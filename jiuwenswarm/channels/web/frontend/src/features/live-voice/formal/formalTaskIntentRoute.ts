@@ -547,6 +547,7 @@ export class ProductFormalTaskIntentOwner {
   #reason: string | null = null;
   #recovery: Promise<FormalTaskIntentReceipt | null> | null = null;
   #ownedCheckpoint: FormalTaskIntentRecoveryCheckpoint | null = null;
+  #cancelledCheckpoint: FormalTaskIntentRecoveryCheckpoint | null = null;
   #recoveryBlocked = false;
   #closed = false;
 
@@ -580,6 +581,7 @@ export class ProductFormalTaskIntentOwner {
     this.#retained = null;
     this.#recovery = null;
     this.#ownedCheckpoint = null;
+    this.#cancelledCheckpoint = null;
     this.#recoveryBlocked = false;
     this.#receipt = null;
     this.#reason = null;
@@ -588,13 +590,24 @@ export class ProductFormalTaskIntentOwner {
   }
 
   cancelPendingConfirmation(): FormalTaskIntentOwnerSnapshot {
-    if (this.#retained !== null || this.#recovery !== null || this.#recoveryBlocked) {
+    if (
+      this.#retained !== null
+      || this.#recovery !== null
+      || (this.#recoveryBlocked && this.#cancelledCheckpoint === null)
+    ) {
       throw new Error('formal task intent outcome is unresolved');
     }
-    this.#clearOwnedCheckpoint(true);
+    // The destructive confirmation is invalidated with, never after, its durable
+    // removal.  A journal failure must leave neither a usable token nor a
+    // claimable checkpoint behind, so the owner retains a cancellation tombstone
+    // that fails submission and recovery closed until the removal settles.
+    this.#cancelledCheckpoint = this.#ownedCheckpoint;
     this.#pending = null;
     this.#receipt = null;
     this.#reason = null;
+    this.#clearOwnedCheckpoint(true);
+    this.#cancelledCheckpoint = null;
+    this.#recoveryBlocked = false;
     this.#status = this.#enabled ? 'idle' : 'disabled';
     return this.snapshot();
   }
@@ -639,6 +652,9 @@ export class ProductFormalTaskIntentOwner {
 
   recoverPending(input: Readonly<{ session_id: string; correlation_id: string }>): Promise<FormalTaskIntentReceipt | null> {
     if (!this.#enabled || this.#closed) return Promise.reject(new Error('formal task intent route is disabled'));
+    if (this.#cancelledCheckpoint !== null) {
+      return Promise.reject(new Error('formal task intent cancellation is unsettled'));
+    }
     if (this.#retained !== null) return Promise.reject(new Error('formal task intent transport is active'));
     if (this.#recovery !== null) return this.#recovery;
     const sessionId = requiredText(input.session_id, 'session_id');
@@ -766,6 +782,9 @@ export class ProductFormalTaskIntentOwner {
       return Promise.reject(new Error('formal task confirmation cannot change source, scope, operation or target'));
     }
     const semantic = canonicalSemanticInput({ ...input, session_id: sessionId, correlation_id: correlationId, task_id: taskId }, pending);
+    if (this.#cancelledCheckpoint !== null) {
+      return Promise.reject(new Error('formal task intent cancellation is unsettled'));
+    }
     if (this.#recovery !== null || this.#recoveryBlocked) {
       return Promise.reject(new Error('formal task intent recovery is active'));
     }

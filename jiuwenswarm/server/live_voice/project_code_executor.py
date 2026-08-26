@@ -42,6 +42,14 @@ from jiuwenswarm.agents.harness.common.tools.command_tools import (
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
 )
+from jiuwenswarm.common.bounded_git_manifest import (
+    MAX_CONTENT_BYTES_PER_PATH,
+    MAX_TOTAL_CONTENT_BYTES,
+    BoundedGitManifest,
+    BoundedGitManifestError,
+    GitManifestCapacityExceeded,
+    capture_bounded_git_manifest,
+)
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ErrorCode,
@@ -500,53 +508,36 @@ def _git_head(root: Path) -> str:
 
 
 def _project_tree_fingerprint(root: Path) -> str:
-    """Hash tracked and non-ignored untracked project content without mutation."""
+    """Project-specific exact-tree projection of the shared Git manifest."""
 
-    digest = hashlib.sha256()
-    digest.update(
-        _git_output(root, "status", "--porcelain=v2", "-z", "--untracked-files=all")
-    )
-    raw_paths = _git_output(
-        root,
-        "ls-files",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-        "-z",
-    ).split(b"\0")
-    for raw_relative in sorted(path for path in raw_paths if path):
-        try:
-            relative = raw_relative.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise FormalTaskViolation(
-                "EXECUTION_TARGET_NOT_BOUND",
-                "selected project contains a non-UTF-8 Git path",
-                ErrorCode.PERMISSION_DENIED,
-            ) from error
-        path = root / Path(relative)
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        try:
-            if path.is_symlink():
-                digest.update(b"L\0")
-                digest.update(str(path.readlink()).encode("utf-8"))
-            elif not path.exists():
-                digest.update(b"M\0")
-            elif path.is_dir():
-                digest.update(b"D\0")
-            else:
-                digest.update(b"F\0")
-                with path.open("rb") as stream:
-                    while chunk := stream.read(1024 * 1024):
-                        digest.update(chunk)
-        except OSError as error:
-            raise FormalTaskViolation(
-                "EXECUTION_TARGET_NOT_BOUND",
-                "selected project could not be fingerprinted",
-                ErrorCode.PERMISSION_DENIED,
-            ) from error
-        digest.update(b"\0")
-    return digest.hexdigest()
+    return _project_manifest(root).tree_fingerprint()
+
+
+def _project_manifest(root: Path) -> BoundedGitManifest:
+    try:
+        return capture_bounded_git_manifest(root)
+    except GitManifestCapacityExceeded as error:
+        raise FormalTaskViolation(
+            "TARGET_CHANGE_VALIDATION_FAILED",
+            str(error),
+            ErrorCode.PERMISSION_DENIED,
+        ) from error
+    except BoundedGitManifestError as error:
+        raise FormalTaskViolation(
+            "EXECUTION_TARGET_NOT_BOUND",
+            "selected project could not be fingerprinted",
+            ErrorCode.PERMISSION_DENIED,
+        ) from error
+
+
+def _raise_target_change_validation_failure(
+    error: GitManifestCapacityExceeded,
+) -> None:
+    raise FormalTaskViolation(
+        "TARGET_CHANGE_VALIDATION_FAILED",
+        str(error),
+        ErrorCode.PERMISSION_DENIED,
+    ) from error
 
 
 def _is_unsafe_filesystem_link(path: Path) -> bool:
@@ -610,36 +601,9 @@ def _reject_git_visible_symlinks(root: Path) -> None:
 
 
 def _project_content_fingerprint(root: Path) -> str:
-    """Hash the Git-visible path/content state without index presentation details."""
+    """Project-specific content projection without staging presentation."""
 
-    digest = hashlib.sha256()
-    raw_paths = _git_output(
-        root,
-        "ls-files",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-        "-z",
-    ).split(b"\0")
-    for raw_relative in sorted(path for path in raw_paths if path):
-        relative = raw_relative.decode("utf-8", errors="strict")
-        path = root / Path(relative)
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        if path.is_symlink():
-            digest.update(b"L\0")
-            digest.update(str(path.readlink()).encode("utf-8"))
-        elif not path.exists():
-            digest.update(b"M\0")
-        elif path.is_dir():
-            digest.update(b"D\0")
-        else:
-            digest.update(b"F\0")
-            with path.open("rb") as stream:
-                while chunk := stream.read(1024 * 1024):
-                    digest.update(chunk)
-        digest.update(b"\0")
-    return digest.hexdigest()
+    return _project_manifest(root).content_fingerprint()
 
 
 def _git_visible_patch(root: Path) -> bytes:
@@ -1117,15 +1081,27 @@ def _seed_attempt_worktree(root: Path, worktree: Path, expected_tree: str) -> No
         "--exclude-standard",
         "-z",
     ).split(b"\0")
+    copied_content_bytes = 0
     for raw_relative in (item for item in raw_untracked if item):
         relative = Path(raw_relative.decode("utf-8", errors="strict"))
         source = root / relative
         destination = worktree / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         if source.is_symlink():
-            destination.symlink_to(source.readlink(), target_is_directory=False)
+            link_target = source.readlink()
+            link_bytes = str(link_target).encode("utf-8", errors="strict")
+            _enforce_direct_content_capacity(
+                len(link_bytes),
+                copied_content_bytes,
+            )
+            destination.symlink_to(link_target, target_is_directory=False)
+            copied_content_bytes += len(link_bytes)
         else:
-            shutil.copy2(source, destination)
+            copied_content_bytes += _copy_bounded_regular_file(
+                source,
+                destination,
+                current_total=copied_content_bytes,
+            )
     if _project_tree_fingerprint(worktree) != expected_tree:
         raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH")
     _git_output(worktree, "add", "-A", "--")
@@ -1182,6 +1158,94 @@ def _bounded_chat_final(payload: Mapping[str, Any]) -> str | None:
     return content
 
 
+def _enforce_direct_content_capacity(content_bytes: int, current_total: int) -> None:
+    if content_bytes > MAX_CONTENT_BYTES_PER_PATH:
+        _raise_target_change_validation_failure(
+            GitManifestCapacityExceeded(
+                "content_bytes_per_path",
+                limit=MAX_CONTENT_BYTES_PER_PATH,
+                observed=content_bytes,
+            )
+        )
+    observed_total = current_total + content_bytes
+    if observed_total > MAX_TOTAL_CONTENT_BYTES:
+        _raise_target_change_validation_failure(
+            GitManifestCapacityExceeded(
+                "total_content_bytes",
+                limit=MAX_TOTAL_CONTENT_BYTES,
+                observed=observed_total,
+            )
+        )
+
+
+def _read_bounded_regular_file(
+    path: Path,
+    *,
+    current_total: int,
+) -> tuple[bytes, os.stat_result]:
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise RuntimeError("PROJECT_CHANGE_CAPTURE_FAILED") from error
+    if path.is_symlink() or not stat.S_ISREG(before.st_mode):
+        raise RuntimeError("PROJECT_CHANGE_CAPTURE_FAILED")
+    _enforce_direct_content_capacity(before.st_size, current_total)
+    payload = bytearray()
+    try:
+        with path.open("rb") as stream:
+            while True:
+                per_file_remaining = MAX_CONTENT_BYTES_PER_PATH - len(payload)
+                total_remaining = MAX_TOTAL_CONTENT_BYTES - current_total - len(payload)
+                chunk = stream.read(min(64 * 1024, per_file_remaining + 1, total_remaining + 1))
+                if not chunk:
+                    break
+                payload.extend(chunk)
+                _enforce_direct_content_capacity(len(payload), current_total)
+        after = path.lstat()
+    except FormalTaskViolation:
+        raise
+    except OSError as error:
+        raise RuntimeError("PROJECT_CHANGE_CAPTURE_FAILED") from error
+    if (
+        before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or before.st_mode != after.st_mode
+    ):
+        raise RuntimeError("PROJECT_CHANGE_CAPTURE_FAILED")
+    return bytes(payload), before
+
+
+def _copy_bounded_regular_file(
+    source: Path,
+    destination: Path,
+    *,
+    current_total: int,
+) -> int:
+    payload, metadata = _read_bounded_regular_file(
+        source,
+        current_total=current_total,
+    )
+    try:
+        with destination.open("xb") as stream:
+            stream.write(payload)
+        shutil.copystat(source, destination, follow_symlinks=False)
+    except OSError as error:
+        raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH") from error
+    return metadata.st_size
+
+
+def _bounded_regular_file_sha256(
+    path: Path,
+    *,
+    current_total: int,
+) -> tuple[str, int]:
+    payload, metadata = _read_bounded_regular_file(
+        path,
+        current_total=current_total,
+    )
+    return hashlib.sha256(payload).hexdigest(), metadata.st_size
+
+
 def _attempt_result_artifacts(worktree: Path) -> tuple[TaskResultArtifact, ...]:
     raw_paths = _git_output(
         worktree,
@@ -1199,6 +1263,7 @@ def _attempt_result_artifacts(worktree: Path) -> tuple[TaskResultArtifact, ...]:
         return ()
     root = worktree.resolve(strict=True)
     artifacts: list[TaskResultArtifact] = []
+    total_content_bytes = 0
     try:
         for relative_path in relative_paths:
             artifact = TaskResultArtifact(relative_path=relative_path, sha256="0" * 64)
@@ -1206,17 +1271,22 @@ def _attempt_result_artifacts(worktree: Path) -> tuple[TaskResultArtifact, ...]:
             candidate.relative_to(root)
             if not candidate.is_file() or candidate.is_symlink():
                 return ()
-            digest = hashlib.sha256()
-            with candidate.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(64 * 1024), b""):
-                    digest.update(chunk)
+            digest, content_bytes = _bounded_regular_file_sha256(
+                candidate,
+                current_total=total_content_bytes,
+            )
+            total_content_bytes += content_bytes
             artifacts.append(
                 TaskResultArtifact(
                     relative_path=artifact.relative_path,
-                    sha256=digest.hexdigest(),
+                    sha256=digest,
                 )
             )
-    except (FormalTaskViolation, OSError, RuntimeError, UnicodeDecodeError, ValueError):
+    except FormalTaskViolation as error:
+        if error.reason == "TARGET_CHANGE_VALIDATION_FAILED":
+            raise
+        return ()
+    except (OSError, RuntimeError, UnicodeDecodeError, ValueError):
         return ()
     return tuple(artifacts)
 
@@ -1227,19 +1297,21 @@ def _applied_artifacts_match(
     if not artifacts:
         return False
     canonical_root = root.resolve(strict=True)
+    total_content_bytes = 0
     try:
         for artifact in artifacts:
             candidate = (canonical_root / artifact.relative_path).resolve(strict=True)
             candidate.relative_to(canonical_root)
             if not candidate.is_file() or candidate.is_symlink():
                 return False
-            digest = hashlib.sha256()
-            with candidate.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(64 * 1024), b""):
-                    digest.update(chunk)
-            if digest.hexdigest() != artifact.sha256:
+            digest, content_bytes = _bounded_regular_file_sha256(
+                candidate,
+                current_total=total_content_bytes,
+            )
+            total_content_bytes += content_bytes
+            if digest != artifact.sha256:
                 return False
-    except (OSError, RuntimeError, ValueError):
+    except (FormalTaskViolation, OSError, RuntimeError, ValueError):
         return False
     return True
 
@@ -1253,23 +1325,29 @@ def _applied_result_artifacts(
         return ()
     canonical_root = root.resolve(strict=True)
     applied: list[TaskResultArtifact] = []
+    total_content_bytes = 0
     try:
         for artifact in artifacts:
             candidate = (canonical_root / artifact.relative_path).resolve(strict=True)
             candidate.relative_to(canonical_root)
             if not candidate.is_file() or candidate.is_symlink():
                 raise RuntimeError("PROJECT_CHANGE_ATTRIBUTION_FAILED")
-            digest = hashlib.sha256()
-            with candidate.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(64 * 1024), b""):
-                    digest.update(chunk)
+            digest, content_bytes = _bounded_regular_file_sha256(
+                candidate,
+                current_total=total_content_bytes,
+            )
+            total_content_bytes += content_bytes
             applied.append(
                 TaskResultArtifact(
                     relative_path=artifact.relative_path,
-                    sha256=digest.hexdigest(),
+                    sha256=digest,
                 )
             )
-    except (FormalTaskViolation, OSError, RuntimeError, ValueError) as exc:
+    except FormalTaskViolation as exc:
+        if exc.reason == "TARGET_CHANGE_VALIDATION_FAILED":
+            raise
+        raise RuntimeError("PROJECT_CHANGE_ATTRIBUTION_FAILED") from exc
+    except (OSError, RuntimeError, ValueError) as exc:
         raise RuntimeError("PROJECT_CHANGE_ATTRIBUTION_FAILED") from exc
     return tuple(applied)
 
@@ -4456,15 +4534,25 @@ class DirectProjectCodeExecutorAdapter:
                 after_seq=item.source_seq,
                 selection=item.selection,
             )
-        if len(self._running) >= _MAX_DIRECT_RUNNING_WORKERS:
+        before_manifest = await asyncio.to_thread(_project_manifest, root)
+        before_tree = before_manifest.tree_fingerprint()
+        before_content = before_manifest.content_fingerprint()
+        self._redrive_retained_worktree_cleanups()
+        if len(self._retained_worktree_cleanups) >= _MAX_DIRECT_RUNNING_WORKERS:
+            raise FormalTaskViolation(
+                "EXECUTOR_CAPACITY_EXHAUSTED",
+                "direct project Executor retained-worker capacity is exhausted",
+                ErrorCode.UNAVAILABLE,
+            )
+        retained_workers = set(self._running)
+        retained_workers.update(self._retained_worktree_cleanups)
+        if len(retained_workers) >= _MAX_DIRECT_RUNNING_WORKERS:
             raise FormalTaskViolation(
                 "EXECUTOR_CAPACITY_EXHAUSTED",
                 "direct project Executor retained-worker capacity is exhausted",
                 ErrorCode.UNAVAILABLE,
             )
 
-        before_tree = await asyncio.to_thread(_project_tree_fingerprint, root)
-        before_content = await asyncio.to_thread(_project_content_fingerprint, root)
         before_head = await asyncio.to_thread(_git_head, root)
         protected_support = await asyncio.to_thread(_target_support_fingerprints, root)
         governance = await asyncio.to_thread(_runtime_support_governance, root)
@@ -5067,11 +5155,16 @@ class DirectProjectCodeExecutorAdapter:
                 if interruption is None:
                     interruption = ("cancelled", "TASK_CANCEL_ACKNOWLEDGED")
                 raw_status, error = interruption
+                user_cancel = error == "TASK_CANCEL_ACKNOWLEDGED"
                 await asyncio.to_thread(
                     self._journal.finish,
                     item.attempt_id,
                     owner_id=self._owner_id,
-                    outcome=TerminalOutcome.INTERRUPTED,
+                    outcome=(
+                        TerminalOutcome.CANCELLED
+                        if user_cancel
+                        else TerminalOutcome.INTERRUPTED
+                    ),
                     raw_status=raw_status,
                     summary=None,
                     error=error,
@@ -5223,6 +5316,7 @@ class DirectProjectCodeExecutorAdapter:
                 "PROJECT_WORKTREE_CLEANUP_PENDING",
                 "PROJECT_WORKTREE_CLEANUP_TARGET_UNSAFE",
                 "EXECUTION_TARGET_SYMLINK_UNSAFE",
+                "TARGET_CHANGE_VALIDATION_FAILED",
                 "DEMO_ITINERARY_FIXTURE_CONTRACT_VIOLATION",
                 "TASK_ADJUSTMENT_REJECTED",
             }:
@@ -5578,6 +5672,44 @@ class DirectProjectCodeExecutorAdapter:
         """Expose bounded cleanup truth without leaking temporary paths."""
 
         return tuple(sorted(self._retained_worktree_cleanups))
+
+    def _redrive_retained_worktree_cleanups(self) -> None:
+        """Re-drive settled worker cleanup without releasing unknown ownership."""
+
+        retained_slice: list[tuple[str, _RetainedAttemptCleanup]] = []
+        for item in self._retained_worktree_cleanups.items():
+            retained_slice.append(item)
+            if len(retained_slice) >= _MAX_DIRECT_RUNNING_WORKERS:
+                break
+
+        occupied_attempts = set(self._running)
+        restartable: list[tuple[str, _RetainedAttemptCleanup]] = []
+        for attempt_id, cleanup in retained_slice:
+            worker = self._running.get(attempt_id)
+            if worker is not None and not worker.done():
+                continue
+            coordinator = cleanup.coordinator
+            if coordinator is not None and coordinator.done():
+                try:
+                    coordinator.result()
+                except BaseException:  # noqa: BLE001 -- retained retry owns failure
+                    pass
+                else:
+                    if self._retained_worktree_cleanups.get(attempt_id) is cleanup:
+                        self._retained_worktree_cleanups.pop(attempt_id, None)
+                    continue
+                restartable.append((attempt_id, cleanup))
+                continue
+            if coordinator is not None:
+                occupied_attempts.add(attempt_id)
+                continue
+            restartable.append((attempt_id, cleanup))
+
+        for attempt_id, cleanup in restartable:
+            if len(occupied_attempts) >= _MAX_DIRECT_RUNNING_WORKERS:
+                break
+            self._ensure_attempt_cleanup_coordinator(attempt_id, cleanup)
+            occupied_attempts.add(attempt_id)
 
     @staticmethod
     def _consume_attempt_cleanup_result(task: asyncio.Task[None]) -> None:

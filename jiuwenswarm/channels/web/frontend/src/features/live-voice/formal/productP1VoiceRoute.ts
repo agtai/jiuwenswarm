@@ -381,6 +381,9 @@ export class ProductP1VoiceRouteOwner {
   #failureCleanupReason: string | null = null;
   #pendingPlayout: PendingProductPlayout | null = null;
   #settlingPlayout: PendingProductPlayout | null = null;
+  #ownedDownlinkRoute: ActiveBrowserDedicatedMediaRoute | null = null;
+  #playoutOperationInFlight = false;
+  #bargeInMediaRevocation: Promise<void> | null = null;
   #captureStartupAudioReady = false;
   #captureStartupFailure: (Error & { readonly reason: string }) | null = null;
   #mediaTerminalFailure: (Error & { readonly reason: string }) | null = null;
@@ -1022,6 +1025,10 @@ export class ProductP1VoiceRouteOwner {
     if (['starting', 'capturing', 'recognizing'].includes(this.#status)) {
       throw new Error('formal P1 capture must settle before Agent playout');
     }
+    if (this.#playoutOperationInFlight) {
+      throw new Error('formal playout is already active');
+    }
+    this.#playoutOperationInFlight = true;
     const operationGeneration = ++this.#operationGeneration;
     const speech = this.#speech;
     let playoutResponse: Readonly<AudioResponseRef> | null = null;
@@ -1092,6 +1099,7 @@ export class ProductP1VoiceRouteOwner {
             if (pendingRef !== null && downlinkRoute !== null) this.#observeMediaTerminal(downlinkRoute, event);
           }
         );
+        this.#ownedDownlinkRoute = downlinkRoute;
       }
       const expected = new Map<string, number>();
       if (frameCount !== null) expected.set(result.unit_id, frameCount - 1);
@@ -1151,6 +1159,7 @@ export class ProductP1VoiceRouteOwner {
         if (!downlinkRoute.leaf.closed) {
           throw new Error('dedicated media downlink did not close after final render ACK');
         }
+        if (this.#ownedDownlinkRoute === downlinkRoute) this.#ownedDownlinkRoute = null;
         await waitTurn();
       }
       const rotation = this.#captureRotationPromise;
@@ -1193,6 +1202,15 @@ export class ProductP1VoiceRouteOwner {
       }
     } catch (error) {
       if (error !== null && typeof error === 'object' && (error as Record<string, unknown>).reason === 'FORMAL_PLAYOUT_BARGED') {
+        const revocation = this.#bargeInMediaRevocation;
+        if (revocation !== null) {
+          try {
+            await revocation;
+          } catch (revocationError) {
+            await this.#fail(revocationError);
+            throw revocationError;
+          }
+        }
         this.#setStatus(this.#route === null ? 'recognized' : 'capturing', null);
         this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
         return;
@@ -1219,6 +1237,8 @@ export class ProductP1VoiceRouteOwner {
       }
       await this.#fail(failure);
       throw failure;
+    } finally {
+      this.#playoutOperationInFlight = false;
     }
   }
 
@@ -1266,6 +1286,15 @@ export class ProductP1VoiceRouteOwner {
       );
     }
     pending.downlinkRoute?.leaf.close('MEDIA_LOCAL_CLOSE');
+    if (this.#ownedDownlinkRoute === pending.downlinkRoute) this.#ownedDownlinkRoute = null;
+    const revocation = this.#revokeMediaAuthority(pending.receiptAuthority);
+    const retainedRevocation = revocation.finally(() => {
+      if (this.#bargeInMediaRevocation === retainedRevocation) {
+        this.#bargeInMediaRevocation = null;
+      }
+    });
+    this.#bargeInMediaRevocation = retainedRevocation;
+    void retainedRevocation.catch(() => undefined);
     pending.reject(
       Object.assign(new Error('formal playout was interrupted'), {
         reason: 'FORMAL_PLAYOUT_BARGED',
@@ -1948,6 +1977,8 @@ export class ProductP1VoiceRouteOwner {
         : null;
     if (deviceFailure !== null && this.#failureCleanupPromise === null && !this.#closed && !this.#closeRequested) {
       const failure = Object.assign(new Error('formal browser output selection failed'), { reason: deviceFailure });
+      this.#ownedDownlinkRoute?.leaf.close('MEDIA_LOCAL_CLOSE');
+      this.#ownedDownlinkRoute = null;
       if (pending !== null) {
         this.#pendingPlayout = null;
         pending.reject(failure);
@@ -2467,6 +2498,8 @@ export class ProductP1VoiceRouteOwner {
             })
       );
     }
+    this.#ownedDownlinkRoute?.leaf.close('MEDIA_LOCAL_CLOSE');
+    this.#ownedDownlinkRoute = null;
     // Raw PCM is local, memory-only recognition input. Release it before any
     // fallible browser or remote authority cleanup; retained close bindings are
     // sufficient for an exact retry and must never retain expired audio.
@@ -2485,6 +2518,14 @@ export class ProductP1VoiceRouteOwner {
       /* close remains authoritative */
     }
     await this.#audio.close();
+    const bargeInRevocation = this.#bargeInMediaRevocation;
+    if (bargeInRevocation !== null) {
+      try {
+        await bargeInRevocation;
+      } catch {
+        /* the retained authority is retried below */
+      }
+    }
     const authorities = new Map(this.#retainedMediaAuthorities);
     if (this.#mediaCloseBinding !== null) {
       authorities.set(this.#mediaCloseBinding.subject_id, this.#mediaCloseBinding);

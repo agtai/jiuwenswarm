@@ -224,9 +224,13 @@ def test_metric_codec_emits_exact_metric_schema_without_trace() -> None:
 )
 def test_codec_reuses_product_private_carrier_rejection(carrier: str) -> None:
     module = _codec()
+    observation = _fallback_observation("route.compatibility.v1")
+    # The public schema rejects these carriers before encoding. Mutate a valid
+    # frozen value to keep the backend's defence-in-depth path covered.
+    object.__setattr__(observation.route, "contract_version", carrier)
 
     encoding = module.encode_observation_for_otel_backend(
-        _fallback_observation(carrier),
+        observation,
         trace_context=_trace(module),
         enabled=True,
     )

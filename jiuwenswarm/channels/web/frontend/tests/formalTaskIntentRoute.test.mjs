@@ -881,3 +881,178 @@ test('forged target response and flag-off both fail closed', async () => {
   );
   assert.equal(calls, 1);
 });
+
+const destructiveIntent = Object.freeze({
+  session_id: 'session-cancel',
+  correlation_id: 'correlation-cancel',
+  operation: 'task.cancel',
+  task_id: 'task-1',
+  text: 'cancel task task-1',
+});
+
+function faultInjectingJournal(inner, faults) {
+  return {
+    load: sessionId => inner.load(sessionId),
+    save: checkpoint => inner.save(checkpoint),
+    claim: (checkpoint, ownerId) => {
+      faults.claims += 1;
+      return inner.claim(checkpoint, ownerId);
+    },
+    replace: (checkpoint, next) => inner.replace(checkpoint, next),
+    clear: checkpoint => {
+      faults.clears += 1;
+      if (faults.clear) throw new Error('durable cancellation removal failed');
+      inner.clear(checkpoint);
+    },
+  };
+}
+
+function destructiveConfirmationOwner(storage, faults, calls) {
+  return new ProductFormalTaskIntentOwner({
+    enabled: true,
+    recovery_journal: faultInjectingJournal(createSessionFormalTaskIntentRecoveryJournal(storage), faults),
+    request: async (method, params, requestId) => {
+      calls.push({ method, params, requestId });
+      if (method === PRODUCT_P3_TASK_INTENT_STATUS_METHOD) {
+        return envelope(requestId, {
+          status: 'pending',
+          phase: 'awaiting_confirmation',
+          intent_request_id: params.intent_request_id,
+          source: 'text',
+          intent: clarification('task.cancel', 'task-1'),
+        });
+      }
+      return envelope(requestId, clarification('task.cancel', 'task-1'));
+    },
+  });
+}
+
+test('a cancelled destructive confirmation is invalidated with, not after, its durable removal', async () => {
+  const storage = memoryStorage();
+  const faults = { clear: false, clears: 0, claims: 0 };
+  const calls = [];
+  const owner = destructiveConfirmationOwner(storage, faults, calls);
+
+  const clarified = await owner.submitText(destructiveIntent);
+  assert.equal(clarified.disposition, 'clarification');
+  assert.equal(owner.snapshot().pending_confirmation?.token, token);
+  assert.equal(storage.values.size, 1);
+  assert.equal(calls.length, 1);
+
+  faults.clear = true;
+  assert.throws(() => owner.cancelPendingConfirmation(), /durable cancellation removal failed/);
+  const blocked = owner.snapshot();
+  assert.equal(blocked.pending_confirmation, null, 'a cancelled destructive confirmation must never remain usable');
+  assert.equal(blocked.status, 'failed');
+  assert.equal(blocked.reason, 'FORMAL_TASK_INTENT_RECOVERY_CLEAR_FAILED');
+  assert.equal(blocked.retained_transport, true);
+  assert.equal(faults.clears, 1);
+
+  await assert.rejects(
+    owner.submitText({ ...destructiveIntent, text: `confirm task request ${token}` }),
+    /cancellation is unsettled/,
+  );
+  assert.equal(calls.length, 1, 'a fail-closed cancellation allocates zero Gateway calls');
+  assert.equal(storage.values.size, 1);
+
+  const closed = owner.close();
+  assert.equal(closed.status, 'closed');
+  assert.equal(closed.pending_confirmation, null);
+  assert.equal(closed.retained_transport, false);
+  await assert.rejects(
+    owner.recoverPending({ session_id: destructiveIntent.session_id, correlation_id: destructiveIntent.correlation_id }),
+    /disabled/,
+  );
+  assert.equal(calls.length, 1);
+
+  const journalless = new ProductFormalTaskIntentOwner({
+    enabled: true,
+    request: async (_method, _params, requestId) => envelope(requestId, clarification('task.cancel', 'task-1')),
+  });
+  await journalless.submitText(destructiveIntent);
+  assert.equal(journalless.snapshot().pending_confirmation?.token, token);
+  const journallessCancelled = journalless.cancelPendingConfirmation();
+  assert.equal(journallessCancelled.status, 'idle');
+  assert.equal(journallessCancelled.pending_confirmation, null);
+  assert.equal(journallessCancelled.retained_transport, false);
+});
+
+test('recovery cannot re-authorize a confirmation whose durable cancellation failed', async () => {
+  const storage = memoryStorage();
+  const faults = { clear: false, clears: 0, claims: 0 };
+  const calls = [];
+  const owner = destructiveConfirmationOwner(storage, faults, calls);
+  await owner.submitText(destructiveIntent);
+  faults.clear = true;
+  assert.throws(() => owner.cancelPendingConfirmation(), /durable cancellation removal failed/);
+
+  await assert.rejects(
+    owner.recoverPending({ session_id: destructiveIntent.session_id, correlation_id: destructiveIntent.correlation_id }),
+    /cancellation is unsettled/,
+  );
+  assert.equal(faults.claims, 0, 'an unsettled cancellation never re-claims its durable checkpoint');
+  assert.equal(calls.length, 1, 'an unsettled cancellation allocates zero Gateway status or mutation calls');
+  assert.equal(owner.snapshot().pending_confirmation, null);
+  assert.equal(owner.snapshot().status, 'failed');
+  await assert.rejects(
+    owner.recoverPending({ session_id: 'session-other', correlation_id: 'correlation-other' }),
+    /cancellation is unsettled/,
+  );
+  assert.equal(faults.claims, 0);
+  assert.equal(calls.length, 1);
+
+  const [recovery, submission] = await Promise.allSettled([
+    owner.recoverPending({ session_id: destructiveIntent.session_id, correlation_id: destructiveIntent.correlation_id }),
+    owner.submitText({ ...destructiveIntent, text: `confirm task request ${token}` }),
+  ]);
+  assert.equal(recovery.status, 'rejected');
+  assert.equal(submission.status, 'rejected');
+  assert.match(recovery.reason.message, /cancellation is unsettled/);
+  assert.match(submission.reason.message, /cancellation is unsettled/);
+  assert.equal(calls.length, 1);
+  assert.equal(faults.claims, 0);
+
+  faults.clear = false;
+  const settled = owner.cancelPendingConfirmation();
+  assert.equal(settled.status, 'idle');
+  assert.equal(settled.pending_confirmation, null);
+  assert.equal(settled.retained_transport, false);
+  assert.equal(faults.clears, 2);
+  assert.equal(storage.values.size, 0, 'a settled cancellation retains no durable checkpoint');
+
+  const next = await owner.submitText({ ...destructiveIntent, text: 'cancel task task-1 once more' });
+  assert.equal(next.disposition, 'clarification');
+  assert.equal(calls.length, 2);
+});
+
+test('a restarted owner replays a lost cancellation as an explicit confirmation, never as a dispatch', async () => {
+  const storage = memoryStorage();
+  const faults = { clear: false, clears: 0, claims: 0 };
+  const calls = [];
+  const owner = destructiveConfirmationOwner(storage, faults, calls);
+  await owner.submitText(destructiveIntent);
+  faults.clear = true;
+  assert.throws(() => owner.cancelPendingConfirmation(), /durable cancellation removal failed/);
+  owner.close();
+
+  const successor = destructiveConfirmationOwner(storage, faults, calls);
+  const recovered = await successor.recoverPending({
+    session_id: destructiveIntent.session_id,
+    correlation_id: destructiveIntent.correlation_id,
+  });
+  assert.equal(recovered?.disposition, 'clarification');
+  assert.equal(successor.snapshot().pending_confirmation?.token, token);
+  assert.equal(
+    calls.filter(call => call.method === PRODUCT_P3_TASK_INTENT_METHOD).length,
+    1,
+    'a restart never redispatches the destructive intent',
+  );
+  assert.equal(calls.filter(call => call.method === PRODUCT_P3_TASK_INTENT_STATUS_METHOD).length, 1);
+  assert.equal(faults.claims, 1);
+
+  faults.clear = false;
+  const settled = successor.cancelPendingConfirmation();
+  assert.equal(settled.status, 'idle');
+  assert.equal(settled.pending_confirmation, null);
+  assert.equal(storage.values.size, 0);
+});

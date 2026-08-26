@@ -24,6 +24,9 @@ from jiuwenswarm.server.live_voice.p3_confirmation import (
     TrustedP3ConfirmationIssue,
     p3_confirmation_intent_fingerprint,
 )
+from jiuwenswarm.server.live_voice.p3_product_confirmation import (
+    ProductP3ConfirmationForwarder,
+)
 
 
 NOW = "2026-08-07T10:00:00Z"
@@ -111,6 +114,17 @@ def _confirmation_count(database: Path) -> int:
         return int(
             connection.execute("SELECT COUNT(*) FROM p3_confirmations").fetchone()[0]
         )
+    finally:
+        connection.close()
+
+
+def _confirmation_rows(database: Path) -> list[sqlite3.Row]:
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        return connection.execute(
+            "SELECT * FROM p3_confirmations ORDER BY issued_at, confirmation_id"
+        ).fetchall()
     finally:
         connection.close()
 
@@ -259,6 +273,64 @@ def test_low_level_ledger_also_enforces_hard_capacity(tmp_path: Path) -> None:
     assert _confirmation_count(database) == 1
 
 
+@pytest.mark.parametrize("terminal_kind", ("consumed", "expired"))
+def test_low_level_terminal_row_reclaims_capacity_without_reauthorizing(
+    tmp_path: Path,
+    terminal_kind: str,
+) -> None:
+    database = tmp_path / "confirmations.sqlite3"
+    ledger = SqliteP3ConfirmationLedger(database, capacity=1)
+    first_binding = _binding()
+    first_expiry = (
+        "2026-08-07T10:01:00Z"
+        if terminal_kind == "consumed"
+        else "2026-08-07T10:00:01Z"
+    )
+    first_id = ledger.issue(
+        first_binding,
+        expires_at=first_expiry,
+        now=NOW,
+        confirmation_id="legacy-confirmation-1",
+    )
+    if terminal_kind == "consumed":
+        ledger.verify_and_consume(first_id, first_binding, now=NOW)
+
+    reopened = SqliteP3ConfirmationLedger(database, capacity=1)
+    second_binding = _binding(
+        command_id="command-2",
+        target_task_id="task-2",
+        intent_fingerprint="intent-2",
+    )
+    second_id = reopened.issue(
+        second_binding,
+        expires_at=EXPIRY,
+        now="2026-08-07T10:00:01Z",
+        confirmation_id="legacy-confirmation-2",
+    )
+
+    if terminal_kind == "consumed":
+        assert (
+            reopened.verify_and_consume(
+                first_id,
+                first_binding,
+                now="2026-08-07T10:00:02Z",
+            ).replayed
+            is True
+        )
+        assert len(_confirmation_rows(database)) == 2
+    else:
+        with pytest.raises(FormalTaskViolation) as stale:
+            reopened.verify_and_consume(
+                first_id,
+                first_binding,
+                now="2026-08-07T10:00:02Z",
+            )
+        assert stale.value.reason == "P3_CONFIRMATION_EXPIRED"
+        assert len(_confirmation_rows(database)) == 2
+    assert second_id == "legacy-confirmation-2"
+    assert _confirmation_row(database, second_id)["consumed_at"] is None
+
+
 def test_full_capacity_allows_exact_replay_but_rejects_new_issue(
     tmp_path: Path,
 ) -> None:
@@ -325,30 +397,351 @@ def test_concurrent_new_issuance_cannot_cross_capacity(tmp_path: Path) -> None:
     assert _confirmation_count(database) == 2
 
 
-def test_consumed_expired_rows_are_not_evicted_or_overwritten(
+def test_consumed_confirmation_reclaims_capacity_with_durable_minimal_replay_fence(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "confirmations.sqlite3"
     owner = BoundedP3ConfirmationOwner(database, enabled=True, capacity=1)
-    issue = _issue(expires_at="2026-08-07T10:00:01Z")
+    issue = _issue(expires_at="2026-08-07T10:01:00Z")
     confirmation_id = owner.issue(issue, now=NOW).confirmation_id
     verifier = owner.raw_verifier
     assert verifier is not None
     verifier.verify_and_consume(confirmation_id, issue.binding, now=NOW)
 
-    with pytest.raises(FormalTaskViolation) as raised:
-        owner.issue(
-            _issue(
-                confirmation_id="confirmation-2",
-                expires_at="2026-08-07T10:02:01Z",
-            ),
+    reopened = BoundedP3ConfirmationOwner(database, enabled=True, capacity=1)
+    second_issue = _issue(
+        binding=_binding(
+            command_id="command-2",
+            target_task_id="task-2",
+            intent_fingerprint="intent-2",
+        ),
+        owner=_owner_context(correlation_id="correlation-2"),
+        confirmation_id="confirmation-2",
+        expires_at=EXPIRY,
+    )
+    second = reopened.issue(second_issue, now="2026-08-07T10:00:01Z")
+
+    replayed_issue = reopened.issue(issue, now="2026-08-07T10:00:02Z")
+    replayed_forwarding = reopened.validate_for_forwarding(
+        confirmation_id,
+        issue.binding,
+        issue.owner,
+        now="2026-08-07T10:00:02Z",
+    )
+    with pytest.raises(FormalTaskViolation) as wrong_owner:
+        reopened.validate_for_forwarding(
+            confirmation_id,
+            issue.binding,
+            replace(issue.owner, correlation_id="correlation-other"),
+            now="2026-08-07T10:00:02Z",
+        )
+    reopened_verifier = reopened.raw_verifier
+    assert reopened_verifier is not None
+    forwarder = ProductP3ConfirmationForwarder(reopened)
+    with forwarder.permit(replayed_forwarding):
+        replayed_consume = forwarder.verify_and_consume(
+            confirmation_id,
+            issue.binding,
+            now="2026-08-07T10:00:02Z",
+        )
+    with pytest.raises(FormalTaskViolation) as mismatched:
+        reopened_verifier.verify_and_consume(
+            confirmation_id,
+            _binding(intent_fingerprint="intent-other"),
+            now="2026-08-07T10:00:02Z",
+        )
+
+    rows = _confirmation_rows(database)
+    assert second.confirmation_id == "confirmation-2"
+    assert second.replayed is False
+    assert replayed_issue.replayed is True
+    assert wrong_owner.value.reason == "P3_CONFIRMATION_BINDING_MISMATCH"
+    assert replayed_forwarding.confirmation_id == confirmation_id
+    assert replayed_forwarding.binding == issue.binding
+    assert replayed_forwarding.owner == issue.owner
+    assert replayed_consume.replayed is True
+    assert mismatched.value.reason == "P3_CONFIRMATION_BINDING_MISMATCH"
+    assert {row["confirmation_id"] for row in rows} == {
+        "confirmation-1",
+        "confirmation-2",
+    }
+    fence = next(row for row in rows if row["confirmation_id"] == confirmation_id)
+    serialized_fence = "|".join(
+        str(fence[field])
+        for field in (
+            "principal_id",
+            "scope_key",
+            "operation",
+            "command_id",
+            "target_task_id",
+            "intent_fingerprint",
+            "owner_session_id",
+            "owner_correlation_id",
+            "owner_generation",
+        )
+    )
+    for heavy_value in (
+        "user-1",
+        "project-1",
+        "session-1",
+        "task-1",
+        "command-1",
+        "intent-1",
+        "correlation-1",
+    ):
+        assert heavy_value not in serialized_fence
+    assert _confirmation_row(database, second.confirmation_id)["consumed_at"] is None
+
+
+def test_expired_confirmation_reclaims_capacity_and_old_token_stays_expired(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "confirmations.sqlite3"
+    owner = BoundedP3ConfirmationOwner(database, enabled=True, capacity=1)
+    expired_issue = _issue(expires_at="2026-08-07T10:00:01Z")
+    expired_id = owner.issue(expired_issue, now=NOW).confirmation_id
+
+    reopened = BoundedP3ConfirmationOwner(database, enabled=True, capacity=1)
+    active_issue = _issue(
+        binding=_binding(
+            command_id="command-2",
+            target_task_id="task-2",
+            intent_fingerprint="intent-2",
+        ),
+        owner=_owner_context(correlation_id="correlation-2"),
+        confirmation_id="confirmation-2",
+    )
+    active = reopened.issue(active_issue, now="2026-08-07T10:00:01Z")
+
+    verifier = reopened.raw_verifier
+    assert verifier is not None
+    with pytest.raises(FormalTaskViolation) as stale:
+        verifier.verify_and_consume(
+            expired_id,
+            expired_issue.binding,
             now="2026-08-07T10:00:01Z",
         )
 
-    assert raised.value.reason == "P3_CONFIRMATION_CAPACITY_EXCEEDED"
-    retained = _confirmation_row(database, confirmation_id)
-    assert retained["consumed_at"] == NOW
-    assert _confirmation_count(database) == 1
+    assert active.replayed is False
+    assert stale.value.reason == "P3_CONFIRMATION_EXPIRED"
+    assert {row["confirmation_id"] for row in _confirmation_rows(database)} == {
+        "confirmation-1",
+        "confirmation-2",
+    }
+    assert _confirmation_row(database, expired_id)["consumed_at"] is not None
+    assert _confirmation_row(database, active.confirmation_id)["consumed_at"] is None
+
+
+def test_replay_fence_is_bounded_and_evicted_token_never_authorizes(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "confirmations.sqlite3"
+    owner = BoundedP3ConfirmationOwner(database, enabled=True, capacity=1)
+    first_issue = _issue(expires_at="2026-08-07T10:01:00Z")
+    first = owner.issue(first_issue, now=NOW)
+    verifier = owner.raw_verifier
+    assert verifier is not None
+    verifier.verify_and_consume(first.confirmation_id, first_issue.binding, now=NOW)
+
+    second_issue = _issue(
+        binding=_binding(
+            command_id="command-2",
+            target_task_id="task-2",
+            intent_fingerprint="intent-2",
+        ),
+        owner=_owner_context(correlation_id="correlation-2"),
+        confirmation_id="confirmation-2",
+        expires_at="2026-08-07T10:01:00Z",
+    )
+    second = owner.issue(second_issue, now="2026-08-07T10:00:01Z")
+    verifier.verify_and_consume(
+        second.confirmation_id,
+        second_issue.binding,
+        now="2026-08-07T10:00:01Z",
+    )
+    third_issue = _issue(
+        binding=_binding(
+            command_id="command-3",
+            target_task_id="task-3",
+            intent_fingerprint="intent-3",
+        ),
+        owner=_owner_context(correlation_id="correlation-3"),
+        confirmation_id="confirmation-3",
+    )
+    third = owner.issue(third_issue, now="2026-08-07T10:00:02Z")
+
+    with pytest.raises(FormalTaskViolation) as evicted:
+        verifier.verify_and_consume(
+            first.confirmation_id,
+            first_issue.binding,
+            now="2026-08-07T10:00:02Z",
+        )
+    second_replay = verifier.verify_and_consume(
+        second.confirmation_id,
+        second_issue.binding,
+        now="2026-08-07T10:00:02Z",
+    )
+
+    assert third.replayed is False
+    assert evicted.value.reason == "P3_CONFIRMATION_INVALID"
+    assert second_replay.replayed is True
+    rows = _confirmation_rows(database)
+    assert len(rows) == 2
+    assert {row["confirmation_id"] for row in rows} == {
+        "confirmation-2",
+        "confirmation-3",
+    }
+    assert _confirmation_row(database, third.confirmation_id)["consumed_at"] is None
+
+
+def test_concurrent_reopen_issuers_recover_consumed_capacity_once(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "confirmations.sqlite3"
+    initial_owner = BoundedP3ConfirmationOwner(database, enabled=True, capacity=1)
+    initial_issue = _issue(expires_at="2026-08-07T10:01:00Z")
+    initial = initial_owner.issue(initial_issue, now=NOW)
+    initial_verifier = initial_owner.raw_verifier
+    assert initial_verifier is not None
+    initial_verifier.verify_and_consume(
+        initial.confirmation_id,
+        initial_issue.binding,
+        now=NOW,
+    )
+    owners = (
+        BoundedP3ConfirmationOwner(database, enabled=True, capacity=1),
+        BoundedP3ConfirmationOwner(database, enabled=True, capacity=1),
+    )
+
+    def attempt(index: int) -> tuple[str, str]:
+        candidate = _issue(
+            binding=_binding(
+                command_id=f"command-{index}",
+                target_task_id=f"task-{index}",
+                intent_fingerprint=f"intent-{index}",
+            ),
+            owner=_owner_context(correlation_id=f"correlation-{index}"),
+            confirmation_id=f"confirmation-{index}",
+        )
+        try:
+            return "issued", owners[index - 2].issue(
+                candidate,
+                now="2026-08-07T10:00:01Z",
+            ).confirmation_id
+        except FormalTaskViolation as exc:
+            return "rejected", exc.reason
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(attempt, (2, 3)))
+
+    assert sum(kind == "issued" for kind, _ in outcomes) == 1
+    assert outcomes.count(("rejected", "P3_CONFIRMATION_CAPACITY_EXCEEDED")) == 1
+    rows = _confirmation_rows(database)
+    assert len(rows) == 2
+    assert sum(row["consumed_at"] is None for row in rows) == 1
+    assert sum(row["consumed_at"] is not None for row in rows) == 1
+    reopened_verifier = owners[0].raw_verifier
+    assert reopened_verifier is not None
+    assert (
+        reopened_verifier.verify_and_consume(
+            initial.confirmation_id,
+            initial_issue.binding,
+            now="2026-08-07T10:00:02Z",
+        ).replayed
+        is True
+    )
+
+
+@pytest.mark.parametrize("failure_point", ("cleanup", "insert"))
+def test_capacity_recovery_failure_rolls_back_before_retry(
+    tmp_path: Path,
+    failure_point: str,
+) -> None:
+    database = tmp_path / "confirmations.sqlite3"
+    owner = BoundedP3ConfirmationOwner(database, enabled=True, capacity=1)
+    initial_issue = _issue(expires_at="2026-08-07T10:01:00Z")
+    initial = owner.issue(initial_issue, now=NOW)
+    verifier = owner.raw_verifier
+    assert verifier is not None
+    verifier.verify_and_consume(initial.confirmation_id, initial_issue.binding, now=NOW)
+    before = [tuple(row) for row in _confirmation_rows(database)]
+
+    connection = sqlite3.connect(database)
+    try:
+        if failure_point == "cleanup":
+            connection.executescript(
+                """
+                CREATE TRIGGER reject_confirmation_cleanup_update
+                BEFORE UPDATE ON p3_confirmations
+                WHEN OLD.consumed_at IS NOT NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected cleanup failure');
+                END;
+                CREATE TRIGGER reject_confirmation_cleanup_delete
+                BEFORE DELETE ON p3_confirmations
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected cleanup failure');
+                END;
+                """
+            )
+        else:
+            connection.execute(
+                """
+                CREATE TRIGGER reject_confirmation_insert
+                BEFORE INSERT ON p3_confirmations
+                WHEN NEW.confirmation_id = 'confirmation-2'
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected insert failure');
+                END
+                """
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    second_issue = _issue(
+        binding=_binding(
+            command_id="command-2",
+            target_task_id="task-2",
+            intent_fingerprint="intent-2",
+        ),
+        owner=_owner_context(correlation_id="correlation-2"),
+        confirmation_id="confirmation-2",
+    )
+    with pytest.raises(FormalTaskViolation) as failed:
+        owner.issue(second_issue, now="2026-08-07T10:00:01Z")
+
+    assert failed.value.reason == "P3_CONFIRMATION_UNAVAILABLE"
+    assert [tuple(row) for row in _confirmation_rows(database)] == before
+    assert (
+        verifier.verify_and_consume(
+            initial.confirmation_id,
+            initial_issue.binding,
+            now="2026-08-07T10:00:02Z",
+        ).replayed
+        is True
+    )
+
+    connection = sqlite3.connect(database)
+    try:
+        trigger = (
+            "reject_confirmation_insert"
+            if failure_point == "insert"
+            else "reject_confirmation_cleanup_update"
+        )
+        connection.execute(f"DROP TRIGGER {trigger}")
+        if failure_point == "cleanup":
+            connection.execute("DROP TRIGGER reject_confirmation_cleanup_delete")
+        connection.commit()
+    finally:
+        connection.close()
+
+    recovered = BoundedP3ConfirmationOwner(
+        database,
+        enabled=True,
+        capacity=1,
+    ).issue(second_issue, now="2026-08-07T10:00:02Z")
+    assert recovered.replayed is False
 
 
 def test_create_confirmation_binds_no_existing_target(tmp_path: Path) -> None:

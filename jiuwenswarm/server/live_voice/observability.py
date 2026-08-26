@@ -654,12 +654,6 @@ def _required_text(value: object, field_name: str) -> str:
     return value
 
 
-def _optional_text(value: object, field_name: str) -> str | None:
-    if value is None:
-        return None
-    return _required_text(value, field_name)
-
-
 def _opaque_identity(value: object, field_name: str) -> str:
     """Validate a bounded carrier, not the meaning of an ACG-owned opaque ID.
 
@@ -1017,7 +1011,15 @@ class RouteDescriptor:
             _token(self.owner_module, "route.owner_module")
         if self.capability_provider is not None:
             _token(self.capability_provider, "route.capability_provider")
-        _optional_text(self.contract_version, "route.contract_version")
+        if self.contract_version is not None:
+            contract_version = _token(
+                self.contract_version, "route.contract_version"
+            )
+            if _SENSITIVE_IDENTITY_MARKER.search(contract_version) is not None:
+                raise _violation(
+                    "INVALID_STABLE_TOKEN",
+                    "route.contract_version must be a bounded public identifier",
+                )
         _optional_member(self.reason_code, REASON_CODES, "route.reason_code")
         if self.implementation_class == "formal":
             if (

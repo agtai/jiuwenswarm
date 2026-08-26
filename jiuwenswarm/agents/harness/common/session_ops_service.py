@@ -11,11 +11,12 @@ from typing import Any, TYPE_CHECKING
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir, get_agent_workspace_dir
 from jiuwenswarm.server.runtime.session.session_history import (
+    _rewrite_session_history_records,
+    _session_history_lock,
     get_read_history_path,
     history_exists,
     load_history_records,
     write_history_records,
-    _write_records_to_path,
 )
 
 if TYPE_CHECKING:
@@ -285,7 +286,6 @@ def compact_partial_session(
 
     import uuid
     from jiuwenswarm.server.runtime.session.session_history import (
-        _FILE_LOCK,
         _WRITE_QUEUE,
         truncate_history_records,
     )
@@ -331,8 +331,13 @@ def compact_partial_session(
         remaining = len(kept)
 
         _WRITE_QUEUE.join()
-        with _FILE_LOCK:
-            _write_records_to_path(history_path, kept)
+        with _session_history_lock(session_id):
+            current = load_history_records(session_id)
+            kept = current[target_user_index:]
+            remaining = len(kept)
+            removed = len(current) - remaining
+            summarized_count = removed
+            _rewrite_session_history_records(session_id, kept)
     else:
         raise ValueError(f"unknown direction: {direction}")
 
@@ -384,7 +389,7 @@ def compact_partial_session(
     }
 
     _WRITE_QUEUE.join()
-    with _FILE_LOCK:
+    with _session_history_lock(session_id):
         existing = load_history_records(session_id) if history_path.exists() else []
         if not isinstance(existing, list):
             existing = []
@@ -411,7 +416,7 @@ def compact_partial_session(
             }
             existing.append(compact_summary_record)
 
-        _write_records_to_path(history_path, existing)
+        _rewrite_session_history_records(session_id, existing)
 
     return {
         "session_id": session_id,

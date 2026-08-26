@@ -11,6 +11,7 @@ the exact pending item available for a later drain.
 from __future__ import annotations
 
 import hashlib
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -436,6 +437,8 @@ _NO_PROJECTION_PROGRESS_DOMAIN = b"live-voice.no-projection.progress.v1\0"
 _NO_PROJECTION_WORK_DOMAIN = b"live-voice.no-projection.work.v1\0"
 _NO_PROJECTION_OBSERVATION_DOMAIN = b"live-voice.no-projection.observation.v1\0"
 _TASK_PROGRESS_RETURN_EXTENSION = "jiuwenswarm.task_progress_return"
+_RETIRED_PROGRESS_IDENTITY_FENCE_ROWS = 4
+_RETIRED_PROGRESS_IDENTITY_FENCE_WIDTH = 1 << 13
 
 
 class ProgressNotificationArbiter:
@@ -482,8 +485,23 @@ class ProgressNotificationArbiter:
         self._observed_source_to_progress: dict[str, str] = {}
         self._observed_progress_to_source: dict[str, str] = {}
         self._observed_no_projection_fingerprints: dict[str, bytes] = {}
+        self._observed_source_work: dict[str, _WorkKey] = {}
+        self._observed_progress_work: dict[str, _WorkKey] = {}
         self._decisions: dict[str, NotificationDecision] = {}
         self._pending: dict[_WorkKey, _PendingNotification] = {}
+        # Terminal acknowledgement releases canonical event bodies and sequence
+        # ledgers, but must never re-authorize their identities.  Keep exact
+        # digests for the current observation working set and fold older digests
+        # into the same conservative bounded membership shape already used by
+        # the runtime replay fences: collisions may reject fresh input but can
+        # never authorize a replay.
+        self._retired_identity_capacity = self._observation_capacity
+        self._retired_identities: deque[bytes] = deque()
+        self._retired_identity_set: set[bytes] = set()
+        self._retired_identity_fence = tuple(
+            bytearray(_RETIRED_PROGRESS_IDENTITY_FENCE_WIDTH)
+            for _ in range(_RETIRED_PROGRESS_IDENTITY_FENCE_ROWS)
+        )
         self._accepted_events = 0
         self._coalesced_events = 0
         self._duplicate_events = 0
@@ -493,6 +511,9 @@ class ProgressNotificationArbiter:
         self._no_projection_duplicates = 0
         self._superseded_notifications = 0
         self._attempt_epochs: dict[_WorkKey, tuple[str, int, int]] = {}
+        self._retired_attempt_epochs: dict[
+            _WorkKey, tuple[str, int, int]
+        ] = {}
         self._consumer_routes: dict[
             _ConsumerKey,
             tuple[_SourceStreamKey, _ProgressStreamKey, _WorkKey],
@@ -561,16 +582,26 @@ class ProgressNotificationArbiter:
         assert attempt_number is not None
         epoch = (event.attempt_id, attempt_number, event.seq)
         with self._lock:
-            prior = self._attempt_epochs.get(work_key)
+            active_prior = self._attempt_epochs.get(work_key)
+            retired_prior = self._retired_attempt_epochs.get(work_key)
+            prior = active_prior or retired_prior
+            if active_prior == epoch:
+                return
             if prior is not None:
-                if prior == epoch:
-                    return
                 if epoch[1] <= prior[1] or epoch[2] <= prior[2]:
                     raise ProgressNotificationArbiterViolation(
                         "STALE_ATTEMPT_EPOCH",
                         "attempt epoch cannot regress or fork",
                         ErrorCode.STALE,
                     )
+            elif self._retired_identity_known(
+                self._retired_attempt_history_digest(work_key)
+            ):
+                raise ProgressNotificationArbiterViolation(
+                    "STALE_ATTEMPT_EPOCH",
+                    "attempt epoch history is no longer exact",
+                    ErrorCode.STALE,
+                )
             self._source_streams[source_key] = _SequenceState(event.seq, {})
             self._progress_streams[progress_key] = _SequenceState(event.seq, {})
             self._work_streams[work_key] = _WorkState(_SequenceState(event.seq, {}))
@@ -580,6 +611,7 @@ class ProgressNotificationArbiter:
                 # notification.  Record that fact separately from acknowledgement;
                 # callers can therefore distinguish supersession from consumption.
                 self._superseded_notifications += 1
+            self._retired_attempt_epochs.pop(work_key, None)
             self._attempt_epochs[work_key] = epoch
 
     def _resume_consumer_cursor(self, baseline: object) -> None:
@@ -714,6 +746,7 @@ class ProgressNotificationArbiter:
                 terminal=terminal,
             )
             if epoch is not None:
+                self._retired_attempt_epochs.pop(work_key, None)
                 self._attempt_epochs[work_key] = epoch
             self._consumer_routes[consumer_key] = (
                 source_key,
@@ -932,6 +965,24 @@ class ProgressNotificationArbiter:
             _NO_PROJECTION_OBSERVATION_DOMAIN + source_bytes
         ).digest()
 
+        retired_reason = (
+            None
+            if consumer_cursor
+            else self._retired_offer_reason(
+                source_event_id=event.event_id,
+                progress_event_id=None,
+                work_key=work_key,
+                persistent_attempt_id=event.attempt_id,
+            )
+        )
+        if retired_reason is not None:
+            self._rejected_events += 1
+            return NoProjectionAdvanceDecision(
+                NoProjectionAdvanceDisposition.REJECTED,
+                retired_reason,
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
         prior_source = self._observed_source_fingerprints.get(event.event_id)
         if not consumer_cursor and prior_source is not None:
             if event.event_id in self._observed_source_to_progress:
@@ -1046,6 +1097,7 @@ class ProgressNotificationArbiter:
                 source_observation_fingerprint
             )
             self._observed_no_projection_fingerprints[event.event_id] = evidence_bytes
+            self._observed_source_work[event.event_id] = work_key
         self._no_projection_advances += 1
         return NoProjectionAdvanceDecision(
             NoProjectionAdvanceDisposition.ADVANCED,
@@ -1099,6 +1151,16 @@ class ProgressNotificationArbiter:
                 "INVALID_EVENT_ENVELOPE", ErrorCode.PROTOCOL_VIOLATION
             )
 
+        retired_reason = self._retired_offer_reason(
+            source_event_id=source.event_id,
+            progress_event_id=projected.event_id,
+            work_key=work_key,
+            persistent_attempt_id=persistent_attempt_id,
+        )
+        if not consumer_cursor and retired_reason is not None:
+            self._rejected_events += 1
+            return self._rejected(retired_reason, ErrorCode.PROTOCOL_VIOLATION)
+
         if (
             not consumer_cursor
             and source.event_id in self._observed_no_projection_fingerprints
@@ -1115,6 +1177,7 @@ class ProgressNotificationArbiter:
             else self._observe_identity(
                 source,
                 projected,
+                work_key=work_key,
                 source_bytes=source_bytes,
                 progress_bytes=progress_bytes,
             )
@@ -1259,35 +1322,74 @@ class ProgressNotificationArbiter:
         scope: object,
         foreground: object,
         *,
+        work_ref: object | None = None,
         max_items: int | None = None,
     ) -> tuple[NotificationDecision, ...]:
-        """Return exact-scope delivery candidates without consuming them."""
+        """Return exact-scope/work delivery candidates without consuming them."""
 
         if not self._enabled:
             return ()
         with self._lock:
-            return self._drain_locked(scope, foreground, max_items=max_items)
+            return self._drain_locked(
+                scope,
+                foreground,
+                work_ref=work_ref,
+                max_items=max_items,
+            )
 
     def _drain_locked(
         self,
         scope: object,
         foreground: object,
         *,
+        work_ref: object | None,
         max_items: int | None,
     ) -> tuple[NotificationDecision, ...]:
         try:
             selected_scope = self._validate_authenticated_scope(scope)
             facts = self._validate_foreground(foreground)
+            selected_work_ref: IdentityRef | None = None
+            if work_ref is not None:
+                if type(work_ref) is not IdentityRef:
+                    raise _InputRejected(
+                        "INVALID_PROGRESS_BINDING",
+                        "drain work_ref must be canonical",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                selected_work_ref = IdentityRef.from_dict(work_ref.to_dict())
+                if (
+                    selected_work_ref != work_ref
+                    or selected_work_ref.kind
+                    not in {IdentityKind.ROUND, IdentityKind.TASK}
+                ):
+                    raise _InputRejected(
+                        "INVALID_PROGRESS_BINDING",
+                        "drain work_ref must identify an exact round or task",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
         except _InputRejected as error:
             self._rejected_events += 1
             return (self._rejected(error.reason, error.code),)
+        except (AttributeError, ContractViolation, TypeError, ValueError):
+            self._rejected_events += 1
+            return (
+                self._rejected(
+                    "INVALID_PROGRESS_BINDING", ErrorCode.INVALID_ARGUMENT
+                ),
+            )
         if max_items is not None and (type(max_items) is not int or max_items <= 0):
             self._rejected_events += 1
             return (self._rejected("INVALID_DRAIN_LIMIT", ErrorCode.INVALID_ARGUMENT),)
         if not self._foreground_safe(facts):
             return ()
         pending = tuple(
-            item for key, item in self._pending.items() if key[0] == selected_scope
+            item
+            for key, item in self._pending.items()
+            if key[0] == selected_scope
+            and (
+                selected_work_ref is None
+                or key[1:] == (selected_work_ref.kind, selected_work_ref.id)
+            )
         )
         if max_items is not None:
             pending = pending[:max_items]
@@ -1347,6 +1449,8 @@ class ProgressNotificationArbiter:
         if pending is None or pending.progress_event.event_id != event_id:
             return False
         self._pending.pop(key)
+        if pending.progress.state is WorkState.TERMINAL:
+            self._release_terminal_work_locked(key, pending)
         return True
 
     def snapshot(self) -> ProgressNotificationArbiterSnapshot:
@@ -1387,6 +1491,149 @@ class ProgressNotificationArbiter:
         if type(attempt_id) is not str or attempt_id != epoch[0]:
             return "STALE_ATTEMPT"
         return None
+
+    @staticmethod
+    def _retired_event_digest(kind: str, event_id: str) -> bytes:
+        return hashlib.sha256(
+            b"live-voice.progress-retired.v1\0"
+            + kind.encode("ascii")
+            + b"\0"
+            + event_id.encode("utf-8")
+        ).digest()
+
+    @staticmethod
+    def _retired_work_digest(work_key: _WorkKey) -> bytes:
+        scope, kind, work_id = work_key
+        return hashlib.sha256(
+            b"live-voice.progress-retired.v1\0work\0"
+            + canonical_json_bytes(
+                {
+                    "scope": scope.to_dict(),
+                    "work_ref": {"kind": kind.value, "id": work_id},
+                }
+            )
+        ).digest()
+
+    @staticmethod
+    def _retired_attempt_history_digest(work_key: _WorkKey) -> bytes:
+        scope, kind, work_id = work_key
+        return hashlib.sha256(
+            b"live-voice.progress-retired.v1\0attempt-history\0"
+            + canonical_json_bytes(
+                {
+                    "scope": scope.to_dict(),
+                    "work_ref": {"kind": kind.value, "id": work_id},
+                }
+            )
+        ).digest()
+
+    def _retired_fence_indices(self, digest: bytes) -> tuple[int, ...]:
+        width = len(self._retired_identity_fence[0])
+        return tuple(
+            int.from_bytes(digest[offset : offset + 4], "big") % width
+            for offset in range(0, 4 * _RETIRED_PROGRESS_IDENTITY_FENCE_ROWS, 4)
+        )
+
+    def _retired_identity_known(self, digest: bytes) -> bool:
+        return digest in self._retired_identity_set or all(
+            row[index]
+            for row, index in zip(
+                self._retired_identity_fence,
+                self._retired_fence_indices(digest),
+                strict=True,
+            )
+        )
+
+    def _retire_identity(self, digest: bytes) -> None:
+        if self._retired_identity_known(digest):
+            return
+        self._retired_identities.append(digest)
+        self._retired_identity_set.add(digest)
+        while len(self._retired_identities) > self._retired_identity_capacity:
+            evicted = self._retired_identities.popleft()
+            self._retired_identity_set.discard(evicted)
+            for row, index in zip(
+                self._retired_identity_fence,
+                self._retired_fence_indices(evicted),
+                strict=True,
+            ):
+                row[index] = 1
+
+    def _retire_attempt_epoch(
+        self,
+        work_key: _WorkKey,
+        epoch: tuple[str, int, int],
+    ) -> None:
+        self._retired_attempt_epochs.pop(work_key, None)
+        self._retired_attempt_epochs[work_key] = epoch
+        while len(self._retired_attempt_epochs) > self._observation_capacity:
+            evicted_work = next(iter(self._retired_attempt_epochs))
+            self._retired_attempt_epochs.pop(evicted_work)
+            self._retire_identity(
+                self._retired_attempt_history_digest(evicted_work)
+            )
+
+    def _retired_offer_reason(
+        self,
+        *,
+        source_event_id: str,
+        progress_event_id: str | None,
+        work_key: _WorkKey,
+        persistent_attempt_id: object,
+    ) -> str | None:
+        if self._retired_identity_known(
+            self._retired_event_digest("source", source_event_id)
+        ):
+            return "SOURCE_EVENT_ID_CONFLICT"
+        if progress_event_id is not None and self._retired_identity_known(
+            self._retired_event_digest("progress", progress_event_id)
+        ):
+            return "PROGRESS_EVENT_ID_CONFLICT"
+        if not self._retired_identity_known(self._retired_work_digest(work_key)):
+            return None
+        epoch = self._attempt_epochs.get(work_key)
+        if (
+            epoch is not None
+            and type(persistent_attempt_id) is str
+            and persistent_attempt_id == epoch[0]
+        ):
+            return None
+        return "WORK_EVENT_AFTER_TERMINAL"
+
+    def _release_terminal_work_locked(
+        self,
+        work_key: _WorkKey,
+        pending: _PendingNotification,
+    ) -> None:
+        source_ids = tuple(
+            event_id
+            for event_id, owner in self._observed_source_work.items()
+            if owner == work_key
+        )
+        progress_ids = tuple(
+            event_id
+            for event_id, owner in self._observed_progress_work.items()
+            if owner == work_key
+        )
+        self._retire_identity(self._retired_work_digest(work_key))
+        for event_id in source_ids:
+            self._retire_identity(self._retired_event_digest("source", event_id))
+            self._observed_source_fingerprints.pop(event_id, None)
+            self._observed_source_to_progress.pop(event_id, None)
+            self._observed_no_projection_fingerprints.pop(event_id, None)
+            self._observed_source_work.pop(event_id, None)
+        for event_id in progress_ids:
+            self._retire_identity(self._retired_event_digest("progress", event_id))
+            self._observed_progress_fingerprints.pop(event_id, None)
+            self._observed_progress_to_source.pop(event_id, None)
+            self._observed_progress_work.pop(event_id, None)
+            self._decisions.pop(event_id, None)
+        epoch = self._attempt_epochs.pop(work_key, None)
+        if epoch is not None:
+            self._retire_attempt_epoch(work_key, epoch)
+        self._source_streams.pop(pending.source_event.stream_key, None)
+        self._progress_streams.pop(pending.progress_event.stream_key, None)
+        self._work_streams.pop(work_key, None)
 
     @staticmethod
     def _validate_no_projection_advance(
@@ -1875,6 +2122,7 @@ class ProgressNotificationArbiter:
         source: EventEnvelope,
         projected: EventEnvelope,
         *,
+        work_key: _WorkKey,
         source_bytes: bytes,
         progress_bytes: bytes,
     ) -> str | None:
@@ -1921,9 +2169,11 @@ class ProgressNotificationArbiter:
         if new_source:
             self._observed_source_fingerprints[source_id] = source_bytes
             self._observed_source_to_progress[source_id] = progress_id
+            self._observed_source_work[source_id] = work_key
         if new_progress:
             self._observed_progress_fingerprints[progress_id] = progress_bytes
             self._observed_progress_to_source[progress_id] = source_id
+            self._observed_progress_work[progress_id] = work_key
         return reason
 
     def _capacity_reason(

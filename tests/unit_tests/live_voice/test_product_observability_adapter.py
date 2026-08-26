@@ -172,16 +172,19 @@ def _metric(
 def _observation_with_unreviewed_contract(
     event_id: str, contract_version: str
 ) -> LiveVoiceObservation:
-    route = {
+    value = _observation(event_id).to_dict()
+    value["route"] = {
         "implementation_class": "fallback",
         "owner_module": "route.compatibility",
         "capability_provider": None,
-        "contract_version": contract_version,
+        "contract_version": "route.compatibility.v1",
         "reason_code": "ROUTE_FALLBACK",
     }
-    value = _observation(event_id).to_dict()
-    value["route"] = route
-    return create_observation(value)
+    observation = create_observation(value)
+    # The public schema rejects this value. Mutate a valid frozen object so the
+    # adapter must still fail closed if an upstream boundary is bypassed.
+    object.__setattr__(observation.route, "contract_version", contract_version)
+    return observation
 
 
 async def _activate(
@@ -831,7 +834,7 @@ async def test_credentials_urls_device_identity_and_unreviewed_content_are_rejec
 
 
 @pytest.mark.asyncio
-async def test_schema_valid_url_query_and_equal_delimited_carriers_export_zero() -> (
+async def test_bypassed_url_query_and_equal_delimited_carriers_export_zero() -> (
     None
 ):
     exported: list[ExportRecord] = []

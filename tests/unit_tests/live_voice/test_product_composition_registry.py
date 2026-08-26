@@ -35,6 +35,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TerminalOutcome,
     TurnCommit,
     TurnCommitLedger,
+    canonical_json_bytes,
 )
 from jiuwenswarm.server.live_voice.formal_task_models import (
     ExecutorDeliveryResult,
@@ -115,6 +116,9 @@ from jiuwenswarm.server.live_voice.product_observability_runtime import (
     ProductObservabilityRuntime,
     create_product_observability_runtime_from_environment,
 )
+from jiuwenswarm.server.live_voice.product_p2_interaction_adapter import (
+    P2LeaseState,
+)
 from jiuwenswarm.server.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry,
     PRODUCT_COMPOSITION_ENABLE_ENV,
@@ -174,7 +178,12 @@ from jiuwenswarm.server.live_voice.unified_committed_input import (
     SqliteUnifiedCommittedInputJournal,
 )
 from jiuwenswarm.server.live_voice.voice_task_bridge import (
+    ResolvedTaskIntent,
+    TaskIntentDisposition,
+    TaskIntentSourceSpan,
+    VoiceTaskBridge,
     VoiceTaskBridgeViolation,
+    _resolution_identity,
 )
 
 
@@ -1674,6 +1683,19 @@ def _p2_params(**changes: object) -> dict[str, object]:
     return params
 
 
+def _p2_durable_text_corpus() -> dict[str, object]:
+    fixture = (
+        Path(__file__).parents[2]
+        / "fixtures"
+        / "live_voice_contract_v2"
+        / "strict_review_stage2_parity.json"
+    )
+    return cast(
+        dict[str, object],
+        json.loads(fixture.read_text(encoding="utf-8"))["p2_durable_committed_text"],
+    )
+
+
 def _p2_task_origin_params(*, stem: str, text: str) -> dict[str, object]:
     commit_id = f"commit-{stem}"
     turn_id = f"turn-{stem}"
@@ -1697,6 +1719,130 @@ def _p2_task_origin_params(*, stem: str, text: str) -> dict[str, object]:
             "critical_policy": "eligible",
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_p2_submit_enforces_shared_raw_utf8_and_canonical_operation_boundaries_before_business_effects(
+    tmp_path: Path,
+) -> None:
+    corpus = _p2_durable_text_corpus()
+    operation_without_text = cast(dict[str, object], corpus["operation_without_text"])
+    base_params = cast(dict[str, object], operation_without_text["params"])
+    cases = cast(list[dict[str, object]], corpus["cases"])
+
+    for item in cases:
+        text = cast(str, item["token"]) * cast(int, item["repeat"])
+        params = {"auth_token": "trusted-token", **base_params, "text": text}
+        if item["accepted"] is True:
+            assert product_composition_registry._required_utf8_content(
+                text,
+                "text",
+                maximum=cast(int, corpus["raw_text_max_utf8_bytes"]),
+            ) == text
+            product_composition_registry._require_p2_durable_submit_operation_bound(
+                params=params,
+                request_id=cast(str, operation_without_text["request_id"]),
+            )
+
+        case_path = tmp_path / cast(str, item["name"])
+        case_path.mkdir()
+        registry, _p3, manager, _pushed = _registry(case_path)
+        activated = await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id=f"request-activate-{item['name']}",
+            session_id="session-product",
+            channel_id="web",
+        )
+        assert activated.ok is True
+        route = registry._p2_routes[("session-product", "interaction-1")]
+        history = _HistoryWriter()
+        route.activation_lease._runtime._history_writer = history
+        try:
+            submitted = await registry.handle_p2_submit(
+                params=params,
+                request_id=cast(str, operation_without_text["request_id"]),
+                session_id="session-product",
+                channel_id="web",
+            )
+
+            if item["accepted"] is True:
+                assert submitted.ok is True, item["name"]
+                await manager.agent.wait_for_calls(1)
+                await _wait_for_p2_notifications(route, 4)
+                assert manager.agent.calls == 1, item["name"]
+                presentation: dict[str, object] | None = None
+                response: dict[str, object] | None = None
+                for sequence in range(1, 5):
+                    polled = await registry.handle_p2_notification_next(
+                        params=_p2_params(notification_sequence=sequence),
+                        request_id=f"request-notification-{item['name']}-{sequence}",
+                        session_id="session-product",
+                    )
+                    assert polled.ok is True, item["name"]
+                    notification = cast(dict[str, object], polled.payload["result"])
+                    if isinstance(notification["presentation_unit"], dict):
+                        presentation = cast(
+                            dict[str, object], notification["presentation_unit"]
+                        )
+                        response = cast(dict[str, object], notification["response"])
+                        break
+                assert presentation is not None, item["name"]
+                assert response is not None, item["name"]
+                acknowledged = await registry.handle_p2_presentation_ack(
+                    params=_p2_params(
+                        response_id=response["response_id"],
+                        response_generation=response["response_generation"],
+                        surface=presentation["surface"],
+                        unit_id=presentation["unit_id"],
+                        contiguous_cursor=presentation["seq"],
+                        presented_at=NOW,
+                    ),
+                    request_id=f"request-ack-{item['name']}",
+                    session_id="session-product",
+                )
+                assert acknowledged.ok is True, item["name"]
+            else:
+                assert submitted.ok is False, item["name"]
+                assert cast(dict[str, object], submitted.payload["error"])["reason"] == (
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+                )
+                assert manager.agent.calls == 0, item["name"]
+                assert registry._p2_submit_operations == {}
+                assert history.users == []
+                assert history.assistants == []
+        finally:
+            await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_submit_rejects_unpaired_surrogate_before_business_effects(
+    tmp_path: Path,
+) -> None:
+    corpus = _p2_durable_text_corpus()
+    operation_without_text = cast(dict[str, object], corpus["operation_without_text"])
+    base_params = cast(dict[str, object], operation_without_text["params"])
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-invalid-surrogate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+
+    submitted = await registry.handle_p2_submit(
+        params={"auth_token": "trusted-token", **base_params, "text": "\ud800"},
+        request_id=cast(str, operation_without_text["request_id"]),
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is False
+    assert cast(dict[str, object], submitted.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )
+    assert manager.agent.calls == 0
+    assert registry._p2_submit_operations == {}
+    await registry.close_active_routes()
 
 
 def _unified_final_params(*, stem: str, text: str) -> dict[str, object]:
@@ -1946,6 +2092,65 @@ def _presentation_progress_ack_params(
         }
     )
     return params
+
+
+async def _settle_progress_surface(
+    registry: AgentServerProductCompositionRegistry,
+    pushed: list[dict[str, object]],
+    params: dict[str, object],
+    *,
+    stem: str,
+) -> None:
+    """Activate, close and acknowledge one progress surface end to end.
+
+    Only a fully settled surface is evictable at capacity, so this is the exact
+    journey that turns a live generation into an evicted one.
+    """
+
+    activated = await registry.handle_p3_progress_activate(
+        params=params,
+        request_id=f"request-{stem}-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert activated.ok is True
+    event = cast(Mapping[str, object], pushed[-1]["payload"])
+    closed = await registry.handle_p3_progress_close(
+        params=params,
+        request_id=f"request-{stem}-close",
+        session_id="session-product",
+    )
+    assert closed.ok is True
+    acknowledged = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(event),
+        request_id=f"request-{stem}-ack",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert acknowledged.ok is True
+
+
+async def _settle_progress_surfaces(
+    registry: AgentServerProductCompositionRegistry,
+    pushed: list[dict[str, object]],
+    *,
+    stem: str,
+    surfaces: int,
+) -> None:
+    """Settle further keys so the bound keeps evicting the oldest retained one."""
+
+    for index in range(1, surfaces + 1):
+        await _settle_progress_surface(
+            registry,
+            pushed,
+            _progress_params(
+                origin_id=f"{stem}-surface-{index}",
+                generation_id=f"{stem}-generation-{index}",
+            ),
+            stem=f"{stem}-{index}",
+        )
 
 
 def _route(payload: dict[str, object], segment: str) -> dict[str, object]:
@@ -10766,6 +10971,981 @@ async def test_progress_generation_admission_is_bounded_without_unsafe_eviction(
 
 
 @pytest.mark.asyncio
+async def test_evicted_progress_generation_still_rejects_the_old_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capacity eviction releases heavy route state, never the replay fence.
+
+    Evicting the whole key drops its generation high-water mark, so a
+    superseded generation can activate again against the same exact identity.
+    """
+
+    registry, p3, manager, pushed = _registry(tmp_path)
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 2)
+    fenced_key = (
+        "session-product",
+        "task-1",
+        "web-surface-1",
+        "web-session-generation-1",
+    )
+
+    superseding = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=2),
+        request_id="request-fence-superseding",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert superseding.ok is True
+    assert registry._progress_generations[fenced_key] == 2
+    fenced_event = cast(Mapping[str, object], pushed[0]["payload"])
+
+    closed = await registry.handle_p3_progress_close(
+        params=_progress_params(generation=2),
+        request_id="request-fence-close",
+        session_id="session-product",
+    )
+    acknowledged = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(fenced_event),
+        request_id="request-fence-ack",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert closed.ok is True
+    assert acknowledged.ok is True
+
+    # Fill the bound so the settled key becomes the eviction candidate.
+    for index in (2, 3):
+        filler = await registry.handle_p3_progress_activate(
+            params=_progress_params(
+                origin_id=f"web-surface-{index}",
+                generation_id=f"web-generation-{index}",
+            ),
+            request_id=f"request-fence-filler-{index}",
+            session_id="session-product",
+            channel_id="web",
+        )
+        await asyncio.sleep(0)
+        assert filler.ok is True
+
+    # Eviction must release the heavy closed-route state, which is what the
+    # bound exists to reclaim.
+    assert fenced_key not in registry._progress_routes
+    assert all(
+        closed_key[:4] != fenced_key for closed_key in registry._closed_progress_routes
+    )
+    effects = (
+        len(p3.subscription_calls),
+        len(p3.query_calls),
+        len(pushed),
+        len(manager.get_calls),
+        manager.agent.calls,
+    )
+
+    # Restore admission room so the replay is judged by the generation fence
+    # rather than by capacity refusal, which would hide a missing fence.
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 8)
+    replayed = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=1),
+        request_id="request-fence-old-generation",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+
+    assert replayed.ok is False
+    replay_error = cast(dict, replayed.payload["error"])
+    assert replay_error["reason"] == "TASK_PROGRESS_STALE_GENERATION"
+    assert replay_error["code"] == ErrorCode.CONFLICT.value
+    assert fenced_key not in registry._progress_routes
+    assert (
+        len(p3.subscription_calls),
+        len(p3.query_calls),
+        len(pushed),
+        len(manager.get_calls),
+        manager.agent.calls,
+    ) == effects
+
+    # A strictly newer generation is still admitted, so the fence refuses
+    # replay without freezing the identity.
+    successor = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=3),
+        request_id="request-fence-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    assert successor.ok is True
+    assert registry._progress_generations[fenced_key] == 3
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_progress_generation_fence_never_forgets_an_evicted_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One evicted generation stays refused through many later evictions.
+
+    The exact working set is a bounded cache: every further settled surface
+    evicts one more retained key, so a single eviction proves nothing about the
+    key evicted fifteen surfaces ago. Only a fence that never forgets keeps the
+    first surface's superseded generation from activating again, and it has to
+    do that at a fixed memory cost.
+    """
+
+    registry, p3, manager, pushed = _registry(tmp_path)
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 2)
+    fenced_key = (
+        "session-product",
+        "task-1",
+        "web-surface-1",
+        "web-session-generation-1",
+    )
+
+    await _settle_progress_surface(
+        registry,
+        pushed,
+        _progress_params(generation=4),
+        stem="long-fence-owner",
+    )
+    await _settle_progress_surfaces(
+        registry,
+        pushed,
+        stem="long-fence-filler",
+        surfaces=16,
+    )
+
+    # Eviction released exactly the heavy state the bound exists to reclaim,
+    # and it happened long before the newest surfaces were admitted.
+    assert fenced_key not in registry._progress_generations
+    assert fenced_key not in registry._progress_routes
+    assert all(
+        closed_key[:4] != fenced_key for closed_key in registry._closed_progress_routes
+    )
+    assert len(registry._progress_generations) == 2
+
+    effects = (
+        len(p3.subscription_calls),
+        len(p3.query_calls),
+        len(pushed),
+        len(manager.get_calls),
+        manager.agent.calls,
+    )
+    # Restore admission room so the replays are judged by the generation fence
+    # rather than by capacity refusal, which would hide a missing fence.
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 8)
+
+    for label, generation in (("equal", 4), ("older", 3)):
+        replayed = await registry.handle_p3_progress_activate(
+            params=_progress_params(generation=generation),
+            request_id=f"request-long-fence-{label}",
+            session_id="session-product",
+            channel_id="web",
+        )
+        await asyncio.sleep(0)
+
+        assert replayed.ok is False
+        replay_error = cast(dict, replayed.payload["error"])
+        assert replay_error["reason"] == "TASK_PROGRESS_STALE_GENERATION"
+        assert replay_error["code"] == ErrorCode.CONFLICT.value
+        assert fenced_key not in registry._progress_routes
+        assert fenced_key not in registry._progress_generations
+        assert fenced_key not in registry._progress_targets
+        assert fenced_key not in registry._progress_deliveries
+        assert (
+            len(p3.subscription_calls),
+            len(p3.query_calls),
+            len(pushed),
+            len(manager.get_calls),
+            manager.agent.calls,
+        ) == effects
+
+    # The fence refuses replay without freezing the identity: a strictly newer
+    # generation is still admitted on the same surface.
+    successor = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=5),
+        request_id="request-long-fence-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert successor.ok is True
+    assert registry._progress_generations[fenced_key] == 5
+    await registry.close_active_routes()
+
+    # Supplementary structural checks on the sketch the journey above exercised.
+    footprint = tuple(len(row) for row in registry._progress_generation_fence)
+    keys = [
+        ("session-product", "task-1", f"sketch-surface-{index}", "sketch-generation-1")
+        for index in range(2048)
+    ]
+    for index, key in enumerate(keys):
+        registry._record_progress_generation(key, index + 1)
+    # Far past _PROGRESS_GENERATION_CAPACITY the very first key is still fenced,
+    # and the sketch has not grown by a single slot.
+    assert registry._fenced_progress_generation(keys[0]) >= 1
+    assert registry._fenced_progress_generation(keys[-1]) >= len(keys)
+    assert tuple(len(row) for row in registry._progress_generation_fence) == footprint
+    # An unrecorded key reads as absent rather than as generation 0.
+    absent = ("session-product", "task-1", "sketch-surface-absent", "sketch-gen-1")
+    assert registry._progress_generation_high_water(absent) == -1
+    assert registry._fenced_progress_generation(absent) is None
+    # The sketch is monotonic: a lower generation never lowers the high-water.
+    registry._record_progress_generation(keys[0], 500)
+    registry._record_progress_generation(keys[0], 2)
+    assert registry._fenced_progress_generation(keys[0]) >= 500
+    # The exact working set always wins over the conservative sketch.
+    registry._progress_generations[keys[0]] = 501
+    assert registry._fenced_progress_generation(keys[0]) == 501
+
+
+@pytest.mark.asyncio
+async def test_progress_generation_fence_is_not_durable_across_a_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Characterization of the fence's durability boundary, not a guarantee.
+
+    The fence is an in-process sketch, so a restarted registry starts with an
+    empty one. That is the same lifetime the evicted `_progress_generations`
+    working set already had, so the fence narrows nothing: cross-restart replay
+    protection remains durable TaskEvent truth, not this registry's bound. The
+    restart half below therefore holds on the pre-fence baseline too; only the
+    same-process half is a defect reproduction.
+    """
+
+    registry, _p3, _manager, pushed = _registry(tmp_path)
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 2)
+    fenced_key = (
+        "session-product",
+        "task-1",
+        "web-surface-1",
+        "web-session-generation-1",
+    )
+
+    await _settle_progress_surface(
+        registry,
+        pushed,
+        _progress_params(generation=4),
+        stem="restart-owner",
+    )
+    await _settle_progress_surfaces(
+        registry,
+        pushed,
+        stem="restart-filler",
+        surfaces=3,
+    )
+    assert fenced_key not in registry._progress_generations
+
+    # A restarted process keeps neither the exact working set nor the fence,
+    # so generation 4 is admitted again there. This is the recorded boundary,
+    # not a regression: both maps have exactly the same process lifetime.
+    restarted, restarted_p3, restarted_manager, restarted_pushed = _registry(tmp_path)
+    assert restarted._progress_generations == {}
+    assert restarted._progress_routes == {}
+    readmitted = await restarted.handle_p3_progress_activate(
+        params=_progress_params(generation=4),
+        request_id="request-restart-readmit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert readmitted.ok is True
+    assert restarted._progress_generations[fenced_key] == 4
+    assert len(restarted_p3.subscription_calls) == 1
+    assert restarted_manager.agent.calls == 0
+    assert len(restarted_pushed) == 1
+    await restarted.close_active_routes()
+
+    # The original process still refuses the same replay, so the durability
+    # boundary is the process, not the eviction.
+    replayed = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=4),
+        request_id="request-restart-same-process-replay",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+
+    assert replayed.ok is False
+    assert cast(dict, replayed.payload["error"])["reason"] == (
+        "TASK_PROGRESS_STALE_GENERATION"
+    )
+    assert fenced_key not in registry._progress_routes
+    assert fenced_key not in registry._progress_generations
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_oversized_progress_generation_never_reaches_the_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fence encodes `generation + 1` into `array("Q")` uint64 cells.
+
+    Progress admission only checks that the generation is a positive integer,
+    so the uint64 bound is held by the contract's cross-language safe range
+    further down: anything above `MAX_SAFE_INTEGER` fails closed and its
+    transient exact entry is rolled back under the same lock, and the largest
+    admissible generation still round-trips through the sketch. No
+    `OverflowError` escapes on either side of that boundary.
+    """
+
+    registry, p3, manager, pushed = _registry(tmp_path)
+    # The rejection is decided by the binding, not by a delivered event; an
+    # event-free subscription keeps the assertion on the admission boundary.
+    p3.subscription_event = False
+    oversized_keys = []
+
+    for label, generation in (
+        ("int63", 2**63 - 1),
+        ("uint64-max", 2**64 - 1),
+        ("uint64-overflow", 2**64),
+    ):
+        key = ("session-product", "task-1", f"web-{label}", f"generation-{label}")
+        oversized_keys.append(key)
+        subscriptions_before = len(p3.subscription_calls)
+        pushes_before = len(pushed)
+        rejected = await registry.handle_p3_progress_activate(
+            params=_progress_params(
+                generation=generation,
+                origin_id=f"web-{label}",
+                generation_id=f"generation-{label}",
+            ),
+            request_id=f"request-oversized-{label}",
+            session_id="session-product",
+            channel_id="web",
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert rejected.ok is False
+        assert cast(dict, rejected.payload["error"])["reason"] == (
+            "PRODUCT_P3_PROGRESS_ACTIVATION_FAILED"
+        )
+        # Nothing is retained, so the sketch never sees the oversized value and
+        # a later eviction can never try to encode it.
+        assert key not in registry._progress_generations
+        assert key not in registry._progress_routes
+        assert key not in registry._progress_targets
+        assert key not in registry._progress_deliveries
+        # One bounded activation attempt is torn down; no product effect lands.
+        assert len(p3.subscription_calls) == subscriptions_before + 1
+        assert len(pushed) == pushes_before
+        assert p3.query_calls == []
+        assert manager.get_calls == []
+        assert manager.agent.calls == 0
+
+    # The largest admissible generation is fenced exactly, which is the real
+    # uint64 boundary this sketch has to survive.
+    p3.subscription_event = True
+    largest = 9007199254740991
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 2)
+    largest_key = (
+        "session-product",
+        "task-1",
+        "web-surface-1",
+        "web-session-generation-1",
+    )
+    await _settle_progress_surface(
+        registry,
+        pushed,
+        _progress_params(generation=largest),
+        stem="largest-owner",
+    )
+    await _settle_progress_surfaces(
+        registry,
+        pushed,
+        stem="largest-filler",
+        surfaces=3,
+    )
+    assert largest_key not in registry._progress_generations
+
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 8)
+    replayed = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=largest),
+        request_id="request-largest-replay",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+
+    assert replayed.ok is False
+    assert cast(dict, replayed.payload["error"])["reason"] == (
+        "TASK_PROGRESS_STALE_GENERATION"
+    )
+    assert largest_key not in registry._progress_routes
+    assert largest_key not in registry._progress_generations
+    await registry.close_active_routes()
+
+    # Supplementary: the sketch itself holds the exact largest admissible value
+    # and never recorded a cell for any of the rejected oversized generations.
+    assert registry._progress_generation_high_water(largest_key) == largest
+    for key in oversized_keys:
+        assert registry._progress_generation_high_water(key) == -1
+        assert registry._fenced_progress_generation(key) is None
+
+
+@pytest.mark.parametrize(
+    "label,first_generation,second_generation",
+    [("stale-first", 5, 6), ("successor-first", 6, 5)],
+)
+@pytest.mark.asyncio
+async def test_concurrent_progress_activation_admits_one_generation_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    first_generation: int,
+    second_generation: int,
+) -> None:
+    """A forced interleaving inside the critical section keeps one owner.
+
+    The fence is read at the top of the critical section and written after the
+    authority round trip, so that `await` is the only window a second
+    activation of the same key can interleave with. A barrier parks the first
+    request exactly there and releases it only once the second is provably
+    blocked on the registry lock, so each ordering is driven deterministically
+    rather than hoped for. Whichever request wins the lock, the high-water never
+    regresses and exactly one generation owns the surface.
+    """
+
+    registry, p3, manager, pushed = _registry(tmp_path)
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 2)
+    key = (
+        "session-product",
+        "task-1",
+        "web-surface-1",
+        "web-session-generation-1",
+    )
+    await _settle_progress_surface(
+        registry,
+        pushed,
+        _progress_params(generation=5),
+        stem=f"race-{label}-owner",
+    )
+    await _settle_progress_surfaces(
+        registry,
+        pushed,
+        stem=f"race-{label}-filler",
+        surfaces=3,
+    )
+    assert key not in registry._progress_generations
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 8)
+
+    parked = asyncio.Event()
+    release = asyncio.Event()
+    armed = [True]
+    real_authority = registry._authority_registration
+
+    async def barrier_authority(**kwargs):
+        if armed[0]:
+            armed[0] = False
+            parked.set()
+            await release.wait()
+        return await real_authority(**kwargs)
+
+    monkeypatch.setattr(registry, "_authority_registration", barrier_authority)
+
+    first = asyncio.create_task(
+        registry.handle_p3_progress_activate(
+            params=_progress_params(generation=first_generation),
+            request_id=f"request-race-{label}-first",
+            session_id="session-product",
+            channel_id="web",
+        )
+    )
+    await parked.wait()
+    # The first request already read the fence and is parked inside the
+    # critical section, holding the registry lock.
+    authority_calls = len(p3.authority_calls)
+    subscriptions = len(p3.subscription_calls)
+    second = asyncio.create_task(
+        registry.handle_p3_progress_activate(
+            params=_progress_params(generation=second_generation),
+            request_id=f"request-race-{label}-second",
+            session_id="session-product",
+            channel_id="web",
+        )
+    )
+    for _ in range(8):
+        await asyncio.sleep(0)
+    # The interleaving is real and observed, not assumed: the second request
+    # cannot resolve authority or allocate anything while the first holds the
+    # lock, so the release below is what orders them.
+    assert registry._lock.locked() is True
+    assert second.done() is False
+    assert len(p3.authority_calls) == authority_calls
+    assert len(p3.subscription_calls) == subscriptions
+
+    release.set()
+    first_result = await first
+    second_result = await second
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    stale_result = first_result if first_generation == 5 else second_result
+    winner_result = second_result if first_generation == 5 else first_result
+    assert winner_result.ok is True
+    winner_payload = cast(Mapping[str, object], winner_result.payload["result"])
+    assert winner_payload["generation"] == 6
+    # The superseded generation is refused in both orderings, and only the
+    # winner ever reached a subscription.
+    assert stale_result.ok is False
+    stale_error = cast(dict, stale_result.payload["error"])
+    assert stale_error["reason"] == "TASK_PROGRESS_STALE_GENERATION"
+    assert stale_error["code"] == ErrorCode.CONFLICT.value
+    assert len(p3.subscription_calls) == subscriptions + 1
+    assert registry._progress_generations[key] == 6
+    assert registry._progress_routes[key].binding.generation == 6
+    assert manager.agent.calls == 0
+    assert manager.get_calls == []
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_higher_generation_p2_replacement_drops_the_superseded_origin(
+    tmp_path: Path,
+) -> None:
+    """Replacement runs the exact cleanup that normal close runs.
+
+    Popping the route and retaining a tombstone without dropping the voice
+    origin leaves the superseded activation holding an actionable task origin
+    and its critical-token commit.
+    """
+
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    route_key = ("session-product", "interaction-1")
+
+    first = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-replace-first",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert first.ok is True
+    retained = registry._p2_routes[route_key]
+    registry._voice_task_origins["task-superseded"] = _VoiceTaskOrigin(
+        session_id="session-product",
+        interaction_id="interaction-1",
+        activation_id=retained.binding.activation_id,
+        activation_generation=retained.binding.activation_generation,
+        correlation_id=retained.binding.correlation_id,
+        response_ref=ResponseRef("interaction-1", "response-superseded", 0),
+    )
+    foreign_key = ("session-product", "interaction-neighbour")
+    registry._voice_task_origins["task-neighbour"] = _VoiceTaskOrigin(
+        session_id=foreign_key[0],
+        interaction_id=foreign_key[1],
+        activation_id="activation-neighbour",
+        activation_generation=1,
+        correlation_id="correlation-neighbour",
+        response_ref=ResponseRef(foreign_key[1], "response-neighbour", 0),
+    )
+
+    # Replacement only reaches the cleanup path once the superseded activation
+    # lease is no longer OPEN; an OPEN lease is either an exact replay or a
+    # binding conflict.
+    retained.activation_lease._state = P2LeaseState.CLOSED
+    successor = await registry.handle_p2_activate(
+        params=_p2_params(activation_id="activation-2", activation_generation=2),
+        request_id="request-p2-replace-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert successor.ok is True
+    # The superseded activation keeps no actionable task origin.
+    assert "task-superseded" not in registry._voice_task_origins
+    # A neighbouring interaction is untouched by the replacement.
+    assert "task-neighbour" in registry._voice_task_origins
+    # The successor owns the route and its generation fence advanced.
+    assert registry._p2_routes[route_key].binding.activation_generation == 2
+    assert registry._p2_routes[route_key].binding.activation_id == "activation-2"
+
+    # The superseded generation cannot come back through the tombstone.
+    stale = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-replace-stale",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert stale.ok is False
+    assert cast(dict, stale.payload["error"])["reason"] in {
+        "ACTIVATION_GENERATION_STALE",
+        "ACTIVATION_BINDING_CONFLICT",
+    }
+    assert registry._p2_routes[route_key].binding.activation_generation == 2
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_post_gate_origin_admission_failure_releases_critical_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A definite post-gate failure retains no critical-input identity.
+
+    Failure cleanup settles the pending and unknown commit maps only, so a
+    gate-approved submit that later fails definitely leaves its exact
+    generation entry, its guarded-commit marker and its token-gate hold
+    behind.
+    """
+
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-post-gate-failure",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    original_accept = route.activation_lease.accept_task_origin
+
+    observed: dict[str, object] = {}
+
+    async def fail_origin_admission(*_args: object, **_kwargs: object):
+        # Capture the identity that the gate has already granted, then fail
+        # definitely: no RESULT_UNKNOWN code.
+        observed["generations"] = dict(registry._critical_input_commit_generations)
+        observed["guarded"] = set(registry._critical_input_guarded_commits)
+        raise RuntimeError("injected definite origin admission failure")
+
+    monkeypatch.setattr(
+        route.activation_lease,
+        "accept_task_origin",
+        fail_origin_admission,
+    )
+    params = _p2_task_origin_params(
+        stem="post-gate-failure",
+        text="definite failure must retain no critical identity",
+    )
+    rejected = await registry.handle_p2_submit(
+        params=params,
+        request_id="request-submit-post-gate-failure",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert rejected.ok is False
+    error = cast(dict, rejected.payload["error"])
+    assert error["code"] != ErrorCode.RESULT_UNKNOWN.value
+    # The gate must actually have granted identity before the failure, or this
+    # scenario would not exercise the post-gate release path at all.
+    # The gate must actually have granted identity before the failure, or this
+    # scenario would not exercise the post-gate release path at all.
+    assert observed["generations"] != {}
+    assert observed["guarded"] != set()
+    assert manager.agent.calls == 0
+    assert registry._critical_input_commit_generations == {}
+    assert registry._critical_input_guarded_commits == set()
+
+    # A later submit on the same interaction is still admitted, so the exact
+    # release did not fence the successor out.
+    monkeypatch.setattr(route.activation_lease, "accept_task_origin", original_accept)
+    successor = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(
+            stem="post-gate-successor",
+            text="successor keeps its own critical identity",
+        ),
+        request_id="request-submit-post-gate-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert successor.ok is True
+    await registry.stop()
+    assert registry._critical_input_commit_generations == {}
+    assert registry._critical_input_guarded_commits == set()
+
+
+@pytest.mark.asyncio
+async def test_superseded_voice_commit_cannot_act_through_the_successor_route(
+    tmp_path: Path,
+) -> None:
+    """B13 acceptance, proven by actually acting with the superseded identity.
+
+    `_accepted_voice_commit_routes` is keyed by session and interaction only,
+    with no activation id or generation, so republishing the key for a
+    successor would otherwise let a superseded generation's committed speech
+    reach `_obtain_task_intent_commit` and mint a live confirmation through the
+    successor's route with its critical-token identity intact. The mutation
+    fixture is required: a registry without a P3 control issuer refuses the
+    intent before that lookup, which would prove nothing.
+    """
+
+    ledger = TurnCommitLedger()
+    registry, composition, _owner = _voice_mutation_registry(
+        tmp_path,
+        commit_ledger=ledger,
+    )
+    manager = registry._agent_manager
+    route_key = ("session-product", "interaction-1")
+    commit_id = "commit-b13-journey"
+
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-b13-journey-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    submitted = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(
+            stem="b13-journey",
+            text="create task: inspect the repository",
+        ),
+        request_id="request-b13-journey-submit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+    # The real journey, not hand-injected state: the commit is accepted, bound
+    # to this exact route, and holds its critical-token identity.
+    assert commit_id in registry._accepted_turn_commits_by_commit
+    assert registry._accepted_voice_commit_routes[commit_id] == route_key
+    assert commit_id in registry._critical_input_guarded_commits
+    assert registry._critical_input_commit_generations[commit_id] == (
+        "interaction-1",
+        1,
+    )
+
+    registry._p2_routes[route_key].activation_lease._state = P2LeaseState.CLOSED
+    successor = await registry.handle_p2_activate(
+        params=_p2_params(activation_id="activation-2", activation_generation=2),
+        request_id="request-b13-journey-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert successor.ok is True
+    assert registry._p2_routes[route_key].binding.activation_generation == 2
+
+    agent_calls = manager.agent.calls
+    acted = await registry.handle_p3_intent(
+        params=_voice_intent_params(stem="b13-journey", operation="task.create"),
+        request_id="request-b13-journey-superseded-act",
+        session_id="session-product",
+    )
+
+    # The superseded speech is refused at the origin binding, not merely left
+    # unconfirmed: no confirmation token is minted for it.
+    assert acted.ok is False
+    acted_error = cast(dict, acted.payload["error"])
+    assert acted_error["reason"] == "VOICE_TASK_ROUTE_MISMATCH"
+    assert acted_error["code"] == ErrorCode.PERMISSION_DENIED.value
+    assert cast(dict, acted.payload["result"])["status"] == "rejected"
+    # The superseded identity is gone, not merely unreachable by one lookup.
+    assert commit_id not in registry._accepted_voice_commit_routes
+    assert commit_id not in registry._accepted_turn_commits_by_commit
+    assert commit_id not in registry._critical_input_guarded_commits
+    assert commit_id not in registry._critical_input_commit_generations
+    # Zero forbidden effects on the rejected path.
+    assert registry._pending_task_intents == {}
+    assert composition.mutation_calls == []
+    assert manager.agent.calls == agent_calls
+    assert registry._voice_task_origins == {}
+    # The successor keeps its route and its own monotonic input fence.
+    assert registry._p2_routes[route_key].binding.activation_generation == 2
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("abandon", ["close", "disconnect"])
+async def test_superseded_voice_commit_cannot_act_through_a_reactivated_route(
+    tmp_path: Path, abandon: str
+) -> None:
+    """The same leak on the close-then-reactivate path, not only on replacement.
+
+    `handle_p2_close` and the Gateway disconnect cleanup both release the
+    interaction gate, but they kept the accepted commit, its route binding and
+    its critical-input identity. `_accepted_voice_commit_routes` is keyed by
+    session and interaction only, so the next higher-generation activation
+    republished that key and let the superseded speech mint a live confirmation
+    token through the successor's route. B13/SRR-20 closed this for a live
+    predecessor being replaced; a closed predecessor reaches publication by the
+    other path.
+    """
+
+    ledger = TurnCommitLedger()
+    registry, composition, _owner = _voice_mutation_registry(
+        tmp_path,
+        commit_ledger=ledger,
+    )
+    manager = registry._agent_manager
+    route_key = ("session-product", "interaction-1")
+    commit_id = "commit-reactivate-journey"
+
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-reactivate-journey-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    submitted = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(
+            stem="reactivate-journey",
+            text="create task: inspect the repository",
+        ),
+        request_id="request-reactivate-journey-submit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+    # The real journey, not hand-injected state: the commit is accepted, bound
+    # to this exact route, and holds its critical-token identity.
+    assert commit_id in registry._accepted_turn_commits_by_commit
+    assert registry._accepted_voice_commit_routes[commit_id] == route_key
+    assert commit_id in registry._critical_input_guarded_commits
+    assert registry._critical_input_commit_generations[commit_id] == (
+        "interaction-1",
+        1,
+    )
+
+    if abandon == "close":
+        closed = await registry.handle_p2_close(
+            params=_p2_params(),
+            request_id="request-reactivate-journey-close",
+            session_id="session-product",
+        )
+        assert closed.ok is True
+    else:
+        await registry.close_active_routes()
+    assert route_key not in registry._p2_routes
+    # The bounded late-create grace still retains it: this is a live-identity
+    # leak at republication, not a capacity question.
+    assert commit_id in registry._accepted_turn_commits_by_commit
+
+    successor = await registry.handle_p2_activate(
+        params=_p2_params(activation_id="activation-2", activation_generation=2),
+        request_id="request-reactivate-journey-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert successor.ok is True
+    assert registry._p2_routes[route_key].binding.activation_generation == 2
+
+    agent_calls = manager.agent.calls
+    acted = await registry.handle_p3_intent(
+        params=_voice_intent_params(stem="reactivate-journey", operation="task.create"),
+        request_id="request-reactivate-journey-superseded-act",
+        session_id="session-product",
+    )
+
+    # The superseded speech is refused at the origin binding, not merely left
+    # unconfirmed: no confirmation token is minted for it.
+    assert acted.ok is False, acted.payload
+    acted_error = cast(dict, acted.payload["error"])
+    assert acted_error["reason"] == "VOICE_TASK_ROUTE_MISMATCH"
+    assert acted_error["code"] == ErrorCode.PERMISSION_DENIED.value
+    assert cast(dict, acted.payload["result"])["status"] == "rejected"
+    # The superseded identity is gone, not merely unreachable by one lookup.
+    assert commit_id not in registry._accepted_voice_commit_routes
+    assert commit_id not in registry._accepted_turn_commits_by_commit
+    assert commit_id not in registry._critical_input_guarded_commits
+    assert commit_id not in registry._critical_input_commit_generations
+    # Zero forbidden effects on the rejected path.
+    assert registry._pending_task_intents == {}
+    assert composition.mutation_calls == []
+    assert composition.prepare_calls == []
+    assert manager.agent.calls == agent_calls
+    assert registry._voice_task_origins == {}
+    # A retired identity stays refused instead of being resubmittable.
+    replayed = await registry.handle_p2_submit(
+        params=_routed_task_origin_params(
+            stem="reactivate-journey",
+            text="create task: inspect the repository",
+            interaction_id="interaction-1",
+            activation_id="activation-2",
+            activation_generation=2,
+        ),
+        request_id="request-reactivate-journey-replay",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert replayed.ok is False
+    assert cast(dict, replayed.payload["error"])["reason"] == "TURN_COMMIT_RETIRED"
+    # The successor keeps its route and can still commit its own speech.
+    assert registry._p2_routes[route_key].binding.activation_generation == 2
+    successor_commit = await registry.handle_p2_submit(
+        params=_routed_task_origin_params(
+            stem="reactivate-journey-successor",
+            text="create task: inspect the successor repository",
+            interaction_id="interaction-1",
+            activation_id="activation-2",
+            activation_generation=2,
+        ),
+        request_id="request-reactivate-journey-successor-submit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert successor_commit.ok is True, successor_commit.payload
+    assert (
+        "commit-reactivate-journey-successor"
+        in registry._accepted_turn_commits_by_commit
+    )
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_successful_agent_submit_retains_its_gate_commit_evidence(
+    tmp_path: Path,
+) -> None:
+    """A successful dispatch keeps its gate evidence until the route is fenced.
+
+    Only a definite failure may release a commit early. The default dispatch
+    target is the Agent, and that path never records an accepted turn commit,
+    so a failure-only release must not treat its success as a failure.
+    """
+
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-agent-retention",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+
+    params = {
+        **_p2_params(),
+        "commit_id": "commit-agent-retention",
+        "turn_id": "turn-agent-retention",
+        "response_id": "response-agent-retention",
+        "committed_at": NOW,
+        "text": "a successful agent submit keeps its gate evidence",
+        "dispatch_target": "agent",
+    }
+    accepted = await registry.handle_p2_submit(
+        params=params,
+        request_id="request-submit-agent-retention",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert accepted.ok is True
+    assert manager.agent.calls == 1
+
+    # The gate, not the outer commit ledger, must still own this commit id.
+    # Releasing it early would move the refusal to the second layer and shorten
+    # the contracted evidence lifetime.
+    resubmitted = await registry.handle_p2_submit(
+        params=params,
+        request_id="request-submit-agent-retention-second",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert resubmitted.ok is False
+    assert cast(dict, resubmitted.payload["error"])["reason"] == (
+        "CRITICAL_TOKEN_INPUT_REJECTED"
+    )
+    assert manager.agent.calls == 1
+    await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_progress_authority_failure_allocates_no_subscription_or_sink(
     tmp_path: Path,
 ) -> None:
@@ -11038,6 +12218,1014 @@ async def test_stop_waits_for_inflight_query_before_closing_registry(
         "tasks": [],
         "supported_operations": [],
     }
+
+
+class _ObservedRegistryLock:
+    """Expose exact task acquire requests without using time as an oracle."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._requested: dict[str, asyncio.Event] = {}
+        self._acquired: dict[str, asyncio.Event] = {}
+
+    def watch(self, task_name: str) -> tuple[asyncio.Event, asyncio.Event]:
+        return (
+            self._requested.setdefault(task_name, asyncio.Event()),
+            self._acquired.setdefault(task_name, asyncio.Event()),
+        )
+
+    async def acquire(self) -> bool:
+        current = asyncio.current_task()
+        task_name = "" if current is None else current.get_name()
+        if task_name in self._requested:
+            self._requested[task_name].set()
+        await self._lock.acquire()
+        if task_name in self._acquired:
+            self._acquired[task_name].set()
+        return True
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    async def __aenter__(self):
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        self.release()
+
+
+def _allow_fixture_sessions(
+    composition: _P3Composition,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = composition.resolve_product_authority_candidate
+
+    def resolve_for_routed_session(**kwargs: object):
+        candidate, context = original(**kwargs)
+        session_id = cast(str, kwargs["session_id"])
+        scope = ScopeRef(
+            candidate.principal_id,
+            candidate.project_id,
+            session_id,
+            candidate.assurance,
+        )
+        return (
+            replace(candidate, session_id=session_id, scope=scope),
+            replace(context, scope=scope),
+        )
+
+    monkeypatch.setattr(
+        composition,
+        "resolve_product_authority_candidate",
+        resolve_for_routed_session,
+    )
+
+
+@pytest.mark.asyncio
+async def test_blocked_p3_query_does_not_block_unrelated_p2_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, p3, _manager, _pushed = _registry(tmp_path)
+    _allow_fixture_sessions(p3, monkeypatch)
+    p2_scope_b = _p2_params(
+        session_id="session-a14-b",
+        correlation_id="correlation-a14-b",
+        interaction_id="interaction-a14-b",
+        activation_id="activation-a14-b",
+        activation_generation=7,
+    )
+    activated = await registry.handle_p2_activate(
+        params=p2_scope_b,
+        request_id="request-a14-activate",
+        session_id="session-a14-b",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    observed_lock = _ObservedRegistryLock()
+    registry._lock = observed_lock  # type: ignore[assignment]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = registry._p3_adapter.activate_prepared_query
+
+    async def blocked_query(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(registry._p3_adapter, "activate_prepared_query", blocked_query)
+    query = asyncio.create_task(
+        registry.handle_p3_query(
+            operation="task.list",
+            params={"auth_token": "trusted-token", "session_id": "session-a14-a"},
+            request_id="request-a14-blocked-query",
+            session_id="session-a14-a",
+        ),
+        name="a14-query-scope-a",
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    close_requested, close_acquired = observed_lock.watch("a14-close-scope-b")
+    close = asyncio.create_task(
+        registry.handle_p2_close(
+            params=p2_scope_b,
+            request_id="request-a14-unrelated-close",
+            session_id="session-a14-b",
+        ),
+        name="a14-close-scope-b",
+    )
+    await asyncio.wait_for(close_requested.wait(), timeout=5)
+    assert close_acquired.is_set() is True
+
+    release.set()
+    assert (await asyncio.wait_for(query, timeout=5)).ok is True
+    assert (await asyncio.wait_for(close, timeout=5)).ok is True
+    assert ("session-a14-b", "interaction-a14-b") not in registry._p2_routes
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_blocked_p2_activation_does_not_block_unrelated_p3_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, p3, manager, _pushed = _registry(tmp_path)
+    _allow_fixture_sessions(p3, monkeypatch)
+    observed_lock = _ObservedRegistryLock()
+    registry._lock = observed_lock  # type: ignore[assignment]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = manager.get_agent
+
+    async def blocked_get_agent(*args):
+        entered.set()
+        await release.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(manager, "get_agent", blocked_get_agent)
+    params = _p2_params(
+        correlation_id="correlation-b15-a",
+        interaction_id="interaction-b15-a",
+        activation_id="activation-b15-a",
+        activation_generation=11,
+    )
+    activation = asyncio.create_task(
+        registry.handle_p2_activate(
+            params=params,
+            request_id="request-b15-blocked-activation",
+            session_id="session-product",
+            channel_id="web",
+        ),
+        name="b15-activation-scope-a",
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    query_requested, query_acquired = observed_lock.watch("b15-query-scope-b")
+    query = asyncio.create_task(
+        registry.handle_p3_query(
+            operation="task.list",
+            params={"auth_token": "trusted-token", "session_id": "session-b15-b"},
+            request_id="request-b15-unrelated-query",
+            session_id="session-b15-b",
+        ),
+        name="b15-query-scope-b",
+    )
+    await asyncio.wait_for(query_requested.wait(), timeout=5)
+    assert query_acquired.is_set() is True
+
+    release.set()
+    assert (await asyncio.wait_for(activation, timeout=5)).ok is True
+    assert (await asyncio.wait_for(query, timeout=5)).ok is True
+    retained = registry._p2_routes.get(("session-product", "interaction-b15-a"))
+    assert retained is not None and retained.binding.activation_generation == 11
+    assert (
+        await registry.handle_p2_close(
+            params=params,
+            request_id="request-b15-cleanup",
+            session_id="session-product",
+        )
+    ).ok is True
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_fences_and_cleans_late_p2_allocation_before_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B15: a stopped late allocation is cleaned and never becomes a route."""
+
+    registry, _p3, manager, pushed = _registry(tmp_path)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = manager.get_agent
+
+    async def blocked_get_agent(*args):
+        entered.set()
+        await release.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(manager, "get_agent", blocked_get_agent)
+    params = _p2_params(
+        interaction_id="interaction-b15-late",
+        activation_id="activation-b15-late",
+        activation_generation=12,
+    )
+    activation = asyncio.create_task(
+        registry.handle_p2_activate(
+            params=params,
+            request_id="request-b15-late",
+            session_id="session-product",
+            channel_id="web",
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    stop = asyncio.create_task(registry.stop())
+    await asyncio.sleep(0)
+    assert stop.done() is False
+
+    release.set()
+    result = await asyncio.wait_for(activation, timeout=5)
+    await asyncio.wait_for(stop, timeout=5)
+
+    assert result.ok is False
+    assert cast(dict, result.payload["error"])["reason"] == (
+        "PRODUCT_COMPOSITION_STOPPED"
+    )
+    assert ("session-product", "interaction-b15-late") not in registry._p2_routes
+    assert registry._pending_p2_agents == {}
+    assert manager.pins == 1
+    assert manager.unpins == 1
+    assert pushed == []
+
+
+@pytest.mark.asyncio
+async def test_transport_generation_cleanup_closes_only_its_product_routes(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    progress = await registry.handle_p3_progress_activate(
+        params=_progress_params(),
+        request_id="request-a19-progress",
+        session_id="session-product",
+        channel_id="web",
+        transport_generation=41,
+    )
+    p2_params = _p2_params(
+        interaction_id="interaction-a19-successor",
+        activation_id="activation-a19-successor",
+        activation_generation=42,
+    )
+    p2 = await registry.handle_p2_activate(
+        params=p2_params,
+        request_id="request-a19-p2",
+        session_id="session-product",
+        channel_id="web",
+        transport_generation=42,
+    )
+    assert progress.ok is True
+    assert p2.ok is True
+    progress_key = (
+        "session-product",
+        "task-1",
+        "web-surface-1",
+        "web-session-generation-1",
+    )
+    p2_key = ("session-product", "interaction-a19-successor")
+
+    await registry.close_active_routes_for_transport_generation(41)
+
+    assert progress_key not in registry._progress_routes
+    assert p2_key in registry._p2_routes
+    assert registry._p2_routes[p2_key].transport_generation == 42
+
+    await registry.close_active_routes_for_transport_generation(42)
+
+    assert p2_key not in registry._p2_routes
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_authenticated_activation_replay_transfers_transport_generation(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    params = _p2_params(
+        interaction_id="interaction-a19-transfer",
+        activation_id="activation-a19-transfer",
+        activation_generation=51,
+    )
+    first = await registry.handle_p2_activate(
+        params=params,
+        request_id="request-a19-transfer-first",
+        session_id="session-product",
+        channel_id="web",
+        transport_generation=51,
+    )
+    replay = await registry.handle_p2_activate(
+        params=params,
+        request_id="request-a19-transfer-replay",
+        session_id="session-product",
+        channel_id="web",
+        transport_generation=52,
+    )
+    key = ("session-product", "interaction-a19-transfer")
+    assert first.ok is True
+    assert replay.ok is True
+    assert cast(dict, replay.payload["result"])["replayed"] is True
+    assert registry._p2_routes[key].transport_generation == 52
+
+    await registry.close_active_routes_for_transport_generation(51)
+    assert key in registry._p2_routes
+
+    await registry.close_active_routes_for_transport_generation(52)
+    assert key not in registry._p2_routes
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_successor_product_admission_does_not_wait_for_old_route_cleanup(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    progress = await registry.handle_p3_progress_activate(
+        params=_progress_params(),
+        request_id="request-a19-blocked-progress",
+        session_id="session-product",
+        channel_id="web",
+        transport_generation=61,
+    )
+    assert progress.ok is True
+    progress_key = (
+        "session-product",
+        "task-1",
+        "web-surface-1",
+        "web-session-generation-1",
+    )
+    retained = registry._progress_routes[progress_key]
+    original_lease = retained.lease
+    cleanup_entered = asyncio.Event()
+    cleanup_release = asyncio.Event()
+
+    class BlockingLease:
+        async def close(self) -> None:
+            cleanup_entered.set()
+            await cleanup_release.wait()
+            await original_lease.close()
+
+    retained.lease = BlockingLease()  # type: ignore[assignment]
+    cleanup = asyncio.create_task(
+        registry.close_active_routes_for_transport_generation(61)
+    )
+    await asyncio.wait_for(cleanup_entered.wait(), timeout=1)
+
+    successor_key = ("session-product", "interaction-a19-independent")
+    successor = await asyncio.wait_for(
+        registry.handle_p2_activate(
+            params=_p2_params(
+                interaction_id=successor_key[1],
+                activation_id="activation-a19-independent",
+                activation_generation=62,
+            ),
+            request_id="request-a19-independent",
+            session_id="session-product",
+            channel_id="web",
+            transport_generation=62,
+        ),
+        timeout=1,
+    )
+
+    assert successor.ok is True
+    assert successor_key in registry._p2_routes
+    assert cleanup.done() is False
+
+    cleanup_release.set()
+    await asyncio.wait_for(cleanup, timeout=1)
+    assert progress_key not in registry._progress_routes
+    assert successor_key in registry._p2_routes
+    await registry.close_active_routes_for_transport_generation(62)
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_generation_progress_cleanup_restores_retryable_owner(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p3_progress_activate(
+        params=_progress_params(),
+        request_id="request-a19-cancelled-progress",
+        session_id="session-product",
+        channel_id="web",
+        transport_generation=71,
+    )
+    assert activated.ok is True
+    key = (
+        "session-product",
+        "task-1",
+        "web-surface-1",
+        "web-session-generation-1",
+    )
+    retained = registry._progress_routes[key]
+    original_lease = retained.lease
+
+    class SelfCancellingLease:
+        async def close(self) -> None:
+            raise asyncio.CancelledError
+
+    retained.lease = SelfCancellingLease()  # type: ignore[assignment]
+    with pytest.raises(asyncio.CancelledError):
+        await registry.close_active_routes_for_transport_generation(71)
+
+    assert registry._progress_routes[key] is retained
+    assert retained.transport_cleanup_pending is False
+    assert retained.transport_generation == 71
+
+    retained.lease = original_lease
+    await registry.close_active_routes_for_transport_generation(71)
+    assert key not in registry._progress_routes
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_gateway_cleanup_owns_blocked_p2_activation_until_no_late_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B15: Gateway loss owns an admitted activation through exact cleanup."""
+
+    registry, _p3, manager, pushed = _registry(tmp_path)
+    observed_lock = _ObservedRegistryLock()
+    registry._lock = observed_lock  # type: ignore[assignment]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = manager.get_agent
+
+    async def blocked_get_agent(*args):
+        entered.set()
+        await release.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(manager, "get_agent", blocked_get_agent)
+    params = _p2_params(
+        interaction_id="interaction-b15-gateway",
+        activation_id="activation-b15-gateway",
+        activation_generation=13,
+    )
+    activation = asyncio.create_task(
+        registry.handle_p2_activate(
+            params=params,
+            request_id="request-b15-gateway",
+            session_id="session-product",
+            channel_id="web",
+        ),
+        name="b15-gateway-activation",
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    cleanup_requested, cleanup_acquired = observed_lock.watch("b15-gateway-cleanup")
+    cleanup = asyncio.create_task(
+        registry.close_active_routes(), name="b15-gateway-cleanup"
+    )
+    await asyncio.wait_for(cleanup_requested.wait(), timeout=5)
+    await asyncio.wait_for(cleanup_acquired.wait(), timeout=5)
+    cleanup_returned_while_allocation_blocked = cleanup.done()
+
+    release.set()
+    result = await asyncio.wait_for(activation, timeout=5)
+    await asyncio.wait_for(cleanup, timeout=5)
+
+    assert cleanup_returned_while_allocation_blocked is False
+    assert result.ok is False
+    assert cast(dict, result.payload["error"])["reason"] == (
+        "PRODUCT_P2_ACTIVATION_FAILED"
+    )
+    assert ("session-product", "interaction-b15-gateway") not in registry._p2_routes
+    assert registry._pending_p2_agents == {}
+    assert manager.pins == 1
+    assert manager.unpins == 1
+    assert manager.agent.calls == 0
+    assert manager.agent.executions == []
+    assert pushed == []
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_gateway_cleanup_rejects_same_key_waiter_before_new_p2_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B15: an old-generation gate waiter cannot allocate after Gateway loss."""
+
+    registry, p3, manager, pushed = _registry(tmp_path)
+    observed_lock = _ObservedRegistryLock()
+    registry._lock = observed_lock  # type: ignore[assignment]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_get_agent = manager.get_agent
+    original_root_activate = product_composition_registry.ProductCompositionRoot.activate
+    root_activate_calls = 0
+
+    async def blocked_get_agent(*args):
+        entered.set()
+        await release.wait()
+        return await original_get_agent(*args)
+
+    async def counted_root_activate(root, context):
+        nonlocal root_activate_calls
+        root_activate_calls += 1
+        return await original_root_activate(root, context)
+
+    monkeypatch.setattr(manager, "get_agent", blocked_get_agent)
+    monkeypatch.setattr(
+        product_composition_registry.ProductCompositionRoot,
+        "activate",
+        counted_root_activate,
+    )
+    first_params = _p2_params(
+        interaction_id="interaction-b15-gateway-queued",
+        correlation_id="correlation-b15-gateway-first",
+        activation_id="activation-b15-gateway-first",
+        activation_generation=21,
+    )
+    second_params = _p2_params(
+        interaction_id="interaction-b15-gateway-queued",
+        correlation_id="correlation-b15-gateway-second",
+        activation_id="activation-b15-gateway-second",
+        activation_generation=22,
+    )
+    first = asyncio.create_task(
+        registry.handle_p2_activate(
+            params=first_params,
+            request_id="request-b15-gateway-first",
+            session_id="session-product",
+            channel_id="web",
+        ),
+        name="b15-gateway-first",
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    second_requested, second_acquired = observed_lock.watch("b15-gateway-second")
+    second = asyncio.create_task(
+        registry.handle_p2_activate(
+            params=second_params,
+            request_id="request-b15-gateway-second",
+            session_id="session-product",
+            channel_id="web",
+        ),
+        name="b15-gateway-second",
+    )
+    await asyncio.wait_for(second_requested.wait(), timeout=5)
+    await asyncio.wait_for(second_acquired.wait(), timeout=5)
+    assert len(registry._composition_inflight) == 2
+    cleanup_requested, cleanup_acquired = observed_lock.watch(
+        "b15-gateway-queued-cleanup"
+    )
+    cleanup = asyncio.create_task(
+        registry.close_active_routes(), name="b15-gateway-queued-cleanup"
+    )
+    await asyncio.wait_for(cleanup_requested.wait(), timeout=5)
+    await asyncio.wait_for(cleanup_acquired.wait(), timeout=5)
+    assert cleanup.done() is False
+
+    release.set()
+    first_result, second_result = await asyncio.gather(first, second)
+    await asyncio.wait_for(cleanup, timeout=5)
+
+    assert first_result.ok is False
+    assert second_result.ok is False
+    assert cast(dict, first_result.payload["error"])["reason"] == (
+        "PRODUCT_P2_ACTIVATION_FAILED"
+    )
+    assert cast(dict, second_result.payload["error"])["reason"] == (
+        "PRODUCT_P2_ACTIVATION_FAILED"
+    )
+    assert root_activate_calls == 1
+    assert len(p3.authority_calls) == 1
+    assert len(manager.get_calls) == 1
+    assert manager.pins == 1
+    assert manager.unpins == 1
+    assert registry._pending_p2_agents == {}
+    assert registry._p2_routes == {}
+    assert manager.agent.calls == 0
+    assert manager.agent.executions == []
+    assert pushed == []
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_gateway_cleanup_admits_new_lifecycle_only_after_old_sweep(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B15: a request arriving during cleanup belongs only to the new lifecycle."""
+
+    registry, p3, manager, pushed = _registry(tmp_path)
+    observed_lock = _ObservedRegistryLock()
+    registry._lock = observed_lock  # type: ignore[assignment]
+    old_entered = asyncio.Event()
+    old_release = asyncio.Event()
+    sweep_complete = asyncio.Event()
+    original_get_agent = manager.get_agent
+    original_cleanup = registry._close_active_routes_impl
+    get_agent_calls = 0
+
+    async def lifecycle_checked_get_agent(*args):
+        nonlocal get_agent_calls
+        get_agent_calls += 1
+        if get_agent_calls == 1:
+            old_entered.set()
+            await old_release.wait()
+        else:
+            assert sweep_complete.is_set()
+        return await original_get_agent(*args)
+
+    async def observed_cleanup() -> None:
+        await original_cleanup()
+        sweep_complete.set()
+
+    monkeypatch.setattr(manager, "get_agent", lifecycle_checked_get_agent)
+    monkeypatch.setattr(registry, "_close_active_routes_impl", observed_cleanup)
+    old = asyncio.create_task(
+        registry.handle_p2_activate(
+            params=_p2_params(
+                interaction_id="interaction-b15-old-lifecycle",
+                correlation_id="correlation-b15-old-lifecycle",
+                activation_id="activation-b15-old-lifecycle",
+                activation_generation=31,
+            ),
+            request_id="request-b15-old-lifecycle",
+            session_id="session-product",
+            channel_id="web",
+        ),
+        name="b15-old-lifecycle",
+    )
+    await asyncio.wait_for(old_entered.wait(), timeout=5)
+    cleanup_requested, cleanup_acquired = observed_lock.watch(
+        "b15-lifecycle-cleanup"
+    )
+    cleanup = asyncio.create_task(
+        registry.close_active_routes(), name="b15-lifecycle-cleanup"
+    )
+    await asyncio.wait_for(cleanup_requested.wait(), timeout=5)
+    await asyncio.wait_for(cleanup_acquired.wait(), timeout=5)
+    new_requested, new_acquired = observed_lock.watch("b15-new-lifecycle")
+    new_params = _p2_params(
+        interaction_id="interaction-b15-new-lifecycle",
+        correlation_id="correlation-b15-new-lifecycle",
+        activation_id="activation-b15-new-lifecycle",
+        activation_generation=32,
+    )
+    new = asyncio.create_task(
+        registry.handle_p2_activate(
+            params=new_params,
+            request_id="request-b15-new-lifecycle",
+            session_id="session-product",
+            channel_id="web",
+        ),
+        name="b15-new-lifecycle",
+    )
+    await asyncio.wait_for(new_requested.wait(), timeout=5)
+    await asyncio.wait_for(new_acquired.wait(), timeout=5)
+    assert new.done() is False
+    assert get_agent_calls == 1
+
+    old_release.set()
+    old_result = await asyncio.wait_for(old, timeout=5)
+    await asyncio.wait_for(cleanup, timeout=5)
+    new_result = await asyncio.wait_for(new, timeout=5)
+
+    assert old_result.ok is False
+    assert cast(dict, old_result.payload["error"])["reason"] == (
+        "PRODUCT_P2_ACTIVATION_FAILED"
+    )
+    assert new_result.ok is True
+    assert sweep_complete.is_set() is True
+    assert len(p3.authority_calls) == 2
+    assert len(manager.get_calls) == 2
+    assert manager.pins == 2
+    assert manager.unpins == 1
+    assert (
+        "session-product",
+        "interaction-b15-old-lifecycle",
+    ) not in registry._p2_routes
+    assert (
+        "session-product",
+        "interaction-b15-new-lifecycle",
+    ) in registry._p2_routes
+    assert manager.agent.calls == 0
+    assert manager.agent.executions == []
+    assert pushed == []
+    assert (
+        await registry.handle_p2_close(
+            params=new_params,
+            request_id="request-b15-new-lifecycle-close",
+            session_id="session-product",
+        )
+    ).ok is True
+    assert manager.unpins == 2
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_gateway_cleanup_keeps_barrier_until_exact_sweep(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B15: cancelling the carrier cannot abandon the owned Gateway sweep."""
+
+    registry, _p3, manager, pushed = _registry(tmp_path)
+    existing_params = _p2_params(
+        interaction_id="interaction-b15-cancel-existing",
+        correlation_id="correlation-b15-cancel-existing",
+        activation_id="activation-b15-cancel-existing",
+        activation_generation=41,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=existing_params,
+            request_id="request-b15-cancel-existing",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok is True
+
+    old_entered = asyncio.Event()
+    old_release = asyncio.Event()
+    sweep_complete = asyncio.Event()
+    cleanup_began = asyncio.Event()
+    original_get_agent = manager.get_agent
+    original_begin = registry._begin_composition_cleanup
+    original_cleanup = registry._close_active_routes_impl
+    get_agent_calls = 0
+    sweep_calls = 0
+
+    async def lifecycle_checked_get_agent(*args):
+        nonlocal get_agent_calls
+        get_agent_calls += 1
+        if get_agent_calls == 1:
+            old_entered.set()
+            await old_release.wait()
+        return await original_get_agent(*args)
+
+    async def observed_begin():
+        inflight = await original_begin()
+        cleanup_began.set()
+        return inflight
+
+    async def observed_cleanup() -> None:
+        nonlocal sweep_calls
+        sweep_calls += 1
+        await original_cleanup()
+        sweep_complete.set()
+
+    monkeypatch.setattr(manager, "get_agent", lifecycle_checked_get_agent)
+    monkeypatch.setattr(registry, "_begin_composition_cleanup", observed_begin)
+    monkeypatch.setattr(registry, "_close_active_routes_impl", observed_cleanup)
+    old = asyncio.create_task(
+        registry.handle_p2_activate(
+            params=_p2_params(
+                interaction_id="interaction-b15-cancel-old",
+                correlation_id="correlation-b15-cancel-old",
+                activation_id="activation-b15-cancel-old",
+                activation_generation=42,
+            ),
+            request_id="request-b15-cancel-old",
+            session_id="session-product",
+            channel_id="web",
+        ),
+        name="b15-cancel-old-lifecycle",
+    )
+    await asyncio.wait_for(old_entered.wait(), timeout=5)
+    cleanup = asyncio.create_task(
+        registry.close_active_routes(), name="b15-cancelled-cleanup"
+    )
+    await asyncio.wait_for(cleanup_began.wait(), timeout=5)
+    assert registry._composition_cleanup_active is True
+
+    cleanup.cancel()
+    await asyncio.sleep(0)
+    new_params = _p2_params(
+        interaction_id="interaction-b15-cancel-new",
+        correlation_id="correlation-b15-cancel-new",
+        activation_id="activation-b15-cancel-new",
+        activation_generation=43,
+    )
+    new = asyncio.create_task(
+        registry.handle_p2_activate(
+            params=new_params,
+            request_id="request-b15-cancel-new",
+            session_id="session-product",
+            channel_id="web",
+        ),
+        name="b15-cancel-new-lifecycle",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    cleanup_done_before_old_release = cleanup.done()
+    barrier_held_after_cancel = registry._composition_cleanup_active
+    new_done_before_sweep = new.done()
+    calls_before_sweep = get_agent_calls
+    sweeps_before_old_release = sweep_calls
+
+    old_release.set()
+    old_result = await asyncio.wait_for(old, timeout=5)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(cleanup, timeout=5)
+    primary_sweep_calls = sweep_calls
+    new_result = await asyncio.wait_for(new, timeout=5)
+
+    # Keep the RED carrier hermetic even when the broken implementation skips
+    # its sweep, so no route or task leaks into pytest teardown.
+    if registry._p2_routes:
+        await registry.close_active_routes()
+    await registry.stop()
+
+    assert cleanup_done_before_old_release is False
+    assert barrier_held_after_cancel is True
+    assert new_done_before_sweep is False
+    assert calls_before_sweep == 1
+    assert sweeps_before_old_release == 0
+    assert primary_sweep_calls == 1
+    assert old_result.ok is False
+    assert cast(dict, old_result.payload["error"])["reason"] == (
+        "PRODUCT_P2_ACTIVATION_FAILED"
+    )
+    assert new_result.ok is True
+    assert sweep_complete.is_set() is True
+    assert registry._composition_cleanup_active is False
+    assert manager.pins == 3
+    assert manager.unpins == 3
+    assert manager.agent.calls == 0
+    assert manager.agent.executions == []
+    assert pushed == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_gateway_cleanup_keeps_barrier_during_sweep(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B15: cancellation during the sweep cannot expose partial cleanup."""
+
+    registry, _p3, manager, pushed = _registry(tmp_path)
+    existing_params = _p2_params(
+        interaction_id="interaction-b15-sweep-existing",
+        correlation_id="correlation-b15-sweep-existing",
+        activation_id="activation-b15-sweep-existing",
+        activation_generation=51,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=existing_params,
+            request_id="request-b15-sweep-existing",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok is True
+
+    sweep_entered = asyncio.Event()
+    sweep_release = asyncio.Event()
+    sweep_complete = asyncio.Event()
+    original_cleanup = registry._close_active_routes_impl
+    original_get_agent = manager.get_agent
+    get_agent_before_sweep = False
+
+    async def blocked_cleanup() -> None:
+        sweep_entered.set()
+        await sweep_release.wait()
+        await original_cleanup()
+        sweep_complete.set()
+
+    async def observed_get_agent(*args):
+        nonlocal get_agent_before_sweep
+        if not sweep_complete.is_set():
+            get_agent_before_sweep = True
+        return await original_get_agent(*args)
+
+    monkeypatch.setattr(registry, "_close_active_routes_impl", blocked_cleanup)
+    monkeypatch.setattr(manager, "get_agent", observed_get_agent)
+    cleanup = asyncio.create_task(
+        registry.close_active_routes(), name="b15-cancelled-active-sweep"
+    )
+    await asyncio.wait_for(sweep_entered.wait(), timeout=5)
+    assert registry._composition_cleanup_active is True
+
+    cleanup.cancel()
+    await asyncio.sleep(0)
+    new_params = _p2_params(
+        interaction_id="interaction-b15-sweep-new",
+        correlation_id="correlation-b15-sweep-new",
+        activation_id="activation-b15-sweep-new",
+        activation_generation=52,
+    )
+    new = asyncio.create_task(
+        registry.handle_p2_activate(
+            params=new_params,
+            request_id="request-b15-sweep-new",
+            session_id="session-product",
+            channel_id="web",
+        ),
+        name="b15-sweep-new-lifecycle",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    cleanup_done_during_sweep = cleanup.done()
+    barrier_held_during_sweep = registry._composition_cleanup_active
+    new_done_during_sweep = new.done()
+
+    sweep_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(cleanup, timeout=5)
+    primary_sweep_completed = sweep_complete.is_set()
+    new_result = await asyncio.wait_for(new, timeout=5)
+
+    if registry._p2_routes:
+        await registry.close_active_routes()
+    await registry.stop()
+
+    assert cleanup_done_during_sweep is False
+    assert barrier_held_during_sweep is True
+    assert new_done_during_sweep is False
+    assert get_agent_before_sweep is False
+    assert primary_sweep_completed is True
+    assert new_result.ok is True
+    assert registry._composition_cleanup_active is False
+    assert manager.pins == 2
+    assert manager.unpins == 2
+    assert manager.agent.calls == 0
+    assert manager.agent.executions == []
+    assert pushed == []
+
+
+@pytest.mark.asyncio
+async def test_gateway_cleanup_waits_faulting_p3_query_and_drains_its_orphan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A14: an old-lifecycle query cannot retain cleanup after Gateway sweep."""
+
+    registry, _p3, manager, pushed = _registry(tmp_path)
+    observed_lock = _ObservedRegistryLock()
+    registry._lock = observed_lock  # type: ignore[assignment]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_query = registry._p3_adapter.activate_prepared_query
+    close_calls = 0
+    original_noop_close = product_composition_registry._NoopLease.close
+
+    async def blocked_query(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original_query(*args, **kwargs)
+
+    async def fail_first_noop_close(lease) -> None:
+        nonlocal close_calls
+        close_calls += 1
+        if close_calls == 1:
+            raise RuntimeError("injected query root close failure")
+        await original_noop_close(lease)
+
+    monkeypatch.setattr(registry._p3_adapter, "activate_prepared_query", blocked_query)
+    monkeypatch.setattr(
+        product_composition_registry._NoopLease,
+        "close",
+        fail_first_noop_close,
+    )
+    query = asyncio.create_task(
+        registry.handle_p3_query(
+            operation="task.list",
+            params={"auth_token": "trusted-token", "session_id": "session-product"},
+            request_id="request-a14-gateway",
+            session_id="session-product",
+        ),
+        name="a14-gateway-query",
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    cleanup_requested, cleanup_acquired = observed_lock.watch("a14-gateway-cleanup")
+    cleanup = asyncio.create_task(
+        registry.close_active_routes(), name="a14-gateway-cleanup"
+    )
+    await asyncio.wait_for(cleanup_requested.wait(), timeout=5)
+    await asyncio.wait_for(cleanup_acquired.wait(), timeout=5)
+    cleanup_returned_while_query_blocked = cleanup.done()
+
+    release.set()
+    result = await asyncio.wait_for(query, timeout=5)
+    await asyncio.wait_for(cleanup, timeout=5)
+    orphans_after_cleanup = tuple(registry._root_orphan_cleanups)
+    await asyncio.sleep(0)
+
+    assert cleanup_returned_while_query_blocked is False
+    assert result.ok is False
+    assert cast(dict, result.payload["error"])["reason"] == "PRODUCT_P3_QUERY_FAILED"
+    assert close_calls == 2
+    assert orphans_after_cleanup == ()
+    assert registry._root_orphan_cleanups == []
+    assert manager.agent.calls == 0
+    assert manager.agent.executions == []
+    assert pushed == []
+    await registry.stop()
 
 
 @pytest.mark.asyncio
@@ -12496,6 +14684,506 @@ async def test_closed_p2_voice_origin_is_consumed_once_by_exact_p3_create(
         )
 
 
+_ABANDONED_VOICE_ORIGIN_GRACE = 8
+
+
+def _routed_task_origin_params(
+    *,
+    stem: str,
+    text: str,
+    interaction_id: str,
+    activation_id: str = "activation-1",
+    activation_generation: int = 1,
+) -> dict[str, object]:
+    """One task-origin submit bound to an explicit P2 route of its own."""
+
+    params = _p2_task_origin_params(stem=stem, text=text)
+    params["interaction_id"] = interaction_id
+    params["activation_id"] = activation_id
+    params["activation_generation"] = activation_generation
+    claim = cast(dict[str, object], params["gateway_voice_claim"])
+    claim["interaction_id"] = interaction_id
+    return params
+
+
+def _abandoned_origin_text(stem: str) -> str:
+    return f"abandoned task origin {stem}"
+
+
+async def _abandon_task_origin_route(
+    registry: AgentServerProductCompositionRegistry,
+    *,
+    stem: str,
+) -> None:
+    """Activate one route, accept one task origin, then close without a create."""
+
+    interaction_id = f"interaction-{stem}"
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_id=interaction_id),
+        request_id=f"request-activate-{stem}",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True, activated.payload
+    submitted = await registry.handle_p2_submit(
+        params=_routed_task_origin_params(
+            stem=stem,
+            text=_abandoned_origin_text(stem),
+            interaction_id=interaction_id,
+        ),
+        request_id=f"request-submit-{stem}",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True, submitted.payload
+    closed = await registry.handle_p2_close(
+        params=_p2_params(interaction_id=interaction_id),
+        request_id=f"request-close-{stem}",
+        session_id="session-product",
+    )
+    assert closed.ok is True, closed.payload
+
+
+def _abandoned_accepted_commits(
+    registry: AgentServerProductCompositionRegistry,
+) -> list[str]:
+    return [
+        commit_id
+        for commit_id, route_key in registry._accepted_voice_commit_routes.items()
+        if route_key not in registry._p2_routes
+    ]
+
+
+@pytest.mark.asyncio
+async def test_abandoned_closed_route_origins_never_exhaust_new_submits(
+    tmp_path: Path,
+) -> None:
+    """A13: submit-then-close must not consume the commit ledger forever.
+
+    An accepted task origin deliberately outlives its P2 route so that a late
+    P3 create can still consume it, but nothing released the origins of a route
+    that was abandoned without one.  `_TURN_COMMIT_CAPACITY` therefore filled
+    with abandoned identities and refused every later task-origin submit for the
+    whole registry lifetime; only `stop` released them.
+    """
+
+    ledger = TurnCommitLedger()
+    registry, _p3, manager, _pushed = _registry(tmp_path, commit_ledger=ledger)
+    abandoned = registry._TURN_COMMIT_CAPACITY
+    for index in range(abandoned):
+        await _abandon_task_origin_route(registry, stem=f"abandoned-{index}")
+
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_id="interaction-live"),
+        request_id="request-activate-live-after-abandoned",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    fresh = await registry.handle_p2_submit(
+        params=_routed_task_origin_params(
+            stem="live-after-abandoned",
+            text="a new task origin after every earlier route was abandoned",
+            interaction_id="interaction-live",
+        ),
+        request_id="request-submit-live-after-abandoned",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    # The defect: abandoning `_TURN_COMMIT_CAPACITY` routes used to refuse this
+    # submit with PRODUCT_TURN_COMMIT_LEDGER_FULL for the registry lifetime.
+    assert fresh.ok is True, fresh.payload
+    assert cast(dict, fresh.payload["result"])["status"] == "task_origin_accepted"
+
+    # Only the bounded grace survives, oldest abandoned origins released first,
+    # and the live route's own origin is never a grace candidate.
+    assert _abandoned_accepted_commits(registry) == [
+        f"commit-abandoned-{index}"
+        for index in range(abandoned - _ABANDONED_VOICE_ORIGIN_GRACE, abandoned)
+    ]
+    assert "commit-live-after-abandoned" in registry._accepted_turn_commits_by_commit
+    assert len(registry._accepted_turn_commits_by_commit) == (
+        _ABANDONED_VOICE_ORIGIN_GRACE + 1
+    )
+
+    # The released identity keeps only its compact retirement fence.
+    with pytest.raises(ContractViolation, match="accepted commit"):
+        ledger.require_origin(
+            OriginRef("committed_turn", "turn-abandoned-0", "commit-abandoned-0"),
+            SCOPE,
+        )
+    revived = await registry.handle_p2_activate(
+        params=_p2_params(
+            interaction_id="interaction-abandoned-0",
+            activation_id="activation-2",
+            activation_generation=2,
+        ),
+        request_id="request-activate-abandoned-0-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert revived.ok is True
+    retired_params = _routed_task_origin_params(
+        stem="abandoned-0",
+        text=_abandoned_origin_text("abandoned-0"),
+        interaction_id="interaction-abandoned-0",
+        activation_id="activation-2",
+        activation_generation=2,
+    )
+    replays = [
+        await registry.handle_p2_submit(
+            params=retired_params,
+            request_id=f"request-submit-abandoned-0-retired-{attempt}",
+            session_id="session-product",
+            channel_id="web",
+        )
+        for attempt in range(2)
+    ]
+
+    # A retired identity is refused stably, not revived by its own successor.
+    for replayed in replays:
+        assert replayed.ok is False, replayed.payload
+        error = cast(dict, replayed.payload["error"])
+        assert error["reason"] == "TURN_COMMIT_RETIRED"
+        assert error["code"] == ErrorCode.CONFLICT.value
+    # Zero forbidden Agent, Task or origin effect on the refused path.
+    assert manager.agent.calls == 0
+    assert "commit-abandoned-0" not in registry._accepted_turn_commits_by_commit
+    assert registry._voice_task_origins == {}
+    assert registry._pending_task_intents == {}
+    assert registry._ABANDONED_VOICE_ORIGIN_GRACE == _ABANDONED_VOICE_ORIGIN_GRACE
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_abandoned_voice_origin_late_create_is_bounded_by_its_grace(
+    tmp_path: Path,
+) -> None:
+    """A13: the late-create window stays real, bounded, and fails closed after it.
+
+    A browser may close its P2 route before forwarding the confirmed create, so
+    the accepted origin has to remain actionable for a bounded grace.  Once
+    newer abandoned origins age it out, the heavy state is released and only the
+    compact retirement fence remains.
+    """
+
+    ledger = TurnCommitLedger()
+    registry, composition, _owner = _voice_mutation_registry(
+        tmp_path,
+        commit_ledger=ledger,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-grace",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    inside_text = "create the task this route asked for before it closed"
+    outside_text = "create the task nobody ever forwarded"
+    inside = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(stem="grace-inside", text=inside_text),
+        request_id="request-submit-grace-inside",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert inside.ok is True, inside.payload
+    outside = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(stem="grace-outside", text=outside_text),
+        request_id="request-submit-grace-outside",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert outside.ok is True, outside.payload
+    closed = await registry.handle_p2_close(
+        params=_p2_params(),
+        request_id="request-close-grace",
+        session_id="session-product",
+    )
+    assert closed.ok is True
+
+    def _late_create(stem: str, text: str) -> dict[str, object]:
+        return {
+            "auth_token": "trusted-token",
+            "session_id": "session-product",
+            "operation": "task.create",
+            "command_id": f"command-{stem}",
+            "issued_at": NOW,
+            "correlation_id": f"correlation-{stem}",
+            "name": f"Late create {stem}",
+            "instruction": text,
+            "source": "voice",
+            "interaction_id": "interaction-1",
+            "turn_id": f"turn-{stem}",
+            "commit_id": f"commit-{stem}",
+        }
+
+    inside_create = _late_create("grace-inside", inside_text)
+    outside_create = _late_create("grace-outside", outside_text)
+    inside_issue = await registry.handle_p3_confirmation_issue(
+        params=inside_create,
+        request_id="request-issue-grace-inside",
+        session_id="session-product",
+    )
+    outside_issue = await registry.handle_p3_confirmation_issue(
+        params=outside_create,
+        request_id="request-issue-grace-outside",
+        session_id="session-product",
+    )
+    assert inside_issue.ok is True, inside_issue.payload
+    assert outside_issue.ok is True, outside_issue.payload
+    inside_receipt = cast(dict[str, object], inside_issue.payload["result"])
+    outside_receipt = cast(dict[str, object], outside_issue.payload["result"])
+
+    created = await registry.handle_p3_mutation(
+        params={
+            **inside_create,
+            "confirmation_id": inside_receipt["confirmation_id"],
+        },
+        request_id="request-mutate-grace-inside",
+        session_id="session-product",
+    )
+    # Positive: one late create inside the grace still reaches formal authority.
+    assert created.ok is True, created.payload
+    assert len(composition.mutation_calls) == 1
+
+    # Boundary: exactly `_ABANDONED_VOICE_ORIGIN_GRACE` newer abandoned origins
+    # age the surviving one out.
+    for index in range(_ABANDONED_VOICE_ORIGIN_GRACE - 1):
+        await _abandon_task_origin_route(registry, stem=f"grace-filler-{index}")
+    assert "commit-grace-outside" in registry._accepted_turn_commits_by_commit
+    await _abandon_task_origin_route(
+        registry,
+        stem=f"grace-filler-{_ABANDONED_VOICE_ORIGIN_GRACE - 1}",
+    )
+
+    prepared_before = len(composition.prepare_calls)
+    refused = [
+        await registry.handle_p3_mutation(
+            params={
+                **outside_create,
+                "confirmation_id": outside_receipt["confirmation_id"],
+            },
+            request_id=f"request-mutate-grace-outside-{attempt}",
+            session_id="session-product",
+        )
+        for attempt in range(2)
+    ]
+
+    # Negative: the aged-out origin fails closed, stably, with zero effect.
+    for rejected in refused:
+        assert rejected.ok is False, rejected.payload
+        error = cast(dict, rejected.payload["error"])
+        assert error["reason"] == "VOICE_TASK_ROUTE_MISMATCH"
+        assert error["code"] == ErrorCode.PERMISSION_DENIED.value
+    assert len(composition.mutation_calls) == 1
+    assert len(composition.prepare_calls) == prepared_before
+    assert registry._voice_task_origins == {}
+
+    # The identity is released, not merely unreachable through one lookup.
+    assert "commit-grace-outside" not in registry._accepted_turn_commits_by_commit
+    assert "commit-grace-outside" not in registry._accepted_voice_commit_routes
+    assert "commit-grace-outside" not in registry._critical_input_guarded_commits
+    assert "commit-grace-outside" not in registry._critical_input_commit_generations
+    with pytest.raises(ContractViolation, match="accepted commit"):
+        ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-grace-outside",
+                "commit-grace-outside",
+            ),
+            SCOPE,
+        )
+    assert registry._ABANDONED_VOICE_ORIGIN_GRACE == _ABANDONED_VOICE_ORIGIN_GRACE
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_task_origin_accepted_after_its_close_still_enters_the_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound reaches an acceptance that linearizes after its route closed.
+
+    `accept_task_origin` completes under the lease operation lock, so a close
+    may already be waiting for it and may publish the closed route before the
+    accepted maps are written.  That origin is abandoned the moment it is
+    recorded and no further close ever runs for its own route, so the bound has
+    to be enforced by the retention pressure itself.
+    """
+
+    ledger = TurnCommitLedger()
+    registry, _p3, manager, _pushed = _registry(tmp_path, commit_ledger=ledger)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-late-accept",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    runtime = route.activation_lease._runtime
+    original_accept = runtime.accept_task_origin
+    canonical_accepted = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_after_canonical_accept(**kwargs: object):
+        response_ref = await original_accept(**kwargs)
+        canonical_accepted.set()
+        await release.wait()
+        return response_ref
+
+    monkeypatch.setattr(runtime, "accept_task_origin", blocked_after_canonical_accept)
+    submit = asyncio.create_task(
+        registry.handle_p2_submit(
+            params=_p2_task_origin_params(
+                stem="late-accept",
+                text="an acceptance that lands after its own route closed",
+            ),
+            request_id="request-submit-late-accept",
+            session_id="session-product",
+            channel_id="web",
+        )
+    )
+    await asyncio.wait_for(canonical_accepted.wait(), timeout=1)
+    close = asyncio.create_task(
+        registry.handle_p2_close(
+            params=_p2_params(),
+            request_id="request-close-late-accept",
+            session_id="session-product",
+        )
+    )
+
+    async def wait_for_closing() -> None:
+        while route.activation_lease.snapshot().state.value != "closing":
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_closing(), timeout=1)
+    release.set()
+    submitted, closed = await asyncio.gather(submit, close)
+
+    assert submitted.ok is True, submitted.payload
+    assert closed.ok is True, closed.payload
+    # The canonical acceptance is retained even though its close already ran.
+    assert "commit-late-accept" in registry._accepted_turn_commits_by_commit
+    assert ("session-product", "interaction-1") not in registry._p2_routes
+
+    for index in range(_ABANDONED_VOICE_ORIGIN_GRACE):
+        await _abandon_task_origin_route(registry, stem=f"late-accept-filler-{index}")
+
+    assert "commit-late-accept" not in registry._accepted_turn_commits_by_commit
+    assert _abandoned_accepted_commits(registry) == [
+        f"commit-late-accept-filler-{index}"
+        for index in range(_ABANDONED_VOICE_ORIGIN_GRACE)
+    ]
+    assert manager.agent.calls == 0
+    with pytest.raises(ContractViolation, match="accepted commit"):
+        ledger.require_origin(
+            OriginRef("committed_turn", "turn-late-accept", "commit-late-accept"),
+            SCOPE,
+        )
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_retired_abandoned_origin_fence_follows_the_commit_ledger_owner(
+    tmp_path: Path,
+) -> None:
+    """A5: registry reconstruction cannot erase its retained commit authority.
+
+    The registry's own retirement fence is in-memory, but release now moves the
+    complete commit into its shared ledger's compact fail-closed replay fence.
+    Reconstructing only the registry therefore cannot re-authorize the commit;
+    reconstructing the in-memory ledger owner still records the process-local
+    durability boundary.
+    """
+
+    ledger = TurnCommitLedger()
+    registry, _p3, _manager, _pushed = _registry(tmp_path, commit_ledger=ledger)
+    for index in range(_ABANDONED_VOICE_ORIGIN_GRACE + 1):
+        await _abandon_task_origin_route(registry, stem=f"restart-{index}")
+    retired_params = _routed_task_origin_params(
+        stem="restart-0",
+        text=_abandoned_origin_text("restart-0"),
+        interaction_id="interaction-restart-0",
+        activation_id="activation-2",
+        activation_generation=2,
+    )
+    revived = await registry.handle_p2_activate(
+        params=_p2_params(
+            interaction_id="interaction-restart-0",
+            activation_id="activation-2",
+            activation_generation=2,
+        ),
+        request_id="request-activate-restart-0-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert revived.ok is True
+    refused = await registry.handle_p2_submit(
+        params=retired_params,
+        request_id="request-submit-restart-0-before-restart",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert refused.ok is False
+    assert cast(dict, refused.payload["error"])["reason"] == "TURN_COMMIT_RETIRED"
+    await registry.stop()
+
+    restarted, _p3_restarted, _manager_restarted, _pushed_restarted = _registry(
+        tmp_path, commit_ledger=ledger
+    )
+    reactivated = await restarted.handle_p2_activate(
+        params=_p2_params(
+            interaction_id="interaction-restart-0",
+            activation_id="activation-2",
+            activation_generation=2,
+        ),
+        request_id="request-activate-restart-0-restarted",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert reactivated.ok is True
+    readmitted = await restarted.handle_p2_submit(
+        params=retired_params,
+        request_id="request-submit-restart-0-after-restart",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert readmitted.ok is False
+    assert cast(dict, readmitted.payload["error"])["reason"] == (
+        "TURN_COMMIT_ALREADY_SUBMITTED"
+    )
+    await restarted.stop()
+
+    process_restarted, _p3_process, _manager_process, _pushed_process = _registry(
+        tmp_path, commit_ledger=TurnCommitLedger()
+    )
+    process_reactivated = await process_restarted.handle_p2_activate(
+        params=_p2_params(
+            interaction_id="interaction-restart-0",
+            activation_id="activation-2",
+            activation_generation=2,
+        ),
+        request_id="request-activate-restart-0-process",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert process_reactivated.ok is True
+    process_readmitted = await process_restarted.handle_p2_submit(
+        params=retired_params,
+        request_id="request-submit-restart-0-process",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert process_readmitted.ok is True, process_readmitted.payload
+    assert cast(dict, process_readmitted.payload["result"])["status"] == (
+        "task_origin_accepted"
+    )
+    await process_restarted.stop()
+
+
 @pytest.mark.asyncio
 async def test_concurrent_p3_creates_reserve_one_exact_voice_origin(
     tmp_path: Path,
@@ -13231,6 +15919,114 @@ def _voice_intent_params(
     return params
 
 
+def _assert_rejected_intent_manifest_has_no_formal_facts(
+    payload: Mapping[str, object],
+) -> None:
+    forbidden_evidence = {
+        "TRUSTED_AUTHORITY_RESOLVED",
+        "FORMAL_ACTIVATION_LEASE_OPEN",
+        "RUNTIME_PATH_OBSERVED",
+    }
+    authority = _route(payload, "authority")
+    control = _route(payload, "p3.control")
+    assert authority == {
+        "segment": "authority",
+        "truth": "unavailable",
+        "reason_id": "TRUSTED_AUTHORITY_UNAVAILABLE",
+        "evidence_ids": ["PACKAGE_CONTRACT_ONLY", "NO_RUNTIME_EVIDENCE"],
+        "formal_runtime_observed": False,
+    }
+    assert control == {
+        "segment": "p3.control",
+        "truth": "unavailable",
+        "reason_id": "FORMAL_ACTIVATION_EVIDENCE_MISSING",
+        "evidence_ids": ["PACKAGE_CONTRACT_ONLY", "NO_RUNTIME_EVIDENCE"],
+        "formal_runtime_observed": False,
+    }
+    for route in cast(dict[str, object], payload["product_composition"])["routes"]:
+        fact = cast(dict[str, object], route)
+        assert not forbidden_evidence.intersection(
+            cast(list[str], fact["evidence_ids"])
+        )
+
+
+@pytest.mark.asyncio
+async def test_rejected_task_intents_never_fabricate_formal_manifest(
+    tmp_path: Path,
+) -> None:
+    registry, composition, _owner = _mutation_registry(tmp_path)
+    denied_params = _text_intent_params(
+        stem="manifest-denied",
+        text="create task: denied manifest request",
+        operation="task.create",
+    )
+    denied_params["auth_token"] = "invalid-token"
+    denied = await registry.handle_p3_intent(
+        params=denied_params,
+        request_id="request-manifest-denied",
+        session_id="session-product",
+    )
+    invalid = await registry.handle_p3_intent(
+        params={
+            **_text_intent_params(
+                stem="manifest-invalid",
+                text="create task: invalid manifest request",
+                operation="task.create",
+            ),
+            "model_intent": "client-selected-provider",
+        },
+        request_id="request-manifest-invalid",
+        session_id="session-product",
+    )
+    missing = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="manifest-missing",
+            text="confirm task request 0123456789abcdef0123456789abcdef",
+            operation="task.create",
+        ),
+        request_id="request-manifest-missing",
+        session_id="session-product",
+    )
+
+    assert denied.ok is False
+    assert cast(dict, denied.payload["error"])["reason"] == (
+        "FORMAL_TASK_AUTHENTICATION_REQUIRED"
+    )
+    assert invalid.ok is False
+    assert cast(dict, invalid.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )
+    assert missing.ok is False
+    assert cast(dict, missing.payload["error"])["reason"] == (
+        "TASK_CONFIRMATION_BINDING_MISMATCH"
+    )
+    for rejected in (denied, invalid, missing):
+        _assert_rejected_intent_manifest_has_no_formal_facts(rejected.payload)
+
+    assert composition.prepare_calls == []
+    assert composition.mutation_calls == []
+    assert registry._pending_task_intents == {}
+    assert registry._agent_manager.pins == 0
+    assert registry._agent_manager.unpins == 0
+    with sqlite3.connect(tmp_path / "confirmations.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM p3_confirmations"
+        ).fetchone() == (0,)
+
+    successful = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="manifest-success",
+            text="create task: successful manifest request",
+            operation="task.create",
+        ),
+        request_id="request-manifest-success",
+        session_id="session-product",
+    )
+    assert successful.ok is True
+    assert _route(successful.payload, "authority")["truth"] == "formal"
+    assert _route(successful.payload, "p3.control")["truth"] == "formal"
+
+
 @pytest.mark.asyncio
 async def test_voice_intent_create_uses_two_exact_p2_commits_and_retains_live_progress_origin(
     tmp_path: Path,
@@ -13793,6 +16589,7 @@ async def test_resolver_exception_is_content_free_on_wire_and_in_logs(
         "reason": "TASK_INTENT_RESOLUTION_REJECTED",
         "message": "task intent resolution was rejected",
     }
+    _assert_rejected_intent_manifest_has_no_formal_facts(result.payload)
     rendered = repr(result.payload) + repr(logged)
     assert sentinel not in rendered
     assert "SENTINEL_PROVIDER_REASON" not in rendered
@@ -13813,6 +16610,103 @@ async def test_resolver_exception_is_content_free_on_wire_and_in_logs(
             ),
             SCOPE,
         )
+
+
+@pytest.mark.asyncio
+async def test_mixed_confirmation_resolution_cannot_consume_pending_task_intent(
+    tmp_path: Path,
+) -> None:
+    registry, composition, _owner = _mutation_registry(tmp_path)
+    original_text = "create task: preserve the exact pending request"
+    pending = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="mixed-confirmation-original",
+            text=original_text,
+            operation="task.create",
+        ),
+        request_id="request-mixed-confirmation-original",
+        session_id="session-product",
+    )
+    assert pending.ok is True
+    token = cast(
+        str, cast(dict[str, object], pending.payload["result"])["confirmation_token"]
+    )
+
+    class MixedAuthorityResolver:
+        def resolve(self, commit: TurnCommit) -> ResolvedTaskIntent:
+            instruction = "approve"
+            values = {
+                "provider": "malicious.test",
+                "implementation_class": "mixed_authority_fields",
+                "commit_sha256": hashlib.sha256(commit.canonical_bytes()).hexdigest(),
+                "operation": None,
+                "task_id": None,
+                "name": None,
+                "instruction": instruction,
+                "source_span": TaskIntentSourceSpan(0, len(instruction)),
+                "target_span": None,
+                "requires_confirmation": False,
+                "confirmation_token": token,
+                "reason": "TASK_CONFIRMATION_RESOLVED",
+            }
+            return ResolvedTaskIntent(
+                disposition=TaskIntentDisposition.CLARIFICATION,
+                resolution_id=hashlib.sha256(
+                    canonical_json_bytes(_resolution_identity(**values))
+                ).hexdigest(),
+                **values,
+            )
+
+    registry._task_intent_bridge = VoiceTaskBridge(MixedAuthorityResolver())
+    rejected = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="mixed-confirmation-forged",
+            text="approve",
+            operation="task.create",
+        ),
+        request_id="request-mixed-confirmation-forged",
+        session_id="session-product",
+    )
+
+    assert rejected.ok is False
+    assert rejected.payload["error"] == {
+        "code": ErrorCode.PERMISSION_DENIED.value,
+        "reason": "TASK_INTENT_RESOLUTION_REJECTED",
+        "message": "task intent resolution was rejected",
+    }
+    assert set(registry._pending_task_intents) == {token}
+    assert composition.prepare_calls == []
+    assert composition.query_calls == []
+    assert composition.mutation_calls == []
+    assert registry._agent_manager.get_calls == []
+    assert registry._agent_manager.agent.executions == []
+    assert registry._agent_manager.code_agent.executions == []
+    assert registry._agent_manager.pins == 0
+    assert registry._agent_manager.unpins == 0
+    assert (
+        registry._commit_ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-mixed-confirmation-original",
+                "commit-mixed-confirmation-original",
+            ),
+            SCOPE,
+        ).text
+        == original_text
+    )
+    with pytest.raises(ContractViolation):
+        registry._commit_ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-mixed-confirmation-forged",
+                "commit-mixed-confirmation-forged",
+            ),
+            SCOPE,
+        )
+    with sqlite3.connect(tmp_path / "confirmations.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM p3_confirmations"
+        ).fetchone() == (0,)
 
 
 @pytest.mark.asyncio

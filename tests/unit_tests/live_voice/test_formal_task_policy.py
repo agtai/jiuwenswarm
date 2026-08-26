@@ -148,6 +148,89 @@ def test_turn_commit_ledger_is_bounded_and_exact_release_recovers_capacity() -> 
     assert ledger.accept(second)
 
 
+def test_released_turn_commit_keeps_bounded_exact_and_conservative_replay_fences() -> (
+    None
+):
+    ledger = TurnCommitLedger(capacity=1)
+
+    def candidate(index: int) -> TurnCommit:
+        return TurnCommit.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "commit_id": f"commit-retired-{index}",
+                "turn_id": f"turn-retired-{index}",
+                "interaction_id": f"interaction-retired-{index}",
+                "text": f"retired {index}",
+                "hypothesis_provenance": {"provider": "test", "seq": index},
+                "scope": _scope().to_dict(),
+                "context_refs": [],
+                "committed_at": NOW,
+            }
+        )
+
+    first = candidate(1)
+    second = candidate(2)
+    for commit in (first, second):
+        assert ledger.accept(commit)
+        assert ledger.release_origin(
+            OriginRef("committed_turn", commit.turn_id, commit.commit_id),
+            commit.scope,
+        )
+
+    retired_commits = getattr(ledger, "_retired_commits", None)
+    retired_commit_ids = getattr(ledger, "_retired_commit_ids", None)
+    retired_turn_ids = getattr(ledger, "_retired_turn_ids", None)
+    assert retired_commits is not None
+    assert retired_commit_ids is not None
+    assert retired_turn_ids is not None
+    assert len(retired_commits) == 1
+    assert len(retired_commit_ids) == 1
+    assert len(retired_turn_ids) == 1
+    with pytest.raises(ContractViolation) as replay:
+        ledger.accept(first)
+    assert replay.value.reason == "TURN_COMMIT_CONFLICT"
+
+    commit_replay = TurnCommit.from_dict(
+        {**candidate(3).to_dict(), "commit_id": first.commit_id}
+    )
+    with pytest.raises(ContractViolation) as commit_conflict:
+        ledger.accept(commit_replay)
+    assert commit_conflict.value.reason == "TURN_COMMIT_CONFLICT"
+    with pytest.raises(ContractViolation) as absent_commit_replay:
+        ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                commit_replay.turn_id,
+                commit_replay.commit_id,
+            ),
+            commit_replay.scope,
+        )
+    assert absent_commit_replay.value.reason == "TURN_COMMIT_NOT_ACCEPTED"
+
+    turn_replay = TurnCommit.from_dict(
+        {**candidate(4).to_dict(), "turn_id": first.turn_id}
+    )
+    with pytest.raises(ContractViolation) as turn_conflict:
+        ledger.accept(turn_replay)
+    assert turn_conflict.value.reason == "TURN_COMMIT_CONFLICT"
+    with pytest.raises(ContractViolation) as absent_turn_replay:
+        ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                turn_replay.turn_id,
+                turn_replay.commit_id,
+            ),
+            turn_replay.scope,
+        )
+    assert absent_turn_replay.value.reason == "TURN_COMMIT_NOT_ACCEPTED"
+
+    fresh = candidate(5)
+    assert ledger.accept(fresh) is True
+    assert ledger.require_origin(
+        OriginRef("committed_turn", fresh.turn_id, fresh.commit_id), fresh.scope
+    ) == fresh
+
+
 def test_committed_voice_create_maps_to_formal_v2_without_claiming_authority(
     tmp_path: Path,
 ) -> None:

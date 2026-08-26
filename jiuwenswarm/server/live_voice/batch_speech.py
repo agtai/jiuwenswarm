@@ -749,13 +749,20 @@ class OpenAICompatibleBatchSpeechProvider:
                 "speech Provider returned an invalid recognition result",
             )
         text = payload.get("text")
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(text, str):
             raise _fail(
                 ErrorCode.PROTOCOL_VIOLATION,
                 "SPEECH_PROVIDER_EMPTY_TRANSCRIPT",
                 "speech Provider returned an empty recognition result",
             )
-        if len(text) > MAX_RECOGNITION_TEXT_CHARS:
+        canonical_text = text.strip()
+        if not canonical_text:
+            raise _fail(
+                ErrorCode.PROTOCOL_VIOLATION,
+                "SPEECH_PROVIDER_EMPTY_TRANSCRIPT",
+                "speech Provider returned an empty recognition result",
+            )
+        if len(canonical_text) > MAX_RECOGNITION_TEXT_CHARS:
             raise _fail(
                 ErrorCode.PROTOCOL_VIOLATION,
                 "SPEECH_PROVIDER_TRANSCRIPT_LIMIT",
@@ -764,7 +771,7 @@ class OpenAICompatibleBatchSpeechProvider:
         observed_locale = payload.get("language")
         if not isinstance(observed_locale, str) or not observed_locale.strip():
             observed_locale = None
-        return ProviderRecognitionResult(text, observed_locale, model)
+        return ProviderRecognitionResult(canonical_text, observed_locale, model)
 
     async def synthesize(
         self, request: ProviderSynthesisRequest
@@ -791,7 +798,8 @@ class OpenAICompatibleBatchSpeechProvider:
             bytes(response.content),
             sample_rate_hz=_OPENAI_PCM_SAMPLE_RATE_HZ,
         )
-        audio = _resample_pcm16_mono_wav(
+        audio = await asyncio.to_thread(
+            _resample_pcm16_mono_wav,
             audio,
             target_sample_rate_hz=request.required_sample_rate_hz,
         )
@@ -1016,6 +1024,7 @@ class _OperationEntry:
     fence_code: ErrorCode | None = None
     fence_reason: str | None = None
     fence_event: asyncio.Event = field(default_factory=asyncio.Event)
+    voice_commit_receipt_token: str | None = None
 
 
 def _parse_common(
@@ -1504,7 +1513,7 @@ class FormalBatchSpeechService:
     async def _issue_voice_commit_receipt(
         self, request: RecognitionBatchRequest, text: str
     ) -> str:
-        return await self.issue_streaming_voice_commit_receipt(
+        token = await self.issue_streaming_voice_commit_receipt(
             operation_id=request.operation_id,
             capture_id=request.capture_id,
             capture_generation=request.capture_generation,
@@ -1513,6 +1522,12 @@ class FormalBatchSpeechService:
             interaction_id=None,
             text=text,
         )
+        entry = self._operations[(request.scope, request.operation_id)]
+        if entry.fence_code is not None:
+            self._voice_commit_receipts.pop(token, None)
+            raise BatchSpeechError(self._fence_error(entry))
+        entry.voice_commit_receipt_token = token
+        return token
 
     async def issue_streaming_voice_commit_receipt(
         self,
@@ -2196,8 +2211,8 @@ class FormalBatchSpeechService:
             "formal batch speech was cancelled",
         )
 
-    @staticmethod
     def _fence_entry(
+        self,
         entry: _OperationEntry,
         code: ErrorCode,
         reason: str,
@@ -2208,6 +2223,10 @@ class FormalBatchSpeechService:
             return False
         entry.fence_code = code
         entry.fence_reason = reason
+        receipt_token = entry.voice_commit_receipt_token
+        if receipt_token is not None:
+            self._voice_commit_receipts.pop(receipt_token, None)
+            entry.voice_commit_receipt_token = None
         deadline_handle = entry.deadline_handle
         if deadline_handle is not None:
             deadline_handle.cancel()

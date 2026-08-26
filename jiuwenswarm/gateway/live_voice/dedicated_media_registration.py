@@ -611,14 +611,19 @@ class _MediaAuthority:
     streaming_recognition_begin_task: asyncio.Task[None] | None = field(
         default=None, repr=False
     )
+    streaming_result_dispatch_pending: bool = False
     streaming_preopen_frames: list[MediaAudioFrame] = field(
         default_factory=list, repr=False
     )
+    streaming_preopen_f32_bytes: int = 0
     streaming_voice_commit_receipt: str | None = field(default=None, repr=False)
     streaming_started_at: float | None = None
     streaming_observation_emitted: bool = False
     streaming_x_obs_event: StreamingXObsEvent | None = None
     streaming_x_obs_metric: StreamingXObsMetric | None = None
+    streaming_degradation_observation_emitted: bool = False
+    streaming_degradation_x_obs_event: StreamingXObsEvent | None = None
+    streaming_degradation_x_obs_metric: StreamingXObsMetric | None = None
     streaming_observation_lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False
     )
@@ -911,6 +916,9 @@ class DedicatedMediaProductRegistry:
         self._streaming_recognition_owner: StreamingRecognitionRouteOwner | None = None
         self._streaming_receipt_issuer: Callable[..., Awaitable[str]] | None = None
         self._streaming_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._streaming_result_dispatch_tasks: dict[
+            str, asyncio.Task[None] | None
+        ] = {}
         if streaming_observability is not None and not isinstance(
             streaming_observability, LiveVoiceObservabilityCollector
         ):
@@ -1566,6 +1574,7 @@ class DedicatedMediaProductRegistry:
                 record.streaming_recognition_handle = handle
                 preopen_frames = tuple(record.streaming_preopen_frames)
                 record.streaming_preopen_frames.clear()
+                record.streaming_preopen_f32_bytes = 0
             else:
                 preopen_frames = ()
         if not current:
@@ -1704,10 +1713,17 @@ class DedicatedMediaProductRegistry:
                 and begin_task is not None
                 and record.streaming_recognition_outcome is None
             ):
-                if len(record.streaming_preopen_frames) < _MAX_STREAMING_PREOPEN_FRAMES:
+                frame_f32_bytes = len(frame.samples) * 4
+                if (
+                    len(record.streaming_preopen_frames) < _MAX_STREAMING_PREOPEN_FRAMES
+                    and record.streaming_preopen_f32_bytes + frame_f32_bytes
+                    <= _MAX_CAPTURE_WAV_BYTES
+                ):
                     record.streaming_preopen_frames.append(frame)
+                    record.streaming_preopen_f32_bytes += frame_f32_bytes
                 else:
                     record.streaming_preopen_frames.clear()
+                    record.streaming_preopen_f32_bytes = 0
                     cancel_begin = True
         if owner is not None and handle is not None:
             owner.offer(handle, frame)
@@ -1868,6 +1884,7 @@ class DedicatedMediaProductRegistry:
             task = record.streaming_recognition_begin_task
             record.streaming_recognition_begin_task = None
             record.streaming_preopen_frames.clear()
+            record.streaming_preopen_f32_bytes = 0
         if task is None:
             return
         if not task.done():
@@ -1890,6 +1907,27 @@ class DedicatedMediaProductRegistry:
         connection_id: str,
         request_origin: str | None,
     ) -> dict[str, object]:
+        record, capture = self._authorize_streaming_recognition_result(
+            params=params,
+            routed_session_id=routed_session_id,
+            connection_id=connection_id,
+            request_origin=request_origin,
+        )
+        return await self._settle_streaming_recognition_result(
+            record,
+            capture=capture,
+            retain_prior_authority=False,
+        )
+
+    def _authorize_streaming_recognition_result(
+        self,
+        *,
+        params: Mapping[str, object],
+        routed_session_id: str,
+        connection_id: str,
+        request_origin: str | None,
+        claim_dispatch: bool = False,
+    ) -> tuple[_MediaAuthority, dict[str, object]]:
         expected_keys = {
             "session_id",
             "subject_id",
@@ -1943,6 +1981,64 @@ class DedicatedMediaProductRegistry:
                     "MEDIA_STREAMING_RESULT_UNAUTHORIZED",
                     "streaming recognition result authority is absent or stale",
                 )
+            if claim_dispatch and record.streaming_result_dispatch_pending:
+                raise MediaTransportViolation(
+                    "MEDIA_INVALID_STREAMING_RESULT",
+                    "streaming recognition result is already pending",
+                )
+            if claim_dispatch:
+                if len(self._streaming_result_dispatch_tasks) >= self._capacity:
+                    raise MediaTransportViolation(
+                        "MEDIA_INVALID_STREAMING_RESULT",
+                        "streaming recognition result capacity is exhausted",
+                    )
+                self._streaming_result_dispatch_tasks[record.record_id] = None
+                record.streaming_result_dispatch_pending = True
+        return record, {
+            "capture_id": capture_id,
+            "capture_generation": capture_generation,
+            "track_id": track_id,
+            "final": True,
+        }
+
+    def _bind_streaming_result_dispatch_task(
+        self,
+        record: _MediaAuthority,
+        task: asyncio.Task[None],
+    ) -> None:
+        with self._lock:
+            if (
+                record.record_id not in self._streaming_result_dispatch_tasks
+                or self._streaming_result_dispatch_tasks[record.record_id] is not None
+            ):
+                raise RuntimeError("streaming recognition result reservation is absent")
+            self._streaming_result_dispatch_tasks[record.record_id] = task
+
+    def _release_streaming_result_dispatch(
+        self,
+        record: _MediaAuthority,
+        task: asyncio.Task[None] | None,
+    ) -> None:
+        with self._lock:
+            reserved = record.record_id in self._streaming_result_dispatch_tasks
+            current = self._streaming_result_dispatch_tasks.get(record.record_id)
+            if (task is None and reserved and current is None) or current is task:
+                self._streaming_result_dispatch_tasks.pop(record.record_id, None)
+                record.streaming_result_dispatch_pending = False
+        if task is not None:
+            try:
+                task.result()
+            except (Exception, asyncio.CancelledError):
+                return
+
+    async def _settle_streaming_recognition_result(
+        self,
+        record: _MediaAuthority,
+        *,
+        capture: dict[str, object],
+        retain_prior_authority: bool,
+    ) -> dict[str, object]:
+        with self._lock:
             ready = record.streaming_recognition_ready
             immediate = record.streaming_recognition_outcome
         if immediate is None and ready is not None:
@@ -1965,18 +2061,15 @@ class DedicatedMediaProductRegistry:
                 StreamingRecognitionFallbackReason.CONFIGURATION_UNAVAILABLE
             )
         with self._lock:
-            if self._records.get(record.record_id) is not record:
+            if (
+                not retain_prior_authority
+                and self._records.get(record.record_id) is not record
+            ):
                 raise MediaTransportViolation(
                     "MEDIA_STREAMING_RESULT_UNAUTHORIZED",
                     "streaming recognition result authority is absent or stale",
                 )
             receipt = record.streaming_voice_commit_receipt
-        capture = {
-            "capture_id": capture_id,
-            "capture_generation": capture_generation,
-            "track_id": track_id,
-            "final": True,
-        }
         if immediate.completed:
             if (
                 immediate.final_text is None
@@ -2058,8 +2151,14 @@ class DedicatedMediaProductRegistry:
         if owner is None:
             return None, None
         with record.streaming_observation_lock:
-            if record.streaming_observation_emitted:
-                return record.streaming_x_obs_event, record.streaming_x_obs_metric
+            if outcome.completed:
+                if record.streaming_observation_emitted:
+                    return record.streaming_x_obs_event, record.streaming_x_obs_metric
+            elif record.streaming_degradation_observation_emitted:
+                return (
+                    record.streaming_degradation_x_obs_event,
+                    record.streaming_degradation_x_obs_metric,
+                )
             built = self._build_streaming_observability(record, outcome=outcome)
             if built is None:
                 emitted: tuple[
@@ -2072,8 +2171,15 @@ class DedicatedMediaProductRegistry:
                     if owner.submit(observation, metric)
                     else (None, None)
                 )
-            record.streaming_x_obs_event, record.streaming_x_obs_metric = emitted
-            record.streaming_observation_emitted = True
+            if outcome.completed:
+                record.streaming_x_obs_event, record.streaming_x_obs_metric = emitted
+                record.streaming_observation_emitted = True
+            else:
+                (
+                    record.streaming_degradation_x_obs_event,
+                    record.streaming_degradation_x_obs_metric,
+                ) = emitted
+                record.streaming_degradation_observation_emitted = True
             return emitted
 
     def _build_streaming_observability(
@@ -3788,6 +3894,7 @@ class DedicatedMediaProductRegistry:
         begin_task = record.streaming_recognition_begin_task
         record.streaming_recognition_begin_task = None
         record.streaming_preopen_frames.clear()
+        record.streaming_preopen_f32_bytes = 0
         handle = record.streaming_recognition_handle
         record.streaming_recognition_handle = None
         if owner is None or (begin_task is None and (handle is None or handle.settled)):
@@ -3931,17 +4038,65 @@ def register_dedicated_media_rpc_handlers(
                     "MEDIA_INVALID_STREAMING_RESULT",
                     "streaming recognition result must be an object",
                 )
-            payload = await registry.streaming_recognition_result(
+            record, capture = registry._authorize_streaming_recognition_result(
                 params=params,
                 routed_session_id=session_id,
                 connection_id=str(getattr(ws, "_jiuwen_ws_id", "") or id(ws)),
                 request_origin=_request_origin(ws),
+                claim_dispatch=True,
             )
-            await channel.send_response(ws, req_id, ok=True, payload=payload)
         except MediaTransportViolation as exc:
             await channel.send_response(
                 ws, req_id, ok=False, error=str(exc), code=exc.reason_id
             )
+            return
+
+        async def send_response_once(**kwargs: object) -> None:
+            try:
+                await channel.send_response(ws, req_id, **kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return
+
+        async def send_settled_result() -> None:
+            try:
+                payload = await registry._settle_streaming_recognition_result(
+                    record,
+                    capture=capture,
+                    retain_prior_authority=True,
+                )
+            except MediaTransportViolation as exc:
+                await send_response_once(
+                    ok=False, error=str(exc), code=exc.reason_id
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await send_response_once(
+                    ok=False,
+                    error=f"handler error: {exc}",
+                    code="INTERNAL_ERROR",
+                )
+            else:
+                await send_response_once(ok=True, payload=payload)
+
+        try:
+            task = asyncio.create_task(
+                send_settled_result(),
+                name=f"live-voice-streaming-result-{record.record_id}",
+            )
+        except Exception:
+            registry._release_streaming_result_dispatch(record, None)
+            raise
+        registry._bind_streaming_result_dispatch_task(record, task)
+        registry._streaming_cleanup_tasks.add(task)
+
+        def release_dispatch(completed: asyncio.Task[None]) -> None:
+            registry._streaming_cleanup_tasks.discard(completed)
+            registry._release_streaming_result_dispatch(record, completed)
+
+        task.add_done_callback(release_dispatch)
 
     channel.register_method(MEDIA_ACTIVATE_METHOD, activation_handler)
     channel.register_method(MEDIA_CLOSE_METHOD, close_handler)

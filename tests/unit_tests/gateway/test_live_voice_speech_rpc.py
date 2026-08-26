@@ -312,6 +312,66 @@ async def test_result_transform_failure_is_closed(
 
 
 @pytest.mark.asyncio
+async def test_transform_failure_drops_internal_result_fields() -> None:
+    """L13: a public transform failure is rebuilt, never spread from raw result."""
+
+    class InternalResultService(SpyService):
+        async def synthesize(
+            self, payload: object, context: SpeechRpcContext
+        ) -> dict[str, object]:
+            self.calls.append(("synthesize", payload, context))
+            return {
+                "contract_version": "live-voice.contract.v2",
+                "request_id": "request-transform-internal",
+                "operation_id": "operation-transform-internal",
+                "ok": True,
+                "result": {"route": "synthesize"},
+                "error": None,
+                "_streaming_degradation_reason": "private-provider-detail",
+                "_internal_nested": {"secret": "must-not-escape"},
+            }
+
+    channel = FakeChannel()
+    service = InternalResultService()
+
+    def fail_transform(*_args: object) -> dict[str, object]:
+        raise RuntimeError("private-transform-detail")
+
+    register_speech_rpc_handlers(
+        channel,
+        service=service,  # type: ignore[arg-type]
+        result_transform=fail_transform,  # type: ignore[arg-type]
+    )
+    await channel.handlers[SYNTHESIZE_BATCH_METHOD](
+        "ws",
+        "rpc-transform-internal",
+        {
+            "correlation_id": "correlation-transform-internal",
+            "request_id": "request-transform-internal",
+            "operation_id": "operation-transform-internal",
+        },
+        "session-transform",
+        user_id="alice",
+    )
+
+    payload = channel.responses[0]["payload"]
+    assert set(payload) == {
+        "contract_version",
+        "request_id",
+        "operation_id",
+        "ok",
+        "result",
+        "error",
+    }
+    assert payload["contract_version"] == "live-voice.contract.v2"
+    assert payload["request_id"] == "request-transform-internal"
+    assert payload["operation_id"] == "operation-transform-internal"
+    assert payload["ok"] is False
+    assert payload["result"] is None
+    assert "private" not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
 async def test_missing_connection_subject_fails_before_provider_or_other_authority() -> (
     None
 ):

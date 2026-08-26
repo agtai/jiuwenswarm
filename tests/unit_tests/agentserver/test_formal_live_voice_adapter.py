@@ -49,6 +49,7 @@ class OutputLease:
         self.close_release = close_release
         self.close_error = close_error
         self.closed_with: list[bool] = []
+        self.close_started = asyncio.Event()
 
     def __aiter__(self):
         return self
@@ -61,6 +62,7 @@ class OutputLease:
 
     async def close(self, *, abort_active_round: bool) -> None:
         self.closed_with.append(abort_active_round)
+        self.close_started.set()
         if self.close_release is not None:
             await self.close_release.wait()
         if self.close_error is not None:
@@ -531,7 +533,7 @@ async def test_formal_deep_seam_rejects_legacy_controls_before_agent_effect() ->
 
 
 @pytest.mark.asyncio
-async def test_formal_output_cleanup_retains_ownership_across_bounded_waits(
+async def test_formal_output_cleanup_retains_ownership_until_settled(
     monkeypatch,
 ) -> None:
     close_release = asyncio.Event()
@@ -542,7 +544,11 @@ async def test_formal_output_cleanup_retains_ownership_across_bounded_waits(
     instance = FormalInstance(lease)
     adapter = adapter_with(instance)
     request, inputs = formal_request()
-    monkeypatch.setattr(interface_deep, "_FORMAL_OUTPUT_CLOSE_TIMEOUT_SECONDS", 0.01)
+
+    async def forbidden_slice(*_args, **_kwargs):
+        raise AssertionError("formal cleanup must not start a second deadline slice")
+
+    monkeypatch.setattr(interface_deep.asyncio, "wait_for", forbidden_slice)
 
     async def consume():
         return [
@@ -553,12 +559,11 @@ async def test_formal_output_cleanup_retains_ownership_across_bounded_waits(
         ]
 
     consumer = asyncio.create_task(consume())
-    while not lease.closed_with:
-        await asyncio.sleep(0)
+    await lease.close_started.wait()
     await asyncio.sleep(0.03)
     assert consumer.done() is False
     close_release.set()
-    chunks = await asyncio.wait_for(consumer, timeout=1)
+    chunks = await consumer
     assert [chunk.payload for chunk in chunks] == [
         {"event_type": "chat.final", "content": "formal result"}
     ]
@@ -604,7 +609,11 @@ async def test_formal_root_retains_dedicated_session_cleanup(monkeypatch) -> Non
 
     monkeypatch.setattr(root, "_get_or_create_session_adapter", get_child)
     monkeypatch.setattr(root, "cleanup_session_adapter", cleanup_child)
-    monkeypatch.setattr(interface_deep, "_FORMAL_OUTPUT_CLOSE_TIMEOUT_SECONDS", 0.01)
+
+    async def forbidden_slice(*_args, **_kwargs):
+        raise AssertionError("session cleanup must use the outer total deadline")
+
+    monkeypatch.setattr(interface_deep.asyncio, "wait_for", forbidden_slice)
     request, inputs = formal_request()
 
     async def consume():
@@ -616,11 +625,11 @@ async def test_formal_root_retains_dedicated_session_cleanup(monkeypatch) -> Non
         ]
 
     consumer = asyncio.create_task(consume())
-    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+    await cleanup_started.wait()
     await asyncio.sleep(0.03)
     assert consumer.done() is False
     cleanup_release.set()
-    chunks = await asyncio.wait_for(consumer, timeout=1)
+    chunks = await consumer
     assert [chunk.payload for chunk in chunks] == [
         {"event_type": "chat.final", "content": "done"}
     ]

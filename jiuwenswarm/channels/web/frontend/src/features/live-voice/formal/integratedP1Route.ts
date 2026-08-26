@@ -49,37 +49,34 @@ export function createIntegratedP1Route(options: Readonly<IntegratedP1RouteOptio
     available: options.recognitionAvailable ?? browserRecognitionAvailable(),
   });
   const synthesis = new BrowserSpeechSynthesisAdapter(options.synthesisEnvironment);
-  const routes: RouteTelemetryRecord[] = [];
+  let recognitionRoute: RouteTelemetryRecord | null = null;
+  let synthesisRoute: RouteTelemetryRecord | null = null;
   let activeCapture: Readonly<BrowserRecognitionCapture> | null = null;
   let playbackGeneration = 0;
 
   const recordRecognitionRoute = () => {
-    routes.push(
-      createRouteTelemetryRecord({
-        segment_id: 'p1.browser_recognition',
-        implementation_class: recognition.capability.available ? 'fallback' : 'unsupported',
-        owner_module: 'formal.adapters.browserSpeechRecognitionAdapter',
-        capability_provider: recognition.capability.available ? recognition.capability.provider.provider_id : null,
-        contract_version: CONTRACT_VERSION,
-        correlation_id: options.correlationId,
-        observed_at: options.observedAt ?? new Date().toISOString(),
-        safe_reason: recognition.capability.available ? 'BROWSER_SPEECH_COMPATIBILITY_ADAPTER' : 'BROWSER_RECOGNITION_UNAVAILABLE',
-      })
-    );
+    recognitionRoute = createRouteTelemetryRecord({
+      segment_id: 'p1.browser_recognition',
+      implementation_class: recognition.capability.available ? 'fallback' : 'unsupported',
+      owner_module: 'formal.adapters.browserSpeechRecognitionAdapter',
+      capability_provider: recognition.capability.available ? recognition.capability.provider.provider_id : null,
+      contract_version: CONTRACT_VERSION,
+      correlation_id: options.correlationId,
+      observed_at: options.observedAt ?? new Date().toISOString(),
+      safe_reason: recognition.capability.available ? 'BROWSER_SPEECH_COMPATIBILITY_ADAPTER' : 'BROWSER_RECOGNITION_UNAVAILABLE',
+    });
   };
   const recordSynthesisRoute = () => {
-    routes.push(
-      createRouteTelemetryRecord({
-        segment_id: 'p1.browser_synthesis',
-        implementation_class: synthesis.capability.available ? 'fallback' : 'unsupported',
-        owner_module: 'formal.adapters.browserSpeechSynthesisAdapter',
-        capability_provider: synthesis.capability.available ? synthesis.capability.provider.provider_id : null,
-        contract_version: CONTRACT_VERSION,
-        correlation_id: options.correlationId,
-        observed_at: options.observedAt ?? new Date().toISOString(),
-        safe_reason: synthesis.capability.available ? 'BROWSER_SPEECH_COMPATIBILITY_ADAPTER' : 'BROWSER_SYNTHESIS_UNAVAILABLE',
-      })
-    );
+    synthesisRoute = createRouteTelemetryRecord({
+      segment_id: 'p1.browser_synthesis',
+      implementation_class: synthesis.capability.available ? 'fallback' : 'unsupported',
+      owner_module: 'formal.adapters.browserSpeechSynthesisAdapter',
+      capability_provider: synthesis.capability.available ? synthesis.capability.provider.provider_id : null,
+      contract_version: CONTRACT_VERSION,
+      correlation_id: options.correlationId,
+      observed_at: options.observedAt ?? new Date().toISOString(),
+      safe_reason: synthesis.capability.available ? 'BROWSER_SPEECH_COMPATIBILITY_ADAPTER' : 'BROWSER_SYNTHESIS_UNAVAILABLE',
+    });
   };
 
   const speechPlayer: LiveVoiceSpeechPlayer = {
@@ -138,7 +135,7 @@ export function createIntegratedP1Route(options: Readonly<IntegratedP1RouteOptio
       activeCapture = null;
       return recognition.cancel(capture);
     },
-    routeTelemetry: () => routes.slice(),
+    routeTelemetry: () => [recognitionRoute, synthesisRoute].filter((route): route is RouteTelemetryRecord => route !== null),
     capabilities: () =>
       Object.freeze({
         recognition_streaming: false,

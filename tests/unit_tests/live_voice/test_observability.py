@@ -524,6 +524,35 @@ def test_route_classes_remain_truthful_and_free_text_is_redacted(
     assert "secret-token" not in json.dumps(descriptor.to_dict())
 
 
+@pytest.mark.parametrize(
+    "contract_version",
+    ["   ", "Bearer-private-marker", "v" * 65, "v" * 4096],
+)
+def test_nonformal_route_contract_version_is_a_bounded_safe_token(
+    contract_version: str,
+) -> None:
+    """L10: optional contract versions cannot become a free-text sink channel."""
+
+    with pytest.raises(ObservabilityViolation):
+        create_route_descriptor(
+            {
+                **fallback_route(),
+                "contract_version": contract_version,
+            }
+        )
+
+
+def test_nonformal_route_contract_version_accepts_exact_stable_token_bound() -> None:
+    descriptor = create_route_descriptor(
+        {
+            **fallback_route(),
+            "contract_version": "v" * 64,
+        }
+    )
+
+    assert descriptor.contract_version == "v" * 64
+
+
 def test_cancel_fence_queue_failures_and_degradation_are_observable() -> None:
     collector = LiveVoiceObservabilityCollector()
     binding = {

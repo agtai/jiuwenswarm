@@ -317,11 +317,13 @@ function requireScope(value: unknown, binding: FormalTaskControlBinding): void {
   }
 }
 
+type ObservedFormalTask = Omit<FormalTaskControlRecord, 'state'> & { readonly state: FormalTaskState };
+
 function parseTask(
   value: unknown,
   binding: FormalTaskControlBinding,
   authoritativeAttemptNumber: number | null = null,
-): FormalTaskControlRecord {
+): ObservedFormalTask {
   const task = objectValue(value);
   if (task === null) throw new Error('task result is invalid');
   requireScope(task.scope, binding);
@@ -342,6 +344,64 @@ function parseTask(
     event_head: nonNegativeInteger(task.event_head, 'task.event_head'),
     last_event_id: null,
     last_event_seq: null,
+  });
+}
+
+/**
+ * Merge one authoritative `task.get`/`task.status` snapshot into an already
+ * observed replica.  The snapshot owns the current summary facts, but it can
+ * never roll the replica back to an earlier attempt, event head or lifecycle
+ * state, never change a terminal outcome, and never silently drop the consumed
+ * event cursor that fences stale or forged `task.events` replays.  An attempt
+ * boundary follows the same rule the TaskEvent history enforces: only an
+ * observed terminal attempt may be succeeded by an accepted retry attempt.
+ */
+function mergeObservedTask(
+  existing: FormalTaskControlRecord,
+  observed: ObservedFormalTask,
+): FormalTaskControlRecord {
+  const retryBoundary = (
+    existing.attempt_number !== null
+    && observed.attempt_number !== null
+    && observed.attempt_number > existing.attempt_number
+  );
+  if (
+    (existing.attempt_number !== null && observed.attempt_number !== null && observed.attempt_number < existing.attempt_number)
+    || (
+      existing.attempt_id !== null
+      && (retryBoundary ? existing.attempt_id === observed.attempt_id : existing.attempt_id !== observed.attempt_id)
+    )
+  ) {
+    throw new Error('formal task snapshot cannot change or roll back its authoritative attempt');
+  }
+  if (
+    (existing.event_head !== null && observed.event_head !== null && observed.event_head < existing.event_head)
+    || (existing.last_event_seq !== null && observed.event_head !== null && observed.event_head < existing.last_event_seq)
+  ) {
+    throw new Error('formal task snapshot cannot roll back its authoritative event head');
+  }
+  if (existing.state !== null && !validTaskStateTransition(existing.state, observed.state, retryBoundary)) {
+    throw new Error('formal task snapshot cannot revive or regress its observed lifecycle');
+  }
+  if (!retryBoundary && existing.outcome !== null && existing.outcome !== observed.outcome) {
+    throw new Error('formal task snapshot cannot change its observed terminal outcome');
+  }
+  // The consumed cursor stays exact only while the snapshot still describes the
+  // event head that produced it.  A snapshot ahead of the cursor, like an
+  // accepted retry result, replaces the summary and requires a complete
+  // `task.events` replay before the leaf claims a consumed cursor again.
+  const retainsCursor = (
+    !retryBoundary
+    && existing.last_event_seq !== null
+    && observed.event_head === existing.last_event_seq
+  );
+  if (retainsCursor && (existing.state !== observed.state || existing.outcome !== observed.outcome)) {
+    throw new Error('formal task snapshot contradicts the observed event head truth');
+  }
+  return Object.freeze({
+    ...observed,
+    last_event_id: retainsCursor ? existing.last_event_id : null,
+    last_event_seq: retainsCursor ? existing.last_event_seq : null,
   });
 }
 
@@ -568,27 +628,32 @@ export class FormalTaskControlLeaf {
     } else if (operation === 'task.get' || operation === 'task.status') {
       const attempt = objectValue(result.attempt);
       if (attempt === null) throw new Error('formal task/attempt result binding mismatch');
-      const task = parseTask(result.task, this.#binding, attemptNumber(attempt.attempt_number, 'attempt.attempt_number'));
+      const observed = parseTask(result.task, this.#binding, attemptNumber(attempt.attempt_number, 'attempt.attempt_number'));
       if (
         context.target_task_id === null
-        || task.task_id !== context.target_task_id
-        || attempt.task_id !== task.task_id
-        || attempt.attempt_id !== task.attempt_id
+        || observed.task_id !== context.target_task_id
+        || attempt.task_id !== observed.task_id
+        || attempt.attempt_id !== observed.attempt_id
       ) {
         throw new Error('formal task/attempt result binding mismatch');
       }
-      if (!this.#tasks.has(task.task_id) && this.#tasks.size >= FORMAL_TASK_CONTROL_LIMITS.max_tasks) {
+      const existing = this.#tasks.get(observed.task_id);
+      if (existing === undefined && this.#tasks.size >= FORMAL_TASK_CONTROL_LIMITS.max_tasks) {
         throw new Error('formal task capacity is exhausted');
       }
-      this.#tasks.set(task.task_id, task);
+      this.#tasks.set(observed.task_id, existing === undefined ? observed : mergeObservedTask(existing, observed));
     } else if (operation === 'task.events') {
       if (context.events_query === null) throw new Error('task.events adoption context is missing');
       this.#adoptEvents(result, context.events_query);
     } else {
       if (context.command_id === null) throw new Error('formal task mutation adoption context is missing');
-      const responseCommandId = productMutation === null
-        ? text(result.command_id, 'result.command_id')
-        : text(productMutation.command_id, 'product mutation command_id');
+      if (productMutation === null) {
+        // A legacy `{ ok: true, result }` success carries no mutation authority.
+        // It has no processed-mutation status, no operation/target binding and no
+        // durable outcome fields, so it can never bind a create, cancel or retry.
+        throw new Error(`formal ${operation} requires an authoritative product mutation envelope`);
+      }
+      const responseCommandId = text(productMutation.command_id, 'product mutation command_id');
       if (responseCommandId !== context.command_id) {
         throw new Error('formal task mutation response command binding mismatch');
       }
@@ -596,73 +661,69 @@ export class FormalTaskControlLeaf {
       if (submitted === undefined || submitted.operation !== operation) {
         throw new Error('formal task mutation response has no exact submitted binding');
       }
-      let responseState: FormalTaskState | null = null;
-      let responseOutboxId: string | null = null;
       let responseAttemptNumber: number | null = null;
       let responsePreviousAttemptId: string | null = null;
-      if (productMutation !== null) {
-        const responseTargetTaskId = productMutation.target_task_id === null
-          ? null
-          : text(productMutation.target_task_id, 'product mutation target_task_id');
-        if (responseTargetTaskId !== submitted.target_task_id) {
-          throw new Error('formal task mutation response target binding mismatch');
+      const responseTargetTaskId = productMutation.target_task_id === null
+        ? null
+        : text(productMutation.target_task_id, 'product mutation target_task_id');
+      if (responseTargetTaskId !== submitted.target_task_id) {
+        throw new Error('formal task mutation response target binding mismatch');
+      }
+      if (
+        Object.prototype.hasOwnProperty.call(result, 'operation')
+        || Object.prototype.hasOwnProperty.call(result, 'command_id')
+        || Object.prototype.hasOwnProperty.call(result, 'target_task_id')
+      ) {
+        throw new Error('formal task mutation result contains misplaced authority fields');
+      }
+      const responseState: FormalTaskState = canonicalTaskState(result.state);
+      const responseOutboxId = !Object.prototype.hasOwnProperty.call(result, 'outbox_id') || result.outbox_id === null
+        ? null
+        : text(result.outbox_id, 'result.outbox_id');
+      if (operation === 'task.create') {
+        responseAttemptNumber = Object.prototype.hasOwnProperty.call(result, 'attempt_number')
+          ? attemptNumber(result.attempt_number, 'result.attempt_number')
+          : 1;
+        if (responseState !== 'accepted' || responseOutboxId === null || responseAttemptNumber !== 1) {
+          throw new Error('formal task.create result is not an accepted durable task initial attempt');
+        }
+      }
+      if (operation === 'task.cancel') {
+        if (result.cancel_acknowledged !== true) {
+          throw new Error('formal task.cancel result is not acknowledged');
+        }
+        if (typeof result.applied !== 'boolean') {
+          throw new Error('formal task.cancel applied result is invalid');
+        }
+        if (!result.applied && responseOutboxId !== null) {
+          throw new Error('formal task.cancel unapplied result cannot own an outbox');
         }
         if (
-          Object.prototype.hasOwnProperty.call(result, 'operation')
-          || Object.prototype.hasOwnProperty.call(result, 'command_id')
-          || Object.prototype.hasOwnProperty.call(result, 'target_task_id')
+          result.applied
+          && ((responseState === 'terminal') !== (responseOutboxId === null))
         ) {
-          throw new Error('formal task mutation result contains misplaced authority fields');
+          throw new Error('formal task.cancel applied result has an invalid durable outbox');
         }
-        responseState = canonicalTaskState(result.state);
-        responseOutboxId = !Object.prototype.hasOwnProperty.call(result, 'outbox_id') || result.outbox_id === null
-          ? null
-          : text(result.outbox_id, 'result.outbox_id');
-        if (operation === 'task.create') {
-          responseAttemptNumber = Object.prototype.hasOwnProperty.call(result, 'attempt_number')
-            ? attemptNumber(result.attempt_number, 'result.attempt_number')
-            : 1;
-          if (responseState !== 'accepted' || responseOutboxId === null || responseAttemptNumber !== 1) {
-            throw new Error('formal task.create result is not an accepted durable task initial attempt');
-          }
+        if (
+          Object.prototype.hasOwnProperty.call(result, 'attempt_number')
+          && attemptNumber(result.attempt_number, 'result.attempt_number') !== submitted.target_attempt_number
+        ) {
+          throw new Error('formal task.cancel result attempt number mismatch');
         }
-        if (operation === 'task.cancel') {
-          if (result.cancel_acknowledged !== true) {
-            throw new Error('formal task.cancel result is not acknowledged');
-          }
-          if (typeof result.applied !== 'boolean') {
-            throw new Error('formal task.cancel applied result is invalid');
-          }
-          if (!result.applied && responseOutboxId !== null) {
-            throw new Error('formal task.cancel unapplied result cannot own an outbox');
-          }
-          if (
-            result.applied
-            && ((responseState === 'terminal') !== (responseOutboxId === null))
-          ) {
-            throw new Error('formal task.cancel applied result has an invalid durable outbox');
-          }
-          if (
-            Object.prototype.hasOwnProperty.call(result, 'attempt_number')
-            && attemptNumber(result.attempt_number, 'result.attempt_number') !== submitted.target_attempt_number
-          ) {
-            throw new Error('formal task.cancel result attempt number mismatch');
-          }
-        }
-        if (operation === 'task.retry') {
-          responseAttemptNumber = attemptNumber(result.attempt_number, 'result.attempt_number');
-          responsePreviousAttemptId = text(result.previous_attempt_id, 'result.previous_attempt_id');
-          if (
-            result.applied !== true
-            || responseState !== 'accepted'
-            || responseOutboxId === null
-            || responsePreviousAttemptId !== submitted.target_attempt_id
-            || submitted.target_attempt_number === null
-            || responseAttemptNumber !== submitted.target_attempt_number + 1
-            || responseAttemptNumber > 3
-          ) {
-            throw new Error('formal task.retry result lineage is invalid');
-          }
+      }
+      if (operation === 'task.retry') {
+        responseAttemptNumber = attemptNumber(result.attempt_number, 'result.attempt_number');
+        responsePreviousAttemptId = text(result.previous_attempt_id, 'result.previous_attempt_id');
+        if (
+          result.applied !== true
+          || responseState !== 'accepted'
+          || responseOutboxId === null
+          || responsePreviousAttemptId !== submitted.target_attempt_id
+          || submitted.target_attempt_number === null
+          || responseAttemptNumber !== submitted.target_attempt_number + 1
+          || responseAttemptNumber > 3
+        ) {
+          throw new Error('formal task.retry result lineage is invalid');
         }
       }
       const taskId = text(result.task_id, 'result.task_id');

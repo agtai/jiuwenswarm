@@ -7,11 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import logging
 import os
-import subprocess
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -23,6 +21,11 @@ from openjiuwen.core.foundation.llm import Model
 
 from jiuwenswarm.agents.harness.common.tools.command_tools import (
     forbid_background_project_shell_commands,
+)
+from jiuwenswarm.common.bounded_git_manifest import (
+    BoundedGitManifestError,
+    GitManifestCapacityExceeded,
+    capture_bounded_git_manifest,
 )
 
 from .project_execution import (
@@ -69,52 +72,12 @@ def _snapshot_target_tree(project_dir: str) -> str:
     root = Path(project_dir).resolve()
     if not root.is_dir():
         raise RuntimeError(f"execution target is not a directory: {root}")
-
-    def run_git(*args: str) -> bytes:
-        completed = subprocess.run(
-            ["git", "-C", str(root), *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if completed.returncode != 0:
-            detail = completed.stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(f"failed to inspect execution target: {detail}")
-        return completed.stdout
-
-    digest = hashlib.sha256()
-    digest.update(run_git("status", "--porcelain=v2", "-z", "--untracked-files=all"))
-    raw_paths = run_git(
-        "ls-files",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-        "-z",
-    ).split(b"\0")
-    for raw_relative in sorted(path for path in raw_paths if path):
-        relative = raw_relative.decode("utf-8")
-        path = root / Path(relative)
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        try:
-            if path.is_symlink():
-                digest.update(b"L\0")
-                digest.update(str(path.readlink()).encode("utf-8"))
-            elif not path.exists():
-                digest.update(b"M\0")
-            elif path.is_dir():
-                digest.update(b"D\0")
-            else:
-                digest.update(b"F\0")
-                with path.open("rb") as stream:
-                    while chunk := stream.read(1024 * 1024):
-                        digest.update(chunk)
-        except OSError as exc:
-            raise RuntimeError(
-                f"failed to read execution target file {relative}: {exc}"
-            ) from exc
-        digest.update(b"\0")
-    return digest.hexdigest()
+    try:
+        return capture_bounded_git_manifest(root).tree_fingerprint()
+    except GitManifestCapacityExceeded:
+        raise
+    except BoundedGitManifestError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 class Scheduler:
@@ -542,10 +505,15 @@ class Scheduler:
                     raise RuntimeError(
                         "execution target is required for target change validation"
                     )
-                target_tree_before = await asyncio.to_thread(
-                    _snapshot_target_tree,
-                    project_dir,
-                )
+                try:
+                    target_tree_before = await asyncio.to_thread(
+                        _snapshot_target_tree,
+                        project_dir,
+                    )
+                except GitManifestCapacityExceeded as exc:
+                    raise RuntimeError(
+                        f"TARGET_CHANGE_VALIDATION_FAILED: {exc}"
+                    ) from exc
 
             if project_execution:
                 execution_contract = task.get("execution_contract")

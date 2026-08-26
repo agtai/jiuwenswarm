@@ -39,6 +39,172 @@ test('streaming speech result text and commit receipt never reach the dev log', 
   assert.equal(source.payload.includes(transcript), true);
 });
 
+test('real recognition alternatives and synthesis render plans redact display and spoken text variants', () => {
+  const privateValues = Array.from({ length: 11 }, (_, index) => 'PRIVATE_RENDER_TEXT_' + index);
+  const source = {
+    type: 'res',
+    id: 'speech-render-1',
+    ok: true,
+    payload: JSON.stringify({
+      status: 'completed',
+      event: {
+        hypothesis: {
+          alternatives: [
+            {
+              display_text: privateValues[0],
+              displayText: privateValues[1],
+              'DISPLAY-TEXT': privateValues[2],
+              confidence: 0.91,
+            },
+          ],
+          selected_index: 0,
+        },
+      },
+      deliveries: [
+        {
+          render_plan: {
+            display_text: privateValues[3],
+            spoken_text: privateValues[4],
+            transforms: [
+              {
+                transform: 'abbreviation',
+                source_start: 0,
+                source_end: 3,
+                rendered_text: privateValues[5],
+              },
+            ],
+          },
+        },
+      ],
+      compact_variants: [
+        { spokenText: privateValues[6] },
+        { 'SPOKEN-TEXT': privateValues[7] },
+        { renderedText: privateValues[8] },
+        { 'rendered_-text': privateValues[9] },
+        { Display__Text: privateValues[10] },
+      ],
+      provider: 'safe-provider-id',
+    }),
+  };
+
+  const sanitized = redactRawAudioForDevLog(source);
+  const payload = JSON.parse(sanitized.payload);
+
+  assert.deepEqual(payload.event.hypothesis.alternatives[0], {
+    display_text: SPEECH_TEXT_REDACTION,
+    displayText: SPEECH_TEXT_REDACTION,
+    'DISPLAY-TEXT': SPEECH_TEXT_REDACTION,
+    confidence: 0.91,
+  });
+  assert.deepEqual(payload.deliveries[0].render_plan, {
+    display_text: SPEECH_TEXT_REDACTION,
+    spoken_text: SPEECH_TEXT_REDACTION,
+    transforms: [
+      {
+        transform: 'abbreviation',
+        source_start: 0,
+        source_end: 3,
+        rendered_text: SPEECH_TEXT_REDACTION,
+      },
+    ],
+  });
+  assert.equal(payload.compact_variants[0].spokenText, SPEECH_TEXT_REDACTION);
+  assert.equal(payload.compact_variants[1]['SPOKEN-TEXT'], SPEECH_TEXT_REDACTION);
+  assert.equal(payload.compact_variants[2].renderedText, SPEECH_TEXT_REDACTION);
+  assert.equal(payload.compact_variants[3]['rendered_-text'], SPEECH_TEXT_REDACTION);
+  assert.equal(payload.compact_variants[4].Display__Text, SPEECH_TEXT_REDACTION);
+  assert.equal(payload.provider, 'safe-provider-id');
+  for (const privateValue of privateValues) {
+    assert.equal(JSON.stringify(sanitized).includes(privateValue), false);
+    assert.equal(source.payload.includes(privateValue), true);
+  }
+});
+
+test('speech compact keys remove every non-ASCII-alphanumeric separator without touching safe metadata', () => {
+  const privateValues = Array.from({ length: 6 }, (_, index) => `PRIVATE_SEPARATOR_TEXT_${index}`);
+  const source = {
+    'display.text': privateValues[0],
+    'spoken text': privateValues[1],
+    'rendered/text': privateValues[2],
+    'fi--nal_ / .. text': privateValues[3],
+    'raw. _-/ text': privateValues[4],
+    'voice // commit_-. receipt': privateValues[5],
+    rendered_text_digest: 'safe-rendered-digest',
+    display_text_confidence: 0.98,
+    spoken_text_locale: 'en-GB',
+    provider: 'safe-provider-id',
+  };
+  const before = JSON.stringify(source);
+
+  const sanitized = redactRawAudioForDevLog(source);
+
+  assert.deepEqual(sanitized, {
+    'display.text': SPEECH_TEXT_REDACTION,
+    'spoken text': SPEECH_TEXT_REDACTION,
+    'rendered/text': SPEECH_TEXT_REDACTION,
+    'fi--nal_ / .. text': SPEECH_TEXT_REDACTION,
+    'raw. _-/ text': SPEECH_TEXT_REDACTION,
+    'voice // commit_-. receipt': VOICE_COMMIT_RECEIPT_REDACTION,
+    rendered_text_digest: 'safe-rendered-digest',
+    display_text_confidence: 0.98,
+    spoken_text_locale: 'en-GB',
+    provider: 'safe-provider-id',
+  });
+  assert.equal(JSON.stringify(source), before);
+  for (const privateValue of privateValues) {
+    assert.equal(JSON.stringify(sanitized).includes(privateValue), false);
+  }
+});
+
+test('malformed JSON display and spoken text variants fail closed', () => {
+  const privateValues = Array.from({ length: 6 }, (_, index) => 'PRIVATE_MALFORMED_RENDER_TEXT_' + index);
+  const variants = [
+    '{"display_text":"' + privateValues[0] + '"',
+    '{"displayText":"' + privateValues[1] + '"',
+    '{"DISPLAY-TEXT":"' + privateValues[2] + '"',
+    '{"spoken_text":"' + privateValues[3] + '"',
+    '{"spokenText":"' + privateValues[4] + '"',
+    '{"SPOKEN_-TEXT":"' + privateValues[5] + '"',
+  ];
+  const source = { type: 'res', payload: JSON.stringify({ malformed: variants, status: 'failed' }) };
+
+  const sanitized = redactRawAudioForDevLog(source);
+  const payload = JSON.parse(sanitized.payload);
+
+  assert.deepEqual(
+    payload.malformed,
+    variants.map(() => RAW_TRANSPORT_DATA_REDACTION),
+  );
+  assert.equal(payload.status, 'failed');
+  for (const privateValue of privateValues) {
+    assert.equal(JSON.stringify(sanitized).includes(privateValue), false);
+    assert.equal(source.payload.includes(privateValue), true);
+  }
+});
+
+test('JSON-looking malformed object and array strings fail closed without private-key regex matching', () => {
+  const privateValues = Array.from({ length: 3 }, (_, index) => `PRIVATE_MALFORMED_JSON_SHAPE_${index}`);
+  const malformed = [String.raw`{"\u0064isplay_text":"${privateValues[0]}"`, `  {"safe_metadata":"${privateValues[1]}"`, `\n\t["${privateValues[2]}"`];
+  const source = {
+    type: 'res',
+    payload: JSON.stringify({ malformed, ordinary: 'ordinary diagnostic' }),
+  };
+  const before = JSON.stringify(source);
+
+  const sanitized = redactRawAudioForDevLog(source);
+  const payload = JSON.parse(sanitized.payload);
+
+  assert.deepEqual(
+    payload.malformed,
+    malformed.map(() => RAW_TRANSPORT_DATA_REDACTION),
+  );
+  assert.equal(payload.ordinary, 'ordinary diagnostic');
+  assert.equal(JSON.stringify(source), before);
+  for (const privateValue of privateValues) {
+    assert.equal(JSON.stringify(sanitized).includes(privateValue), false);
+  }
+});
+
 test('JSON-wrapped and malformed speech key variants fail closed', () => {
   const privateValues = Array.from({ length: 10 }, (_, index) => `PRIVATE_SPEECH_VARIANT_${index}`);
   const source = {
@@ -98,10 +264,7 @@ test('media tickets are removed recursively and from JSON-wrapped persistence pa
   assert.equal(payload.nested[0]['media-ticket'], MEDIA_TICKET_REDACTION);
   assert.equal(JSON.stringify(sanitized).includes(ticket), false);
   assert.equal(source.payload.includes(ticket), true);
-  assert.equal(
-    redactRawAudioForDevLog({ type: 'res', payload: `{"media_ticket":"${ticket}"` }).payload,
-    RAW_TRANSPORT_DATA_REDACTION
-  );
+  assert.equal(redactRawAudioForDevLog({ type: 'res', payload: `{"media_ticket":"${ticket}"` }).payload, RAW_TRANSPORT_DATA_REDACTION);
 });
 
 test('recursive log copy removes request and response audio without mutating WebSocket data', () => {
@@ -148,7 +311,7 @@ test('persistence parser sanitizes valid objects and fails closed for malformed 
     JSON.stringify({
       direction: 'incoming',
       data: { result: { audio: { data_base64: rawAudio } } },
-    })
+    }),
   );
 
   assert.equal(sanitized.data.result.audio.data_base64, RAW_AUDIO_REDACTION);
@@ -255,10 +418,13 @@ test('exact raw-audio key is redacted for every JSON value type', () => {
   }
 });
 
-test('actual persistence-boundary output contains no raw-audio sentinel anywhere on disk', () => {
+test('actual persistence-boundary output contains no raw audio or speech text anywhere on disk', () => {
   const directory = mkdtempSync(join(tmpdir(), 'live-voice-route-to-disk-'));
   const logFile = join(directory, 'ws-dev.log');
   const sentinel = 'RAW_AUDIO_SENTINEL_8f2c6bb7d6af4ea78bf07a3e9ebf8505';
+  const displaySentinel = 'DISPLAY_TEXT_SENTINEL_8f2c6bb7d6af4ea78bf07a3e9ebf8505';
+  const spokenSentinel = 'SPOKEN_TEXT_SENTINEL_8f2c6bb7d6af4ea78bf07a3e9ebf8505';
+  const renderedSentinel = 'RENDERED_TEXT_SENTINEL_8f2c6bb7d6af4ea78bf07a3e9ebf8505';
   try {
     const envelopes = [
       {
@@ -279,6 +445,40 @@ test('actual persistence-boundary output contains no raw-audio sentinel anywhere
         direction: 'incoming',
         data: { rawData: `{"audio":{"data_base64":"${sentinel}"`, parse: 'failed' },
       },
+      {
+        direction: 'incoming',
+        data: {
+          type: 'res',
+          payload: JSON.stringify({
+            event: {
+              hypothesis: {
+                alternatives: [{ display_text: displaySentinel, confidence: 0.91 }],
+                selected_index: 0,
+              },
+            },
+          }),
+        },
+      },
+      {
+        direction: 'outgoing',
+        data: {
+          method: 'live_voice.speech.synthesize_batch',
+          params: {
+            render_plan: {
+              display_text: displaySentinel,
+              spoken_text: spokenSentinel,
+              transforms: [
+                {
+                  transform: 'none',
+                  source_start: 0,
+                  source_end: 1,
+                  rendered_text: renderedSentinel,
+                },
+              ],
+            },
+          },
+        },
+      },
     ];
 
     for (const envelope of envelopes) {
@@ -292,8 +492,30 @@ test('actual persistence-boundary output contains no raw-audio sentinel anywhere
     assert.deepEqual(persistedFiles, [logFile]);
     const persisted = persistedFiles.map(path => readFileSync(path, 'utf8')).join('\n');
     assert.equal(persisted.includes(sentinel), false);
+    assert.equal(persisted.includes(displaySentinel), false);
+    assert.equal(persisted.includes(spokenSentinel), false);
+    assert.equal(persisted.includes(renderedSentinel), false);
     assert.equal(persisted.includes(RAW_AUDIO_REDACTION), true);
+    assert.equal(persisted.includes(SPEECH_TEXT_REDACTION), true);
     assert.equal(persisted.includes(RAW_TRANSPORT_DATA_REDACTION), true);
+    const persistedEntries = persisted
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line));
+    const recognitionPayload = JSON.parse(persistedEntries[3].payload.data.payload);
+    assert.equal(recognitionPayload.event.hypothesis.alternatives[0].confidence, 0.91);
+    assert.deepEqual(persistedEntries[4].payload.data.params.render_plan, {
+      display_text: SPEECH_TEXT_REDACTION,
+      spoken_text: SPEECH_TEXT_REDACTION,
+      transforms: [
+        {
+          transform: 'none',
+          source_start: 0,
+          source_end: 1,
+          rendered_text: SPEECH_TEXT_REDACTION,
+        },
+      ],
+    });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

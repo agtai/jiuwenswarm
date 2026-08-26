@@ -1,0 +1,205 @@
+{
+  "identity": {
+    "scope": {
+      "subject_id": "subject-parity",
+      "project_id": "project-parity",
+      "session_id": "session-parity",
+      "assurance": "authenticated"
+    },
+    "record": {
+      "ref": { "kind": "interaction", "id": "interaction-parity" },
+      "parents": []
+    },
+    "conflicting_scope": {
+      "subject_id": "subject-parity",
+      "project_id": "project-parity",
+      "session_id": "session-other",
+      "assurance": "authenticated"
+    },
+    "missing_ref": { "kind": "interaction", "id": "interaction-missing" },
+    "expected": {
+      "conflict": { "reason": "IDENTITY_CONFLICT", "code": "CONFLICT" },
+      "missing": { "reason": "IDENTITY_NOT_FOUND", "code": "NOT_FOUND" }
+    }
+  },
+  "required_text": [
+    {
+      "name": "byte-order-mark",
+      "value": "\uFEFF",
+      "expected": {
+        "reason": "INVALID_REQUIRED_TEXT",
+        "code": "INVALID_ARGUMENT"
+      }
+    },
+    {
+      "name": "next-line",
+      "value": "\u0085",
+      "expected": {
+        "reason": "INVALID_REQUIRED_TEXT",
+        "code": "INVALID_ARGUMENT"
+      }
+    },
+    {
+      "name": "file-separator",
+      "value": "\u001C",
+      "expected": {
+        "reason": "INVALID_REQUIRED_TEXT",
+        "code": "INVALID_ARGUMENT"
+      }
+    },
+    {
+      "name": "group-separator",
+      "value": "\u001D",
+      "expected": {
+        "reason": "INVALID_REQUIRED_TEXT",
+        "code": "INVALID_ARGUMENT"
+      }
+    },
+    {
+      "name": "record-separator",
+      "value": "\u001E",
+      "expected": {
+        "reason": "INVALID_REQUIRED_TEXT",
+        "code": "INVALID_ARGUMENT"
+      }
+    },
+    {
+      "name": "unit-separator",
+      "value": "\u001F",
+      "expected": {
+        "reason": "INVALID_REQUIRED_TEXT",
+        "code": "INVALID_ARGUMENT"
+      }
+    },
+    {
+      "name": "no-break-space",
+      "value": "\u00A0",
+      "expected": {
+        "reason": "INVALID_REQUIRED_TEXT",
+        "code": "INVALID_ARGUMENT"
+      }
+    },
+    {
+      "name": "narrow-no-break-space",
+      "value": "\u202F",
+      "expected": {
+        "reason": "INVALID_REQUIRED_TEXT",
+        "code": "INVALID_ARGUMENT"
+      }
+    }
+  ],
+  "invalid_progress_source": {
+    "kind": "response",
+    "id": "response-illegal-source",
+    "expected": {
+      "reason": "INVALID_PROGRESS_SOURCE_KIND",
+      "code": "INVALID_ARGUMENT"
+    }
+  },
+  "malformed_json": [
+    {
+      "name": "native-non-string-object-key",
+      "operation": "native_object_key",
+      "expected": { "reason": "INVALID_JSON_KEY", "code": "INVALID_ARGUMENT" }
+    },
+    {
+      "name": "non-finite-number",
+      "operation": "non_finite_number",
+      "expected": { "reason": "NON_FINITE_NUMBER", "code": "INVALID_ARGUMENT" }
+    },
+    {
+      "name": "duplicate-capability",
+      "operation": "duplicate_capability",
+      "expected": {
+        "reason": "DUPLICATE_REQUIRED_CAPABILITY",
+        "code": "INVALID_ARGUMENT"
+      }
+    }
+  ],
+  "p2_durable_committed_text": {
+    "raw_text_max_utf8_bytes": 100000,
+    "canonical_operation_max_utf8_bytes": 131072,
+    "operation_without_text": {
+      "method": "live_voice.composition.p2.submit",
+      "request_id": "request-p2-byte-parity",
+      "params": {
+        "session_id": "session-product",
+        "correlation_id": "correlation-p2",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+        "commit_id": "commit-byte-parity",
+        "turn_id": "turn-byte-parity",
+        "response_id": "response-byte-parity",
+        "committed_at": "2026-08-26T00:00:00Z",
+        "dispatch_target": "agent"
+      }
+    },
+    "canonical_golden": {
+      "text": "A你😀\"\\",
+      "canonical_operation_utf8_bytes": 434,
+      "canonical_operation_sha256": "e86250dcc2043bdf5aad44386f8dd8f6e81498f3ebd9d2d0a1d63f956c40765a"
+    },
+    "cases": [
+      {
+        "name": "ascii-raw-boundary",
+        "token": "a",
+        "repeat": 100000,
+        "raw_utf8_bytes": 100000,
+        "canonical_operation_utf8_bytes": 100422,
+        "accepted": true
+      },
+      {
+        "name": "three-byte-cjk-inside",
+        "token": "你",
+        "repeat": 33333,
+        "raw_utf8_bytes": 99999,
+        "canonical_operation_utf8_bytes": 100421,
+        "accepted": true
+      },
+      {
+        "name": "three-byte-cjk-raw-overflow",
+        "token": "你",
+        "repeat": 33334,
+        "raw_utf8_bytes": 100002,
+        "canonical_operation_utf8_bytes": 100424,
+        "accepted": false,
+        "failure": "raw_text"
+      },
+      {
+        "name": "four-byte-emoji-raw-boundary",
+        "token": "😀",
+        "repeat": 25000,
+        "raw_utf8_bytes": 100000,
+        "canonical_operation_utf8_bytes": 100422,
+        "accepted": true
+      },
+      {
+        "name": "four-byte-emoji-raw-overflow",
+        "token": "😀",
+        "repeat": 25001,
+        "raw_utf8_bytes": 100004,
+        "canonical_operation_utf8_bytes": 100426,
+        "accepted": false,
+        "failure": "raw_text"
+      },
+      {
+        "name": "escaped-quote-envelope-boundary",
+        "token": "\"",
+        "repeat": 65325,
+        "raw_utf8_bytes": 65325,
+        "canonical_operation_utf8_bytes": 131072,
+        "accepted": true
+      },
+      {
+        "name": "escaped-quote-envelope-overflow",
+        "token": "\"",
+        "repeat": 65326,
+        "raw_utf8_bytes": 65326,
+        "canonical_operation_utf8_bytes": 131074,
+        "accepted": false,
+        "failure": "canonical_operation"
+      }
+    ]
+  }
+}

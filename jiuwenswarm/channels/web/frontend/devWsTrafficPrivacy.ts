@@ -14,9 +14,6 @@ interface RedactionResult {
   readonly changed: boolean;
 }
 
-const PRIVATE_KEY_IN_JSON_TEXT =
-  /"(?:data[-_]base64|media[-_]ticket|final[-_]*text|raw[-_]*text|voice[-_]*commit[-_]*receipt)"\s*:/i;
-
 function redactValue(payload: unknown, inspectJsonStrings: boolean): RedactionResult {
   if (typeof payload === 'string' && inspectJsonStrings) {
     try {
@@ -27,7 +24,10 @@ function redactValue(payload: unknown, inspectJsonStrings: boolean): RedactionRe
       const redacted = redactValue(parsed, true);
       return redacted.changed ? { value: JSON.stringify(redacted.value), changed: true } : { value: payload, changed: false };
     } catch {
-      return PRIVATE_KEY_IN_JSON_TEXT.test(payload) ? { value: RAW_TRANSPORT_DATA_REDACTION, changed: true } : { value: payload, changed: false };
+      const candidate = payload.trimStart();
+      return candidate.startsWith('{') || candidate.startsWith('[')
+        ? { value: RAW_TRANSPORT_DATA_REDACTION, changed: true }
+        : { value: payload, changed: false };
     }
   }
 
@@ -46,17 +46,22 @@ function redactValue(payload: unknown, inspectJsonStrings: boolean): RedactionRe
   const normalizeIgnored = payload.normalize === 'ignored';
   let changed = false;
   const entries = Object.entries(payload).map(([key, value]) => {
-    const normalizedKey = key.trim().toLowerCase().replace(/-/g, '_');
-    const compactKey = normalizedKey.replace(/_/g, '');
+    const compactKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
     if (key === 'data_base64') {
       changed = true;
       return [key, RAW_AUDIO_REDACTION] as const;
     }
-    if (normalizedKey === 'media_ticket') {
+    if (compactKey === 'mediaticket') {
       changed = true;
       return [key, MEDIA_TICKET_REDACTION] as const;
     }
-    if (compactKey === 'finaltext' || compactKey === 'rawtext') {
+    if (
+      compactKey === 'finaltext' ||
+      compactKey === 'rawtext' ||
+      compactKey === 'displaytext' ||
+      compactKey === 'spokentext' ||
+      compactKey === 'renderedtext'
+    ) {
       changed = true;
       return [key, SPEECH_TEXT_REDACTION] as const;
     }
@@ -76,8 +81,9 @@ function redactValue(payload: unknown, inspectJsonStrings: boolean): RedactionRe
 }
 
 /**
- * Return a logging-only copy with raw Speech audio removed. The fixed marker is
- * intentionally not derived from the audio, so logs cannot correlate payloads.
+ * Return a logging-only copy with private Speech media and text removed. The
+ * fixed markers are not derived from private values, so logs cannot correlate
+ * payloads.
  */
 export function redactRawAudioForDevLog(payload: unknown): unknown {
   return redactValue(payload, false).value;

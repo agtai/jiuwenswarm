@@ -18,6 +18,10 @@ function chunk(response, seq, overrides = {}) {
   };
 }
 
+function closeInteraction(port, response) {
+  return port.closeInteraction?.(response) ?? false;
+}
+
 test('current response queues ordered audio and acknowledgements drain it', () => {
   const port = new AudioPort();
   port.begin(first);
@@ -45,14 +49,133 @@ test('replacement and wrong response chunks have zero playback effect', () => {
   assert.deepEqual(port.pending(second), []);
 });
 
-test('local stop does not escalate to a business cancellation', () => {
+test('local stop drops queued audio and fences later chunks', () => {
   const port = new AudioPort();
   port.begin(first);
   port.enqueue(chunk(first, 0));
   assert.equal(port.stopLocal(first), true);
   assert.deepEqual(port.pending(first), []);
-  assert.equal(port.businessCancelCount(), 0);
   assert.equal(port.enqueue(chunk(first, 1)), false);
+});
+
+test('exact interaction close releases stopped state and permanently fences revival', () => {
+  const port = new AudioPort();
+  port.begin(first);
+  port.enqueue(chunk(first, 0));
+  assert.equal(port.stopLocal(first), true);
+  const closed = closeInteraction(port, first);
+
+  let revivalRejected = false;
+  try {
+    port.begin(second);
+  } catch (error) {
+    revivalRejected = error instanceof AudioPortViolation && error.reason === 'RESPONSE_GENERATION_NOT_INCREASING';
+  }
+  assert.equal(revivalRejected, true);
+  assert.equal(closed, true);
+  assert.deepEqual(port.pending(first), []);
+  assert.equal(port.enqueue(chunk(first, 1)), false);
+  assert.equal(closeInteraction(port, first), false);
+});
+
+test('stale interaction close cannot retire a newer response generation', () => {
+  const port = new AudioPort();
+  port.begin(first);
+  port.begin(second);
+  assert.equal(closeInteraction(port, first), false);
+  assert.equal(port.enqueue(chunk(second, 0)), true);
+  const closed = closeInteraction(port, second);
+
+  let revivalRejected = false;
+  try {
+    port.begin({ interaction_id: second.interaction_id, response_id: 'response-3', response_generation: 2 });
+  } catch (error) {
+    revivalRejected = error instanceof AudioPortViolation && error.reason === 'RESPONSE_GENERATION_NOT_INCREASING';
+  }
+  assert.equal(revivalRejected, true);
+  assert.equal(closed, true);
+  assert.equal(port.enqueue(chunk(second, 1)), false);
+});
+
+test('audio replay ownership uses distinct bounded response and terminal-interaction fences', () => {
+  const port = new AudioPort();
+  let closedCount = 0;
+  for (let index = 0; index < 2_000; index += 1) {
+    const response = Object.freeze({
+      interaction_id: `closed-interaction-${index}`,
+      response_id: `audio-response-${index}`,
+      response_generation: 0,
+    });
+    port.begin(response);
+    if (closeInteraction(port, response)) closedCount += 1;
+  }
+
+  assert.throws(
+    () =>
+      port.begin({
+        interaction_id: 'retired-response-replay',
+        response_id: 'audio-response-0',
+        response_generation: 0,
+      }),
+    error => error instanceof AudioPortViolation && error.reason === 'RESPONSE_ID_REUSED'
+  );
+
+  // This unused response ID becomes a four-hash false positive only when
+  // audio-response-1871 retires at the exact 128-entry response-ID boundary.
+  // The old unbounded Set, or a 129-entry exact ledger, admits it.
+  assert.throws(
+    () =>
+      port.begin({
+        interaction_id: 'response-fence-recovery-owner',
+        response_id: 'unused-audio-boundary-4053973',
+        response_generation: 0,
+      }),
+    error => error instanceof AudioPortViolation && error.reason === 'RESPONSE_ID_REUSED'
+  );
+  const responseRecovery = Object.freeze({
+    interaction_id: 'response-fence-recovery-owner',
+    response_id: 'fresh-audio-recovery',
+    response_generation: 0,
+  });
+  port.begin(responseRecovery);
+  assert.equal(closeInteraction(port, responseRecovery), true);
+
+  assert.throws(
+    () =>
+      port.begin({
+        interaction_id: 'closed-interaction-0',
+        response_id: 'revival-response',
+        response_generation: 1,
+      }),
+    error => error instanceof AudioPortViolation && error.reason === 'RESPONSE_GENERATION_NOT_INCREASING'
+  );
+
+  // Unlike response IDs, retired interactions do not keep a second 128-entry
+  // exact ledger: every terminal identity enters its own conservative tombstone.
+  assert.throws(
+    () =>
+      port.begin({
+        interaction_id: 'unused-interaction-candidate-9808',
+        response_id: 'interaction-candidate-response',
+        response_generation: 0,
+      }),
+    error => error instanceof AudioPortViolation && error.reason === 'RESPONSE_GENERATION_NOT_INCREASING'
+  );
+  const interactionRecovery = Object.freeze({
+    interaction_id: 'fresh-interaction-recovery',
+    response_id: 'fresh-interaction-response',
+    response_generation: 0,
+  });
+  port.begin(interactionRecovery);
+  assert.equal(closeInteraction(port, interactionRecovery), true);
+
+  const replacementOwner = new AudioPort();
+  replacementOwner.begin({
+    interaction_id: 'unused-interaction-candidate-9808',
+    response_id: 'unused-audio-boundary-4053973',
+    response_generation: 0,
+  });
+  assert.equal(closedCount, 2_000);
 });
 
 test('sequence gaps and response reuse reject without queued audio', () => {

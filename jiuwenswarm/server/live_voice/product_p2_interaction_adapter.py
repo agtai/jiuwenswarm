@@ -20,6 +20,8 @@ import hashlib
 import json
 import math
 import threading
+from array import array
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -63,6 +65,23 @@ from .task_progress_return import TaskProgressNotificationIntent
 _P2_OPERATION = "agent.chat"
 _P2_CAPABILITIES = frozenset({_P2_OPERATION})
 _MAX_NOTIFICATION_BATCH = 16
+# A terminal close releases the heavyweight lease immediately and keeps only a
+# compact generation tombstone, so distinct closed interactions never retain a
+# runtime, an Interaction Engine or an authenticated context.  The exact map
+# answers the recent working set; entries evicted from it fold into a
+# conservative maximum sketch that this owner never lowers.  Nothing is dropped
+# by plain LRU: an evicted tombstone still refuses every generation it fenced,
+# and a hash collision can only refuse an activation that could have run, never
+# admit a stale generation that must stay refused.
+_CLOSED_GENERATION_CAPACITY = 256
+_GENERATION_FENCE_ROWS = 4
+_GENERATION_FENCE_CELLS = 1 << 13
+# The widest value a fence cell holds is reserved as a saturation sentinel
+# rather than spent on a generation.  A generation whose encoding reaches it no
+# longer fits the cell, so the cell stops naming a bound and refuses every
+# generation instead.  Over-refusing is the sketch's sanctioned direction;
+# reporting a bound *below* the released generation would readmit it.
+_GENERATION_FENCE_CELL_MAX = (1 << 64) - 1
 
 
 class ProductP2AdapterViolation(ValueError):
@@ -544,6 +563,7 @@ class P2ActivationLease:
         interaction_engine: InteractionEnginePort,
         close_poll_seconds: float,
         clock: Callable[[], datetime],
+        on_closed: Callable[[P2ActivationLease], None] | None = None,
     ) -> None:
         self._context = context
         self._binding = binding
@@ -551,6 +571,7 @@ class P2ActivationLease:
         self._interaction_engine = interaction_engine
         self._close_poll_seconds = close_poll_seconds
         self._clock = clock
+        self._on_closed = on_closed
         self._state = P2LeaseState.OPEN
         self._state_lock = threading.RLock()
         self._operation_lock = asyncio.Lock()
@@ -1137,6 +1158,23 @@ class P2ActivationLease:
                 ErrorCode.PERMISSION_DENIED,
             )
 
+    def _notify_closed(self) -> None:
+        """Announce this lease's terminal close to its retaining owner once.
+
+        Only a completed teardown is announced.  A failed teardown never
+        reclaimed its runtime, so its lease stays retained and keeps refusing
+        every successor exactly as before.
+        """
+
+        with self._state_lock:
+            callback, self._on_closed = self._on_closed, None
+        if callback is None:
+            return
+        try:
+            callback(self)
+        except Exception:  # noqa: BLE001 - releasing state never rewrites truth
+            return
+
     async def _run_close(self) -> P2LeaseCloseResult:
         try:
             async with self._operation_lock:
@@ -1163,6 +1201,7 @@ class P2ActivationLease:
                     if result.status is AgentConversationShutdownStatus.CLOSED:
                         with self._state_lock:
                             self._state = P2LeaseState.CLOSED
+                        self._notify_closed()
                         return P2LeaseCloseResult(
                             P2LeaseCloseStatus.CLOSED, "activation_teardown_complete"
                         )
@@ -1329,7 +1368,16 @@ class ProductP2InteractionAdapter:
         self._close_poll_seconds = _require_timeout(close_poll_seconds)
         self._clock = clock
         self._activation_lock = asyncio.Lock()
+        # Live and unreclaimed leases only.  A completed close releases its
+        # entry here and leaves the bounded tombstone/fence pair below behind,
+        # so distinct closed interactions no longer accumulate.
         self._leases: dict[tuple[str, str], P2ActivationLease] = {}
+        self._closed_generations: OrderedDict[tuple[str, str], int] = OrderedDict()
+        self._closed_generation_fence = tuple(
+            array("Q", [0]) * _GENERATION_FENCE_CELLS
+            for _ in range(_GENERATION_FENCE_ROWS)
+        )
+        self._closed_generation_lock = threading.RLock()
         self._failed_cleanups: dict[
             tuple[str, str, str, str, int], P2FailedActivationCleanup
         ] = {}
@@ -1498,8 +1546,20 @@ class ProductP2InteractionAdapter:
                 # A newer transport generation may therefore allocate without
                 # reviving or polling the predecessor.  Its shielded close
                 # coordinator remains the sole owner of predecessor teardown.
-                self._leases.pop(lease_key)
+                self._release_closed_lease(lease_key, existing)
                 return await self._allocate(context, binding, lease_key)
+            return P2ActivationResult(
+                P2ActivationStatus.DENIED,
+                P2ActivationReason.ACTIVATION_BINDING_CONFLICT,
+            )
+        fenced_generation = self._closed_generation(lease_key)
+        if (
+            fenced_generation is not None
+            and binding.activation_generation <= fenced_generation
+        ):
+            # The exact closed lease was released, so the tombstone is now the
+            # only truth about this key.  It keeps the released generation's
+            # existing refusal instead of readmitting it as an unknown key.
             return P2ActivationResult(
                 P2ActivationStatus.DENIED,
                 P2ActivationReason.ACTIVATION_BINDING_CONFLICT,
@@ -1668,6 +1728,7 @@ class ProductP2InteractionAdapter:
                 interaction_engine=engine,
                 close_poll_seconds=self._close_poll_seconds,
                 clock=self._clock,
+                on_closed=lambda closed: self._release_closed_lease(lease_key, closed),
             )
         except asyncio.CancelledError:
             await self._cleanup_before_reraise(runtime, binding)
@@ -1687,6 +1748,97 @@ class ProductP2InteractionAdapter:
             P2ActivationReason.ACTIVATION_LEASE_OPEN,
             lease=lease,
         )
+
+    def _release_closed_lease(
+        self,
+        lease_key: tuple[str, str],
+        lease: P2ActivationLease,
+    ) -> None:
+        """Drop one closed heavyweight lease, keeping its generation fenced."""
+
+        with self._closed_generation_lock:
+            if self._leases.get(lease_key) is not lease:
+                # A successor already owns this key, or this lease was already
+                # released.  A superseded terminal notification must only ever
+                # retire itself and can never collect the live lease.
+                return
+            # Fence first, release second.  A key must never be observable
+            # with neither its lease nor its tombstone, so a failure while
+            # recording keeps the closed lease retained, refusing successors
+            # exactly as before, instead of freeing an unfenced key.
+            self._record_closed_generation(
+                lease_key,
+                lease.binding.activation_generation,
+            )
+            del self._leases[lease_key]
+
+    def _record_closed_generation(
+        self,
+        key: tuple[str, str],
+        generation: int,
+    ) -> None:
+        retained = self._closed_generations.get(key)
+        if retained is None or generation > retained:
+            self._closed_generations[key] = generation
+        self._closed_generations.move_to_end(key)
+        while len(self._closed_generations) > _CLOSED_GENERATION_CAPACITY:
+            evicted_key, evicted = self._closed_generations.popitem(last=False)
+            self._fence_closed_generation(evicted_key, evicted)
+
+    def _fence_closed_generation(
+        self,
+        key: tuple[str, str],
+        generation: int,
+    ) -> None:
+        # A generation whose encoding reaches the cell width saturates the cell
+        # into the sentinel that refuses everything.  Storing a smaller number
+        # instead would publish a fence *below* the released generation and
+        # readmit it, which is the opposite of failing closed.
+        encoded = min(generation + 1, _GENERATION_FENCE_CELL_MAX)
+        for row, index in zip(
+            self._closed_generation_fence,
+            self._closed_generation_fence_indices(key),
+            strict=True,
+        ):
+            row[index] = max(row[index], encoded)
+
+    def _closed_generation_fence_indices(
+        self,
+        key: tuple[str, str],
+    ) -> tuple[int, ...]:
+        digest = hashlib.sha256("\0".join(key).encode("utf-8")).digest()
+        capacity = len(self._closed_generation_fence[0])
+        return tuple(
+            int.from_bytes(digest[offset : offset + 4], "big") % capacity
+            for offset in (0, 4, 8, 12)
+        )
+
+    def _closed_generation(self, key: tuple[str, str]) -> int | float | None:
+        """Report the highest released generation, exact tombstone first.
+
+        A saturated sketch cell reports ``math.inf`` instead of a number: the
+        released generation no longer fits the cell, so the key refuses every
+        generation rather than naming a bound that generation could outrank.
+        """
+
+        with self._closed_generation_lock:
+            exact = self._closed_generations.get(key)
+            if exact is not None:
+                return exact
+            fenced = min(
+                row[index]
+                for row, index in zip(
+                    self._closed_generation_fence,
+                    self._closed_generation_fence_indices(key),
+                    strict=True,
+                )
+            )
+        if fenced >= _GENERATION_FENCE_CELL_MAX:
+            return math.inf
+        # Activation generations are positive, so a recorded cell holds at
+        # least two.  Anything lower was never recorded and reads as a missing
+        # key rather than as generation zero.
+        return int(fenced) - 1 if fenced >= 2 else None
 
     async def _settle_partial_failure(
         self,

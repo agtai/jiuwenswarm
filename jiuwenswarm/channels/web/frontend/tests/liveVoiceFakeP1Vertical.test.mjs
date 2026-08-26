@@ -31,7 +31,6 @@ test('partial and uncommitted text have zero audio and telemetry effects', () =>
   }
   assert.deepEqual(vertical.pending(first), []);
   assert.deepEqual(vertical.routes(), []);
-  assert.equal(vertical.businessCancelCount(), 0);
 });
 
 test('committed text queues deterministic audio with a truthful substitute route', () => {
@@ -45,7 +44,6 @@ test('committed text queues deterministic audio with a truthful substitute route
   assert.equal(result.route.capability_provider, 'deterministic-speech-fake');
   assert.equal(vertical.pending(first).length, 1);
   assert.equal(vertical.routes().length, 1);
-  assert.equal(vertical.businessCancelCount(), 0);
 });
 
 test('a replacement response removes stale queued audio', () => {

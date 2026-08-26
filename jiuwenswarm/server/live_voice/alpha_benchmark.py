@@ -380,7 +380,7 @@ def _evaluate_executed_target(
     selected = tuple(
         sample for sample in samples if sample.target_id == target.target_id
     )
-    values = [sample.elapsed_ms for sample in selected]
+    values = [sample.elapsed_ms for sample in selected if not sample.failed]
     correlations = frozenset(sample.correlation_id for sample in selected)
     observed_failure_count = sum(sample.failed for sample in selected)
     p50 = _percentile(values, 0.50) if values else None

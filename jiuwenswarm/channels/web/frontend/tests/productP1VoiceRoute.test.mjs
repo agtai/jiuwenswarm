@@ -3615,6 +3615,7 @@ async function runConcurrentCaptureJourney(options = {}) {
   let secondMediaCloseFailures = options.failSecondMediaCloseOnce === true ? 1 : 0;
   let activationCountAtFinalDownlinkAck = null;
   let concurrentCaptureStartedCalls = 0;
+  const concurrentCaptureStarted = deferred();
   let bargeInSpeechStartCalls = 0;
   let bargeInEotCalls = 0;
   let bargeInStopped = null;
@@ -3626,9 +3627,12 @@ async function runConcurrentCaptureJourney(options = {}) {
   let staleCaptureFrameHandler = null;
   let staleUplinkMessageHandler = null;
   let staleDownlinkMessageHandler = null;
+  let staleDownlinkErrorHandler = null;
+  let staleDownlinkCloseHandler = null;
   let socketFactory = null;
   let request = null;
   let receiptSubjectId = null;
+  let firstMediaCloseFailures = options.failFirstMediaCloseOnce === true ? 1 : 0;
   let finalDownlinkAckResolve;
   const finalDownlinkAckObserved = new Promise(resolve => {
     finalDownlinkAckResolve = resolve;
@@ -3640,6 +3644,13 @@ async function runConcurrentCaptureJourney(options = {}) {
     })(),
   );
   environment.deferSourceEnds = options.deferSourceEndsUntilTransportAck === true;
+  if (options.failOutputSelectionDuringDownlink === true) {
+    environment.outputDeviceSelection = true;
+    environment.devices = [
+      { kind: 'audioinput', deviceId: 'private-input-1' },
+      { kind: 'audiooutput', deviceId: 'private-output-1' },
+    ];
+  }
   const response = {
     interaction_id: 'interaction-1',
     response_id: 'response-duplex-1',
@@ -3788,6 +3799,7 @@ async function runConcurrentCaptureJourney(options = {}) {
     },
     on_concurrent_capture_started: () => {
       concurrentCaptureStartedCalls += 1;
+      concurrentCaptureStarted.resolve();
     },
     ...(options.triggerBargeInEot === true
       ? {
@@ -3822,6 +3834,20 @@ async function runConcurrentCaptureJourney(options = {}) {
           data: serializeMediaControl({ type: 'media.attach', binding }),
         });
         if (binding.direction === 'downlink') {
+          if (options.retainDownlinkCallbacks === true) {
+            staleDownlinkMessageHandler = socket.onmessage;
+            staleDownlinkErrorHandler = socket.onerror;
+            staleDownlinkCloseHandler = socket.onclose;
+          }
+          if (options.failOutputSelectionDuringDownlink === true) {
+            await concurrentCaptureStarted.promise;
+            environment.devices = [{ kind: 'audioinput', deviceId: 'private-input-1' }];
+            environment.mediaDevices.emit('devicechange');
+            for (let turn = 0; turn < 100 && owner.status().status === 'playing'; turn += 1) {
+              await new Promise(resolve => setImmediate(resolve));
+            }
+            concurrentFailureSnapshot = owner.status();
+          }
           if (options.useRealProcessorForSecondCapture === true) {
             for (let turn = 0; turn < 500 && realProcessorHarness === null; turn += 1) {
               await new Promise(resolve => setImmediate(resolve));
@@ -4045,6 +4071,10 @@ async function runConcurrentCaptureJourney(options = {}) {
         };
       }
       if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        if (params.subject_id === 'media-subject-1' && firstMediaCloseFailures > 0) {
+          firstMediaCloseFailures -= 1;
+          throw { code: 'WS_NOT_READY' };
+        }
         if (params.subject_id === 'media-subject-2' && secondMediaCloseFailures > 0) {
           secondMediaCloseFailures -= 1;
           throw { code: 'WS_NOT_READY' };
@@ -4062,6 +4092,15 @@ async function runConcurrentCaptureJourney(options = {}) {
     activation_id: 'activation-1',
     activation_generation: 7,
     locale: 'zh-CN',
+    ...(options.failOutputSelectionDuringDownlink === true
+      ? {
+          device_selection: {
+            selection_generation: 1,
+            input_device_id: 'private-input-1',
+            output_device_id: 'private-output-1',
+          },
+        }
+      : {}),
   }, options.pauseForNotificationBeforePlayout === true
     ? { samples: new Float32Array(960) }
     : {});
@@ -4079,6 +4118,20 @@ async function runConcurrentCaptureJourney(options = {}) {
     text: options.agentText ?? 'duplex Agent response',
   });
   void playing.catch(() => undefined);
+  let overlappingPlayout = null;
+  let overlappingPlayoutError = null;
+  if (options.reenterPlayout === true) {
+    overlappingPlayout = owner.playAgentText({
+      response: {
+        ...response,
+        response_id: 'response-duplex-overlap',
+        response_generation: response.response_generation + 1,
+      },
+      unit_id: 'unit-duplex-overlap',
+      text: 'overlapping Agent response',
+    });
+    void overlappingPlayout.catch(() => undefined);
+  }
   if (options.sendSecondFrame !== false) {
     if (options.deferSuccessorCaptureUntilAfterPlayout === true) {
       await finalDownlinkAckObserved;
@@ -4462,6 +4515,13 @@ async function runConcurrentCaptureJourney(options = {}) {
   } finally {
     if (playoutSettleTimer !== null) clearTimeout(playoutSettleTimer);
   }
+  if (overlappingPlayout !== null) {
+    try {
+      await overlappingPlayout;
+    } catch (error) {
+      overlappingPlayoutError = error;
+    }
+  }
   if (playError === null && options.exercisePostReceiptCaptureAdvance === true) {
     assert.notEqual(realProcessorHarness, null);
     const { processor, quantum, sandbox } = realProcessorHarness;
@@ -4625,10 +4685,82 @@ async function runConcurrentCaptureJourney(options = {}) {
     staleCaptureFrameHandler,
     staleUplinkMessageHandler,
     staleDownlinkMessageHandler,
+    staleDownlinkErrorHandler,
+    staleDownlinkCloseHandler,
     socketFactory,
     request,
     response,
     environment,
+    overlappingPlayoutError,
+  };
+}
+
+async function replayRetainedDownlinkCallbacks(journey) {
+  const downlink = journey.sockets.find(socket => socket.serverBinding?.direction === 'downlink');
+  assert.ok(downlink);
+  assert.equal(typeof journey.staleDownlinkMessageHandler, 'function');
+  assert.equal(typeof journey.staleDownlinkErrorHandler, 'function');
+  assert.equal(typeof journey.staleDownlinkCloseHandler, 'function');
+  journey.staleDownlinkMessageHandler({
+    data: encodeAudioFrame(downlink.serverBinding, {
+      seq: downlink.downlinkNextSeq,
+      sample_cursor: downlink.downlinkNextSeq * 960,
+      samples: new Float32Array(960).fill(0.25),
+    }),
+  });
+  journey.staleDownlinkMessageHandler({
+    data: serializeMediaControl({
+      type: 'media.detach',
+      lease_id: downlink.serverBinding.lease_id,
+      generation: downlink.serverBinding.generation.value,
+      reason_id: 'MEDIA_LOCAL_CLOSE',
+      through_seq: Math.max(0, downlink.downlinkNextSeq - 1),
+      business_cancel_count_delta: 0,
+    }),
+  });
+  journey.staleDownlinkErrorHandler({});
+  journey.staleDownlinkCloseHandler({});
+  await new Promise(resolve => setImmediate(resolve));
+}
+
+function journeyEffectSnapshot(journey) {
+  const socketEffects = journey.sockets.map(socket => ({
+    sentCount: socket.sent.length,
+    controls: socket.sent
+      .filter(value => typeof value === 'string')
+      .map(value => {
+        const control = JSON.parse(value);
+        return {
+          type: control.type,
+          businessCancelDelta: Object.hasOwn(control, 'business_cancel_count_delta')
+            ? control.business_cancel_count_delta
+            : null,
+        };
+      }),
+  }));
+  return {
+    callCount: journey.calls.length,
+    closeSubjects: journey.calls
+      .filter(([method]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD)
+      .map(([, params]) => params.subject_id),
+    receiptCount: journey.calls.filter(
+      ([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD,
+    ).length,
+    socketEffects,
+    browserSourceStarts: journey.environment.contexts.map(context => context.sourceStartCount),
+    businessCancelDeltas: socketEffects.flatMap(socket =>
+      socket.controls
+        .filter(control => control.businessCancelDelta !== null)
+        .map(control => control.businessCancelDelta),
+    ),
+    forbiddenMutationCount: journey.calls.filter(
+      ([method]) => method.includes('agent')
+        || method.includes('tool')
+        || method.includes('task')
+        || method.includes('history')
+        || method.includes('response.cancel')
+        || method.includes('round.cancel'),
+    ).length,
   };
 }
 
@@ -4844,11 +4976,113 @@ test('server speech-start/EOT during playout triggers barge-in without Task muta
     false,
   );
   const downlink = journey.sockets.find(socket => socket.serverBinding?.direction === 'downlink');
-  if (downlink !== undefined) {
-    const controls = downlink.sent.filter(value => typeof value === 'string').map(JSON.parse);
-    const detach = controls.find(control => control.type === 'media.detach');
-    if (detach !== undefined) assert.equal(detach.business_cancel_count_delta, 0);
-  }
+  assert.ok(downlink);
+  const controls = downlink.sent.filter(value => typeof value === 'string').map(JSON.parse);
+  const detach = controls.find(control => control.type === 'media.detach');
+  assert.ok(detach);
+  assert.deepEqual(
+    {
+      business_cancel_delta: detach.business_cancel_count_delta,
+      downlink_ready_state: downlink.readyState,
+      old_subject_closes: journey.calls.filter(
+        ([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1',
+      ).length,
+      successor_subject_closes: journey.calls.filter(
+        ([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2',
+      ).length,
+      playout_receipts: journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length,
+    },
+    {
+      business_cancel_delta: 0,
+      downlink_ready_state: 3,
+      old_subject_closes: 1,
+      successor_subject_closes: 0,
+      playout_receipts: 0,
+    },
+  );
+  await journey.owner.close();
+});
+
+test('barge predecessor revoke failure retries only its exact authority and settles fail-closed without business effects', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    negotiatedEot: true,
+    triggerBargeInEot: true,
+    holdDownlinkDetachAfterFinalRender: true,
+    deferSourceEndsUntilTransportAck: true,
+    failFirstMediaCloseOnce: true,
+    retainDownlinkCallbacks: true,
+  });
+  const { owner, calls, sockets, playError } = journey;
+  const downlink = sockets.find(socket => socket.serverBinding?.direction === 'downlink');
+  assert.ok(downlink);
+  assert.equal(playError?.code, 'WS_NOT_READY');
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'WS_NOT_READY' });
+
+  const immutableBaseline = journeyEffectSnapshot(journey);
+  await replayRetainedDownlinkCallbacks(journey);
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'WS_NOT_READY' });
+  assert.deepEqual(journeyEffectSnapshot(journey), immutableBaseline);
+  await owner.close();
+  assert.deepEqual(journeyEffectSnapshot(journey), immutableBaseline);
+  await replayRetainedDownlinkCallbacks(journey);
+  const predecessorCloses = calls.filter(
+    ([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD
+      && params.subject_id === 'media-subject-1',
+  );
+  const finalEffects = journeyEffectSnapshot(journey);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(owner.status(), { status: 'closed', reason: null });
+  assert.equal(downlink.readyState, 3);
+  assert.deepEqual(finalEffects.closeSubjects, [
+    'media-subject-1',
+    'media-subject-1',
+    'media-subject-2',
+  ]);
+  const expectedPredecessorClose = {
+    session_id: 'session-1',
+    subject_id: 'media-subject-1',
+    correlation_id: 'correlation-1',
+    interaction_id: 'interaction-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+  };
+  assert.deepEqual(
+    predecessorCloses.map(([, params]) => params),
+    [expectedPredecessorClose, expectedPredecessorClose],
+  );
+  assert.equal(finalEffects.receiptCount, 0);
+  assert.ok(finalEffects.businessCancelDeltas.length > 0);
+  assert.equal(finalEffects.businessCancelDeltas.every(delta => delta === 0), true);
+  assert.equal(finalEffects.forbiddenMutationCount, 0);
+  assert.deepEqual(finalEffects, immutableBaseline);
+  assert.deepEqual(journeyEffectSnapshot(journey), finalEffects);
+});
+
+test('formal P1 rejects reentrant playout before a second synth/downlink/audio/history effect and lets the first settle', async () => {
+  const journey = await runConcurrentCaptureJourney({ reenterPlayout: true, sendSecondFrame: false });
+  assert.deepEqual(
+    {
+      overlapping_error: journey.overlappingPlayoutError?.message ?? null,
+      first_error: journey.playError?.message ?? null,
+      synth_calls: journey.calls.filter(([method]) => method === 'live_voice.speech.synthesize_batch').length,
+      downlinks: journey.sockets.filter(socket => socket.serverBinding?.direction === 'downlink').length,
+      receipts: journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length,
+      forbidden_business_effect: journey.calls.some(
+        ([method]) => method.includes('agent') || method.includes('task') || method.includes('history'),
+      ),
+      owner_status: journey.owner.status().status,
+    },
+    {
+      overlapping_error: 'formal playout is already active',
+      first_error: null,
+      synth_calls: 1,
+      downlinks: 1,
+      receipts: 1,
+      forbidden_business_effect: false,
+      owner_status: 'recognized',
+    },
+  );
   await journey.owner.close();
 });
 
@@ -6236,6 +6470,39 @@ test('a real processor render-clock regression fails exact P1 playout with zero 
   );
   await owner.close();
 });
+
+for (const streamingDownlink of [false, true]) {
+  test(`output loss closes the ${streamingDownlink ? 'streaming' : 'batch'} downlink leaf and revokes its exact gateway lease once`, async () => {
+    const journey = await runConcurrentCaptureJourney({
+      failOutputSelectionDuringDownlink: true,
+      streamingDownlink,
+      retainDownlinkCallbacks: true,
+    });
+    const { owner, sockets, playError } = journey;
+    const downlink = sockets.find(socket => socket.serverBinding?.direction === 'downlink');
+    assert.ok(downlink);
+
+    const immutableBaseline = journeyEffectSnapshot(journey);
+    await replayRetainedDownlinkCallbacks(journey);
+    assert.deepEqual(journeyEffectSnapshot(journey), immutableBaseline);
+    await owner.close();
+    assert.deepEqual(journeyEffectSnapshot(journey), immutableBaseline);
+    await replayRetainedDownlinkCallbacks(journey);
+    const finalEffects = journeyEffectSnapshot(journey);
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.equal(playError?.reason, 'AUDIO_OUTPUT_SELECTION_LOST');
+    assert.deepEqual(owner.status(), { status: 'closed', reason: null });
+    assert.equal(downlink.readyState, 3);
+    assert.deepEqual(finalEffects.closeSubjects, ['media-subject-1', 'media-subject-2']);
+    assert.equal(finalEffects.receiptCount, 0);
+    assert.ok(finalEffects.businessCancelDeltas.length > 0);
+    assert.equal(finalEffects.businessCancelDeltas.every(delta => delta === 0), true);
+    assert.equal(finalEffects.forbiddenMutationCount, 0);
+    assert.deepEqual(finalEffects, immutableBaseline);
+    assert.deepEqual(journeyEffectSnapshot(journey), finalEffects);
+  });
+}
 
 test('formal P1 concurrent capture cannot publish readiness without a real frame', async () => {
   const journey = await runConcurrentCaptureJourney({ sendSecondFrame: false });

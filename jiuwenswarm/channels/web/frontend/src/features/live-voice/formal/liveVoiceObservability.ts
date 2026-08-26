@@ -483,6 +483,8 @@ export const IDENTITY_POLICY = Object.freeze({
   trusted_source_boundary: 'authoritative_public_identity_fields_only',
 } as const);
 
+const SENSITIVE_IDENTITY_MARKER = /(?:^|[._:@-])(?:api[_-]?key|authorization|bearer|credential|password|passwd|secret|token|transcript)(?:$|[._:@-])/i;
+
 export interface TraceBindingInput {
   correlation_id: string;
   interaction_id?: string | null;
@@ -706,17 +708,11 @@ function requiredText(value: unknown, fieldName: string): string {
   return validUnicode(value, fieldName);
 }
 
-function optionalText(value: unknown, fieldName: string): string | null {
-  if (value === null || value === undefined) return null;
-  return requiredText(value, fieldName);
-}
-
 function opaqueIdentity(value: unknown, fieldName: string): string {
   // This bounds the carrier; callers still must project an authoritative public
   // identity field because arbitrary opaque tokens cannot be content-classified.
   const result = requiredText(value, fieldName);
-  const blockedMarker = /(?:^|[._:@-])(?:api[_-]?key|authorization|bearer|credential|password|passwd|secret|token|transcript)(?:$|[._:@-])/i;
-  if (result.length > IDENTITY_MAX_LENGTH || !/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/.test(result) || blockedMarker.test(result)) {
+  if (result.length > IDENTITY_MAX_LENGTH || !/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/.test(result) || SENSITIVE_IDENTITY_MARKER.test(result)) {
     throw violation('INVALID_OPAQUE_IDENTITY', `${fieldName} must be a bounded opaque ID from a trusted identity field`);
   }
   return result;
@@ -927,7 +923,15 @@ export function createRouteDescriptor(value: RouteDescriptorInput | RouteDescrip
   }
   const ownerModule = data.owner_module === null ? null : stableToken(data.owner_module, 'route.owner_module');
   const capabilityProvider = data.capability_provider === null ? null : stableToken(data.capability_provider, 'route.capability_provider');
-  const contractVersion = optionalText(data.contract_version, 'route.contract_version');
+  const contractVersion = data.contract_version === null || data.contract_version === undefined
+    ? null
+    : stableToken(data.contract_version, 'route.contract_version');
+  if (
+    contractVersion !== null &&
+    SENSITIVE_IDENTITY_MARKER.test(contractVersion)
+  ) {
+    throw violation('INVALID_STABLE_TOKEN', 'route.contract_version must be a bounded public identifier');
+  }
   const reasonCode = optionalMember(data.reason_code, REASON_CODES, 'route.reason_code');
   const routeClass = implementationClass as ObservedRouteClass;
   if (routeClass === 'formal') {

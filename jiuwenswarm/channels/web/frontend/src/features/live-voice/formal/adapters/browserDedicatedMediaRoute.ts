@@ -349,9 +349,6 @@ function validateBrowserAudioLocalStopReceipt(value: unknown): Readonly<BrowserA
       'timing',
       'physical_heard',
       'physical_silence',
-      'business_cancel_count_before',
-      'business_cancel_count_after',
-      'business_cancel_count_delta',
     ])
   ) {
     throw new TypeError('local playback stop requires a closed BrowserAudio receipt');
@@ -431,12 +428,6 @@ function validateBrowserAudioLocalStopReceipt(value: unknown): Readonly<BrowserA
   }
   if (value.physical_heard !== 'unproven' || value.physical_silence !== 'unproven') {
     throw new TypeError('local playback stop receipt cannot claim physical truth');
-  }
-  const before = value.business_cancel_count_before;
-  const after = value.business_cancel_count_after;
-  const delta = value.business_cancel_count_delta;
-  if (!isNonNegativeSafeInteger(before) || !isNonNegativeSafeInteger(after) || !Number.isSafeInteger(delta) || delta !== after - before || delta !== 0) {
-    throw new TypeError('local playback stop cannot carry business cancellation');
   }
   if (!localFenceEstablished) {
     throw new TypeError('local playback stop requires an established local fence');

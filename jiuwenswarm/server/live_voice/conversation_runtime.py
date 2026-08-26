@@ -13,6 +13,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ErrorCode,
     LifecycleKind,
     MAX_SAFE_INTEGER,
+    OriginRef,
     ResponseFence,
     ResponseRef,
     ScopeRef,
@@ -241,6 +242,9 @@ class ConversationRuntime:
                     if not response.fenced:
                         self._response_fence.cancel(response.ref)
                         self._responses[active_id] = replace(response, fenced=True)
+                for turn in self._turns.values():
+                    if turn.interaction_id == interaction_id:
+                        self._release_turn_commit(turn.turn_id)
             return self._emit(
                 f"interaction.{target.value}", interaction_id, state=target.value
             )
@@ -382,6 +386,8 @@ class ConversationRuntime:
             if prior_id is not None:
                 prior = self._responses[prior_id]
                 self._responses[prior_id] = replace(prior, fenced=True)
+                if prior.turn_id != turn_id:
+                    self._release_turn_commit(prior.turn_id)
             ref = ResponseRef(interaction_id, response_id, generation)
             self._response_fence.begin(ref)
             record = ResponseRecord(ref, turn_id, ResponseState.ACCEPTED)
@@ -416,6 +422,7 @@ class ConversationRuntime:
             if target is ResponseState.TERMINAL:
                 if self._active_response.get(ref.interaction_id) == ref.response_id:
                     self._response_fence.terminal(ref)
+                    self._release_turn_commit(record.turn_id)
                 updated = replace(updated, fenced=True)
             self._responses[ref.response_id] = updated
             return self._emit(
@@ -598,6 +605,13 @@ class ConversationRuntime:
                 "TURN_NOT_FOUND", "turn does not exist", ErrorCode.NOT_FOUND
             )
         return record
+
+    def _release_turn_commit(self, turn_id: str) -> None:
+        turn = self._turns[turn_id]
+        if turn.commit_id is not None:
+            self._commit_ledger.release_origin(
+                OriginRef("committed_turn", turn.turn_id, turn.commit_id), self._scope
+            )
 
     def _response(self, ref: ResponseRef) -> ResponseRecord:
         record = self._responses.get(ref.response_id)

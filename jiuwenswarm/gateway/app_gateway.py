@@ -386,35 +386,36 @@ async def _connect_with_retry(
         if not _tcp_ready():
             if attempt >= max_retries:
                 logger.error(
-                    "[App] connect AgentServer failed after %d tries: port %s not listening  uri=%s",
-                    attempt, port, uri,
+                    "[App] connect AgentServer failed after %d tries: endpoint unavailable",
+                    attempt,
                 )
-                raise ConnectionRefusedError(f"AgentServer port {port} not listening")
+                raise ConnectionRefusedError("AgentServer endpoint is unavailable")
             logger.info(
-                "[App] AgentServer port %s not listening yet (%d/%d), retry in %.2fs...",
-                port, attempt, max_retries, backoff,
+                "[App] AgentServer endpoint not ready (%d/%d), retry in %.2fs...",
+                attempt,
+                max_retries,
+                backoff,
             )
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, interval)
             continue
         try:
             await client.connect(uri)
-            logger.info("[App] connected to AgentServer: %s", uri)
+            logger.info("[App] connected to AgentServer")
             return
         except Exception as exc:  # noqa: BLE001
             if attempt >= max_retries:
                 logger.error(
-                    "[App] connect AgentServer failed after %d tries: %s  last=%s",
+                    "[App] connect AgentServer failed after %d tries (failure=%s)",
                     attempt,
-                    uri,
-                    exc,
+                    _gateway_shutdown_failure_category(exc),
                 )
                 raise
             logger.warning(
-                "[App] connect AgentServer failed (%d/%d): %s  retry in %.2fs...",
+                "[App] connect AgentServer failed (%d/%d, failure=%s); retry in %.2fs...",
                 attempt,
                 max_retries,
-                exc,
+                _gateway_shutdown_failure_category(exc),
                 backoff,
             )
             await asyncio.sleep(backoff)
@@ -474,7 +475,11 @@ async def _wait_for_gateway_tasks_or_restart(
                 exc = task.exception()
                 if exc is not None:
                     if restart_request.requested:
-                        logger.warning("[App] service task failed while Gateway restart is pending: %s", exc)
+                        logger.warning(
+                            "[App] service task failed while Gateway restart is pending "
+                            "(failure=%s)",
+                            _gateway_shutdown_failure_category(exc),
+                        )
                         return True
                     raise exc
             if not service_tasks:
@@ -487,6 +492,281 @@ async def _wait_for_gateway_tasks_or_restart(
                 await restart_task
             except asyncio.CancelledError:
                 pass
+
+
+_GATEWAY_SHUTDOWN_PHASES = frozenset(
+    {
+        "service.wait",
+        "prewarm.debounce_task",
+        "prewarm.periodic_task",
+        "a2a.task",
+        "a2a.stop",
+        "a2a.unregister",
+        "gateway.task",
+        "gateway.stop",
+        "inbound.stop",
+        "tui.stop",
+        "web.task",
+        "web.stop",
+        "feishu.task",
+        "feishu.stop",
+        "feishu.enterprise.task",
+        "feishu.enterprise.stop",
+        "xiaoyi.task",
+        "xiaoyi.stop",
+        "channels.pop.feishu",
+        "channels.feishu.task",
+        "channels.feishu.stop",
+        "channels.pop.xiaoyi",
+        "channels.xiaoyi.task",
+        "channels.xiaoyi.stop",
+        "dingtalk.task",
+        "dingtalk.stop",
+        "telegram.task",
+        "telegram.stop",
+        "discord.task",
+        "discord.stop",
+        "slack.task",
+        "slack.stop",
+        "whatsapp.task",
+        "whatsapp.stop",
+        "wecom.task",
+        "wecom.stop",
+        "wechat.task",
+        "wechat.stop",
+        "ssh.task",
+        "ssh.stop",
+        "ssh.clear_key_issuer",
+        "cron.stop",
+        "dispatch.stop",
+        "heartbeat.stop",
+        "forward.stop",
+        "client.disconnect",
+        "restart_cleanup",
+    }
+)
+
+
+class _GatewayShutdownError(RuntimeError):
+    """Content-free public failure for unsupported shutdown exceptions."""
+
+
+def _gateway_shutdown_exception_matches(
+    exc: BaseException,
+    *expected_types: type[BaseException],
+) -> bool:
+    """Classify an exception without invoking instance/metaclass hooks."""
+
+    exception_type = type(exc)
+    try:
+        mro = type.__getattribute__(exception_type, "__mro__")
+    except BaseException:
+        mro = (exception_type,)
+    return any(
+        candidate is expected
+        for candidate in mro
+        for expected in expected_types
+    )
+
+
+@dataclass
+class _GatewayShutdownFailures:
+    entries: list[tuple[str, BaseException]] = field(default_factory=list)
+    caller_cancellation: tuple[str, asyncio.CancelledError] | None = None
+
+    def record(self, phase: str, exc: BaseException) -> None:
+        phase_category = _gateway_shutdown_phase_category(phase)
+        current = asyncio.current_task()
+        if (
+            _gateway_shutdown_exception_matches(exc, asyncio.CancelledError)
+            and current is not None
+            and current.cancelling()
+            and self.caller_cancellation is None
+        ):
+            self.caller_cancellation = (phase_category, exc)
+        self.entries.append((phase_category, exc))
+
+    def record_caller_cancellation(
+        self,
+        phase: str,
+        exc: asyncio.CancelledError,
+    ) -> None:
+        phase_category = _gateway_shutdown_phase_category(phase)
+        if self.caller_cancellation is None:
+            self.caller_cancellation = (phase_category, exc)
+        self.entries.append((phase_category, exc))
+
+    @property
+    def first_phase(self) -> str:
+        return self.entries[0][0]
+
+    def take_caller_cancellation(self) -> asyncio.CancelledError | None:
+        if self.caller_cancellation is None:
+            return None
+        cancellation = self.caller_cancellation[1]
+        if not self.entries or self.entries[0][1] is not cancellation:
+            return None
+        cancellation.args = ()
+        cancellation.__traceback__ = None
+        cancellation.__cause__ = None
+        cancellation.__context__ = None
+        cancellation.__suppress_context__ = True
+        cancellation.__notes__ = []
+        self.clear()
+        return cancellation
+
+    def public_first_failure(self) -> BaseException:
+        phase, failure = self.entries[0]
+        public_failure = _gateway_public_shutdown_failure(phase, failure)
+        self.clear()
+        return public_failure
+
+    def clear(self) -> None:
+        self.entries.clear()
+        self.caller_cancellation = None
+
+    def __bool__(self) -> bool:
+        return bool(self.entries)
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+
+def _gateway_shutdown_phase_category(phase: str) -> str:
+    if type(phase) is str and phase in _GATEWAY_SHUTDOWN_PHASES:
+        return phase
+    return "unknown"
+
+
+def _gateway_shutdown_failure_category(exc: BaseException) -> str:
+    if _gateway_shutdown_exception_matches(exc, asyncio.CancelledError):
+        return "cancelled"
+    if _gateway_shutdown_exception_matches(
+        exc,
+        KeyboardInterrupt,
+        SystemExit,
+        GeneratorExit,
+    ):
+        return "interrupt"
+    if _gateway_shutdown_exception_matches(exc, TimeoutError):
+        return "timeout"
+    if _gateway_shutdown_exception_matches(exc, OSError):
+        return "io_error"
+    if _gateway_shutdown_exception_matches(exc, RuntimeError):
+        return "runtime_error"
+    if _gateway_shutdown_exception_matches(exc, Exception):
+        return "exception"
+    return "base_exception"
+
+
+def _gateway_public_shutdown_failure(
+    phase: str,
+    exc: BaseException,
+) -> BaseException:
+    phase_category = _gateway_shutdown_phase_category(phase)
+    failure_category = _gateway_shutdown_failure_category(exc)
+    message = (
+        "Gateway shutdown failed "
+        f"(phase={phase_category}, failure={failure_category})"
+    )
+    if _gateway_shutdown_exception_matches(exc, TimeoutError):
+        public_failure: BaseException = TimeoutError(message)
+    elif _gateway_shutdown_exception_matches(exc, OSError):
+        public_failure = OSError(message)
+    elif _gateway_shutdown_exception_matches(exc, RuntimeError):
+        public_failure = RuntimeError(message)
+    elif _gateway_shutdown_exception_matches(exc, TypeError):
+        public_failure = TypeError(message)
+    elif _gateway_shutdown_exception_matches(exc, ValueError):
+        public_failure = ValueError(message)
+    elif _gateway_shutdown_exception_matches(exc, LookupError):
+        public_failure = LookupError(message)
+    elif _gateway_shutdown_exception_matches(exc, ArithmeticError):
+        public_failure = ArithmeticError(message)
+    elif _gateway_shutdown_exception_matches(exc, AssertionError):
+        public_failure = AssertionError(message)
+    elif _gateway_shutdown_exception_matches(exc, KeyboardInterrupt):
+        public_failure = KeyboardInterrupt(message)
+    elif _gateway_shutdown_exception_matches(exc, SystemExit):
+        public_failure = SystemExit(message)
+    elif _gateway_shutdown_exception_matches(exc, GeneratorExit):
+        public_failure = GeneratorExit(message)
+    elif type(exc) is Exception:
+        public_failure = Exception(message)
+    else:
+        public_failure = _GatewayShutdownError(message)
+    public_failure.__traceback__ = None
+    public_failure.__cause__ = None
+    public_failure.__context__ = None
+    public_failure.__suppress_context__ = True
+    return public_failure
+
+
+async def _run_gateway_shutdown_phase(
+    phase: str,
+    action: Callable[[], Awaitable[Any] | Any],
+    failures: _GatewayShutdownFailures,
+) -> Any:
+    """Run one shutdown owner without allowing it to skip later owners."""
+    try:
+        result = action()
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+    except BaseException as exc:
+        phase_category = _gateway_shutdown_phase_category(phase)
+        failures.record(phase_category, exc)
+        logger.error(
+            "[App] Gateway shutdown owner failed (phase=%s, failure=%s)",
+            phase_category,
+            _gateway_shutdown_failure_category(exc),
+        )
+        return None
+
+
+async def _cancel_gateway_owned_task(
+    task: asyncio.Task[Any],
+    *,
+    suppress_type_error: bool = False,
+) -> None:
+    task.cancel()
+    current = asyncio.current_task()
+    observed_cancellation_count = current.cancelling() if current is not None else 0
+    caller_cancellation: asyncio.CancelledError | None = None
+    owned_failure: BaseException | None = None
+    while True:
+        try:
+            await asyncio.shield(task)
+            break
+        except asyncio.CancelledError as exc:
+            current_cancellation_count = (
+                current.cancelling() if current is not None else 0
+            )
+            if current_cancellation_count > observed_cancellation_count:
+                if caller_cancellation is None:
+                    caller_cancellation = exc
+                observed_cancellation_count = current_cancellation_count
+                continue
+            break
+        except BaseException as exc:
+            owned_failure = exc
+            break
+    if caller_cancellation is not None:
+        raise caller_cancellation
+    if (
+        owned_failure is not None
+        and _gateway_shutdown_exception_matches(owned_failure, TypeError)
+        and suppress_type_error
+    ):
+        return
+    if owned_failure is not None:
+        raise owned_failure
+
+
+async def _cancel_gateway_channel_start_task(channel: Any) -> None:
+    task = getattr(channel, "start_task", None)
+    if task is not None:
+        await _cancel_gateway_owned_task(task)
 
 
 @dataclass
@@ -1664,7 +1944,7 @@ async def _run(
     from jiuwenswarm.common.updater import UpdaterService
     from openjiuwen.core.runner import Runner
 
-    logger.info("[App] Gateway starting, connecting AgentServer: %s", agent_server_url)
+    logger.info("[App] Gateway starting; connecting AgentServer")
     restart_request = GatewayRestartRequest()
 
     callback_framework = Runner.callback_framework
@@ -2161,6 +2441,34 @@ async def _run(
     feishu_enterprise_tasks: dict[str, asyncio.Task] = {}
     xiaoyi_channel = None
     xiaoyi_task = None
+    dynamic_channel_owners: dict[
+        str,
+        list[tuple[Any, asyncio.Task[Any] | None]],
+    ] = {"feishu": [], "xiaoyi": []}
+
+    def _retain_dynamic_channel_owner(
+        channel: Any,
+        task: asyncio.Task[Any] | None = None,
+    ) -> None:
+        owners = dynamic_channel_owners.get(channel.channel_id)
+        if owners is None:
+            return
+        for index, (retained_channel, retained_task) in enumerate(owners):
+            if retained_channel is channel:
+                if task is not None and retained_task is not task:
+                    owners[index] = (channel, task)
+                return
+        owners.append((channel, task))
+
+    register_channel = channel_manager.register_channel
+
+    def _register_channel_with_dynamic_owner(channel: Any) -> None:
+        # Manager-owned configuration paths can register outside the callback;
+        # retain exact identity so shutdown never relies on fallible discovery.
+        register_channel(channel)
+        _retain_dynamic_channel_owner(channel)
+
+    channel_manager.register_channel = _register_channel_with_dynamic_owner
     dingtalk_channel = None
     dingtalk_task = None
     telegram_channel = None
@@ -2182,6 +2490,7 @@ async def _run(
         issuer,
         *,
         ephemeral_key_ttl_sec: float = 300.0,
+        propagate_error: bool = False,
     ) -> None:
         """Inject/clear SshChannel as ephemeral key issuer on AgentOSRouter extension."""
         setter = getattr(agent_server_ext, "set_key_issuer", None)
@@ -2190,6 +2499,8 @@ async def _run(
         try:
             setter(issuer, ephemeral_key_ttl_sec=ephemeral_key_ttl_sec)
         except Exception as exc:  # noqa: BLE001
+            if propagate_error:
+                raise
             logger.warning("[App] failed to set AgentOS SSH key issuer: %s", exc)
 
     _last_channels_conf: dict = {}
@@ -2310,8 +2621,20 @@ async def _run(
             # ---- 停止旧 apps 实例（从 channel_manager 查找） ----
             # 先 pop 再停止，避免 _stop_channel 内部 unregister_channel(channel_id)
             # 批量删除后后续 key 访问抛 KeyError
-            for ch in channel_manager.pop_channels_by_id("feishu"):
-                await _stop_channel(ch, getattr(ch, "start_task", None), f"feishu_app[{ch.app_id}]")
+            old_owners = list(dynamic_channel_owners["feishu"])
+            known_owner_ids = {id(channel) for channel, _task in old_owners}
+            for channel in channel_manager.pop_channels_by_id("feishu"):
+                if id(channel) not in known_owner_ids:
+                    old_owners.append(
+                        (channel, getattr(channel, "start_task", None))
+                    )
+            for ch, task in old_owners:
+                await _stop_channel(
+                    ch,
+                    task,
+                    "feishu_app",
+                )
+            dynamic_channel_owners["feishu"].clear()
             # 统一注销 adapter（所有 feishu app 共享 "feishu" 标识）
             im_inbound.unregister_adapter("feishu")
             im_outbound.unregister_adapter("feishu")
@@ -2323,7 +2646,7 @@ async def _run(
             if not apps:
                 logger.info("[App] channels.feishu.apps empty, FeishuChannel disabled")
             else:
-                for app in apps:
+                for app_index, app in enumerate(apps):
                     if not app.get("enabled", True):
                         continue
                     enabled, reason = _is_channel_enabled(app, ["app_id", "app_secret"])
@@ -2367,16 +2690,22 @@ async def _run(
 
                     channel = FeishuChannel(feishu_config, _DummyBus(), im_platform_adapter=feishu_adapter)
                     channel_manager.register_channel(channel)
-                    task = asyncio.create_task(channel.start(), name=f"feishu-{app_id}")
-                    channel.start_task = task  # 挂到 channel 对象上，不另存 dict
-                    logger.info("[App] FeishuChannel(app=%s) registered from channels.feishu.apps", app_id)
+                    task = asyncio.create_task(
+                        channel.start(),
+                        name=f"feishu-app-{app_index}",
+                    )
+                    channel.start_task = task
+                    _retain_dynamic_channel_owner(channel, task)
+                    logger.info(
+                        "[App] FeishuChannel registered from channels.feishu.apps"
+                    )
 
         if "feishu_enterprise" in changed_channels:
             for bot_key, task in list(feishu_enterprise_tasks.items()):
                 await _stop_channel(
                     feishu_enterprise_channels.get(bot_key),
                     task,
-                    f"feishu_enterprise[{bot_key}]",
+                    "feishu_enterprise",
                 )
             for _old_ch in feishu_enterprise_channels.values():
                 _old_ch_id = getattr(_old_ch, "_channel_id", "") or getattr(_old_ch, "name", "")
@@ -2393,18 +2722,22 @@ async def _run(
                     "FeishuEnterpriseChannel disabled"
                 )
             else:
-                for bot_key, bot_conf_raw in enterprise_conf.items():
+                for bot_index, (bot_key, bot_conf_raw) in enumerate(
+                    enterprise_conf.items()
+                ):
                     if not isinstance(bot_key, str) or not bot_key.strip():
                         continue
                     bot_conf = bot_conf_raw if isinstance(bot_conf_raw, dict) else None
                     if bot_conf is None:
-                        logger.info("[App] channels.feishu_enterprise.%s invalid config, skipping", bot_key)
+                        logger.info(
+                            "[App] channels.feishu_enterprise entry invalid; skipping"
+                        )
                         continue
                     enabled, reason = _is_channel_enabled(bot_conf, ["app_id", "app_secret"])
                     if not enabled:
                         logger.info(
-                            "[App] channels.feishu_enterprise.%s.%s, FeishuEnterpriseChannel disabled",
-                            bot_key,
+                            "[App] channels.feishu_enterprise entry %s; "
+                            "FeishuEnterpriseChannel disabled",
                             reason,
                         )
                         continue
@@ -2443,13 +2776,15 @@ async def _run(
                         im_outbound.register_adapter(channel_id, feishu_adapter)
                     channel = FeishuChannel(feishu_config, _DummyBus(), im_platform_adapter=feishu_adapter)
                     channel_manager.register_channel(channel)
-                    task = asyncio.create_task(channel.start(), name=f"feishu-enterprise-{bot_key}")
+                    task = asyncio.create_task(
+                        channel.start(),
+                        name=f"feishu-enterprise-{bot_index}",
+                    )
                     feishu_enterprise_channels[bot_key] = channel
                     feishu_enterprise_tasks[bot_key] = task
                     logger.info(
-                        "[App] registered FeishuChannel(%s) from config.yaml.channels.feishu_enterprise.%s",
-                        bot_key,
-                        channel_id,
+                        "[App] registered FeishuChannel from "
+                        "config.yaml.channels.feishu_enterprise"
                     )
 
         if "xiaoyi" in changed_channels:
@@ -2458,8 +2793,20 @@ async def _run(
             # ---- 停止旧 apps 实例（从 channel_manager 查找） ----
             # 先 pop 再停止，避免 _stop_channel 内部 unregister_channel(channel_id)
             # 批量删除后后续 key 访问抛 KeyError
-            for ch in channel_manager.pop_channels_by_id("xiaoyi"):
-                await _stop_channel(ch, getattr(ch, "start_task", None), f"xiaoyi_app[{ch.app_id}]")
+            old_owners = list(dynamic_channel_owners["xiaoyi"])
+            known_owner_ids = {id(channel) for channel, _task in old_owners}
+            for channel in channel_manager.pop_channels_by_id("xiaoyi"):
+                if id(channel) not in known_owner_ids:
+                    old_owners.append(
+                        (channel, getattr(channel, "start_task", None))
+                    )
+            for ch, task in old_owners:
+                await _stop_channel(
+                    ch,
+                    task,
+                    "xiaoyi_app",
+                )
+            dynamic_channel_owners["xiaoyi"].clear()
 
             # 单变量置空（不再使用，但保持 nonlocal 兼容）
             xiaoyi_channel, xiaoyi_task = None, None
@@ -2468,7 +2815,7 @@ async def _run(
             if not apps:
                 logger.info("[App] channels.xiaoyi.apps empty, XiaoyiChannel disabled")
             else:
-                for app in apps:
+                for app_index, app in enumerate(apps):
                     if not app.get("enabled", True):
                         continue
                     enabled, reason = _is_channel_enabled(app, ["ak", "sk", "agent_id"])
@@ -2506,9 +2853,15 @@ async def _run(
                     )
                     channel = XiaoyiChannel(config, _DummyBus())
                     channel_manager.register_channel(channel)
-                    task = asyncio.create_task(channel.start(), name=f"xiaoyi-{api_id or 'default'}")
-                    channel.start_task = task  # 挂到 channel 对象上，不另存 dict
-                    logger.info("[App] XiaoyiChannel(api_id=%s) from channels.xiaoyi.apps", api_id or "default")
+                    task = asyncio.create_task(
+                        channel.start(),
+                        name=f"xiaoyi-app-{app_index}",
+                    )
+                    channel.start_task = task
+                    _retain_dynamic_channel_owner(channel, task)
+                    logger.info(
+                        "[App] XiaoyiChannel registered from channels.xiaoyi.apps"
+                    )
 
         if "dingtalk" in changed_channels:
             dingtalk_conf = conf.get("dingtalk") if isinstance(conf, dict) else None
@@ -2797,11 +3150,7 @@ async def _run(
                             ephemeral_key_ttl_sec=ssh_config.auth.ephemeral_key_ttl_sec,
                         )
                     logger.info(
-                        "[App] SshChannel registered from config.yaml.channels.ssh "
-                        "(listen %s:%s -> MessageHandler; southbound via agent client; auth=%s)",
-                        ssh_config.listen_host,
-                        ssh_config.listen_port,
-                        ssh_config.auth.enabled,
+                        "[App] SshChannel registered from config.yaml.channels.ssh"
                     )
             else:
                 logger.info("[App] channels.ssh missing or invalid, SshChannel disabled")
@@ -2845,14 +3194,13 @@ async def _run(
     )
     if web_channel is not None:
         logger.info(
-            "[App] started: Web ws://%s:%s%s  AgentServer: %s  Press Ctrl+C to exit.",
-            web_host,
-            web_port,
-            web_path,
-            agent_server_url,
+            "[App] started: Web and AgentServer endpoints ready; "
+            "Press Ctrl+C to exit."
         )
 
     restart_requested = False
+    service_failure: BaseException | None = None
+    caller_cancellation: asyncio.CancelledError | None = None
     try:
         tasks_to_wait = [task for task in (gateway_server_task, web_task) if task is not None]
         if tasks_to_wait:
@@ -2862,152 +3210,260 @@ async def _run(
             )
     except KeyboardInterrupt:
         logger.info("received Ctrl+C, shutting down...")
-    except asyncio.CancelledError:
-        pass
+    except asyncio.CancelledError as exc:
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            caller_cancellation = exc
+        else:
+            service_failure = exc
+    except BaseException as exc:
+        service_failure = exc
     finally:
-        if prewarm_sync_debounce_task is not None:
-            prewarm_sync_debounce_task.cancel()
-            try:
-                await prewarm_sync_debounce_task
-            except asyncio.CancelledError:
-                pass
-        prewarm_sync_task.cancel()
-        try:
-            await prewarm_sync_task
-        except asyncio.CancelledError:
-            pass
-        if a2a_task is not None:
-            a2a_task.cancel()
-            try:
-                await a2a_task
-            except asyncio.CancelledError:
-                pass
-        await a2a_channel.stop()
-        channel_manager.unregister_channel(a2a_channel.channel_id)
-        if gateway_server_task is not None:
-            gateway_server_task.cancel()
-            try:
-                await gateway_server_task
-            except asyncio.CancelledError:
-                pass
-        await gateway_server.stop()
-        await acp_inbound_server.stop()
-        if tui_channel is not None:
-            await tui_channel.stop()
-        if web_task is not None:
-            web_task.cancel()
-            try:
-                await web_task
-            except asyncio.CancelledError:
-                pass
-        if web_channel is not None:
-            await web_channel.stop()
+        shutdown_failures = _GatewayShutdownFailures()
+        if service_failure is not None:
+            shutdown_failures.record("service.wait", service_failure)
+            service_failure = None
+        if caller_cancellation is not None:
+            shutdown_failures.record_caller_cancellation(
+                "service.wait",
+                caller_cancellation,
+            )
+            caller_cancellation = None
 
-        if feishu_channel is not None and feishu_task is not None:
-            feishu_task.cancel()
-            try:
-                await feishu_task
-            except asyncio.CancelledError:
-                pass
-            await feishu_channel.stop()
-        for bot_key, task in list(feishu_enterprise_tasks.items()):
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        if prewarm_sync_debounce_task is not None:
+            await _run_gateway_shutdown_phase(
+                "prewarm.debounce_task",
+                lambda: _cancel_gateway_owned_task(prewarm_sync_debounce_task),
+                shutdown_failures,
+            )
+        await _run_gateway_shutdown_phase(
+            "prewarm.periodic_task",
+            lambda: _cancel_gateway_owned_task(prewarm_sync_task),
+            shutdown_failures,
+        )
+        if a2a_task is not None:
+            await _run_gateway_shutdown_phase(
+                "a2a.task",
+                lambda: _cancel_gateway_owned_task(a2a_task),
+                shutdown_failures,
+            )
+        await _run_gateway_shutdown_phase(
+            "a2a.stop",
+            lambda: a2a_channel.stop(),
+            shutdown_failures,
+        )
+        await _run_gateway_shutdown_phase(
+            "a2a.unregister",
+            lambda: channel_manager.unregister_channel(a2a_channel.channel_id),
+            shutdown_failures,
+        )
+        if gateway_server_task is not None:
+            await _run_gateway_shutdown_phase(
+                "gateway.task",
+                lambda: _cancel_gateway_owned_task(gateway_server_task),
+                shutdown_failures,
+            )
+        await _run_gateway_shutdown_phase(
+            "gateway.stop",
+            lambda: gateway_server.stop(),
+            shutdown_failures,
+        )
+        await _run_gateway_shutdown_phase(
+            "inbound.stop",
+            lambda: acp_inbound_server.stop(),
+            shutdown_failures,
+        )
+        if tui_channel is not None:
+            await _run_gateway_shutdown_phase(
+                "tui.stop",
+                lambda: tui_channel.stop(),
+                shutdown_failures,
+            )
+        if web_task is not None:
+            await _run_gateway_shutdown_phase(
+                "web.task",
+                lambda: _cancel_gateway_owned_task(web_task),
+                shutdown_failures,
+            )
+        if web_channel is not None:
+            await _run_gateway_shutdown_phase(
+                "web.stop",
+                lambda: web_channel.stop(),
+                shutdown_failures,
+            )
+
+        if feishu_task is not None:
+            await _run_gateway_shutdown_phase(
+                "feishu.task",
+                lambda: _cancel_gateway_owned_task(feishu_task),
+                shutdown_failures,
+            )
+        if feishu_channel is not None:
+            await _run_gateway_shutdown_phase(
+                "feishu.stop",
+                lambda: feishu_channel.stop(),
+                shutdown_failures,
+            )
+        enterprise_keys = list(feishu_enterprise_tasks)
+        enterprise_keys.extend(
+            bot_key
+            for bot_key in feishu_enterprise_channels
+            if bot_key not in feishu_enterprise_tasks
+        )
+        for bot_key in enterprise_keys:
+            task = feishu_enterprise_tasks.get(bot_key)
+            if task is not None:
+                await _run_gateway_shutdown_phase(
+                    "feishu.enterprise.task",
+                    lambda task=task: _cancel_gateway_owned_task(task),
+                    shutdown_failures,
+                )
             channel = feishu_enterprise_channels.get(bot_key)
             if channel is not None:
-                await channel.stop()
-        if xiaoyi_channel is not None and xiaoyi_task is not None:
-            xiaoyi_task.cancel()
-            try:
-                await xiaoyi_task
-            except asyncio.CancelledError:
-                pass
-            await xiaoyi_channel.stop()
+                await _run_gateway_shutdown_phase(
+                    "feishu.enterprise.stop",
+                    lambda channel=channel: channel.stop(),
+                    shutdown_failures,
+                )
+        if xiaoyi_task is not None:
+            await _run_gateway_shutdown_phase(
+                "xiaoyi.task",
+                lambda: _cancel_gateway_owned_task(xiaoyi_task),
+                shutdown_failures,
+            )
+        if xiaoyi_channel is not None:
+            await _run_gateway_shutdown_phase(
+                "xiaoyi.stop",
+                lambda: xiaoyi_channel.stop(),
+                shutdown_failures,
+            )
         # ---- 从 channel_manager 清理所有动态注册的 channel 实例 ----
         for _cid in ("feishu", "xiaoyi"):
-            for ch in channel_manager.pop_channels_by_id(_cid):
-                task = getattr(ch, "start_task", None)
+            owners: list[tuple[Any, asyncio.Task[Any] | None]] = list(
+                dynamic_channel_owners[_cid]
+            )
+            known_owner_ids = {id(channel) for channel, _task in owners}
+            registered_channels = await _run_gateway_shutdown_phase(
+                f"channels.pop.{_cid}",
+                lambda _cid=_cid: list(channel_manager.get_channels_by_id(_cid)),
+                shutdown_failures,
+            )
+            for ch in registered_channels or []:
+                if id(ch) not in known_owner_ids:
+                    owners.append((ch, None))
+                    known_owner_ids.add(id(ch))
+            channels = await _run_gateway_shutdown_phase(
+                f"channels.pop.{_cid}",
+                lambda _cid=_cid: list(channel_manager.pop_channels_by_id(_cid)),
+                shutdown_failures,
+            )
+            if channels is None:
+                await _run_gateway_shutdown_phase(
+                    f"channels.pop.{_cid}",
+                    lambda _cid=_cid: channel_manager.unregister_channel(_cid),
+                    shutdown_failures,
+                )
+            for ch in channels or []:
+                if id(ch) not in known_owner_ids:
+                    owners.append((ch, None))
+                    known_owner_ids.add(id(ch))
+            for ch, task in owners:
                 if task is not None:
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                await ch.stop()
+                    await _run_gateway_shutdown_phase(
+                        f"channels.{_cid}.task",
+                        lambda task=task: _cancel_gateway_owned_task(task),
+                        shutdown_failures,
+                    )
+                else:
+                    await _run_gateway_shutdown_phase(
+                        f"channels.{_cid}.task",
+                        lambda ch=ch: _cancel_gateway_channel_start_task(ch),
+                        shutdown_failures,
+                    )
+                await _run_gateway_shutdown_phase(
+                    f"channels.{_cid}.stop",
+                    lambda ch=ch: ch.stop(),
+                    shutdown_failures,
+                )
+            dynamic_channel_owners[_cid].clear()
         # -----------------------------------
-        if dingtalk_channel is not None and dingtalk_task is not None:
-            dingtalk_task.cancel()
-            try:
-                await dingtalk_task
-            except (TypeError, asyncio.CancelledError):
-                pass
-            await dingtalk_channel.stop()
-        if telegram_channel is not None and telegram_task is not None:
-            telegram_task.cancel()
-            try:
-                await telegram_task
-            except asyncio.CancelledError:
-                pass
-            await telegram_channel.stop()
-        if discord_channel is not None and discord_task is not None:
-            discord_task.cancel()
-            try:
-                await discord_task
-            except asyncio.CancelledError:
-                pass
-            await discord_channel.stop()
-        if slack_channel is not None and slack_task is not None:
-            slack_task.cancel()
-            try:
-                await slack_task
-            except asyncio.CancelledError:
-                pass
-            await slack_channel.stop()
-        if whatsapp_channel is not None and whatsapp_task is not None:
-            whatsapp_task.cancel()
-            try:
-                await whatsapp_task
-            except asyncio.CancelledError:
-                pass
-            await whatsapp_channel.stop()
-        if wecom_channel is not None and wecom_task is not None:
-            wecom_task.cancel()
-            try:
-                await wecom_task
-            except asyncio.CancelledError:
-                pass
-            await wecom_channel.stop()
-        if wechat_channel is not None and wechat_task is not None:
-            wechat_task.cancel()
-            try:
-                await wechat_task
-            except asyncio.CancelledError:
-                pass
-            await wechat_channel.stop()
-        if ssh_channel is not None and ssh_task is not None:
-            ssh_task.cancel()
-            try:
-                await ssh_task
-            except asyncio.CancelledError:
-                pass
-            await ssh_channel.stop()
-            _set_agentos_ssh_key_issuer(None)
+        channel_owners = (
+            ("dingtalk", dingtalk_channel, dingtalk_task, True),
+            ("telegram", telegram_channel, telegram_task, False),
+            ("discord", discord_channel, discord_task, False),
+            ("slack", slack_channel, slack_task, False),
+            ("whatsapp", whatsapp_channel, whatsapp_task, False),
+            ("wecom", wecom_channel, wecom_task, False),
+            ("wechat", wechat_channel, wechat_task, False),
+            ("ssh", ssh_channel, ssh_task, False),
+        )
+        for channel_id, channel, task, suppress_type_error in channel_owners:
+            if task is not None:
+                await _run_gateway_shutdown_phase(
+                    f"{channel_id}.task",
+                    lambda task=task, suppress_type_error=suppress_type_error: (
+                        _cancel_gateway_owned_task(
+                            task,
+                            suppress_type_error=suppress_type_error,
+                        )
+                    ),
+                    shutdown_failures,
+                )
+            if channel is not None:
+                await _run_gateway_shutdown_phase(
+                    f"{channel_id}.stop",
+                    lambda channel=channel: channel.stop(),
+                    shutdown_failures,
+                )
+        if ssh_channel is not None:
+            await _run_gateway_shutdown_phase(
+                "ssh.clear_key_issuer",
+                lambda: _set_agentos_ssh_key_issuer(None, propagate_error=True),
+                shutdown_failures,
+            )
 
-        await cron_scheduler.stop()
-        await channel_manager.stop_dispatch()
-        await heartbeat_service.stop()
-        await message_handler.stop_forwarding()
-        await client.disconnect()
+        await _run_gateway_shutdown_phase(
+            "cron.stop",
+            lambda: cron_scheduler.stop(),
+            shutdown_failures,
+        )
+        await _run_gateway_shutdown_phase(
+            "dispatch.stop",
+            lambda: channel_manager.stop_dispatch(),
+            shutdown_failures,
+        )
+        await _run_gateway_shutdown_phase(
+            "heartbeat.stop",
+            lambda: heartbeat_service.stop(),
+            shutdown_failures,
+        )
+        await _run_gateway_shutdown_phase(
+            "forward.stop",
+            lambda: message_handler.stop_forwarding(),
+            shutdown_failures,
+        )
+        await _run_gateway_shutdown_phase(
+            "client.disconnect",
+            lambda: client.disconnect(),
+            shutdown_failures,
+        )
+        await _run_gateway_shutdown_phase(
+            "restart_cleanup",
+            lambda: _cancel_gateway_owned_task(_cleanup_task),
+            shutdown_failures,
+        )
 
-        _cleanup_task.cancel()
-        try:
-            await _cleanup_task
-        except (asyncio.CancelledError, Exception):
-            pass
-
+        if shutdown_failures:
+            logger.error(
+                "[App] Gateway shutdown completed with %d failure(s); first phase: %s",
+                len(shutdown_failures),
+                shutdown_failures.first_phase,
+            )
+            public_cancellation = shutdown_failures.take_caller_cancellation()
+            if public_cancellation is not None:
+                raise public_cancellation from None
+            public_failure = shutdown_failures.public_first_failure()
+            raise public_failure from None
         logger.info("[App] Gateway stopped")
 
     if restart_requested:

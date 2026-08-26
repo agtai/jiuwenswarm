@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import logging
 import json
 import os
@@ -8,14 +9,16 @@ import queue
 import re
 import threading
 import time
+import weakref
+from collections import OrderedDict
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir
 
 
 logger = logging.getLogger(__name__)
-_FILE_LOCK = threading.Lock()
 _WRITE_QUEUE: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue(maxsize=20000)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
@@ -23,9 +26,60 @@ _LEGACY_HISTORY_FILENAME = "history.json"
 _JSONL_HISTORY_FILENAME = "history.jsonl"
 _LEGACY_HISTORY_ENV = "JIUWENSWARM_USE_LEGACY_HISTORY_JSON"
 _HEARTBEAT_OK = "HEARTBEAT_OK"
+_SESSION_STATE_RECENT_LIMIT = 128
 _VALID_SESSION_ID = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,78}[A-Za-z0-9])?$"
 )
+
+
+class _SessionHistoryState:
+    """Process-local lock and rebuildable formal-idempotency acceleration."""
+
+    __slots__ = ("lock", "formal_index", "formal_index_path", "__weakref__")
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.formal_index: dict[str, str | None] | None = None
+        self.formal_index_path: Path | None = None
+
+
+_SESSION_STATE_REGISTRY_LOCK = threading.Lock()
+_SESSION_STATE_WEAK: weakref.WeakValueDictionary[str, _SessionHistoryState] = (
+    weakref.WeakValueDictionary()
+)
+_SESSION_STATE_RECENT: OrderedDict[str, _SessionHistoryState] = OrderedDict()
+
+
+def _get_session_history_state(session_id: str) -> _SessionHistoryState:
+    """Return one exact state while retaining only a bounded recent working set.
+
+    The weak registry prevents an active state from being duplicated if it is evicted
+    from the bounded strong LRU.  Eviction only loses acceleration; JSONL remains the
+    business source of truth and the index is rebuilt on the next formal append.
+    """
+
+    with _SESSION_STATE_REGISTRY_LOCK:
+        state = _SESSION_STATE_WEAK.get(session_id)
+        if state is None:
+            state = _SessionHistoryState()
+            _SESSION_STATE_WEAK[session_id] = state
+        _SESSION_STATE_RECENT.pop(session_id, None)
+        _SESSION_STATE_RECENT[session_id] = state
+        while len(_SESSION_STATE_RECENT) > _SESSION_STATE_RECENT_LIMIT:
+            _SESSION_STATE_RECENT.popitem(last=False)
+        return state
+
+
+@contextmanager
+def _session_history_lock(
+    session_id: str,
+) -> Iterator[_SessionHistoryState]:
+    """Serialize every in-process mutation of one normalized Session history."""
+
+    sid = str(session_id or "").strip()
+    state = _get_session_history_state(sid)
+    with state.lock:
+        yield state
 # Gateway may inline @path as <file-content>...</file-content> before chat.send.
 # History should keep the short @path form so jsonl rows stay one physical line
 # and refresh UI does not load megabytes of file body.
@@ -228,23 +282,12 @@ def use_legacy_history_json() -> bool:
 
 
 def get_write_history_path(session_id: str) -> Path:
-    """Return the preferred durable history write target for a session."""
-    if use_legacy_history_json():
-        return _history_file(session_id)
+    """Return the JSONL business source of truth for new mutations."""
     return _history_jsonl_file(session_id)
 
 
 def get_read_history_path(session_id: str) -> Path:
-    """Return the preferred history source, falling back to legacy json."""
-    if use_legacy_history_json():
-        legacy_path = _history_file(session_id, create=False)
-        if legacy_path.exists():
-            return legacy_path
-        jsonl_path = _history_jsonl_file(session_id, create=False)
-        if jsonl_path.exists():
-            return jsonl_path
-        return legacy_path
-
+    """Return JSONL when present, falling back to the legacy migration input."""
     jsonl_path = _history_jsonl_file(session_id, create=False)
     if jsonl_path.exists():
         return jsonl_path
@@ -354,32 +397,163 @@ def _append_record_jsonl(path: Path, record: dict[str, Any]) -> None:
         fh.write("\n")
 
 
-def _ensure_jsonl_bootstrap(session_id: str) -> Path:
-    jsonl_path = _history_jsonl_file(session_id)
-    if jsonl_path.exists():
-        return jsonl_path
+def _invalidate_formal_index(state: _SessionHistoryState) -> None:
+    state.formal_index = None
+    state.formal_index_path = None
 
-    legacy_path = _history_file(session_id)
-    if legacy_path.exists():
-        legacy_records = _read_history(legacy_path)
-        _write_records_to_path(jsonl_path, legacy_records)
-    else:
-        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-    return jsonl_path
+
+def _canonical_record_digest(record: dict[str, Any]) -> str:
+    # Digest the JSON value that a later reader observes, not Python-only key types.
+    normalized = json.loads(json.dumps(record, ensure_ascii=False))
+    payload = json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _record_formal_digest(
+    index: dict[str, str | None], record: dict[str, Any]
+) -> None:
+    record_id = record.get("id")
+    if not isinstance(record_id, str) or not record_id.strip():
+        return
+    digest = _canonical_record_digest(record)
+    if record_id not in index:
+        index[record_id] = digest
+    elif index[record_id] != digest:
+        # A pre-existing conflicting duplicate must never be accepted as an exact replay.
+        index[record_id] = None
+
+
+def _read_jsonl_records_for_formal_index(path: Path) -> list[dict[str, Any]]:
+    """Read exact persisted objects once without presentation-time normalization."""
+
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("formal history index rebuild failed") from exc
+    for lineno, raw_line in enumerate(text.split("\n"), start=1):
+        line = raw_line.rstrip("\r").strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(
+                f"formal history index line {lineno} is invalid"
+            ) from exc
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"formal history index line {lineno} is not an object"
+            )
+        records.append(item)
+    return records
+
+
+def _build_formal_history_index(path: Path) -> dict[str, str | None]:
+    index: dict[str, str | None] = {}
+    for record in _read_jsonl_records_for_formal_index(path):
+        _record_formal_digest(index, record)
+    return index
+
+
+def _repair_jsonl_tail(path: Path) -> bool:
+    """Repair one interrupted final JSONL row before a later append.
+
+    A complete JSON object missing only its delimiter is preserved by adding ``\n``.
+    An invalid partial row is truncated to the previous delimiter.  The operation is
+    intentionally process-local and makes no fsync or multi-process durability claim.
+    """
+
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+
+    with path.open("r+b") as fh:
+        end = fh.seek(0, os.SEEK_END)
+        fh.seek(end - 1)
+        if fh.read(1) == b"\n":
+            return False
+
+        cursor = end
+        chunks: list[bytes] = []
+        truncate_at = 0
+        while cursor > 0:
+            start = max(0, cursor - 64 * 1024)
+            fh.seek(start)
+            chunk = fh.read(cursor - start)
+            newline = chunk.rfind(b"\n")
+            if newline >= 0:
+                truncate_at = start + newline + 1
+                chunks.append(chunk[newline + 1 :])
+                break
+            chunks.append(chunk)
+            cursor = start
+
+        tail = b"".join(reversed(chunks))
+        try:
+            decoded = tail.rstrip(b"\r").decode("utf-8")
+            item = json.loads(decoded)
+            complete_object = isinstance(item, dict)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            complete_object = False
+
+        if complete_object:
+            fh.seek(end)
+            fh.write(b"\n")
+        else:
+            fh.truncate(truncate_at)
+    return True
+
+
+def _ensure_jsonl_bootstrap(session_id: str) -> Path:
+    with _session_history_lock(session_id) as state:
+        jsonl_path = _history_jsonl_file(session_id)
+        if jsonl_path.exists():
+            return jsonl_path
+
+        legacy_path = _history_file(session_id)
+        if legacy_path.exists():
+            legacy_records = _read_history(legacy_path)
+            _write_records_to_path(jsonl_path, legacy_records)
+            _invalidate_formal_index(state)
+        else:
+            jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        return jsonl_path
 
 
 def _ensure_legacy_json_bootstrap(session_id: str) -> Path:
-    legacy_path = _history_file(session_id)
-    if legacy_path.exists():
+    with _session_history_lock(session_id) as state:
+        legacy_path = _history_file(session_id)
+        if legacy_path.exists():
+            return legacy_path
+
+        jsonl_path = _history_jsonl_file(session_id)
+        if jsonl_path.exists():
+            jsonl_records = _read_history_jsonl(jsonl_path)
+            _write_records_to_path(legacy_path, jsonl_records)
+            _invalidate_formal_index(state)
+        else:
+            legacy_path.parent.mkdir(parents=True, exist_ok=True)
         return legacy_path
 
-    jsonl_path = _history_jsonl_file(session_id)
-    if jsonl_path.exists():
-        jsonl_records = _read_history_jsonl(jsonl_path)
-        _write_records_to_path(legacy_path, jsonl_records)
-    else:
-        legacy_path.parent.mkdir(parents=True, exist_ok=True)
-    return legacy_path
+
+def _rewrite_session_history_records(
+    session_id: str, records: list[dict[str, Any]]
+) -> Path:
+    """Rewrite the JSONL truth under the Session mutation lock."""
+
+    sid = str(session_id or "").strip()
+    with _session_history_lock(sid) as state:
+        path = _ensure_jsonl_bootstrap(sid)
+        _write_records_to_path(path, records)
+        _invalidate_formal_index(state)
+        return path
 
 
 def write_history_records(
@@ -388,15 +562,10 @@ def write_history_records(
     *,
     preserve_existing_format: bool = True,
 ) -> Path:
-    """Rewrite a session's history in its current format, defaulting new sessions to jsonl."""
-    path = (
-        get_read_history_path(session_id)
-        if preserve_existing_format
-        else get_write_history_path(session_id)
-    )
-    with _FILE_LOCK:
-        _write_records_to_path(path, records)
-    return path
+    """Rewrite JSONL history; ``preserve_existing_format`` is compatibility-only."""
+
+    del preserve_existing_format
+    return _rewrite_session_history_records(session_id, records)
 
 
 _TEAM_RELEVANT_EVENT_TYPES = frozenset({
@@ -543,16 +712,16 @@ def read_session_history_records(session_id: str) -> list[dict[str, Any]]:
 
 
 def _write_item(session_id: str, item: dict[str, Any]) -> None:
-    with _FILE_LOCK:
-        if use_legacy_history_json():
-            target_path = _ensure_legacy_json_bootstrap(session_id)
-            records = _read_history(target_path)
-            records.append(item)
-            _write_records_to_path(target_path, records)
-            return
-
+    with _session_history_lock(session_id) as state:
         target_path = _ensure_jsonl_bootstrap(session_id)
+        if _repair_jsonl_tail(target_path):
+            _invalidate_formal_index(state)
         _append_record_jsonl(target_path, item)
+        if (
+            state.formal_index is not None
+            and state.formal_index_path == target_path.resolve(strict=False)
+        ):
+            _record_formal_digest(state.formal_index, item)
 
 
 def append_formal_history_record_idempotent(
@@ -563,6 +732,10 @@ def append_formal_history_record_idempotent(
     The record ``id`` is the idempotency key.  Unlike the legacy Chat writer,
     this seam intentionally performs no session metadata, cloud, or memory
     hooks; Live Voice CR owns the commit and PresentationAck boundaries.
+
+    JSONL is the business source of truth.  The digest index is only a bounded,
+    rebuildable single-process accelerator.  External file mutation and multiple
+    process writers are unsupported, and this seam makes no fsync durability promise.
     """
 
     sid = str(session_id or "").strip()
@@ -576,28 +749,26 @@ def append_formal_history_record_idempotent(
     if not isinstance(record_id, str) or not record_id.strip():
         raise ValueError("formal history record id must be non-empty")
 
-    with _FILE_LOCK:
-        target_path = (
-            _ensure_legacy_json_bootstrap(sid)
-            if use_legacy_history_json()
-            else _ensure_jsonl_bootstrap(sid)
-        )
-        records = (
-            _read_history(target_path)
-            if target_path.suffix.lower() != ".jsonl"
-            else _read_history_jsonl(target_path)
-        )
-        for existing in records:
-            if existing.get("id") != record_id:
-                continue
-            if existing == serialized:
+    with _session_history_lock(sid) as state:
+        target_path = _ensure_jsonl_bootstrap(sid)
+        resolved_path = target_path.resolve(strict=False)
+        if _repair_jsonl_tail(target_path):
+            _invalidate_formal_index(state)
+        if (
+            state.formal_index is None
+            or state.formal_index_path != resolved_path
+        ):
+            state.formal_index = _build_formal_history_index(target_path)
+            state.formal_index_path = resolved_path
+
+        digest = _canonical_record_digest(serialized)
+        if record_id in state.formal_index:
+            if state.formal_index[record_id] == digest:
                 return False
             raise ValueError("formal history idempotency conflict")
-        if target_path.suffix.lower() == ".jsonl":
-            _append_record_jsonl(target_path, serialized)
-        else:
-            records.append(serialized)
-            _write_records_to_path(target_path, records)
+
+        _append_record_jsonl(target_path, serialized)
+        state.formal_index[record_id] = digest
     return True
 
 
@@ -788,8 +959,8 @@ def truncate_history_records(*, session_id: str, cut_index: int) -> dict[str, An
     sid = (session_id or "default").strip() or "default"
     _WRITE_QUEUE.join()
 
-    fpath = get_read_history_path(sid)
-    with _FILE_LOCK:
+    with _session_history_lock(sid) as state:
+        fpath = get_read_history_path(sid)
         if not fpath.exists():
             return {"remaining_records": 0, "removed_records": 0}
         history = load_history_records(sid)
@@ -801,7 +972,9 @@ def truncate_history_records(*, session_id: str, cut_index: int) -> dict[str, An
         if cut_index > total:
             cut_index = total
         truncated = history[:cut_index]
-        _write_records_to_path(fpath, truncated)
+        target_path = _ensure_jsonl_bootstrap(sid)
+        _write_records_to_path(target_path, truncated)
+        _invalidate_formal_index(state)
         return {
             "remaining_records": len(truncated),
             "removed_records": total - len(truncated),

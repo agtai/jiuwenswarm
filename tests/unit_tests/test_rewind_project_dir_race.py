@@ -101,7 +101,7 @@ def test_compact_passes_explicit_project_dir(wired, tmp_path):
 
     ds, order = wired
     with patch(
-            "jiuwenswarm.agents.harness.common.session_ops_service._write_records_to_path"
+            "jiuwenswarm.agents.harness.common.session_ops_service._rewrite_session_history_records"
     ):
         compact_partial_session(session_id="sess-race", turn_index=2, direction="from")
 

@@ -190,6 +190,26 @@ def test_stale_synthesis_response_produces_no_new_chunk() -> None:
     assert raised.value.reason == "STALE_RESPONSE_OUTPUT"
 
 
+def test_stale_synthesis_response_cannot_publish_completed_terminal() -> None:
+    """L2: replacement fences terminal output as well as audio chunks."""
+
+    port = SynthesisPort(capability())
+    first = ResponseRef("interaction-1", "response-1", 0)
+    second = ResponseRef("interaction-1", "response-2", 1)
+    plan = port.create_render_plan("Hello", "Hello")
+    port.activate_response(first)
+    port.start(
+        SynthesisRequest("synthesis-1", first, "unit-1", 0, 5, plan, SpeechMode.STREAM)
+    )
+    port.activate_response(second)
+
+    with pytest.raises(ContractViolation) as raised:
+        port.complete("synthesis-1")
+
+    assert raised.value.reason == "STALE_RESPONSE_OUTPUT"
+    assert port._requests["synthesis-1"][2] is False
+
+
 def test_invalid_confidence_threshold_and_fallback_provenance_reject() -> None:
     port = RecognitionPort(capability())
     session = port.start("session", SpeechMode.BATCH)

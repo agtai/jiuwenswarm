@@ -557,7 +557,7 @@ class StreamingRecognitionRouteOwner:
             cleanup_process_control: BaseException | None = None
             if handle.failure is not None:
                 try:
-                    await self._bounded_provider_call(
+                    await self._bounded_provider_cleanup_call(
                         lambda: handle.provider.cancel_recognition(
                             handle.ref, reason="product_streaming_fallback"
                         ),
@@ -601,7 +601,7 @@ class StreamingRecognitionRouteOwner:
         # allowing revoked authority to keep consuming Provider resources.
         process_control: BaseException | None = None
         try:
-            await self._bounded_provider_call(
+            await self._bounded_provider_cleanup_call(
                 lambda: handle.provider.cancel_recognition(
                     handle.ref, reason="product_streaming_route_revoked"
                 ),
@@ -1157,6 +1157,28 @@ class StreamingRecognitionRouteOwner:
         if retained is not None and retained[0] is identity and retained[1] is task:
             self._provider_close_tasks.pop(identity_key, None)
             self._complete_provider_close_obligation(identity_key, identity)
+
+    async def _bounded_provider_cleanup_call(
+        self,
+        factory: Callable[[], Awaitable[_T]],
+        *,
+        timeout_seconds: float,
+        task_name: str,
+    ) -> _T:
+        task = self._start_provider_cleanup_task(factory, task_name=task_name)
+        try:
+            done, _pending = await asyncio.wait({task}, timeout=timeout_seconds)
+        except asyncio.CancelledError:
+            if not task.done():
+                task.cancel()
+            self._retain_provider_task(task)
+            raise
+        if task not in done:
+            task.cancel()
+            self._retain_provider_task(task)
+            raise TimeoutError("streaming provider operation timed out")
+        self._release_provider_cleanup_task_capacity(task)
+        return task.result()
 
     def _prune_provider_close_tasks(self) -> None:
         for identity_key, (identity, task) in tuple(self._provider_close_tasks.items()):

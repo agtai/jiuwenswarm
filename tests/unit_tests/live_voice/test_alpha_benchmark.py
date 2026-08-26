@@ -195,15 +195,74 @@ async def test_deterministic_runner_closes_sample_latency_and_failure_counts() -
     assert execution.samples[1].failure_class == "OSError"
     assert "private provider detail" not in repr(execution)
     result = execution.report.target_results[0]
-    assert result.sample_count == 3
+    assert result.sample_count == 2
     assert result.observed_failure_count == 1
-    assert result.p50_ms == pytest.approx(20.0)
+    assert result.p50_ms == pytest.approx(10.0)
     assert result.p95_ms == pytest.approx(70.0)
     assert result.failure_coverage_verified is True
-    assert result.target_met is True
-    assert execution.report.all_automated_targets_met is True
+    assert result.reason_codes == (
+        AlphaBenchmarkTargetReason.SAMPLE_COUNT_INCOMPLETE,
+    )
+    assert result.target_met is False
+    assert execution.report.all_automated_targets_met is False
     assert execution.report.binding_verified is False
     assert execution.report.alpha_gate_pass is False
+
+
+@pytest.mark.asyncio
+async def test_fast_failures_cannot_improve_success_latency_percentile() -> None:
+    """B20: latency population contains successes only; failures stay separate."""
+
+    correlations = tuple(f"correlation-{index}" for index in range(10))
+    benchmark_plan = AlphaBenchmarkPlan(
+        declared_candidate_sha=CANDIDATE,
+        declared_environment_id="alpha-local-1",
+        declared_evidence_set_id="alpha-evidence-1",
+        expected_correlations=correlations,
+        targets=(
+            target(
+                min_sample_count=2,
+                max_failure_count=8,
+                p50_max_ms=10.0,
+                p95_max_ms=None,
+            ),
+        ),
+    )
+    elapsed = (100.0, 100.0, *(1.0 for _ in range(8)))
+    ticks = iter(
+        tick
+        for index, duration_ms in enumerate(elapsed)
+        for tick in (index * 1.0, index * 1.0 + duration_ms / 1000.0)
+    )
+
+    def operation(*, fail: bool):
+        async def run() -> None:
+            if fail:
+                raise OSError("private failure")
+
+        return run
+
+    execution = await run_alpha_benchmark(
+        enabled=True,
+        plan=benchmark_plan,
+        cases=tuple(
+            AlphaBenchmarkCase(
+                f"case-{index}",
+                "rm-ingress",
+                correlation,
+                operation(fail=index >= 2),
+            )
+            for index, correlation in enumerate(correlations)
+        ),
+        monotonic=lambda: next(ticks),
+    )
+
+    result = execution.report.target_results[0]
+    assert result.sample_count == 2
+    assert result.observed_failure_count == 8
+    assert result.p50_ms == 100.0
+    assert result.target_met is False
+    assert AlphaBenchmarkTargetReason.P50_TARGET_EXCEEDED in result.reason_codes
 
 
 @pytest.mark.asyncio

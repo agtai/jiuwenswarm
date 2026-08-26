@@ -4,11 +4,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import ClassVar, Protocol
+from typing import Any, ClassVar, Protocol
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CommandEnvelope,
@@ -356,16 +357,18 @@ class PersistentTaskCore:
             .isoformat(timespec="seconds")
             .replace("+00:00", "Z")
         )
-        authority = self.store.read_durable_recovery_authority(
-            scope=scope, task_id=task_id
+        authority = await self._run_store(
+            self.store.read_durable_recovery_authority, scope=scope, task_id=task_id
         )
-        binding = self.store.read_durability_binding(
+        binding = await self._run_store(
+            self.store.read_durability_binding,
             scope=scope,
             task_id=task_id,
             origin_attempt_id=authority.producer_attempt.attempt_id,
         )
         owner_id = f"durability-recovery:{operator_id}:{uuid.uuid4().hex}"
-        claim = self.store.claim_durability_mutator(
+        claim = await self._run_store(
+            self.store.claim_durability_mutator,
             scope=scope,
             task_id=task_id,
             owner_id=owner_id,
@@ -381,8 +384,10 @@ class PersistentTaskCore:
         candidate_attempt_id = f"attempt-{uuid.uuid4().hex}"
         recovery_id = f"recovery-{uuid.uuid4().hex}"
         try:
-            checkpoints = self.store.read_durability_checkpoints(binding)
-            effects = self.store.read_durability_effects(binding)
+            checkpoints = await self._run_store(
+                self.store.read_durability_checkpoints, binding
+            )
+            effects = await self._run_store(self.store.read_durability_effects, binding)
             authorize = getattr(self.executor, "authorize_durable_recovery", None)
             if not callable(authorize):
                 raise FormalTaskViolation(
@@ -416,7 +421,8 @@ class PersistentTaskCore:
                     "Executor recovery facts are not exact",
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
-            return self.store.recover_durable_attempt(
+            return await self._run_store(
+                self.store.recover_durable_attempt,
                 authority,
                 recovery_id=recovery_id,
                 recovery_facts=facts,
@@ -429,7 +435,8 @@ class PersistentTaskCore:
                 admission_policy=self._admission_policy,
             )
         except BaseException:
-            self.store.release_durability_mutator(
+            await self._run_store(
+                self.store.release_durability_mutator,
                 scope=scope,
                 task_id=task_id,
                 owner_id=owner_id,
@@ -501,6 +508,124 @@ class PersistentTaskCore:
                 await sink(event, receipt.attempt)
             except Exception:  # noqa: BLE001 -- evidence never owns Task truth
                 continue
+
+    @staticmethod
+    async def _await_retained(task: asyncio.Task[Any]) -> Any:
+        """Join one owner through repeated cancellation before propagating it."""
+
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                if task.done() and task.cancelled():
+                    break
+                if cancellation is None:
+                    cancellation = error
+            except Exception:
+                # Read the settled task below so one earlier caller
+                # cancellation remains authoritative over ordinary failure.
+                break
+        ordinary_failure: Exception | None = None
+        try:
+            result = task.result()
+        except Exception as error:
+            ordinary_failure = error
+            result = None
+        if ordinary_failure is not None:
+            if cancellation is not None:
+                raise cancellation from None
+            raise ordinary_failure
+        if cancellation is not None:
+            raise cancellation from None
+        return result
+
+    @staticmethod
+    async def _run_store(
+        callable_: Callable[..., Any], /, *args: Any, **kwargs: Any
+    ) -> Any:
+        """Keep SQLite off-loop and retain ownership until its call settles."""
+
+        task = asyncio.create_task(asyncio.to_thread(callable_, *args, **kwargs))
+        return await PersistentTaskCore._await_retained(task)
+
+    async def _claim_outbox(
+        self, worker: str, *, observed_at: str | None = None
+    ) -> PersistentOutboxItem | None:
+        """Release an exact claim if its caller is cancelled during SQLite work."""
+
+        task = asyncio.create_task(
+            asyncio.to_thread(self.store.claim_outbox, worker, observed_at=observed_at)
+        )
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                if task.done() and task.cancelled():
+                    break
+                if cancellation is None:
+                    cancellation = error
+            except Exception:
+                # Apply the same caller-cancellation precedence as the common
+                # retained Store owner without swallowing BaseException.
+                break
+        ordinary_failure: Exception | None = None
+        try:
+            item = task.result()
+        except Exception as error:
+            ordinary_failure = error
+            item = None
+        if ordinary_failure is not None:
+            if cancellation is not None:
+                raise cancellation from None
+            raise ordinary_failure
+        if cancellation is None:
+            return item
+        if item is not None:
+            try:
+                await self._run_store(
+                    self.store.release_outbox,
+                    item,
+                    "outbox claim owner cancelled before Executor delivery",
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # The durable claim remains visible for lease recovery; an
+                # ordinary cleanup failure cannot replace caller cancellation.
+                pass
+        raise cancellation from None
+
+    async def _complete_adjustment_delivery(
+        self,
+        item: PersistentOutboxItem,
+        delivery: TaskAdjustmentDeliveryResult,
+    ) -> None:
+        """Keep Store truth and the Executor settlement fence under one owner."""
+
+        try:
+            settlement = await self._run_store(
+                self.store.complete_adjustment_outbox,
+                item,
+                delivery,
+            )
+        except FormalTaskViolation as error:
+            rejected = TaskAdjustmentSettlement(
+                TaskAdjustmentState.REJECTED,
+                False,
+            )
+            await self.executor.settle_adjustment(item, rejected)
+            try:
+                await self._run_store(self.store.release_outbox, item, str(error))
+            except FormalTaskViolation:
+                pass
+            raise FormalTaskViolation(
+                error.reason,
+                "Executor adjustment exists but Core rejected its evidence",
+                ErrorCode.RESULT_UNKNOWN,
+            ) from error
+        await self.executor.settle_adjustment(item, settlement)
 
     def execute(
         self,
@@ -1095,7 +1220,7 @@ class PersistentTaskCore:
         observed_at: str | None = None,
     ) -> bool:
         worker = worker_id or f"task-core-{uuid.uuid4().hex}"
-        item = self.store.claim_outbox(worker, observed_at=observed_at)
+        item = await self._claim_outbox(worker, observed_at=observed_at)
         if item is None:
             return False
         try:
@@ -1113,7 +1238,8 @@ class PersistentTaskCore:
                 and error.reason
                 in {"EXECUTOR_PROJECT_BUSY", "EXECUTOR_CAPACITY_EXHAUSTED"}
             ):
-                self.store.defer_admission(
+                await self._run_store(
+                    self.store.defer_admission,
                     item,
                     reason=error.reason,
                     policy=self._admission_policy,
@@ -1137,40 +1263,37 @@ class PersistentTaskCore:
                 ErrorCode.TIMEOUT,
                 ErrorCode.RESULT_UNKNOWN,
             }:
-                self.store.release_outbox(item, str(error))
+                await self._run_store(self.store.release_outbox, item, str(error))
                 raise
             else:
-                self.store.reject_outbox(item, error)
+                await self._run_store(self.store.reject_outbox, item, error)
                 return True
+        except asyncio.CancelledError as cancellation:
+            try:
+                await self._run_store(
+                    self.store.release_outbox,
+                    item,
+                    "outbox Executor delivery owner cancelled",
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            raise cancellation from None
         except Exception as error:
-            self.store.release_outbox(item, str(error))
+            await self._run_store(self.store.release_outbox, item, str(error))
             raise
         if item.kind is OutboxKind.ATTEMPT_ADJUST:
-            try:
-                settlement = self.store.complete_adjustment_outbox(
-                    item,
-                    adjustment_delivery,
-                )
-            except FormalTaskViolation as error:
-                rejected = TaskAdjustmentSettlement(
-                    TaskAdjustmentState.REJECTED,
-                    False,
-                )
-                await self.executor.settle_adjustment(item, rejected)
-                try:
-                    self.store.release_outbox(item, str(error))
-                except FormalTaskViolation:
-                    pass
-                raise FormalTaskViolation(
-                    error.reason,
-                    "Executor adjustment exists but Core rejected its evidence",
-                    ErrorCode.RESULT_UNKNOWN,
-                ) from error
-            await self.executor.settle_adjustment(item, settlement)
+            owner = asyncio.create_task(
+                self._complete_adjustment_delivery(item, adjustment_delivery)
+            )
+            await self._await_retained(owner)
             return True
         if item.kind is OutboxKind.ATTEMPT_DISPATCH and not delivery.observations:
-            self.store.release_outbox(
-                item, "dispatch returned no accepted Executor evidence"
+            await self._run_store(
+                self.store.release_outbox,
+                item,
+                "dispatch returned no accepted Executor evidence",
             )
             raise FormalTaskViolation(
                 "EXECUTOR_DISPATCH_RESULT_UNKNOWN",
@@ -1178,13 +1301,14 @@ class PersistentTaskCore:
                 ErrorCode.RESULT_UNKNOWN,
             )
         try:
-            self.store.complete_outbox(
+            await self._run_store(
+                self.store.complete_outbox,
                 item,
                 executor_ref=delivery.executor_ref,
                 observations=delivery.observations,
             )
         except FormalTaskViolation as error:
-            self.store.release_outbox(item, str(error))
+            await self._run_store(self.store.release_outbox, item, str(error))
             raise FormalTaskViolation(
                 error.reason,
                 f"Executor delivery exists but Core rejected its evidence: {error}",
@@ -1205,8 +1329,8 @@ class PersistentTaskCore:
         claimed_before = (
             (datetime.now(UTC) - _OUTBOX_CLAIM_LEASE).isoformat().replace("+00:00", "Z")
         )
-        reset_claims = self.store.reset_expired_outbox_claims(
-            claimed_before=claimed_before
+        reset_claims = await self._run_store(
+            self.store.reset_expired_outbox_claims, claimed_before=claimed_before
         )
         delivered = delivery_unavailable = 0
         while True:
@@ -1230,17 +1354,22 @@ class PersistentTaskCore:
         """Consume only Executor status evidence for canonical nonterminal attempts."""
 
         known = unavailable = lost = superseded = 0
-        for task, attempt in self.store.nonterminal_attempts():
+        nonterminal_attempts = await self._run_store(self.store.nonterminal_attempts)
+        for task, attempt in nonterminal_attempts:
             if attempt.executor_ref is None:
-                receipt = self.store.mark_reconciliation_pending(
-                    task.task_id, attempt.attempt_id, "ATTEMPT_NOT_YET_BOUND"
+                receipt = await self._run_store(
+                    self.store.mark_reconciliation_pending,
+                    task.task_id,
+                    attempt.attempt_id,
+                    "ATTEMPT_NOT_YET_BOUND",
                 )
                 if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
                     superseded += 1
                     continue
                 unavailable += 1
                 continue
-            receipt = self.store.mark_reconciliation_pending(
+            receipt = await self._run_store(
+                self.store.mark_reconciliation_pending,
                 task.task_id,
                 attempt.attempt_id,
                 "EXECUTOR_STATUS_QUERY",
@@ -1252,7 +1381,8 @@ class PersistentTaskCore:
             try:
                 resolution = await self.executor.status(task, attempt)
             except Exception as error:  # noqa: BLE001 -- isolate one Executor attempt
-                receipt = self.store.mark_reconciliation_pending(
+                receipt = await self._run_store(
+                    self.store.mark_reconciliation_pending,
                     task.task_id,
                     attempt.attempt_id,
                     f"EXECUTOR_STATUS_ERROR: {error}"[:1000],
@@ -1264,7 +1394,8 @@ class PersistentTaskCore:
                 continue
             if isinstance(resolution, ExecutorDeliveryResult):
                 if resolution.executor_ref != attempt.executor_ref:
-                    receipt = self.store.mark_reconciliation_pending(
+                    receipt = await self._run_store(
+                        self.store.mark_reconciliation_pending,
                         task.task_id,
                         attempt.attempt_id,
                         "EXECUTOR_STATUS_BINDING_MISMATCH",
@@ -1276,7 +1407,8 @@ class PersistentTaskCore:
                     continue
                 if not resolution.observations:
                     if attempt.selection is not None:
-                        receipt = self.store.mark_reconciliation_pending(
+                        receipt = await self._run_store(
+                            self.store.mark_reconciliation_pending,
                             task.task_id,
                             attempt.attempt_id,
                             "EXECUTOR_STATUS_SELECTION_PROOF_REQUIRED",
@@ -1286,7 +1418,8 @@ class PersistentTaskCore:
                             continue
                         unavailable += 1
                         continue
-                    receipt = self.store.mark_reconciliation_resolved(
+                    receipt = await self._run_store(
+                        self.store.mark_reconciliation_resolved,
                         task.task_id,
                         attempt.attempt_id,
                         "EXECUTOR_STATE_UNCHANGED",
@@ -1300,7 +1433,8 @@ class PersistentTaskCore:
             elif isinstance(resolution, ExecutorObservation):
                 observations = (resolution,)
             else:
-                receipt = self.store.mark_reconciliation_pending(
+                receipt = await self._run_store(
+                    self.store.mark_reconciliation_pending,
                     task.task_id,
                     attempt.attempt_id,
                     "EXECUTOR_STATUS_PROTOCOL_VIOLATION",
@@ -1317,7 +1451,8 @@ class PersistentTaskCore:
                 or final.executor_id != attempt.executor_id
                 or final.executor_ref != attempt.executor_ref
             ):
-                receipt = self.store.mark_reconciliation_pending(
+                receipt = await self._run_store(
+                    self.store.mark_reconciliation_pending,
                     task.task_id,
                     attempt.attempt_id,
                     "EXECUTOR_STATUS_BINDING_MISMATCH",
@@ -1343,7 +1478,8 @@ class PersistentTaskCore:
                 != expected_selection_binding
                 for observation in observations
             ):
-                receipt = self.store.mark_reconciliation_pending(
+                receipt = await self._run_store(
+                    self.store.mark_reconciliation_pending,
                     task.task_id,
                     attempt.attempt_id,
                     "EXECUTOR_STATUS_SELECTION_MISMATCH",
@@ -1355,11 +1491,14 @@ class PersistentTaskCore:
                 continue
             if final.resolution is ExecutorResolution.KNOWN:
                 try:
-                    receipt = self.store.apply_observations(observations)
+                    receipt = await self._run_store(
+                        self.store.apply_observations, observations
+                    )
                 except FormalTaskViolation as error:
                     if error.code is ErrorCode.INTERNAL:
                         raise
-                    receipt = self.store.mark_reconciliation_pending(
+                    receipt = await self._run_store(
+                        self.store.mark_reconciliation_pending,
                         task.task_id,
                         attempt.attempt_id,
                         f"EXECUTOR_EVIDENCE_REJECTED: {error.reason}",
@@ -1375,7 +1514,8 @@ class PersistentTaskCore:
                     known += 1
                     await self._publish_reconciliation_events(receipt)
             elif final.resolution is ExecutorResolution.LOST:
-                receipt = self.store.resolve_lost_attempt(
+                receipt = await self._run_store(
+                    self.store.resolve_lost_attempt,
                     task.task_id,
                     attempt.attempt_id,
                     final.error or "EXECUTOR_ATTEMPT_LOST",
@@ -1386,7 +1526,8 @@ class PersistentTaskCore:
                 lost += 1
                 await self._publish_reconciliation_events(receipt)
             else:
-                receipt = self.store.mark_reconciliation_pending(
+                receipt = await self._run_store(
+                    self.store.mark_reconciliation_pending,
                     task.task_id,
                     attempt.attempt_id,
                     final.error or "EXECUTOR_STATUS_UNAVAILABLE",
