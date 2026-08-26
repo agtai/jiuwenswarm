@@ -20,6 +20,14 @@ export const FEATURE_LIVE_VOICE_TASK_DEMO = import.meta.env.VITE_FEATURE_LIVE_VO
 
 export const FEATURE_LIVE_VOICE_INTEGRATED_P1 = import.meta.env.VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1 === 'true';
 
+const rawLiveVoicePlayoutStartupLeadMs = import.meta.env.VITE_LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS;
+
+/** Candidate WebAudio startup lead. BrowserAudioIOAdapter owns closed bounds. */
+export const LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS =
+  rawLiveVoicePlayoutStartupLeadMs === undefined
+    ? 250
+    : Number(rawLiveVoicePlayoutStartupLeadMs);
+
 /**
  * Cumulative P1/P2/P3alpha Web composition shell and diagnostics. Disabled by
  * default: enabling the shell discloses route facts but does not make missing

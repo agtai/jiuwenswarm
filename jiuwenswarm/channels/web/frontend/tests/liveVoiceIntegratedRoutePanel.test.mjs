@@ -2035,6 +2035,20 @@ test('formal P1 receives the exact Web request function without an option-droppi
   assert.doesNotMatch(admission, /request: \(method, params\) => productRequest\(method, params\)/);
 });
 
+test('formal P1 receives the candidate bounded WebAudio startup lead', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const admission = source.match(
+    /const startProductVoiceCaptureOwned = async \(\) => \{(?<body>[\s\S]*?)\n  const startProductVoiceCapture =/,
+  )?.groups?.body;
+
+  assert.ok(admission);
+  assert.match(source, /LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS/);
+  assert.match(
+    admission,
+    /playout_startup_lead_ms: LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS/,
+  );
+});
+
 test('voice Task origin is exact-session and exact-committed-text only', () => {
   const origin = Object.freeze({
     session_id: 'session-voice',

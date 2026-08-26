@@ -31,6 +31,14 @@ const MANUAL_EOT_FALLBACK = Object.freeze({
   visible: true,
 });
 
+test('formal P1 forwards the configured playout startup lead to browser audio', () => {
+  assert.match(productP1VoiceRouteSource, /playout_startup_lead_ms\?: number/);
+  assert.match(
+    productP1VoiceRouteSource,
+    /new BrowserAudioIOAdapter\(\{[\s\S]*?playoutStartupLeadMs: input\.playout_startup_lead_ms/,
+  );
+});
+
 function attachRealCaptureProcessor(worklet, sampleRate = 48_000) {
   let Processor = null;
   class FakeAudioWorkletProcessor {

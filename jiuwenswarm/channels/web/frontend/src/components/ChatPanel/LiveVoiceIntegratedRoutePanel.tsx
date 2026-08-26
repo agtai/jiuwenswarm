@@ -7,6 +7,7 @@ import {
   FEATURE_LIVE_VOICE_INTEGRATED_P1,
   FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION,
   FEATURE_LIVE_VOICE_TASK_DEMO,
+  LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS,
 } from '../../featureFlags';
 import {
   IntegratedWebRouteShell,
@@ -5522,6 +5523,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         enabled: true,
         expected_origin: window.location.origin,
         request: productRequest,
+        playout_startup_lead_ms: LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS,
         ...(l0CaptureStreamFactoryRef.current === null
           ? {}
           : { capture_stream_factory: l0CaptureStreamFactoryRef.current }),

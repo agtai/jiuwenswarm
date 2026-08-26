@@ -431,6 +431,7 @@ export class ProductP1VoiceRouteOwner {
       socket_factory?: DedicatedMediaSocketFactory;
       audio_environment?: BrowserAudioEnvironment;
       capture_stream_factory?: BrowserAudioCaptureStreamFactory;
+      playout_startup_lead_ms?: number;
       on_status?: (status: ProductP1VoiceStatus, reason: string | null) => void;
       on_concurrent_capture_started?: () => void;
       on_barge_in_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
@@ -451,6 +452,9 @@ export class ProductP1VoiceRouteOwner {
       enabled: this.#enabled,
       ...(input.audio_environment === undefined ? {} : { environment: input.audio_environment }),
       ...(input.capture_stream_factory === undefined ? {} : { captureStreamFactory: input.capture_stream_factory }),
+      ...(input.playout_startup_lead_ms === undefined
+        ? {}
+        : { playoutStartupLeadMs: input.playout_startup_lead_ms }),
       observer: {
         onCaptureFrame: frame => this.#acceptCaptureFrame(frame),
         onCaptureState: event => {

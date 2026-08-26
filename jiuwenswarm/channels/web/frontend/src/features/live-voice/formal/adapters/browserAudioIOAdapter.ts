@@ -376,7 +376,23 @@ const CAPTURE_PROCESSOR_NAME = 'jiuwenswarm-live-voice-capture-v1';
 // first sustained burst.  Schedule the browser graph slightly ahead so that
 // ordered 20 ms sources remain contiguous instead of exposing that Provider
 // interarrival gap as a click or a short dropout.
-const PLAYOUT_STARTUP_LEAD_SECONDS = 1.0;
+export const PLAYOUT_STARTUP_LEAD_MIN_MS = 160;
+export const PLAYOUT_STARTUP_LEAD_MAX_MS = 1000;
+export const PLAYOUT_STARTUP_LEAD_BASELINE_MS = 1000;
+
+function requirePlayoutStartupLeadMs(value: number): number {
+  if (
+    !Number.isSafeInteger(value)
+    || value < PLAYOUT_STARTUP_LEAD_MIN_MS
+    || value > PLAYOUT_STARTUP_LEAD_MAX_MS
+  ) {
+    throw new BrowserAudioIOViolation(
+      'INVALID_PLAYOUT_STARTUP_LEAD',
+      'playout startup lead must be an integer from 160 to 1000 ms',
+    );
+  }
+  return value;
+}
 
 const DISABLED_BROWSER_AUDIO_ENVIRONMENT: BrowserAudioEnvironment = Object.freeze({
   isSecureContext: false,
@@ -583,6 +599,7 @@ export interface BrowserAudioIOAdapterOptions {
   readonly captureStreamFactory?: BrowserAudioCaptureStreamFactory;
   readonly captureWorkletModuleUrl?: string;
   readonly monotonicNowMs?: () => number;
+  readonly playoutStartupLeadMs?: number;
 }
 
 export class BrowserAudioIOAdapter {
@@ -592,6 +609,7 @@ export class BrowserAudioIOAdapter {
   readonly #captureStreamFactory: BrowserAudioCaptureStreamFactory | null;
   readonly #captureWorkletModuleUrl: string;
   readonly #monotonicNowMs: () => number;
+  readonly #playoutStartupLeadSeconds: number;
   readonly #audioPort = new AudioPort();
   readonly #seenCaptureIds = new Set<string>();
   readonly #onVisibilityChange: BrowserEventListener;
@@ -626,6 +644,9 @@ export class BrowserAudioIOAdapter {
     this.#captureStreamFactory = this.#enabled ? (options.captureStreamFactory ?? null) : null;
     this.#captureWorkletModuleUrl = options.captureWorkletModuleUrl ?? new URL('./liveVoiceCaptureProcessor.js', import.meta.url).href;
     this.#monotonicNowMs = options.monotonicNowMs ?? defaultMonotonicNowMs;
+    this.#playoutStartupLeadSeconds = requirePlayoutStartupLeadMs(
+      options.playoutStartupLeadMs ?? PLAYOUT_STARTUP_LEAD_BASELINE_MS,
+    ) / 1000;
     this.#onVisibilityChange = () => {
       if (this.#closed || this.#environment.document?.visibilityState !== 'hidden') return;
       if (this.#pendingPlayoutGeneration !== null) this.#pageHiddenPlayoutGeneration = this.#pendingPlayoutGeneration;
@@ -1187,7 +1208,7 @@ export class BrowserAudioIOAdapter {
       completed: new Map(),
       acknowledged: new Map(),
       units: new Set(),
-      nextStartTime: context.currentTime + PLAYOUT_STARTUP_LEAD_SECONDS,
+      nextStartTime: context.currentTime + this.#playoutStartupLeadSeconds,
       stopped: false,
     };
     this.#playback = playback;

@@ -2187,6 +2187,34 @@ test('playout schedules exact current response and acknowledges only contiguous 
   assert.equal(adapter.businessCancelCount(), 0);
 });
 
+test('playout uses the exact injected bounded startup lead', async () => {
+  const fake = fakeEnvironment();
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    playoutStartupLeadMs: 250,
+  });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  assert.deepEqual(fake.contexts[0].bufferSources[0].starts, [10.25]);
+});
+
+test('playout rejects malformed or out-of-bound startup leads before audio effects', () => {
+  for (const invalid of [159, 1001, 250.5, Number.NaN]) {
+    const fake = fakeEnvironment();
+    assert.throws(
+      () => new BrowserAudioIOAdapter({
+        enabled: true,
+        environment: fake.environment,
+        playoutStartupLeadMs: invalid,
+      }),
+      error => error instanceof BrowserAudioIOViolation && error.reason === 'INVALID_PLAYOUT_STARTUP_LEAD',
+    );
+    assert.equal(fake.contexts.length, 0);
+  }
+});
+
 test('playout unlock exposes the actual PCM rate and reports idle context loss', async () => {
   const fake = fakeEnvironment();
   const events = [];
