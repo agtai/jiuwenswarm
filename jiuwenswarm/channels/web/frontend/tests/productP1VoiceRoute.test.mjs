@@ -172,10 +172,14 @@ class FakeAudioContext {
 }
 
 class FakeTrack extends FakeEventTarget {
-  id = 'track-1';
   kind = 'audio';
   readyState = 'live';
   muted = false;
+
+  constructor(id = 'track-1') {
+    super();
+    this.id = id;
+  }
 
   stop() {
     this.readyState = 'ended';
@@ -272,14 +276,17 @@ class FakeSocket {
   }
 }
 
-function audioEnvironment(createId = () => 'capture-1') {
+function audioEnvironment(
+  createId = () => 'capture-1',
+  createTrackId = () => 'track-1',
+) {
   const document = new FakeEventTarget();
   document.visibilityState = 'visible';
   const mediaDevices = new FakeEventTarget();
   mediaDevices.constraints = [];
   mediaDevices.getUserMedia = async constraints => {
     mediaDevices.constraints.push(constraints);
-    const track = new FakeTrack();
+    const track = new FakeTrack(createTrackId());
     track.muted = environment.initialTrackMuted;
     environment.track = track;
     return {
@@ -3629,6 +3636,8 @@ async function runConcurrentCaptureJourney(options = {}) {
   let socketFactory = null;
   let request = null;
   let receiptSubjectId = null;
+  const secondActivationHeld = deferred();
+  const releaseHeldSecondActivation = deferred();
   let finalDownlinkAckResolve;
   const finalDownlinkAckObserved = new Promise(resolve => {
     finalDownlinkAckResolve = resolve;
@@ -3931,7 +3940,7 @@ async function runConcurrentCaptureJourney(options = {}) {
           }
           concurrentCloseAudioReleased = environment.contexts.every(context => context.state === 'closed');
         }
-        return {
+        const activation = {
           status: 'active',
           reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
           subject_id: `media-subject-${activationCount}`,
@@ -3958,6 +3967,11 @@ async function runConcurrentCaptureJourney(options = {}) {
           binding,
           privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
         };
+        if (activationCount === 2 && options.holdSecondActivationForExit === true) {
+          secondActivationHeld.resolve();
+          await releaseHeldSecondActivation.promise;
+        }
+        return activation;
       }
       if (method === 'live_voice.speech.recognize_streaming_result') {
         return streamingRecognitionResult(params, 'duplex streaming text');
@@ -4079,6 +4093,26 @@ async function runConcurrentCaptureJourney(options = {}) {
     text: options.agentText ?? 'duplex Agent response',
   });
   void playing.catch(() => undefined);
+  if (options.holdSecondActivationForExit === true) {
+    await secondActivationHeld.promise;
+    concurrentClosePromise = owner.close();
+    concurrentCloseSnapshot = owner.status();
+    for (let turn = 0; turn < 100 && calls.filter(
+      ([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1'
+    ).length === 0; turn += 1) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    for (let turn = 0; turn < 100 && !environment.contexts.every(context => context.state === 'closed'); turn += 1) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    concurrentCloseAudioReleased = environment.contexts.every(context => context.state === 'closed');
+    // Settle close(A), including its single-flight finalizer, before B can
+    // publish its activation and attempt to retain A again.
+    for (let turn = 0; turn < 5; turn += 1) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    releaseHeldSecondActivation.resolve();
+  }
   if (options.sendSecondFrame !== false) {
     if (options.deferSuccessorCaptureUntilAfterPlayout === true) {
       await finalDownlinkAckObserved;
@@ -6477,7 +6511,7 @@ test('formal P1 non-advancing concurrent render clock stops playout with the exa
 test('formal P1 concurrent close waits for pending activation and revokes both exact authorities', async () => {
   const journey = await runConcurrentCaptureJourney({
     sendSecondFrame: false,
-    closeSecondCaptureWhilePending: true,
+    holdSecondActivationForExit: true,
   });
   const { owner, calls, statuses, sockets, playError, concurrentCloseSnapshot, concurrentCloseAudioReleased } = journey;
 
@@ -6489,8 +6523,14 @@ test('formal P1 concurrent close waits for pending activation and revokes both e
   assert.equal(playError?.reason, 'FORMAL_P1_CLOSED');
   assert.equal(statuses.includes('failed'), false);
   assert.deepEqual(owner.status(), { status: 'closed', reason: null });
-  assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1'));
-  assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
+  assert.equal(
+    calls.filter(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1').length,
+    1,
+  );
+  assert.equal(
+    calls.filter(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2').length,
+    1,
+  );
   assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
   assert.equal(
     sockets.some(socket => socket.serverBinding?.generation.id === 'capture-2'),
@@ -6571,4 +6611,322 @@ test('formal P1 never publishes a private transport error message', async () => 
     /synthesis authority is unavailable/
   );
   await owner.close();
+});
+
+test('a generation-time release preserves the utterance and Exit fences its pending combined recognition', async () => {
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const heldRecognition = deferred();
+  // A successor capture needs its own identity, exactly as a bounded rotation
+  // does; reusing one is rejected by the audio adapter.
+  const environment = audioEnvironment(
+    (() => {
+      let value = 0;
+      return () => `capture-${++value}`;
+    })(),
+    (() => {
+      let value = 0;
+      return () => `track-${++value}`;
+    })(),
+  );
+  const sockets = [];
+  const bindings = [];
+  const calls = [];
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      const next = new FakeSocket();
+      sockets.push(next);
+      queueMicrotask(() => next.open(bindings[sockets.length - 1] ?? binding));
+      return next;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
+        if (bindings.length % 2 === 0) {
+          assert.equal('recognition_predecessor_subject_id' in params, false);
+        } else {
+          assert.equal(params.recognition_predecessor_subject_id, `media-subject-${bindings.length}`);
+        }
+        // Each capture -- the original and the successor a speaking user gets
+        // -- carries its own exact browser capture identity.
+        const bound = {
+          ...binding,
+          lease_id: `media-lease-${bindings.length + 1}`,
+          track_id: params.track_id,
+          generation: { kind: 'capture', id: params.capture_id, value: params.capture_generation },
+        };
+        bindings.push(bound);
+        return {
+          ...streamingMediaActivation(bound, null, {
+            status: 'active',
+            capability_version: 'media.end_of_turn.v1',
+            detector: 'server_vad',
+            create_response: false,
+            interrupt_response: false,
+          }),
+          subject_id: `media-subject-${bindings.length}`,
+        };
+      }
+      if (method === 'live_voice.speech.recognize_batch') {
+        assert.equal(params.scope.subject_id, `media-subject-${bindings.length}`);
+        assert.equal(params.capture.capture_id, `capture-${bindings.length}`);
+        assert.equal(params.predecessor.subject_id, `media-subject-${bindings.length - 1}`);
+        assert.equal(params.predecessor.capture.capture_id, `capture-${bindings.length - 1}`);
+        const prefix = Buffer.from(params.predecessor.audio.data_base64, 'base64');
+        const tail = Buffer.from(params.audio.data_base64, 'base64');
+        assert.equal(new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength).getInt16(44, true) < 0, true);
+        assert.equal(new DataView(tail.buffer, tail.byteOffset, tail.byteLength).getInt16(44, true) > 0, true);
+        return calls.filter(([candidate]) => candidate === 'live_voice.speech.recognize_batch').length === 1
+          ? batchRecognitionResult(params, '算了，换个问题')
+          : heldRecognition.promise;
+      }
+      if (method === 'live_voice.speech.cancel') {
+        return { status: 'cancelled', reason_id: 'SPEECH_OPERATION_CANCELLED', ...params };
+      }
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      throw new Error(`unexpected release method ${method}`);
+    },
+  });
+  await startCaptureWithFirstFrame(
+    owner,
+    environment,
+    {
+      session_id: 'session-1',
+      interaction_id: 'interaction-1',
+      correlation_id: 'correlation-1',
+      activation_id: 'activation-1',
+      activation_generation: 7,
+    },
+    { samples: new Float32Array(960).fill(-0.25) },
+  );
+  assert.equal(owner.status().status, 'capturing');
+  assert.equal(owner.captureDiagnostics().provider_speech_start_observed, false);
+
+  // The answer arrived, so the silent listening window is released. The user
+  // starts speaking inside the release itself: the provider reports it while
+  // the capture is still stopping, which is exactly the window in which a
+  // release that retired its callbacks up front would drop the utterance.
+  const trackBeforeRelease = environment.track;
+  // The successor capture this release must produce is only ready once it
+  // delivers a frame, exactly like any other capture.
+  environment.nextWorkletFirstFrameSamples = new Float32Array(960).fill(0.25);
+  const releasing = owner.abandonCapture('formal_generation_listening_released');
+  const firstBinding = bindings[0];
+  sockets[0].onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: firstBinding.lease_id,
+      generation: firstBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 120,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  const released = await releasing;
+
+  assert.equal(released, false);
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  // `capturing` has to be physically true, not just a retained status: the
+  // release already ended the previous microphone track, so a successor
+  // capture must be live to record the rest of what the user is saying.
+  assert.notEqual(environment.track, trackBeforeRelease);
+  assert.equal(trackBeforeRelease.readyState, 'ended');
+  assert.equal(environment.track.readyState, 'live');
+  assert.equal(
+    sockets[0].sent
+      .filter(value => typeof value === 'string')
+      .map(JSON.parse)
+      .find(control => control.type === 'media.detach')?.reason_id,
+    'MEDIA_RECOGNITION_CONTINUATION',
+  );
+  assert.equal(
+    calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1'),
+    false,
+    'the predecessor authority must remain live until the combined recognition settles',
+  );
+
+  let automatic = null;
+  assert.equal(owner.armEndOfTurn(() => {
+    automatic = owner.stopAndRecognize();
+  }), true);
+  const successorBinding = bindings[1];
+  sockets[1].onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: successorBinding.lease_id,
+      generation: successorBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 120,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  sockets[1].onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.end_of_turn',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: successorBinding.lease_id,
+      generation: successorBinding.generation.value,
+      detector: 'server_vad',
+      speech_started_observed: true,
+      provider_start_ms: 120,
+      provider_end_ms: 720,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  for (let turn = 0; turn < 20 && automatic === null; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.notEqual(automatic, null);
+  assert.deepEqual(await automatic, {
+    text: '算了，换个问题',
+    voice_commit_receipt: 'batch-voice-receipt-1',
+  });
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_streaming_result').length, 0);
+  assert.equal(
+    calls.filter(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1').length,
+    1,
+  );
+  assert.equal(calls.some(([method]) => method.includes('agent') || method.includes('tool') || method.includes('task')), false);
+
+  // Repeat the exact continuation, but keep the combined Batch request pending.
+  // Exit must synchronously own its one cancel and release both raw-audio and
+  // media-authority owners even when browser audio cleanup stalls.
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+  }, { samples: new Float32Array(960).fill(-0.25) });
+  environment.nextWorkletFirstFrameSamples = new Float32Array(960).fill(0.25);
+  const secondRelease = owner.abandonCapture('formal_generation_listening_released');
+  const secondPredecessorBinding = bindings[2];
+  sockets[2].onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: secondPredecessorBinding.lease_id,
+      generation: secondPredecessorBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 120,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  assert.equal(await secondRelease, false);
+  let pendingAutomatic = null;
+  assert.equal(owner.armEndOfTurn(() => {
+    pendingAutomatic = owner.stopAndRecognize();
+    void pendingAutomatic.catch(() => undefined);
+  }), true);
+  const secondSuccessorBinding = bindings[3];
+  sockets[3].onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: secondSuccessorBinding.lease_id,
+      generation: secondSuccessorBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 120,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  sockets[3].onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.end_of_turn',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: secondSuccessorBinding.lease_id,
+      generation: secondSuccessorBinding.generation.value,
+      detector: 'server_vad',
+      speech_started_observed: true,
+      provider_start_ms: 120,
+      provider_end_ms: 720,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  for (let turn = 0; turn < 20 && calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length < 2; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.notEqual(pendingAutomatic, null);
+  const pendingBatch = calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').at(-1)[1];
+  const stalledAudioClose = deferred();
+  let stalledAudioCloseCalls = 0;
+  const openAudioContexts = environment.contexts.filter(context => context.state !== 'closed');
+  assert.ok(openAudioContexts.length > 0);
+  for (const context of openAudioContexts) {
+    context.close = async () => {
+      stalledAudioCloseCalls += 1;
+      await stalledAudioClose.promise;
+      context.state = 'closed';
+    };
+  }
+  const closing = owner.close();
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.cancel').length, 1);
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.cancel')[0][1].target_operation_id, pendingBatch.operation_id);
+  assert.equal(owner.captureDiagnostics().frame_count, 0);
+  assert.equal(
+    calls.filter(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-3').length,
+    1,
+  );
+  assert.equal(
+    calls.filter(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-4').length,
+    1,
+  );
+  heldRecognition.reject(Object.assign(new Error('request aborted after Exit fence'), {
+    code: 'REQUEST_ABORTED',
+  }));
+  for (let turn = 0; turn < 20 && stalledAudioCloseCalls === 0; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.ok(stalledAudioCloseCalls > 0);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.cancel').length, 1);
+  assert.equal(owner.status().status, 'cleanup_pending');
+  stalledAudioClose.resolve();
+  await closing;
+  assert.deepEqual(owner.status(), { status: 'closed', reason: null });
+  assert.equal(owner.captureDiagnostics().frame_count, 0);
+  assert.equal(
+    calls.filter(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-3').length,
+    1,
+  );
+  assert.equal(
+    calls.filter(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-4').length,
+    1,
+  );
+  assert.equal(
+    calls.some(([method]) => method.includes('agent') || method.includes('tool') || method.includes('task')),
+    false,
+  );
 });

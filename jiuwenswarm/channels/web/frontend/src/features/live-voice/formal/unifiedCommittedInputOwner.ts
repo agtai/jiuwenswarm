@@ -16,6 +16,16 @@ export type UnifiedCommittedInputBinding = Readonly<{
   activation_generation: number;
 }>;
 
+/**
+ * The exact unfinished response a committed final replaces. It carries no
+ * cancellation scope: the server always fences the conversational round only
+ * and never reaches a background Task.
+ */
+export type UnifiedSupersededResponse = Readonly<{
+  response_id: string;
+  response_generation: number;
+}>;
+
 export type UnifiedAuthoritativeFinal = Readonly<{
   request_id: string;
   commit_id: string;
@@ -199,8 +209,15 @@ export class ProductUnifiedCommittedInputOwner {
     return this.#pending !== null;
   }
 
-  submit(binding: UnifiedCommittedInputBinding, input: UnifiedAuthoritativeFinal): Promise<JsonObject> {
+  submit(
+    binding: UnifiedCommittedInputBinding,
+    input: UnifiedAuthoritativeFinal,
+    supersedes: UnifiedSupersededResponse | null = null,
+  ): Promise<JsonObject> {
     const requestId = requiredText(input.request_id, 'request_id', 256);
+    if (supersedes !== null && !Number.isSafeInteger(supersedes.response_generation)) {
+      return Promise.reject(new Error('supersedes_response generation is invalid'));
+    }
     const params = {
       session_id: requiredText(binding.session_id, 'session_id', 256),
       correlation_id: requiredText(binding.correlation_id, 'correlation_id', 256),
@@ -213,6 +230,16 @@ export class ProductUnifiedCommittedInputOwner {
       text: requiredContent(input.text, 'text'),
       input_state: 'final' as const,
       voice_commit_receipt: requiredText(input.voice_commit_receipt, 'voice_commit_receipt', 16_384),
+      // Only a replacement turn carries this key, so an ordinary turn keeps
+      // the exact request fingerprint the durable journal already retains.
+      ...(supersedes === null
+        ? {}
+        : {
+            supersedes_response: {
+              response_id: requiredText(supersedes.response_id, 'supersedes_response.response_id', 256),
+              response_generation: supersedes.response_generation,
+            },
+          }),
     };
     const fingerprint = JSON.stringify(params);
     const replay = this.#completed.get(fingerprint);

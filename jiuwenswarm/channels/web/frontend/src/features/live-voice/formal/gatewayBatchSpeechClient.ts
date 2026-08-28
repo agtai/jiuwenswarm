@@ -189,6 +189,10 @@ export interface FormalSynthesisDownlink {
 
 export interface FormalRecognitionInput {
   readonly frames: readonly Readonly<CapturedAudioFrame>[];
+  readonly predecessor?: Readonly<{
+    readonly subjectId: string;
+    readonly frames: readonly Readonly<CapturedAudioFrame>[];
+  }>;
   readonly locale: string;
   readonly correlationId: string;
   readonly interactionId?: string;
@@ -901,10 +905,49 @@ export class GatewayBatchSpeechClient {
     const capture = first.capture;
     const captureId = requiredText(capture.capture_id, 'capture_id');
     const captureGeneration = nonNegativeSafeInteger(capture.capture_generation, 'capture_generation');
-    const seenGeneration = this.#seenCaptures.get(captureId);
-    if (seenGeneration !== undefined) {
-      const reason = seenGeneration === captureGeneration ? 'STALE_RECOGNITION_SESSION' : 'CAPTURE_ID_REUSED';
-      const code = seenGeneration === captureGeneration ? 'STALE' : 'CONFLICT';
+    const predecessor = input.predecessor;
+    const predecessorFirst = predecessor?.frames[0];
+    const predecessorWav = predecessor === undefined
+      ? null
+      : capturedFramesToPcm16Wav(predecessor.frames);
+    const predecessorCapture = predecessorFirst?.capture ?? null;
+    if (
+      predecessor !== undefined
+      && (
+        predecessorFirst === undefined
+        || predecessorCapture === null
+        || requiredText(predecessor.subjectId, 'predecessor.subject_id') === this.#scope!.subject_id
+        || predecessorCapture.capture_id === captureId
+        || predecessorCapture.capture_generation === captureGeneration
+        || predecessorCapture.track_id === capture.track_id
+        || predecessorFirst.format.sample_rate_hz !== first.format.sample_rate_hz
+        || predecessorWav === null
+        || predecessorWav.byteLength + wav.byteLength - 44 > MAX_BATCH_AUDIO_BYTES
+      )
+    ) {
+      throw new GatewayBatchSpeechError(
+        'INVALID_ARGUMENT',
+        'CAPTURE_CONTINUATION_IDENTITY_CONFLICT',
+        'continued recognition requires two distinct bounded capture authorities',
+      );
+    }
+    const identities = [
+      ...(predecessorCapture === null
+        ? []
+        : [{
+            captureId: requiredText(predecessorCapture.capture_id, 'predecessor.capture_id'),
+            generation: nonNegativeSafeInteger(
+              predecessorCapture.capture_generation,
+              'predecessor.capture_generation',
+            ),
+          }]),
+      { captureId, generation: captureGeneration },
+    ];
+    for (const identity of identities) {
+      const seenGeneration = this.#seenCaptures.get(identity.captureId);
+      if (seenGeneration === undefined) continue;
+      const reason = seenGeneration === identity.generation ? 'STALE_RECOGNITION_SESSION' : 'CAPTURE_ID_REUSED';
+      const code = seenGeneration === identity.generation ? 'STALE' : 'CONFLICT';
       throw new GatewayBatchSpeechError(code, reason, 'capture identity was already consumed');
     }
     const baseOperation = this.#beginOperation(input.operationId, input.correlationId);
@@ -912,7 +955,9 @@ export class GatewayBatchSpeechClient {
     const prior = this.#activeRecognition;
     if (prior !== null) void this.#cancelBestEffort(prior);
     this.#activeRecognition = operation;
-    this.#boundedSet(this.#seenCaptures, captureId, captureGeneration);
+    for (const identity of identities) {
+      this.#boundedSet(this.#seenCaptures, identity.captureId, identity.generation);
+    }
     const timeoutMs = input.timeoutMs ?? DEFAULT_BATCH_TIMEOUT_MS;
     const requestId = this.#createId();
     let raw: unknown;
@@ -935,15 +980,32 @@ export class GatewayBatchSpeechClient {
             channel_count: 1,
             data_base64: encodeBase64(wav),
           },
+          ...(predecessor === undefined || predecessorCapture === null || predecessorWav === null
+            ? {}
+            : {
+                predecessor: {
+                  subject_id: requiredText(predecessor.subjectId, 'predecessor.subject_id'),
+                  capture: { ...predecessorCapture, final: true },
+                  audio: {
+                    format: 'wav_pcm16_mono',
+                    sample_rate_hz: predecessorFirst!.format.sample_rate_hz,
+                    channel_count: 1,
+                    data_base64: encodeBase64(predecessorWav),
+                  },
+                },
+              }),
           locale: requiredText(input.locale, 'locale'),
         },
         { timeoutMs: timeoutMs + 1000, signal: input.signal }
       );
     } catch (error) {
-      if (this.#activeRecognition?.token === operation.token) this.#activeRecognition = null;
+      const ownsCancellation = this.#activeRecognition?.token === operation.token;
+      if (ownsCancellation) this.#activeRecognition = null;
       if (
-        input.signal?.aborted ||
-        (typeof error === 'object' && error !== null && ['REQUEST_TIMEOUT', 'REQUEST_ABORTED'].includes(String((error as { code?: unknown }).code)))
+        ownsCancellation && (
+          input.signal?.aborted ||
+          (typeof error === 'object' && error !== null && ['REQUEST_TIMEOUT', 'REQUEST_ABORTED'].includes(String((error as { code?: unknown }).code)))
+        )
       ) {
         void this.#cancelBestEffort(operation);
       }

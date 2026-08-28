@@ -27,5 +27,16 @@ export const FEATURE_LIVE_VOICE_INTEGRATED_P1 = import.meta.env.VITE_FEATURE_LIV
  */
 export const FEATURE_LIVE_VOICE_INTEGRATED_WEB = import.meta.env.VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB === 'true';
 
+/**
+ * Hands-free interruption of an Agent answer that is still being generated.
+ *
+ * Default-off: enabling it opens a listening window between turn submission and
+ * first audio, which changes microphone occupancy, echo exposure and capture
+ * cost for every hands-free turn. The server-side fence it drives is bounded to
+ * the conversational round and never reaches a background Task.
+ */
+export const FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION =
+  import.meta.env.VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION === 'true';
+
 /** Destructive formal task control stays separately default-off. */
 export const FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION = import.meta.env.VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION === 'true';

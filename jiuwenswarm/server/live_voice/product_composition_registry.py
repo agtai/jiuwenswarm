@@ -264,6 +264,7 @@ PRODUCT_COMPOSITION_METHODS = frozenset(
         _PRODUCT_P2_PRESENTATION_ACK_OPERATION,
         _PRODUCT_P2_PRESENTATION_FAILURE_OPERATION,
         "live_voice.composition.p2.barge_in",
+        "live_voice.composition.p2.interrupt_generation",
         "live_voice.composition.p3.confirmation.issue",
         "live_voice.composition.p3.intent",
         "live_voice.composition.p3.intent.status",
@@ -1020,6 +1021,9 @@ class AgentServerProductCompositionRegistry:
             str, _RetainedProductOperation
         ] = {}
         self._p2_barge_operations: dict[str, _RetainedProductOperation] = {}
+        self._p2_generation_interrupt_operations: dict[
+            str, _RetainedProductOperation
+        ] = {}
         self._p3_issue_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_mutation_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_intent_operations: dict[str, _RetainedProductOperation] = {}
@@ -3036,6 +3040,7 @@ class AgentServerProductCompositionRegistry:
         *,
         retained: _P2Route,
         ack: PresentationAck,
+        ack_reservation_id: int,
         params: Mapping[str, object],
         route: AuthorityRouteContext,
         request_id: str,
@@ -3098,6 +3103,7 @@ class AgentServerProductCompositionRegistry:
             accepted_outcome = await retained.activation_lease.acknowledge_presentation(
                 retained.binding,
                 item,
+                reservation_id=ack_reservation_id,
             )
             return accepted_outcome
 
@@ -6971,6 +6977,9 @@ class AgentServerProductCompositionRegistry:
                         "text",
                         "input_state",
                         "gateway_voice_claim",
+                        # Optional: the exact unfinished response this committed
+                        # speech replaces.  Absent means an ordinary next turn.
+                        "supersedes_response",
                     }
                 ),
             )
@@ -7010,6 +7019,9 @@ class AgentServerProductCompositionRegistry:
                     }
                 )
             ).hexdigest()
+            supersedes = self._parse_supersedes_response(
+                params.get("supersedes_response"), interaction_id=interaction_id
+            )
             fingerprint = hashlib.sha256(
                 canonical_json_bytes(
                     {
@@ -7025,6 +7037,20 @@ class AgentServerProductCompositionRegistry:
                             text_value.encode("utf-8")
                         ).hexdigest(),
                         "voice_identity": voice_identity,
+                        # Only a replacement turn adds this key, so an ordinary
+                        # turn keeps its already-durable fingerprint unchanged.
+                        **(
+                            {}
+                            if supersedes is None
+                            else {
+                                "supersedes": {
+                                    "response_id": supersedes.response_id,
+                                    "response_generation": (
+                                        supersedes.response_generation
+                                    ),
+                                }
+                            }
+                        ),
                     }
                 )
             ).digest()
@@ -7049,6 +7075,16 @@ class AgentServerProductCompositionRegistry:
                 retained_commit_id = commit_id
                 context = await retained.activation_lease.select_formal_context(
                     retained.binding
+                )
+            if supersedes is not None:
+                # Fence before any semantic routing so the replaced answer can
+                # never keep speaking while the new input is still being
+                # classified.  The action identifier is derived from the exact
+                # voice identity, so replay of this committed final fences once.
+                await retained.activation_lease.interrupt_generation(
+                    retained.binding,
+                    action_id=f"unified-interrupt-{voice_identity[:40]}",
+                    response=supersedes,
                 )
             commit = TurnCommit.from_dict(
                 {
@@ -7959,26 +7995,37 @@ class AgentServerProductCompositionRegistry:
                             ErrorCode.UNAVAILABLE,
                         )
 
-                    async def acknowledge() -> P3RouteResult:
-                        marked_delivery: _ProgressDelivery | None = None
-                        try:
-                            async with self._lock:
-                                with self._task_presentation_state_lock:
-                                    mapped = self._task_presentation_deliveries.get(
-                                        ack.ref
+                    marked_delivery: _ProgressDelivery | None = None
+                    ack_reservation_id = retained.activation_lease.reserve_presentation_ack(
+                        retained.binding,
+                        ack,
+                    )
+                    try:
+                        with self._task_presentation_state_lock:
+                            mapped = self._task_presentation_deliveries.get(ack.ref)
+                            if mapped is not None:
+                                marked_delivery = mapped[0]
+                                if marked_delivery.audio_ack_in_flight:
+                                    raise FormalTaskViolation(
+                                        "PRESENTATION_ACK_IN_FLIGHT",
+                                        "an exact Task audio ACK is already in flight",
+                                        ErrorCode.CONFLICT,
                                     )
-                                    if mapped is not None:
-                                        marked_delivery = mapped[0]
-                                        if marked_delivery.audio_ack_in_flight:
-                                            raise FormalTaskViolation(
-                                                "PRESENTATION_ACK_IN_FLIGHT",
-                                                "an exact Task audio ACK is already in flight",
-                                                ErrorCode.CONFLICT,
-                                            )
-                                        marked_delivery.audio_ack_in_flight = True
+                                marked_delivery.audio_ack_in_flight = True
+                    except BaseException:
+                        retained.activation_lease.release_presentation_ack(
+                            retained.binding,
+                            ack,
+                            ack_reservation_id,
+                        )
+                        raise
+
+                    async def acknowledge() -> P3RouteResult:
+                        try:
                             outcome = await self._acknowledge_task_voice_presentation(
                                 retained=retained,
                                 ack=ack,
+                                ack_reservation_id=ack_reservation_id,
                                 params=params,
                                 route=parsed[5],
                                 request_id=request_id,
@@ -7987,6 +8034,7 @@ class AgentServerProductCompositionRegistry:
                                 outcome = await retained.activation_lease.acknowledge_presentation(
                                     retained.binding,
                                     ack,
+                                    reservation_id=ack_reservation_id,
                                 )
                             if (
                                 outcome.accepted
@@ -8027,14 +8075,29 @@ class AgentServerProductCompositionRegistry:
                             )
                         finally:
                             if marked_delivery is not None:
-                                async with self._lock:
-                                    with self._task_presentation_state_lock:
-                                        marked_delivery.audio_ack_in_flight = False
+                                with self._task_presentation_state_lock:
+                                    marked_delivery.audio_ack_in_flight = False
+                            retained.activation_lease.release_presentation_ack(
+                                retained.binding,
+                                ack,
+                                ack_reservation_id,
+                            )
 
-                    task = asyncio.create_task(
-                        acknowledge(),
-                        name=f"live-voice-product-p2-ack:{request_id}",
-                    )
+                    try:
+                        task = asyncio.create_task(
+                            acknowledge(),
+                            name=f"live-voice-product-p2-ack:{request_id}",
+                        )
+                    except BaseException:
+                        if marked_delivery is not None:
+                            with self._task_presentation_state_lock:
+                                marked_delivery.audio_ack_in_flight = False
+                        retained.activation_lease.release_presentation_ack(
+                            retained.binding,
+                            ack,
+                            ack_reservation_id,
+                        )
+                        raise
                     entry = _RetainedProductOperation(
                         fingerprint,
                         task,
@@ -8539,6 +8602,234 @@ class AgentServerProductCompositionRegistry:
                         p2_binding=retained.binding,
                     )
                     self._p2_barge_operations[request_id] = entry
+            return await asyncio.shield(entry.task)
+        except FormalTaskViolation as exc:
+            return _error_result(
+                request_id, reason=exc.reason, code=exc.code, message=str(exc)
+            )
+
+    @staticmethod
+    def _parse_supersedes_response(
+        value: object, *, interaction_id: str
+    ) -> ResponseRef | None:
+        """Bind an optional replacement target to the exact routed interaction.
+
+        The browser never supplies the interaction: it is taken from the
+        already-authorized route binding, so a replacement turn cannot fence a
+        response belonging to a different interaction.
+        """
+
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            raise FormalTaskViolation(
+                "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                "supersedes_response must be an object",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if set(value) != {"response_id", "response_generation"}:
+            raise FormalTaskViolation(
+                "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                "supersedes_response fields are incomplete or unknown",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        response_id = _required_text(value.get("response_id"), "response_id")
+        generation = value.get("response_generation")
+        if (
+            type(generation) is not int
+            or generation < 0
+            or generation > MAX_SAFE_INTEGER
+        ):
+            raise FormalTaskViolation(
+                "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                "supersedes_response generation is invalid",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        return ResponseRef(interaction_id, response_id, generation)
+
+    async def handle_p2_interrupt_generation(
+        self,
+        *,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+    ) -> P3RouteResult:
+        """Fence one exact unfinished response while the Agent still generates.
+
+        This operation owns no cancellation-scope argument.  The runtime always
+        issues ``round.cancel`` against the exact conversational round, so a
+        browser can never escalate a spoken interruption into a background Task
+        cancellation through this seam.
+        """
+
+        if not self._settings.p2_enabled:
+            return _error_result(request_id, reason="PRODUCT_P2_DISABLED")
+        try:
+            _require_exact_params(
+                params,
+                frozenset(
+                    {
+                        "auth_token",
+                        "session_id",
+                        "correlation_id",
+                        "interaction_id",
+                        "activation_id",
+                        "activation_generation",
+                        "claimed_user_id",
+                        "claimed_project_id",
+                        "action_id",
+                        "response_id",
+                        "response_generation",
+                    }
+                ),
+            )
+            self._ensure_running()
+            parsed = self._parse_p2_route_binding(params, session_id=session_id)
+            action_id = _required_text(params.get("action_id"), "action_id")
+            response_id = _required_text(params.get("response_id"), "response_id")
+            response_generation = params.get("response_generation")
+            if (
+                type(response_generation) is not int
+                or response_generation < 0
+                or response_generation > MAX_SAFE_INTEGER
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                    "generation interruption response generation is invalid",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            fingerprint = canonical_json_bytes(
+                {key: value for key, value in params.items() if key != "auth_token"}
+            )
+            async with self._lock:
+                entry = self._p2_generation_interrupt_operations.get(request_id)
+                if entry is not None:
+                    if entry.p2_binding is None:
+                        raise RuntimeError(
+                            "retained P2 generation interruption lost its binding"
+                        )
+                    await self._require_p2_binding_authority_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                        binding=entry.p2_binding,
+                    )
+                    if entry.fingerprint != fingerprint:
+                        raise FormalTaskViolation(
+                            "PRODUCT_REQUEST_ID_CONFLICT",
+                            "generation interruption request_id cannot change binding",
+                            ErrorCode.CONFLICT,
+                        )
+                else:
+                    retained = await self._require_active_p2_route_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                    )
+                    self._require_product_request_not_evicted(
+                        "p2.interrupt_generation", request_id
+                    )
+                    if (
+                        len(self._p2_generation_interrupt_operations)
+                        >= self._PRODUCT_OPERATION_CAPACITY
+                        and not self._evict_completed_product_operation(
+                            self._p2_generation_interrupt_operations,
+                            namespace="p2.interrupt_generation",
+                        )
+                    ):
+                        raise FormalTaskViolation(
+                            "PRODUCT_OPERATION_LEDGER_FULL",
+                            "bounded generation interruption replay ledger is full",
+                            ErrorCode.UNAVAILABLE,
+                        )
+                    response = ResponseRef(parsed[2], response_id, response_generation)
+
+                    async def interrupt() -> P3RouteResult:
+                        try:
+                            outcome = (
+                                await retained.activation_lease.interrupt_generation(
+                                    retained.binding,
+                                    action_id=action_id,
+                                    response=response,
+                                )
+                            )
+                            return _success_result(
+                                request_id,
+                                {
+                                    "status": "generation_interrupted",
+                                    "session_id": retained.binding.session_id,
+                                    "correlation_id": retained.binding.correlation_id,
+                                    "interaction_id": retained.binding.interaction_id,
+                                    "activation_id": retained.binding.activation_id,
+                                    "activation_generation": (
+                                        retained.binding.activation_generation
+                                    ),
+                                    "action_id": outcome.action_id,
+                                    "response_id": response.response_id,
+                                    "response_generation": (
+                                        response.response_generation
+                                    ),
+                                    "cancel_scope": outcome.cancel_scope,
+                                    "fence_status": outcome.fence_status.value,
+                                    "fence_reason": outcome.fence_reason,
+                                    "round_id": outcome.round_id,
+                                    "round_cancel_accepted": (
+                                        None
+                                        if outcome.round_cancel is None
+                                        else outcome.round_cancel.accepted
+                                    ),
+                                    "round_cancel_reason": (
+                                        outcome.round_cancel_reason
+                                        if outcome.round_cancel is None
+                                        else outcome.round_cancel.reason
+                                    ),
+                                    "applied": (
+                                        False
+                                        if outcome.fence is None
+                                        else outcome.fence.applied
+                                    ),
+                                    "replayed": outcome.replayed,
+                                    "effect_ids": (
+                                        []
+                                        if outcome.fence is None
+                                        else list(outcome.fence.effect_ids)
+                                    ),
+                                },
+                                retained.manifest,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            return _error_result(
+                                request_id,
+                                reason=getattr(
+                                    exc,
+                                    "reason",
+                                    "PRODUCT_P2_GENERATION_INTERRUPT_FAILED",
+                                ),
+                                code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                                message=str(exc),
+                                manifest=retained.manifest,
+                            )
+
+                    task = asyncio.create_task(
+                        interrupt(),
+                        name=(
+                            f"live-voice-product-p2-generation-interrupt:{request_id}"
+                        ),
+                    )
+                    entry = _RetainedProductOperation(
+                        fingerprint,
+                        task,
+                        p2_binding=retained.binding,
+                    )
+                    self._p2_generation_interrupt_operations[request_id] = entry
             return await asyncio.shield(entry.task)
         except FormalTaskViolation as exc:
             return _error_result(
@@ -13923,6 +14214,7 @@ class AgentServerProductCompositionRegistry:
                 self._p2_ack_operations,
                 self._p2_presentation_failure_operations,
                 self._p2_barge_operations,
+                self._p2_generation_interrupt_operations,
                 self._p3_issue_operations,
                 self._p3_mutation_operations,
                 self._p3_intent_operations,

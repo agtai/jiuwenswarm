@@ -2079,6 +2079,136 @@ async def test_registry_returns_streaming_final_without_batch_audio_replay(
 
 
 @pytest.mark.asyncio
+async def test_continued_capture_uses_streaming_eot_without_minting_commit_receipt() -> (
+    None
+):
+    provider = _Provider()
+    owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
+        )
+    )
+    receipts: list[dict[str, object]] = []
+
+    async def issue_receipt(**binding: object) -> str:
+        receipts.append(dict(binding))
+        return "streaming-voice-receipt-must-not-be-issued"
+
+    registry = DedicatedMediaProductRegistry(enabled=True)
+    registry.set_provider_available(True)
+    registry.configure_streaming_recognition(owner, receipt_issuer=issue_receipt)
+    await registry.prepare_streaming_provider()
+    _trust_activation(registry)
+    predecessor_activation = registry.activate(
+        params=_activation_params(),
+        request_origin="https://voice.example.test",
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    predecessor = registry.consume_ticket(
+        str(predecessor_activation["media_ticket"]),
+        request_origin="https://voice.example.test",
+    )
+    assert predecessor is not None
+    await registry.begin_streaming_recognition(predecessor)
+    predecessor_frame = _frame(0)
+    registry.accept_frame(predecessor, predecessor_frame)
+    registry.accept_streaming_frame(predecessor, predecessor_frame)
+    registry.complete_route(
+        predecessor,
+        DedicatedMediaSocketLeafResult(
+            activated=True,
+            socket_touched=True,
+            attach_sent=True,
+            accepted_frames=1,
+            close_result=None,
+            reason_id=MediaDetachReason.RECOGNITION_CONTINUATION,
+        ),
+    )
+    await registry.finish_streaming_recognition(predecessor)
+    assert predecessor.recognition_continuation_predecessor is True
+    assert receipts == []
+    assert predecessor.streaming_voice_commit_receipt is None
+    with pytest.raises(
+        MediaTransportViolation, match="authority is absent or stale"
+    ):
+        await registry.streaming_recognition_result(
+            params={
+                "session_id": "session-1",
+                "subject_id": predecessor_activation["subject_id"],
+                "correlation_id": "correlation-1",
+                "interaction_id": "interaction-1",
+                "capture_id": "capture-1",
+                "capture_generation": 0,
+                "track_id": "track-1",
+            },
+            routed_session_id="session-1",
+            connection_id="connection-1",
+            request_origin="https://voice.example.test",
+        )
+
+    successor_params = {
+        **_activation_params(),
+        "capture_id": "capture-2",
+        "capture_generation": 1,
+        "track_id": "track-2",
+        "recognition_predecessor_subject_id": predecessor_activation["subject_id"],
+    }
+    successor_activation = registry.activate(
+        params=successor_params,
+        request_origin="https://voice.example.test",
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    successor = registry.consume_ticket(
+        str(successor_activation["media_ticket"]),
+        request_origin="https://voice.example.test",
+    )
+    assert successor is not None
+    assert successor.recognition_predecessor_subject_id == (
+        predecessor_activation["subject_id"]
+    )
+    await registry.begin_streaming_recognition(successor)
+    frame = _frame(0)
+    registry.accept_frame(successor, frame)
+    registry.accept_streaming_frame(successor, frame)
+    registry.complete_route(
+        successor,
+        DedicatedMediaSocketLeafResult(
+            activated=True,
+            socket_touched=True,
+            attach_sent=True,
+            accepted_frames=1,
+            close_result=None,
+            reason_id=MediaDetachReason.LOCAL_CLOSE,
+        ),
+    )
+    await registry.finish_streaming_recognition(successor)
+
+    assert receipts == []
+    assert successor.streaming_voice_commit_receipt is None
+    with pytest.raises(
+        MediaTransportViolation, match="authority is absent or stale"
+    ):
+        await registry.streaming_recognition_result(
+            params={
+                "session_id": "session-1",
+                "subject_id": successor_activation["subject_id"],
+                "correlation_id": "correlation-1",
+                "interaction_id": "interaction-1",
+                "capture_id": "capture-2",
+                "capture_generation": 1,
+                "track_id": "track-2",
+            },
+            routed_session_id="session-1",
+            connection_id="connection-1",
+            request_origin="https://voice.example.test",
+        )
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_fixed_media_socket_runs_streaming_stt_to_formal_receipt_without_batch_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

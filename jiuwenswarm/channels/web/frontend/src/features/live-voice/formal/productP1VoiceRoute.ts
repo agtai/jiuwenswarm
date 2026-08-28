@@ -130,6 +130,11 @@ interface ProductP1MediaCloseBinding {
   readonly activation_generation: number;
 }
 
+interface ProductP1RecognitionContinuation {
+  readonly authority: Readonly<ProductP1MediaCloseBinding>;
+  readonly frames: readonly Readonly<CapturedAudioFrame>[];
+}
+
 function objectValue(value: unknown, field: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`${field} must be an object`);
@@ -347,6 +352,7 @@ export class ProductP1VoiceRouteOwner {
   readonly #socketFactory: DedicatedMediaSocketFactory;
   readonly #onStatus?: (status: ProductP1VoiceStatus, reason: string | null) => void;
   readonly #onConcurrentCaptureStarted?: () => void;
+  readonly #onGenerationSpeechStart?: (event: Readonly<MediaSpeechStart>) => void;
   readonly #onBargeInSpeechStart?: (event: Readonly<MediaSpeechStart>) => void;
   readonly #onBargeInEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void;
   readonly #audio: BrowserAudioIOAdapter;
@@ -376,6 +382,7 @@ export class ProductP1VoiceRouteOwner {
   #operationGeneration = 0;
   #mediaCloseBinding: Readonly<ProductP1MediaCloseBinding> | null = null;
   readonly #retainedMediaAuthorities = new Map<string, Readonly<ProductP1MediaCloseBinding>>();
+  readonly #mediaAuthorityRevocations = new Map<string, Promise<void>>();
   #closePromise: Promise<void> | null = null;
   #failureCleanupPromise: Promise<void> | null = null;
   #failureCleanupReason: string | null = null;
@@ -401,7 +408,10 @@ export class ProductP1VoiceRouteOwner {
   #endOfTurnDelivered = false;
   #bargeInSpeechStartDelivered = false;
   #bargeInEndOfTurnDelivered = false;
+  #generationSpeechStartDelivered = false;
   #stopAndRecognizePromise: Promise<Readonly<ProductP1Recognition>> | null = null;
+  #recognitionContinuation: Readonly<ProductP1RecognitionContinuation> | null = null;
+  #abandonCapturePromise: Promise<boolean> | null = null;
   #captureRotationPromise: Promise<void> | null = null;
   #captureRotationSourceId: string | null = null;
   #idleCapturePausePromise: Promise<'paused' | 'speech_active'> | null = null;
@@ -432,6 +442,12 @@ export class ProductP1VoiceRouteOwner {
       on_concurrent_capture_started?: () => void;
       on_barge_in_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
       on_barge_in_end_of_turn?: (event: Readonly<MediaEndOfTurn>) => void;
+      /**
+       * Provider speech-start observed while an ordinary capture is open. The
+       * hands-free loop uses this to interrupt an Agent answer that is still
+       * being generated, before any of it has been spoken.
+       */
+      on_generation_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
     }>
   ) {
     this.#enabled = input.enabled === true;
@@ -443,6 +459,7 @@ export class ProductP1VoiceRouteOwner {
     this.#onBargeInSpeechStart = input.on_barge_in_speech_start;
     this.#onBargeInEndOfTurn = input.on_barge_in_end_of_turn;
     this.#l0Available = browserL0Available();
+    this.#onGenerationSpeechStart = input.on_generation_speech_start;
     this.#status = this.#enabled ? 'idle' : 'closed';
     this.#audio = new BrowserAudioIOAdapter({
       enabled: this.#enabled,
@@ -616,7 +633,9 @@ export class ProductP1VoiceRouteOwner {
     this.#endOfTurnDelivered = false;
     this.#bargeInSpeechStartDelivered = false;
     this.#bargeInEndOfTurnDelivered = false;
+    this.#generationSpeechStartDelivered = false;
     this.#stopAndRecognizePromise = null;
+    this.#recognitionContinuation = null;
     this.#failureCleanupReason = null;
     this.#frames = [];
     this.#captureSpeechObserved = false;
@@ -816,6 +835,152 @@ export class ProductP1VoiceRouteOwner {
     return operation;
   }
 
+  /**
+   * Release an open capture that produced no utterance, without recognizing it.
+   *
+   * The hands-free loop listens while an Agent answer is still being generated.
+   * When that answer arrives and nobody spoke, the listening window has to close
+   * before playout, and paying for a recognition round-trip on silence would add
+   * exactly the first-audio latency this listening window is meant to remove.
+   * Speech and playout authority are retained, so the next capture reuses them.
+   */
+  abandonCapture(reason: string): Promise<boolean> {
+    const retained = this.#abandonCapturePromise;
+    if (retained !== null) return retained;
+    const operation = this.#abandonCaptureOnce(requiredText(reason, 'abandon_reason')).finally(() => {
+      if (this.#abandonCapturePromise === operation) this.#abandonCapturePromise = null;
+    });
+    this.#abandonCapturePromise = operation;
+    return operation;
+  }
+
+  async #abandonCaptureOnce(reason: string): Promise<boolean> {
+    // A recognition already in flight owns this capture; an utterance the user
+    // actually spoke must never be discarded by a late playout arrival.
+    if (
+      this.#closed ||
+      this.#closeRequested ||
+      this.#failureCleanupPromise !== null ||
+      this.#stopAndRecognizePromise !== null ||
+      this.#status !== 'capturing' ||
+      this.#route === null ||
+      this.#captureProviderSpeechStartObserved
+    ) {
+      return false;
+    }
+    const rotation = this.#captureRotationPromise;
+    if (rotation !== null) await rotation;
+    if (this.#status !== 'capturing' || this.#route === null || this.#captureProviderSpeechStartObserved) {
+      return false;
+    }
+    // The operation generation is deliberately NOT advanced before the capture
+    // is physically stopped. Advancing it first makes every control event that
+    // arrives during `stopCapture` -- including an authoritative provider
+    // speech-start -- fail its own generation check and be dropped, which is
+    // exactly how a real utterance would be silently discarded by a release
+    // that was only ever meant for a silent window. Keeping the generation
+    // lets that speech-start land, so the check below can still see it.
+    const operationGeneration = this.#operationGeneration;
+    const route = this.#route;
+    try {
+      this.#captureStopExpected = true;
+      try {
+        await this.#audio.stopCapture(reason);
+      } finally {
+        this.#captureStopExpected = false;
+      }
+      this.#requireCurrent(operationGeneration);
+      // The user may have started speaking while the capture was stopping.
+      // `stopCapture` has already ended the microphone track by then, so the
+      // window cannot simply be left open: keeping the status at `capturing`
+      // without a live track would be a lie, and the rest of the utterance
+      // would never be captured. The uplink below is finished either way, and
+      // a speaker gets a real successor capture instead of a release.
+      const speakerStarted = this.#captureProviderSpeechStartObserved;
+      // The release is irreversible from here, so retire the callbacks of the
+      // capture being torn down.
+      const releaseGeneration = ++this.#operationGeneration;
+      const priorAuthority = this.#mediaCloseBinding;
+      // Finish the uplink the same way recognition does. The acknowledged
+      // frame count is the media receipt authority the answer about to be
+      // spoken depends on, so a released listening window must settle it
+      // rather than drop it. No recognition request is made.
+      this.#drainCaptureFrames();
+      const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
+      let pending = route.leaf.flush();
+      while ((this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) && !route.leaf.closed && Date.now() < deadline) {
+        await waitTurn();
+        this.#requireCurrent(releaseGeneration);
+        this.#drainCaptureFrames();
+        pending = route.leaf.flush();
+      }
+      if (this.#mediaSentFrames === this.#frames.length && pending.pending_frames === 0) {
+        this.#captureFramesAcked = this.#mediaSentFrames;
+        await awaitRouteCompletion(
+          route.leaf.completeUplink(
+            speakerStarted
+              ? 'MEDIA_RECOGNITION_CONTINUATION'
+              : 'MEDIA_LOCAL_CLOSE',
+          ),
+        );
+      } else {
+        route.leaf.close('MEDIA_LOCAL_CLOSE');
+      }
+      this.#requireCurrent(releaseGeneration);
+      const predecessorFrames = speakerStarted
+        ? Object.freeze([...this.#frames])
+        : null;
+      if (this.#route === route) this.#route = null;
+      this.#frames = [];
+      this.#captureSpeechObserved = false;
+      this.#captureProviderSpeechStartObserved = false;
+      this.#captureLocalActivityRecencyFrames = 0;
+      this.#captureUtteranceStartFrameIndex = null;
+      this.#mediaSentFrames = 0;
+      if (speakerStarted) {
+        // A real utterance is in progress. Rotate onto a successor capture the
+        // same way a bounded silent boundary does: the frames already uplinked
+        // are settled above, a fresh lease keeps recording what the user is
+        // still saying, and end-of-turn and recognition proceed normally. The
+        // caller sees `capturing` because the capture really is live.
+        if (priorAuthority === null || predecessorFrames === null || predecessorFrames.length === 0) {
+          throw new Error('generation interruption continuation lost predecessor authority');
+        }
+        this.#recognitionContinuation = Object.freeze({
+          authority: priorAuthority,
+          frames: predecessorFrames,
+        });
+        this.#captureFramesAcked = 0;
+        this.#speech = null;
+        await this.#startConcurrentCapture(
+          releaseGeneration,
+          priorAuthority.subject_id,
+        );
+        this.#requireCurrent(releaseGeneration);
+        this.#setStatus('capturing', this.#streamingFallbackReason);
+        this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
+        return false;
+      }
+      // `#captureFramesAcked` is the retained proof that this lease really
+      // captured and delivered audio; Agent playout requires it. Releasing a
+      // silent listening window must not erase the authority the answer about
+      // to be spoken depends on, exactly as an empty recognition does not.
+      this.#endOfTurnNegotiated = false;
+      this.#pendingSpeechStart = null;
+      this.#pendingEndOfTurn = null;
+      this.#endOfTurnHandler = null;
+      this.#endOfTurnDelivered = false;
+      this.#bargeInSpeechStartDelivered = false;
+      this.#bargeInEndOfTurnDelivered = false;
+      this.#generationSpeechStartDelivered = false;
+      this.#setStatus('idle', reason);
+      return true;
+    } catch (error) {
+      await this.#fail(error);
+      throw error;
+    }
+  }
+
   pauseIdleCaptureForNotification(): Promise<'paused' | 'speech_active'> {
     const retained = this.#idleCapturePausePromise;
     if (retained !== null) return retained;
@@ -933,42 +1098,59 @@ export class ProductP1VoiceRouteOwner {
       // unaffected.
       const recognitionInput = Object.freeze({
         frames: this.#frames,
+        ...(this.#recognitionContinuation === null
+          ? {}
+          : {
+              predecessor: Object.freeze({
+                subjectId: this.#recognitionContinuation.authority.subject_id,
+                frames: this.#recognitionContinuation.frames,
+              }),
+            }),
         locale: this.#locale,
         correlationId: requiredText(this.#correlationId, 'correlation_id'),
         interactionId: requiredText(this.#interactionId, 'interaction_id'),
       });
       let degradationReason: string | null = this.#streamingFallbackReason;
       let result: Readonly<FormalBatchRecognitionResult | FormalStreamingRecognitionResult> | null;
-      if (this.#streamingRecognitionAvailable) {
-        const streaming = await speech.recognizeStreamingFinal(recognitionInput);
-        this.#requireCurrent(operationGeneration);
-        if (streaming.status === 'completed') {
-          result = streaming.result;
-        } else if (streaming.fallback.fallback_tier === 'batch') {
-          degradationReason = streaming.fallback.reason_id;
-          this.#l0Record('fallback', null, undefined, 'fallback');
-          console.warn(`live_voice_speech_degradation reason=${degradationReason} target=batch visible=true`);
-          this.#setStatus('recognizing', degradationReason);
-          result = await speech.recognizeFinal(recognitionInput);
-        } else {
-          throw Object.assign(new Error('streaming recognition requires text fallback'), {
-            reason_id: streaming.fallback.reason_id,
-          });
-        }
-      } else {
-        if (degradationReason !== null) {
-          const fallbackTier = this.#streamingFallbackTier;
-          if (fallbackTier === null) throw new Error('streaming recognition fallback tier is absent');
-          this.#l0Record('fallback', null, undefined, 'fallback');
-          console.warn(`live_voice_speech_degradation reason=${degradationReason} target=${fallbackTier} visible=true`);
-          this.#setStatus('recognizing', degradationReason);
-          if (fallbackTier === 'text') {
+      const continuation = this.#recognitionContinuation;
+      try {
+        if (this.#streamingRecognitionAvailable && continuation === null) {
+          const streaming = await speech.recognizeStreamingFinal(recognitionInput);
+          this.#requireCurrent(operationGeneration);
+          if (streaming.status === 'completed') {
+            result = streaming.result;
+          } else if (streaming.fallback.fallback_tier === 'batch') {
+            degradationReason = streaming.fallback.reason_id;
+            this.#l0Record('fallback', null, undefined, 'fallback');
+            console.warn(`live_voice_speech_degradation reason=${degradationReason} target=batch visible=true`);
+            this.#setStatus('recognizing', degradationReason);
+            result = await speech.recognizeFinal(recognitionInput);
+          } else {
             throw Object.assign(new Error('streaming recognition requires text fallback'), {
-              reason_id: degradationReason,
+              reason_id: streaming.fallback.reason_id,
             });
           }
+        } else {
+          if (degradationReason !== null && continuation === null) {
+            const fallbackTier = this.#streamingFallbackTier;
+            if (fallbackTier === null) throw new Error('streaming recognition fallback tier is absent');
+            this.#l0Record('fallback', null, undefined, 'fallback');
+            console.warn(`live_voice_speech_degradation reason=${degradationReason} target=${fallbackTier} visible=true`);
+            this.#setStatus('recognizing', degradationReason);
+            if (fallbackTier === 'text') {
+              throw Object.assign(new Error('streaming recognition requires text fallback'), {
+                reason_id: degradationReason,
+              });
+            }
+          }
+          result = await speech.recognizeFinal(recognitionInput);
         }
-        result = await speech.recognizeFinal(recognitionInput);
+      } finally {
+        if (continuation !== null) {
+          this.#recognitionContinuation = null;
+          await this.#revokeMediaAuthority(continuation.authority);
+          this.#requireCurrent(operationGeneration);
+        }
       }
       // The formal STT result, not captured samples, is the retained product
       // fact. Release the browser copy as soon as the exact request settles.
@@ -1282,12 +1464,18 @@ export class ProductP1VoiceRouteOwner {
     this.#status = 'cleanup_pending';
     this.#reason = 'FORMAL_P1_CLEANUP_IN_PROGRESS';
     this.#publish();
+    // Exit owns the remote fences before any browser cleanup can suspend. The
+    // request stack may still hold both continuation arrays until its abort is
+    // observed, but the owner drops its copies synchronously and cannot issue a
+    // second cancel for the same active Speech token.
+    const recognitionFence = this.#fenceRecognitionForRelease();
+    this.#releaseRecognitionFrames();
+    const authorityCleanup = this.#beginMediaAuthorityRelease();
+    // Browser resources still start closing promptly while a late activation
+    // registers. They are deliberately ordered after the remote fences, and
+    // the authoritative release below observes the same single-flight result.
+    void this.#audio.close().catch(() => undefined);
     const retained = Promise.resolve().then(async () => {
-      try {
-        await this.#audio.close();
-      } catch {
-        /* authoritative release retries below */
-      }
       const pendingActivation = this.#pendingMediaActivation;
       if (pendingActivation !== null) {
         try {
@@ -1303,7 +1491,12 @@ export class ProductP1VoiceRouteOwner {
           /* retry below */
         }
       }
-      await this.#releaseResources('formal_route_close');
+      await this.#releaseResources(
+        'formal_route_close',
+        null,
+        recognitionFence,
+        authorityCleanup,
+      );
       this.#closed = true;
       this.#setStatus('closed', null);
     })
@@ -1404,18 +1597,26 @@ export class ProductP1VoiceRouteOwner {
     this.#endOfTurnDelivered = false;
     this.#bargeInSpeechStartDelivered = false;
     this.#bargeInEndOfTurnDelivered = false;
+    this.#generationSpeechStartDelivered = false;
     this.#stopAndRecognizePromise = null;
+    this.#recognitionContinuation = null;
     this.#reason = reason;
   }
 
-  async #startConcurrentCapture(operationGeneration: number): Promise<void> {
+  async #startConcurrentCapture(
+    operationGeneration: number,
+    recognitionPredecessorSubjectId: string | null = null,
+  ): Promise<void> {
     this.#captureStartupAudioReady = false;
     this.#captureStartupFailure = null;
     this.#mediaTerminalFailure = null;
     this.#captureReadinessPending = true;
     this.#captureReadinessPurpose = 'successor';
     try {
-      await this.#startConcurrentCaptureOwned(operationGeneration);
+      await this.#startConcurrentCaptureOwned(
+        operationGeneration,
+        recognitionPredecessorSubjectId,
+      );
       this.#captureStartupAudioReady = false;
       this.#captureStartupFailure = null;
       this.#mediaTerminalFailure = null;
@@ -1432,7 +1633,10 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
-  async #startConcurrentCaptureOwned(operationGeneration: number): Promise<void> {
+  async #startConcurrentCaptureOwned(
+    operationGeneration: number,
+    recognitionPredecessorSubjectId: string | null,
+  ): Promise<void> {
     const sessionId = requiredText(this.#sessionId, 'session_id');
     const interactionId = requiredText(this.#interactionId, 'interaction_id');
     const correlationId = requiredText(this.#correlationId, 'correlation_id');
@@ -1457,6 +1661,7 @@ export class ProductP1VoiceRouteOwner {
     this.#endOfTurnDelivered = false;
     this.#bargeInSpeechStartDelivered = false;
     this.#bargeInEndOfTurnDelivered = false;
+    this.#generationSpeechStartDelivered = false;
     this.#stopAndRecognizePromise = null;
     if (this.#l0Available) {
       this.#l0CaptureStartedAtMs = monotonicNowMs();
@@ -1484,13 +1689,21 @@ export class ProductP1VoiceRouteOwner {
         sample_rate_hz: metadata.frame_format.sample_rate_hz,
         locale: this.#locale,
         end_of_turn_capability: MEDIA_END_OF_TURN_CAPABILITY,
+        ...(recognitionPredecessorSubjectId === null
+          ? {}
+          : { recognition_predecessor_subject_id: recognitionPredecessorSubjectId }),
       });
       const activation = exactMediaActivation(activationValue);
       if (activation.status !== 'active' || activation.subprotocol !== 'live-voice.media.v1') {
         throw routeUnavailable(activation.reason_id);
       }
       const subjectId = requiredText(activation.subject_id, 'subject_id');
-      this.#retainedMediaAuthorities.set(priorAuthority.subject_id, priorAuthority);
+      // Transfer the predecessor only while this owner still holds it. Exit
+      // may have completed its exact revocation while this activation was
+      // pending; re-adding that closed subject would mint a duplicate close.
+      if (this.#mediaCloseBinding === priorAuthority) {
+        this.#retainedMediaAuthorities.set(priorAuthority.subject_id, priorAuthority);
+      }
       this.#mediaCloseBinding = Object.freeze({
         session_id: sessionId,
         subject_id: subjectId,
@@ -2179,8 +2392,25 @@ export class ProductP1VoiceRouteOwner {
     );
   }
 
-  async #revokeMediaAuthority(binding: Readonly<ProductP1MediaCloseBinding> | null = this.#mediaCloseBinding): Promise<void> {
-    if (binding === null) return;
+  #revokeMediaAuthority(binding: Readonly<ProductP1MediaCloseBinding> | null = this.#mediaCloseBinding): Promise<void> {
+    if (binding === null) return Promise.resolve();
+    const inFlight = this.#mediaAuthorityRevocations.get(binding.subject_id);
+    if (inFlight !== undefined) return inFlight;
+    if (
+      this.#mediaCloseBinding?.subject_id !== binding.subject_id
+      && !this.#retainedMediaAuthorities.has(binding.subject_id)
+    ) return Promise.resolve();
+    let operation: Promise<void>;
+    operation = this.#revokeMediaAuthorityOnce(binding).finally(() => {
+      if (this.#mediaAuthorityRevocations.get(binding.subject_id) === operation) {
+        this.#mediaAuthorityRevocations.delete(binding.subject_id);
+      }
+    });
+    this.#mediaAuthorityRevocations.set(binding.subject_id, operation);
+    return operation;
+  }
+
+  async #revokeMediaAuthorityOnce(binding: Readonly<ProductP1MediaCloseBinding>): Promise<void> {
     const value = exactObject(
       await this.#request(PRODUCT_P1_MEDIA_CLOSE_METHOD, { ...binding }),
       ['status', 'reason_id', 'session_id', 'subject_id', 'correlation_id', 'interaction_id', 'activation_id', 'activation_generation'],
@@ -2437,8 +2667,44 @@ export class ProductP1VoiceRouteOwner {
     this.#publish();
   }
 
-  async #releaseResources(reason: string, pendingFailureReason: string | null = null): Promise<void> {
+  #fenceRecognitionForRelease(): Promise<void> {
+    const recognitionGeneration = this.#route?.binding.generation;
+    return (
+      this.#speech !== null
+      && recognitionGeneration?.kind === 'capture'
+    )
+      ? this.#speech.fenceRecognition(recognitionGeneration.id)
+      : Promise.resolve();
+  }
+
+  #releaseRecognitionFrames(): void {
+    this.#frames = [];
+    this.#recognitionContinuation = null;
+  }
+
+  #beginMediaAuthorityRelease(): Promise<readonly PromiseSettledResult<void>[]> {
+    const authorities = new Map(this.#retainedMediaAuthorities);
+    if (this.#mediaCloseBinding !== null) {
+      authorities.set(this.#mediaCloseBinding.subject_id, this.#mediaCloseBinding);
+    }
+    return Promise.allSettled(
+      [...authorities.values()].map(authority => this.#revokeMediaAuthority(authority)),
+    );
+  }
+
+  async #releaseResources(
+    reason: string,
+    pendingFailureReason: string | null = null,
+    startedRecognitionFence: Promise<void> | null = null,
+    startedAuthorityCleanup: Promise<readonly PromiseSettledResult<void>[]> | null = null,
+  ): Promise<void> {
     this.#operationGeneration += 1;
+    const recognitionFence = startedRecognitionFence ?? this.#fenceRecognitionForRelease();
+    // Starting every exact revocation here, before browser audio cleanup, also
+    // catches an authority minted by a pending activation after close began.
+    // allSettled keeps an early remote failure handled while local cleanup is
+    // suspended; the final outcome remains retryable by close().
+    const authorityCleanup = this.#beginMediaAuthorityRelease();
     this.#captureReadinessPending = false;
     this.#captureReadinessPurpose = null;
     this.#captureStartupAudioReady = false;
@@ -2470,7 +2736,7 @@ export class ProductP1VoiceRouteOwner {
     // Raw PCM is local, memory-only recognition input. Release it before any
     // fallible browser or remote authority cleanup; retained close bindings are
     // sufficient for an exact retry and must never retain expired audio.
-    this.#frames = [];
+    this.#releaseRecognitionFrames();
     this.#captureSpeechObserved = false;
     this.#captureProviderSpeechStartObserved = false;
     this.#captureLocalActivityRecencyFrames = 0;
@@ -2479,17 +2745,21 @@ export class ProductP1VoiceRouteOwner {
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
     this.#playout = null;
+    await recognitionFence;
     try {
       await this.#audio.stopCapture(reason);
     } catch {
       /* close remains authoritative */
     }
     await this.#audio.close();
-    const authorities = new Map(this.#retainedMediaAuthorities);
-    if (this.#mediaCloseBinding !== null) {
-      authorities.set(this.#mediaCloseBinding.subject_id, this.#mediaCloseBinding);
+    if (startedAuthorityCleanup !== null) await startedAuthorityCleanup;
+    const authorityOutcomes = await authorityCleanup;
+    const authorityFailure = authorityOutcomes.find(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
+    );
+    if (authorityFailure !== undefined) {
+      throw authorityFailure.reason;
     }
-    for (const authority of authorities.values()) await this.#revokeMediaAuthority(authority);
   }
 
   #requireCurrent(operationGeneration: number): void {
@@ -2643,6 +2913,31 @@ export class ProductP1VoiceRouteOwner {
     }
     this.#pendingSpeechStart = event;
     this.#deliverBargeInSpeechStart(operationGeneration, route);
+    this.#deliverGenerationSpeechStart(operationGeneration, route);
+  }
+
+  #deliverGenerationSpeechStart(
+    operationGeneration: number,
+    route: ActiveBrowserDedicatedMediaRoute | null
+  ): void {
+    // An ordinary open capture is the hands-free listening window that runs
+    // while an Agent answer is still being generated. Playout-time barge-in
+    // owns the `playing` status separately and must not be duplicated here.
+    const event = this.#pendingSpeechStart;
+    if (
+      event === null ||
+      this.#onGenerationSpeechStart === undefined ||
+      this.#generationSpeechStartDelivered ||
+      this.#status !== 'capturing' ||
+      this.#pendingPlayout !== null ||
+      route === null ||
+      route !== this.#route ||
+      operationGeneration !== this.#operationGeneration
+    ) {
+      return;
+    }
+    this.#generationSpeechStartDelivered = true;
+    this.#onGenerationSpeechStart(event);
   }
 
   #deliverBargeInSpeechStart(

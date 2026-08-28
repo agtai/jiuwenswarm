@@ -530,6 +530,22 @@ class ConversationRuntime:
                 ),
             )
 
+    def response_fence_state(
+        self, ref: ResponseRef
+    ) -> tuple[bool, ResponseState] | None:
+        """Read one exact response fence without building a full snapshot.
+
+        High-frequency Agent output consults this on every token, so it must
+        stay O(1) and must read the same authoritative record ``apply_output``
+        enforces rather than a copy that could drift from it.
+        """
+
+        with self._lock:
+            record = self._responses.get(ref.response_id)
+            if record is None or record.ref != ref:
+                return None
+            return record.fenced, record.state
+
     def events(self) -> tuple[RuntimeEvent, ...]:
         with self._lock:
             return tuple(self._events)

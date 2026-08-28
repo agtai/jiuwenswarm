@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 
 from jiuwenswarm.server.live_voice import batch_speech
@@ -13,6 +15,50 @@ from scripts.live_voice.w2_rehearsal import w2_wav_speech_preflight
 
 _BUNDLE = Path(__file__).resolve().parents[1]
 _LIVE_VOICE_SCRIPTS = _BUNDLE.parent
+_REPO_ROOT = _LIVE_VOICE_SCRIPTS.parents[1]
+_FORMAL_SOURCE_BRANCHES = {
+    "codex/live-voice-generation-interruption-review-20260828",
+    "hx/0812_live_voice_w3",
+    "hx/0823_generation_interruption",
+}
+
+
+def _run_launcher(
+    *arguments: str,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(_LIVE_VOICE_SCRIPTS / "start_hands_free_demo.ps1"),
+            *arguments,
+        ],
+        cwd=_REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
+def _current_source_branch() -> str:
+    result = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+    branch = result.stdout.strip()
+    assert branch in _FORMAL_SOURCE_BRANCHES
+    return branch
 
 
 def test_wav_speech_preflight_emits_ascii_safe_json(monkeypatch) -> None:
@@ -91,6 +137,85 @@ def test_formal_web_validation_uses_the_controlled_runtime_profile() -> None:
     assert "--remote-debugging-port=$RemoteDebuggingPort" in launcher
     assert "?live_voice_l0_measurement=1" in launcher
     assert "l0_browser_capture.py" in launcher
+
+
+def test_launcher_exposes_only_the_reviewed_formal_source_branches() -> None:
+    launcher_path = str(_LIVE_VOICE_SCRIPTS / "start_hands_free_demo.ps1").replace(
+        "'", "''"
+    )
+    probe = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            (
+                f"$command = Get-Command -Name '{launcher_path}'; "
+                "$parameter = $command.Parameters['ExpectedSourceBranch']; "
+                "$validateSet = $parameter.Attributes | Where-Object { "
+                "$_ -is [System.Management.Automation.ValidateSetAttribute] }; "
+                "[ordered]@{ "
+                "type = $parameter.ParameterType.FullName; "
+                "values = @($validateSet.ValidValues) "
+                "} | ConvertTo-Json -Compress"
+            ),
+        ],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+
+    metadata = json.loads(probe.stdout)
+    assert metadata == {
+        "type": "System.String",
+        "values": sorted(_FORMAL_SOURCE_BRANCHES),
+    }
+
+
+def test_generation_interruption_requires_formal_web_validation_profile() -> None:
+    result = _run_launcher(
+        "-RuntimeProfile",
+        "hands-free-demo",
+        "-ExpectedSourceBranch",
+        "hx/0812_live_voice_w3",
+        "-GenerationInterruption",
+        "-PreflightOnly",
+        "-NoBrowser",
+    )
+
+    assert result.returncode == 1
+    assert "GENERATION_INTERRUPTION_REQUIRES_FORMAL_WEB_VALIDATION" in (
+        result.stdout + result.stderr
+    )
+
+
+def test_generation_interruption_frontend_flag_is_explicit_and_defaults_off() -> None:
+    branch = _current_source_branch()
+    contaminated_environment = os.environ.copy()
+    contaminated_environment["VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION"] = "true"
+
+    disabled = _run_launcher(
+        "-RuntimeProfile",
+        "formal-web-validation",
+        "-ExpectedSourceBranch",
+        branch,
+        "-PreflightOnly",
+        "-NoBrowser",
+        environment=contaminated_environment,
+    )
+    enabled = _run_launcher(
+        "-RuntimeProfile",
+        "formal-web-validation",
+        "-ExpectedSourceBranch",
+        branch,
+        "-GenerationInterruption",
+        "-PreflightOnly",
+        "-NoBrowser",
+    )
+
+    assert "LIVE_VOICE_FRONTEND_GENERATION_INTERRUPTION=false" in disabled.stdout
+    assert "LIVE_VOICE_FRONTEND_GENERATION_INTERRUPTION=true" in enabled.stdout
 
 
 def test_formal_web_runtime_probe_binds_critical_receipt_and_rejects_forgery(
