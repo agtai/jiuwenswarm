@@ -202,6 +202,9 @@ class _DelegateResult:
 
 _EVENT_KEYS = {
     "error": frozenset({"type", "event_id", "error"}),
+    "conversation.item.truncated": frozenset(
+        {"type", "event_id", "item_id", "content_index", "audio_end_ms"}
+    ),
     "input_audio_buffer.speech_started": frozenset(
         {"type", "event_id", "audio_start_ms", "item_id"}
     ),
@@ -274,6 +277,7 @@ _HARMLESS_EVENT_TYPES = frozenset(
         "conversation.item.input_audio_transcription.completed",
         "conversation.item.input_audio_transcription.delta",
         "conversation.item.input_audio_transcription.failed",
+        "conversation.item.truncated",
         "input_audio_buffer.cleared",
         "input_audio_buffer.timeout_triggered",
         "rate_limits.updated",

@@ -1130,6 +1130,16 @@ async def test_cancel_response_sends_exact_cancel_then_truncate_once() -> None:
         "content_index": 0,
         "audio_end_ms": 10,
     }
+    socket.push(
+        provider_event(
+            "conversation.item.truncated",
+            "event-truncated-ack",
+            item_id="assistant-item-1",
+            content_index=0,
+            audio_end_ms=10,
+        )
+    )
+    assert await engine.next_event() == NativeEngineEvent()
     assert await engine.cancel_response(cursor) == ids
     sent = tuple(socket.sent)
     with pytest.raises(OpenAIRealtimeNativeInteractionError) as changed:

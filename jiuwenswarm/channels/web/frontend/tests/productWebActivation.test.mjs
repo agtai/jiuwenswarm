@@ -313,6 +313,36 @@ function notificationBatch(notifications, changes = {}) {
   return response('notification_batch', { notifications, ...changes });
 }
 
+function nativeAudioNotification(changes = {}) {
+  return response('notification', {
+    kind: 'native.audio',
+    request_id: 'request-native-audio-1',
+    round_id: null,
+    response: {
+      interaction_id: binding.interaction_id,
+      response_id: 'response-native-1',
+      response_generation: 0,
+    },
+    agent_event: null,
+    source_event: null,
+    progress_event: null,
+    presentation_unit: {
+      surface: 'voice',
+      unit_id: 'unit-native-1',
+      seq: 0,
+      source_start_utf8: 0,
+      source_end_utf8: 0,
+      content_ref: 'sha256:fixture',
+    },
+    audio: {
+      delivery: 'dedicated_media_downlink',
+    },
+    error_reason: null,
+    publish_seq: null,
+    ...changes,
+  });
+}
+
 function webError(message, code, retriable = false) {
   return Object.assign(new Error(message), { code, retriable });
 }
@@ -604,6 +634,50 @@ test('active stock Web owner submits text, polls output, and ACKs exact presenta
   assert.equal(calls[2][1].notification_sequence, 1);
   assert.equal('max_notifications' in calls[2][1], false);
   for (const [, params] of calls) assert.equal('auth_token' in params, false);
+});
+
+test('Gateway-local Native audio does not consume the AgentServer notification sequence', async () => {
+  const calls = [];
+  const replies = [response('notification', { kind: 'agent.output' }), nativeAudioNotification(), response('notification', { kind: 'agent.output' })];
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      assert.equal(method, PRODUCT_P2_NOTIFICATION_NEXT_METHOD);
+      calls.push([params.notification_sequence, requestId]);
+      return replies.shift();
+    },
+  });
+  await owner.start(binding);
+
+  assert.equal((await owner.nextNotification()).kind, 'agent.output');
+  assert.equal((await owner.nextNotification()).kind, 'native.audio');
+  assert.equal((await owner.nextNotification()).kind, 'agent.output');
+
+  assert.deepEqual(
+    calls.map(([sequence]) => sequence),
+    [1, 2, 2],
+  );
+  assert.equal(new Set(calls.map(([, requestId]) => requestId)).size, 3);
+});
+
+test('noncanonical Native audio cannot reuse an AgentServer notification sequence', async () => {
+  const sequences = [];
+  const replies = [nativeAudioNotification({ publish_seq: 1 }), response('notification', { kind: 'agent.output' })];
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params) => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      sequences.push(params.notification_sequence);
+      return replies.shift();
+    },
+  });
+  await owner.start(binding);
+
+  await owner.nextNotification();
+  await owner.nextNotification();
+
+  assert.deepEqual(sequences, [1, 2]);
 });
 
 test('bounded P2 notification owner delivers eighteen ordered items through two RPCs', async () => {

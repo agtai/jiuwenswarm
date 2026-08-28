@@ -169,6 +169,7 @@ class _ProductRegistry:
                 "ok": True,
                 "result": {"accepted": True},
                 "error": None,
+                "product_composition": {"enabled": True},
             },
         )
 
@@ -181,6 +182,7 @@ class _ProductRegistry:
                 "ok": True,
                 "result": {"accepted": True},
                 "error": None,
+                "product_composition": {"enabled": True},
             },
         )
 
@@ -193,6 +195,7 @@ class _ProductRegistry:
                 "ok": True,
                 "result": {"accepted": True},
                 "error": None,
+                "product_composition": {"enabled": True},
             },
         )
 
@@ -701,7 +704,14 @@ async def test_native_handler_requires_private_gateway_channel(
             },
         )
     ]
-    assert json.loads(private_ws.sent[0])["status"] == "succeeded"
+    private_wire = json.loads(private_ws.sent[0])
+    assert private_wire["status"] == "succeeded"
+    assert set(private_wire["body"]["result"]) == {
+        "request_id",
+        "ok",
+        "result",
+        "error",
+    }
 
     browser_ws = _WebSocket()
     browser_request = AgentRequest(

@@ -9379,7 +9379,11 @@ class AgentWebSocketServer:
                     session_id=request.session_id,
                 )
             result_ok = result.ok
-            payload = result.payload
+            payload = dict(result.payload)
+            # Product-composition metadata belongs to the browser-facing
+            # lifecycle carrier.  The Gateway-only Native Runtime protocol is
+            # intentionally closed to request_id/ok/result/error.
+            payload.pop("product_composition", None)
         response = AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,

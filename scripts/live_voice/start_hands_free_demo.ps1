@@ -2,6 +2,7 @@
 param(
     [ValidateSet('hands-free-demo', 'formal-web-validation')]
     [string]$RuntimeProfile = 'hands-free-demo',
+    [string]$ExpectedBranch = 'hx/0812_live_voice_w3',
     [string]$ProjectPath,
     [string]$ProjectId,
     [string]$DataDir,
@@ -43,7 +44,6 @@ $ProductionFrontendEnv = Join-Path $FrontendRoot '.env.production'
 $LiveVoiceFrontendEnv = Join-Path $FrontendRoot '.env.live-voice'
 $FormalWebRuntimeProbe = Join-Path $PSScriptRoot 'formal_web_runtime_probe.py'
 $L0OrdinaryChromeCoordinator = Join-Path $PSScriptRoot 'l0_ordinary_chrome_batch.py'
-$ExpectedBranch = 'hx/0812_live_voice_w3'
 $L0Enabled = $L0Measurement -or $L0OrdinaryChromeBatch
 $FrontendPort = if ($RuntimeProfile -eq 'formal-web-validation') { 5173 } else { 6173 }
 $RuntimeProfileLabel = if ($RuntimeProfile -eq 'formal-web-validation') {

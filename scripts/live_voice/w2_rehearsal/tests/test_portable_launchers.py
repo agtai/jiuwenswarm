@@ -72,6 +72,8 @@ def test_formal_web_validation_uses_the_controlled_runtime_profile() -> None:
     )
 
     assert "'hands-free-demo', 'formal-web-validation'" in launcher
+    assert "[string]$ExpectedBranch = 'hx/0812_live_voice_w3'" in launcher
+    assert "if ($branch -ne $ExpectedBranch)" in launcher
     assert "JIUWENSWARM_LIVE_VOICE_RUNTIME_PROFILE" in launcher
     assert "requiredRuntimeFlags" in launcher
     assert "$ExecutorProfile = 'live-voice.direct-project-code.d2.v1'" in launcher

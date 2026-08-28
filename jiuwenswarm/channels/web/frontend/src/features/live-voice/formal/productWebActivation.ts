@@ -490,6 +490,19 @@ function isP2BatchObserver(notification: Readonly<Record<string, unknown>>): boo
   );
 }
 
+function isGatewayNativeAudioProjection(notification: Readonly<Record<string, unknown>>): boolean {
+  const audio = objectValue(notification.audio);
+  return (
+    notification.kind === 'native.audio' &&
+    notification.round_id === null &&
+    notification.agent_event === null &&
+    notification.source_event === null &&
+    notification.progress_event === null &&
+    notification.publish_seq === null &&
+    audio?.delivery === 'dedicated_media_downlink'
+  );
+}
+
 function requireP2NotificationResult(
   value: unknown,
   binding: Readonly<ProductWebP2ActivationBinding>,
@@ -1198,6 +1211,11 @@ export class ProductWebP2ActivationOwner {
           }
         }
         this.notificationQueue.push(...tail);
+        // Native audio is projected by the Gateway without polling AgentServer.
+        // Preserve the AgentServer-owned sequence for the next remote poll.
+        if (tail.length === 0 && isGatewayNativeAudioProjection(result)) {
+          this.notificationSequence -= 1;
+        }
         this.notificationRequestId = null;
         return result;
       })
