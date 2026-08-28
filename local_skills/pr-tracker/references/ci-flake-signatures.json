@@ -1,0 +1,31 @@
+{
+  "comment": [
+    "Known CI flake signatures, matched against the failure text of every failing",
+    "test in the pytest-html artifact. A test matches a signature when every",
+    "string in `all_of` appears in its failure text; a run is `matches_known_flake`",
+    "only when *every* failing test matches one, and `unrelated_to_known_flake` as",
+    "soon as one does not.",
+    "",
+    "Match the signature, never the test name, because a flake's victim rotates.",
+    "The one signature shipped below is an example from one project's test suite,",
+    "not a signature every project needs: there, three tests dial example.com and",
+    "leave an httpx socket unclosed, the resulting ResourceWarning becomes a",
+    "PytestUnraisableExceptionWarning, and that fails whichever unrelated test",
+    "happened to be running under filterwarnings = error. A test-name allowlist",
+    "would have been wrong on its first run.",
+    "",
+    "This file is data. Replace the signatures with your own project's, and extend",
+    "it when a new flake appears. A hint is never a gate: a red build is reported",
+    "whatever its cause, because both causes are work."
+  ],
+  "signatures": [
+    {
+      "name": "example.com unclosed socket",
+      "all_of": [
+        "PytestUnraisableExceptionWarning",
+        "ResourceWarning",
+        "unclosed"
+      ]
+    }
+  ]
+}

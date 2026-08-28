@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Block until jiuwenswarm's pinned ports are bindable, so the launcher does not drift.
+
+jiuwenswarm probes its port group with a bind() that does NOT set SO_REUSEADDR
+(instance_manager/config.py is_port_available). A port carrying TIME-WAIT entries from a
+previous run therefore looks occupied, and the launcher shifts the whole group by +1000
+(base_port + index * 1000, config.py:179,187) -- even when the ports were pinned via
+JIUWENSWARM_*_PORT.
+
+The real servers do set SO_REUSEADDR, so they would bind fine; the probe is stricter than
+the thing it is probing for. Until that is fixed upstream, wait the TIME-WAIT out here.
+
+The failure this prevents is silent: without it the instance comes up healthy on ports
+nobody expects, rather than failing loudly.
+
+Exits 0 as soon as every port binds, or after the deadline (letting the launcher fall back
+rather than blocking the unit forever).
+
+Usage:  jiuwenswarm-wait-ports [PORT ...]
+Wired up as ExecStartPre= in the systemd unit; see deploy/local/jiuwenswarm.service.
+"""
+import socket
+import sys
+import time
+
+PORTS = [int(p) for p in sys.argv[1:]] or [18092, 19000, 19001, 5173]
+DEADLINE_SECONDS = 90
+HOST = "127.0.0.1"
+
+
+def bindable(port: int) -> bool:
+    """Mirror jiuwenswarm's probe: plain bind()+listen(), no SO_REUSEADDR."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((HOST, port))
+            sock.listen(1)
+            return True
+        except OSError:
+            return False
+
+
+def main() -> int:
+    deadline = time.monotonic() + DEADLINE_SECONDS
+    while True:
+        blocked = [p for p in PORTS if not bindable(p)]
+        if not blocked:
+            return 0
+        if time.monotonic() >= deadline:
+            print(
+                f"still blocked after {DEADLINE_SECONDS}s: {blocked} "
+                "- starting anyway, the launcher will pick a fallback group",
+                file=sys.stderr,
+            )
+            return 0
+        time.sleep(2)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

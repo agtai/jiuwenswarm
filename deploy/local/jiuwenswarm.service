@@ -1,0 +1,191 @@
+[Unit]
+# systemd --user unit for the dedicated `jiuwenswarm` service account.
+#
+# Install to ~/.local/share/systemd/user/jiuwenswarm.service -- NOT
+# ~/.config/systemd/user/. That is the "installed by software" tier, the user-scope
+# analogue of /usr/local/lib/systemd/system, and it sits *below* ~/.config in the
+# search path. Host-specific tweaks then go in a drop-in via
+#   systemctl --user edit jiuwenswarm      -> ~/.config/systemd/user/jiuwenswarm.service.d/
+# so redeploying this file from the repo never clobbers local overrides, and
+# `systemctl --user revert jiuwenswarm` drops back to exactly what is committed here.
+#
+#   loginctl enable-linger jiuwenswarm     # survive logout
+#   systemctl --user enable --now jiuwenswarm
+#
+# BEFORE ENABLING: confirm no system-scope jiuwenswarm.service is enabled. A unit
+# at system scope and this one at user scope both starting at boot would run two
+# instances against the same workspace and the same ports.
+Description=JiuwenSwarm (jiuwenswarm instance)
+Documentation=https://github.com/openJiuwen-ai/jiuwenswarm
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# ---------------------------------------------------------------------------
+# Paths are ABSOLUTE on purpose -- do NOT rewrite them as %h.
+#
+# %h is "the home directory of the user running the service manager", and is
+# explicitly NOT influenced by User=. In a --user unit it is /home/jiuwenswarm as
+# expected, but the moment this is converted to a system unit with
+# User=jiuwenswarm it silently becomes /root. Absolute paths convert without
+# surprises: that conversion then only adds User=/Group= and changes WantedBy=.
+# ---------------------------------------------------------------------------
+
+# The workspace, NOT the code tree. The parent process writes its SDK log
+# cwd-relative (openjiuwen defaults to log_path "./logs/"), while the children are
+# already launched with cwd=DATA_ROOT. Pointing here converges both and leaves the
+# checkout with no runtime writes at all.
+WorkingDirectory=/home/jiuwenswarm/.jiuwenswarm
+
+# No ExecStartPre= any more. It used to run jiuwenswarm-wait-ports to wait out
+# TIME-WAIT, because the launcher's probe bound without SO_REUSEADDR and so read
+# this service's own recently-closed ports as occupied, silently relocating the
+# whole group by +1000. Both halves of that are now fixed in-tree:
+#   - the probe sets SO_REUSEADDR on POSIX, matching what the servers actually do,
+#     so TIME-WAIT no longer reads as occupied and there is nothing to wait for;
+#   - a genuinely occupied port that was pinned via JIUWENSWARM_*_PORT now aborts
+#     startup with an error naming the port, instead of drifting.
+# The helper is kept at deploy/local/jiuwenswarm-wait-ports (and installed at
+# /home/jiuwenswarm/bin/) rather than deleted, so this is a one-line revert if the
+# drift ever reappears.
+
+# ExecStart is what selects the environment -- VIRTUAL_ENV does not. Going through
+# a `current` symlink makes deploy and rollback a symlink repoint.
+ExecStart=/home/jiuwenswarm/venvs/current/bin/jiuwenswarm-start all
+
+# Startup itself is the reason for this now that the port wait is gone: bringing up
+# four processes, importing the SDK and compiling bytecode into a cold cache runs
+# well past systemd's 90s default on a loaded host. Keep the headroom.
+TimeoutStartSec=300
+
+Environment=PYTHONUNBUFFERED=1
+
+# The agent shells out, and the shell it gets must be the environment the service
+# itself runs in. Without this the inherited PATH is the stock system one, so a
+# tool call that runs `python3` reaches /usr/bin/python3 -- an interpreter that has
+# none of the libraries the deployment pins. Document parsing is the clearest case:
+# pdfplumber, pdfminer, PyPDF2, python-docx and openpyxl are all present in the venv
+# and all absent from the system interpreter, so the same PDF that parses in-process
+# fails from a tool call, with an ImportError that names a library the deployment
+# demonstrably has.
+#
+# PATH rather than PYTHONPATH, deliberately. The venv is built with
+# include-system-site-packages=false, so pointing PATH at it yields exactly the
+# interpreter and exactly the packages the service imports -- a subprocess resolves
+# an import the same way the running process does, which is the property that makes
+# a result observed in a tool call transferable. Adding the venv's site-packages to
+# PYTHONPATH under the system interpreter would instead union the two sets: the venv
+# would win on name collisions, but every system package would remain reachable as
+# an unpinned fallback that an apt upgrade can change underneath. PYTHONPATH is also
+# inherited by every nested subprocess, and it does nothing for console scripts.
+#
+# What is given up is the OS-integration modules the system interpreter carries and
+# the venv does not -- apt, gi, dbus, systemd. None are usable by an unprivileged
+# service account, and numpy is gained in exchange.
+#
+# VIRTUAL_ENV does not affect import resolution; a venv interpreter finds its own
+# site-packages through pyvenv.cfg whatever the environment says (see the ExecStart
+# note above). It is set because tooling reads it -- uv in particular -- and venv
+# binaries on PATH with no VIRTUAL_ENV is a half-activated state that real
+# activation never produces and that tools are not tested against.
+#
+# Consequence worth stating: this puts the venv's pip on the agent's PATH, so a
+# stray install would mutate the running deployment rather than failing. The venv is
+# already writable and reachable by absolute path, so this widens an existing hole
+# rather than opening one -- but the deployed venv can be made read-only if that
+# matters, because PYTHONPYCACHEPREFIX below already keeps bytecode out of it.
+Environment=PATH=/home/jiuwenswarm/venvs/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=VIRTUAL_ENV=/home/jiuwenswarm/venvs/current
+
+# Bytecode cache. CacheDirectory= is used here -- and StateDirectory= deliberately
+# is not, see below -- because bytecode is genuinely disposable: systemd creates it
+# with the right ownership, `systemctl --user clean --what=cache jiuwenswarm`
+# becomes a real operation, and the fact that %C resolves elsewhere under a system
+# manager costs nothing when the contents regenerate themselves.
+CacheDirectory=jiuwenswarm jiuwenswarm/tmp
+Environment=PYTHONPYCACHEPREFIX=%C/jiuwenswarm/pycache
+
+# Private temp root. Several fixed-name directories are created directly under
+# tempfile.gettempdir() -- openjiuwen_bash_outputs and openjiuwen-fs-rwlocks among
+# them. On a shared host the first account to run creates them 0755 and owns them,
+# and every later account gets EACCES: the bash tool then fails every call with a
+# bare Errno 13 that names no cause. Giving this service its own temp root sidesteps
+# the collision regardless of what else runs on the host, and does not wait on the
+# upstream fixes (agent-core #282/#283 and the shell-output equivalent).
+#
+# Listed in CacheDirectory= above rather than created by an ExecStartPre= so systemd
+# guarantees it exists with the right ownership before ExecStart. That guarantee is
+# the point: tempfile.gettempdir() falls back to /tmp *silently* when $TMPDIR is
+# missing or unwritable, so a directory that is merely expected to exist would
+# reintroduce the bug with no signal that it had.
+#
+# PrivateTmp=yes would isolate this more thoroughly, but it is part of the
+# sandboxing question deferred at the end of this file: the agent shells out to
+# arbitrary tools, and a private /tmp changes what those tools see.
+Environment=TMPDIR=%C/jiuwenswarm/tmp
+
+# Workspace location. Stated explicitly even though it matches the application's own
+# default, so the unit is self-describing and the account's HOME stops being
+# load-bearing.
+#
+# StateDirectory= is deliberately NOT used for this. It would place the workspace at
+# $XDG_STATE_HOME/jiuwenswarm, diverging from that default, and would relocate it
+# again on a switch to a system unit.
+# LogsDirectory= and ConfigurationDirectory= are unused for the same class of reason:
+# jiuwenswarm keeps logs and config inside the workspace and never reads
+# $LOGS_DIRECTORY or $CONFIGURATION_DIRECTORY, so they would only create empty dirs.
+Environment=JIUWENSWARM_DATA_DIR=/home/jiuwenswarm/.jiuwenswarm
+
+# The port group. These MUST be the JIUWENSWARM_-prefixed names (PORT_ENV_OVERRIDES,
+# instance_manager/config.py:132-137). The unprefixed AGENT_SERVER_PORT/WEB_PORT/...
+# in .env feed only the post-start readiness probe, do not bind anything, and are
+# rewritten on every start -- editing them looks effective and is not.
+Environment=JIUWENSWARM_AGENT_SERVER_PORT=18092
+Environment=JIUWENSWARM_WEB_PORT=19000
+Environment=JIUWENSWARM_GATEWAY_PORT=19001
+Environment=JIUWENSWARM_FRONTEND_PORT=5173
+
+# Free search configured the proper way, via the environment rather than .env.
+# On unfixed code this is silently and permanently ignored, because
+# reset_free_search_runtime_flags() overwrites it just after the dotenv load. The
+# fix is in this branch (upstream PR #2095), so it now takes effect.
+Environment=FREE_SEARCH_DDG_ENABLED=true
+Environment=FREE_SEARCH_BING_ENABLED=true
+
+Restart=on-failure
+RestartSec=5
+
+# jiuwenswarm-start exits 130 on a clean SIGTERM. Without this every `systemctl stop`
+# leaves the unit `failed`, which then poisons Restart=on-failure reasoning and any
+# health checking built on unit state.
+SuccessExitStatus=130
+
+TimeoutStopSec=30
+KillMode=control-group
+
+SyslogIdentifier=jiuwenswarm
+
+# Sandboxing (ProtectSystem=strict, ProtectHome=, PrivateTmp=, NoNewPrivileges=) is
+# deliberately absent for now: the agent shells out to arbitrary tools -- bash, git,
+# browsers -- so each option needs testing against real workloads rather than being
+# enabled blind. Worth revisiting later, because ProtectSystem=strict plus a narrow
+# ReadWritePaths= would enforce the read-only-code property above at the systemd
+# level instead of by convention.
+
+[Install]
+WantedBy=default.target
+
+# --- system-unit variant -----------------------------------------------------
+# To run system-wide instead:
+#   - add User=jiuwenswarm and Group=jiuwenswarm
+#   - set WantedBy=multi-user.target
+#   - install to /usr/local/lib/systemd/system/ -- the tier for locally installed
+#     software. Not /usr/lib (that belongs to the distro package manager) and not
+#     /etc/systemd/system (that is where the admin's own overrides live, and a
+#     redeploy would overwrite them). Drop-ins from `systemctl edit` land in
+#     /etc/systemd/system/jiuwenswarm.service.d/ and keep working either way.
+#   - drop the `loginctl enable-linger` step
+# Every path above is absolute, so nothing else changes. %C then resolves to
+# /var/cache instead of $XDG_CACHE_HOME -- harmless, the cache regenerates.

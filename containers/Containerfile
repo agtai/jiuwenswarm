@@ -1,0 +1,75 @@
+# Test-only container image for the jiuwenswarm suite.  [local] — not upstreamed.
+#
+# Deliberately carries NO application code and NO virtualenv.  The code arrives
+# at run time as a bind-mounted git worktree and the venv lives in a named
+# volume, so one rarely-rebuilt image serves every branch and every
+# jiuwenswarm/agent-core combination.  See containers/README.md.
+#
+# Unrelated to docker/Dockerfile.claw, which builds the deployable product and
+# is asserted on by tests/unit_tests/test_dockerfile_claw.py.  Do not merge them.
+
+ARG PYTHON_VERSION=3.11
+
+# ---------------------------------------------------------------------------
+# base — system packages and the interpreter.  Rebuilt only when this file or
+# the pinned Debian/Python base changes.
+#
+# A future non-test stage (frozen code + venv, for deployment) can start
+# "FROM base AS runtime" and add its own COPY/pip layers.  Nothing here assumes
+# the test shape; that is why the venv and the source tree are absent.
+# ---------------------------------------------------------------------------
+FROM docker.io/library/python:${PYTHON_VERSION}-slim-bookworm AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# git   — pyproject resolves openjiuwen over git+https, and parts of the suite
+#         shell out to git.
+# nodejs/npm — the web frontend, and the codex/claude dependency-install paths
+#         that some handler tests exercise.  Present so those tests take the
+#         same branch they take on a developer machine rather than an
+#         artificially absent-binary branch.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        nodejs \
+        npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# testbase — the test image proper.
+# ---------------------------------------------------------------------------
+FROM base AS testbase
+
+# The container runs as its own root, which rootless podman maps to the
+# invoking host user.  Files written into a bind-mounted worktree therefore
+# come out owned by that user, with no --userns=keep-id and no :z relabelling
+# (this host has no SELinux).
+ENV HOME=/home/tester \
+    JIUWENSWARM_HOME=/home/tester \
+    JIUWENSWARM_DATA_DIR=/home/tester/.jiuwenswarm \
+    TMPDIR=/tmp \
+    VIRTUAL_ENV=/venv \
+    PATH=/venv/bin:$PATH \
+    PIP_CACHE_DIR=/cache/pip \
+    NPM_CONFIG_CACHE=/cache/npm \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# These are belt-and-braces only.  The isolation that matters is that the host
+# ~/.jiuwenswarm is not mounted, so no value of these variables can reach it.
+RUN mkdir -p /home/tester/.jiuwenswarm /cache/pip /cache/npm /venv /src \
+    && chmod 0777 /home/tester /cache /cache/pip /cache/npm /venv /src
+
+# The venv cache key is derived from this label, not from the image ID, so
+# editing entrypoint.sh does not needlessly discard a good venv.  It must list
+# everything in this image that can change the resolved dependency closure.
+ARG PYTHON_VERSION
+LABEL jws.venv_inputs="py=${PYTHON_VERSION};apt=ca-certificates+git+nodejs+npm"
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh
+
+WORKDIR /src/jws
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["pytest", "-p", "no:cacheprovider", "tests/unit_tests"]
