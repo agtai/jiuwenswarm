@@ -196,6 +196,18 @@ public protocol.
   Tier-2 representation repair inside the existing optional audit transcript,
   not a relaxation of the Native contract or a change to speech, routing,
   history authority, Agent, Tool, or Task semantics.
+- Independent review of the passing candidate found one multi-item cursor
+  inconsistency: Runtime presentation spans still used the response-global PCM
+  cursor, while the corrected barge fence validates `audio_end_ms` against the
+  exact Provider item. The second 20 ms item therefore appeared to end at 40 ms
+  and failed as `NATIVE_BARGE_CURSOR_AHEAD`. Runtime presentation spans remain
+  response-global for PresentationLedger; the dedicated media source must keep
+  separate item-local Provider cursors per `(provider_item_id, content_index)`
+  alongside its response-wide frame sequence. A padded final Browser frame
+  must retain only its actual Provider sample duration for truncation; OpenAI rejects a
+  truncate cursor beyond the actual item audio. This is a Tier-3 correction of
+  the existing played-cursor authority and changes no method, public carrier,
+  Agent/Tool/Task policy, or media frame format.
 - First-audio latency is measured from the authoritative Browser end-of-speech
   milestone to `webaudio_actually_started`, using the same content-free clock
   model as the existing Cascade L0 baseline. A comparable Cascade run uses the
@@ -236,6 +248,9 @@ public protocol.
 - OpenAI Realtime Native Engine response-output tracking only as required to
   preserve bounded, ordered multi-item audio output and exact per-item barge
   truncation within one already-admitted Provider response.
+- Native response downlink bookkeeping only as required to preserve the
+  response-wide transport and Runtime presentation sequences while deriving
+  the already-owned item-local Provider sample cursor used by STOP.
 - Native Runtime audio replay working set only as required to retire terminal
   or cancelled predecessor frame records on exact successor admission, retain
   cumulative content-free counts, and mirror ordered per-item cursor checks.
@@ -317,6 +332,13 @@ public protocol.
   mutate the other. Runtime frame sequence follows exact Provider event
   arrival, and a new regressing index or delta after item-local completion
   remains effect-free.
+- A cursor taken from the second item and from an earlier item resumed after an
+  interleaved item uses that exact item's local played duration, succeeds through
+  Gateway and Runtime, and never borrows the response-global sample count. A
+  padded partial final frame carries its actual Provider sample count into the
+  item-local cursor, so `conversation.item.truncate.audio_end_ms` cannot exceed
+  the Provider item's real duration; response-wide frame sequence, digest and
+  Browser playback remain unchanged.
 - With the Runtime audio-record limit reduced in test, a terminal or cancelled
   predecessor can fill the bound and a successor still admits audio after
   exact retirement; an active predecessor is not compacted, current-response

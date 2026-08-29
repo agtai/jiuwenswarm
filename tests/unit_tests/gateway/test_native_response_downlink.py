@@ -88,6 +88,62 @@ async def test_native_response_frame_boundary_is_one_bounded_contiguous_source(
 
 
 @pytest.mark.asyncio
+async def test_native_source_tracks_actual_provider_spans_per_audio_item() -> None:
+    response = ResponseRef("interaction-1", "response-1", 1)
+    source = NativeResponseDownlinkSource(
+        response=response,
+        sample_rate_hz=24_000,
+        capacity=3,
+        max_frames=3,
+    )
+    cases = (
+        (0, "provider-item-a", 0, 480),
+        (1, "provider-item-b", 480, 617),
+        (2, "provider-item-a", 617, 1097),
+    )
+    for sequence, item_id, source_start, source_end in cases:
+        pcm16 = sequence.to_bytes(2, "little") * 480
+        unit = NativeDownlinkPresentationUnit(
+            response=response,
+            unit_id=f"native-unit-{sequence}",
+            unit_seq=sequence,
+            provider_item_id=item_id,
+            content_index=0,
+            source_start_sample=source_start,
+            source_end_sample=source_end,
+            content_sha256=hashlib.sha256(pcm16).hexdigest(),
+        )
+        await source.append(
+            MediaAudioFrame(
+                seq=sequence,
+                sample_cursor=sequence * 480,
+                samples=(0.0,) * 480,
+            ),
+            unit,
+            pcm16=pcm16,
+        )
+
+    assert [source.unit_for_media_sequence(index) for index in range(3)] == [
+        NativeDownlinkPresentationUnit(
+            response=response,
+            unit_id=f"native-unit-{sequence}",
+            unit_seq=sequence,
+            provider_item_id=item_id,
+            content_index=0,
+            source_start_sample=source_start,
+            source_end_sample=source_end,
+            content_sha256=hashlib.sha256(
+                sequence.to_bytes(2, "little") * 480
+            ).hexdigest(),
+        )
+        for sequence, item_id, source_start, source_end in cases
+    ]
+    assert [
+        source.provider_sample_end_for_media_sequence(index) for index in range(3)
+    ] == [480, 137, 960]
+
+
+@pytest.mark.asyncio
 async def test_native_source_close_unblocks_producer_and_changed_scope_is_zero_effect() -> None:
     response = ResponseRef("interaction-1", "response-1", 1)
     source = NativeResponseDownlinkSource(

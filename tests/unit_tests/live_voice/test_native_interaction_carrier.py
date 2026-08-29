@@ -97,6 +97,7 @@ def test_native_proposal_carries_only_audio_metadata_and_never_pcm() -> None:
             sequence=0,
             pcm16=pcm16,
             response=response,
+            provider_sample_count=137,
         )
     )
 
@@ -106,7 +107,7 @@ def test_native_proposal_carries_only_audio_metadata_and_never_pcm() -> None:
 
     assert NativeInteractionProposal.from_dict(payload) == proposal
     assert proposal.audio_observation is not None
-    assert proposal.audio_observation.sample_count == 480
+    assert proposal.audio_observation.sample_count == 137
     assert (
         proposal.audio_observation.content_sha256 == hashlib.sha256(pcm16).hexdigest()
     )
@@ -123,6 +124,29 @@ def test_native_proposal_carries_only_audio_metadata_and_never_pcm() -> None:
     assert "pcm16" not in encoded
     assert "EjQ=" not in encoded
     assert pcm16.hex() not in encoded
+
+
+@pytest.mark.parametrize("sample_count", [0, 481, True])
+def test_native_proposal_rejects_provider_samples_outside_emitted_frame(
+    sample_count: int,
+) -> None:
+    response = ResponseRef(BINDING.interaction_id, "native-response-1", 1)
+    engine_event = NativeEngineEvent(
+        audio=NativeAudioOutput(
+            provider_event_id="provider-audio-event-1",
+            provider_response_id="provider-response-1",
+            provider_item_id="provider-assistant-item-1",
+            content_index=0,
+            sequence=0,
+            pcm16=b"\x12\x34" * 480,
+            response=response,
+            provider_sample_count=sample_count,
+        )
+    )
+
+    with pytest.raises(NativeCarrierViolation) as raised:
+        NativeInteractionProposal.from_engine_event(BINDING, engine_event)
+    assert raised.value.reason == "NATIVE_AUDIO_OBSERVATION_INVALID"
 
 
 def test_native_proposal_rejects_cross_binding_action_before_runtime() -> None:

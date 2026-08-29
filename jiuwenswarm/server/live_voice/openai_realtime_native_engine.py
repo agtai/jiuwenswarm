@@ -139,6 +139,9 @@ class NativeAudioOutput:
     sequence: int
     pcm16: bytes = field(repr=False)
     response: ResponseRef
+    # The Browser frame may be zero-padded to 20 ms.  This retains only the
+    # actual Provider audio samples represented by that frame.
+    provider_sample_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +211,7 @@ class _BufferedAudio:
     content_index: int
     sequence: int
     pcm16: bytes = field(repr=False)
+    provider_sample_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1309,7 +1313,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_PROVIDER_AUDIO_ITEMS_FULL",
                 "Provider response exceeds the bounded audio item count",
-            )
+        )
         if any(
             item.provider_item_id == item_id
             for item in response.audio_items.values()
@@ -1445,6 +1449,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                     content_index=content_index,
                     sequence=sequence,
                     pcm16=combined[offset : offset + NATIVE_AUDIO_FRAME_BYTES],
+                    provider_sample_count=NATIVE_AUDIO_FRAME_BYTES // 2,
                 )
             )
         audio_item.audio_buffer = bytearray(remainder)
@@ -1507,6 +1512,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         if not audio_item.audio_buffer:
             audio_item.audio_buffer_event_id = None
             return []
+        provider_sample_count = len(audio_item.audio_buffer) // 2
         padding = NATIVE_AUDIO_FRAME_BYTES - len(audio_item.audio_buffer)
         buffered = _BufferedAudio(
             provider_event_id=audio_item.audio_buffer_event_id or provider_event_id,
@@ -1515,6 +1521,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             content_index=audio_item.content_index,
             sequence=response.next_audio_sequence,
             pcm16=bytes(audio_item.audio_buffer) + bytes(padding),
+            provider_sample_count=provider_sample_count,
         )
         if response.runtime_ref is None:
             if len(self._pending_audio) + 1 > self._pending_audio_capacity:
@@ -1533,7 +1540,6 @@ class OpenAIRealtimeNativeInteractionEngine:
             self._state = NativeProviderState.SPEAKING
             audio_events = [self._audio_event(buffered, response.runtime_ref)]
         response.next_audio_sequence += 1
-        audio_item.received_samples += padding // 2
         audio_item.audio_buffer.clear()
         audio_item.audio_buffer_event_id = None
         return audio_events
@@ -1818,6 +1824,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                 sequence=buffered.sequence,
                 pcm16=buffered.pcm16,
                 response=response,
+                provider_sample_count=buffered.provider_sample_count,
             )
         )
 

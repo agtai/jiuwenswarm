@@ -122,6 +122,9 @@ class NativeResponseDownlinkSource:
         self._condition = asyncio.Condition()
         self._frames: deque[MediaAudioFrame] = deque()
         self._units: dict[int, NativeDownlinkPresentationUnit] = {}
+        self._provider_sample_ends: dict[int, int] = {}
+        self._item_sample_cursors: dict[tuple[str, int], int] = {}
+        self._runtime_sample_cursor = 0
         self._digest = hashlib.sha256()
         self._sealed = False
         self._closed = False
@@ -150,6 +153,11 @@ class NativeResponseDownlinkSource:
     ) -> NativeDownlinkPresentationUnit | None:
         return self._units.get(sequence)
 
+    def provider_sample_end_for_media_sequence(self, sequence: int) -> int | None:
+        """Return the item-local Provider cursor for one admitted Browser frame."""
+
+        return self._provider_sample_ends.get(sequence)
+
     async def append(
         self,
         frame: MediaAudioFrame,
@@ -169,11 +177,12 @@ class NativeResponseDownlinkSource:
                 "MEDIA_NATIVE_STREAM_RESPONSE_MISMATCH",
                 "Native stream unit response does not match the source response",
             )
+        provider_sample_count = unit.source_end_sample - unit.source_start_sample
         if (
             type(pcm16) is not bytes
             or len(pcm16) != 960
             or hashlib.sha256(pcm16).hexdigest() != unit.content_sha256
-            or unit.source_end_sample - unit.source_start_sample != 480
+            or not 0 < provider_sample_count <= 480
         ):
             raise MediaTransportViolation(
                 "MEDIA_NATIVE_STREAM_FRAME_INVALID",
@@ -208,12 +217,14 @@ class NativeResponseDownlinkSource:
                 )
             expected_sequence = self.appended_frames
             expected_cursor = expected_sequence * (self.sample_rate_hz // 50)
+            item_key = (unit.provider_item_id, unit.content_index)
+            expected_item_cursor = self._item_sample_cursors.get(item_key, 0)
             if (
                 frame.seq != expected_sequence
                 or frame.sample_cursor != expected_cursor
                 or len(frame.samples) != self.sample_rate_hz // 50
                 or unit.unit_seq != expected_sequence
-                or unit.source_start_sample != expected_sequence * 480
+                or unit.source_start_sample != self._runtime_sample_cursor
                 or expected_sequence >= self.max_frames
             ):
                 raise MediaTransportViolation(
@@ -222,6 +233,10 @@ class NativeResponseDownlinkSource:
                 )
             self._frames.append(frame)
             self._units[expected_sequence] = unit
+            provider_sample_end = expected_item_cursor + provider_sample_count
+            self._provider_sample_ends[expected_sequence] = provider_sample_end
+            self._item_sample_cursors[item_key] = provider_sample_end
+            self._runtime_sample_cursor = unit.source_end_sample
             self._digest.update(pcm16)
             self.appended_frames += 1
             self.peak_buffered_frames = max(

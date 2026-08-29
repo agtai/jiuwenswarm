@@ -916,14 +916,30 @@ async def test_runtime_accepts_ordered_audio_items_and_barges_exact_presented_it
     assert await owner.accept_audio(second)
     assert await owner.accept_audio(first_again)
 
+    units = [
+        record.unit
+        for record in sorted(
+            runtime.snapshot().presentation.records,
+            key=lambda record: record.unit.seq,
+        )
+    ]
+    assert [
+        (
+            unit.seq,
+            unit.source_start_utf8,
+            unit.source_end_utf8,
+        )
+        for unit in units
+    ] == [(0, 0, 480), (1, 480, 960), (2, 960, 1440)]
+
     cursor = NativePresentationCursor(
         response=admission.response,
-        provider_item_id=first.provider_item_id,
-        content_index=first.content_index,
-        audio_end_ms=40,
+        provider_item_id=second.provider_item_id,
+        content_index=second.content_index,
+        audio_end_ms=20,
     )
     result = await owner.barge_in(
-        action_id="native-stop-first-item",
+        action_id="native-stop-second-item",
         response=admission.response,
         cursor=cursor,
     )

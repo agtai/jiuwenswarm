@@ -371,6 +371,7 @@ async def test_native_session_direct_audio_does_not_require_transcript_or_bridge
     assert commit.turn_commit.committed_audio_ms == 640
     assert audio.audio is not None
     assert audio.audio.pcm16 == b"\x01\x00" + b"\x00\x00" * 479
+    assert audio.audio.provider_sample_count == 1
     assert audio.audio.response == runtime_ref
     assert done.provider_done is not None and done.provider_done.completed is True
     assert done.provider_done.transcript is None
@@ -395,6 +396,45 @@ async def test_native_session_direct_audio_does_not_require_transcript_or_bridge
             },
         }
     ]
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_padded_final_frame_never_advances_provider_truncation_cursor() -> None:
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x01\x00",
+        ),
+        output_audio_done("event-8", "provider-response-1", "assistant-item-1"),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    ref = response_ref(1)
+    assert await engine.admit_response("provider-response-1", ref) is True
+    assert await engine.next_event() == NativeEngineEvent()
+    audio = await engine.next_event()
+
+    assert audio.audio is not None
+    assert audio.audio.provider_sample_count == 1
+    assert len(audio.audio.pcm16) == 960
+    cursor = NativePresentationCursor(
+        response=ref,
+        provider_item_id="assistant-item-1",
+        content_index=0,
+        audio_end_ms=20,
+    )
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.cancel_response(cursor)
+    assert raised.value.reason == "NATIVE_CANCEL_CURSOR_AHEAD"
     await engine.close()
 
 

@@ -276,7 +276,7 @@ class NativeAudioObservation:
         ):
             raise NativeInteractionContractViolation(
                 "NATIVE_AUDIO_SAMPLE_COUNT_INVALID",
-                "sample_count must describe bounded non-empty PCM16",
+                "sample_count must describe bounded non-empty Provider PCM16",
             )
         if (
             type(self.content_sha256) is not str

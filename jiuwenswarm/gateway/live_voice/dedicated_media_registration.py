@@ -2104,6 +2104,9 @@ class DedicatedMediaProductRegistry:
         }
         response_payload = unit.get("response")
         digest = hashlib.sha256(output.pcm16).hexdigest()
+        provider_sample_count = output.provider_sample_count
+        if provider_sample_count is None:
+            provider_sample_count = len(output.pcm16) // 2
         source_start_sample = unit.get("source_start_utf8")
         source_end_sample = unit.get("source_end_utf8")
         if (
@@ -2114,7 +2117,9 @@ class DedicatedMediaProductRegistry:
             or type(source_start_sample) is not int
             or type(source_end_sample) is not int
             or source_start_sample < 0
-            or source_end_sample - source_start_sample != len(output.pcm16) // 2
+            or type(provider_sample_count) is not int
+            or not 0 < provider_sample_count <= len(output.pcm16) // 2
+            or source_end_sample - source_start_sample != provider_sample_count
             or not isinstance(response_payload, Mapping)
             or set(response_payload)
             != {"interaction_id", "response_id", "response_generation"}
@@ -2433,7 +2438,14 @@ class DedicatedMediaProductRegistry:
         cursor: NativePresentationCursor | None = None
         if exact.confirmed_through_seq is not None:
             played = source.unit_for_media_sequence(exact.confirmed_through_seq)
-            if played is None or played.response != record.downlink_response:
+            provider_sample_end = source.provider_sample_end_for_media_sequence(
+                exact.confirmed_through_seq
+            )
+            if (
+                played is None
+                or provider_sample_end is None
+                or played.response != record.downlink_response
+            ):
                 raise MediaTransportViolation(
                     "MEDIA_NATIVE_PLAYBACK_CURSOR_INVALID",
                     "Native played cursor has no exact admitted Runtime unit",
@@ -2442,9 +2454,7 @@ class DedicatedMediaProductRegistry:
                 response=record.downlink_response,
                 provider_item_id=played.provider_item_id,
                 content_index=played.content_index,
-                audio_end_ms=(
-                    played.source_end_sample * 1_000 // NATIVE_PCM_SAMPLE_RATE
-                ),
+                audio_end_ms=(provider_sample_end * 1_000 // NATIVE_PCM_SAMPLE_RATE),
             )
         action_id = self._native_barge_action_id(record, exact, cursor)
         client = self._native_runtime_client

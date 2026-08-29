@@ -315,6 +315,7 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
         self.proposals: list[NativeEngineEvent] = []
         self.audio_batches: list[tuple[NativeEngineEvent, ...]] = []
         self.audio_proposed = asyncio.Event()
+        self.audio_sample_cursors: dict[ResponseRef, int] = {}
         self.playback_actions: list[tuple[str, object]] = []
         self.close_calls = 0
         self.close_request_ids: list[str] = []
@@ -349,7 +350,14 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
             }
         if event.audio is not None:
             output = event.audio
-            source_start = output.sequence * (len(output.pcm16) // 2)
+            sample_count = (
+                len(output.pcm16) // 2
+                if output.provider_sample_count is None
+                else output.provider_sample_count
+            )
+            source_start = self.audio_sample_cursors.get(output.response, 0)
+            source_end = source_start + sample_count
+            self.audio_sample_cursors[output.response] = source_end
             result = {
                 "kind": "audio",
                 "status": "observed",
@@ -364,7 +372,7 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
                     "unit_id": f"native-audio-unit-{output.sequence}",
                     "seq": output.sequence,
                     "source_start_utf8": source_start,
-                    "source_end_utf8": source_start + len(output.pcm16) // 2,
+                    "source_end_utf8": source_end,
                     "content_ref": f"sha256:{hashlib.sha256(output.pcm16).hexdigest()}",
                 },
             }
@@ -1771,7 +1779,7 @@ async def test_native_turn_commit_becomes_exact_media_end_of_turn() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("browser_sample_rate", [24_000, 48_000])
-async def test_native_playback_stop_admits_runtime_before_provider_cancel(
+async def test_native_playback_stop_admits_later_item_before_provider_cancel(
     browser_sample_rate: int,
 ) -> None:
     activation_handle = _native_activation()
@@ -1808,7 +1816,25 @@ async def test_native_playback_stop_admits_runtime_before_provider_cancel(
             )
         )
     )
-    await client.audio_proposed.wait()
+    await engine.events.put(
+        NativeEngineEvent(
+            audio=NativeAudioOutput(
+                provider_event_id="provider-audio-barge-2",
+                provider_response_id="provider-response-1",
+                provider_item_id="provider-item-2",
+                content_index=0,
+                sequence=1,
+                pcm16=b"\x02\x00" * 480,
+                response=response,
+            )
+        )
+    )
+
+    async def wait_for_both_audio_items() -> None:
+        while sum(proposal.audio is not None for proposal in client.proposals) < 2:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_both_audio_items(), timeout=1.0)
     notification = registry.take_native_notification(
         session_id="session-1",
         interaction_id="interaction-1",
@@ -1825,13 +1851,13 @@ async def test_native_playback_stop_admits_runtime_before_provider_cancel(
         create_playback_stop_receipt(
             downlink.binding,
             outcome=MediaPlaybackStopOutcome.LOCAL_FENCE_ESTABLISHED,
-            confirmed_through_seq=0,
+            confirmed_through_seq=1,
         ),
     )
 
     cursor = NativePresentationCursor(
         response=response,
-        provider_item_id="provider-item-1",
+        provider_item_id="provider-item-2",
         content_index=0,
         audio_end_ms=20,
     )

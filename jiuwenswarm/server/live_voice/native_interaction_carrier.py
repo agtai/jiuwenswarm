@@ -357,13 +357,24 @@ class NativeInteractionProposal:
                     "NATIVE_AUDIO_OBSERVATION_INVALID",
                     "Provider audio must use NativeAudioOutput",
                 )
+            sample_count = event.audio.provider_sample_count
+            if sample_count is None:
+                sample_count = len(event.audio.pcm16) // 2
+            if (
+                type(sample_count) is not int
+                or not 0 < sample_count <= len(event.audio.pcm16) // 2
+            ):
+                raise NativeCarrierViolation(
+                    "NATIVE_AUDIO_OBSERVATION_INVALID",
+                    "Provider sample count must fit the emitted PCM16 frame",
+                )
             audio_observation = NativeAudioObservation(
                 provider_event_id=event.audio.provider_event_id,
                 provider_response_id=event.audio.provider_response_id,
                 provider_item_id=event.audio.provider_item_id,
                 content_index=event.audio.content_index,
                 sequence=event.audio.sequence,
-                sample_count=len(event.audio.pcm16) // 2,
+                sample_count=sample_count,
                 content_sha256=hashlib.sha256(event.audio.pcm16).hexdigest(),
                 response=event.audio.response,
             )

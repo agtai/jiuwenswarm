@@ -850,7 +850,9 @@ class NativeInteractionRuntimeOwner:
             len(self._audio_event_ids), "NATIVE_AUDIO_LEDGER_FULL"
         )
         # NATIVE_AUDIO has no source text.  Under that policy only, the
-        # existing source span fields carry contiguous 24 kHz PCM samples.
+        # existing source span fields carry response-contiguous 24 kHz PCM
+        # samples for PresentationLedger.  Provider item-local truncation
+        # cursors are derived by the dedicated downlink source.
         unit = PresentationUnit(
             ref=observation.response,
             surface=PresentationSurface.AUDIO,
