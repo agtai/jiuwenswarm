@@ -290,6 +290,7 @@ async def _serve_live_voice_native_notification(
     )
     if payload is None:
         return False
+    logger.info("live_voice_native_audio_notification_served")
     await send_response(ws, msg.id, ok=True, payload=payload)
     return True
 

@@ -32,6 +32,68 @@ const MANUAL_EOT_FALLBACK = Object.freeze({
   visible: true,
 });
 
+test('formal P1 buffers the bounded downlink handshake window before playout ownership is installed', () => {
+  assert.match(
+    productP1VoiceRouteSource,
+    /const earlyDownlinkFrames: Readonly<MediaAudioFrame>\[\] = \[\]/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /reason: 'PLAYOUT_OWNERSHIP_BUFFER_OVERFLOW'/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /for \(const frame of earlyDownlinkFrames\) this\.#acceptDownlinkFrame\(pendingPlayout, frame, result\.provider\)/,
+  );
+});
+
+test('formal P1 gives every synchronous Native downlink consumer rejection a bounded reason', () => {
+  assert.doesNotMatch(
+    productP1VoiceRouteSource,
+    /reason: 'PLAYOUT_OWNERSHIP_NOT_READY'/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /dedicated media downlink frame is stale or non-contiguous'[\s\S]{0,160}reason: 'PLAYOUT_DOWNLINK_FRAME_STALE'/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /browser playout rejected a formal chunk'[\s\S]{0,160}reason: 'PLAYOUT_CHUNK_REJECTED'/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /classifySynchronousPlayoutFailure\(error, 'PLAYOUT_FRAME_ACCEPT_FAILED'\)/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /this\.#nativePlayoutFailureReason \?\?= stableFailureReason\(failure\)/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /void this\.#fail\(failure\)/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /reason: 'PLAYOUT_DOWNLINK_ACK_FAILED'/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /const failureReason = this\.#nativePlayoutFailureReason \?\? stableFailureReason\(error\)/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /this\.#nativePlayoutFailureReason \?\?= stableFailureReason\(error\)[\s\S]{0,240}const failureReason = this\.#nativePlayoutFailureReason/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /event\.direction === 'downlink'[\s\S]{0,360}this\.#nativePlayoutFailureReason \?\?= mediaTerminalFailureReason\(event\)/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /ADAPTER_\$\{direction\}_\$\{source\}_MEDIA_CONSUMER_FAILED/,
+  );
+});
+
 function attachRealCaptureProcessor(worklet, sampleRate = 48_000) {
   let Processor = null;
   class FakeAudioWorkletProcessor {
@@ -6225,6 +6287,19 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
 
   class NativeSocket extends FakeSocket {
     serverBinding = null;
+    nextDownlinkSequence = 0;
+    pendingUplinkAckThrough = null;
+    uplinkAckScheduled = false;
+
+    queueDownlinkFrame(sequence) {
+      queueMicrotask(() => this.onmessage?.({
+        data: encodeAudioFrame(this.serverBinding, {
+          seq: sequence,
+          sample_cursor: sequence * 960,
+          samples: new Float32Array(960).fill(sequence / nativeFrameCount),
+        }),
+      }));
+    }
 
     send(value) {
       this.sent.push(value);
@@ -6237,16 +6312,10 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
           this.serverBinding.generation.value === 1 &&
           control.type === 'media.ack'
         ) {
-          if (control.through_seq + 1 < nativeFrameCount) {
-            const sequence = control.through_seq + 1;
-            queueMicrotask(() => this.onmessage?.({
-              data: encodeAudioFrame(this.serverBinding, {
-                seq: sequence,
-                sample_cursor: sequence * 960,
-                samples: new Float32Array(960).fill(sequence / nativeFrameCount),
-              }),
-            }));
-          } else {
+          if (this.nextDownlinkSequence < nativeFrameCount) {
+            this.queueDownlinkFrame(this.nextDownlinkSequence);
+            this.nextDownlinkSequence += 1;
+          } else if (control.through_seq === nativeFrameCount - 1) {
             queueMicrotask(() => this.onmessage?.({
               data: serializeMediaControl({
                 type: 'media.detach',
@@ -6263,27 +6332,40 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
       }
       if (this.serverBinding?.direction === 'uplink') {
         const frame = decodeAudioFrame(this.serverBinding, value);
-        queueMicrotask(() => this.onmessage?.({
-          data: serializeMediaControl({
-            type: 'media.ack',
-            lease_id: this.serverBinding.lease_id,
-            generation: this.serverBinding.generation.value,
-            through_seq: frame.seq,
-          }),
-        }));
+        this.pendingUplinkAckThrough = frame.seq;
+        if (!this.uplinkAckScheduled) {
+          this.uplinkAckScheduled = true;
+          setImmediate(() => {
+            this.uplinkAckScheduled = false;
+            const throughSeq = this.pendingUplinkAckThrough;
+            this.pendingUplinkAckThrough = null;
+            this.onmessage?.({
+              data: serializeMediaControl({
+                type: 'media.ack',
+                lease_id: this.serverBinding.lease_id,
+                generation: this.serverBinding.generation.value,
+                through_seq: throughSeq,
+              }),
+            });
+          });
+        }
       }
     }
   }
 
   let activeBargeResponse = null;
   let bargeStopped = null;
+  let unexpectedBargeStarts = 0;
   let owner;
   owner = new ProductP1VoiceRouteOwner({
     enabled: true,
     expected_origin: 'https://voice.example.test',
     audio_environment: environment,
     on_barge_in_speech_start: () => {
-      assert.notEqual(activeBargeResponse, null);
+      if (activeBargeResponse === null) {
+        unexpectedBargeStarts += 1;
+        return;
+      }
       bargeStopped = owner.stopAgentPlayout(activeBargeResponse);
     },
     socket_factory: () => {
@@ -6297,13 +6379,11 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
         assert.notEqual(binding, null);
         socket.onmessage?.({ data: serializeMediaControl({ type: 'media.attach', binding }) });
         if (binding.direction === 'downlink') {
-          queueMicrotask(() => socket.onmessage?.({
-            data: encodeAudioFrame(binding, {
-              seq: 0,
-              sample_cursor: 0,
-              samples: new Float32Array(960).fill(0.125),
-            }),
-          }));
+          const initialBurst = 8;
+          while (socket.nextDownlinkSequence < initialBurst) {
+            socket.queueDownlinkFrame(socket.nextDownlinkSequence);
+            socket.nextDownlinkSequence += 1;
+          }
         }
       });
       return socket;
@@ -6339,8 +6419,29 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
   const uplink = sockets.find(socket => socket.serverBinding?.direction === 'uplink');
   assert.ok(uplink);
   const uplinkFramesBeforePlayout = uplink.sent.filter(value => typeof value !== 'string').length;
-
-  await owner.playNativeAudio({
+  let forbiddenCascadeStopCalls = 0;
+  assert.equal(
+    owner.armEndOfTurn(() => {
+      forbiddenCascadeStopCalls += 1;
+    }),
+    false,
+  );
+  uplink.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: uplink.serverBinding.lease_id,
+      generation: uplink.serverBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 100,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  const nativeAudioInput = {
     response,
     presentation_unit: {
       response,
@@ -6367,18 +6468,86 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
       streaming: true,
       degradation_reason: null,
     },
+  };
+  await assert.rejects(
+    owner.playNativeAudio({
+      ...nativeAudioInput,
+      audio: { ...nativeAudioInput.audio, sample_rate_hz: 24_000 },
+    }),
+    error => error?.reason === 'PRODUCT_NATIVE_AUDIO_SAMPLE_RATE_MISMATCH',
+  );
+  await assert.rejects(
+    owner.playNativeAudio({
+      ...nativeAudioInput,
+      audio: { ...nativeAudioInput.audio, delivery: 'inline' },
+    }),
+    error => error?.reason === 'PRODUCT_NATIVE_AUDIO_DELIVERY_INVALID',
+  );
+  await assert.rejects(
+    owner.playNativeAudio({
+      ...nativeAudioInput,
+      audio: { ...nativeAudioInput.audio, unexpected: true },
+    }),
+    error => error?.reason === 'PRODUCT_NATIVE_AUDIO_FIELDS_INVALID',
+  );
+  environment.contexts[0].deferSourceEnds = true;
+  const normalPlayout = owner.playNativeAudio(nativeAudioInput);
+  for (let turn = 0; turn < 100 && owner.status().status !== 'playing'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(owner.status().status, 'playing');
+  uplink.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.end_of_turn',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: uplink.serverBinding.lease_id,
+      generation: uplink.serverBinding.generation.value,
+      detector: 'server_vad',
+      speech_started_observed: true,
+      provider_start_ms: 100,
+      provider_end_ms: 700,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
   });
+  // Native owns one continuous Provider session. Crossing the Cascade
+  // capture lease boundary while its response is still rendering must only
+  // compact already-ACKed browser PCM; it must never rotate the uplink and
+  // create a second Native activation.
+  await sendCaptureToDurationBoundary(environment, new Float32Array(960), {
+    exceed: true,
+    extraFrames: 1,
+  });
+  for (let turn = 0; turn < 20; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(sockets.filter(socket => socket.serverBinding?.direction === 'uplink').length, 1);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length, 1);
+  assert.equal(owner.captureDiagnostics().rotation_in_flight, false);
+  assert.equal(owner.captureDiagnostics().last_rotation, null);
+  assert.equal(uplink.readyState, 1);
+  assert.ok(uplink.sent.filter(value => typeof value !== 'string').length > uplinkFramesBeforePlayout);
+  environment.contexts[0].deferSourceEnds = false;
+  environment.contexts[0].releaseSourceEnds();
+  await normalPlayout;
 
+  assert.equal(unexpectedBargeStarts, 0);
+  assert.equal(forbiddenCascadeStopCalls, 0);
   assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(owner.captureDiagnostics().provider_speech_start_observed, false);
+  assert.equal(owner.captureDiagnostics().utterance_start_frame_index, null);
   assert.equal(environment.contexts[0].sourceStartCount, nativeFrameCount);
   assert.equal(environment.contexts[0].sourceEndCount, nativeFrameCount);
   assert.equal(uplink.readyState, 1);
-  assert.equal(uplink.sent.filter(value => typeof value !== 'string').length, uplinkFramesBeforePlayout);
+  assert.equal(uplink.sent.filter(value => typeof value !== 'string').length, 1_502);
   assert.equal(calls.filter(([method]) => method.includes('speech.recognize')).length, 0);
   assert.equal(calls.filter(([method]) => method.includes('speech.synthesize')).length, 0);
   const receiptCalls = calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD);
   assert.equal(receiptCalls.length, 1);
-  assert.equal(receiptCalls[0][1].capture_frames_acked, 1);
+  assert.equal(receiptCalls[0][1].capture_frames_acked, 1_502);
   assert.equal(receiptCalls[0][1].rendered_chunks, nativeFrameCount);
   assert.equal(receiptCalls[0][1].rendered_through_seq, nativeFrameCount - 1);
   const firstDownlink = sockets.find(
@@ -6393,7 +6562,6 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
     Array.from({ length: nativeFrameCount }, (_value, sequence) => sequence),
   );
 
-  environment.contexts[0].deferSourceEnds = false;
   const secondResponse = Object.freeze({
     interaction_id: 'interaction-1',
     response_id: 'native-response-2',
@@ -6413,21 +6581,8 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
     },
   };
   activeBargeResponse = secondResponse;
-  uplink.onmessage?.({
-    data: serializeMediaControl({
-      type: 'media.speech_start',
-      capability_version: 'media.end_of_turn.v1',
-      lease_id: uplink.serverBinding.lease_id,
-      generation: uplink.serverBinding.generation.value,
-      detector: 'server_vad',
-      provider_start_ms: 40,
-      timing_basis: 'provider_time',
-      timing_provenance: 'adapter_derived',
-      create_response: false,
-      interrupt_response: false,
-      business_cancel_count_delta: 0,
-    }),
-  });
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  environment.contexts[0].deferSourceEnds = true;
   const bargedPlayout = owner.playNativeAudio({
     response: secondResponse,
     presentation_unit: {
@@ -6456,9 +6611,49 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
       degradation_reason: null,
     },
   });
+  for (let turn = 0; turn < 100 && owner.status().status !== 'playing'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(owner.status().status, 'playing');
+  uplink.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: uplink.serverBinding.lease_id,
+      generation: uplink.serverBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 900,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  uplink.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.end_of_turn',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: uplink.serverBinding.lease_id,
+      generation: uplink.serverBinding.generation.value,
+      detector: 'server_vad',
+      speech_started_observed: true,
+      provider_start_ms: 900,
+      provider_end_ms: 1_300,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  environment.contexts[0].deferSourceEnds = false;
+  environment.contexts[0].releaseSourceEnds();
   await bargedPlayout;
   assert.equal(bargeStopped, true);
   assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(owner.captureDiagnostics().provider_speech_start_observed, false);
+  assert.equal(owner.captureDiagnostics().utterance_start_frame_index, null);
   const secondDownlink = sockets.find(
     socket => socket.serverBinding?.generation?.id === secondResponse.response_id,
   );

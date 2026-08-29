@@ -8,6 +8,10 @@ import type {
 const P2_SUBMIT_METHOD: ProductP2DurableOperationMethod = 'live_voice.composition.p2.submit';
 const P2_PRESENTATION_ACK_METHOD: ProductP2DurableOperationMethod = 'live_voice.composition.p2.presentation.ack';
 const P2_BARGE_IN_METHOD: ProductP2DurableOperationMethod = 'live_voice.composition.p2.barge_in';
+const CLOSED_PREDECESSOR_ACTIVATION_REASONS = new Set([
+  'ACTIVATION_GENERATION_STALE',
+  'NATIVE_RUNTIME_CLOSED',
+]);
 
 export const PRODUCT_P2_ACTIVATION_JOURNAL_SCHEMA = 'live-voice.product-p2-activation-journal.v3' as const;
 export const PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED = 'P2_REFRESH_RECONCILIATION_REQUIRED' as const;
@@ -1139,7 +1143,7 @@ export async function reconcileProductP2Predecessor(
             outcome = superseded();
             return outcome;
           }
-          if (input.error_reason(error) === 'ACTIVATION_GENERATION_STALE') {
+          if (CLOSED_PREDECESSOR_ACTIVATION_REASONS.has(input.error_reason(error) ?? '')) {
             try {
               input.journal.markClosed(predecessor, claim);
               outcome = ready();

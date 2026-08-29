@@ -566,7 +566,51 @@ async def test_exact_barge_is_idempotent_and_changed_cursor_has_zero_new_effect(
 
 
 @pytest.mark.asyncio
-async def test_cursorless_fence_cancels_runtime_before_audio_and_rejects_late_output() -> None:
+async def test_audio_observation_batch_is_ordered_and_preflights_before_effects() -> (
+    None
+):
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response(
+        "provider-response-batch", "native-response-batch"
+    )
+
+    def observation(sequence: int) -> NativeAudioObservation:
+        pcm16 = sequence.to_bytes(2, "little") * 480
+        return NativeAudioObservation(
+            provider_event_id=f"provider-audio-batch-{sequence}",
+            provider_response_id=admission.provider_response_id,
+            provider_item_id="provider-assistant-item-batch",
+            content_index=0,
+            sequence=sequence,
+            sample_count=480,
+            content_sha256=hashlib.sha256(pcm16).hexdigest(),
+            response=admission.response,
+        )
+
+    before = runtime.snapshot()
+    with pytest.raises(NativeInteractionRuntimeError) as invalid:
+        await owner.accept_audio_observations((observation(0), observation(2)))
+    assert invalid.value.reason == "NATIVE_AUDIO_SEQUENCE_GAP"
+    assert runtime.snapshot() == before
+
+    admitted = await owner.accept_audio_observations(
+        tuple(observation(sequence) for sequence in range(16))
+    )
+
+    assert admitted is not None
+    assert [item.accepted for item in admitted] == [True] * 16
+    assert [item.unit.seq for item in admitted] == list(range(16))
+    assert owner.snapshot().audio_count == 16
+    assert [record.effect.effect_type for record in runtime.snapshot().effects] == [
+        "audio.enqueue"
+    ] * 16
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_cursorless_fence_cancels_runtime_before_audio_and_rejects_late_output() -> (
+    None
+):
     owner, runtime = await active_owner()
     admission = await owner.accept_provider_response("provider-response-1", "native-r1")
 
@@ -587,12 +631,18 @@ async def test_cursorless_fence_cancels_runtime_before_audio_and_rejects_late_ou
     assert response_record.cancel_state is CancelState.REQUESTED
     assert response_record.fenced is True
     before_late = runtime.snapshot()
-    assert await owner.accept_audio(
-        audio(admission.response, admission.provider_response_id, 0)
-    ) is False
-    assert await owner.accept_provider_done(
-        done(admission.response, admission.provider_response_id)
-    ) is False
+    assert (
+        await owner.accept_audio(
+            audio(admission.response, admission.provider_response_id, 0)
+        )
+        is False
+    )
+    assert (
+        await owner.accept_provider_done(
+            done(admission.response, admission.provider_response_id)
+        )
+        is False
+    )
     assert runtime.snapshot() == before_late
     assert [record.effect.effect_type for record in runtime.snapshot().effects].count(
         "response.cancel"
@@ -825,4 +875,67 @@ async def test_audio_ledger_capacity_fails_before_runtime_or_media_effect(
 
     assert raised.value.reason == "NATIVE_AUDIO_LEDGER_FULL"
     assert runtime.snapshot() == before
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_predecessor_audio_ledger_is_retired_for_successor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(native_runtime_module, "_MAX_NATIVE_RUNTIME_RECORDS", 2)
+    owner, runtime = await active_owner()
+    first = await owner.accept_provider_response("provider-response-1", "native-r1")
+    assert await owner.accept_audio(audio(first.response, first.provider_response_id, 0))
+    assert await owner.accept_audio(audio(first.response, first.provider_response_id, 1))
+    assert await owner.accept_provider_done(
+        done(first.response, first.provider_response_id, transcript=None)
+    )
+
+    second = await owner.accept_provider_response("provider-response-2", "native-r2")
+    assert await owner.accept_audio(
+        audio(second.response, second.provider_response_id, 0)
+    )
+    assert owner.snapshot().audio_count == 3
+    assert len(runtime.snapshot().effects) == 3
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_accepts_ordered_audio_items_and_barges_exact_presented_item() -> (
+    None
+):
+    owner, runtime = await active_owner()
+    admission = await owner.accept_provider_response("provider-response-1", "native-r1")
+    first = audio(admission.response, admission.provider_response_id, 0)
+    second = replace(
+        audio(admission.response, admission.provider_response_id, 1),
+        provider_item_id="provider-assistant-item-2",
+    )
+    first_again = replace(first, sequence=2, provider_event_id="provider-audio-3")
+    assert await owner.accept_audio(first)
+    assert await owner.accept_audio(second)
+    assert await owner.accept_audio(first_again)
+
+    cursor = NativePresentationCursor(
+        response=admission.response,
+        provider_item_id=first.provider_item_id,
+        content_index=first.content_index,
+        audio_end_ms=40,
+    )
+    result = await owner.barge_in(
+        action_id="native-stop-first-item",
+        response=admission.response,
+        cursor=cursor,
+    )
+
+    assert result.applied is True
+    assert result.cursor == cursor
+    assert owner.snapshot().audio_count == 3
+    assert [record.effect.effect_type for record in runtime.snapshot().effects] == [
+        "audio.enqueue",
+        "audio.enqueue",
+        "audio.enqueue",
+        "playback.stop",
+        "response.cancel",
+    ]
     await owner.close()

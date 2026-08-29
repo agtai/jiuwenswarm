@@ -164,15 +164,33 @@ def output_audio_delta(
     sequence: int,
     *,
     pcm16: bytes = b"\x01\x00" * 480,
+    output_index: int = 0,
 ) -> dict[str, object]:
     return provider_event(
         "response.output_audio.delta",
         event_id,
         response_id=response_id,
         item_id=item_id,
-        output_index=sequence,
+        output_index=output_index,
         content_index=0,
         delta=base64.b64encode(pcm16).decode("ascii"),
+    )
+
+
+def output_audio_done(
+    event_id: str,
+    response_id: str,
+    item_id: str,
+    *,
+    output_index: int = 0,
+) -> dict[str, object]:
+    return provider_event(
+        "response.output_audio.done",
+        event_id,
+        response_id=response_id,
+        item_id=item_id,
+        output_index=output_index,
+        content_index=0,
     )
 
 
@@ -181,13 +199,15 @@ def output_transcript_done(
     response_id: str,
     item_id: str,
     transcript: str,
+    *,
+    output_index: int = 0,
 ) -> dict[str, object]:
     return provider_event(
         "response.output_audio_transcript.done",
         event_id,
         response_id=response_id,
         item_id=item_id,
-        output_index=0,
+        output_index=output_index,
         content_index=0,
         transcript=transcript,
     )
@@ -359,7 +379,7 @@ async def test_native_session_direct_audio_does_not_require_transcript_or_bridge
     assert socket.sent[0]["session"]["audio"]["input"]["turn_detection"] == {
         "type": "semantic_vad",
         "eagerness": "auto",
-        "create_response": True,
+        "create_response": False,
         "interrupt_response": False,
     }
     assert socket.sent[0]["session"]["tools"] == [
@@ -375,6 +395,285 @@ async def test_native_session_direct_audio_does_not_require_transcript_or_bridge
             },
         }
     ]
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_one_response_preserves_two_ordered_audio_items() -> None:
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x01\x00" * 480,
+        ),
+        output_audio_delta(
+            "event-8",
+            "provider-response-1",
+            "assistant-item-2",
+            1,
+            pcm16=b"\x02\x00" * 480,
+            output_index=1,
+        ),
+        output_audio_done(
+            "event-9", "provider-response-1", "assistant-item-1"
+        ),
+        output_transcript_done(
+            "event-10", "provider-response-1", "assistant-item-1", "第一段。"
+        ),
+        output_audio_done(
+            "event-11",
+            "provider-response-1",
+            "assistant-item-2",
+            output_index=1,
+        ),
+        output_transcript_done(
+            "event-12",
+            "provider-response-1",
+            "assistant-item-2",
+            "第二段。",
+            output_index=1,
+        ),
+        response_done("event-13", "provider-response-1"),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    ref = response_ref(1)
+    assert await engine.admit_response("provider-response-1", ref) is True
+
+    first = await engine.next_event()
+    assert first.audio is not None
+    assert (
+        first.audio.sequence,
+        first.audio.provider_item_id,
+        first.audio.content_index,
+        first.audio.pcm16,
+    ) == (0, "assistant-item-1", 0, b"\x01\x00" * 480)
+    second = await engine.next_event()
+    assert second.audio is not None
+    assert (
+        second.audio.sequence,
+        second.audio.provider_item_id,
+        second.audio.content_index,
+        second.audio.pcm16,
+    ) == (1, "assistant-item-2", 0, b"\x02\x00" * 480)
+    assert await engine.next_event() == NativeEngineEvent()
+    assert await engine.next_event() == NativeEngineEvent()
+    assert await engine.next_event() == NativeEngineEvent()
+    assert await engine.next_event() == NativeEngineEvent()
+    done = await engine.next_event()
+    assert done.provider_done is not None
+    assert done.provider_done.transcript == "第一段。 第二段。"
+    assert done.provider_done.transcript_event_id == "event-13"
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_two_item_response_cancels_exact_presented_item_cursor() -> None:
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7", "provider-response-1", "assistant-item-1", 0
+        ),
+        output_audio_done(
+            "event-8", "provider-response-1", "assistant-item-1"
+        ),
+        output_audio_delta(
+            "event-9",
+            "provider-response-1",
+            "assistant-item-2",
+            1,
+            output_index=1,
+        ),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    ref = response_ref(1)
+    await engine.admit_response("provider-response-1", ref)
+    assert (await engine.next_event()).audio is not None
+    assert await engine.next_event() == NativeEngineEvent()
+    assert (await engine.next_event()).audio is not None
+
+    cursor = NativePresentationCursor(
+        response=ref,
+        provider_item_id="assistant-item-1",
+        content_index=0,
+        audio_end_ms=20,
+    )
+    await engine.cancel_response(cursor)
+
+    assert socket.sent[-1]["type"] == "conversation.item.truncate"
+    assert socket.sent[-1]["item_id"] == "assistant-item-1"
+    assert socket.sent[-1]["audio_end_ms"] == 20
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_changed_same_index_audio_item_has_zero_new_audio_effect() -> None:
+    invalid_event = output_audio_delta(
+        "event-invalid",
+        "provider-response-1",
+        "changed-same-index",
+        1,
+    )
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7", "provider-response-1", "assistant-item-1", 0
+        ),
+        invalid_event,
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    await engine.admit_response("provider-response-1", response_ref(1))
+    assert (await engine.next_event()).audio is not None
+    before = engine.snapshot()
+
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.next_event()
+
+    assert raised.value.reason == "NATIVE_PROVIDER_ITEM_MISMATCH"
+    after = engine.snapshot()
+    assert after.released_audio_count == before.released_audio_count
+    assert after.delegate_count == before.delegate_count == 0
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_interleaved_partial_audio_items_never_mix_buffers() -> None:
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x01\x00" * 240,
+        ),
+        output_audio_delta(
+            "event-8",
+            "provider-response-1",
+            "assistant-item-2",
+            1,
+            pcm16=b"\x02\x00" * 480,
+            output_index=1,
+        ),
+        output_audio_delta(
+            "event-9",
+            "provider-response-1",
+            "assistant-item-1",
+            2,
+            pcm16=b"\x03\x00" * 240,
+        ),
+        output_audio_done(
+            "event-10", "provider-response-1", "assistant-item-1"
+        ),
+        output_audio_done(
+            "event-11",
+            "provider-response-1",
+            "assistant-item-2",
+            output_index=1,
+        ),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    await engine.admit_response("provider-response-1", response_ref(1))
+    assert await engine.next_event() == NativeEngineEvent()
+    second = await engine.next_event()
+    first = await engine.next_event()
+
+    assert second.audio is not None
+    assert (second.audio.sequence, second.audio.provider_item_id) == (
+        0,
+        "assistant-item-2",
+    )
+    assert second.audio.pcm16 == b"\x02\x00" * 480
+    assert first.audio is not None
+    assert (first.audio.sequence, first.audio.provider_item_id) == (
+        1,
+        "assistant-item-1",
+    )
+    assert first.audio.pcm16 == b"\x01\x00" * 240 + b"\x03\x00" * 240
+    assert await engine.next_event() == NativeEngineEvent()
+    assert await engine.next_event() == NativeEngineEvent()
+    await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_event",
+    (
+        output_audio_delta(
+            "event-invalid",
+            "provider-response-1",
+            "regressed-item",
+            1,
+            output_index=0,
+        ),
+        output_audio_delta(
+            "event-invalid",
+            "provider-response-1",
+            "assistant-item-1",
+            1,
+            output_index=2,
+        ),
+    ),
+    ids=("output-index-regression", "item-id-moved-to-new-index"),
+)
+async def test_completed_audio_item_replay_change_fails_closed(
+    invalid_event: dict[str, object],
+) -> None:
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            output_index=1,
+        ),
+        output_audio_done(
+            "event-8",
+            "provider-response-1",
+            "assistant-item-1",
+            output_index=1,
+        ),
+        invalid_event,
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    await engine.admit_response("provider-response-1", response_ref(1))
+    assert (await engine.next_event()).audio is not None
+    assert await engine.next_event() == NativeEngineEvent()
+    before = engine.snapshot()
+
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.next_event()
+
+    assert raised.value.reason == "NATIVE_PROVIDER_ITEM_MISMATCH"
+    assert engine.snapshot().released_audio_count == before.released_audio_count
     await engine.close()
 
 
@@ -710,6 +1009,102 @@ async def test_complete_transcript_keeps_exact_provider_provenance() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transcript", ["", " \t\r\n "])
+async def test_blank_interrupted_transcript_is_absent_and_does_not_close_engine(
+    transcript: str,
+) -> None:
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta("event-7", "provider-response-1", "assistant-item-1", 0),
+        output_transcript_done(
+            "event-8", "provider-response-1", "assistant-item-1", transcript
+        ),
+        response_done("event-9", "provider-response-1", status="cancelled"),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    await engine.admit_response("provider-response-1", response_ref(1))
+    assert (await engine.next_event()).audio is not None
+
+    assert await engine.next_event() == NativeEngineEvent()
+    done = await engine.next_event()
+
+    assert done.provider_done is not None
+    assert done.provider_done.completed is False
+    assert done.provider_done.transcript is None
+    assert done.provider_done.transcript_event_id is None
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_complete_transcript_canonicalizes_provider_line_breaks_for_audit() -> None:
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta("event-7", "provider-response-1", "assistant-item-1", 0),
+        output_transcript_done(
+            "event-8",
+            "provider-response-1",
+            "assistant-item-1",
+            "  First paragraph.\r\nSecond paragraph.\r\n",
+        ),
+        response_done("event-9", "provider-response-1"),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    await engine.admit_response("provider-response-1", response_ref(1))
+    assert (await engine.next_event()).audio is not None
+
+    assert await engine.next_event() == NativeEngineEvent()
+    done = await engine.next_event()
+
+    assert done.provider_done is not None
+    assert done.provider_done.transcript == "First paragraph. Second paragraph."
+    assert done.provider_done.transcript_event_id == "event-8"
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_transcript_control_fails_before_history_admission() -> None:
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta("event-7", "provider-response-1", "assistant-item-1", 0),
+        output_transcript_done(
+            "event-8",
+            "provider-response-1",
+            "assistant-item-1",
+            "unsafe\x00transcript",
+        ),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    await engine.admit_response("provider-response-1", response_ref(1))
+    assert (await engine.next_event()).audio is not None
+    before = engine.snapshot()
+
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.next_event()
+
+    assert raised.value.reason == "NATIVE_PROVIDER_TRANSCRIPT_INVALID"
+    after = engine.snapshot()
+    assert after.released_audio_count == before.released_audio_count
+    assert after.delegate_count == before.delegate_count
+    assert after.retained_action_count == before.retained_action_count
+    await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_explicit_harmless_ga_event_has_zero_native_effect() -> None:
     engine, _, _ = active_engine(
         provider_event(
@@ -786,7 +1181,18 @@ async def test_unknown_or_non_closed_provider_event_has_zero_output(
 
 
 @pytest.mark.asyncio
-async def test_provider_error_is_sanitized_and_has_zero_native_effect() -> None:
+async def test_provider_error_is_sanitized_and_has_zero_native_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logged: list[str] = []
+
+    def capture_error(message: str, *args: object) -> None:
+        logged.append(message % args)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_realtime_native_engine.logger.error",
+        capture_error,
+    )
     engine, _, _ = active_engine(
         provider_event(
             "error",
@@ -808,6 +1214,12 @@ async def test_provider_error_is_sanitized_and_has_zero_native_effect() -> None:
 
     assert raised.value.reason == "NATIVE_PROVIDER_ERROR"
     assert "private-provider-detail" not in str(raised.value)
+    assert all("private-provider-detail" not in entry for entry in logged)
+    assert (
+        "openai_realtime_native_provider_error "
+        "type=invalid_request_error code=invalid_value param=session.audio "
+        "event_id_present=False"
+    ) in logged
     after = engine.snapshot()
     assert after.emitted_event_count == before.emitted_event_count == 0
     assert after.retained_action_count == before.retained_action_count == 0
@@ -1191,6 +1603,67 @@ async def test_concurrent_exact_cancel_sends_one_provider_pair() -> None:
 
 
 @pytest.mark.asyncio
+async def test_barge_turn_waits_for_cancelled_response_terminal_before_create() -> None:
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x00\x00" * 480,
+        ),
+        speech_started("event-8", "user-item-2", 40),
+        speech_stopped("event-9", "user-item-2", 60),
+        input_committed("event-10", "user-item-2"),
+        response_done("event-11", "provider-response-1", status="cancelled"),
+        response_created("event-12", "provider-response-2"),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    assert [event["type"] for event in socket.sent] == [
+        "session.update",
+        "response.create",
+    ]
+    assert (await engine.next_event()).action is not None
+    first_ref = response_ref(1)
+    await engine.admit_response("provider-response-1", first_ref)
+    assert (await engine.next_event()).audio is not None
+
+    stop = await engine.next_event()
+    assert stop.action is not None and stop.action.operation == "STOP"
+    await engine.cancel_response(
+        NativePresentationCursor(
+            response=first_ref,
+            provider_item_id="assistant-item-1",
+            content_index=0,
+            audio_end_ms=10,
+        )
+    )
+    listen = await engine.next_event()
+    assert listen.action is not None and listen.action.operation == "LISTEN"
+    silence = await engine.next_event()
+    assert silence.action is not None and silence.action.operation == "SILENCE"
+    second_commit = await engine.next_event()
+    assert (
+        second_commit.action is not None
+        and second_commit.action.operation == "TURN_COMMIT"
+    )
+    assert [event["type"] for event in socket.sent].count("response.create") == 1
+
+    assert await engine.next_event() == NativeEngineEvent()
+    assert [event["type"] for event in socket.sent].count("response.create") == 2
+    second_speak = await engine.next_event()
+    assert second_speak.action is not None
+    assert second_speak.action.operation == "SPEAK"
+    assert action_payload(second_speak)["turn_id"] == "native-turn-00000002"
+    await engine.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("late_kind", ["transcript", "function", "done"])
 async def test_cancelled_response_discards_late_provider_authority_events(
     late_kind: str,
@@ -1352,17 +1825,22 @@ async def test_barge_stop_proposal_binds_exact_runtime_generation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_timeout_remote_close_process_control_and_unique_close() -> None:
-    timeout_engine, timeout_socket, _ = active_engine(
+async def test_receive_idle_remote_close_process_control_and_unique_close() -> None:
+    idle_engine, idle_socket, _ = active_engine(
         session_config=config(operation_timeout_seconds=0.01)
     )
-    await timeout_engine.start()
-    with pytest.raises(OpenAIRealtimeNativeInteractionError) as timed_out:
-        await timeout_engine.next_event()
-    assert timed_out.value.reason == "REALTIME_PROVIDER_TIMEOUT"
-    await timeout_engine.close()
-    await timeout_engine.close()
-    assert timeout_socket.close_calls == 1
+    await idle_engine.start()
+    idle_event_task = asyncio.create_task(idle_engine.next_event())
+    await asyncio.sleep(0.035)
+    assert idle_event_task.done() is False
+    assert idle_engine.snapshot().state is NativeProviderState.READY
+    idle_socket.push(speech_started("event-3", "user-item-1", 0))
+    idle_event = await asyncio.wait_for(idle_event_task, timeout=1)
+    assert idle_event.action is not None
+    assert idle_event.action.operation == "LISTEN"
+    await idle_engine.close()
+    await idle_engine.close()
+    assert idle_socket.close_calls == 1
 
     remote, _, _ = active_engine(ConnectionError("private-remote"))
     await remote.start()

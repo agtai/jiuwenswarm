@@ -1800,6 +1800,23 @@ def _native_turn_proposal(
     )
 
 
+def _native_action_proposal(
+    binding: NativeInteractionBinding, *, ordinal: int
+) -> NativeInteractionProposal:
+    return NativeInteractionProposal.from_engine_event(
+        binding,
+        NativeEngineEvent(
+            action=InteractionAction(
+                action_id=f"native-listen-action-{ordinal}",
+                operation="LISTEN",
+                interaction_id=binding.interaction_id,
+                scope=binding.scope,
+                payload=(("provider_item_id", f"provider-item-{ordinal}"),),
+            )
+        ),
+    )
+
+
 def _native_propose_params(
     binding: NativeInteractionBinding,
     capability: str,
@@ -1833,21 +1850,36 @@ def _native_speak_proposal(
 def _native_audio_proposal(
     binding: NativeInteractionBinding,
     response: ResponseRef,
+    *,
+    sequence: int = 0,
 ) -> NativeInteractionProposal:
     return NativeInteractionProposal.from_engine_event(
         binding,
         NativeEngineEvent(
             audio=NativeAudioOutput(
-                provider_event_id="provider-audio-1",
+                provider_event_id=f"provider-audio-{sequence}",
                 provider_response_id="provider-response-1",
                 provider_item_id="provider-assistant-item-1",
                 content_index=0,
-                sequence=0,
+                sequence=sequence,
                 pcm16=b"\x12\x34" * 480,
                 response=response,
             )
         ),
     )
+
+
+def _native_audio_batch_params(
+    binding: NativeInteractionBinding,
+    capability: str,
+    proposals: list[NativeInteractionProposal],
+) -> dict[str, object]:
+    return {
+        "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
+        "binding": binding.to_dict(),
+        "capability": capability,
+        "proposals": [proposal.to_dict() for proposal in proposals],
+    }
 
 
 def _native_done_proposal(
@@ -2390,6 +2422,49 @@ async def test_native_activation_replays_capability_and_admits_exact_turn(
     route = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
     assert route.native_runtime_owner is not None
     assert route.native_runtime_owner.snapshot().turn_count == 1
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_activation_action_ledger_crosses_generic_256_default(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(
+        tmp_path,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_engine="openai-realtime-native"),
+        request_id="request-native-capacity-activate",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    descriptor = cast(
+        dict[str, object],
+        cast(dict[str, object], activated.payload["result"])["_native_gateway"],
+    )
+    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
+    capability = cast(str, descriptor["capability"])
+
+    for ordinal in range(1, 258):
+        proposed = await registry.handle_native_propose(
+            params=_native_propose_params(
+                binding,
+                capability,
+                _native_action_proposal(binding, ordinal=ordinal),
+            ),
+            request_id=f"request-native-capacity-{ordinal}",
+            session_id=SCOPE.session_id,
+        )
+        assert proposed.ok is True
+        assert proposed.payload["result"] == {
+            "kind": "action",
+            "status": "observed",
+            "accepted": True,
+        }
+
+    route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
+    assert route.activation_lease.snapshot().accepted_intents == 257
     await registry.stop()
 
 
@@ -2999,6 +3074,95 @@ async def test_native_speak_changed_replay_and_close_are_exactly_fenced(
     assert cast(dict, stale.payload["error"])["reason"] == (
         "NATIVE_RUNTIME_CAPABILITY_REJECTED"
     )
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_audio_batch_preflights_and_returns_ordered_units(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(
+        tmp_path,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_engine="openai-realtime-native"),
+        request_id="request-native-batch-activate",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    descriptor = cast(
+        dict[str, object],
+        cast(dict[str, object], activated.payload["result"])["_native_gateway"],
+    )
+    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
+    capability = cast(str, descriptor["capability"])
+    assert (
+        await registry.handle_native_propose(
+            params=_native_propose_params(
+                binding, capability, _native_turn_proposal(binding)
+            ),
+            request_id="request-native-batch-turn",
+            session_id=SCOPE.session_id,
+        )
+    ).ok
+    source = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_speak_proposal(binding)
+        ),
+        request_id="request-native-batch-source",
+        session_id=SCOPE.session_id,
+    )
+    response_payload = cast(
+        dict[str, object], cast(dict[str, object], source.payload["result"])["response"]
+    )
+    response = ResponseRef(
+        interaction_id=cast(str, response_payload["interaction_id"]),
+        response_id=cast(str, response_payload["response_id"]),
+        response_generation=cast(int, response_payload["response_generation"]),
+    )
+    route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
+    owner = route.native_runtime_owner
+    assert owner is not None
+    invalid = [
+        _native_audio_proposal(binding, response, sequence=sequence)
+        for sequence in [*range(15), 17]
+    ]
+
+    rejected = await registry.handle_native_propose(
+        params=_native_audio_batch_params(binding, capability, invalid),
+        request_id="request-native-batch-invalid",
+        session_id=SCOPE.session_id,
+    )
+
+    assert rejected.ok is False
+    assert cast(dict[str, object], rejected.payload["error"])["reason"] == (
+        "NATIVE_AUDIO_BATCH_INVALID"
+    )
+    assert owner.snapshot().audio_count == 0
+
+    accepted = await registry.handle_native_propose(
+        params=_native_audio_batch_params(
+            binding,
+            capability,
+            [
+                _native_audio_proposal(binding, response, sequence=sequence)
+                for sequence in range(16)
+            ],
+        ),
+        request_id="request-native-batch-valid",
+        session_id=SCOPE.session_id,
+    )
+
+    assert accepted.ok is True
+    result = cast(dict[str, object], accepted.payload["result"])
+    assert result["kind"] == "audio_batch"
+    assert result["status"] == "observed"
+    items = cast(list[dict[str, object]], result["items"])
+    assert [
+        cast(dict[str, object], item["presentation_unit"])["seq"] for item in items
+    ] == list(range(16))
+    assert owner.snapshot().audio_count == 16
     await registry.stop()
 
 

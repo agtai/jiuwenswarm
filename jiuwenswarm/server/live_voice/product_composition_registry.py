@@ -84,6 +84,7 @@ from .native_interaction_config import (
     select_interaction_engine_environment,
 )
 from .native_interaction_contract import (
+    MAX_NATIVE_AUDIO_PROPOSAL_BATCH,
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeInteractionBinding,
     NativePresentationCursor,
@@ -899,6 +900,7 @@ class AgentServerProductCompositionRegistry:
     _PROGRESS_GENERATION_CAPACITY = 128
     _P2_RESPONSE_GENERATION_CAPACITY = 128
     _PRODUCT_OPERATION_CAPACITY = 128
+    _NATIVE_INTERACTION_ACTION_CAPACITY = 1024
     _TURN_COMMIT_CAPACITY = 128
     _TURN_COMMIT_CAPACITY_PER_ROUTE = 32
 
@@ -1116,7 +1118,13 @@ class AgentServerProductCompositionRegistry:
                             "task.cancel",
                         }
                     )
-                )
+                ),
+                **(
+                    {"max_actions": self._NATIVE_INTERACTION_ACTION_CAPACITY}
+                    if settings.interaction_engine
+                    is InteractionEngineKind.OPENAI_REALTIME_NATIVE
+                    else {}
+                ),
             ),
         )
         self._p3_adapter = ProductP3TextAdapter(
@@ -4565,10 +4573,19 @@ class AgentServerProductCompositionRegistry:
         """Admit one capability-bound Native proposal through the P2 owners."""
 
         try:
-            _require_exact_params(
-                params,
-                frozenset({"contract_version", "binding", "capability", "proposal"}),
+            keys = frozenset(params)
+            single_keys = frozenset(
+                {"contract_version", "binding", "capability", "proposal"}
             )
+            batch_keys = frozenset(
+                {"contract_version", "binding", "capability", "proposals"}
+            )
+            if keys not in {single_keys, batch_keys}:
+                raise FormalTaskViolation(
+                    "NATIVE_PROPOSAL_INVALID",
+                    "Native proposal fields must match one closed shape",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
             if params.get("contract_version") != NATIVE_INTERACTION_CONTRACT_VERSION:
                 raise FormalTaskViolation(
                     "NATIVE_CONTRACT_VERSION_UNSUPPORTED",
@@ -4578,7 +4595,52 @@ class AgentServerProductCompositionRegistry:
             routed_session = _required_text(session_id, "routed_session_id")
             parsed_request_id = _required_text(request_id, "request_id")
             binding = NativeInteractionBinding.from_dict(params.get("binding"))
-            proposal = NativeInteractionProposal.from_dict(params.get("proposal"))
+            proposal: NativeInteractionProposal | None = None
+            audio_batch: tuple[NativeInteractionProposal, ...] | None = None
+            if keys == single_keys:
+                proposal = NativeInteractionProposal.from_dict(params.get("proposal"))
+            else:
+                raw_proposals = params.get("proposals")
+                if (
+                    type(raw_proposals) is not list
+                    or not 0 < len(raw_proposals) <= MAX_NATIVE_AUDIO_PROPOSAL_BATCH
+                ):
+                    raise FormalTaskViolation(
+                        "NATIVE_AUDIO_BATCH_INVALID",
+                        "Native audio batch must be bounded and non-empty",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                audio_batch = tuple(
+                    NativeInteractionProposal.from_dict(raw) for raw in raw_proposals
+                )
+                first_audio = audio_batch[0].audio_observation
+                if first_audio is None:
+                    raise FormalTaskViolation(
+                        "NATIVE_AUDIO_BATCH_INVALID",
+                        "Native audio batch requires standalone audio observations",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                for ordinal, candidate in enumerate(audio_batch):
+                    audio = candidate.audio_observation
+                    if (
+                        candidate.binding != binding
+                        or audio is None
+                        or candidate.action is not None
+                        or candidate.turn_commit is not None
+                        or candidate.delegate is not None
+                        or candidate.provider_done is not None
+                        or audio.response != first_audio.response
+                        or audio.provider_response_id
+                        != first_audio.provider_response_id
+                        or audio.provider_item_id != first_audio.provider_item_id
+                        or audio.content_index != first_audio.content_index
+                        or audio.sequence != first_audio.sequence + ordinal
+                    ):
+                        raise FormalTaskViolation(
+                            "NATIVE_AUDIO_BATCH_INVALID",
+                            "Native audio batch must be contiguous and response-exact",
+                            ErrorCode.INVALID_ARGUMENT,
+                        )
             capability = params.get("capability")
             if (
                 type(capability) is not str
@@ -4590,9 +4652,8 @@ class AgentServerProductCompositionRegistry:
                     "Native Runtime capability is invalid",
                     ErrorCode.PERMISSION_DENIED,
                 )
-            if (
-                binding.scope.session_id != routed_session
-                or proposal.binding != binding
+            if binding.scope.session_id != routed_session or (
+                proposal is not None and proposal.binding != binding
             ):
                 raise FormalTaskViolation(
                     "NATIVE_RUNTIME_BINDING_MISMATCH",
@@ -4623,7 +4684,7 @@ class AgentServerProductCompositionRegistry:
                 message=str(exc),
             )
 
-        if proposal.delegate is not None:
+        if proposal is not None and proposal.delegate is not None:
             return await self._handle_native_delegate_propose(
                 binding=binding,
                 capability=capability,
@@ -4686,6 +4747,84 @@ class AgentServerProductCompositionRegistry:
                 )
             owner = route.native_runtime_owner
             assert owner is not None
+            if audio_batch is not None:
+                try:
+                    observations = tuple(
+                        candidate.audio_observation for candidate in audio_batch
+                    )
+                    assert all(observation is not None for observation in observations)
+                    admissions = await owner.accept_audio_observations(
+                        tuple(
+                            observation
+                            for observation in observations
+                            if observation is not None
+                        )
+                    )
+                    if admissions is None:
+                        raise NativeInteractionRuntimeError(
+                            "NATIVE_AUDIO_RESPONSE_STALE",
+                            "Native audio requires the exact current Runtime response",
+                        )
+                    items: list[dict[str, object]] = []
+                    for admission in admissions:
+                        unit = admission.unit
+                        items.append(
+                            {
+                                "kind": "audio",
+                                "status": "observed",
+                                "accepted": admission.accepted,
+                                "presentation_unit": {
+                                    "response": {
+                                        "interaction_id": unit.ref.interaction_id,
+                                        "response_id": unit.ref.response_id,
+                                        "response_generation": (
+                                            unit.ref.response_generation
+                                        ),
+                                    },
+                                    "surface": unit.surface.value,
+                                    "unit_id": unit.unit_id,
+                                    "seq": unit.seq,
+                                    "source_start_utf8": unit.source_start_utf8,
+                                    "source_end_utf8": unit.source_end_utf8,
+                                    "content_ref": unit.content_ref,
+                                },
+                            }
+                        )
+                except (FormalTaskViolation, NativeInteractionRuntimeError) as exc:
+                    return _error_result(
+                        request_id,
+                        reason=exc.reason,
+                        code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                        message=str(exc),
+                        manifest=route.manifest,
+                    )
+                except Exception as exc:
+                    return _error_result(
+                        request_id,
+                        reason=getattr(exc, "reason", "NATIVE_RUNTIME_REJECTED"),
+                        code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                        message=str(exc),
+                        manifest=route.manifest,
+                    )
+                result = _success_result(
+                    request_id,
+                    {"kind": "audio_batch", "status": "observed", "items": items},
+                    route.manifest,
+                )
+                if (
+                    len(self._native_propose_operations)
+                    >= self._PRODUCT_OPERATION_CAPACITY
+                ):
+                    expired_request_id = next(iter(self._native_propose_operations))
+                    self._native_propose_operations.pop(expired_request_id)
+                    self._mark_evicted_product_request(
+                        "native.propose", expired_request_id
+                    )
+                self._native_propose_operations[parsed_request_id] = (
+                    _NativeProductOperation(fingerprint, result)
+                )
+                return result
+            assert proposal is not None
             action_intent = None
             try:
                 if proposal.action is not None:
@@ -5310,7 +5449,10 @@ class AgentServerProductCompositionRegistry:
                             ErrorCode.INVALID_ARGUMENT,
                         )
                     generation = raw_response.get("response_generation")
-                    if type(generation) is not int or not 0 < generation <= MAX_SAFE_INTEGER:
+                    if (
+                        type(generation) is not int
+                        or not 0 < generation <= MAX_SAFE_INTEGER
+                    ):
                         raise FormalTaskViolation(
                             "NATIVE_PRESENTATION_ACK_INVALID",
                             "Native response fence generation is invalid",

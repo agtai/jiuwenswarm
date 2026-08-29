@@ -14,6 +14,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import logging
 import unicodedata
 from collections import deque
 from collections.abc import Mapping
@@ -56,8 +57,22 @@ MAX_NATIVE_AUDIO_DELTA_BYTES = 96_000
 MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES = 65_536
 _MAX_ENGINE_CAPACITY = 4_096
 _MAX_NATIVE_ACTIONS = 1_024
+_MAX_PROVIDER_AUDIO_ITEMS = 64
 _MAX_IDENTITY_CHARS = 256
 _MAX_IDENTITY_UTF8_BYTES = 1_024
+
+
+logger = logging.getLogger(__name__)
+
+
+def _provider_error_label(value: object) -> str:
+    if value is None:
+        return "none"
+    if type(value) is not str or not value or len(value) > 96 or not value.isascii():
+        return "other"
+    if any(not (character.isalnum() or character in "._-") for character in value):
+        return "other"
+    return value
 
 
 class OpenAIRealtimeNativeInteractionError(RuntimeError):
@@ -161,18 +176,26 @@ class NativeEngineSnapshot:
 
 
 @dataclass(slots=True)
+class _ProviderAudioItem:
+    output_index: int
+    provider_item_id: str
+    content_index: int
+    received_samples: int = 0
+    transcript: str | None = None
+    transcript_event_id: str | None = None
+    transcript_done: bool = False
+    done: bool = False
+    audio_buffer: bytearray = field(default_factory=bytearray, repr=False)
+    audio_buffer_event_id: str | None = None
+
+
+@dataclass(slots=True)
 class _ProviderResponse:
     provider_response_id: str
     turn_id: str
     runtime_ref: ResponseRef | None = None
-    provider_item_id: str | None = None
-    content_index: int | None = None
+    audio_items: dict[int, _ProviderAudioItem] = field(default_factory=dict)
     next_audio_sequence: int = 0
-    received_samples: int = 0
-    transcript: str | None = None
-    transcript_event_id: str | None = None
-    audio_buffer: bytearray = field(default_factory=bytearray, repr=False)
-    audio_buffer_event_id: str | None = None
     done: bool = False
     cancelled: bool = False
 
@@ -224,6 +247,16 @@ _EVENT_KEYS = {
             "output_index",
             "content_index",
             "delta",
+        }
+    ),
+    "response.output_audio.done": frozenset(
+        {
+            "type",
+            "event_id",
+            "response_id",
+            "item_id",
+            "output_index",
+            "content_index",
         }
     ),
     "response.output_audio_transcript.done": frozenset(
@@ -284,7 +317,6 @@ _HARMLESS_EVENT_TYPES = frozenset(
         "response.content_part.added",
         "response.content_part.done",
         "response.function_call_arguments.delta",
-        "response.output_audio.done",
         "response.output_audio_transcript.delta",
         "response.output_item.added",
         "response.output_item.done",
@@ -309,7 +341,7 @@ def _session_update() -> dict[str, object]:
                 "turn_detection": {
                     "type": "semantic_vad",
                     "eagerness": "auto",
-                    "create_response": True,
+                    "create_response": False,
                     "interrupt_response": False,
                 },
             },
@@ -555,6 +587,8 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._input_start_ms: int | None = None
         self._input_end_ms: int | None = None
         self._current_turn_id: str | None = None
+        self._pending_direct_response_turn_id: str | None = None
+        self._direct_response_requested_turn_ids: set[str] = set()
         self._responses: dict[str, _ProviderResponse] = {}
         self._current_response_id: str | None = None
         self._delegates: dict[str, _DelegateWait] = {}
@@ -627,6 +661,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             data = _closed_event(provider_event)
             results = self._map_event(provider_event, data)
             self._processed_event_ids.add(provider_event.event_id)
+            await self._request_pending_direct_response()
             if not results:
                 return NativeEngineEvent()
             if len(results) > self._event_queue_capacity:
@@ -646,6 +681,30 @@ class OpenAIRealtimeNativeInteractionEngine:
         except OpenAIRealtimeNativeInteractionError as exc:
             self._mark_failed(exc.reason)
             raise exc from None
+
+    async def _request_pending_direct_response(self) -> None:
+        turn_id = self._pending_direct_response_turn_id
+        if turn_id is None:
+            return
+        current = self._current_response()
+        if current is not None and not current.done:
+            return
+        if turn_id in self._direct_response_requested_turn_ids:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_DIRECT_RESPONSE_REQUEST_CONFLICT",
+                "one Native turn permits only one direct response request",
+            )
+        try:
+            await self._session.send_event("response.create", {})
+        except (KeyboardInterrupt, SystemExit, GeneratorExit):
+            self._state = NativeProviderState.FAILED
+            raise
+        except OpenAIRealtimeSessionError as exc:
+            self._mark_failed(exc.reason)
+            raise OpenAIRealtimeNativeInteractionError(exc.reason, str(exc)) from None
+        self._direct_response_requested_turn_ids.add(turn_id)
+        self._pending_direct_response_turn_id = None
+        self._state = NativeProviderState.RESPONSE_PENDING
 
     async def admit_response(
         self, provider_response_id: str, response: ResponseRef
@@ -782,15 +841,20 @@ class OpenAIRealtimeNativeInteractionEngine:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_CANCEL_CONFLICT", "cancel cursor cannot change on replay"
             )
-        if (
-            response.provider_item_id != cursor.provider_item_id
-            or response.content_index != cursor.content_index
-        ):
+        matching_items = [
+            item
+            for item in response.audio_items.values()
+            if item.provider_item_id == cursor.provider_item_id
+            and item.content_index == cursor.content_index
+        ]
+        if len(matching_items) != 1:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_CANCEL_CURSOR_MISMATCH",
                 "cancel cursor must match the exact Provider output item",
             )
-        received_ms = response.received_samples * 1_000 // NATIVE_PCM_SAMPLE_RATE
+        received_ms = (
+            matching_items[0].received_samples * 1_000 // NATIVE_PCM_SAMPLE_RATE
+        )
         if cursor.audio_end_ms > received_ms:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_CANCEL_CURSOR_AHEAD",
@@ -818,8 +882,9 @@ class OpenAIRealtimeNativeInteractionEngine:
         ids = (cancel_id, truncate_id)
         self._cancelled[response.provider_response_id] = (cursor, ids)
         response.cancelled = True
-        response.audio_buffer.clear()
-        response.audio_buffer_event_id = None
+        for audio_item in response.audio_items.values():
+            audio_item.audio_buffer.clear()
+            audio_item.audio_buffer_event_id = None
         self._discard_response_output(response, ref)
         self._state = NativeProviderState.LISTENING
         return ids
@@ -834,8 +899,9 @@ class OpenAIRealtimeNativeInteractionEngine:
             if response.provider_response_id in self._locally_fenced:
                 return False
             response.cancelled = True
-            response.audio_buffer.clear()
-            response.audio_buffer_event_id = None
+            for audio_item in response.audio_items.values():
+                audio_item.audio_buffer.clear()
+                audio_item.audio_buffer_event_id = None
             self._discard_response_output(response, parsed)
             self._locally_fenced.add(response.provider_response_id)
             self._state = NativeProviderState.LISTENING
@@ -885,9 +951,10 @@ class OpenAIRealtimeNativeInteractionEngine:
             response_count=len(self._responses),
             pending_audio_count=len(self._pending_audio)
             + sum(
-                bool(response.audio_buffer)
+                bool(audio_item.audio_buffer)
                 for response in self._responses.values()
                 if response.runtime_ref is None
+                for audio_item in response.audio_items.values()
             ),
             released_audio_count=self._released_audio_count,
             emitted_event_count=self._emitted_event_count,
@@ -914,6 +981,8 @@ class OpenAIRealtimeNativeInteractionEngine:
             return self._response_created(event, data)
         if event_type == "response.output_audio.delta":
             return self._output_audio(event, data)
+        if event_type == "response.output_audio.done":
+            return self._output_audio_done(event, data)
         if event_type == "response.output_audio_transcript.done":
             return self._output_transcript(event, data)
         if event_type == "response.function_call_arguments.done":
@@ -943,6 +1012,14 @@ class OpenAIRealtimeNativeInteractionEngine:
                     "NATIVE_PROVIDER_EVENT_NOT_CLOSED",
                     "Provider error optional fields must be strings or null",
                 )
+        logger.error(
+            "openai_realtime_native_provider_error type=%s code=%s param=%s "
+            "event_id_present=%s",
+            _provider_error_label(error["type"]),
+            _provider_error_label(error["code"]),
+            _provider_error_label(error["param"]),
+            error["event_id"] is not None,
+        )
         raise OpenAIRealtimeNativeInteractionError(
             "NATIVE_PROVIDER_ERROR", "OpenAI Realtime Provider returned an error"
         )
@@ -1077,6 +1154,11 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_INPUT_COMMIT_BEFORE_STOP",
                 "input commit requires one stopped speech interval",
             )
+        if self._pending_direct_response_turn_id is not None:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_DIRECT_RESPONSE_PENDING",
+                "only one committed direct turn may await Provider response creation",
+            )
         self._require_action_capacity(1)
         self._turn_count += 1
         turn_id = f"native-turn-{self._turn_count:08d}"
@@ -1110,6 +1192,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             (("turn_id", turn_id), ("provider_item_id", item_id)),
         )
         self._current_turn_id = turn_id
+        self._pending_direct_response_turn_id = turn_id
         self._input_item_id = None
         self._input_start_ms = None
         self._input_end_ms = None
@@ -1187,6 +1270,75 @@ class OpenAIRealtimeNativeInteractionEngine:
         )
         return [NativeEngineEvent(action=action)]
 
+    def _provider_audio_item(
+        self,
+        response: _ProviderResponse,
+        *,
+        output_index: int,
+        item_id: str,
+        content_index: int,
+        allow_create: bool,
+    ) -> _ProviderAudioItem:
+        existing = response.audio_items.get(output_index)
+        if existing is not None:
+            if (
+                existing.provider_item_id != item_id
+                or existing.content_index != content_index
+            ):
+                logger.error(
+                    "openai_realtime_native_audio_identity_mismatch "
+                    "item_changed=%s content_changed=%s output_index=%s "
+                    "response_cancelled=%s response_done=%s",
+                    existing.provider_item_id != item_id,
+                    existing.content_index != content_index,
+                    output_index,
+                    response.cancelled,
+                    response.done,
+                )
+                raise OpenAIRealtimeNativeInteractionError(
+                    "NATIVE_PROVIDER_ITEM_MISMATCH",
+                    "one Provider output index must keep one audio identity",
+                )
+            return existing
+        if not allow_create:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_CANCEL_CURSOR_MISMATCH",
+                "presentation cursor must match an emitted Provider audio item",
+            )
+        if len(response.audio_items) >= _MAX_PROVIDER_AUDIO_ITEMS:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_PROVIDER_AUDIO_ITEMS_FULL",
+                "Provider response exceeds the bounded audio item count",
+            )
+        if any(
+            item.provider_item_id == item_id
+            for item in response.audio_items.values()
+        ):
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_PROVIDER_ITEM_MISMATCH",
+                "Provider audio item id cannot move to another output index",
+            )
+        if response.audio_items:
+            prior_index = max(response.audio_items)
+            if output_index <= prior_index:
+                logger.error(
+                    "openai_realtime_native_audio_index_mismatch "
+                    "incoming_output_index=%s prior_output_index=%s",
+                    output_index,
+                    prior_index,
+                )
+                raise OpenAIRealtimeNativeInteractionError(
+                    "NATIVE_PROVIDER_ITEM_MISMATCH",
+                    "new Provider audio item indexes must advance",
+                )
+        created = _ProviderAudioItem(
+            output_index=output_index,
+            provider_item_id=item_id,
+            content_index=content_index,
+        )
+        response.audio_items[output_index] = created
+        return created
+
     def _output_audio(
         self, event: OpenAIRealtimeEvent, data: dict[str, object]
     ) -> list[NativeEngineEvent]:
@@ -1203,7 +1355,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             reason="NATIVE_PROVIDER_ITEM_INVALID",
             field_name="output item id",
         )
-        _cursor(
+        output_index = _cursor(
             data["output_index"],
             reason="NATIVE_PROVIDER_AUDIO_INVALID",
             field_name="output_index",
@@ -1213,13 +1365,17 @@ class OpenAIRealtimeNativeInteractionEngine:
             reason="NATIVE_PROVIDER_AUDIO_INVALID",
             field_name="content_index",
         )
-        if response.provider_item_id is not None and (
-            response.provider_item_id != item_id
-            or response.content_index != content_index
-        ):
+        audio_item = self._provider_audio_item(
+            response,
+            output_index=output_index,
+            item_id=item_id,
+            content_index=content_index,
+            allow_create=True,
+        )
+        if audio_item.done:
             raise OpenAIRealtimeNativeInteractionError(
-                "NATIVE_PROVIDER_ITEM_MISMATCH",
-                "audio delta must keep one Provider item and content index",
+                "NATIVE_STALE_PROVIDER_AUDIO",
+                "Provider audio cannot follow audio item completion",
             )
         delta = data["delta"]
         if type(delta) is not str:
@@ -1240,15 +1396,17 @@ class OpenAIRealtimeNativeInteractionEngine:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_PROVIDER_AUDIO_INVALID", "Provider audio must be PCM16 bytes"
             )
-        retained_prefix = bytes(response.audio_buffer)
+        retained_prefix = bytes(audio_item.audio_buffer)
         combined = retained_prefix + pcm16
         frame_count = len(combined) // NATIVE_AUDIO_FRAME_BYTES
         remainder = combined[frame_count * NATIVE_AUDIO_FRAME_BYTES :]
         if response.runtime_ref is None:
             other_partials = sum(
-                bool(candidate.audio_buffer)
+                bool(candidate_item.audio_buffer)
                 for candidate in self._responses.values()
-                if candidate is not response and candidate.runtime_ref is None
+                if candidate.runtime_ref is None
+                for candidate_item in candidate.audio_items.values()
+                if candidate is not response or candidate_item is not audio_item
             )
             if (
                 len(self._pending_audio)
@@ -1266,7 +1424,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_ENGINE_EVENT_QUEUE_FULL",
                 "Provider audio delta expands beyond the bounded Native queue",
             )
-        prefix_event_id = response.audio_buffer_event_id
+        prefix_event_id = audio_item.audio_buffer_event_id
         buffered_frames: list[_BufferedAudio] = []
         for ordinal in range(frame_count):
             offset = ordinal * NATIVE_AUDIO_FRAME_BYTES
@@ -1289,13 +1447,10 @@ class OpenAIRealtimeNativeInteractionEngine:
                     pcm16=combined[offset : offset + NATIVE_AUDIO_FRAME_BYTES],
                 )
             )
-        if response.provider_item_id is None:
-            response.provider_item_id = item_id
-            response.content_index = content_index
-        response.audio_buffer = bytearray(remainder)
-        response.audio_buffer_event_id = event.event_id if remainder else None
+        audio_item.audio_buffer = bytearray(remainder)
+        audio_item.audio_buffer_event_id = event.event_id if remainder else None
         response.next_audio_sequence += frame_count
-        response.received_samples += len(pcm16) // 2
+        audio_item.received_samples += len(pcm16) // 2
         if response.runtime_ref is None:
             self._pending_audio.extend(buffered_frames)
             return []
@@ -1304,6 +1459,84 @@ class OpenAIRealtimeNativeInteractionEngine:
             self._audio_event(buffered, response.runtime_ref)
             for buffered in buffered_frames
         ]
+
+    def _output_audio_done(
+        self, event: OpenAIRealtimeEvent, data: dict[str, object]
+    ) -> list[NativeEngineEvent]:
+        response = self._require_response(data["response_id"])
+        if response.cancelled:
+            return []
+        self._require_live_response_event(response)
+        item_id = _identity(
+            data["item_id"],
+            reason="NATIVE_PROVIDER_ITEM_INVALID",
+            field_name="audio item id",
+        )
+        output_index = _cursor(
+            data["output_index"],
+            reason="NATIVE_PROVIDER_AUDIO_INVALID",
+            field_name="output_index",
+        )
+        content_index = _cursor(
+            data["content_index"],
+            reason="NATIVE_PROVIDER_AUDIO_INVALID",
+            field_name="content_index",
+        )
+        audio_item = self._provider_audio_item(
+            response,
+            output_index=output_index,
+            item_id=item_id,
+            content_index=content_index,
+            allow_create=True,
+        )
+        if audio_item.done:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_PROVIDER_AUDIO_DONE_CONFLICT",
+                "Provider audio item cannot complete twice",
+            )
+        audio_events = self._flush_audio_buffer(response, audio_item, event.event_id)
+        audio_item.done = True
+        return audio_events
+
+    def _flush_audio_buffer(
+        self,
+        response: _ProviderResponse,
+        audio_item: _ProviderAudioItem,
+        provider_event_id: str,
+    ) -> list[NativeEngineEvent]:
+        if not audio_item.audio_buffer:
+            audio_item.audio_buffer_event_id = None
+            return []
+        padding = NATIVE_AUDIO_FRAME_BYTES - len(audio_item.audio_buffer)
+        buffered = _BufferedAudio(
+            provider_event_id=audio_item.audio_buffer_event_id or provider_event_id,
+            provider_response_id=response.provider_response_id,
+            provider_item_id=audio_item.provider_item_id,
+            content_index=audio_item.content_index,
+            sequence=response.next_audio_sequence,
+            pcm16=bytes(audio_item.audio_buffer) + bytes(padding),
+        )
+        if response.runtime_ref is None:
+            if len(self._pending_audio) + 1 > self._pending_audio_capacity:
+                raise OpenAIRealtimeNativeInteractionError(
+                    "NATIVE_PENDING_AUDIO_FULL",
+                    "unadmitted Provider audio exceeds the bounded buffer",
+                )
+            self._pending_audio.append(buffered)
+            audio_events: list[NativeEngineEvent] = []
+        else:
+            if self._event_queue_capacity < 1:
+                raise OpenAIRealtimeNativeInteractionError(
+                    "NATIVE_ENGINE_EVENT_QUEUE_FULL",
+                    "Provider audio completion exceeds the Native queue",
+                )
+            self._state = NativeProviderState.SPEAKING
+            audio_events = [self._audio_event(buffered, response.runtime_ref)]
+        response.next_audio_sequence += 1
+        audio_item.received_samples += padding // 2
+        audio_item.audio_buffer.clear()
+        audio_item.audio_buffer_event_id = None
+        return audio_events
 
     def _output_transcript(
         self, event: OpenAIRealtimeEvent, data: dict[str, object]
@@ -1317,7 +1550,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             reason="NATIVE_PROVIDER_ITEM_INVALID",
             field_name="transcript item id",
         )
-        _cursor(
+        output_index = _cursor(
             data["output_index"],
             reason="NATIVE_PROVIDER_TRANSCRIPT_INVALID",
             field_name="output_index",
@@ -1327,30 +1560,56 @@ class OpenAIRealtimeNativeInteractionEngine:
             reason="NATIVE_PROVIDER_TRANSCRIPT_INVALID",
             field_name="content_index",
         )
-        if response.provider_item_id is not None and (
-            response.provider_item_id != item_id
-            or response.content_index != content_index
-        ):
+        audio_item = self._provider_audio_item(
+            response,
+            output_index=output_index,
+            item_id=item_id,
+            content_index=content_index,
+            allow_create=True,
+        )
+        if audio_item.transcript_done:
             raise OpenAIRealtimeNativeInteractionError(
-                "NATIVE_PROVIDER_ITEM_MISMATCH",
-                "transcript must match the response audio item",
+                "NATIVE_PROVIDER_TRANSCRIPT_CONFLICT",
+                "Provider audio transcript cannot complete twice",
             )
         transcript = data["transcript"]
-        if (
-            type(transcript) is not str
-            or not transcript
-            or transcript != transcript.strip()
-            or any(
-                unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
-                for character in transcript
+        if type(transcript) is not str:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_PROVIDER_TRANSCRIPT_INVALID",
+                "complete transcript must be canonical text",
             )
-        ):
+        canonical = transcript.strip().replace("\r\n", "\n").replace("\r", "\n")
+        if not canonical:
+            # OpenAI also emits transcript.done for interrupted, incomplete,
+            # and cancelled responses.  A semantically empty transcript is
+            # absence of optional history text, not a Native session failure.
+            audio_item.transcript = None
+            audio_item.transcript_event_id = None
+            audio_item.transcript_done = True
+            return []
+        forbidden_codepoints = tuple(
+            sorted(
+                {
+                    f"U+{ord(character):04X}"
+                    for character in canonical
+                    if character != "\n"
+                    and unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+                }
+            )[:8]
+        )
+        if forbidden_codepoints:
+            logger.error(
+                "openai_realtime_native_transcript_control "
+                "forbidden_codepoints=%s transcript_utf8_bytes=%s",
+                ",".join(forbidden_codepoints),
+                len(canonical.encode("utf-8", errors="replace")),
+            )
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_PROVIDER_TRANSCRIPT_INVALID",
                 "complete transcript must be canonical text",
             )
         try:
-            transcript_bytes = transcript.encode("utf-8")
+            transcript_bytes = canonical.encode("utf-8")
         except UnicodeEncodeError:
             transcript_bytes = b"x" * 65_537
         if len(transcript_bytes) > 65_536:
@@ -1358,10 +1617,9 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_PROVIDER_TRANSCRIPT_INVALID",
                 "complete transcript is oversized",
             )
-        response.provider_item_id = item_id
-        response.content_index = content_index
-        response.transcript = transcript
-        response.transcript_event_id = event.event_id
+        audio_item.transcript = canonical
+        audio_item.transcript_event_id = event.event_id
+        audio_item.transcript_done = True
         return []
 
     def _function_done(
@@ -1433,7 +1691,18 @@ class OpenAIRealtimeNativeInteractionEngine:
     ) -> list[NativeEngineEvent]:
         provider_id, status, _ = _response_envelope(data["response"], done=True)
         response = self._require_response(provider_id)
+        if status not in {"completed", "cancelled", "failed", "incomplete"}:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_PROVIDER_RESPONSE_INVALID",
+                "Provider response has an unsupported terminal status",
+            )
         if response.cancelled:
+            response.done = True
+            self._state = (
+                NativeProviderState.TURN_COMMITTED
+                if self._pending_direct_response_turn_id is not None
+                else NativeProviderState.READY
+            )
             return []
         self._require_live_response_event(response)
         if response.runtime_ref is None:
@@ -1441,47 +1710,62 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_RESPONSE_DONE_BEFORE_ADMISSION",
                 "Provider completion requires Runtime response admission",
             )
-        if status not in {"completed", "cancelled", "failed", "incomplete"}:
-            raise OpenAIRealtimeNativeInteractionError(
-                "NATIVE_PROVIDER_RESPONSE_INVALID",
-                "Provider response has an unsupported terminal status",
-            )
         audio_events: list[NativeEngineEvent] = []
-        if response.audio_buffer and status in {"completed", "incomplete"}:
-            padding = NATIVE_AUDIO_FRAME_BYTES - len(response.audio_buffer)
-            buffered = _BufferedAudio(
-                provider_event_id=response.audio_buffer_event_id or event.event_id,
-                provider_response_id=response.provider_response_id,
-                provider_item_id=response.provider_item_id or "",
-                content_index=response.content_index
-                if response.content_index is not None
-                else 0,
-                sequence=response.next_audio_sequence,
-                pcm16=bytes(response.audio_buffer) + bytes(padding),
+        partial_items = [
+            audio_item
+            for _, audio_item in sorted(response.audio_items.items())
+            if audio_item.audio_buffer
+        ]
+        if (
+            status in {"completed", "incomplete"}
+            and len(partial_items) + 1 > self._event_queue_capacity
+        ):
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_ENGINE_EVENT_QUEUE_FULL",
+                "Provider completion exceeds the bounded Native event queue",
             )
-            if not buffered.provider_item_id:
-                raise OpenAIRealtimeNativeInteractionError(
-                    "NATIVE_PROVIDER_ITEM_MISMATCH",
-                    "buffered Provider audio lost its output item",
+        if status in {"completed", "incomplete"}:
+            for audio_item in partial_items:
+                audio_events.extend(
+                    self._flush_audio_buffer(response, audio_item, event.event_id)
                 )
-            response.next_audio_sequence += 1
-            response.received_samples += padding // 2
-            audio_events.append(self._audio_event(buffered, response.runtime_ref))
-        response.audio_buffer.clear()
-        response.audio_buffer_event_id = None
+                audio_item.done = True
+        for audio_item in response.audio_items.values():
+            audio_item.audio_buffer.clear()
+            audio_item.audio_buffer_event_id = None
         if len(audio_events) + 1 > self._event_queue_capacity:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_ENGINE_EVENT_QUEUE_FULL",
                 "Provider completion exceeds the bounded Native event queue",
             )
         response.done = True
+        transcript_items = [
+            item
+            for _, item in sorted(response.audio_items.items())
+            if item.transcript is not None
+        ]
+        transcript = (
+            " ".join(
+                (item.transcript or "").replace("\n", " ")
+                for item in transcript_items
+            )
+            if transcript_items
+            else None
+        )
+        transcript_event_id = None
+        if len(transcript_items) == 1:
+            transcript_event_id = transcript_items[0].transcript_event_id
+        elif transcript_items:
+            # The terminal response event is the single Provider provenance
+            # that covers the ordered output array represented by this text.
+            transcript_event_id = event.event_id
         done = NativeProviderDone(
             provider_event_id=event.event_id,
             provider_response_id=provider_id,
             response=response.runtime_ref,
             completed=status == "completed",
-            transcript=response.transcript,
-            transcript_event_id=response.transcript_event_id,
+            transcript=transcript,
+            transcript_event_id=transcript_event_id,
         )
         self._state = NativeProviderState.READY
         return [*audio_events, NativeEngineEvent(provider_done=done)]

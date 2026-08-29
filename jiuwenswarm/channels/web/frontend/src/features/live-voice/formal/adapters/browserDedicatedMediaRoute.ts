@@ -3,6 +3,7 @@
 import { createCapturedAudioFrame, type CapturedAudioFrame } from '../audioPort.js';
 import type { BrowserAudioLocalStopReceipt } from './browserAudioIOAdapter.js';
 import {
+  boundedMediaConsumerFailureReason,
   createBrowserGatewayMediaActivation,
   createPlaybackStopReceipt,
   deserializeMediaControl,
@@ -113,6 +114,7 @@ export type DedicatedMediaTerminalSource = 'local_close' | 'expected_completion'
 
 export interface DedicatedMediaTerminalEvent {
   readonly reason_id: MediaDetachReason;
+  readonly consumer_reason_id?: string;
   readonly source: DedicatedMediaTerminalSource;
   readonly direction: MediaAuthorityBinding['direction'];
   readonly attached_before_close: boolean;
@@ -131,6 +133,8 @@ export interface BrowserDedicatedMediaRouteRequest {
   readonly on_uplink_frame_sent?: (seq: number) => void;
   readonly on_terminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void;
   readonly end_of_turn_capability?: 'media.end_of_turn.v1';
+  /** Permit successive speech/EOT cycles on one Native continuous uplink. */
+  readonly continuous_end_of_turn?: boolean;
   readonly on_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
   readonly on_end_of_turn?: (event: Readonly<MediaEndOfTurn>) => void;
   readonly max_pending_frames?: number;
@@ -483,6 +487,8 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
     (request.end_of_turn_capability === undefined) !== (request.on_speech_start === undefined) ||
     (request.end_of_turn_capability === undefined) !== (request.on_end_of_turn === undefined) ||
     (request.end_of_turn_capability !== undefined && request.end_of_turn_capability !== 'media.end_of_turn.v1') ||
+    (request.continuous_end_of_turn !== undefined && typeof request.continuous_end_of_turn !== 'boolean') ||
+    (request.continuous_end_of_turn === true && request.end_of_turn_capability === undefined) ||
     (request.on_speech_start !== undefined && typeof request.on_speech_start !== 'function') ||
     (request.on_end_of_turn !== undefined && typeof request.on_end_of_turn !== 'function')
   ) {
@@ -552,6 +558,7 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
       request.on_terminal,
       request.on_uplink_frame_sent,
       request.end_of_turn_capability,
+      request.continuous_end_of_turn === true,
       request.on_speech_start,
       request.on_end_of_turn,
       DEDICATED_MEDIA_LEAF_CONSTRUCTION_TOKEN
@@ -591,6 +598,7 @@ export class BrowserDedicatedMediaSocketLeaf {
   readonly #onTerminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void;
   readonly #onUplinkFrameSent?: (seq: number) => void;
   readonly #endOfTurnCapability?: 'media.end_of_turn.v1';
+  readonly #continuousEndOfTurn: boolean;
   readonly #onSpeechStart?: (event: Readonly<MediaSpeechStart>) => void;
   readonly #onEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void;
   readonly #pendingDownlinkAcks = new Map<number, Readonly<{ ack: Readonly<MediaAck>; byteLength: number }>>();
@@ -604,9 +612,11 @@ export class BrowserDedicatedMediaSocketLeaf {
   #speechStartSeen = false;
   #speechStartProviderMs: number | null = null;
   #endOfTurnSeen = false;
+  #lastEndOfTurnProviderMs: number | null = null;
   #scheduledDrainRetry: ScheduledDrainRetry | null = null;
   #drainRetryGeneration = 0;
   #drainStallRetries = 0;
+  #consumerFailureReasonId: string | null = null;
 
   constructor(
     activation: ActiveMediaActivation,
@@ -623,6 +633,7 @@ export class BrowserDedicatedMediaSocketLeaf {
     onTerminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void,
     onUplinkFrameSent?: (seq: number) => void,
     endOfTurnCapability?: 'media.end_of_turn.v1',
+    continuousEndOfTurn = false,
     onSpeechStart?: (event: Readonly<MediaSpeechStart>) => void,
     onEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void,
     constructionToken?: symbol
@@ -645,6 +656,7 @@ export class BrowserDedicatedMediaSocketLeaf {
     this.#onTerminal = onTerminal;
     this.#onUplinkFrameSent = onUplinkFrameSent;
     this.#endOfTurnCapability = endOfTurnCapability;
+    this.#continuousEndOfTurn = continuousEndOfTurn;
     this.#onSpeechStart = onSpeechStart;
     this.#onEndOfTurn = onEndOfTurn;
     socket.binaryType = 'arraybuffer';
@@ -981,6 +993,9 @@ export class BrowserDedicatedMediaSocketLeaf {
       return;
     }
     const result = this.#activation.owner.acceptBinary(binary);
+    if (result.type === 'media.detach' && result.reason_id === 'MEDIA_CONSUMER_FAILED') {
+      this.#consumerFailureReasonId = this.#activation.owner.consumer_failure_reason_id;
+    }
     if (result.type === 'media.ack' && this.#deferDownlinkAck) {
       this.#pendingDownlinkAcks.set(
         result.through_seq,
@@ -1107,6 +1122,7 @@ export class BrowserDedicatedMediaSocketLeaf {
       control.capability_version !== this.#endOfTurnCapability ||
       control.lease_id !== this.binding.lease_id ||
       control.generation !== this.binding.generation.value ||
+      (this.#continuousEndOfTurn && this.#lastEndOfTurnProviderMs !== null && control.provider_start_ms < this.#lastEndOfTurnProviderMs) ||
       this.#speechStartSeen ||
       this.#endOfTurnSeen
     ) {
@@ -1121,7 +1137,11 @@ export class BrowserDedicatedMediaSocketLeaf {
     this.#speechStartProviderMs = control.provider_start_ms;
     try {
       this.#onSpeechStart(control);
-    } catch {
+    } catch (error: unknown) {
+      this.#consumerFailureReasonId = boundedMediaConsumerFailureReason(
+        error,
+        'ADAPTER_SPEECH_START_CALLBACK_FAILED'
+      );
       if (this.#pendingUplinkCompletion !== null) {
         this.#failPendingUplinkCompletion('MEDIA_CONSUMER_FAILED');
       } else {
@@ -1152,7 +1172,17 @@ export class BrowserDedicatedMediaSocketLeaf {
     this.#endOfTurnSeen = true;
     try {
       this.#onEndOfTurn(control);
-    } catch {
+      if (this.#continuousEndOfTurn) {
+        this.#lastEndOfTurnProviderMs = control.provider_end_ms;
+        this.#speechStartSeen = false;
+        this.#speechStartProviderMs = null;
+        this.#endOfTurnSeen = false;
+      }
+    } catch (error: unknown) {
+      this.#consumerFailureReasonId = boundedMediaConsumerFailureReason(
+        error,
+        'ADAPTER_END_OF_TURN_CALLBACK_FAILED'
+      );
       if (this.#pendingUplinkCompletion !== null) {
         this.#failPendingUplinkCompletion('MEDIA_CONSUMER_FAILED');
       } else {
@@ -1212,6 +1242,9 @@ export class BrowserDedicatedMediaSocketLeaf {
       this.#onTerminal?.(
         Object.freeze({
           reason_id: reasonId,
+          ...(reasonId === 'MEDIA_CONSUMER_FAILED' && this.#consumerFailureReasonId !== null
+            ? { consumer_reason_id: this.#consumerFailureReasonId }
+            : {}),
           source,
           direction: this.binding.direction,
           attached_before_close: attachedBeforeClose,

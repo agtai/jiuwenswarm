@@ -1304,7 +1304,10 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
       response: responseBinding,
       unit_id: unit.unit_id as string,
       presentation_unit: Object.freeze({ ...unit, response: Object.freeze({ ...unitResponse }) }),
-      audio: Object.freeze({ ...audio }),
+      // This object is the one-use handoff into P1. P1 must remove the private
+      // media ticket immediately after creating its ticket consumer, so freezing
+      // the handoff here makes an otherwise valid Gateway descriptor unusable.
+      audio: { ...audio },
     };
   }
   if (

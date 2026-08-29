@@ -13,12 +13,16 @@ from typing import Any
 
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.agent import AgentResponse
-from jiuwenswarm.common.schema.live_voice_contract_v2 import MAX_SAFE_INTEGER, ResponseRef
+from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    MAX_SAFE_INTEGER,
+    ResponseRef,
+)
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.live_voice.native_interaction_carrier import (
     NativeInteractionProposal,
 )
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
+    MAX_NATIVE_AUDIO_PROPOSAL_BATCH,
     MAX_NATIVE_TRANSCRIPT_UTF8_BYTES,
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeInteractionBinding,
@@ -185,6 +189,17 @@ def _canonical_audio_presentation_unit(value: object) -> bool:
     )
 
 
+def _canonical_audio_result(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"kind", "status", "accepted", "presentation_unit"}
+        and value.get("kind") == "audio"
+        and value.get("status") == "observed"
+        and type(value.get("accepted")) is bool
+        and _canonical_audio_presentation_unit(value.get("presentation_unit"))
+    )
+
+
 def _canonical_transcript(value: object) -> bool:
     if (
         type(value) is not str
@@ -259,6 +274,15 @@ def _validate_method_result(
                 result.get("status") == "observed"
                 and type(result.get("accepted")) is bool
                 and _canonical_audio_presentation_unit(result.get("presentation_unit"))
+            )
+        elif kind == "audio_batch":
+            _closed_result(result, frozenset({"kind", "status", "items"}))
+            items = result.get("items")
+            valid = (
+                result.get("status") == "observed"
+                and type(items) is list
+                and 0 < len(items) <= MAX_NATIVE_AUDIO_PROPOSAL_BATCH
+                and all(_canonical_audio_result(item) for item in items)
             )
         elif kind == "delegate":
             _closed_result(
@@ -399,7 +423,9 @@ class GatewayNativeInteractionRuntimeClient:
         routed_session_id: str | None,
         connection_id: str | None,
         request_method: str | None,
-    ) -> tuple[dict[str, object], dict[str, object] | None, GatewayNativeActivation | None]:
+    ) -> tuple[
+        dict[str, object], dict[str, object] | None, GatewayNativeActivation | None
+    ]:
         sanitized = copy.deepcopy(payload)
         result = sanitized.get("result")
         if not isinstance(result, dict):
@@ -519,6 +545,67 @@ class GatewayNativeInteractionRuntimeClient:
             ),
         )
 
+    async def propose_audio_batch(
+        self,
+        *,
+        binding: NativeInteractionBinding,
+        capability: str,
+        events: tuple[NativeEngineEvent, ...],
+        request_id: str,
+    ) -> tuple[dict[str, object], ...]:
+        retained = self._authorize(binding, capability)
+        if (
+            type(events) is not tuple
+            or not 0 < len(events) <= MAX_NATIVE_AUDIO_PROPOSAL_BATCH
+        ):
+            raise NativeRuntimeClientError(
+                "NATIVE_AUDIO_BATCH_INVALID",
+                "Native audio batch must be a bounded non-empty tuple",
+            )
+        first_audio = events[0].audio
+        if first_audio is None:
+            raise NativeRuntimeClientError(
+                "NATIVE_AUDIO_BATCH_INVALID",
+                "Native audio batch requires standalone audio events",
+            )
+        proposals: list[dict[str, object]] = []
+        for ordinal, event in enumerate(events):
+            audio = event.audio
+            if (
+                audio is None
+                or event.action is not None
+                or event.turn_commit is not None
+                or event.delegate is not None
+                or event.provider_done is not None
+                or audio.response != first_audio.response
+                or audio.provider_response_id != first_audio.provider_response_id
+                or audio.provider_item_id != first_audio.provider_item_id
+                or audio.content_index != first_audio.content_index
+                or audio.sequence != first_audio.sequence + ordinal
+            ):
+                raise NativeRuntimeClientError(
+                    "NATIVE_AUDIO_BATCH_INVALID",
+                    "Native audio batch must be contiguous and response-exact",
+                )
+            proposals.append(
+                NativeInteractionProposal.from_engine_event(binding, event).to_dict()
+            )
+        result = await self._request(
+            method=ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE,
+            binding=binding,
+            capability=retained.capability,
+            request_id=request_id,
+            extra={"proposals": proposals},
+        )
+        items = result["items"]
+        assert isinstance(items, list)
+        if len(items) != len(events):
+            raise NativeRuntimeClientError(
+                "NATIVE_RUNTIME_RESPONSE_INVALID",
+                "Native audio batch result count does not match its request",
+            )
+        return tuple(dict(item) for item in items if isinstance(item, dict))
+
     async def presentation_ack(
         self,
         *,
@@ -615,9 +702,7 @@ class GatewayNativeInteractionRuntimeClient:
             capability=retained.capability,
             request_id=request_id,
             extra=(
-                {}
-                if disposition == "closed"
-                else {"disposition": "activation_aborted"}
+                {} if disposition == "closed" else {"disposition": "activation_aborted"}
             ),
         )
         key = (binding.scope.session_id or "", binding.interaction_id)

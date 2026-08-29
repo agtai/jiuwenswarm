@@ -43,6 +43,7 @@ from jiuwenswarm.gateway.live_voice.dedicated_media_route import (
 )
 from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
     GatewayNativeActivation,
+    NativeRuntimeClientError,
 )
 from jiuwenswarm.gateway.live_voice import dedicated_media_registration
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
@@ -59,9 +60,11 @@ from jiuwenswarm.server.live_voice.batch_speech import (
 )
 from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
+    NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeDelegateProposal,
     NativeInteractionBinding,
     NativePresentationCursor,
+    NativeTurnCommit,
 )
 from jiuwenswarm.server.live_voice.interaction_engine import InteractionAction
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
@@ -310,6 +313,7 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
     def __init__(self, activation: GatewayNativeActivation) -> None:
         super().__init__(activation)
         self.proposals: list[NativeEngineEvent] = []
+        self.audio_batches: list[tuple[NativeEngineEvent, ...]] = []
         self.audio_proposed = asyncio.Event()
         self.playback_actions: list[tuple[str, object]] = []
         self.close_calls = 0
@@ -328,6 +332,8 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
         assert capability == self.activation.capability
         assert request_id
         self.proposals.append(event)
+        if event.turn_commit is not None:
+            return {"kind": "turn", "status": "observed", "accepted": True}
         if event.action is not None and event.action.operation == "SPEAK":
             provider_response_id = dict(event.action.payload)["provider_response_id"]
             return {
@@ -382,6 +388,28 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
                 },
             }
         return {"kind": "action", "status": "observed", "accepted": True}
+
+    async def propose_audio_batch(
+        self,
+        *,
+        binding: NativeInteractionBinding,
+        capability: str,
+        events: tuple[NativeEngineEvent, ...],
+        request_id: str,
+    ) -> tuple[dict[str, object], ...]:
+        assert events
+        self.audio_batches.append(events)
+        return tuple(
+            [
+                await self.propose(
+                    binding=binding,
+                    capability=capability,
+                    event=event,
+                    request_id=f"{request_id}:{ordinal}",
+                )
+                for ordinal, event in enumerate(events)
+            ]
+        )
 
     async def presentation_ack(
         self,
@@ -439,6 +467,95 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
         self.close_calls += 1
         self.close_request_ids.append(request_id)
         return {"kind": "close", "status": "closed", "accepted": True}
+
+
+class _BargeRaceNativeRuntimeClient(_FakeNativeRuntimeClient):
+    def __init__(self, activation: GatewayNativeActivation) -> None:
+        super().__init__(activation)
+        self.late_audio_entered = asyncio.Event()
+        self.release_late_audio = asyncio.Event()
+
+    async def propose(
+        self,
+        *,
+        binding: NativeInteractionBinding,
+        capability: str,
+        event: NativeEngineEvent,
+        request_id: str,
+    ) -> dict[str, object]:
+        if event.audio is not None and event.audio.sequence == 1:
+            assert self.activation is not None
+            assert binding == self.activation.binding
+            assert capability == self.activation.capability
+            assert request_id
+            self.proposals.append(event)
+            self.late_audio_entered.set()
+            await self.release_late_audio.wait()
+            raise NativeRuntimeClientError(
+                "NATIVE_AUDIO_RESPONSE_STALE",
+                "response was fenced while the proposal was in flight",
+            )
+        return await super().propose(
+            binding=binding,
+            capability=capability,
+            event=event,
+            request_id=request_id,
+        )
+
+
+class _BlockedAudioNativeRuntimeClient(_FakeNativeRuntimeClient):
+    def __init__(self, activation: GatewayNativeActivation) -> None:
+        super().__init__(activation)
+        self.blocked_audio_entered = asyncio.Event()
+        self.release_blocked_audio = asyncio.Event()
+        self.stop_proposed = asyncio.Event()
+
+    async def propose(
+        self,
+        *,
+        binding: NativeInteractionBinding,
+        capability: str,
+        event: NativeEngineEvent,
+        request_id: str,
+    ) -> dict[str, object]:
+        if event.audio is not None and event.audio.sequence == 1:
+            self.blocked_audio_entered.set()
+            await self.release_blocked_audio.wait()
+        if event.action is not None and event.action.operation == "STOP":
+            self.stop_proposed.set()
+        return await super().propose(
+            binding=binding,
+            capability=capability,
+            event=event,
+            request_id=request_id,
+        )
+
+
+class _FirstAudioBlockedNativeRuntimeClient(_FakeNativeRuntimeClient):
+    def __init__(self, activation: GatewayNativeActivation) -> None:
+        super().__init__(activation)
+        self.first_audio_entered = asyncio.Event()
+        self.release_first_audio = asyncio.Event()
+        self._blocked = False
+
+    async def propose(
+        self,
+        *,
+        binding: NativeInteractionBinding,
+        capability: str,
+        event: NativeEngineEvent,
+        request_id: str,
+    ) -> dict[str, object]:
+        if event.audio is not None and not self._blocked:
+            self._blocked = True
+            self.first_audio_entered.set()
+            await self.release_first_audio.wait()
+        return await super().propose(
+            binding=binding,
+            capability=capability,
+            event=event,
+            request_id=request_id,
+        )
 
 
 class _FailOnceNativeRuntimeCloseClient(_FakeNativeRuntimeClient):
@@ -819,6 +936,63 @@ def test_native_media_activation_without_exact_private_handle_has_zero_route() -
 
 
 @pytest.mark.asyncio
+async def test_native_continuous_uplink_crosses_browser_retention_bound_and_fences_duplicate() -> (
+    None
+):
+    activation_handle = _native_activation()
+    client = _FakeNativeRuntimeClient(activation_handle)
+    engine = _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine,
+    )
+    activated = _activate(
+        registry,
+        params=_params(sample_rate_hz=24_000),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    assert uplink is not None
+    await registry.begin_native_interaction(uplink)
+
+    for sequence in range(1_501):
+        registry.accept_native_frame(
+            uplink,
+            MediaAudioFrame(
+                seq=sequence,
+                sample_cursor=sequence * 480,
+                samples=(0.0,) * 480,
+            ),
+        )
+        if sequence % 100 == 99:
+            await asyncio.sleep(0)
+
+    async def wait_for_input_drain() -> None:
+        while len(engine.offered_audio) < 1_501:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_input_drain(), timeout=1.0)
+    with pytest.raises(MediaTransportViolation) as duplicate:
+        registry.accept_native_frame(
+            uplink,
+            MediaAudioFrame(
+                seq=1_500,
+                sample_cursor=1_500 * 480,
+                samples=(0.0,) * 480,
+            ),
+        )
+
+    assert duplicate.value.reason_id == "MEDIA_NATIVE_INPUT_FENCE_REJECTED"
+    assert "sequence_mismatch:incoming=1500:expected=1501" in str(duplicate.value)
+    assert uplink.accepted_frames == 1_501
+    assert len(engine.offered_audio) == 1_501
+    assert client.proposals == []
+    await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
 async def test_native_audio_reuses_uplink_session_and_allocates_fenced_downlink() -> (
     None
 ):
@@ -933,7 +1107,9 @@ async def test_native_audio_reuses_uplink_session_and_allocates_fenced_downlink(
 
 
 @pytest.mark.asyncio
-async def test_native_three_second_response_reuses_one_route_and_acks_last_runtime_unit() -> None:
+async def test_native_three_second_response_reuses_one_route_and_acks_last_runtime_unit() -> (
+    None
+):
     activation_handle = _native_activation()
     client = _FakeNativeRuntimeClient(activation_handle)
     engine = _FakeNativeEngine()
@@ -1012,16 +1188,22 @@ async def test_native_three_second_response_reuses_one_route_and_acks_last_runti
     assert [frame.seq for frame in frames] == list(range(150))
     assert socket.close_calls == 1
     assert source.peak_buffered_frames <= 8
-    assert registry.take_native_notification(
-        session_id="session-1",
-        interaction_id="interaction-1",
-        connection_id="connection-1",
-    ) is None
-    assert sum(
-        record.native_session_key is not None
-        and record.binding.direction.value == "downlink"
-        for record in registry._records.values()
-    ) == 1
+    assert (
+        registry.take_native_notification(
+            session_id="session-1",
+            interaction_id="interaction-1",
+            connection_id="connection-1",
+        )
+        is None
+    )
+    assert (
+        sum(
+            record.native_session_key is not None
+            and record.binding.direction.value == "downlink"
+            for record in registry._records.values()
+        )
+        == 1
+    )
     assert downlink.downlink_content_sha256 == source.content_sha256
     presentation_unit = notification["presentation_unit"]
     assert isinstance(presentation_unit, dict)
@@ -1058,9 +1240,13 @@ async def test_native_three_second_response_reuses_one_route_and_acks_last_runti
     assert presentation[0] == "presentation"
     assert presentation[1].unit_id == "native-audio-unit-149"
     assert presentation[1].contiguous_cursor == 149
-    assert len(
-        [proposal for proposal in client.proposals if proposal.audio is not None]
-    ) == 150
+    assert (
+        len([proposal for proposal in client.proposals if proposal.audio is not None])
+        == 150
+    )
+    assert client.audio_batches
+    assert all(1 < len(batch) <= 16 for batch in client.audio_batches)
+    assert sum(len(batch) for batch in client.audio_batches) == 149
     assert all(
         proposal.turn_commit is None and proposal.delegate is None
         for proposal in client.proposals
@@ -1069,7 +1255,163 @@ async def test_native_three_second_response_reuses_one_route_and_acks_last_runti
 
 
 @pytest.mark.asyncio
-async def test_native_unconsumed_downlink_saturation_closes_before_later_controls() -> None:
+async def test_native_delivery_splits_audio_batches_at_response_and_item_boundaries() -> (
+    None
+):
+    activation_handle = _native_activation()
+    client = _FirstAudioBlockedNativeRuntimeClient(activation_handle)
+    engine = _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine,
+    )
+    activated = _activate(
+        registry,
+        params=_params(sample_rate_hz=24_000),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    assert uplink is not None
+    await registry.begin_native_interaction(uplink)
+    first_response = ResponseRef("interaction-1", "native-response-first", 1)
+    second_response = ResponseRef("interaction-1", "native-response-second", 2)
+
+    def audio_event(
+        *,
+        response: ResponseRef,
+        provider_response_id: str,
+        provider_item_id: str,
+        content_index: int,
+        sequence: int,
+    ) -> NativeEngineEvent:
+        return NativeEngineEvent(
+            audio=NativeAudioOutput(
+                provider_event_id=f"provider-audio-{provider_item_id}-{sequence}",
+                provider_response_id=provider_response_id,
+                provider_item_id=provider_item_id,
+                content_index=content_index,
+                sequence=sequence,
+                pcm16=sequence.to_bytes(2, "little") * 480,
+                response=response,
+            )
+        )
+
+    await engine.events.put(
+        audio_event(
+            response=first_response,
+            provider_response_id="provider-response-first",
+            provider_item_id="provider-item-first",
+            content_index=0,
+            sequence=0,
+        )
+    )
+    await asyncio.wait_for(client.first_audio_entered.wait(), timeout=1.0)
+    for sequence in (1, 2):
+        engine.events.put_nowait(
+            audio_event(
+                response=first_response,
+                provider_response_id="provider-response-first",
+                provider_item_id="provider-item-first",
+                content_index=0,
+                sequence=sequence,
+            )
+        )
+    for sequence in range(3):
+        engine.events.put_nowait(
+            audio_event(
+                response=second_response,
+                provider_response_id="provider-response-second",
+                provider_item_id="provider-item-second-a",
+                content_index=0,
+                sequence=sequence,
+            )
+        )
+    for sequence in range(3, 6):
+        engine.events.put_nowait(
+            audio_event(
+                response=second_response,
+                provider_response_id="provider-response-second",
+                provider_item_id="provider-item-second-b",
+                content_index=1,
+                sequence=sequence,
+            )
+        )
+    engine.events.put_nowait(
+        NativeEngineEvent(
+            action=InteractionAction(
+                action_id="native-silence-after-audio-boundaries",
+                operation="SILENCE",
+                interaction_id=activation_handle.binding.interaction_id,
+                scope=activation_handle.binding.scope,
+            )
+        )
+    )
+    session = next(iter(registry._native_sessions.values()))
+
+    async def wait_for_ordered_boundary() -> None:
+        while engine.events.qsize() > 0:
+            await asyncio.sleep(0)
+        while session.delivery_queue.qsize() < 8:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_ordered_boundary(), timeout=1.0)
+    client.release_first_audio.set()
+    await asyncio.wait_for(session.delivery_queue.join(), timeout=1.0)
+
+    batch_identities = [
+        (
+            batch[0].audio.response,
+            batch[0].audio.provider_response_id,
+            batch[0].audio.provider_item_id,
+            batch[0].audio.content_index,
+            tuple(event.audio.sequence for event in batch),
+        )
+        for batch in client.audio_batches
+        if batch[0].audio is not None
+    ]
+    proposed_operations = [
+        proposal.action.operation
+        for proposal in client.proposals
+        if proposal.action is not None
+    ]
+    delivery_live = session.delivery_task is not None and not session.delivery_task.done()
+    event_live = session.event_task is not None and not session.event_task.done()
+    await registry.close_native_interaction(uplink)
+
+    assert batch_identities == [
+        (
+            first_response,
+            "provider-response-first",
+            "provider-item-first",
+            0,
+            (1, 2),
+        ),
+        (
+            second_response,
+            "provider-response-second",
+            "provider-item-second-a",
+            0,
+            (1, 2),
+        ),
+        (
+            second_response,
+            "provider-response-second",
+            "provider-item-second-b",
+            1,
+            (3, 4, 5),
+        ),
+    ]
+    assert proposed_operations == ["SILENCE"]
+    assert delivery_live is True
+    assert event_live is True
+
+
+@pytest.mark.asyncio
+async def test_native_unconsumed_downlink_saturation_closes_before_later_controls() -> (
+    None
+):
     activation_handle = _native_activation()
     client = _FakeNativeRuntimeClient(activation_handle)
     engine = _FakeNativeEngine()
@@ -1139,16 +1481,23 @@ async def test_native_unconsumed_downlink_saturation_closes_before_later_control
     await asyncio.wait_for(wait_until_cleanup_is_visible(), timeout=1.0)
     assert len(client.proposals) == 9
     assert all(proposal.audio is not None for proposal in client.proposals)
-    assert engine.events.qsize() == 2
+    # The lifecycle barrier moved LISTEN behind the prior audio, then stopped
+    # the Provider reader. Saturation admits neither that control nor the later
+    # completion; the unread fake completion remains outside product effects.
+    assert engine.events.qsize() == 1
+    assert engine.events._queue[0].provider_done is not None
     assert client.close_calls == 1
     assert registry._records == {uplink.record_id: uplink}
     assert uplink.route_completed is True
     assert registry._pending_tickets == {}
-    assert registry.take_native_notification(
-        session_id="session-1",
-        interaction_id="interaction-1",
-        connection_id="connection-1",
-    ) is None
+    assert (
+        registry.take_native_notification(
+            session_id="session-1",
+            interaction_id="interaction-1",
+            connection_id="connection-1",
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -1351,6 +1700,76 @@ async def test_native_listen_event_becomes_exact_media_speech_start() -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_turn_commit_becomes_exact_media_end_of_turn() -> None:
+    activation_handle = _native_activation()
+    client = _FakeNativeRuntimeClient(activation_handle)
+    engine = _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine,
+    )
+    activated = _activate(
+        registry,
+        params=_params(sample_rate_hz=24_000),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    assert uplink is not None
+    await registry.begin_native_interaction(uplink)
+
+    end_of_turn = asyncio.create_task(registry.wait_native_end_of_turn(uplink))
+    commit = NativeTurnCommit(
+        contract_version=NATIVE_INTERACTION_CONTRACT_VERSION,
+        commit_id="native-commit-1",
+        binding=activation_handle.binding,
+        turn_id="native-turn-1",
+        provider_session_id="provider-session-1",
+        provider_item_id="provider-user-item-1",
+        provider_event_id="provider-commit-event-1",
+        causation_id="provider-commit-event-1",
+        input_audio_start_ms=120,
+        input_audio_end_ms=780,
+        committed_audio_ms=660,
+    )
+    await engine.events.put(
+        NativeEngineEvent(
+            action=InteractionAction(
+                action_id="native-turn-commit-1",
+                operation="TURN_COMMIT",
+                interaction_id=activation_handle.binding.interaction_id,
+                scope=activation_handle.binding.scope,
+                payload=(
+                    ("turn_id", commit.turn_id),
+                    ("provider_item_id", commit.provider_item_id),
+                ),
+            ),
+            turn_commit=commit,
+        )
+    )
+
+    control = await asyncio.wait_for(end_of_turn, timeout=1.0)
+    assert control.lease_id == uplink.binding.lease_id
+    assert control.generation == uplink.binding.generation.value
+    assert control.provider_start_ms == 120
+    assert control.provider_end_ms == 780
+    assert control.detector == "server_vad"
+    assert control.create_response is False
+    assert control.interrupt_response is False
+    assert (
+        registry.take_native_notification(
+            session_id="session-1",
+            interaction_id="interaction-1",
+            connection_id="connection-1",
+        )
+        is None
+    )
+
+    await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("browser_sample_rate", [24_000, 48_000])
 async def test_native_playback_stop_admits_runtime_before_provider_cancel(
     browser_sample_rate: int,
@@ -1422,7 +1841,9 @@ async def test_native_playback_stop_admits_runtime_before_provider_cancel(
 
 
 @pytest.mark.asyncio
-async def test_native_playback_stop_without_cursor_fences_locally_without_provider_mutation() -> None:
+async def test_native_playback_stop_without_cursor_fences_locally_without_provider_mutation() -> (
+    None
+):
     activation_handle = _native_activation()
     client = _FakeNativeRuntimeClient(activation_handle)
     engine = _FakeNativeEngine()
@@ -1485,7 +1906,426 @@ async def test_native_playback_stop_without_cursor_fences_locally_without_provid
     assert all(kind != "provider" for kind, _value in shared_actions)
     source = downlink.downlink_stream_source
     assert source is not None and source.closed is True
+
+    session = next(iter(registry._native_sessions.values()))
+    assert session.event_task is not None
+    record_count_after_barge = len(registry._records)
+    await engine.events.put(
+        NativeEngineEvent(
+            audio=NativeAudioOutput(
+                provider_event_id="provider-audio-after-response-fence",
+                provider_response_id="provider-response-1",
+                provider_item_id="provider-item-1",
+                content_index=0,
+                sequence=1,
+                pcm16=b"\x02\x00" * 480,
+                response=response,
+            )
+        )
+    )
+    await engine.events.put(
+        NativeEngineEvent(
+            provider_done=NativeProviderDone(
+                provider_event_id="provider-done-after-response-fence",
+                provider_response_id="provider-response-1",
+                response=response,
+                completed=True,
+                transcript=None,
+                transcript_event_id=None,
+            )
+        )
+    )
+
+    async def wait_for_stale_provider_events() -> None:
+        while engine.events.qsize() > 0 and not session.event_task.done():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_stale_provider_events(), timeout=1.0)
+
+    assert session.event_task.done() is False
+    assert len(client.proposals) == 1
+    assert len(registry._records) == record_count_after_barge
+    assert (
+        registry.take_native_notification(
+            session_id="session-1",
+            interaction_id="interaction-1",
+            connection_id="connection-1",
+        )
+        is None
+    )
+    assert engine.closed is False
+    registry.accept_native_frame(
+        uplink,
+        MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.0,) * 480),
+    )
+
+    async def wait_for_continuous_uplink() -> None:
+        while not engine.offered_audio:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_continuous_uplink(), timeout=1.0)
+    assert len(engine.offered_audio) == 1
     await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
+async def test_native_audio_fenced_while_runtime_proposal_is_in_flight_keeps_session_open() -> (
+    None
+):
+    activation_handle = _native_activation()
+    client = _BargeRaceNativeRuntimeClient(activation_handle)
+    engine = _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine,
+    )
+    activated = _activate(
+        registry,
+        params=_params(sample_rate_hz=24_000),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    assert uplink is not None
+    await registry.begin_native_interaction(uplink)
+    response = ResponseRef("interaction-1", "native-response-1", 1)
+    await engine.events.put(
+        NativeEngineEvent(
+            audio=NativeAudioOutput(
+                provider_event_id="provider-audio-before-racing-fence",
+                provider_response_id="provider-response-1",
+                provider_item_id="provider-item-1",
+                content_index=0,
+                sequence=0,
+                pcm16=b"\x01\x00" * 480,
+                response=response,
+            )
+        )
+    )
+    await client.audio_proposed.wait()
+    notification = registry.take_native_notification(
+        session_id="session-1",
+        interaction_id="interaction-1",
+        connection_id="connection-1",
+    )
+    assert notification is not None
+    audio = notification["audio"]
+    assert isinstance(audio, dict)
+    downlink = registry.consume_ticket(_media_ticket(audio), request_origin=ORIGIN)
+    assert downlink is not None
+
+    await engine.events.put(
+        NativeEngineEvent(
+            audio=NativeAudioOutput(
+                provider_event_id="provider-audio-racing-response-fence",
+                provider_response_id="provider-response-1",
+                provider_item_id="provider-item-1",
+                content_index=0,
+                sequence=1,
+                pcm16=b"\x02\x00" * 480,
+                response=response,
+            )
+        )
+    )
+    await asyncio.wait_for(client.late_audio_entered.wait(), timeout=1.0)
+    assert await registry.accept_native_playback_stop(
+        downlink,
+        create_playback_stop_receipt(
+            downlink.binding,
+            outcome=MediaPlaybackStopOutcome.LOCAL_FENCE_ESTABLISHED,
+            confirmed_through_seq=None,
+        ),
+    )
+    client.release_late_audio.set()
+    await engine.events.put(
+        NativeEngineEvent(
+            provider_done=NativeProviderDone(
+                provider_event_id="provider-done-after-racing-fence",
+                provider_response_id="provider-response-1",
+                response=response,
+                completed=True,
+                transcript=None,
+                transcript_event_id=None,
+            )
+        )
+    )
+
+    session = next(iter(registry._native_sessions.values()))
+    assert session.event_task is not None
+
+    async def wait_for_racing_events() -> None:
+        while engine.events.qsize() > 0 and not session.event_task.done():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_racing_events(), timeout=1.0)
+
+    assert session.event_task.done() is False
+    assert len(client.proposals) == 2
+    assert (
+        registry.take_native_notification(
+            session_id="session-1",
+            interaction_id="interaction-1",
+            connection_id="connection-1",
+        )
+        is None
+    )
+    assert engine.closed is False
+    registry.accept_native_frame(
+        uplink,
+        MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.0,) * 480),
+    )
+
+    async def wait_for_continuous_uplink() -> None:
+        while not engine.offered_audio:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_continuous_uplink(), timeout=1.0)
+    assert len(engine.offered_audio) == 1
+    await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
+async def test_native_turn_control_barrier_stops_provider_reader_behind_playout_audio() -> (
+    None
+):
+    activation_handle = _native_activation()
+    client = _BlockedAudioNativeRuntimeClient(activation_handle)
+    engine = _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine,
+    )
+    activated = _activate(
+        registry,
+        params=_params(sample_rate_hz=24_000),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    assert uplink is not None
+    await registry.begin_native_interaction(uplink)
+    response = ResponseRef("interaction-1", "native-response-1", 1)
+    for sequence in range(2):
+        await engine.events.put(
+            NativeEngineEvent(
+                audio=NativeAudioOutput(
+                    provider_event_id=f"provider-audio-control-race-{sequence}",
+                    provider_response_id="provider-response-1",
+                    provider_item_id="provider-item-1",
+                    content_index=0,
+                    sequence=sequence,
+                    pcm16=(sequence + 1).to_bytes(2, "little") * 480,
+                    response=response,
+                )
+            )
+        )
+        if sequence == 0:
+            await asyncio.wait_for(client.audio_proposed.wait(), timeout=1.0)
+    await asyncio.wait_for(client.blocked_audio_entered.wait(), timeout=1.0)
+
+    commit = NativeTurnCommit(
+        contract_version=NATIVE_INTERACTION_CONTRACT_VERSION,
+        commit_id="native-control-race-commit",
+        binding=activation_handle.binding,
+        turn_id="native-turn-control-race",
+        provider_session_id="provider-session-1",
+        provider_item_id="provider-user-item-control-race",
+        provider_event_id="provider-commit-control-race",
+        causation_id="provider-commit-control-race",
+        input_audio_start_ms=800,
+        input_audio_end_ms=1_200,
+        committed_audio_ms=400,
+    )
+    lifecycle_events = (
+        NativeEngineEvent(
+            action=InteractionAction(
+                action_id="native-listen-control-race",
+                operation="LISTEN",
+                interaction_id=activation_handle.binding.interaction_id,
+                scope=activation_handle.binding.scope,
+                payload=(
+                    ("provider_item_id", commit.provider_item_id),
+                    ("provider_start_ms", "800"),
+                ),
+            )
+        ),
+        NativeEngineEvent(
+            action=InteractionAction(
+                action_id="native-silence-control-race",
+                operation="SILENCE",
+                interaction_id=activation_handle.binding.interaction_id,
+                scope=activation_handle.binding.scope,
+                payload=(("provider_item_id", commit.provider_item_id),),
+            )
+        ),
+        NativeEngineEvent(
+            action=InteractionAction(
+                action_id="native-turn-commit-control-race",
+                operation="TURN_COMMIT",
+                interaction_id=activation_handle.binding.interaction_id,
+                scope=activation_handle.binding.scope,
+                payload=(
+                    ("turn_id", commit.turn_id),
+                    ("provider_item_id", commit.provider_item_id),
+                ),
+            ),
+            turn_commit=commit,
+        ),
+        NativeEngineEvent(
+            action=InteractionAction(
+                action_id="native-speak-control-race",
+                operation="SPEAK",
+                interaction_id=activation_handle.binding.interaction_id,
+                scope=activation_handle.binding.scope,
+                payload=(
+                    ("provider_response_id", "provider-response-2"),
+                    ("turn_id", commit.turn_id),
+                ),
+            )
+        ),
+    )
+    for event in lifecycle_events:
+        await engine.events.put(event)
+
+    try:
+        await asyncio.sleep(0.05)
+        assert engine.response_admitted.is_set() is False
+        assert engine.events.qsize() == 3
+        client.release_blocked_audio.set()
+        await asyncio.wait_for(engine.response_admitted.wait(), timeout=1.0)
+        assert [
+            proposal.action.operation
+            for proposal in client.proposals
+            if proposal.action is not None
+        ][-4:] == ["LISTEN", "SILENCE", "TURN_COMMIT", "SPEAK"]
+    finally:
+        client.release_blocked_audio.set()
+        await asyncio.wait_for(registry.close_native_interaction(uplink), timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_native_provider_stop_overtakes_blocked_audio_admission() -> None:
+    activation_handle = _native_activation()
+    client = _BlockedAudioNativeRuntimeClient(activation_handle)
+    engine = _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine,
+    )
+    activated = _activate(
+        registry,
+        params=_params(sample_rate_hz=24_000),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    assert uplink is not None
+    await registry.begin_native_interaction(uplink)
+    response = ResponseRef("interaction-1", "native-response-1", 1)
+    await engine.events.put(
+        NativeEngineEvent(
+            audio=NativeAudioOutput(
+                provider_event_id="provider-audio-before-block",
+                provider_response_id="provider-response-1",
+                provider_item_id="provider-item-1",
+                content_index=0,
+                sequence=0,
+                pcm16=b"\x01\x00" * 480,
+                response=response,
+            )
+        )
+    )
+    await asyncio.wait_for(client.audio_proposed.wait(), timeout=1.0)
+
+    async def wait_for_initial_notification() -> dict[str, object]:
+        while True:
+            notification = registry.take_native_notification(
+                session_id="session-1",
+                interaction_id="interaction-1",
+                connection_id="connection-1",
+            )
+            if notification is not None:
+                return notification
+            await asyncio.sleep(0)
+
+    notification = await asyncio.wait_for(wait_for_initial_notification(), timeout=1.0)
+    assert notification is not None
+
+    await engine.events.put(
+        NativeEngineEvent(
+            audio=NativeAudioOutput(
+                provider_event_id="provider-audio-blocked",
+                provider_response_id="provider-response-1",
+                provider_item_id="provider-item-1",
+                content_index=0,
+                sequence=1,
+                pcm16=b"\x02\x00" * 480,
+                response=response,
+            )
+        )
+    )
+    await asyncio.wait_for(client.blocked_audio_entered.wait(), timeout=1.0)
+    for sequence in range(2, 602):
+        await engine.events.put(
+            NativeEngineEvent(
+                audio=NativeAudioOutput(
+                    provider_event_id=f"provider-audio-queued-before-stop-{sequence}",
+                    provider_response_id="provider-response-1",
+                    provider_item_id="provider-item-1",
+                    content_index=0,
+                    sequence=sequence,
+                    pcm16=sequence.to_bytes(2, "little") * 480,
+                    response=response,
+                )
+            )
+        )
+    await engine.events.put(
+        NativeEngineEvent(
+            action=InteractionAction(
+                action_id="native-provider-stop-overtakes-audio",
+                operation="STOP",
+                interaction_id=activation_handle.binding.interaction_id,
+                scope=activation_handle.binding.scope,
+                payload=(
+                    ("provider_response_id", "provider-response-1"),
+                    ("runtime_response_id", response.response_id),
+                    ("response_generation", str(response.response_generation)),
+                ),
+            )
+        )
+    )
+
+    session = next(iter(registry._native_sessions.values()))
+    try:
+        try:
+            await asyncio.wait_for(client.stop_proposed.wait(), timeout=0.25)
+        except TimeoutError:
+            if session.event_task is not None and session.event_task.done():
+                await session.event_task
+            raise
+        assert session.event_task is not None and session.event_task.done() is False
+        assert response in session.barge_fenced_responses
+
+        async def wait_for_drained_provider_events() -> None:
+            while engine.events.qsize() > 0 and not session.event_task.done():
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_drained_provider_events(), timeout=1.0)
+        assert session.event_task.done() is False
+        assert engine.closed is False
+    finally:
+        client.release_blocked_audio.set()
+        if session.delivery_task is not None and not session.delivery_task.done():
+            await asyncio.wait_for(session.delivery_queue.join(), timeout=1.0)
+            assert [
+                proposal.audio.sequence
+                for proposal in client.proposals
+                if proposal.audio is not None
+            ] == [0, 1]
+        await asyncio.wait_for(registry.close_native_interaction(uplink), timeout=1.0)
 
 
 @pytest.mark.asyncio

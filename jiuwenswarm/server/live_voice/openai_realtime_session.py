@@ -474,7 +474,9 @@ class OpenAIRealtimeSession:
         self._socket: RealtimeSocket | None = None
         self._finalizer = _UniqueSocketFinalizer()
         self._provider_session_id: str | None = None
-        self._provider_events: dict[str, tuple[bytes, OpenAIRealtimeEvent]] = {}
+        self._provider_events: OrderedDict[
+            str, tuple[bytes, OpenAIRealtimeEvent]
+        ] = OrderedDict()
         self._client_event_count = 0
         self._primary_error_reason: str | None = None
         self._close_error_reason: str | None = None
@@ -714,29 +716,32 @@ class OpenAIRealtimeSession:
         async with self._receive_lock:
             socket = await self._require_socket(allow_opening=allow_opening)
             wire: str | bytes | None = None
-            try:
-                wire = await asyncio.wait_for(
-                    socket.recv(),
-                    timeout=self._config.operation_timeout_seconds,
-                )
-            except asyncio.CancelledError:
-                raise
-            except (KeyboardInterrupt, SystemExit, GeneratorExit):
-                raise
-            except (TimeoutError, asyncio.TimeoutError):
-                error = OpenAIRealtimeSessionError(
-                    "REALTIME_PROVIDER_TIMEOUT",
-                    "Realtime Provider receive timed out",
-                )
-                await self._record_primary(error.reason)
-                raise error from None
-            except Exception:
-                error = OpenAIRealtimeSessionError(
-                    "REALTIME_TRANSPORT_RECEIVE_FAILED",
-                    "Realtime Provider receive failed",
-                )
-                await self._record_primary(error.reason)
-                raise error from None
+            while wire is None:
+                try:
+                    wire = await asyncio.wait_for(
+                        socket.recv(),
+                        timeout=self._config.operation_timeout_seconds,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except (KeyboardInterrupt, SystemExit, GeneratorExit):
+                    raise
+                except (TimeoutError, asyncio.TimeoutError):
+                    if not allow_opening and await self._can_wait_for_provider(socket):
+                        continue
+                    error = OpenAIRealtimeSessionError(
+                        "REALTIME_PROVIDER_TIMEOUT",
+                        "Realtime Provider receive timed out",
+                    )
+                    await self._record_primary(error.reason)
+                    raise error from None
+                except Exception:
+                    error = OpenAIRealtimeSessionError(
+                        "REALTIME_TRANSPORT_RECEIVE_FAILED",
+                        "Realtime Provider receive failed",
+                    )
+                    await self._record_primary(error.reason)
+                    raise error from None
             event, protocol_reason = _decode_provider_event(wire)
             wire = None
             if protocol_reason is not None:
@@ -763,6 +768,10 @@ class OpenAIRealtimeSession:
             assert retained is not None
             return retained
 
+    async def _can_wait_for_provider(self, socket: RealtimeSocket) -> bool:
+        async with self._state_lock:
+            return self._state is RealtimeSessionState.OPEN and self._socket is socket
+
     async def _retain_provider_event(
         self, event: OpenAIRealtimeEvent
     ) -> tuple[OpenAIRealtimeEvent | None, str | None]:
@@ -771,12 +780,12 @@ class OpenAIRealtimeSession:
             if existing is not None:
                 canonical, retained = existing
                 if canonical == event._canonical_bytes:
+                    self._provider_events.move_to_end(event.event_id)
                     return retained, None
                 self._state = RealtimeSessionState.FAILED
                 return None, "REALTIME_PROVIDER_EVENT_CONFLICT"
             if len(self._provider_events) >= self._config.max_provider_events:
-                self._state = RealtimeSessionState.FAILED
-                return None, "REALTIME_PROVIDER_EVENT_CAPACITY"
+                self._provider_events.popitem(last=False)
             self._provider_events[event.event_id] = (
                 event._canonical_bytes,
                 event,

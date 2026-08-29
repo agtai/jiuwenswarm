@@ -274,7 +274,7 @@ async def test_send_failures_drop_audio_and_session_update_payloads() -> None:
 
 
 @pytest.mark.asyncio
-async def test_provider_event_capacity_allows_replay_but_rejects_new_identity() -> None:
+async def test_provider_event_capacity_replays_recent_and_evicts_oldest() -> None:
     retained = event("response.created", "evt-3", response={"id": "r1"})
     socket = ScriptedRealtimeSocket(
         (
@@ -291,11 +291,12 @@ async def test_provider_event_capacity_allows_replay_but_rejects_new_identity() 
     await session.open(session_update=session_update())
     assert await session.receive_event() == await session.receive_event()
 
-    with pytest.raises(OpenAIRealtimeSessionError) as raised:
-        await session.receive_event()
+    terminal = await session.receive_event()
 
-    assert raised.value.reason == "REALTIME_PROVIDER_EVENT_CAPACITY"
+    assert terminal.event_type == "response.done"
+    assert terminal.event_id == "evt-4"
     assert session.snapshot().provider_event_count == 3
+    assert session.snapshot().state is RealtimeSessionState.OPEN
     await session.close()
 
 
@@ -372,7 +373,7 @@ async def test_provider_protocol_and_conflict_tracebacks_drop_raw_wire() -> None
 
 
 @pytest.mark.asyncio
-async def test_receive_timeout_is_typed_and_close_still_finalizes() -> None:
+async def test_open_session_receive_idle_keeps_waiting_for_next_provider_event() -> None:
     socket = ScriptedRealtimeSocket(negotiated_events())
     session = OpenAIRealtimeSession(
         realtime_config(operation_timeout_seconds=0.01),
@@ -380,12 +381,35 @@ async def test_receive_timeout_is_typed_and_close_still_finalizes() -> None:
     )
     await session.open(session_update=session_update())
 
-    with pytest.raises(OpenAIRealtimeSessionError) as raised:
-        await session.receive_event()
+    receive_task = asyncio.create_task(session.receive_event())
+    await asyncio.sleep(0.035)
 
-    assert raised.value.reason == "REALTIME_PROVIDER_TIMEOUT"
+    assert receive_task.done() is False
+    assert session.snapshot().state is RealtimeSessionState.OPEN
+    assert session.snapshot().primary_error_reason is None
+
+    socket.push(event("input_audio_buffer.speech_started", "evt-3", audio_start_ms=0))
+    received = await asyncio.wait_for(receive_task, timeout=1)
+
+    assert received.event_id == "evt-3"
     snapshot = await session.close()
     assert snapshot.state is RealtimeSessionState.CLOSED
+    assert socket.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_negotiation_receive_timeout_remains_typed_and_closes_once() -> None:
+    socket = ScriptedRealtimeSocket((negotiated_events()[0],))
+    session = OpenAIRealtimeSession(
+        realtime_config(operation_timeout_seconds=0.01),
+        socket_factory=CapturingFactory(socket),
+    )
+
+    with pytest.raises(OpenAIRealtimeSessionError) as raised:
+        await session.open(session_update=session_update())
+
+    assert raised.value.reason == "REALTIME_PROVIDER_TIMEOUT"
+    assert session.snapshot().state is RealtimeSessionState.CLOSED
     assert socket.close_calls == 1
 
 

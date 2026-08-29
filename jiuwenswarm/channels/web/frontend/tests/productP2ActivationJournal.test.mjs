@@ -141,6 +141,33 @@ test('authoritative stale predecessor advances without a close replay', async ()
   assert.equal(successor.activation_generation, 2);
 });
 
+test('authoritative closed Native runtime advances without replaying its terminal owner', async () => {
+  const storage = memoryStorage();
+  const firstPage = openJournal(storage);
+  const first = firstPage.prepareSuccessor('page-a');
+  firstPage.markActive(first);
+  const refreshedPage = openJournal(storage, 'client-b');
+  let closeCalls = 0;
+
+  const recovered = await reconcileProductP2Predecessor({
+    journal: refreshedPage,
+    activate_exact: async () => {
+      throw { reason: 'NATIVE_RUNTIME_CLOSED' };
+    },
+    close_exact: async () => {
+      closeCalls += 1;
+    },
+    error_reason: error => error?.reason,
+    activation_retryable: () => false,
+  });
+  const successor = refreshedPage.prepareSuccessor('page-b');
+
+  assert.deepEqual(recovered, { kind: 'ready' });
+  assert.equal(closeCalls, 0);
+  assert.equal(successor.activation_generation, 2);
+  assert.notEqual(successor.activation_id, first.activation_id);
+});
+
 test('new allocation under an old binding proves server state loss and blocks', async () => {
   const storage = memoryStorage();
   const firstPage = openJournal(storage);

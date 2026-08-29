@@ -256,6 +256,21 @@ function stableFailureReason(error: unknown): string {
   return 'FORMAL_P1_ROUTE_FAILED';
 }
 
+function classifySynchronousPlayoutFailure(error: unknown, fallback: string): unknown {
+  if (stableFailureReason(error) !== 'FORMAL_P1_ROUTE_FAILED') return error;
+  return Object.assign(new Error('formal browser playout failed in a bounded synchronous stage'), {
+    reason: fallback,
+  });
+}
+
+function mediaTerminalFailureReason(event: Readonly<DedicatedMediaTerminalEvent>): string {
+  if (event.consumer_reason_id !== undefined) return event.consumer_reason_id;
+  if (event.reason_id !== 'MEDIA_CONSUMER_FAILED') return event.reason_id;
+  const direction = event.direction === 'uplink' ? 'UPLINK' : 'DOWNLINK';
+  const source = event.source.toUpperCase();
+  return `ADAPTER_${direction}_${source}_MEDIA_CONSUMER_FAILED`;
+}
+
 function stableCaptureStopReason(reason: string): string {
   switch (reason) {
     case 'audio_context_not_running':
@@ -414,6 +429,7 @@ export class ProductP1VoiceRouteOwner {
   #captureActualProcessing: Readonly<ProductP1CaptureProcessingDiagnostics> | null = null;
   #mediaSentFrames = 0;
   #captureFramesAcked = 0;
+  #nativeCaptureFramesSent = 0;
   #route: ActiveBrowserDedicatedMediaRoute | null = null;
   #speech: GatewayBatchSpeechClient | null = null;
   #sessionId: string | null = null;
@@ -448,6 +464,7 @@ export class ProductP1VoiceRouteOwner {
   #streamingFallbackTier: 'batch' | 'text' | null = null;
   #nativeInteraction: Readonly<NativeInteractionActivation> | null = null;
   #pendingNativeAudio: Readonly<FormalBatchSynthesisResult> | null = null;
+  #nativePlayoutFailureReason: string | null = null;
   #nativeCaptureSendPaused = false;
   #pendingMediaActivation: Promise<unknown> | null = null;
   #endOfTurnNegotiated = false;
@@ -671,6 +688,7 @@ export class ProductP1VoiceRouteOwner {
     this.#streamingFallbackTier = null;
     this.#nativeInteraction = null;
     this.#pendingNativeAudio = null;
+    this.#nativePlayoutFailureReason = null;
     this.#nativeCaptureSendPaused = false;
     this.#endOfTurnNegotiated = false;
     this.#pendingSpeechStart = null;
@@ -688,6 +706,7 @@ export class ProductP1VoiceRouteOwner {
     this.#captureUtteranceStartFrameIndex = null;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
+    this.#nativeCaptureFramesSent = 0;
     this.#route = null;
     this.#speech = null;
     this.#sessionId = sessionId;
@@ -811,15 +830,15 @@ export class ProductP1VoiceRouteOwner {
             if (ownedRoute !== null) this.#observeMediaTerminal(ownedRoute, event);
           },
           ...(this.#endOfTurnNegotiated || this.#nativeInteraction !== null
-            ? {
-                end_of_turn_capability: MEDIA_END_OF_TURN_CAPABILITY,
-                on_speech_start: (event: Readonly<MediaSpeechStart>) => {
+              ? {
+                  end_of_turn_capability: MEDIA_END_OF_TURN_CAPABILITY,
+                  continuous_end_of_turn: this.#nativeInteraction !== null,
+                  on_speech_start: (event: Readonly<MediaSpeechStart>) => {
                   this.#observeSpeechStartControl(operationGeneration, ownedRoute, event);
                 },
                 on_end_of_turn: (event: Readonly<MediaEndOfTurn>) => {
-                  if (this.#nativeInteraction !== null) {
-                    throw new Error('native interaction emitted an unexpected media end-of-turn');
-                  }
+                  // Native EOT is a provider lifecycle fact, not a request to
+                  // run the Cascade recognizer.
                   this.#observeEndOfTurnControl(operationGeneration, ownedRoute, event);
                 },
               }
@@ -868,6 +887,10 @@ export class ProductP1VoiceRouteOwner {
 
   armEndOfTurn(handler: () => void): boolean {
     if (typeof handler !== 'function') throw new TypeError('end-of-turn handler is invalid');
+    // Native provider VAD commits the turn inside the Native Runtime. The
+    // browser still consumes speech-start/end-of-turn controls for continuous
+    // capture and barge-in, but must never arm Cascade stop/STT submission.
+    if (this.#nativeInteraction !== null) return false;
     if (!this.#endOfTurnNegotiated) return false;
     if (this.#status !== 'capturing' || this.#route === null) {
       throw new Error('end-of-turn can only arm the current capture');
@@ -1085,14 +1108,33 @@ export class ProductP1VoiceRouteOwner {
     if (this.#pendingNativeAudio !== null) {
       throw new Error('a Native audio unit is already active');
     }
-    const delivery = this.#parseNativeAudioDelivery(input);
+    let delivery: Readonly<FormalBatchSynthesisResult>;
+    try {
+      delivery = this.#parseNativeAudioDelivery(input);
+    } catch (error) {
+      const retainedReason = (error as { reason?: unknown } | null)?.reason;
+      if (typeof retainedReason === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(retainedReason)) throw error;
+      throw Object.assign(
+        error instanceof Error ? error : new Error('Native audio descriptor validation failed'),
+        { reason: 'PRODUCT_NATIVE_AUDIO_DESCRIPTOR_INVALID' },
+      );
+    }
     this.#pendingNativeAudio = delivery;
     try {
-      await this.playAgentText({
-        response: delivery.response,
-        unit_id: delivery.unit_id,
-        text: 'Native audio delivery',
-      });
+      try {
+        await this.playAgentText({
+          response: delivery.response,
+          unit_id: delivery.unit_id,
+          text: 'Native audio delivery',
+        });
+      } catch (error) {
+        const retainedReason = (error as { reason?: unknown } | null)?.reason;
+        if (typeof retainedReason === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(retainedReason)) throw error;
+        throw Object.assign(
+          error instanceof Error ? error : new Error('Native audio route failed'),
+          { reason: 'PRODUCT_NATIVE_AUDIO_ROUTE_FAILED' },
+        );
+      }
     } finally {
       if (this.#pendingNativeAudio === delivery) this.#pendingNativeAudio = null;
     }
@@ -1144,6 +1186,8 @@ export class ProductP1VoiceRouteOwner {
       let downlinkRoute: ActiveBrowserDedicatedMediaRoute | null = null;
       let downlinkTerminal: Readonly<DedicatedMediaTerminalEvent> | null = null;
       let pendingRef: PendingProductPlayout | null = null;
+      const earlyDownlinkFrames: Readonly<MediaAudioFrame>[] = [];
+      let earlyDownlinkBytes = 0;
       const chunks = [...result.chunks];
       // A streaming downlink deliberately declares no final frame count. Keep
       // that `null` distinct from the batch path's in-envelope chunk count;
@@ -1152,6 +1196,7 @@ export class ProductP1VoiceRouteOwner {
       const frameCount = result.downlink === null ? chunks.length : result.downlink.frame_count;
       const captureDuringPlayout = result.downlink !== null && !native;
       if (result.downlink !== null) {
+        const downlink = result.downlink;
         if (captureDuringPlayout) {
           this.#successorCaptureReadiness = 'pending';
           this.#successorCaptureReadinessReason = null;
@@ -1170,12 +1215,30 @@ export class ProductP1VoiceRouteOwner {
           void capturePreparation.catch(() => undefined);
         }
         downlinkRoute = this.#openDownlinkRoute(
-          result.downlink,
+          downlink,
           result.provider,
           result.response,
           result.unit_id,
           frame => {
-            if (pendingRef === null) throw new Error('downlink arrived before playout ownership');
+            if (pendingRef === null) {
+              const nextBytes = earlyDownlinkBytes + frame.samples.byteLength;
+              if (
+                earlyDownlinkFrames.length >= downlink.max_pending_frames
+                || nextBytes > downlink.max_pending_bytes
+              ) {
+                this.#nativePlayoutFailureReason ??= 'PLAYOUT_OWNERSHIP_BUFFER_OVERFLOW';
+                throw Object.assign(new Error('bounded playout ownership buffer overflowed'), {
+                  reason: 'PLAYOUT_OWNERSHIP_BUFFER_OVERFLOW',
+                });
+              }
+              // The same-origin server may deliver its first frame immediately
+              // after attach, before this method has installed the render
+              // waiter. Retain only the already-negotiated transport window;
+              // ownership is installed synchronously below and drains it.
+              earlyDownlinkFrames.push(frame);
+              earlyDownlinkBytes = nextBytes;
+              return;
+            }
             this.#acceptDownlinkFrame(pendingRef, frame, result.provider);
           },
           event => {
@@ -1219,10 +1282,6 @@ export class ProductP1VoiceRouteOwner {
       };
       pendingRef = pendingPlayout;
       this.#pendingPlayout = pendingPlayout;
-      if (downlinkTerminal !== null && downlinkRoute !== null) {
-        this.#observeMediaTerminal(downlinkRoute, downlinkTerminal);
-        this.#requireCurrent(operationGeneration);
-      }
       if (this.#l0Available) {
         this.#l0PlayoutStartedAtMs = monotonicNowMs();
         this.#l0PlayoutResponseKey = l0ResponseKey(result.response);
@@ -1233,6 +1292,13 @@ export class ProductP1VoiceRouteOwner {
       this.#audio.beginPlayout(result.response);
       if (native) {
         this.#bargeInSpeechStartDelivered = false;
+      }
+      for (const frame of earlyDownlinkFrames) this.#acceptDownlinkFrame(pendingPlayout, frame, result.provider);
+      earlyDownlinkFrames.length = 0;
+      earlyDownlinkBytes = 0;
+      if (downlinkTerminal !== null && downlinkRoute !== null) {
+        this.#observeMediaTerminal(downlinkRoute, downlinkTerminal);
+        this.#requireCurrent(operationGeneration);
       }
       this.#fillPlayoutQueue(pendingPlayout);
       this.#deliverBargeInSpeechStart(operationGeneration, this.#route);
@@ -1305,6 +1371,18 @@ export class ProductP1VoiceRouteOwner {
       if (error !== null && typeof error === 'object' && (error as Record<string, unknown>).reason === 'FORMAL_PLAYOUT_BARGED') {
         this.#setStatus(this.#route === null ? 'recognized' : 'capturing', null);
         this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
+        if (native && this.#pendingEndOfTurn !== null) {
+          const settledEndOfTurn = this.#pendingEndOfTurn;
+          Promise.resolve().then(() => {
+            if (
+              this.#pendingEndOfTurn === settledEndOfTurn
+              && this.#status === 'capturing'
+              && !this.#closed
+            ) {
+              this.#resetNativeTurnBoundary();
+            }
+          });
+        }
         return;
       }
       if (this.#closeRequested) {
@@ -1908,22 +1986,35 @@ export class ProductP1VoiceRouteOwner {
       frame.seq !== pending.chunks.length ||
       frame.seq >= (pending.frameCount ?? MAX_STREAMING_PLAYOUT_FRAMES)
     )
-      throw new Error('dedicated media downlink frame is stale or non-contiguous');
-    if (this.#l0Available && frame.seq === 0) {
-      this.#observeBrowserFirstFrame(pending.response, frame.seq);
+      throw Object.assign(new Error('dedicated media downlink frame is stale or non-contiguous'), {
+        reason: 'PLAYOUT_DOWNLINK_FRAME_STALE',
+      });
+    try {
+      if (this.#l0Available && frame.seq === 0) {
+        this.#observeBrowserFirstFrame(pending.response, frame.seq);
+      }
+      pending.chunks.push(
+        Object.freeze({
+          response: pending.response,
+          unit_id: pending.unitId,
+          seq: frame.seq,
+          sample_rate_hz: pending.downlinkRoute!.binding.frame_format.sample_rate_hz,
+          channel_count: 1,
+          samples: Float32Array.from(frame.samples),
+          provider,
+        })
+      );
+      this.#fillPlayoutQueue(pending);
+    } catch (error) {
+      const failure = classifySynchronousPlayoutFailure(error, 'PLAYOUT_FRAME_ACCEPT_FAILED');
+      this.#nativePlayoutFailureReason ??= stableFailureReason(failure);
+      console.warn(`live_voice_native_playout_failed stage=frame_accept reason=${stableFailureReason(failure)} visible=false`);
+      // Retain the exact browser consumer failure before the media leaf emits a
+      // generic detach and the continuous Native uplink observes that teardown.
+      // Cleanup starts on the next microtask, outside the receiver callback.
+      void this.#fail(failure);
+      throw failure;
     }
-    pending.chunks.push(
-      Object.freeze({
-        response: pending.response,
-        unit_id: pending.unitId,
-        seq: frame.seq,
-        sample_rate_hz: pending.downlinkRoute!.binding.frame_format.sample_rate_hz,
-        channel_count: 1,
-        samples: Float32Array.from(frame.samples),
-        provider,
-      })
-    );
-    this.#fillPlayoutQueue(pending);
   }
 
   #parseNativeAudioDelivery(input: Readonly<ProductP1NativeAudioInput>): Readonly<FormalBatchSynthesisResult> {
@@ -1973,16 +2064,23 @@ export class ProductP1VoiceRouteOwner {
       throw new Error('Native audio presentation unit is invalid');
     }
     const unitId = requiredText(unit.unit_id, 'native_audio.presentation_unit.unit_id');
-    const audio = exactObject(
-      input.audio,
-      [
-        'binding', 'channel_count', 'delivery', 'endpoint_path', 'format',
-        'frame_count', 'max_pending_bytes', 'max_pending_frames',
-        'media_ticket', 'sample_rate_hz', 'streaming', 'subprotocol',
-        'ticket_ttl_ms', 'degradation_reason',
-      ],
-      'native_audio.audio',
-    );
+    let audio: Record<string, unknown>;
+    try {
+      audio = exactObject(
+        input.audio,
+        [
+          'binding', 'channel_count', 'delivery', 'endpoint_path', 'format',
+          'frame_count', 'max_pending_bytes', 'max_pending_frames',
+          'media_ticket', 'sample_rate_hz', 'streaming', 'subprotocol',
+          'ticket_ttl_ms', 'degradation_reason',
+        ],
+        'native_audio.audio',
+      );
+    } catch (error) {
+      throw Object.assign(error instanceof Error ? error : new Error('Native audio fields are invalid'), {
+        reason: 'PRODUCT_NATIVE_AUDIO_FIELDS_INVALID',
+      });
+    }
     const streaming = audio.streaming === true && audio.frame_count === null;
     const maxPendingFrames = positiveSafeInteger(
       audio.max_pending_frames,
@@ -1992,19 +2090,23 @@ export class ProductP1VoiceRouteOwner {
       audio.max_pending_bytes,
       'native_audio.audio.max_pending_bytes',
     );
-    if (
-      audio.channel_count !== 1
-      || audio.delivery !== 'dedicated_media_downlink'
-      || audio.endpoint_path !== '/ws/live-voice/media'
-      || audio.format !== 'pcm_f32_mono_20ms'
-      || audio.sample_rate_hz !== playout.sample_rate_hz
-      || !streaming
-      || audio.subprotocol !== 'live-voice.media.v1'
-      || audio.degradation_reason !== null
-      || maxPendingFrames > 256
-      || maxPendingBytes > NATIVE_AUDIO_MAX_BYTES
-    ) {
-      throw new Error('Native audio descriptor is invalid');
+    if (audio.sample_rate_hz !== playout.sample_rate_hz) {
+      throw Object.assign(new Error('Native audio sample rate does not match browser playout'), {
+        reason: 'PRODUCT_NATIVE_AUDIO_SAMPLE_RATE_MISMATCH',
+      });
+    }
+    const invalidAudioReason =
+      audio.channel_count !== 1 ? 'PRODUCT_NATIVE_AUDIO_CHANNEL_INVALID'
+      : audio.delivery !== 'dedicated_media_downlink' ? 'PRODUCT_NATIVE_AUDIO_DELIVERY_INVALID'
+      : audio.endpoint_path !== '/ws/live-voice/media' ? 'PRODUCT_NATIVE_AUDIO_ENDPOINT_INVALID'
+      : audio.format !== 'pcm_f32_mono_20ms' ? 'PRODUCT_NATIVE_AUDIO_FORMAT_INVALID'
+      : !streaming ? 'PRODUCT_NATIVE_AUDIO_STREAMING_INVALID'
+      : audio.subprotocol !== 'live-voice.media.v1' ? 'PRODUCT_NATIVE_AUDIO_SUBPROTOCOL_INVALID'
+      : audio.degradation_reason !== null ? 'PRODUCT_NATIVE_AUDIO_DEGRADATION_INVALID'
+      : maxPendingFrames > 256 || maxPendingBytes > NATIVE_AUDIO_MAX_BYTES ? 'PRODUCT_NATIVE_AUDIO_LIMIT_INVALID'
+      : null;
+    if (invalidAudioReason !== null) {
+      throw Object.assign(new Error('Native audio descriptor is invalid'), { reason: invalidAudioReason });
     }
     const mediaTicket = consumePrivateText(audio, 'media_ticket', 'native_audio.audio.media_ticket');
     return Object.freeze({
@@ -2045,18 +2147,32 @@ export class ProductP1VoiceRouteOwner {
     }
     this.#drainCaptureFrames();
     this.#nativeCaptureSendPaused = true;
+    const receiptFrameCount = this.#frames.length;
     const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
     let state = route.leaf.flush();
-    while (state.pending_frames !== 0 && !route.leaf.closed && Date.now() < deadline) {
+    while (
+      (this.#mediaSentFrames !== receiptFrameCount || state.pending_frames !== 0) &&
+      !route.leaf.closed &&
+      Date.now() < deadline
+    ) {
       await waitTurn();
       this.#requireCurrent(operationGeneration);
+      // ACK progress releases the media leaf's bounded enqueue window. Move
+      // any browser-local tail into that window before checking completion.
+      this.#drainCaptureFrames(true, receiptFrameCount);
       state = route.leaf.flush();
     }
     this.#requireCurrent(operationGeneration);
-    if (route !== this.#route || route.leaf.closed || state.pending_frames !== 0 || this.#mediaSentFrames <= 0) {
+    if (
+      route !== this.#route ||
+      route.leaf.closed ||
+      this.#mediaSentFrames !== receiptFrameCount ||
+      state.pending_frames !== 0 ||
+      this.#nativeCaptureFramesSent <= 0
+    ) {
       throw new Error('Native capture frames did not settle for playout receipt');
     }
-    pending.captureFramesAcked = this.#mediaSentFrames;
+    pending.captureFramesAcked = this.#nativeCaptureFramesSent;
   }
 
   #fillPlayoutQueue(pending: PendingProductPlayout): void {
@@ -2072,7 +2188,9 @@ export class ProductP1VoiceRouteOwner {
         const depthAfterEnqueue = pending.nextChunkIndex - pending.renderedChunks;
         if (!this.#audio.enqueuePlayout(chunk)) {
           pending.nextChunkIndex -= 1;
-          throw new Error('browser playout rejected a formal chunk');
+          throw Object.assign(new Error('browser playout rejected a formal chunk'), {
+            reason: 'PLAYOUT_CHUNK_REJECTED',
+          });
         }
         // Product `playing` is a claim about browser-owned scheduled audio,
         // not about completed Agent text or an allocated TTS descriptor.
@@ -2192,10 +2310,16 @@ export class ProductP1VoiceRouteOwner {
       try {
         route.leaf.acknowledgeDownlinkThrough(throughSeq);
       } catch (error) {
+        const failure = stableFailureReason(error) === 'FORMAL_P1_ROUTE_FAILED'
+          ? Object.assign(new Error('formal downlink ACK failed'), { reason: 'PLAYOUT_DOWNLINK_ACK_FAILED' })
+          : error;
+        this.#nativePlayoutFailureReason ??= stableFailureReason(failure);
+        console.warn(`live_voice_native_playout_failed stage=downlink_ack reason=${stableFailureReason(failure)} visible=false`);
+        void this.#fail(failure);
         if (this.#pendingPlayout === pending) this.#pendingPlayout = null;
         route.leaf.close('MEDIA_TRANSPORT_PROTOCOL_ERROR');
         this.#audio.stopPlayout(pending.response, 'formal_downlink_ack_failed');
-        pending.reject(error instanceof Error ? error : new Error('formal downlink ACK failed'));
+        pending.reject(failure instanceof Error ? failure : new Error('formal downlink ACK failed'));
       }
     });
   }
@@ -2238,6 +2362,12 @@ export class ProductP1VoiceRouteOwner {
       return;
     }
     if (event.state === 'failed' || event.state === 'stopped' || event.state === 'closed') {
+      if (this.#nativeInteraction !== null) {
+        this.#nativePlayoutFailureReason ??= stableCaptureStopReason(event.reason);
+        console.warn(
+          `live_voice_native_playout_failed stage=audio_event reason=${stableCaptureStopReason(event.reason)} visible=false`,
+        );
+      }
       this.#pendingPlayout = null;
       pending.reject(
         Object.assign(new Error('formal browser playout failed'), {
@@ -2376,6 +2506,16 @@ export class ProductP1VoiceRouteOwner {
     if (event.source === 'local_close' || this.#closed || this.#closeRequested || this.#failureCleanupPromise !== null) return;
     const pending = this.#pendingPlayout ?? this.#settlingPlayout;
     if (this.#route !== route && pending?.downlinkRoute !== route) return;
+    if (
+      this.#nativeInteraction !== null
+      && event.direction === 'downlink'
+      && event.source !== 'expected_completion'
+    ) {
+      this.#nativePlayoutFailureReason ??= mediaTerminalFailureReason(event);
+      console.warn(
+        `live_voice_native_playout_failed stage=media_terminal reason=${mediaTerminalFailureReason(event)} visible=false`,
+      );
+    }
     if (event.source === 'expected_completion') {
       if (event.direction === 'uplink') return;
       if (
@@ -2434,7 +2574,7 @@ export class ProductP1VoiceRouteOwner {
     }
     void this.#fail(
       Object.assign(new Error('formal dedicated media route terminated unexpectedly'), {
-        reason: event.reason_id,
+        reason: mediaTerminalFailureReason(event),
       })
     );
   }
@@ -2465,6 +2605,31 @@ export class ProductP1VoiceRouteOwner {
 
   #acceptCaptureFrame(frame: Readonly<CapturedAudioFrame>): void {
     if (this.#closed || this.#closeRequested || this.#failureCleanupPromise !== null || ['cleanup_pending', 'failed', 'closed'].includes(this.#status)) return;
+    if (this.#nativeInteraction !== null) {
+      this.#compactNativeCaptureFrames();
+      if (this.#frames.length >= MAX_CAPTURE_FRAMES) {
+        const route = this.#route;
+        const pendingFrames =
+          route !== null && route.leaf.attached && !route.leaf.closed
+            ? route.leaf.flush().pending_frames
+            : -1;
+        console.warn(
+          `live_voice_native_capture_unacknowledged frames=${this.#frames.length} sent=${this.#mediaSentFrames} native_sent=${this.#nativeCaptureFramesSent} pending=${pendingFrames} paused=${this.#nativeCaptureSendPaused} attached=${route?.leaf.attached ?? false} closed=${route?.leaf.closed ?? true} visible=false`,
+        );
+        // Native PCM is only a bounded transport queue; unlike Cascade it is
+        // never retained for batch recognition. A healthy continuous route
+        // compacts every fully ACKed prefix. Reaching this bound therefore
+        // means the exact Provider uplink has failed to acknowledge thirty
+        // seconds of audio and must fail closed instead of growing memory or
+        // silently replacing the conversation session.
+        void this.#fail(
+          Object.assign(new Error('Native capture frames were not acknowledged'), {
+            reason: 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED',
+          })
+        );
+        return;
+      }
+    }
     const captureDuringPlayout = this.#status === 'playing';
     if (!captureDuringPlayout) {
       let energy = 0;
@@ -2493,6 +2658,7 @@ export class ProductP1VoiceRouteOwner {
     const utteranceActive = this.#captureProviderSpeechStartObserved;
     const localActivityRecent = !captureDuringPlayout && this.#captureLocalActivityRecencyFrames > 0;
     const canRotateBoundedCapture =
+      this.#nativeInteraction === null &&
       this.#captureRotationPromise === null &&
       this.#frames.length >= MAX_CAPTURE_FRAMES - 1 &&
       !utteranceActive &&
@@ -2546,10 +2712,11 @@ export class ProductP1VoiceRouteOwner {
     }
     const utteranceStartFrameIndex = this.#captureUtteranceStartFrameIndex;
     if (
-      (utteranceActive &&
-        utteranceStartFrameIndex !== null &&
-        this.#frames.length - utteranceStartFrameIndex >= MAX_CAPTURE_FRAMES) ||
-      this.#frames.length >= CAPTURE_ABSOLUTE_MAX_FRAMES
+      this.#nativeInteraction === null &&
+      ((utteranceActive &&
+          utteranceStartFrameIndex !== null &&
+          this.#frames.length - utteranceStartFrameIndex >= MAX_CAPTURE_FRAMES) ||
+        this.#frames.length >= CAPTURE_ABSOLUTE_MAX_FRAMES)
     ) {
       // The declared 30-second budget bounds one authoritative utterance from
       // its provider speech-start, not the lease's wall-clock age: overlapped
@@ -2626,11 +2793,12 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
-  #drainCaptureFrames(): void {
-    if (this.#nativeCaptureSendPaused) return;
+  #drainCaptureFrames(ignoreNativePause = false, throughFrameCount = this.#frames.length): void {
+    if (this.#nativeCaptureSendPaused && !ignoreNativePause) return;
     const route = this.#route;
     if (route === null || !route.leaf.attached || route.leaf.closed) return;
-    while (this.#mediaSentFrames < this.#frames.length) {
+    const boundedFrameCount = Math.min(throughFrameCount, this.#frames.length);
+    while (this.#mediaSentFrames < boundedFrameCount) {
       const result = route.leaf.sendCaptureFrame(this.#frames[this.#mediaSentFrames]);
       if (!result.accepted) {
         if (['MEDIA_NOT_ATTACHED', 'MEDIA_BACKPRESSURE_LIMIT'].includes(result.reason_id)) return;
@@ -2639,6 +2807,38 @@ export class ProductP1VoiceRouteOwner {
         });
       }
       this.#mediaSentFrames += 1;
+      if (this.#nativeInteraction !== null) this.#nativeCaptureFramesSent += 1;
+    }
+  }
+
+  #compactNativeCaptureFrames(): void {
+    const route = this.#route;
+    if (
+      this.#nativeInteraction === null ||
+      this.#nativeCaptureSendPaused ||
+      route === null ||
+      route.leaf.closed ||
+      !route.leaf.attached ||
+      this.#frames.length === 0 ||
+      this.#mediaSentFrames === 0
+    ) return;
+    const pending = route.leaf.flush();
+    const acknowledgedPrefix = this.#mediaSentFrames - pending.pending_frames;
+    if (acknowledgedPrefix <= 0) return;
+    // The media leaf owns transport sequence and ACK history. Its pending
+    // count covers every accepted frame not yet ACKed, so the difference from
+    // this local accepted prefix is the exact contiguous ACKed prefix. Retire
+    // it even while capture remains ahead of the bounded media window; waiting
+    // for the producer to stop would turn a small unsent tail into an
+    // artificial lifetime limit for a continuous Native session.
+    this.#frames = this.#frames.slice(acknowledgedPrefix);
+    this.#mediaSentFrames -= acknowledgedPrefix;
+    this.#captureFramesAcked += acknowledgedPrefix;
+    if (this.#captureUtteranceStartFrameIndex !== null) {
+      this.#captureUtteranceStartFrameIndex = Math.max(
+        0,
+        this.#captureUtteranceStartFrameIndex - acknowledgedPrefix,
+      );
     }
   }
 
@@ -2651,7 +2851,7 @@ export class ProductP1VoiceRouteOwner {
       || route !== this.#route
       || !Number.isSafeInteger(seq)
       || seq < 0
-      || seq >= this.#frames.length
+      || (this.#nativeInteraction === null && seq >= this.#frames.length)
     ) return;
     this.#l0LastFrameSentClock = l0ClockNow();
   }
@@ -2665,7 +2865,13 @@ export class ProductP1VoiceRouteOwner {
     // A late continuation from the operation already fenced by the first
     // failure cannot start a second cleanup or replace its exact stable reason.
     if (this.#failureCleanupReason !== null && ['cleanup_pending', 'failed'].includes(this.#status) && this.#failureCleanupPromise === null) return;
-    const failureReason = stableFailureReason(error);
+    if (this.#nativeInteraction !== null) {
+      this.#nativePlayoutFailureReason ??= stableFailureReason(error);
+      console.warn(
+        `live_voice_native_route_failed reason=${this.#nativePlayoutFailureReason} visible=false`,
+      );
+    }
+    const failureReason = this.#nativePlayoutFailureReason ?? stableFailureReason(error);
     if (this.#failureCleanupPromise === null) {
       const failureResponse = (
         this.#pendingPlayout ?? this.#settlingPlayout
@@ -2739,6 +2945,7 @@ export class ProductP1VoiceRouteOwner {
     this.#captureRotationSourceId = null;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
+    this.#nativeCaptureFramesSent = 0;
     this.#playout = null;
     try {
       await this.#audio.stopCapture(reason);
@@ -2902,6 +3109,13 @@ export class ProductP1VoiceRouteOwner {
       // active utterance.
       this.#captureUtteranceStartFrameIndex = this.#frames.length;
     }
+    if (this.#nativeInteraction !== null && this.#status !== 'playing') {
+      // A Native response may reach the notification/downlink channel before
+      // this same input turn's EOT reaches the uplink control channel. Never
+      // carry a pre-response speech-start into playout as a new barge-in.
+      this.#pendingSpeechStart = null;
+      return;
+    }
     this.#pendingSpeechStart = event;
     this.#deliverBargeInSpeechStart(operationGeneration, route);
   }
@@ -2946,6 +3160,16 @@ export class ProductP1VoiceRouteOwner {
       throw new Error('end-of-turn control escaped its media authority');
     }
     this.#l0Record('browser_eot_receipt');
+    if (
+      this.#nativeInteraction !== null
+      && (this.#status !== 'playing' || !this.#bargeInSpeechStartDelivered)
+    ) {
+      // This EOT committed the input that precedes the next Native response.
+      // Cross-channel ordering can deliver it after playout begins, but only a
+      // speech-start actually observed during playout can authorize barge-in.
+      this.#resetNativeTurnBoundary();
+      return;
+    }
     this.#pendingEndOfTurn = event;
     this.#deliverBargeInEndOfTurn(operationGeneration, route);
     this.#deliverEndOfTurn(operationGeneration, route);
@@ -2981,6 +3205,16 @@ export class ProductP1VoiceRouteOwner {
         callback(event);
       }
     });
+  }
+
+  #resetNativeTurnBoundary(): void {
+    this.#pendingSpeechStart = null;
+    this.#pendingEndOfTurn = null;
+    this.#captureProviderSpeechStartObserved = false;
+    this.#captureUtteranceStartFrameIndex = null;
+    this.#bargeInSpeechStartDelivered = false;
+    this.#bargeInEndOfTurnDelivered = false;
+    this.#compactNativeCaptureFrames();
   }
 
   #publish(): void {

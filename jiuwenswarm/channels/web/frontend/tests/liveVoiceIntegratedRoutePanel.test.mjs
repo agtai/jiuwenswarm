@@ -906,7 +906,8 @@ test('P2 notification classification isolates exact Native audio from text prese
     activation_generation: 1,
   };
 
-  assert.deepEqual(classifyProductP2Notification(notification), {
+  const nativeDisposition = classifyProductP2Notification(notification);
+  assert.deepEqual(nativeDisposition, {
     kind: 'native_audio',
     response_id: 'native-response-1',
     response,
@@ -914,6 +915,10 @@ test('P2 notification classification isolates exact Native audio from text prese
     presentation_unit: presentationUnit,
     audio,
   });
+  assert.notEqual(nativeDisposition.audio, audio);
+  assert.equal(Object.isFrozen(nativeDisposition.audio), false);
+  assert.equal(Reflect.deleteProperty(nativeDisposition.audio, 'media_ticket'), true);
+  assert.equal(Object.hasOwn(nativeDisposition.audio, 'media_ticket'), false);
   assert.deepEqual(
     classifyProductP2Notification({ ...notification, forged_text: 'must not be accepted' }),
     {

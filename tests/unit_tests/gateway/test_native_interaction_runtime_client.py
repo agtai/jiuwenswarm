@@ -14,7 +14,9 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.gateway.channel_manager.web import app_web_handlers
-from jiuwenswarm.gateway.live_voice import native_interaction_runtime_client as client_module
+from jiuwenswarm.gateway.live_voice import (
+    native_interaction_runtime_client as client_module,
+)
 from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
     NATIVE_BROWSER_DESCRIPTOR_KEY,
     NATIVE_GATEWAY_DESCRIPTOR_KEY,
@@ -63,14 +65,14 @@ def listen_event() -> NativeEngineEvent:
     )
 
 
-def audio_event() -> NativeEngineEvent:
+def audio_event(sequence: int = 0) -> NativeEngineEvent:
     return NativeEngineEvent(
         audio=NativeAudioOutput(
-            provider_event_id="provider-audio-1",
+            provider_event_id=f"provider-audio-{sequence}",
             provider_response_id="provider-response-1",
             provider_item_id="provider-assistant-item-1",
             content_index=0,
-            sequence=0,
+            sequence=sequence,
             pcm16=b"\x12\x34" * 480,
             response=ResponseRef(BINDING.interaction_id, "native-response-1", 1),
         )
@@ -310,11 +312,14 @@ async def test_stale_activation_compensation_preserves_newer_exact_capability() 
             request_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value,
         )
     assert stale.value.reason == "NATIVE_RUNTIME_ACTIVATION_STALE"
-    assert client.activation_for(
-        session_id=SCOPE.session_id,
-        interaction_id=BINDING.interaction_id,
-        connection_id="web-connection-2",
-    ) == expected_newer
+    assert (
+        client.activation_for(
+            session_id=SCOPE.session_id,
+            interaction_id=BINDING.interaction_id,
+            connection_id="web-connection-2",
+        )
+        == expected_newer
+    )
 
     first = await client.abort_activation_response(
         activation_payload(),
@@ -336,11 +341,14 @@ async def test_stale_activation_compensation_preserves_newer_exact_capability() 
     assert all(
         request.params["binding"] == BINDING.to_dict() for request in agent.requests
     )
-    assert client.activation_for(
-        session_id=SCOPE.session_id,
-        interaction_id=BINDING.interaction_id,
-        connection_id="web-connection-2",
-    ) == expected_newer
+    assert (
+        client.activation_for(
+            session_id=SCOPE.session_id,
+            interaction_id=BINDING.interaction_id,
+            connection_id="web-connection-2",
+        )
+        == expected_newer
+    )
 
 
 @pytest.mark.asyncio
@@ -524,6 +532,56 @@ async def test_gateway_accepts_closed_runtime_audio_admission_without_pcm() -> N
     proposal = agent.requests[0].params["proposal"]
     assert "audio_observation" in proposal
     assert "pcm16" not in str(proposal)
+
+
+@pytest.mark.asyncio
+async def test_gateway_native_audio_batch_uses_one_bounded_closed_e2a_request() -> None:
+    client, agent, _sanitized = observed_client()
+    items = [
+        {
+            "kind": "audio",
+            "status": "observed",
+            "accepted": True,
+            "presentation_unit": {
+                "response": {
+                    "interaction_id": BINDING.interaction_id,
+                    "response_id": "native-response-1",
+                    "response_generation": 1,
+                },
+                "surface": "audio",
+                "unit_id": f"native-audio-unit-{sequence}",
+                "seq": sequence,
+                "source_start_utf8": sequence * 480,
+                "source_end_utf8": (sequence + 1) * 480,
+                "content_ref": "sha256:" + f"{sequence + 1:064x}",
+            },
+        }
+        for sequence in range(16)
+    ]
+    agent.result_override = {
+        "kind": "audio_batch",
+        "status": "observed",
+        "items": items,
+    }
+
+    result = await client.propose_audio_batch(
+        binding=BINDING,
+        capability=CAPABILITY,
+        events=tuple(audio_event(sequence) for sequence in range(16)),
+        request_id="native-audio-batch-1",
+    )
+
+    assert result == tuple(items)
+    assert len(agent.requests) == 1
+    envelope = agent.requests[0]
+    assert set(envelope.params) == {
+        "contract_version",
+        "binding",
+        "capability",
+        "proposals",
+    }
+    assert len(envelope.params["proposals"]) == 16
+    assert "pcm16" not in str(envelope.params["proposals"])
 
 
 @pytest.mark.asyncio
