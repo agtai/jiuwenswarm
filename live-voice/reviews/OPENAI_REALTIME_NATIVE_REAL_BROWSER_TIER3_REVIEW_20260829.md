@@ -97,4 +97,3 @@ Provider response; it is not presented as a zero-anomaly run. Further capacity
 or response-length policy would be a new product packet, not a defect fix
 silently added here. Physical microphone/headset and human acoustic acceptance
 remain the only foreground acceptance class not run in this packet.
-
