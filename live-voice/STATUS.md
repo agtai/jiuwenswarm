@@ -272,11 +272,17 @@ exact-source Alpha result.
 
 ### OpenAI Realtime Native Interaction Engine
 
-- **Status/source:** **SOURCE/AUTOMATION GATE PASS `C0/I0/M0`; REAL
-  PROVIDER/DEVICE/HUMAN GATE NOT_RUN** on isolated branch
+- **Status/source:** **SOURCE/AUTOMATION + ORDINARY INSTALLED-CHROME
+  PRERECORDED DIGITAL GATE PASS; PHYSICAL DEVICE/HUMAN GATE NOT_RUN;
+  INDEPENDENT REPAIR-DELTA REVIEW PENDING** on isolated branch
   `codex/openai-realtime-native-interaction-engine`, based on clean integration
-  source `1742c1b4e5fa5e7a25a7b41dad9c8eef8453e3cc`. D-100 solution A is frozen
-  at exact source candidate
+  source `1742c1b4e5fa5e7a25a7b41dad9c8eef8453e3cc`. The ordinary-Chrome repair is
+  exact implementation candidate
+  `2026e02fbfcc03164e51d953731f04c0eac41938`: fixed-corpus foreground
+  first-audio is `20/20`, barge-in is `20/20`, Browser drop/failure is zero,
+  and the same-metric first-audio p50/p95 is `2320.633/2902.033 ms` versus the
+  accepted Cascade warm baseline `4834.362/5603.215 ms` (reductions
+  `52.00%/48.21%`). D-100 solution A is frozen at exact source candidate
   `944a1e72addeca67dbb53ec06d7801d5ddf2d232`; the complete affected backend,
   frontend and build automation have passed, and independent Tier-3 cold review is
   `C0/I0/M0 — PASS`. The earlier exact candidate
@@ -313,8 +319,9 @@ exact-source Alpha result.
 - **Exclusions:** no existing TurnCommit or SQLite migration, second
   classifier/Runtime/history/Task authority, Provider-direct Jiuwen Tool/MCP,
   silent cross-Engine fallback, Production/public deployment, remote update or
-  source/real-path claim before its Gate. Real Provider/device/human acceptance
-  remains independent after source/automation and cold Tier-3 review pass.
+  background/W3 change. The passing ordinary-Chrome gate uses prerecorded
+  Browser-stream injection and makes no physical microphone, headset, AEC,
+  room, human-audibility, Production or deployment claim.
 - **Acceptance and re-scope:** red-green-refactor plus deterministic
   event/barrier/manual-clock races now proves 3 s/150-frame sustained audio,
   before-first/between-frame/duplicate speech-start, cursor/no-cursor fencing,
@@ -322,10 +329,11 @@ exact-source Alpha result.
   incomplete Runtime/Provider close ownership, atomic revoke capacity,
   close-retry quiescing, single direct response and transactional activation
   compensation. Mutation-capable negative paths assert zero forbidden effects,
-  and the frozen candidate passed independent fix-only Tier-3 review at
-  `C0/I0`. The remaining Gate is a separately authorized machine-private real
-  OpenAI Provider, real audio-device and human journey; it is `NOT_RUN` and
-  grants no physical, product-readiness, Production or deployment credit. Any
+  and the frozen D-100 candidate passed independent fix-only Tier-3 review at
+  `C0/I0`. The new repair delta passed complete-diff cold self-review at
+  `C0/I0/M0`; its independent review and the physical audio-device/human journey
+  remain open. The real Provider prerecorded digital Gate is passed and grants
+  no physical, product-readiness, Production or deployment credit. Any
   need to change shared wire/schema,
   authority ownership, Provider function exposure, played-cursor truth or
   fallback policy triggers re-scope before code expansion. See the
@@ -334,7 +342,9 @@ exact-source Alpha result.
   boundary is in the
   [D-100 plan](../docs/superpowers/plans/2026-08-25-openai-realtime-native-response-stream-correction.md),
   with exact verification and review recorded in the
-  [D-100 source-candidate evidence](evidence/OPENAI_REALTIME_NATIVE_D100_SOURCE_CANDIDATE_EVIDENCE_20260825.md).
+  [D-100 source-candidate evidence](evidence/OPENAI_REALTIME_NATIVE_D100_SOURCE_CANDIDATE_EVIDENCE_20260825.md)
+  and the
+  [ordinary-Chrome Realtime evidence](evidence/OPENAI_REALTIME_NATIVE_ORDINARY_CHROME_EVIDENCE_20260829.md).
 
 ### Separate outstanding P3-9 cumulative one-product acceptance Gate
 
@@ -1074,6 +1084,17 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
   runtime databases/audio remain ignored and excluded from final integration.
 
 ## Verification and runtime truth
+
+- On 2026-08-29, exact implementation candidate `2026e02fbfcc03164e51d953731f04c0eac41938`
+  ran `gpt-realtime-2.1-mini` through ordinary installed Chrome with a fixed
+  prerecorded capture corpus: warm-up completed, foreground first-audio passed
+  `20/20`, barge-in passed `20/20`, and all 40 attempts had zero Browser drops
+  or failures. Same-metric Browser EOT-to-WebAudio-start latency is p50/p95
+  `2320.633/2902.033 ms`, reductions of `52.00%/48.21%` from the accepted
+  Cascade warm baseline. W3 listeners remained on their original processes and
+  no background Task was invoked. Physical microphone/headset/human acceptance
+  remains `NOT_RUN`; see the
+  [ordinary-Chrome Realtime evidence](evidence/OPENAI_REALTIME_NATIVE_ORDINARY_CHROME_EVIDENCE_20260829.md).
 
 - On 2026-08-25, behaviour source `ba06d9825c` passed the formal launcher
   probes and ordinary installed-Chrome warm sequence: one non-counted warm-up,
