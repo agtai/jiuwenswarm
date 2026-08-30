@@ -330,6 +330,20 @@ _plan_active_sessions: set[str] = set()
 # metadata 之前捎带到 params 里，给 ``_ensure_code_mode_state`` 当跨重启判据。
 _SESSION_PREVIOUS_MODE_KEY = "_session_previous_mode"
 
+# Values that appear in a session's stored ``mode`` but are not runtime modes.
+# History records carry a ``mode`` tag of their own — subagent projections use
+# ``subagent``, and a record written before the turn's mode was resolved falls
+# back to ``unknown`` — and ``update_session_metadata`` writes ``mode``
+# overwrite-style, so either can end up on disk as the session's mode.  A
+# request that carries no explicit ``mode`` inherits the stored value and
+# AgentManager keys its agent instances by it, so inheriting one of these would
+# route the session to a second, empty JiuWenSwarm instance: a fresh DeepAgent
+# and a fresh interaction for a session that already has one.  Skip them and
+# let the generic resolver pick the real mode instead.  ``append_history_record``
+# no longer writes ``subagent`` here, but sessions written before that fix keep
+# the corrupt value on disk, and this guard is what lets them recover.
+_NON_RUNTIME_SESSION_MODES = frozenset({"subagent", "unknown"})
+
 # ``plan_entry_source`` 的合法取值，表示"用户这一条消息明确要求进入 plan"。
 # 一次性字段：TUI 的 ``/plan`` 命令、Web 用户手动打开 Plan 开关后的第一条消息。
 # 字面量定义在 ``jiuwenswarm.common.schema.chat_send`` 的
@@ -2819,7 +2833,21 @@ class AgentWebSocketServer:
             )
             if isinstance(stored_session_mode, str) and stored_session_mode.strip():
                 stored_session_mode = stored_session_mode.strip()
-                params[_SESSION_PREVIOUS_MODE_KEY] = stored_session_mode
+                if stored_session_mode.lower() in _NON_RUNTIME_SESSION_MODES:
+                    # A history-record tag that reached the session's mode; see
+                    # ``_NON_RUNTIME_SESSION_MODES``.  Not a mode any agent can
+                    # be keyed on, and not a previous mode ``_ensure_code_mode_
+                    # state`` can reason about, so drop it entirely.
+                    logger.warning(
+                        "[_prepare_code_mode_chat_turn] ignoring non-runtime stored "
+                        "session mode %r for session=%s",
+                        stored_session_mode,
+                        sid,
+                    )
+                    stored_session_mode = ""
+                else:
+                    params[_SESSION_PREVIOUS_MODE_KEY] = stored_session_mode
+            if isinstance(stored_session_mode, str) and stored_session_mode.strip():
                 if not explicit_mode_provided:
                     # Internal Heartbeat requests are ordinary CHAT_SENDs and
                     # intentionally omit ``mode``.  Runtime selection must

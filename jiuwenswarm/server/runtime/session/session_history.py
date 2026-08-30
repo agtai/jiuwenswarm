@@ -717,6 +717,21 @@ def append_history_record(
 
     _enqueue_history_item(sid, item, subagent_id=subagent_id)
 
+    # ``mode`` on a subagent record labels the record, not the session: the
+    # subagent projections persist ``mode="subagent"`` so a reader can tell a
+    # subagent transcript apart from the parent's.  ``update_session_metadata``
+    # writes ``mode`` overwrite-style (unlike ``channel_id``, which is
+    # first-write-locked), so forwarding it would relabel the parent session's
+    # canonical execution mode to ``subagent``.  That value is authoritative:
+    # a later ``chat.send`` that carries no explicit ``mode`` inherits it, and
+    # AgentManager keys its agent instances by mode — the next turn would land
+    # on a different JiuWenSwarm instance, build a second DeepAgent for the
+    # same session, and run concurrently with the turn that is still streaming
+    # (seen in production as a steer that opened a second card instead of
+    # folding into the running turn).  Subagent records therefore leave the
+    # session's mode alone.
+    metadata_mode = None if subagent_id else mode
+
     # 更新会话元数据
     try:
         from jiuwenswarm.server.runtime.session.session_metadata import (
@@ -731,7 +746,7 @@ def append_history_record(
             user_content=content_text if role_norm == "user" else None,
             # 传入渠道元数据,首次写入时持久化
             channel_metadata=channel_metadata,
-            mode=mode,
+            mode=metadata_mode,
             # 用户消息时刷新 last_user_message_at(用消息时间戳,比请求到达时刻更精确;
             # 与 AgentServer 的 _sync_chat_request_metadata 互补,覆盖所有记录用户消息的路径)
             last_user_message_at=float(timestamp) if role_norm == "user" else None,

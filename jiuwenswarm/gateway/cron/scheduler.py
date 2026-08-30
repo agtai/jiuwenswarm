@@ -23,6 +23,7 @@ from jiuwenswarm.gateway.cron.models import (
     is_team_cron_mode,
     resolve_cron_job_timeout_seconds,
 )
+from jiuwenswarm.gateway.cron.slack_routing import slack_history_metadata_for_cron_job
 from jiuwenswarm.gateway.cron.store import CronJobStore
 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -904,6 +905,7 @@ class CronSchedulerService:
                 cron_expr="",
                 timezone=state.timezone or "Asia/Shanghai",
                 targets=state.targets or "",
+                post_as_root=store_job.post_as_root,
                 session_id=state.session_id,
                 chat_type=state.chat_type,
             )
@@ -1058,6 +1060,22 @@ class CronSchedulerService:
                 }
                 if job.model_name:
                     params["model_name"] = job.model_name
+                # A cron run has no conversation of its own, so anything it is
+                # allowed to read has to be stated on the request rather than
+                # inferred from it. For a job whose Slack session was proven
+                # when it was created, that is the conversation the job belongs
+                # to, taken from the job record -- never from
+                # ``job.description``, which is the part a model wrote. Every
+                # other job gets ``{}`` here and the runtime mounts nothing,
+                # which is what a cron run has always got.
+                request_metadata: dict[str, Any] = {
+                    "cron": {"job_id": job.id, "run_id": run_id},
+                    # 真实推送渠道（普通模式 channel 是内部 "__cron__"）。
+                    # AgentServer 用它注册 send_file 等按渠道开关的工具，并作为
+                    # 文件推送的 channel_id，与 cron 文本结果推送到同一批渠道。
+                    "targets": str(job.targets or "").strip(),
+                }
+                request_metadata.update(slack_history_metadata_for_cron_job(job))
                 envelope = e2a_from_agent_fields(
                     request_id=f"cron-{run_id}",
                     channel_id=channel_id,
@@ -1066,13 +1084,7 @@ class CronSchedulerService:
                     params=params,
                     is_stream=is_team_cron_mode(mode),
                     timestamp=self._now_fn(),
-                    metadata={
-                        "cron": {"job_id": job.id, "run_id": run_id},
-                        # 真实推送渠道（普通模式 channel 是内部 "__cron__"）。
-                        # AgentServer 用它注册 send_file 等按渠道开关的工具，并作为
-                        # 文件推送的 channel_id，与 cron 文本结果推送到同一批渠道。
-                        "targets": str(job.targets or "").strip(),
-                    },
+                    metadata=request_metadata,
                     user_id=job.user_id or None,
                 )
                 if not str(job.user_id or "").strip():
@@ -1773,6 +1785,15 @@ class CronSchedulerService:
 
         if metadata is None:
             metadata = {}
+        # The only producer of this key. ``post_as_root`` is configurable end to
+        # end -- declared on ``CronJob``, persisted by the store, exposed by the
+        # cron tools -- and ``SlackChannel._resolve_delivery_target`` blanks the
+        # thread when it sees it, but nothing put it on an outgoing message. It
+        # is written here rather than at the Slack rung because it is a property
+        # of the job, and this is the one place a delivery knows which job it
+        # belongs to. Channels that do not understand it ignore it.
+        if job.post_as_root:
+            metadata["post_as_root"] = True
         if channel_id == "dingtalk":
             # 仅用可用的钉钉 staffId / delivery binding 补路由；禁止把 dingtalk_… 内部会话当 staffId。
             if routing_sid and not str(metadata.get("dingtalk_sender_id") or "").strip():

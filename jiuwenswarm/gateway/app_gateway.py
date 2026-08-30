@@ -1637,7 +1637,20 @@ async def _run(
     from jiuwenswarm.gateway.channel_manager.im_platforms.discord.discord_connect import DiscordChannel, \
         DiscordChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.slack.slack_connect import SlackChannel, \
-        SlackChannelConfig
+        DEFAULT_THINKING_STATUS, \
+        SlackChannelConfig, describe_configured_channels, \
+        describe_slack_delivery_reachability, resolve_acknowledge_mode, \
+        resolve_blockkit_allow_interactive, \
+        resolve_blockkit_allowed_block_types, resolve_blockkit_tables_mode, \
+        resolve_blockkit_validate, \
+        resolve_render_tables, \
+        resolve_sdk_log_level, resolve_streaming_enabled, \
+        slack_default_channel_id_from_config, warn_if_heartbeat_relay_unreachable
+    from jiuwenswarm.common.slack_history_policy import (
+        resolve_history_exempt_members,
+        resolve_history_never_read,
+        resolve_history_policy,
+    )
     from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_connect import WecomChannel, WecomConfig
     from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import SshChannel, SshChannelConfig
     from jiuwenswarm.extensions.agentos.auth.ssh_key_registry import KeyRegistry
@@ -1782,6 +1795,15 @@ async def _run(
         os.getenv("HEALTH_CHECK_RELAY_CHANNEL_ID")
         or os.getenv("HEARTBEAT_RELAY_CHANNEL_ID")
         or (str(cfg_target) if cfg_target is not None else "web")
+    )
+
+    # ``relay_channel_id`` names a connector, not a conversation, so a heartbeat
+    # aimed at Slack has only ``channels.slack.default_channel_id`` to land in.
+    # Said here, at the one moment the two values are settled together, rather
+    # than left to surface as a SlackDeliveryError once per interval forever.
+    warn_if_heartbeat_relay_unreachable(
+        heartbeat_target=heartbeat_relay_channel,
+        default_channel_id=slack_default_channel_id_from_config(full_cfg),
     )
 
     heartbeat_config = HealthCheckConfig(
@@ -2629,6 +2651,11 @@ async def _run(
             slack_conf = conf.get("slack") if isinstance(conf, dict) else None
             await _stop_channel(slack_channel, slack_task, "slack")
             slack_channel, slack_task = None, None
+            # Drop any adapter the previous incarnation registered, so turning
+            # group_digital_avatar off in the config actually takes effect on a
+            # hot reload instead of leaving the old one wired up.
+            im_inbound.unregister_adapter("slack")
+            im_outbound.unregister_adapter("slack")
 
             if isinstance(slack_conf, dict):
                 enabled, reason = _is_channel_enabled(slack_conf, ["bot_token", "app_token"])
@@ -2641,16 +2668,161 @@ async def _run(
                         if isinstance(reply_in_thread_raw, str)
                         else bool(reply_in_thread_raw)
                     )
+                    enable_streaming = resolve_streaming_enabled(
+                        slack_conf.get("enable_streaming")
+                    )
+                    blockkit_tables = resolve_blockkit_tables_mode(slack_conf)
+                    render_tables = resolve_render_tables(slack_conf)
+                    blockkit_allowed_block_types = (
+                        resolve_blockkit_allowed_block_types(slack_conf)
+                    )
+                    blockkit_validate = resolve_blockkit_validate(slack_conf)
+                    blockkit_allow_interactive = resolve_blockkit_allow_interactive(
+                        slack_conf
+                    )
+                    acknowledge_mode = resolve_acknowledge_mode(slack_conf)
+
+                    def _slack_seconds(key: str, default: float) -> float:
+                        """A non-negative number of seconds, or the default.
+
+                        A mistyped value falls back rather than raising: these
+                        two tune when a status card appears and how often it is
+                        rewritten, and neither is worth refusing to start a
+                        channel over. A negative value is read as zero, which is
+                        what "no delay" and "no floor" already mean.
+                        """
+                        raw = slack_conf.get(key)
+                        if raw is None or isinstance(raw, bool):
+                            return default
+                        try:
+                            value = float(raw)
+                        except (TypeError, ValueError):
+                            logger.warning(
+                                "[App] channels.slack.%s is not a number (%r);"
+                                " using %s",
+                                key, raw, default,
+                            )
+                            return default
+                        return max(0.0, value)
+
+                    # The card grew from a subagent fan-out into the whole
+                    # turn's activity and its keys were renamed with it. The old
+                    # names are still read, second: an operator who tuned either
+                    # knob must not have that setting quietly ignored because
+                    # the feature was renamed underneath them.
+                    activity_card_delay = _slack_seconds(
+                        "activity_card_delay_seconds",
+                        _slack_seconds("subagent_card_delay_seconds", 5.0),
+                    )
+                    activity_card_min_edit = _slack_seconds(
+                        "activity_card_min_edit_seconds",
+                        _slack_seconds("subagent_card_min_edit_seconds", 10.0),
+                    )
                     slack_config = SlackChannelConfig(
                         enabled=True,
                         bot_token=str(slack_conf.get("bot_token") or "").strip(),
                         app_token=str(slack_conf.get("app_token") or "").strip(),
                         allow_from=slack_conf.get("allow_from") or [],
                         allowed_channel_ids=slack_conf.get("allowed_channel_ids") or [],
+                        # One word, settled here so that the connector, the
+                        # cron scheduler and the runtime all read the same
+                        # answer for one conversation. The deprecated
+                        # history_digest_channel_ids is translated inside the
+                        # resolver, which warns once per distinct translation.
+                        history=resolve_history_policy(slack_conf),
+                        history_never_read=resolve_history_never_read(slack_conf),
+                        history_exempt_members=resolve_history_exempt_members(
+                            slack_conf
+                        ),
                         default_channel_id=str(slack_conf.get("default_channel_id") or "").strip(),
                         reply_in_thread=reply_in_thread,
+                        group_chat_mode=str(
+                            slack_conf.get("group_chat_mode") or "mention"
+                        ).strip(),
+                        acknowledge_mode=acknowledge_mode,
+                        acknowledgement_text=str(
+                            slack_conf.get("acknowledgement_text")
+                            or "Received. Analyzing…"
+                        ).strip(),
+                        # Not the ``or default`` the line above uses: empty is
+                        # how this key is turned off, so an operator who blanks
+                        # it must not be handed the default straight back. Only
+                        # a key that is absent entirely falls back.
+                        thinking_status=str(
+                            slack_conf.get(
+                                "thinking_status", DEFAULT_THINKING_STATUS
+                            )
+                            or ""
+                        ).strip(),
+                        acknowledgement_emoji=str(
+                            slack_conf.get("acknowledgement_emoji") or "eyes"
+                        ).strip(),
+                        rejected_emoji=str(
+                            slack_conf.get("rejected_emoji") or "no_entry_sign"
+                        ).strip(),
+                        queued_emoji=str(
+                            slack_conf.get("queued_emoji")
+                            or "hourglass_flowing_sand"
+                        ).strip(),
+                        sdk_log_level=resolve_sdk_log_level(slack_conf),
+                        enable_streaming=enable_streaming,
+                        blockkit_tables=blockkit_tables,
+                        render_tables=render_tables,
+                        blockkit_allowed_block_types=blockkit_allowed_block_types,
+                        blockkit_allow_interactive=blockkit_allow_interactive,
+                        blockkit_validate=blockkit_validate,
+                        group_digital_avatar=bool(
+                            slack_conf.get("group_digital_avatar", False)
+                        ),
+                        my_user_id=str(slack_conf.get("my_user_id") or "").strip(),
+                        principal_name=str(
+                            slack_conf.get("principal_name") or ""
+                        ).strip(),
+                        bot_name=str(slack_conf.get("bot_name") or "").strip(),
+                        enable_memory=bool(slack_conf.get("enable_memory", False)),
+                        activity_card=bool(
+                            slack_conf.get(
+                                "activity_card",
+                                slack_conf.get("subagent_status_card", True),
+                            )
+                        ),
+                        activity_card_delay_seconds=activity_card_delay,
+                        activity_card_min_edit_seconds=activity_card_min_edit,
                     )
-                    slack_channel = SlackChannel(slack_config, _DummyBus())
+                    # Named so a mistyped-but-well-formed channel id shows up in
+                    # the log beside the ones that work, which is the error a
+                    # membership check against Slack would still have missed.
+                    describe_configured_channels(slack_config)
+                    # And the other half of the same question: the line above
+                    # says where the bot listens, this one says whether what it
+                    # is asked to say has anywhere to go.
+                    await describe_slack_delivery_reachability(
+                        slack_config,
+                        cron_store=cron_store,
+                        heartbeat_target=heartbeat_relay_channel,
+                    )
+                    # Digital avatar: build the adapter and register it with both
+                    # pipelines. Without a principal there is nobody for the
+                    # avatar to speak for, so the flag alone is not enough.
+                    slack_adapter = None
+                    if slack_config.group_digital_avatar and slack_config.my_user_id:
+                        from jiuwenswarm.gateway.channel_manager.im_platforms.slack.slack_im_adapter import \
+                            SlackIMPlatformAdapter
+                        slack_adapter = SlackIMPlatformAdapter(
+                            my_user_id=slack_config.my_user_id,
+                            principal_name=slack_config.principal_name,
+                            bot_name=slack_config.bot_name,
+                        )
+                        im_inbound.register_adapter("slack", slack_adapter)
+                        im_outbound.register_adapter("slack", slack_adapter)
+                    elif slack_config.group_digital_avatar:
+                        logger.warning(
+                            "[App] channels.slack.group_digital_avatar is on but "
+                            "my_user_id is empty; the digital avatar stays off"
+                        )
+                    slack_channel = SlackChannel(
+                        slack_config, _DummyBus(), im_platform_adapter=slack_adapter
+                    )
                     channel_manager.register_channel(slack_channel)
                     slack_task = asyncio.create_task(slack_channel.start(), name="slack")
                     logger.info("[App] SlackChannel registered from config.yaml.channels.slack")

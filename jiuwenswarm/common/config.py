@@ -2384,6 +2384,69 @@ def _migrate_legacy_agent_submode_memory(user_data: dict[str, Any]) -> None:
         flat_memory["enabled"] = all(legacy_enabled_values)
 
 
+def _migrate_legacy_slack_render_tables(user_data: dict[str, Any]) -> None:
+    """Carry ``channels.slack.data_table_row_threshold`` onto ``render_tables``.
+
+    Must run before ``_deep_merge``, for the reason every migration here runs
+    before it: the merge writes the template's ``render_tables`` default into
+    a config that has no such key, and a default landing beside an unread
+    threshold would change how every table in the channel is drawn without
+    anything written down that says it happened. Reading the threshold first
+    and recording the answer as the new key is what keeps the change visible.
+
+    The reading is the one ``render_tables_for_row_threshold`` performs in the
+    Slack connector, and the two are pinned to each other by a test rather than
+    shared as code: this module is imported by everything and must not import a
+    channel connector to answer a question about three integers.
+
+    ``0`` meant "every non-empty table becomes a ``data_table``" and is carried
+    over exactly. Any other row count meant "keep a table plain until it grows
+    past this", which is ``basic`` for all but the longest tables and is the
+    reading that leaves the most replies looking as they did. Anything that was
+    never a row count -- absent, a word, a boolean, a negative -- expressed no
+    preference and is left to the template's default.
+
+    Only an operator who has not already written ``render_tables`` is touched. A
+    file that names the new key has said what it wants, whatever else it still
+    carries.
+    """
+    channels = user_data.get("channels")
+    if not isinstance(channels, dict):
+        return
+    slack = channels.get("slack")
+    if not isinstance(slack, dict) or "data_table_row_threshold" not in slack:
+        return
+
+    # The migration removes the key it retires, on every path out of here. It
+    # used to be able to leave that to the template merge, which deleted
+    # whatever the template did not name; the merge is additive now, so a
+    # migration that does not clean up after itself leaves the retired key in
+    # the operator's file for good -- and the connector logs a deprecation
+    # warning for it on every start, with nothing the operator can do to stop
+    # it. Removal is the migration's own business either way.
+    threshold = slack.pop("data_table_row_threshold")
+
+    existing = slack.get("render_tables")
+    if isinstance(existing, bool) or (
+        isinstance(existing, str) and existing.strip()
+    ):
+        return
+
+    # bool is an int subclass and was never a row count.
+    if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 0:
+        return
+
+    mode = "data_table" if threshold == 0 else "basic"
+    slack["render_tables"] = mode
+    logger.warning(
+        "channels.slack.data_table_row_threshold=%r has been replaced by "
+        "channels.slack.render_tables=%r in your config; a table's size no "
+        "longer decides which block it becomes. Valid values are "
+        "off/basic/data_table",
+        threshold, mode,
+    )
+
+
 def migrate_config_from_template(
     template_path: Path,
     user_config_path: Path,
@@ -2434,6 +2497,8 @@ def migrate_config_from_template(
     # 结构性迁移：plan/fast 子模式 memory 配置 -> 合并后的 modes.agent.memory
     # 必须在 _deep_merge 之前执行，否则旧子节点会被静默丢弃而非迁移。
     _migrate_legacy_agent_submode_memory(user_data)
+    # 结构性迁移：channels.slack.data_table_row_threshold -> render_tables
+    _migrate_legacy_slack_render_tables(user_data)
 
     # Deep merge: template provides defaults, user values preserved.
     # user_data is updated in place, which keeps comments and formatting.

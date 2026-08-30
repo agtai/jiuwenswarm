@@ -60,7 +60,7 @@ from openjiuwen.core.sys_operation import (
     SysOperationCard,
     OperationMode,
 )
-from openjiuwen.core.sys_operation.cwd import init_cwd
+from openjiuwen.core.sys_operation.cwd import get_workspace, init_cwd, set_cwd
 from openjiuwen.harness import (
     AudioModelConfig,
     DeepAgent,
@@ -221,6 +221,7 @@ from jiuwenswarm.agents.harness.common.rails.execution_guard import (
 from jiuwenswarm.common.context_window import parse_positive_int, resolve_context_window_tokens
 
 from jiuwenswarm.common.hooks_config import load_hooks_config
+from jiuwenswarm.common.interrupt_prompt import render_prompt_as_text
 from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.common.stage_timer import StageTimer
 from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool, unregister_tool
@@ -315,6 +316,16 @@ from jiuwenswarm.agents.harness.common.tools import (
     skill_sources_from_manager,
     SymphonyToolkit,
 )
+from jiuwenswarm.agents.harness.common.tools.slack_history import SlackHistoryToolkit
+from jiuwenswarm.common.slack_history_policy import (
+    HISTORY_DISABLED,
+    METADATA_POLICY_KEY,
+    normalize_history_policy,
+)
+from jiuwenswarm.agents.harness.common.tools.slack_search import (
+    SlackSearchToolkit,
+    slack_search_request_metadata,
+)
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
@@ -387,6 +398,11 @@ from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KE
 from jiuwenswarm.agents.harness.common.auto_harness.service import _HARNESS_PACKAGES_FILE
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenswarm.gateway.cron import CronTargetChannel
+from jiuwenswarm.gateway.cron.slack_routing import (
+    CRON_CHANNEL_ID as CRON_REQUEST_CHANNEL_ID,
+    SLACK_HISTORY_ORIGIN_CRON_JOB,
+    SLACK_HISTORY_ORIGIN_KEY,
+)
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.utils import (
@@ -454,6 +470,78 @@ class _RuntimeCronContextTokens:
 def get_runtime_tool_session_id() -> str | None:
     """Session id bound for the current agent tool invocation (ContextVar)."""
     return _CRON_TOOL_SESSION_ID.get()
+
+
+def _request_carries_slack_history_context(
+    channel_id: str,
+    metadata: dict[str, Any] | None,
+) -> bool:
+    """Whether this request is one of the two shapes that may name a channel.
+
+    An inbound Slack turn arrives on channel ``slack`` and the connector stamps
+    the conversation the message came from; the channel id is set by the
+    transport, so a request on any other channel carrying Slack-looking metadata
+    is by definition not one.
+
+    A cron run has no Slack channel of its own -- it arrives on ``__cron__`` --
+    so the equivalent assertion has to be explicit: the scheduler stamps the
+    conversation the job was created in, and marks it as its own doing. Without
+    that marker a cron request naming a Slack channel is not honoured, so no
+    later cron code path can grant history access by leaving a stray
+    ``slack_channel_id`` on a request for some unrelated reason.
+
+    Neither shape is reachable by the model: request metadata is written by the
+    gateway before the turn starts and is not part of the tool argument surface.
+    """
+    channel = str(channel_id or "").strip().lower()
+    if channel == "slack":
+        return True
+    if channel != CRON_REQUEST_CHANNEL_ID:
+        return False
+    return (
+        isinstance(metadata, dict)
+        and metadata.get(SLACK_HISTORY_ORIGIN_KEY) == SLACK_HISTORY_ORIGIN_CRON_JOB
+    )
+
+
+def _filter_slack_history_request_metadata(
+    channel_id: str,
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return trusted Slack history metadata or fail closed.
+
+    Both request shapes are held to the same two conditions, unchanged: the
+    conversation must be named by request metadata rather than by a model
+    argument, and the policy decision must already have been taken by the side
+    that has the config. A cron run's decision is taken freshly on every run, so
+    narrowing the policy narrows cron as well.
+
+    What changed is that the decision arrives as a word rather than a boolean.
+    The runtime does not read ``channels.slack`` for it and must not: the same
+    conversation would then be settled twice, in two processes, with two chances
+    to disagree about which one was in force. An absent word is *no connector
+    settled this request* and mounts nothing -- which is also what the retired
+    ``slack_history_digest_allowed`` did, so a request from a path that has not
+    been taught to stamp the word loses the tool rather than gaining an
+    ungoverned one.
+
+    ``disabled`` mounts nothing either, and that is the whole of this gate's
+    reading of the word. Every wider distinction -- whether a target may be
+    named at all, and which one -- is taken at read time against Slack, where
+    the membership is, and is not knowable here.
+    """
+    if not _request_carries_slack_history_context(channel_id, metadata):
+        return {}
+    if not isinstance(metadata, dict):
+        return {}
+    slack_channel_id = str(metadata.get("slack_channel_id") or "").strip()
+    if not slack_channel_id:
+        return {}
+    policy = normalize_history_policy(metadata.get(METADATA_POLICY_KEY))
+    if not policy or policy == HISTORY_DISABLED:
+        return {}
+    return dict(metadata)
+
 
 logger = logging.getLogger(__name__)
 
@@ -564,6 +652,30 @@ _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
         "skill_index",
     }
 )
+# The image-tool fallback notice is delivered verbatim to the user by every
+# channel — the web timeline and the IM connectors alike render ``content`` as
+# received — so it follows ``preferred_language`` rather than the prompt-facing
+# text around it. The model label carries its own brackets because CJK copy
+# takes full-width ones and needs no leading space.
+_IMAGE_TOOL_FALLBACK_NOTICE_CN = (
+    "当前模型{model_label}不支持原生图片理解，已切换为图片理解工具处理。"
+)
+_IMAGE_TOOL_FALLBACK_NOTICE_EN = (
+    "The current model{model_label} does not support native image understanding; "
+    "an image understanding tool is used instead."
+)
+# The same notice when no vision model tool is configured either: the fallback
+# named above is unavailable, so the user is told the attachment reached nothing
+# rather than that it was rerouted.
+_IMAGE_TOOL_FALLBACK_UNAVAILABLE_CN = (
+    "当前模型{model_label}不支持原生图片理解，且未配置可用的视觉模型工具。"
+)
+_IMAGE_TOOL_FALLBACK_UNAVAILABLE_EN = (
+    "The current model{model_label} does not support native image understanding, "
+    "and no vision model tool is configured."
+)
+_IMAGE_TOOL_FALLBACK_MODEL_LABEL_CN = "（{model_name}）"
+_IMAGE_TOOL_FALLBACK_MODEL_LABEL_EN = " ({model_name})"
 # Total ``_update_runtime_config`` cost above which its per-stage breakdown is
 # worth an INFO line. It runs once per turn ahead of the model call, so anything
 # at this scale is directly visible in time-to-first-token.
@@ -1650,6 +1762,10 @@ class JiuWenSwarmDeepAdapter:
         self._dreaming_started = False
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
+        self._slack_history_toolkit: SlackHistoryToolkit | None = None
+        self._slack_history_tools: list[Any] = []
+        self._slack_search_toolkit: SlackSearchToolkit | None = None
+        self._slack_search_tools: list[Any] = []
         self._runtime_state_write_task: asyncio.Task[None] | None = None
         self._channel_id: str | None = None
         # (name, load_record, manifest.version)
@@ -5551,6 +5667,7 @@ class JiuWenSwarmDeepAdapter:
         enable_read_image_multimodal: bool,
         model: Any | None,
         vision_tool_available: bool,
+        language: str,
     ) -> dict[str, Any] | None:
         if enable_read_image_multimodal:
             return None
@@ -5565,14 +5682,26 @@ class JiuWenSwarmDeepAdapter:
 
         model_config = getattr(model, "model_config", None)
         model_name = str(getattr(model_config, "model_name", "") or "").strip()
-        model_label = f"（{model_name}）" if model_name else ""
+        english = str(language or "").strip().lower() == "en"
+        label_template = (
+            _IMAGE_TOOL_FALLBACK_MODEL_LABEL_EN
+            if english
+            else _IMAGE_TOOL_FALLBACK_MODEL_LABEL_CN
+        )
+        model_label = label_template.format(model_name=model_name) if model_name else ""
         if vision_tool_available:
-            content = f"当前模型{model_label}不支持原生图片理解，已切换为图片理解工具处理。"
-        else:
-            content = (
-                f"当前模型{model_label}不支持原生图片理解，"
-                "且未配置可用的视觉模型工具。"
+            notice_template = (
+                _IMAGE_TOOL_FALLBACK_NOTICE_EN
+                if english
+                else _IMAGE_TOOL_FALLBACK_NOTICE_CN
             )
+        else:
+            notice_template = (
+                _IMAGE_TOOL_FALLBACK_UNAVAILABLE_EN
+                if english
+                else _IMAGE_TOOL_FALLBACK_UNAVAILABLE_CN
+            )
+        content = notice_template.format(model_label=model_label)
         notice = {
             "event_type": "chat.notice",
             "notice_type": "image_tool_fallback",
@@ -8064,9 +8193,12 @@ class JiuWenSwarmDeepAdapter:
             completion_timeout=resolve_task_loop_completion_timeout(config),
         )
 
-        initial_runtime_workspace = self._project_dir or str(
-            get_default_project_session_workspace_dir()
-        )
+        # ``start_interaction`` runs right after this and starts the controller's
+        # long-lived TaskScheduler; the scheduler, its supervisor, rounds, tool
+        # tasks and subagents all inherit whatever CwdState this seed installs,
+        # through their copied Context.  So this is the seed the agent runs on
+        # for the whole session, and it has to name the session already.
+        initial_runtime_workspace = self._initial_runtime_workspace()
         self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
         setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
 
@@ -8888,6 +9020,131 @@ class JiuWenSwarmDeepAdapter:
                     project_dir=self._project_dir,
                 )
 
+        # Ahead of the history block below, because that block returns early for
+        # a request that may not read history -- and whether a turn may search
+        # is a separate question with a separate answer. Sequencing search after
+        # it would make one tool's absence silently decide the other's.
+        self._refresh_slack_search_runtime_tool()
+
+        # Slack history is deliberately scoped to the current Slack request.
+        # The channel comes from trusted transport metadata rather than a model
+        # argument, so the tool cannot be used to read an arbitrary channel.
+        slack_history_enabled = bool(self._get_slack_history_request_metadata())
+        # Both tools, one predicate. open_slack_file needs a trusted S to gate
+        # against and needs nothing else -- files.info and the download both run
+        # on the bot token alone -- so it shares the history tool's per-request
+        # availability test unchanged. A cron run therefore opens files, its S
+        # being the conversation it delivers into, exactly as it reads history.
+        slack_history_tool_names = {"read_slack_conversation", "open_slack_file"}
+
+        if not slack_history_enabled:
+            # Once registered, keep the ability stable across concurrent
+            # transports. The request-context provider fails closed for
+            # non-Slack and non-allowlisted requests at invocation time.
+            return
+
+        if self._slack_history_toolkit is None:
+            self._slack_history_toolkit = SlackHistoryToolkit(
+                metadata_provider=self._get_slack_history_request_metadata,
+                session_id_provider=self._get_slack_history_session_id,
+            )
+            self._slack_history_tools = self._slack_history_toolkit.get_tools()
+            for history_tool in self._slack_history_tools:
+                Runner.resource_mgr.add_tool(history_tool)
+                self._instance.ability_manager.add(history_tool.card)
+        else:
+            # The toolkit reads request metadata from the session-scoped context
+            # proxy at invocation time. It therefore survives the DeepAgent
+            # worker boundary without accepting a model-supplied channel id.
+            registered_names = {
+                getattr(existing, "name", "")
+                for existing in (self._instance.ability_manager.list() or [])
+            }
+            if not slack_history_tool_names.issubset(registered_names):
+                for history_tool in self._slack_history_tools:
+                    tool_name = str(
+                        getattr(history_tool, "name", "")
+                        or getattr(getattr(history_tool, "card", None), "name", "")
+                    )
+                    if tool_name not in registered_names:
+                        self._instance.ability_manager.add(history_tool.card)
+
+    def _refresh_slack_search_runtime_tool(self) -> None:
+        """Register the Slack search tool for a turn that is able to use it.
+
+        Deliberately a second decision rather than a branch of the history one.
+        The two tools answer different questions, need different things to be
+        true, and are turned on separately, so a turn can have either, both or
+        neither -- and a turn that cannot search is told so by the tool, never
+        handed history in its place.
+
+        Its predicate has a term history's has not: Slack issues the permission
+        a search call needs with the inbound event, so a turn that no Slack
+        event started -- a scheduled job above all -- can never search, however
+        the install is configured. That is why this cannot be settled once at
+        start-up.
+
+        Registration is one-way within a process, for the reason the history
+        tool's is: the card is shared across concurrent transports, so removing
+        it because *this* request cannot search would take it from a
+        simultaneous request that can. The provider is what fails closed, at
+        invocation time, per request.
+        """
+        if not self._get_slack_search_request_metadata():
+            return
+
+        if self._slack_search_toolkit is None:
+            self._slack_search_toolkit = SlackSearchToolkit(
+                metadata_provider=self._get_slack_search_request_metadata,
+            )
+            self._slack_search_tools = self._slack_search_toolkit.get_tools()
+            for search_tool in self._slack_search_tools:
+                Runner.resource_mgr.add_tool(search_tool)
+                self._instance.ability_manager.add(search_tool.card)
+            return
+
+        registered_names = {
+            getattr(existing, "name", "")
+            for existing in (self._instance.ability_manager.list() or [])
+        }
+        for search_tool in self._slack_search_tools:
+            tool_name = str(
+                getattr(search_tool, "name", "")
+                or getattr(getattr(search_tool, "card", None), "name", "")
+            )
+            if tool_name and tool_name not in registered_names:
+                self._instance.ability_manager.add(search_tool.card)
+
+    def _get_slack_history_request_metadata(self) -> dict[str, Any]:
+        """Read trusted Slack metadata across the DeepAgent worker boundary."""
+        return _filter_slack_history_request_metadata(
+            self._runtime_cron_tool_context.channel_id,
+            self._runtime_cron_tool_context.metadata,
+        )
+
+    def _get_slack_history_session_id(self) -> str:
+        """The session ``open_slack_file`` writes into, per request.
+
+        The same contextvar-backed proxy the metadata provider reads, and for
+        the same reason: the toolkit is built once and answers every request
+        for the life of the process, so a session id captured at construction
+        would be one session's id forever. ``_bind_runtime_cron_context`` sets
+        this for every chat turn and not only for cron runs.
+
+        Grants nothing. It decides *where a file is written*, never whether it
+        may be opened; that is settled entirely by the metadata provider above
+        and by the gate the toolkit runs against Slack. An empty answer is a
+        refusal on the tool's side rather than a fallback directory.
+        """
+        return str(self._runtime_cron_tool_context.session_id or "").strip()
+
+    def _get_slack_search_request_metadata(self) -> dict[str, Any]:
+        """Read trusted Slack search metadata across the worker boundary."""
+        return slack_search_request_metadata(
+            self._runtime_cron_tool_context.channel_id,
+            self._runtime_cron_tool_context.metadata,
+        )
+
     def _refresh_acp_runtime_tools(
         self,
         session_id: str | None,
@@ -8966,26 +9223,83 @@ class JiuWenSwarmDeepAdapter:
         if self._instance.deep_config is not None:
             self._instance.deep_config.language = resolved_language
 
-    def _seed_runtime_cwd(
-        self, cwd: str | None = None, workspace: str | None = None
-    ) -> None:
-        """Seed Core's CwdState holder from the request/runtime cwd.
+    def _initial_runtime_workspace(self) -> str:
+        """Directory this adapter's agent starts in, for its whole session.
 
-        ``workspace``: optional per-request workspace override. When set,
-        becomes the workspace anchor for tools that read ``get_workspace()``
-        (notably ``fs_operation``'s sandbox enforcement, which gates
-        absolute-path writes by membership in the workspace tree). When
-        unset, falls back to the agent's instance-level workspace.
+        A session-scoped adapter keys this off the session it was created for,
+        so each conversation gets its own ``projects/<session_id>/``. The root
+        adapter owns no session and keeps the shared ``projects`` root, which is
+        also what ``get_default_project_session_workspace_dir`` returns for an
+        empty session id.
         """
-        workspace_root = str(
-            workspace or self._workspace_dir or self._project_dir or os.getcwd()
+        return self._project_dir or str(
+            get_default_project_session_workspace_dir(self._parent_session_id)
         )
+
+    def _runtime_workspace_root(self, workspace: str | None) -> str:
+        return str(workspace or self._workspace_dir or self._project_dir or os.getcwd())
+
+    def _resolve_runtime_cwd(self, cwd: str | None, workspace_root: str) -> str:
+        """Pick the first directory that exists: request cwd, project dir, workspace."""
         runtime_cwd = str(cwd or "").strip()
         if not runtime_cwd or not os.path.isdir(runtime_cwd):
             runtime_cwd = str(self._project_dir or "").strip()
         if not runtime_cwd or not os.path.isdir(runtime_cwd):
             runtime_cwd = workspace_root
+        return runtime_cwd
+
+    def _seed_runtime_cwd(
+        self, cwd: str | None = None, workspace: str | None = None
+    ) -> None:
+        """Install a fresh CwdState holder for this agent, replacing any inherited one.
+
+        ``init_cwd`` is the *replace* write: it binds a brand-new CwdState in
+        the current context, which is how Core isolates one agent's cwd from its
+        parent's. Call it once per agent startup, as Core documents -- for a host
+        adapter that means at construction, before ``start_interaction`` starts
+        the controller's long-lived TaskScheduler. Per-turn moves of an
+        already-bound session must go through :meth:`_reseed_runtime_cwd`.
+
+        ``workspace``: optional workspace override. When set, becomes the
+        workspace anchor for tools that read ``get_workspace()`` (notably
+        ``fs_operation``'s sandbox enforcement, which gates absolute-path writes
+        by membership in the workspace tree). When unset, falls back to the
+        agent's instance-level workspace.
+        """
+        workspace_root = self._runtime_workspace_root(workspace)
+        runtime_cwd = self._resolve_runtime_cwd(cwd, workspace_root)
         init_cwd(runtime_cwd, project_root=workspace_root, workspace=workspace_root)
+
+    def _reseed_runtime_cwd(
+        self, cwd: str | None = None, workspace: str | None = None
+    ) -> None:
+        """Move an already-seeded session's cwd in place, so live tasks see it.
+
+        The construction-time :meth:`_seed_runtime_cwd` runs before the
+        controller's long-lived TaskScheduler starts, so the scheduler, its
+        supervisor, every round, tool call and subagent hold a reference to
+        *that* CwdState object through their copied Context. ``init_cwd``
+        installs a different object in the calling context only, so those tasks
+        keep the old reference and never observe it -- that reference copy is
+        precisely the inter-agent isolation Core's ``cwd`` module documents, and
+        it makes ``init_cwd`` the wrong write for a per-turn move. ``set_cwd``
+        mutates the object they already share, which is the only write that
+        reaches them.
+
+        ``project_root`` and ``workspace`` deliberately stay where the session
+        seed put them: Core documents the project root as never changing
+        mid-session, and the workspace anchors ``fs_operation``'s sandbox for the
+        whole session. Moving the cwd only widens that sandbox, because
+        ``get_cwd()`` is itself one of its roots.
+
+        A turn whose context inherited no CwdState has nothing to mutate; seed
+        one so this task still gets all three layers.
+        """
+        if get_workspace() is None:
+            self._seed_runtime_cwd(cwd, workspace=workspace)
+            return
+        workspace_root = self._runtime_workspace_root(workspace)
+        set_cwd(self._resolve_runtime_cwd(cwd, workspace_root))
 
     @dataclass
     class _RuntimeConfig:
@@ -9116,7 +9430,7 @@ class JiuWenSwarmDeepAdapter:
             or str(get_default_project_session_workspace_dir(runtime_config.session_id))
         )
         task_cwd = runtime_config.cwd or task_workspace
-        self._seed_runtime_cwd(task_cwd, workspace=task_workspace)
+        self._reseed_runtime_cwd(task_cwd, workspace=task_workspace)
         resolved_language = self._resolve_runtime_language()
         resolved_channel = (
             str(
@@ -11696,6 +12010,7 @@ class JiuWenSwarmDeepAdapter:
                 vision_tool_available=(
                     getattr(self, "_vision_model_config", None) is not None
                 ),
+                language=self._resolve_runtime_language(),
             )
             inputs = self._prepare_react_image_tool_prompt(
                 request,
@@ -11807,6 +12122,15 @@ class JiuWenSwarmDeepAdapter:
                                 err = parsed.get("error") or parsed.get("message") or ""
                                 if err:
                                     error_text = str(err)
+                            elif event_type == "chat.ask_user_question":
+                                # A non-streaming round answers with one text
+                                # payload, so an approval prompt reaching it can
+                                # only be delivered as text. Dropping it would
+                                # end the round with empty content while the
+                                # agent goes on waiting for the answer.
+                                prompt_text = render_prompt_as_text(parsed)
+                                if prompt_text:
+                                    collected_content.append(prompt_text)
                 else:
                     parsed = self._parse_stream_chunk(chunk, _parent_session_id=self._parent_session_id)
                     if parsed is not None:
@@ -11972,6 +12296,7 @@ class JiuWenSwarmDeepAdapter:
                 vision_tool_available=(
                     getattr(self, "_vision_model_config", None) is not None
                 ),
+                language=self._resolve_runtime_language(),
             )
             inputs = self._prepare_react_image_tool_prompt(
                 request,
@@ -12373,6 +12698,7 @@ class JiuWenSwarmDeepAdapter:
                 vision_tool_available=(
                     getattr(self, "_vision_model_config", None) is not None
                 ),
+                language=self._resolve_runtime_language(),
             )
             inputs = self._prepare_react_image_tool_prompt(
                 request,

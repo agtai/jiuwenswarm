@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -70,3 +71,31 @@ def test_default_skill_evolution_switch_is_disabled():
         assert evolution["skill_evolution"] is False
         assert evolution["auto_save"] is False
         assert evolution["review_feedback_min_confidence"] == 0.7
+
+
+@pytest.mark.parametrize(
+    "config_name",
+    [
+        "config.yaml",
+        "config.team.distributed.leader.yaml",
+        "config.team.distributed.teammate.yaml",
+    ],
+)
+def test_slack_digital_avatar_ships_disabled(config_name):
+    """The avatar changes what the bot reads and answers, so it must be opt-in.
+
+    Shipping it on would make a Slack deployment start reading every channel
+    message and sending them to a model, which is a decision only an operator
+    can make.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    config_file = repo_root / "jiuwenswarm" / "resources" / config_name
+
+    slack = yaml.safe_load(config_file.read_text(encoding="utf-8"))["channels"]["slack"]
+
+    assert slack["group_digital_avatar"] is False
+    assert slack["my_user_id"] == ""
+    assert slack["enable_memory"] is False
+    # Without "all" the pipeline only ever sees mentions, which it would have
+    # answered anyway; the pairing is documented, so assert the shipped default.
+    assert slack["group_chat_mode"] == "mention"

@@ -32,6 +32,8 @@ class _RecordingStore:
             timezone="Asia/Shanghai",
             targets="web",
             work_mode="work",
+            session_id=None,
+            slack_session_trusted=False,
         )
 
     async def update_job(self, job_id: str, patch: dict):

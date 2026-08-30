@@ -12,6 +12,7 @@ from abc import ABC
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from jiuwenswarm.gateway.channel_manager.base import outgoing_for_channel
 from jiuwenswarm.gateway.routing.keys import ChannelKey
 
 logger = logging.getLogger(__name__)
@@ -494,7 +495,7 @@ class ChannelManager(ABC):
                     )
                     for ch in targets:
                         try:
-                            await ch.send(fanout_msg)
+                            await ch.send(outgoing_for_channel(ch, fanout_msg))
                         except Exception as e:
                             logger.error(
                                 "[ChannelManager] 飞书 fan-out 投递失败: channel_id=%s app=%s id=%s: %s",
@@ -526,7 +527,7 @@ class ChannelManager(ABC):
                 )
                 if channel:
                     try:
-                        await channel.send(msg)
+                        await channel.send(outgoing_for_channel(channel, msg))
                     except Exception as e:
                         logger.error("send to channel %s: %s", msg.channel_id, e, exc_info=True)
                         if msg.id and msg.id.startswith("cron-push-"):
