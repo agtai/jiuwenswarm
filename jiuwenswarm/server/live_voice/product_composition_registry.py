@@ -256,8 +256,14 @@ _FROZEN_ONE_CURRENT_TASK_STATUS_UTTERANCES = frozenset(
     {
         "后台任务怎么样了",
         "当前后台任务怎么样了",
+        "当前后台任务怎么样吗",
         "后台任务什么情况",
         "当前后台任务什么情况",
+    }
+)
+_FROZEN_ONE_CURRENT_TASK_ADJUSTMENT_STATUS_UTTERANCES = frozenset(
+    {
+        "请确认刚才的任务修改是否已经应用",
     }
 )
 _PRODUCT_P2_PRESENTATION_ACK_OPERATION = "live_voice.composition.p2.presentation.ack"
@@ -5239,6 +5245,9 @@ class AgentServerProductCompositionRegistry:
                     ),
                     native_result_only=True,
                     native_p3_authority=native_p3_authority,
+                    native_delegate_source_response=(
+                        delegate_admission.source_response
+                    ),
                 )
                 task_result_payload = task_outcome.payload.get("result")
                 canonical_text = (
@@ -5258,6 +5267,7 @@ class AgentServerProductCompositionRegistry:
                         "NATIVE_TASK_DELEGATE_RESULT_INVALID",
                         "Native Task delegate produced no canonical result",
                     )
+            canonical_text = self._native_delegate_speech_text(canonical_text)
             delegate_result = await owner.accept_delegate_result(
                 delegate_admission,
                 canonical_text=canonical_text,
@@ -6868,11 +6878,15 @@ class AgentServerProductCompositionRegistry:
         }
 
     @staticmethod
-    def _matches_frozen_one_current_task_status(text: str) -> bool:
+    def _frozen_one_current_task_status_reason(text: str) -> str | None:
         candidate = text.strip()
         if candidate[-1:] in {"?", "？", ".", "。"}:
             candidate = candidate[:-1].rstrip()
-        return candidate in _FROZEN_ONE_CURRENT_TASK_STATUS_UTTERANCES
+        if candidate in _FROZEN_ONE_CURRENT_TASK_ADJUSTMENT_STATUS_UTTERANCES:
+            return "CURRENT_BACKGROUND_ADJUSTMENT_STATUS_RESOLVED"
+        if candidate in _FROZEN_ONE_CURRENT_TASK_STATUS_UTTERANCES:
+            return "FROZEN_ONE_CURRENT_TASK_STATUS_RESOLVED"
+        return None
 
     @classmethod
     def _bind_frozen_one_current_task_status(
@@ -6890,15 +6904,12 @@ class AgentServerProductCompositionRegistry:
         remains the target authority.
         """
 
-        if (
-            resolution.route is not UnifiedCommittedInputRoute.DIALOGUE
-            or not cls._matches_frozen_one_current_task_status(commit.text)
-        ):
+        reason = cls._frozen_one_current_task_status_reason(commit.text)
+        if resolution.route is not UnifiedCommittedInputRoute.DIALOGUE or reason is None:
             return resolution
         task_id = None if current_task is None else current_task.task_id
         target_binding = None if current_task is None else "current_background_task"
         source_span = TaskIntentSourceSpan(0, len(commit.text))
-        reason = "FROZEN_ONE_CURRENT_TASK_STATUS_RESOLVED"
         identity = {
             "provider": resolution.provider,
             "implementation_class": resolution.implementation_class,
@@ -7622,6 +7633,24 @@ class AgentServerProductCompositionRegistry:
     def _is_chinese_voice_text(text: str) -> bool:
         return any("\u4e00" <= character <= "\u9fff" for character in text)
 
+    @staticmethod
+    def _native_delegate_speech_text(value: object) -> str:
+        """Flatten ordinary Agent line endings before the strict Native seam.
+
+        Native delegate output is spoken rather than rendered as Markdown.  A
+        normal Agent final may contain CR/LF formatting, while the Runtime and
+        Provider boundaries deliberately reject every control character.  Only
+        line endings are flattened here; all other controls, surrounding
+        whitespace, encoding and byte bounds remain fail-closed downstream.
+        """
+
+        if type(value) is not str:
+            raise NativeInteractionRuntimeError(
+                "NATIVE_DELEGATE_RESULT_INVALID",
+                "Native delegate produced no canonical result",
+            )
+        return value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
+
     async def _run_unified_submit(
         self,
         *,
@@ -7639,11 +7668,18 @@ class AgentServerProductCompositionRegistry:
         l0_commit_admission: _L0CommitAdmissionClock,
         native_result_only: bool = False,
         native_p3_authority: NativeP3ActivationAuthority | None = None,
+        native_delegate_source_response: ResponseRef | None = None,
     ) -> P3RouteResult:
-        if native_result_only != (native_p3_authority is not None):
+        has_native_p3_authority = native_p3_authority is not None
+        has_native_delegate_source = native_delegate_source_response is not None
+        if not (
+            native_result_only
+            == has_native_p3_authority
+            == has_native_delegate_source
+        ):
             raise FormalTaskViolation(
                 "NATIVE_DELEGATE_AUTHORITY_INCOMPLETE",
-                "Native delegate result mode requires exact P3 activation authority",
+                "Native delegate result mode requires exact P3 and source-response authority",
                 ErrorCode.PERMISSION_DENIED,
             )
 
@@ -8496,6 +8532,35 @@ class AgentServerProductCompositionRegistry:
                 ],
             }
         )
+        if native_result_only:
+            assert native_delegate_source_response is not None
+            canonical_text = (
+                await retained.activation_lease.execute_native_delegate(
+                    retained.binding,
+                    request_id=f"native-result-agent-{voice_identity[:40]}",
+                    source_response=native_delegate_source_response,
+                    correlation_id=retained.binding.correlation_id,
+                    commit=agent_commit,
+                    context=agent_context,
+                    channel_id=channel_id,
+                    allow_tools=False,
+                    answer_from_selected_task_result=True,
+                )
+            )
+            return await finish_text(
+                retained=retained,
+                voice_identity=voice_identity,
+                fingerprint=fingerprint,
+                request_id=f"unified-present-{voice_identity[:40]}",
+                response_id=response_id,
+                commit=commit,
+                text=canonical_text,
+                channel_id=channel_id,
+                l0_task_id=current.task_id,
+                l0_attempt_id=current.attempt_id,
+                l0_commit_admission=l0_commit_admission,
+                business_task_id=current.task_id,
+            )
         return await self._run_unified_agent_submit(
             retained=retained,
             voice_identity=voice_identity,

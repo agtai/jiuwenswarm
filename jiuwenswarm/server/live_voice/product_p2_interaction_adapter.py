@@ -733,6 +733,7 @@ class P2ActivationLease:
         context: FormalContextSnapshot,
         channel_id: str = "web",
         allow_tools: bool = True,
+        answer_from_selected_task_result: bool = False,
     ) -> str:
         """Execute one Native delegate without a second presentation path."""
 
@@ -746,6 +747,12 @@ class P2ActivationLease:
                     "retained runtime has no Native Agent delegate owner",
                     ErrorCode.UNAVAILABLE,
                 )
+            if type(answer_from_selected_task_result) is not bool:
+                raise _violation(
+                    "INVALID_NATIVE_DELEGATE_RESULT_ANSWER_POLICY",
+                    "Native delegate result-answer policy must be a boolean",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
             outcome = await execute(
                 request_id=request_id,
                 source_response=source_response,
@@ -754,6 +761,9 @@ class P2ActivationLease:
                 context=context,
                 channel_id=channel_id,
                 allow_tools=allow_tools,
+                answer_from_selected_task_result=(
+                    answer_from_selected_task_result
+                ),
             )
             if type(outcome) is not str or not outcome.strip():
                 raise _violation(

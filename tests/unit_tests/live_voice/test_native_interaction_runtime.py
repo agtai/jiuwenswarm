@@ -12,12 +12,16 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     ResponseRef,
     ScopeRef,
+    TerminalOutcome,
     TurnCommit,
 )
 from jiuwenswarm.server.live_voice import (
     native_interaction_runtime as native_runtime_module,
 )
-from jiuwenswarm.server.live_voice.conversation_runtime import CancelState
+from jiuwenswarm.server.live_voice.conversation_runtime import (
+    CancelState,
+    ResponseState,
+)
 from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
     ConversationRuntimeLoop,
     EffectState,
@@ -314,6 +318,79 @@ def ack_for(
         contiguous_cursor=sequence,
         presented_at=presented_at,
     )
+
+
+@pytest.mark.asyncio
+async def test_delegate_result_accepts_late_source_done_without_reopening_surface() -> (
+    None
+):
+    owner, runtime = await active_owner()
+    source = await owner.accept_provider_response(
+        "provider-response-function", "native-response-function"
+    )
+    assert await owner.accept_audio(
+        audio(source.response, source.provider_response_id, 0)
+    )
+    source_ack = ack_for(runtime, source.response, 0)
+    accepted, admission = await owner.admit_delegate(
+        delegate_proposal(source.response), committed_at="2026-08-25T10:00:00Z"
+    )
+    assert accepted is True
+    result = await owner.accept_delegate_result(
+        admission,
+        canonical_text="The task was accepted.",
+        route=UnifiedCommittedInputRoute.BACKGROUND_CREATE,
+    )
+    before_done = runtime.snapshot()
+    source_done = done(
+        source.response,
+        source.provider_response_id,
+        transcript="I sent that task to the system.",
+    )
+
+    assert await owner.accept_provider_done(source_done) is True
+
+    after_done = runtime.snapshot()
+    source_record = next(
+        record
+        for record in after_done.conversation.responses
+        if record.ref == source.response
+    )
+    assert source_record.state is ResponseState.TERMINAL
+    assert source_record.outcome is TerminalOutcome.COMPLETED
+    assert source_record.fenced is True
+    assert after_done.effects == before_done.effects
+    assert (
+        source.response,
+        PresentationSurface.AUDIO,
+    ) not in after_done.presentation.completed_surfaces
+    assert owner.snapshot().done_count == 1
+
+    before_late_ack = runtime.snapshot()
+    assert await owner.acknowledge_audio(source_ack) is None
+    assert runtime.snapshot() == before_late_ack
+
+    replay_snapshot = runtime.snapshot()
+    assert await owner.accept_provider_done(source_done) is False
+    assert runtime.snapshot() == replay_snapshot
+    with pytest.raises(NativeInteractionRuntimeError) as changed:
+        await owner.accept_provider_done(
+            replace(source_done, transcript="Changed acknowledgement.")
+        )
+    assert changed.value.reason == "NATIVE_PROVIDER_DONE_CONFLICT"
+    assert runtime.snapshot() == replay_snapshot
+
+    successor = await owner.bind_delegate_provider_response(
+        "provider-response-delegate-result", result.response
+    )
+    assert await owner.accept_audio(
+        audio(successor.response, successor.provider_response_id, 0)
+    )
+    assert await owner.accept_provider_done(
+        done(successor.response, successor.provider_response_id)
+    )
+    assert owner.snapshot().done_count == 2
+    await owner.close()
 
 
 @pytest.mark.asyncio

@@ -909,6 +909,14 @@ class NativeInteractionRuntimeOwner:
                 or retained.cancelled
             ):
                 return False
+            # Delegate handling is synchronous while Provider events remain queued.
+            # Accepting the exact Jiuwen result therefore fences the source audio
+            # before its already-issued response.done can reach this owner.  That
+            # source may become terminal, but its closed surface must not be
+            # reopened or credited as presentation-complete.
+            delegate_successor_fenced_source = (
+                self._delegate_successor_fenced_source_locked(observation.response)
+            )
             self._validate_done(observation)
             prior_event = self._done_event_ids.get(observation.provider_event_id)
             if retained.done is not None or prior_event is not None:
@@ -918,11 +926,12 @@ class NativeInteractionRuntimeOwner:
                     "NATIVE_PROVIDER_DONE_CONFLICT",
                     "Provider completion cannot change its retained meaning",
                 )
-            await self._runtime.seal_presentation(
-                observation.response,
-                PresentationSurface.AUDIO,
-                unit_count=retained.next_audio_sequence,
-            )
+            if not delegate_successor_fenced_source:
+                await self._runtime.seal_presentation(
+                    observation.response,
+                    PresentationSurface.AUDIO,
+                    unit_count=retained.next_audio_sequence,
+                )
             await self._runtime.transition_response(
                 observation.response,
                 ResponseState.TERMINAL,
@@ -934,7 +943,8 @@ class NativeInteractionRuntimeOwner:
             )
             retained.done = observation
             self._done_event_ids[observation.provider_event_id] = observation
-            await self._reconcile_history_locked(retained)
+            if not delegate_successor_fenced_source:
+                await self._reconcile_history_locked(retained)
             return True
 
     async def acknowledge_audio(
@@ -957,11 +967,24 @@ class NativeInteractionRuntimeOwner:
                 or retained.cancelled
             ):
                 return None
+            if self._delegate_successor_fenced_source_locked(ack.ref):
+                # The Browser may finish an already-issued source frame after the
+                # delegate result pre-admits its successor.  Observe that stale ACK
+                # with zero Runtime/history effect; the successor fence remains the
+                # presentation authority.
+                return None
             if retained.history is not None:
                 await self._runtime.acknowledge_presentation(ack)
                 return retained.history
             await self._runtime.acknowledge_presentation(ack)
             return await self._reconcile_history_locked(retained)
+
+    def _delegate_successor_fenced_source_locked(self, response: ResponseRef) -> bool:
+        return any(
+            admission.source_response == response
+            and provider_call_id in self._delegate_results
+            for provider_call_id, admission in self._delegates_by_call.items()
+        )
 
     async def history_admission(
         self, response: ResponseRef

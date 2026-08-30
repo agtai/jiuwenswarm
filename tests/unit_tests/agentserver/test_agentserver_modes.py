@@ -800,7 +800,8 @@ def test_code_adapter_prepares_only_a_fresh_dedicated_background_child():
     )
 
     class Child:
-        pass
+        async def _disable_background_project_non_file_rails(self):
+            self.non_file_rails_disabled = True
 
     child = Child()
     adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
@@ -815,6 +816,291 @@ def test_code_adapter_prepares_only_a_fresh_dedicated_background_child():
     asyncio.run(adapter.prepare_background_project_session("sched-fresh"))
 
     assert child._is_dedicated_background_project_adapter is True
+    assert child.non_file_rails_disabled is True
+
+
+def test_code_adapter_background_prepare_has_one_concurrent_owner():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        JiuwenSwarmCodeAdapter,
+    )
+
+    async def scenario():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class Child:
+            disable_calls = 0
+
+            async def _disable_background_project_non_file_rails(self):
+                self.disable_calls += 1
+                entered.set()
+                await release.wait()
+
+        child = Child()
+        adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
+        adapter._is_session_scoped_adapter = False
+        adapter._background_project_session_reservations = set()
+        adapter._get_cached_session_adapter = lambda _session_id: None
+        get_calls = 0
+
+        async def get_child(_session_id):
+            nonlocal get_calls
+            get_calls += 1
+            return child
+
+        adapter._get_or_create_session_adapter = get_child
+        first = asyncio.create_task(
+            adapter.prepare_background_project_session("sched-concurrent")
+        )
+        await entered.wait()
+        with pytest.raises(RuntimeError, match="background task session was already used"):
+            await adapter.prepare_background_project_session("sched-concurrent")
+        release.set()
+        await first
+
+        assert get_calls == 1
+        assert child.disable_calls == 1
+        assert adapter._background_project_session_reservations == set()
+
+    asyncio.run(scenario())
+
+
+def test_code_adapter_background_prepare_failure_discards_exact_child():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        JiuwenSwarmCodeAdapter,
+    )
+
+    class Child:
+        cleaned = False
+
+        async def _disable_background_project_non_file_rails(self):
+            raise RuntimeError("injected rail unregister failure")
+
+        async def cleanup_formal_project_task_agent(self):
+            self.cleaned = True
+
+        @staticmethod
+        def has_session_runtime():
+            return False
+
+    async def scenario():
+        sid = "sched-rail-failure"
+        child = Child()
+        unrelated_child = object()
+        adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
+        adapter._is_session_scoped_adapter = False
+        adapter._background_project_session_reservations = set()
+        adapter._session_adapters = {"unrelated-session": unrelated_child}
+        adapter._session_adapter_initializing = set()
+        unrelated_lock = asyncio.Lock()
+        adapter._session_adapter_locks = {"unrelated-session": unrelated_lock}
+        adapter._session_adapter_last_used = {}
+        adapter._session_adapter_versions = {}
+        adapter._session_adapter_reload_failures = {}
+
+        async def get_child(session_id):
+            adapter._session_adapters[session_id] = child
+            adapter._session_adapter_locks.setdefault(session_id, asyncio.Lock())
+            return child
+
+        adapter._get_or_create_session_adapter = get_child
+
+        with pytest.raises(RuntimeError, match="injected rail unregister failure"):
+            await adapter.prepare_background_project_session(sid)
+
+        assert child.cleaned is True
+        assert adapter._session_adapters == {"unrelated-session": unrelated_child}
+        assert adapter._session_adapter_locks == {"unrelated-session": unrelated_lock}
+        assert adapter._background_project_session_reservations == set()
+
+    asyncio.run(scenario())
+
+
+def test_code_adapter_late_prepare_cleanup_never_discards_replacement_child():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        JiuwenSwarmCodeAdapter,
+    )
+
+    class Child:
+        cleaned = False
+
+        async def cleanup_formal_project_task_agent(self):
+            self.cleaned = True
+
+        @staticmethod
+        def has_session_runtime():
+            return False
+
+    async def scenario():
+        sid = "sched-replaced"
+        failed_child = Child()
+        replacement_child = Child()
+        lock = asyncio.Lock()
+        adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
+        adapter._session_adapters = {sid: replacement_child}
+        adapter._session_adapter_locks = {sid: lock}
+
+        await adapter._cleanup_failed_background_project_session(sid, failed_child)
+
+        assert failed_child.cleaned is False
+        assert replacement_child.cleaned is False
+        assert adapter._session_adapters == {sid: replacement_child}
+        assert adapter._session_adapter_locks == {sid: lock}
+
+    asyncio.run(scenario())
+
+
+def test_code_adapter_cancelled_prepare_cleans_retained_exact_child():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        JiuwenSwarmCodeAdapter,
+    )
+
+    class Child:
+        cleaned = False
+
+        async def cleanup_formal_project_task_agent(self):
+            self.cleaned = True
+
+        @staticmethod
+        def has_session_runtime():
+            return False
+
+    async def scenario():
+        sid = "sched-cancelled"
+        child = Child()
+        published = asyncio.Event()
+        adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
+        adapter._is_session_scoped_adapter = False
+        adapter._background_project_session_reservations = set()
+        adapter._session_adapters = {}
+        adapter._session_adapter_initializing = set()
+        adapter._session_adapter_locks = {}
+        adapter._session_adapter_last_used = {}
+        adapter._session_adapter_versions = {}
+        adapter._session_adapter_reload_failures = {}
+
+        async def get_child(session_id):
+            adapter._session_adapters[session_id] = child
+            adapter._session_adapter_locks.setdefault(session_id, asyncio.Lock())
+            published.set()
+            await asyncio.Event().wait()
+
+        adapter._get_or_create_session_adapter = get_child
+        prepare = asyncio.create_task(adapter.prepare_background_project_session(sid))
+        await published.wait()
+        prepare.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await prepare
+
+        assert child.cleaned is True
+        assert adapter._session_adapters == {}
+        assert adapter._session_adapter_locks == {}
+        assert adapter._background_project_session_reservations == set()
+
+    asyncio.run(scenario())
+
+
+def test_code_adapter_removes_non_file_rails_from_dedicated_background_child():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        JiuwenSwarmCodeAdapter,
+    )
+
+    lsp_rail = object()
+    subagent_rail = object()
+
+    class Instance:
+        def __init__(self):
+            self.unregistered = []
+
+        async def unregister_rail(self, rail):
+            self.unregistered.append(rail)
+
+    child = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
+    child._instance = Instance()
+    child._lsp_rail = lsp_rail
+    child._subagent_rail = subagent_rail
+
+    adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
+    adapter._is_session_scoped_adapter = False
+    adapter._get_cached_session_adapter = lambda _session_id: None
+
+    async def get_child(_session_id):
+        return child
+
+    adapter._get_or_create_session_adapter = get_child
+
+    asyncio.run(adapter.prepare_background_project_session("sched-file-only"))
+
+    assert child._is_dedicated_background_project_adapter is True
+    assert child._instance.unregistered == [lsp_rail, subagent_rail]
+    assert child._lsp_rail is None
+    assert child._subagent_rail is None
+
+
+def test_code_adapter_does_not_rebuild_subagent_rail_for_background_project():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        JiuwenSwarmCodeAdapter,
+    )
+
+    class Instance:
+        async def register_rail(self, _rail):
+            raise AssertionError("background project rebuilt an unusable rail")
+
+        async def unregister_rail(self, _rail):
+            return None
+
+    adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
+    adapter._instance = Instance()
+    adapter._is_dedicated_background_project_adapter = True
+    adapter._task_planning_rail = None
+    adapter._skill_evolution_rail = None
+    adapter._evolution_interrupt_rail = None
+    adapter._lsp_rail = None
+    adapter._subagent_rail = None
+    adapter._project_memory_rail = object()
+    adapter._coding_memory_rail = object()
+    adapter._build_subagent_rail = lambda: (_ for _ in ()).throw(
+        AssertionError("background project rebuilt SubagentRail")
+    )
+
+    asyncio.run(adapter._update_rails_for_mode("code"))
+
+    assert adapter._subagent_rail is None
+
+
+def test_ordinary_code_adapter_rebuilds_and_registers_subagent_rail():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        JiuwenSwarmCodeAdapter,
+    )
+
+    rebuilt_rail = object()
+
+    class Instance:
+        def __init__(self):
+            self.registered = []
+
+        async def register_rail(self, rail):
+            self.registered.append(rail)
+
+        async def unregister_rail(self, _rail):
+            return None
+
+    adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
+    adapter._instance = Instance()
+    adapter._is_dedicated_background_project_adapter = False
+    adapter._task_planning_rail = None
+    adapter._skill_evolution_rail = None
+    adapter._evolution_interrupt_rail = None
+    adapter._lsp_rail = None
+    adapter._subagent_rail = None
+    adapter._project_memory_rail = object()
+    adapter._coding_memory_rail = object()
+    adapter._build_subagent_rail = lambda: rebuilt_rail
+
+    asyncio.run(adapter._update_rails_for_mode("code"))
+
+    assert adapter._subagent_rail is rebuilt_rail
+    assert adapter._instance.registered == [rebuilt_rail]
 
 
 def test_background_code_task_rejects_reused_session_before_adapter_call(tmp_path):

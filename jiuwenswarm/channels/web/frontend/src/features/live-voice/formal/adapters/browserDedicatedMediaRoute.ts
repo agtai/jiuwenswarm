@@ -611,8 +611,8 @@ export class BrowserDedicatedMediaSocketLeaf {
   #terminalNotified = false;
   #speechStartSeen = false;
   #speechStartProviderMs: number | null = null;
+  #lastSpeechStartProviderMs: number | null = null;
   #endOfTurnSeen = false;
-  #lastEndOfTurnProviderMs: number | null = null;
   #scheduledDrainRetry: ScheduledDrainRetry | null = null;
   #drainRetryGeneration = 0;
   #drainStallRetries = 0;
@@ -1122,7 +1122,13 @@ export class BrowserDedicatedMediaSocketLeaf {
       control.capability_version !== this.#endOfTurnCapability ||
       control.lease_id !== this.binding.lease_id ||
       control.generation !== this.binding.generation.value ||
-      (this.#continuousEndOfTurn && this.#lastEndOfTurnProviderMs !== null && control.provider_start_ms < this.#lastEndOfTurnProviderMs) ||
+      // Provider speech intervals can overlap: speech_start includes leading
+      // audio while speech_stopped includes trailing audio. Preserve replay
+      // fencing with the strictly increasing start cursor instead of requiring
+      // the next start to follow the prior end.
+      (this.#continuousEndOfTurn
+        && this.#lastSpeechStartProviderMs !== null
+        && control.provider_start_ms <= this.#lastSpeechStartProviderMs) ||
       this.#speechStartSeen ||
       this.#endOfTurnSeen
     ) {
@@ -1135,6 +1141,7 @@ export class BrowserDedicatedMediaSocketLeaf {
     }
     this.#speechStartSeen = true;
     this.#speechStartProviderMs = control.provider_start_ms;
+    this.#lastSpeechStartProviderMs = control.provider_start_ms;
     try {
       this.#onSpeechStart(control);
     } catch (error: unknown) {
@@ -1173,7 +1180,6 @@ export class BrowserDedicatedMediaSocketLeaf {
     try {
       this.#onEndOfTurn(control);
       if (this.#continuousEndOfTurn) {
-        this.#lastEndOfTurnProviderMs = control.provider_end_ms;
         this.#speechStartSeen = false;
         this.#speechStartProviderMs = null;
         this.#endOfTurnSeen = false;

@@ -1020,7 +1020,7 @@ test('speech boundary consumer failures retain a bounded internal stage and keep
   }
 });
 
-test('Native continuous EOT admits successive monotonic speech cycles and rejects a stale replay', () => {
+test('Native continuous EOT admits prefix-overlapped Provider speech cycles and rejects a stale replay', () => {
   const observedStarts = [];
   const observedEnds = [];
   const route = active({
@@ -1054,10 +1054,13 @@ test('Native continuous EOT admits successive monotonic speech cycles and reject
 
   route.socket.message(serializeMediaControl(boundary('media.speech_start', 100)));
   route.socket.message(serializeMediaControl(boundary('media.end_of_turn', 100, 700)));
-  route.socket.message(serializeMediaControl(boundary('media.speech_start', 900)));
-  route.socket.message(serializeMediaControl(boundary('media.end_of_turn', 900, 1400)));
+  // Realtime VAD includes leading audio in speech_start and trailing audio in
+  // speech_stopped, so consecutive provider intervals may legitimately
+  // overlap. This reproduces the observed 512 ms semantic-VAD overlap.
+  route.socket.message(serializeMediaControl(boundary('media.speech_start', 188)));
+  route.socket.message(serializeMediaControl(boundary('media.end_of_turn', 188, 1400)));
 
-  assert.deepEqual(observedStarts, [100, 900]);
+  assert.deepEqual(observedStarts, [100, 188]);
   assert.deepEqual(observedEnds, [700, 1400]);
   assert.equal(route.activation.leaf.closed, false);
 

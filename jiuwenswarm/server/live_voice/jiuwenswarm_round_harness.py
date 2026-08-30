@@ -477,6 +477,7 @@ class JiuWenSwarmRoundHarness:
         facade: FormalAgentFacade,
         channel_id: str = "web",
         allow_tools: bool = True,
+        answer_from_selected_task_result: bool = False,
     ) -> HarnessRoundHandle:
         running = self._require_owner()
         record = self._require_reservation(reservation)
@@ -525,6 +526,12 @@ class JiuWenSwarmRoundHarness:
                 "round tool policy must be a boolean",
                 ErrorCode.INVALID_ARGUMENT,
             )
+        if type(answer_from_selected_task_result) is not bool:
+            raise HarnessRoundViolation(
+                "INVALID_HARNESS_ROUND_INPUT",
+                "round result-answer policy must be a boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         if record.facade is not None and facade is not record.facade:
             raise HarnessRoundViolation(
                 "HARNESS_FACADE_BINDING_CONFLICT",
@@ -550,6 +557,7 @@ class JiuWenSwarmRoundHarness:
                 entry.ref.source == "live_voice.task_result"
                 for entry in context.entries
             ),
+            answer_from_selected_task_result=answer_from_selected_task_result,
         )
         started = asyncio.Event()
         cancel_safe = asyncio.Event()

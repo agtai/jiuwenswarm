@@ -772,6 +772,7 @@ class AgentConversationRuntime:
         context: FormalContextSnapshot,
         channel_id: str = "web",
         allow_tools: bool = True,
+        answer_from_selected_task_result: bool = False,
     ) -> str:
         """Run one Native delegate through the retained Harness/Agent Bridge.
 
@@ -808,6 +809,12 @@ class AgentConversationRuntime:
             raise AgentConversationRuntimeViolation(
                 "INVALID_AGENT_TOOL_POLICY",
                 "formal Agent tool policy must be a boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(answer_from_selected_task_result) is not bool:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_AGENT_RESULT_ANSWER_POLICY",
+                "formal Agent result-answer policy must be a boolean",
                 ErrorCode.INVALID_ARGUMENT,
             )
         source_record = next(
@@ -849,6 +856,9 @@ class AgentConversationRuntime:
                     },
                     "channel_id": channel_id,
                     "allow_tools": allow_tools,
+                    "answer_from_selected_task_result": (
+                        answer_from_selected_task_result
+                    ),
                 }
             )
         ).digest()
@@ -886,6 +896,9 @@ class AgentConversationRuntime:
                         context=context,
                         channel_id=channel_id,
                         allow_tools=allow_tools,
+                        answer_from_selected_task_result=(
+                            answer_from_selected_task_result
+                        ),
                     ),
                     name=f"live-voice-native-delegate:{request_id}",
                 )
@@ -906,6 +919,7 @@ class AgentConversationRuntime:
         context: FormalContextSnapshot,
         channel_id: str,
         allow_tools: bool,
+        answer_from_selected_task_result: bool,
     ) -> str:
         harness_reservation: HarnessRoundReservation | None = None
         bridge_reservation: AgentBridgeDispatchReservation | None = None
@@ -938,6 +952,9 @@ class AgentConversationRuntime:
                 facade=self._facade,
                 channel_id=channel_id,
                 allow_tools=allow_tools,
+                answer_from_selected_task_result=(
+                    answer_from_selected_task_result
+                ),
             )
             submission = self._bridge.commit_dispatch(
                 bridge_reservation,

@@ -466,6 +466,12 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._is_code_agent: bool = True
         self._runtime_language_override: str | None = None
         self._force_english_runtime_prompt: bool = True
+        # Root-adapter-only ownership fence for the short interval between a
+        # fresh-session check and completion of the dedicated child profile.
+        # There is no await between checking and adding an entry, so a second
+        # coroutine for the same Session fails closed before it can acquire or
+        # mutate the partially prepared child.
+        self._background_project_session_reservations: set[str] = set()
 
     # ─── Language override ────────────────────────
 
@@ -1156,8 +1162,17 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     label, mode,
                 )
 
-        # code 模式保留 SubagentRail；若缺失则补充注册
-        if self._subagent_rail is None:
+        dedicated_background_project = bool(
+            getattr(self, "_is_dedicated_background_project_adapter", False)
+        )
+        if dedicated_background_project:
+            await self._disable_background_project_non_file_rails()
+
+        # Ordinary code mode retains SubagentRail.  A dedicated formal project
+        # task is file-tool-only, and its ability filter removes ``task_tool``;
+        # rebuilding SubagentRail there is both unusable and can synchronously
+        # stall the AgentServer control/audio loop during the first request.
+        if not dedicated_background_project and self._subagent_rail is None:
             self._subagent_rail = self._build_subagent_rail()
             if self._subagent_rail is not None:
                 await self._instance.register_rail(self._subagent_rail)
@@ -1235,12 +1250,104 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             raise RuntimeError(
                 "EXECUTION_TARGET_NOT_BOUND: background tasks require a root Code Agent adapter"
             )
-        if self._get_cached_session_adapter(session_id) is not None:
+        sid = self._session_adapter_key(session_id)
+        reservations = getattr(
+            self,
+            "_background_project_session_reservations",
+            None,
+        )
+        if reservations is None:
+            reservations = set()
+            self._background_project_session_reservations = reservations
+        if self._get_cached_session_adapter(sid) is not None or sid in reservations:
             raise RuntimeError(
                 "EXECUTION_TARGET_NOT_BOUND: background task session was already used"
             )
-        child = await self._get_or_create_session_adapter(session_id)
-        child._is_dedicated_background_project_adapter = True
+        reservations.add(sid)
+        child: JiuWenSwarmDeepAdapter | None = None
+        try:
+            child = await self._get_or_create_session_adapter(sid)
+            child._is_dedicated_background_project_adapter = True
+            await child._disable_background_project_non_file_rails()
+        except BaseException:  # noqa: BLE001 -- exact child remains owned until cleanup
+            expected_child = (
+                child if child is not None else self._get_cached_session_adapter(sid)
+            )
+            if expected_child is None:
+                raise
+            cleanup_task = asyncio.create_task(
+                self._cleanup_failed_background_project_session(sid, expected_child),
+                name=f"jiuwenswarm-code-background-prepare-cleanup-{sid}",
+            )
+            cleanup_task.add_done_callback(self._consume_formal_cleanup_result)
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                # The retained task continues to own cleanup.  The cached
+                # child keeps retries fenced until that task proves quiescence.
+                raise
+            except BaseException as cleanup_error:  # noqa: BLE001 -- stable strict seam
+                raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING") from cleanup_error
+            raise
+        finally:
+            reservations.discard(sid)
+
+    async def _cleanup_failed_background_project_session(
+        self,
+        session_id: str,
+        expected_child: JiuWenSwarmDeepAdapter,
+    ) -> None:
+        """Strictly discard only the child whose dedicated setup failed."""
+
+        sid = self._session_adapter_key(session_id)
+        lock = self._session_adapter_locks.setdefault(sid, asyncio.Lock())
+        remove_lock_after_release = False
+        async with lock:
+            child = self._session_adapters.get(sid)
+            if child is None:
+                remove_lock_after_release = True
+            elif child is not expected_child:
+                # A different owner can appear only after another cleanup path
+                # retired the failed child.  Never let this late task tear down
+                # that replacement.
+                return
+            else:
+                await child.cleanup_formal_project_task_agent()
+                if child.has_session_runtime():
+                    raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+                self._drop_session_adapter_cache_entry(sid, remove_lock=False)
+                remove_lock_after_release = True
+        if remove_lock_after_release and self._is_session_lock_idle(sid, lock):
+            self._session_adapter_locks.pop(sid, None)
+
+    async def _disable_background_project_non_file_rails(self) -> None:
+        """Remove rails whose capabilities are forbidden by the formal profile.
+
+        The dedicated background project adapter exposes only bounded project
+        file tools.  LSP and subagent capabilities are therefore unavailable
+        by contract; retaining their rails can still run synchronous first-turn
+        initialization on the AgentServer event loop even though their tools
+        are removed immediately afterwards.
+        """
+
+        instance = getattr(self, "_instance", None)
+        for attr, label in (
+            ("_lsp_rail", "LspRail"),
+            ("_subagent_rail", "SubagentRail"),
+        ):
+            rail = getattr(self, attr, None)
+            if rail is None:
+                continue
+            if instance is None:
+                raise RuntimeError(
+                    "EXECUTION_TARGET_NOT_BOUND: background task Agent is unavailable"
+                )
+            await instance.unregister_rail(rail)
+            setattr(self, attr, None)
+            logger.info(
+                "[JiuwenSwarmCodeAdapter] %s unregistered for bounded background project task",
+                label,
+            )
 
     async def _update_runtime_config(self, runtime_config: "JiuWenSwarmDeepAdapter._RuntimeConfig") -> None:
         """Code 模式 runtime config: ProjectMemoryRail 语言同步 + rail 模式切换."""
