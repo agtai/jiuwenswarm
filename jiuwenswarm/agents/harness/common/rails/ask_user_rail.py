@@ -82,6 +82,19 @@ DECLARED_INPUT_TYPES: tuple[str, ...] = (
 )
 
 
+def _declares_inputs(question: Mapping[str, Any]) -> bool:
+    """Whether a question asks for values to fill in rather than a choice.
+
+    Kept to the one thing the validator needs to know: an ``inputs`` question
+    is exempt from carrying its own ``question`` sentence, because its prompt is
+    derived from ``header`` or the call's top-level ``query``. An empty array is
+    not a declaration -- it asks for nothing, and such a question still needs
+    text of its own to mean anything.
+    """
+    inputs = question.get("inputs")
+    return isinstance(inputs, list) and bool(inputs)
+
+
 def _questions_item_schema(text: Mapping[str, str]) -> dict[str, Any]:
     """Build the per-question schema in one language.
 
@@ -212,12 +225,29 @@ def _questions_item_schema(text: Mapping[str, str]) -> dict[str, Any]:
                 },
             },
         },
-        "required": ["question"],
+        # ``question`` is required for a question that offers `options`, where
+        # the sentence being answered is the whole of what the user is shown.
+        # A question that declares `inputs` is exempt: its fields carry their own
+        # labels, `header` names the group, and the call's top-level `query`
+        # already states what is being asked, so a per-question sentence is a
+        # third restatement of the same thing. Demanding it anyway is what the
+        # model kept declining to do -- and a rejected tool call is retried with
+        # identical arguments until the loop detector aborts the run, so the
+        # schema states the alternative instead of the model losing the argument.
+        "anyOf": [
+            {"required": ["question"]},
+            {"required": ["inputs"]},
+        ],
     }
 
 
 _QUESTION_SCHEMA_TEXT_EN: dict[str, str] = {
-    "question": "The question to present to the user.",
+    "question": (
+        "The question to present to the user. Required for a question that "
+        "offers `options`. A question that declares `inputs` may omit it: the "
+        "prompt shown is this text when given, otherwise `header`, otherwise "
+        "the call's top-level `query`."
+    ),
     "header": "A short label displayed as a chip/tag.",
     "options": "Available choices for this question (2-4 items).",
     "option_label": "Display text for this option (1-5 words).",
@@ -239,6 +269,9 @@ _QUESTION_SCHEMA_TEXT_EN: dict[str, str] = {
         "both, and if both are given the inputs are what is asked. "
         "An entry may be a bare type name when there is nothing to say about it "
         "beyond what it is. "
+        "A question that declares `inputs` does not need its own `question`: "
+        "the prompt shown is `question` when given, otherwise `header`, "
+        "otherwise the call's top-level `query`. "
         "The answer comes back as one value per input, in the order declared."
     ),
     "input_type": (
@@ -301,7 +334,11 @@ _QUESTION_SCHEMA_TEXT_EN: dict[str, str] = {
 }
 
 _QUESTION_SCHEMA_TEXT_CN: dict[str, str] = {
-    "question": "向用户展示的问题。",
+    "question": (
+        "向用户展示的问题。提供 `options` 的问题必须填写。"
+        "声明了 `inputs` 的问题可以不填：展示的提示语依次取本字段、`header`、"
+        "调用顶层的 `query`。"
+    ),
     "header": "作为标签展示的简短标题。",
     "options": "该问题的可选项（2-4 个）。",
     "option_label": "该选项的展示文本（1-5 个词）。",
@@ -318,6 +355,8 @@ _QUESTION_SCHEMA_TEXT_CN: dict[str, str] = {
         "把日期拆成四个文本选项来问，不如直接按日期来问。"
         "`inputs` 与 `options` 二选一：只声明其中之一；若两者都给出，则以 inputs 为准。"
         "当某一项除类型外无需额外说明时，可直接写类型名字符串。"
+        "声明了 `inputs` 的问题无需再写 `question`："
+        "展示的提示语依次取 `question`、`header`、调用顶层的 `query`。"
         "答案按声明顺序，每个输入返回一个值。"
     ),
     "input_type": (
@@ -433,7 +472,9 @@ _EXTENDED_DESCRIPTION_EN: str = (
     "`inputs` — the user fills in a date, a time, a number, text, or a choice "
     "from a list, and answers them together. Use this when the answer is a "
     "value rather than one of a few named actions; asking for a date as four "
-    "text options is worse than asking for it as a date. "
+    "text options is worse than asking for it as a date. A question that "
+    "declares `inputs` needs no `question` text of its own — `header`, or the "
+    "top-level `query`, is the prompt. "
     "Use `questions` when you want the user to choose between specific options "
     "(e.g., 'Apply update' vs 'Skip'). Ask at most 4 questions per call. "
     "Omit options for free-text input; otherwise provide 2-4 options. "
@@ -450,6 +491,8 @@ _EXTENDED_DESCRIPTION_CN: str = (
     "用户填写日期、时刻、数字、文本或从列表中选择，并一并提交。"
     "当答案是一个值而非少数几个具名动作之一时使用；"
     "把日期拆成四个文本选项来问，不如直接按日期来问。"
+    "声明了 `inputs` 的问题无需再写 `question`——"
+    "提示语取 `header`，或顶层的 `query`。"
     "当你希望用户在特定选项间做选择时（如「应用更新」vs「跳过」）使用 `questions`。"
     "每次调用最多询问 4 个问题。自由输入题不提供选项；否则必须提供 2-4 个选项。"
     "对于单选问题，选项可携带 `preview`（markdown，"
@@ -633,6 +676,12 @@ class StructuredAskUserRail(AskUserRail):
                         '[{"label": "A"}, {"label": "B"}]}.'
                     )
                 )
+            # A question that declares `inputs` derives its prompt downstream:
+            # its own `question` when present, else `header`, else the call's
+            # top-level `query`. Requiring `question` here rejected a shape the
+            # model kept producing, and a rejection it cannot act on is retried
+            # byte-identically until the tool-loop detector aborts the run.
+            declares_inputs = _declares_inputs(question)
             if "inputs" in question and not isinstance(question["inputs"], list):
                 return self.reject(
                     tool_result=(
@@ -643,13 +692,19 @@ class StructuredAskUserRail(AskUserRail):
                     )
                 )
             question_text = question.get("question")
-            if not isinstance(question_text, str) or not question_text.strip():
+            has_question_text = (
+                isinstance(question_text, str) and bool(question_text.strip())
+            )
+            if not has_question_text and not declares_inputs:
                 return self.reject(
                     tool_result=(
-                        f"[INVALID_ARGUMENT] questions[{question_index}].question "
-                        "is required and must be a non-empty string. Add the "
-                        'sentence to put to the user, e.g. "question": "Which '
-                        'branch should the fix go on?".'
+                        f"[INVALID_ARGUMENT] questions[{question_index}] needs "
+                        "either a non-empty question string or an inputs array. "
+                        "Add question with the sentence to put to the user, or "
+                        "-- when the answer is a value to fill in rather than a "
+                        'choice -- declare inputs, e.g. inputs: [{"type": '
+                        '"date", "label": "Date"}]; an inputs question takes '
+                        "its prompt from header, or from the top-level query."
                     )
                 )
             if "header" in question and not isinstance(question["header"], str):

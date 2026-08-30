@@ -149,7 +149,15 @@ class TestStructuredAskUserToolSchema:
         assert "options" in props
         assert "multi_select" in props
         assert "inputs" in props
-        assert schema["required"] == ["question"]
+        # `question` is required only for the options shape. A question that
+        # declares `inputs` derives its prompt from `header` or the top-level
+        # `query`, so the schema states the alternative rather than demanding a
+        # sentence the model has nothing new to put in.
+        assert "required" not in schema
+        assert schema["anyOf"] == [
+            {"required": ["question"]},
+            {"required": ["inputs"]},
+        ]
         assert props["question"]["minLength"] == 1
         options_schema = props["options"]
         assert options_schema["maxItems"] == 4
@@ -861,7 +869,7 @@ class TestStructuredAskUserRailResolveInterrupt:
     )
     @pytest.mark.asyncio
     async def test_invalid_question_text_is_rejected(question):
-        """Question text must be a non-empty string."""
+        """A question offering no inputs must carry non-empty question text."""
         rail = StructuredAskUserRail()
         tc = _make_tool_call(arguments={
             "query": "Choose",
@@ -872,7 +880,12 @@ class TestStructuredAskUserRailResolveInterrupt:
 
         from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
         assert isinstance(decision, RejectResult)
-        assert "questions[0].question" in decision.tool_result
+        assert "questions[0]" in decision.tool_result
+        # The rejection names both ways out, not just the fault: a rejection the
+        # model cannot act on is retried byte-identically until the tool-loop
+        # detector aborts the run.
+        assert "question" in decision.tool_result
+        assert "inputs" in decision.tool_result
 
     @staticmethod
     @pytest.mark.parametrize("header", [None, {}, 123])
