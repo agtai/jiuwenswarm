@@ -126,20 +126,30 @@ class TestStructuredAskUserToolSchema:
         )
 
     @staticmethod
-    def test_questions_item_schema_structure():
+    @pytest.mark.parametrize("language", ["en", "cn"])
+    def test_questions_item_schema_structure(language):
         """Each question item must have `question` (required) and optional
-        `header`, `options`, `multi_select`.
+        `header`, `options`, `multi_select`, `inputs`.
+
+        Both languages, because the two schemas are separate objects and a
+        property added to one alone is a capability half the deployments never
+        hear about.
         """
 
         from jiuwenswarm.agents.harness.common.rails.ask_user_rail import (
-            _QUESTIONS_ITEM_SCHEMA,
+            _QUESTIONS_ITEM_SCHEMA_CN,
+            _QUESTIONS_ITEM_SCHEMA_EN,
         )
-        props = _QUESTIONS_ITEM_SCHEMA["properties"]
+        schema = (
+            _QUESTIONS_ITEM_SCHEMA_EN if language == "en" else _QUESTIONS_ITEM_SCHEMA_CN
+        )
+        props = schema["properties"]
         assert "question" in props
         assert "header" in props
         assert "options" in props
         assert "multi_select" in props
-        assert _QUESTIONS_ITEM_SCHEMA["required"] == ["question"]
+        assert "inputs" in props
+        assert schema["required"] == ["question"]
         assert props["question"]["minLength"] == 1
         options_schema = props["options"]
         assert options_schema["maxItems"] == 4
@@ -147,6 +157,142 @@ class TestStructuredAskUserToolSchema:
         option_schema = options_schema["items"]
         assert option_schema["required"] == ["label"]
         assert option_schema["properties"]["label"]["minLength"] == 1
+
+    @staticmethod
+    @pytest.mark.parametrize("language", ["en", "cn"])
+    def test_inputs_declares_exactly_the_seven_shared_types(language):
+        """The vocabulary, stated once per language and identical in both.
+
+        Pinned as a literal rather than compared against the constant: this is
+        the list that is expensive to withdraw, so widening it should be a
+        decision somebody makes, not a test that follows along.
+        """
+        from jiuwenswarm.agents.harness.common.rails.ask_user_rail import (
+            DECLARED_INPUT_TYPES,
+        )
+
+        params = (
+            EXTENDED_INPUT_PARAMS_EN if language == "en" else EXTENDED_INPUT_PARAMS_CN
+        )
+        inputs = params["properties"]["questions"]["items"]["properties"]["inputs"]
+        assert inputs["items"]["required"] == ["type"]
+        assert inputs["items"]["properties"]["type"]["enum"] == [
+            "text",
+            "number",
+            "date",
+            "time",
+            "datetime",
+            "select",
+            "multi_select",
+        ]
+        assert list(DECLARED_INPUT_TYPES) == inputs["items"]["properties"]["type"][
+            "enum"
+        ]
+
+    @staticmethod
+    def test_the_two_languages_declare_the_same_shape():
+        """Only the prose may differ. A property in one schema and not the
+        other is the failure a duplicated schema pair invites.
+        """
+
+        def shape(node):
+            if isinstance(node, dict):
+                return {
+                    key: shape(value)
+                    for key, value in sorted(node.items())
+                    if key != "description"
+                }
+            if isinstance(node, list):
+                return [shape(item) for item in node]
+            return node
+
+        assert shape(EXTENDED_INPUT_PARAMS_EN) == shape(EXTENDED_INPUT_PARAMS_CN)
+
+    @staticmethod
+    @pytest.mark.parametrize("language", ["en", "cn"])
+    def test_every_declared_input_type_resolves_in_the_renderer(language):
+        """A name the model is told about must be one a channel can render."""
+        from jiuwenswarm.gateway.channel_manager.im_platforms.slack import (
+            slack_inputs,
+        )
+
+        params = (
+            EXTENDED_INPUT_PARAMS_EN if language == "en" else EXTENDED_INPUT_PARAMS_CN
+        )
+        inputs = params["properties"]["questions"]["items"]["properties"]["inputs"]
+        for name in inputs["items"]["properties"]["type"]["enum"]:
+            assert slack_inputs.parse_inputs({"inputs": [name]})[0].spec.name == name
+
+    @staticmethod
+    def test_the_unadvertised_types_stay_reachable():
+        """Not declared is not deleted.
+
+        Twelve further types resolve and are left out of the vocabulary on
+        purpose -- six of them answer with Slack ids no other channel can
+        produce. A question deliberately scoped to one platform can still ask
+        for them, which is the whole difference between unadvertised and gone.
+        """
+        from jiuwenswarm.agents.harness.common.rails.ask_user_rail import (
+            DECLARED_INPUT_TYPES,
+        )
+        from jiuwenswarm.gateway.channel_manager.im_platforms.slack import (
+            slack_inputs,
+        )
+
+        undeclared = set(slack_inputs.INPUT_SPECS) - set(DECLARED_INPUT_TYPES)
+
+        assert undeclared == {
+            "datetime_unix",
+            "user",
+            "users",
+            "conversation",
+            "conversations",
+            "channel",
+            "channels",
+            "checkboxes",
+            "radio",
+            "email",
+            "url",
+            "rich_text",
+        }
+        for name in sorted(undeclared):
+            assert slack_inputs.parse_inputs({"inputs": [name]})[0].spec.name == name
+
+    @staticmethod
+    def test_the_design_s_choice_intent_is_not_declared():
+        """`choice` and its `multi` companion were dropped for a reason.
+
+        The renderer refuses `choice` outright, and `multi` is derived from an
+        input's element types rather than declared, so the pair would have
+        needed new specs to mean anything. Declaring them would have put a name
+        in front of the model that fails on arrival.
+        """
+        from jiuwenswarm.agents.harness.common.rails.ask_user_rail import (
+            DECLARED_INPUT_TYPES,
+        )
+        from jiuwenswarm.gateway.channel_manager.im_platforms.slack import (
+            slack_inputs,
+        )
+
+        assert "choice" not in DECLARED_INPUT_TYPES
+        assert "choice" not in slack_inputs.INPUT_SPECS
+        with pytest.raises(slack_inputs.InputRenderError):
+            slack_inputs.parse_inputs({"inputs": ["choice"]})
+
+    @staticmethod
+    def test_the_declared_input_cap_matches_the_renderer_s():
+        """The schema must not let the model write a question nothing can post."""
+        from jiuwenswarm.agents.harness.common.rails.ask_user_rail import (
+            MAX_QUESTION_INPUTS,
+        )
+        from jiuwenswarm.gateway.channel_manager.im_platforms.slack import (
+            slack_inputs,
+        )
+
+        assert MAX_QUESTION_INPUTS == slack_inputs.MAX_INPUTS_PER_QUESTION
+        for params in (EXTENDED_INPUT_PARAMS_EN, EXTENDED_INPUT_PARAMS_CN):
+            inputs = params["properties"]["questions"]["items"]["properties"]["inputs"]
+            assert inputs["maxItems"] == MAX_QUESTION_INPUTS
 
     @staticmethod
     def test_tool_card_name_is_ask_user():

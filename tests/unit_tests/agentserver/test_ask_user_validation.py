@@ -100,6 +100,30 @@ async def test_empty_structured_answers_are_rejected():
     assert "answers must include at least one non-empty response" in decision.tool_result
 
 
+@pytest.mark.asyncio
+async def test_non_array_inputs_is_rejected_with_the_shape_to_send():
+    """`inputs` is now a declared key, so a malformed one is named as itself.
+
+    Without a guard of its own a bare string fell through to the question-text
+    rejection, which named the wrong field and left the model nothing to fix.
+    """
+    rail = StructuredAskUserRail()
+    tc = _make_tool_call(
+        {
+            "query": "Choose",
+            "questions": [
+                {"question": "When?", "header": "Follow-up", "inputs": "date"}
+            ],
+        }
+    )
+
+    decision = await rail.resolve_interrupt(MagicMock(), tc, None)
+
+    assert isinstance(decision, RejectResult)
+    assert "questions[0].inputs" in decision.tool_result
+    assert '"type"' in decision.tool_result
+
+
 # Every rejection the model can reach while writing an ask_user call. A
 # rejection naming only the fault is retried unchanged -- the model has nothing
 # new to try -- and repeated identical tool calls end the run at the loop
@@ -117,6 +141,10 @@ _REJECTION_CASES = [
     (
         "header_not_string",
         {"query": "Q", "questions": [{"question": "Q1", "header": 123}]},
+    ),
+    (
+        "inputs_not_array",
+        {"query": "Q", "questions": [{"question": "Q1", "inputs": "date"}]},
     ),
     (
         "options_not_array",

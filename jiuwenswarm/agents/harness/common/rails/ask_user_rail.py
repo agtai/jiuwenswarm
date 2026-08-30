@@ -46,58 +46,332 @@ MAX_STRUCTURED_QUESTIONS = 4
 # Extended input schema
 # ---------------------------------------------------------------------------
 
-_QUESTIONS_ITEM_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "question": {
-            "type": "string",
-            "minLength": 1,
-            "description": "The question to present to the user.",
-        },
-        "header": {
-            "type": "string",
-            "description": "A short label displayed as a chip/tag.",
-        },
-        "options": {
-            "type": "array",
-            "description": "Available choices for this question (2-4 items).",
-            "maxItems": 4,
-            "anyOf": [{"maxItems": 0}, {"minItems": 2}],
-            "items": {
-                "type": "object",
-                "properties": {
-                    "label": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Display text for this option (1-5 words).",
+# The tightest cap any channel puts on one question's inputs. Slack's renderer
+# refuses more than this rather than posting a message it knows is over Block
+# Kit's limit, so the schema states the same number instead of letting the model
+# write a question that cannot be shown. Guarded by a test against the
+# renderer's own constant so the two cannot drift.
+MAX_QUESTION_INPUTS = 10
+
+# The input types a question may declare, and the whole of what the model is
+# told exists.
+#
+# Seven names, chosen to be the ones every channel can honour. A design proposed
+# six connector-agnostic intents ending in ``choice`` plus a ``multi: true``
+# knob; neither exists. ``choice`` is refused by the renderer, and ``multi`` is
+# derived from an input's element types rather than declared, so the pair would
+# have needed new specs to mean anything. ``select`` and ``multi_select`` are
+# what already works, are equally expressible anywhere, and need nothing built.
+#
+# Twelve further types resolve and stay reachable for a question deliberately
+# scoped to one platform -- ``datetime_unix``, ``user(s)``, ``conversation(s)``,
+# ``channel(s)``, ``checkboxes``, ``radio``, ``email``, ``url``, ``rich_text``.
+# They are not advertised. Six of them answer with Slack ids no other channel
+# can produce, and a vocabulary is the expensive thing to withdraw: a name the
+# model has been told about is one questions get written against. Adding to this
+# tuple later is additive and costs nothing; removing from it breaks questions
+# already in the wild.
+DECLARED_INPUT_TYPES: tuple[str, ...] = (
+    "text",
+    "number",
+    "date",
+    "time",
+    "datetime",
+    "select",
+    "multi_select",
+)
+
+
+def _questions_item_schema(text: Mapping[str, str]) -> dict[str, Any]:
+    """Build the per-question schema in one language.
+
+    One structure, localized strings. Written as a factory rather than as two
+    literals because the English and Chinese schemas must stay the same shape:
+    a property added to one and forgotten in the other is a capability half the
+    deployments never hear about, and that is exactly the failure this file's
+    duplicated ``EXTENDED_INPUT_PARAMS`` pair is prone to.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "minLength": 1,
+                "description": text["question"],
+            },
+            "header": {
+                "type": "string",
+                "description": text["header"],
+            },
+            "options": {
+                "type": "array",
+                "description": text["options"],
+                "maxItems": 4,
+                "anyOf": [{"maxItems": 0}, {"minItems": 2}],
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": text["option_label"],
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": text["option_description"],
+                        },
+                        "preview": {
+                            "type": "string",
+                            "description": text["option_preview"],
+                        },
                     },
-                    "description": {
-                        "type": "string",
-                        "description": "Explanation of what this option means.",
-                    },
-                    "preview": {
-                        "type": "string",
-                        "description": (
-                            "Optional preview content rendered beside this option when "
-                            "comparing concrete artifacts the user should visually compare "
-                            "(e.g. ASCII mockups, code snippets). Markdown is supported; "
-                            "use fenced code blocks for monospace mockups so alignment is "
-                            "preserved. Only rendered for single-select questions; ignored "
-                            "for multi-select."
-                        ),
-                    },
+                    "required": ["label"],
                 },
-                "required": ["label"],
+            },
+            "multi_select": {
+                "type": "boolean",
+                "default": False,
+                "description": text["multi_select"],
+            },
+            "inputs": {
+                "type": "array",
+                "description": text["inputs"],
+                "maxItems": MAX_QUESTION_INPUTS,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": list(DECLARED_INPUT_TYPES),
+                            "description": text["input_type"],
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": text["input_name"],
+                        },
+                        "label": {
+                            "type": "string",
+                            "description": text["input_label"],
+                        },
+                        "hint": {
+                            "type": "string",
+                            "description": text["input_hint"],
+                        },
+                        "placeholder": {
+                            "type": "string",
+                            "description": text["input_placeholder"],
+                        },
+                        "optional": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": text["input_optional"],
+                        },
+                        "initial": {
+                            "description": text["input_initial"],
+                        },
+                        "multiline": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": text["input_multiline"],
+                        },
+                        "min": {
+                            "type": "number",
+                            "description": text["input_min"],
+                        },
+                        "max": {
+                            "type": "number",
+                            "description": text["input_max"],
+                        },
+                        "options": {
+                            "type": "array",
+                            "description": text["input_options"],
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "description": text["input_option_label"],
+                                    },
+                                    "value": {
+                                        "type": "string",
+                                        "description": text["input_option_value"],
+                                    },
+                                    "description": {
+                                        "type": "string",
+                                        "description": (
+                                            text["input_option_description"]
+                                        ),
+                                    },
+                                },
+                                "required": ["label"],
+                            },
+                        },
+                    },
+                    "required": ["type"],
+                },
             },
         },
-        "multi_select": {
-            "type": "boolean",
-            "default": False,
-            "description": "Allow multiple selections instead of just one.",
-        },
-    },
-    "required": ["question"],
+        "required": ["question"],
+    }
+
+
+_QUESTION_SCHEMA_TEXT_EN: dict[str, str] = {
+    "question": "The question to present to the user.",
+    "header": "A short label displayed as a chip/tag.",
+    "options": "Available choices for this question (2-4 items).",
+    "option_label": "Display text for this option (1-5 words).",
+    "option_description": "Explanation of what this option means.",
+    "option_preview": (
+        "Optional preview content rendered beside this option when comparing "
+        "concrete artifacts the user should visually compare (e.g. ASCII "
+        "mockups, code snippets). Markdown is supported; use fenced code blocks "
+        "for monospace mockups so alignment is preserved. Only rendered for "
+        "single-select questions; ignored for multi-select."
+    ),
+    "multi_select": "Allow multiple selections instead of just one.",
+    "inputs": (
+        "Values to ask the user to enter, instead of options to choose between. "
+        "Use this when the answer is a date, a time, a number or typed text "
+        "rather than one of a few named actions -- asking for a date as four "
+        "text options is worse than asking for it as a date. "
+        "`inputs` and `options` are alternatives: declare one or the other, not "
+        "both, and if both are given the inputs are what is asked. "
+        "An entry may be a bare type name when there is nothing to say about it "
+        "beyond what it is. "
+        "The answer comes back as one value per input, in the order declared."
+    ),
+    "input_type": (
+        "What to ask for:\n"
+        "- text: typed text. Answered with what was typed. Set `multiline` for "
+        "more than one line.\n"
+        "- number: a typed number. Answered with the number as written; "
+        "something that is not a number is refused before it reaches you. "
+        "`min` and `max` bound it.\n"
+        "- date: a calendar date. Answered as YYYY-MM-DD.\n"
+        "- time: a time of day with no date. Answered as HH:MM:SS, followed by "
+        "the answerer's IANA timezone in brackets when it is known. There is "
+        "deliberately no UTC offset: a time with no date does not have one.\n"
+        "- datetime: a date and a time together. Answered as one ISO 8601 "
+        "instant with the timezone name appended, e.g. "
+        "2026-08-20T09:30:00+02:00[Europe/Paris]. Prefer this over asking for a "
+        "date and a time as two separate inputs, which cannot be resolved to a "
+        "single instant.\n"
+        "- select: one choice from `options`. Answered with the chosen option's "
+        "`value`. Prefer this over `options` when the question also asks for "
+        "something entered.\n"
+        "- multi_select: any number of choices from `options`. Answered with "
+        "one value per choice."
+    ),
+    "input_name": (
+        "Names this value in the answer. Defaults to the type, which is enough "
+        "when a question asks for one thing. Required to be distinct when a "
+        "question asks for two of the same type."
+    ),
+    "input_label": (
+        "What the field is called where the user sees it. Defaults to the "
+        "input's name. A `datetime` shows two fields; the second is named with "
+        "`time_label`."
+    ),
+    "input_hint": "A short line of guidance shown beneath the field.",
+    "input_placeholder": "Greyed-out text shown in an empty field.",
+    "input_optional": (
+        "Let the user submit without filling this in. By default every declared "
+        "input must be answered, and a submit missing one is refused with a "
+        "note saying which."
+    ),
+    "input_initial": (
+        "The value the field starts at. For `datetime`, use `initial_date` and "
+        "`initial_time` instead, since it is two fields. For `select` it must "
+        "be one of the declared option values."
+    ),
+    "input_multiline": "For `text`: accept more than one line.",
+    "input_min": "For `number`: the smallest value accepted.",
+    "input_max": "For `number`: the largest value accepted.",
+    "input_options": (
+        "For `select` and `multi_select`: what there is to choose from. "
+        "Required for those types and ignored for every other."
+    ),
+    "input_option_label": "Display text for this choice.",
+    "input_option_value": (
+        "What the answer carries when this choice is made. Defaults to the "
+        "label."
+    ),
+    "input_option_description": "Explanation of what this choice means.",
 }
+
+_QUESTION_SCHEMA_TEXT_CN: dict[str, str] = {
+    "question": "向用户展示的问题。",
+    "header": "作为标签展示的简短标题。",
+    "options": "该问题的可选项（2-4 个）。",
+    "option_label": "该选项的展示文本（1-5 个词）。",
+    "option_description": "说明该选项的含义。",
+    "option_preview": (
+        "可选的预览内容，展示在该选项旁，用于对比用户需要直观比较的具体产物"
+        "（如 ASCII mockup、代码片段）。支持 markdown；"
+        "等宽 mockup 请使用围栏代码块以保持对齐。仅单选问题会渲染，多选问题忽略。"
+    ),
+    "multi_select": "允许多选而非单选。",
+    "inputs": (
+        "请用户填写的值，用于替代让用户在选项间选择。"
+        "当答案是日期、时间、数字或自由文本，而不是少数几个具名动作之一时使用；"
+        "把日期拆成四个文本选项来问，不如直接按日期来问。"
+        "`inputs` 与 `options` 二选一：只声明其中之一；若两者都给出，则以 inputs 为准。"
+        "当某一项除类型外无需额外说明时，可直接写类型名字符串。"
+        "答案按声明顺序，每个输入返回一个值。"
+    ),
+    "input_type": (
+        "要询问的内容：\n"
+        "- text：自由文本。返回用户输入的内容。需要多行时设置 `multiline`。\n"
+        "- number：数字。按输入原样返回；非数字会在到达你之前被拒绝。"
+        "可用 `min`、`max` 限定范围。\n"
+        "- date：日历日期。返回格式为 YYYY-MM-DD。\n"
+        "- time：不带日期的时刻。返回格式为 HH:MM:SS，已知时区时在方括号中附上"
+        "回答者的 IANA 时区。刻意不带 UTC 偏移：没有日期的时刻本就没有偏移。\n"
+        "- datetime：日期与时刻一起询问。返回一个 ISO 8601 时间点，并附上时区名，"
+        "例如 2026-08-20T09:30:00+02:00[Europe/Paris]。"
+        "优先使用它，而不是拆成 date 和 time 两个输入——那样无法还原为同一个时间点。\n"
+        "- select：从 `options` 中单选。返回所选项的 `value`。"
+        "当问题同时还需要填写内容时，优先用它而不是 `options`。\n"
+        "- multi_select：从 `options` 中多选。每选中一项返回一个值。"
+    ),
+    "input_name": (
+        "该值在答案中的名称。默认取类型名，单个输入的问题无需另行命名。"
+        "同一问题中出现两个同类型输入时，必须分别命名以示区分。"
+    ),
+    "input_label": (
+        "用户看到的字段名称。默认取该输入的名称。"
+        "`datetime` 会显示两个字段，第二个用 `time_label` 命名。"
+    ),
+    "input_hint": "显示在字段下方的简短提示。",
+    "input_placeholder": "字段为空时显示的浅色占位文本。",
+    "input_optional": (
+        "允许用户不填写该项即可提交。默认每个声明的输入都必须填写，"
+        "缺项的提交会被拒绝，并提示缺少哪一项。"
+    ),
+    "input_initial": (
+        "字段的初始值。`datetime` 由两个字段组成，请改用 `initial_date` 与 "
+        "`initial_time`。`select` 的初始值必须是已声明的某个选项值。"
+    ),
+    "input_multiline": "用于 `text`：允许多行输入。",
+    "input_min": "用于 `number`：允许的最小值。",
+    "input_max": "用于 `number`：允许的最大值。",
+    "input_options": (
+        "用于 `select` 与 `multi_select`：可供选择的内容。"
+        "这两种类型必须提供，其他类型会被忽略。"
+    ),
+    "input_option_label": "该选项的展示文本。",
+    "input_option_value": "选中该项时答案携带的值。默认取 label。",
+    "input_option_description": "说明该选项的含义。",
+}
+
+_QUESTIONS_ITEM_SCHEMA_EN: dict[str, Any] = _questions_item_schema(
+    _QUESTION_SCHEMA_TEXT_EN
+)
+_QUESTIONS_ITEM_SCHEMA_CN: dict[str, Any] = _questions_item_schema(
+    _QUESTION_SCHEMA_TEXT_CN
+)
+
 
 EXTENDED_INPUT_PARAMS_EN: dict[str, Any] = {
     "type": "object",
@@ -113,9 +387,12 @@ EXTENDED_INPUT_PARAMS_EN: dict[str, Any] = {
                 "Use this when you want the user to choose from predefined options "
                 "instead of typing free text. Ask at most 4 questions per call. "
                 "Omit options for free-text input; otherwise provide 2-4 options. "
-                "The user can always select 'Other' for custom input."
+                "The user can always select 'Other' for custom input. "
+                "A question may instead declare `inputs` -- values to enter, "
+                "such as a date or a number -- when the answer is not one of a "
+                "few named actions."
             ),
-            "items": _QUESTIONS_ITEM_SCHEMA,
+            "items": _QUESTIONS_ITEM_SCHEMA_EN,
             "maxItems": MAX_STRUCTURED_QUESTIONS,
         },
     },
@@ -136,8 +413,10 @@ EXTENDED_INPUT_PARAMS_CN: dict[str, Any] = {
                 "每次调用最多询问 4 个问题。"
                 "自由输入题不提供选项；否则必须提供 2-4 个选项。"
                 "用户始终可以选择「其他」进行自定义输入。"
+                "当答案不是少数几个具名动作之一时，问题也可以改为声明 `inputs`——"
+                "即需要用户填写的值，例如日期或数字。"
             ),
-            "items": _QUESTIONS_ITEM_SCHEMA,
+            "items": _QUESTIONS_ITEM_SCHEMA_CN,
             "maxItems": MAX_STRUCTURED_QUESTIONS,
         },
     },
@@ -146,10 +425,15 @@ EXTENDED_INPUT_PARAMS_CN: dict[str, Any] = {
 
 _EXTENDED_DESCRIPTION_EN: str = (
     "Interrupts execution and requests input from the user. "
-    "Supports two modes:\n"
+    "Supports three modes:\n"
     "1. Plain query (free-text): pass only `query` — the user types their answer.\n"
     "2. Structured questions (multi-choice): pass `query` + `questions` — "
     "the user selects from predefined options. "
+    "3. Entered values: pass `query` + `questions`, each question declaring "
+    "`inputs` — the user fills in a date, a time, a number, text, or a choice "
+    "from a list, and answers them together. Use this when the answer is a "
+    "value rather than one of a few named actions; asking for a date as four "
+    "text options is worse than asking for it as a date. "
     "Use `questions` when you want the user to choose between specific options "
     "(e.g., 'Apply update' vs 'Skip'). Ask at most 4 questions per call. "
     "Omit options for free-text input; otherwise provide 2-4 options. "
@@ -159,9 +443,13 @@ _EXTENDED_DESCRIPTION_EN: str = (
 )
 
 _EXTENDED_DESCRIPTION_CN: str = (
-    "中断执行并向用户请求输入。支持两种模式：\n"
+    "中断执行并向用户请求输入。支持三种模式：\n"
     "1. 纯文本查询：只传 `query` —— 用户自由输入回答。\n"
     "2. 结构化选项：传 `query` + `questions` —— 用户从预定义选项中选择。"
+    "3. 填写具体值：传 `query` + `questions`，并在问题中声明 `inputs` —— "
+    "用户填写日期、时刻、数字、文本或从列表中选择，并一并提交。"
+    "当答案是一个值而非少数几个具名动作之一时使用；"
+    "把日期拆成四个文本选项来问，不如直接按日期来问。"
     "当你希望用户在特定选项间做选择时（如「应用更新」vs「跳过」）使用 `questions`。"
     "每次调用最多询问 4 个问题。自由输入题不提供选项；否则必须提供 2-4 个选项。"
     "对于单选问题，选项可携带 `preview`（markdown，"
@@ -339,9 +627,19 @@ class StructuredAskUserRail(AskUserRail):
                     tool_result=(
                         f"[INVALID_ARGUMENT] questions[{question_index}] "
                         "must be an object. Replace it with an object carrying "
-                        "the question text, plus 2-4 options when the answer is "
-                        'a choice, e.g. {"question": "Which one?", "options": '
+                        "the question text, plus either options (2-4 choices to "
+                        "pick between) or inputs (values to fill in), e.g. "
+                        '{"question": "Which one?", "options": '
                         '[{"label": "A"}, {"label": "B"}]}.'
+                    )
+                )
+            if "inputs" in question and not isinstance(question["inputs"], list):
+                return self.reject(
+                    tool_result=(
+                        f"[INVALID_ARGUMENT] questions[{question_index}].inputs "
+                        "must be an array of input objects. Send it as a JSON "
+                        'array, e.g. inputs: [{"type": "date", "label": '
+                        '"Date"}, {"type": "text", "label": "Note"}].'
                     )
                 )
             question_text = question.get("question")
@@ -373,7 +671,9 @@ class StructuredAskUserRail(AskUserRail):
                         "must be an array of option objects. Send it as a JSON "
                         'array, e.g. options: [{"label": "Yes"}, '
                         '{"label": "No"}]. To let the user answer in their own '
-                        "words instead, omit options entirely."
+                        "words instead, omit options entirely; to ask for a "
+                        "typed or picked value rather than a choice, declare "
+                        "inputs in place of options."
                     )
                 )
             for option_index, option in enumerate(options):
@@ -398,8 +698,9 @@ class StructuredAskUserRail(AskUserRail):
                         "must contain either 0 or 2-4 items; "
                         f"received {len(options)}. Merge or drop choices until "
                         "at most 4 remain, ask the rest in a further ask_user "
-                        "call, or omit options entirely to let the user answer "
-                        "in their own words."
+                        "call, omit options entirely to let the user answer in "
+                        "their own words, or -- when the answer is a value "
+                        "rather than a choice -- replace options with inputs."
                     )
                 )
 
