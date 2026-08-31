@@ -1805,13 +1805,18 @@ class AgentWebSocketServer:
 
     async def _drain_gateway_generation_cleanups(self) -> None:
         while True:
-            cleanups = tuple(
-                getattr(self, "_gateway_generation_cleanups", set())
-            )
-            if not cleanups:
+            registered = getattr(self, "_gateway_generation_cleanups", None)
+            if not registered:
                 return
+            cleanups = tuple(registered)
             await asyncio.shield(
                 asyncio.gather(*cleanups, return_exceptions=True)
+            )
+            # Awaiting already-settled cleanups completes synchronously, so
+            # their discard callbacks may not have run yet; drop settled tasks
+            # here or this loop busy-spins without ever yielding.
+            registered.difference_update(
+                task for task in cleanups if task.done()
             )
 
     async def _stop_gateway_process_owners(self) -> None:

@@ -829,6 +829,45 @@ async def test_generation_cleanup_owner_survives_provider_self_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_drain_terminates_on_settled_cleanup_whose_discard_never_ran(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = object.__new__(AgentWebSocketServer)
+
+    async def completed_cleanup() -> None:
+        return None
+
+    task = asyncio.create_task(completed_cleanup())
+    await asyncio.wait({task})
+    assert task.done() is True
+    # A settled task still registered because its discard callback has not
+    # run: awaiting it completes synchronously, so draining must remove it
+    # itself instead of busy-spinning without ever yielding to the loop.
+    server._gateway_generation_cleanups = {task}
+
+    # A busy-spinning drain starves the loop, so wait_for's timer would
+    # never fire; bound the spin itself so a regression fails fast instead
+    # of hanging the whole session.
+    real_shield = asyncio.shield
+    shield_rounds = 0
+
+    def bounded_shield(awaitable):
+        nonlocal shield_rounds
+        shield_rounds += 1
+        if shield_rounds > 4:
+            raise AssertionError(
+                "drain re-gathered settled cleanups without removing them"
+            )
+        return real_shield(awaitable)
+
+    monkeypatch.setattr(asyncio, "shield", bounded_shield)
+
+    await asyncio.wait_for(server._drain_gateway_generation_cleanups(), timeout=1)
+
+    assert server._gateway_generation_cleanups == set()
+
+
+@pytest.mark.asyncio
 async def test_formal_route_passes_only_rpc_context_to_composition() -> None:
     composition = _Composition()
     server = _server(composition)
