@@ -3100,6 +3100,142 @@ test('empty capture settles with zero commit while retaining authoritative P2 pl
   assert.equal(calls.at(-1)[0], PRODUCT_P1_MEDIA_CLOSE_METHOD);
 });
 
+test('oversized Agent text fails fast before any synthesis operation state', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
+        return {
+          status: 'active',
+          reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+          subject_id: 'media-subject-1',
+          endpoint_path: '/ws/live-voice/media',
+          media_ticket: 'P'.repeat(43),
+          subprotocol: 'live-voice.media.v1',
+          ticket_ttl_ms: 30_000,
+          end_of_turn: MANUAL_EOT_FALLBACK,
+          binding,
+          privacy: {
+            raw_audio_persisted: false,
+            raw_audio_logged: false,
+            memory_only: true,
+          },
+        };
+      }
+      if (method === 'live_voice.speech.recognize_batch') {
+        throw Object.assign(new Error('provider returned no transcript'), {
+          reason: PRODUCT_P1_EMPTY_TRANSCRIPT_REASON,
+        });
+      }
+      if (method === 'live_voice.speech.synthesize_batch') {
+        return {
+          contract_version: 'live-voice.contract.v2',
+          request_id: params.request_id,
+          operation_id: params.operation_id,
+          ok: true,
+          error: null,
+          result: {
+            operation: 'speech.synthesize.batch',
+            response: params.response,
+            unit_id: params.unit_id,
+            audio: {
+              format: 'wav_pcm16_mono',
+              sample_rate_hz: 48_000,
+              channel_count: 1,
+              data_base64: wavBase64(48_000, 960),
+            },
+            provider: {
+              provider_id: 'provider-test',
+              implementation_class: 'formal',
+              fallback_from: null,
+              model: 'tts-test',
+              voice: 'voice-test',
+            },
+            presented: false,
+          },
+        };
+      }
+      if (method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD) {
+        return {
+          status: 'media_playout_acknowledged',
+          reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
+          receipt_id: 'media-playout-receipt-1',
+          duplex_media_observed: false,
+          ...params,
+        };
+      }
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+    locale: 'zh-CN',
+  });
+  await assert.rejects(
+    owner.stopAndRecognize(),
+    error => error?.reason === PRODUCT_P1_EMPTY_TRANSCRIPT_REASON
+  );
+
+  // 4,001 characters: the server would reject it with
+  // SYNTHESIS_TEXT_LIMIT_EXCEEDED after operation state already changed, so
+  // the client must fail deterministically before any synthesis operation.
+  await assert.rejects(
+    owner.playAgentText({
+      response: {
+        interaction_id: 'interaction-1',
+        response_id: 'response-oversize-1',
+        response_generation: 0,
+      },
+      unit_id: 'unit-oversize-1',
+      text: '长'.repeat(4_001),
+    }),
+    error => error?.code === 'FORMAL_SYNTHESIS_TEXT_LIMIT'
+  );
+  assert.equal(
+    calls.filter(([method]) => method === 'live_voice.speech.synthesize_batch').length,
+    0,
+    'an oversized final must not reach the synthesis operation'
+  );
+
+  // The refusal must not poison operation state: a boundary-sized final
+  // (exactly 4,000 characters) still synthesizes and settles normally.
+  await owner.playAgentText({
+    response: {
+      interaction_id: 'interaction-1',
+      response_id: 'response-boundary-1',
+      response_generation: 0,
+    },
+    unit_id: 'unit-boundary-1',
+    text: '长'.repeat(4_000),
+  });
+  assert.equal(
+    calls.filter(([method]) => method === 'live_voice.speech.synthesize_batch').length,
+    1
+  );
+  assert.equal(owner.status().status, 'recognized');
+  await owner.close();
+  assert.equal(calls.at(-1)[0], PRODUCT_P1_MEDIA_CLOSE_METHOD);
+});
+
 test('a successor P1 turn revokes the exact prior media and Speech authority first', async () => {
   const calls = [];
   let captureIndex = 0;

@@ -24,6 +24,7 @@ import {
 } from './adapters/browserGatewayMediaTransport.js';
 import {
   GatewayBatchSpeechClient,
+  MAX_SYNTHESIS_TEXT_CHARS,
   isStreamingSpeechDegradationReason,
   normalizeStreamingXObs,
   type FormalBatchRecognitionResult,
@@ -1209,6 +1210,19 @@ export class ProductP1VoiceRouteOwner {
     }
     if (this.#playoutOperationInFlight) {
       throw new Error('formal playout is already active');
+    }
+    if (typeof input.text === 'string' && input.text.length > MAX_SYNTHESIS_TEXT_CHARS) {
+      // The server refuses an oversized unit with SYNTHESIS_TEXT_LIMIT_EXCEEDED
+      // only after the synthesis operation exists. Fail deterministically here,
+      // before any operation/generation state changes, so text presentation can
+      // proceed while audio enters an honest degraded state instead of a
+      // poisoned recovery. Full support (server-side unit splitting) is F14's
+      // remaining product work.
+      throw Object.assign(new Error('formal Agent text exceeds the synthesis limit'), {
+        code: 'FORMAL_SYNTHESIS_TEXT_LIMIT',
+        text_chars: input.text.length,
+        max_chars: MAX_SYNTHESIS_TEXT_CHARS,
+      });
     }
     this.#playoutOperationInFlight = true;
     const operationGeneration = ++this.#operationGeneration;
