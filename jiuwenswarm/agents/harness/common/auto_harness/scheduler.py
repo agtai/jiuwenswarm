@@ -385,6 +385,8 @@ class Scheduler:
                         )
                         self._running_executions[task_id] = exec_task
 
+                await self._recover_blocked_tasks()
+
                 await asyncio.sleep(60)
 
             except asyncio.CancelledError:
@@ -392,6 +394,30 @@ class Scheduler:
             except Exception as e:
                 logger.exception("[Scheduler] Loop error: %s", e)
                 await asyncio.sleep(60)
+
+    async def _recover_blocked_tasks(self) -> int:
+        """F17: 把可重建上下文的 blocked 任务翻回 pending(本轮不执行)。"""
+        rehydrate = getattr(
+            self._service, "rehydrate_scheduled_task_execution_context", None
+        )
+        if not callable(rehydrate):
+            return 0
+        recovered = 0
+        for task in list(self._task_store.list_tasks()):
+            if task.get("status") != "blocked":
+                continue
+            if task.get("origin_namespace") == "live_voice":
+                continue
+            task_id = task.get("task_id")
+            if not task_id or task_id in self._running_executions:
+                continue
+            if rehydrate(task_id, task.get("execution_descriptor")) is None:
+                continue
+            await self._task_store.update_task(
+                task_id, {"status": "pending", "last_error": None}
+            )
+            recovered += 1
+        return recovered
 
     async def _execute_scheduled_task(self, task: dict[str, Any]) -> None:
         """Execute a single scheduled task run.
@@ -461,19 +487,28 @@ class Scheduler:
             else None
         )
         if execution_context is None:
-            logger.error(
-                "[Scheduler] Task %s has no process-local execution context; "
-                "refusing mutable Agent fallback",
+            # F17: 先按持久化描述符 rehydrate;仍不可重建的进可恢复的
+            # blocked,绝不永久 failed(拒绝可变 Agent 兜底的立场不变)。
+            rehydrate = getattr(
+                self._service, "rehydrate_scheduled_task_execution_context", None
+            )
+            if callable(rehydrate):
+                execution_context = rehydrate(
+                    task_id, task.get("execution_descriptor")
+                )
+        if execution_context is None:
+            logger.warning(
+                "[Scheduler] Task %s has no rehydratable execution context; "
+                "parking it as blocked until configuration returns",
                 task_id,
             )
             current_execution = asyncio.current_task()
             if self._running_executions.get(task_id) is current_execution:
                 self._running_executions.pop(task_id, None)
             await self._task_store.update_task(task_id, {
-                "status": "failed",
+                "status": "blocked",
                 "current_execution_id": None,
-                "last_error": "任务执行上下文不可用；服务重启后请重新创建任务",
-                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "last_error": "任务执行上下文不可用；已置为 blocked，配置恢复后自动回到 pending",
             })
             return
 

@@ -762,6 +762,41 @@ class AutoHarnessService:
                 exc,
             )
 
+    def rehydrate_scheduled_task_execution_context(
+        self,
+        task_id: str,
+        descriptor: object,
+    ) -> Optional[ScheduledTaskExecutionContext]:
+        """F17: 重启后按持久化描述符重建执行上下文;不可重建返回 None。
+
+        live_voice 的一次性授权不可从陈旧进程态恢复(必须经 trigger_immediate
+        重新绑权);需要项目执行器的任务无法凭引用重建,同样交回 blocked。
+        """
+        if not isinstance(descriptor, dict) or descriptor.get("version") != 1:
+            return None
+        if descriptor.get("origin_namespace") == "live_voice":
+            return None
+        if descriptor.get("requires_project_executor"):
+            return None
+        if descriptor.get("agent_ref") != "root":
+            return None
+        agent = getattr(self, "_agent", None)
+        if agent is None:
+            return None
+        existing = self.get_scheduled_task_execution_context(task_id)
+        if existing is not None:
+            return existing
+        context = self._capture_scheduled_task_execution_context(agent, None, None)
+        if context is None:
+            return None
+        try:
+            self._bind_scheduled_task_execution_context(task_id, context)
+        except Exception:
+            if context.release is not None:
+                context.release()
+            return None
+        return context
+
     def clear_scheduled_task_execution_contexts(self) -> None:
         """Release all process-local task bindings during service shutdown."""
         contexts = getattr(self, "_scheduled_task_execution_contexts", {})
@@ -3606,6 +3641,14 @@ class AutoHarnessService:
             "idempotency_key": (
                 normalized_idempotency_key if idempotency_requested else None
             ),
+        }
+        # F17: 版本化不可变执行描述符——只存稳定引用,绝不存进程对象或
+        # 凭据;重启后 rehydrate 据此重建上下文,不能重建的进 blocked。
+        task_data["execution_descriptor"] = {
+            "version": 1,
+            "agent_ref": "root",
+            "requires_project_executor": project_executor is not None,
+            "origin_namespace": normalized_origin_namespace,
         }
         if execution_contract is not None:
             task_data["execution_contract"] = dict(execution_contract)

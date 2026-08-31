@@ -2737,10 +2737,10 @@ async def test_scheduler_refuses_mutable_agent_fallback_after_context_loss() -> 
     scheduler._running_executions[task_id] = execution
     await execution
 
-    assert task_store.tasks[task_id]["status"] == "failed"
-    assert task_store.tasks[task_id]["last_error"] == (
-        "任务执行上下文不可用；服务重启后请重新创建任务"
-    )
+    # F17: 拒绝可变 Agent 兜底的立场不变,但结局是可恢复的 blocked,
+    # 不再是要求用户重建任务的永久 failed。
+    assert task_store.tasks[task_id]["status"] == "blocked"
+    assert "blocked" in task_store.tasks[task_id]["last_error"]
     assert task_id not in scheduler._running_executions
 
 
@@ -2980,3 +2980,115 @@ async def test_task_store_reconciles_restart_orphan_running_as_failed(
     assert reloaded["execution_history"][-1]["status"] == "failed"
     assert reloaded["execution_history"][-1]["error"] == reloaded["last_error"]
     assert reloaded["execution_history"][-1]["completed_at"]
+
+
+def _root_descriptor(**updates: object) -> dict[str, object]:
+    descriptor: dict[str, object] = {
+        "version": 1,
+        "agent_ref": "root",
+        "requires_project_executor": False,
+        "origin_namespace": "internal",
+    }
+    descriptor.update(updates)
+    return descriptor
+
+
+@pytest.mark.asyncio
+async def test_run_task_persists_a_versioned_execution_descriptor() -> None:
+    """F17: 任务落库时携带版本化不可变执行描述符(无进程对象/凭据)。"""
+    store = _TaskStore()
+    service = _service(store, _Scheduler())
+
+    await service.run_task("持久化描述符", execution_agent=object())
+
+    assert store.added, "task was not persisted"
+    descriptor = store.added[0].get("execution_descriptor")
+    assert descriptor == {
+        "version": 1,
+        "agent_ref": "root",
+        "requires_project_executor": False,
+        "origin_namespace": store.added[0]["origin_namespace"],
+    }
+
+
+def test_rehydrate_rebuilds_root_agent_context_and_binds_once() -> None:
+    """F17: 描述符 v1 + 根 Agent 在场 → 重建并绑定;重复调用复用同一绑定。"""
+    service = _service(_TaskStore(), _Scheduler())
+    service._agent = object()
+
+    context = service.rehydrate_scheduled_task_execution_context(
+        "sch_rehydrate", _root_descriptor()
+    )
+    assert context is not None
+    assert context.agent is service._agent
+    assert (
+        service.get_scheduled_task_execution_context("sch_rehydrate") is context
+    )
+    again = service.rehydrate_scheduled_task_execution_context(
+        "sch_rehydrate", _root_descriptor()
+    )
+    assert again is context
+
+
+def test_rehydrate_refuses_unrebuildable_descriptors() -> None:
+    """F17: live_voice 一次性授权、项目执行器依赖、未知版本一律拒绝重建。"""
+    service = _service(_TaskStore(), _Scheduler())
+    service._agent = object()
+
+    assert (
+        service.rehydrate_scheduled_task_execution_context(
+            "sch_lv", _root_descriptor(origin_namespace="live_voice")
+        )
+        is None
+    )
+    assert (
+        service.rehydrate_scheduled_task_execution_context(
+            "sch_exec", _root_descriptor(requires_project_executor=True)
+        )
+        is None
+    )
+    assert (
+        service.rehydrate_scheduled_task_execution_context(
+            "sch_v2", _root_descriptor(version=2)
+        )
+        is None
+    )
+    assert service.rehydrate_scheduled_task_execution_context("sch_none", None) is None
+    assert service._scheduled_task_execution_contexts == {}
+
+
+@pytest.mark.asyncio
+async def test_blocked_task_recovers_to_pending_once_context_is_rebuildable() -> None:
+    """F17: 调度循环把可重建上下文的 blocked 任务翻回 pending;
+    不可重建(live_voice / 缺 Agent)的保持 blocked。"""
+    task_store = _TaskStore(
+        [
+            {
+                "task_id": "sch_blocked_ok",
+                "query": "恢复我",
+                "status": "blocked",
+                "execution_descriptor": _root_descriptor(),
+            },
+            {
+                "task_id": "sch_blocked_lv",
+                "query": "语音任务",
+                "status": "blocked",
+                "origin_namespace": "live_voice",
+                "execution_descriptor": _root_descriptor(
+                    origin_namespace="live_voice"
+                ),
+            },
+        ]
+    )
+    service = _service(task_store, _Scheduler())
+    service._agent = object()
+    scheduler = Scheduler(service, task_store)
+
+    recovered = await scheduler._recover_blocked_tasks()
+
+    assert recovered == 1
+    assert task_store.tasks["sch_blocked_ok"]["status"] == "pending"
+    assert task_store.tasks["sch_blocked_lv"]["status"] == "blocked"
+    assert (
+        service.get_scheduled_task_execution_context("sch_blocked_ok") is not None
+    )
