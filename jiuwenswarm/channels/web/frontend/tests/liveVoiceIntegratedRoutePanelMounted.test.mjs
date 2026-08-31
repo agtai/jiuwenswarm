@@ -14943,3 +14943,157 @@ test('mounted a failed answer retires its listening window so the next answer ge
     browser.restore();
   }
 });
+
+test('mounted recovery replays the retained interruption with its exact identity and already_settled stays non-fenced', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-generation-replay-settled-session';
+  const controlRef = { current: null };
+  const states = [];
+  const utterances = ['帮我讲一个很长的故事。'];
+  const responder = generationInterruptResponder({
+    utterances,
+    hold_answer_for: utterances,
+    answer_for: () => '很久很久以前……',
+  });
+  // First attempt is a result-unknown transport loss; the owner retains it.
+  responder.interruptRetriableOnce = true;
+  const originalRequest = responder.request;
+  let failNextNotificationDefinitively = false;
+  responder.request = async (method, params, options_) => {
+    if (method === 'live_voice.composition.p2.notification.next' && failNextNotificationDefinitively) {
+      failNextNotificationDefinitively = false;
+      throw Object.assign(new Error('notification route is closed'), { code: 'PERMISSION_DENIED' });
+    }
+    return originalRequest(method, params, options_);
+  };
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => responder.mediaBinding });
+  let renderer;
+
+  try {
+    const extraProps = {
+      productVoiceControlRef: controlRef,
+      states,
+      onProductVoiceStateChange: state => states.push(state),
+    };
+    await act(async () => {
+      renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
+    });
+    await act(async () => {
+      await browser.emitSpeechStart();
+      await waitForMounted(() => responder.interruptCalls.length === 1, 'speaking during generation did not interrupt it');
+      await new Promise(resolve => setTimeout(resolve, 40));
+    });
+
+    // The replay must observe ALREADY_SETTLED, not fenced.
+    responder.interruptAlreadySettled = true;
+    const statesBeforeReplay = states.length;
+    // Failing the parked notification poll drives P2 route recovery. During
+    // recovery, settlement replays the retained notification request before
+    // the retained interruption, so that replay fails definitively once and
+    // settlement reaches the interruption.
+    await act(async () => {
+      failNextNotificationDefinitively = true;
+      const waiter = responder.notificationWaiters.shift();
+      assert.ok(waiter, 'no parked notification poll to fail');
+      const rejection = Promise.reject(new Error('notification poll lost its route'));
+      rejection.catch(() => {});
+      waiter(rejection);
+      await waitForMounted(() => responder.interruptCalls.length === 2, 'route recovery did not replay the retained interruption');
+      await new Promise(resolve => setTimeout(resolve, 120));
+    });
+
+    // Exact-identity replay: one action ID, one target, no minted retry
+    // identity. (Presenting the old answer afterwards is impossible by design:
+    // presentation authority never crosses the activation generation that
+    // recovery replaces, so the withdrawn optimistic refusal is defense in
+    // depth behind that fence rather than a visible presentation here.)
+    const [first, second] = responder.interruptCalls;
+    assert.equal(second.action_id, first.action_id, 'a recovery replay must reuse the exact action identity');
+    assert.equal(second.response_id, first.response_id);
+    assert.equal(second.response_generation, first.response_generation);
+
+    // ALREADY_SETTLED fenced nothing: the settlement must not manufacture the
+    // fenced outcome (idle reset) for an answer the server left live.
+    const sawFencedReset = states.slice(statesBeforeReplay).some(state => state.text_status === 'idle');
+    assert.equal(
+      sawFencedReset,
+      false,
+      `an already_settled replay was settled as if fenced; states=${states
+        .slice(-8)
+        .map(state => `${state.p1_status}/${state.text_status}`)
+        .join(' | ')}`,
+    );
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('mounted replayed interruption that fenced clears the foreground so capture reopens', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-generation-replay-fenced-session';
+  const controlRef = { current: null };
+  const states = [];
+  const utterances = ['帮我讲一个很长的故事。'];
+  const responder = generationInterruptResponder({
+    utterances,
+    hold_answer_for: utterances,
+    answer_for: () => '很久很久以前……',
+  });
+  responder.interruptRetriableOnce = true;
+  const originalRequest = responder.request;
+  let failNextNotificationDefinitively = false;
+  responder.request = async (method, params, options_) => {
+    if (method === 'live_voice.composition.p2.notification.next' && failNextNotificationDefinitively) {
+      failNextNotificationDefinitively = false;
+      throw Object.assign(new Error('notification route is closed'), { code: 'PERMISSION_DENIED' });
+    }
+    return originalRequest(method, params, options_);
+  };
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => responder.mediaBinding });
+  let renderer;
+
+  try {
+    const extraProps = {
+      productVoiceControlRef: controlRef,
+      states,
+      onProductVoiceStateChange: state => states.push(state),
+    };
+    await act(async () => {
+      renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
+    });
+    await act(async () => {
+      await browser.emitSpeechStart();
+      await waitForMounted(() => responder.interruptCalls.length === 1, 'speaking during generation did not interrupt it');
+      await new Promise(resolve => setTimeout(resolve, 40));
+    });
+
+    // Recovery replays the retained interruption; this time the server fences
+    // the answer. The fenced foreground can no longer arrive, so the route
+    // must stop waiting for it instead of blocking capture forever.
+    await act(async () => {
+      failNextNotificationDefinitively = true;
+      const waiter = responder.notificationWaiters.shift();
+      assert.ok(waiter, 'no parked notification poll to fail');
+      const rejection = Promise.reject(new Error('notification poll lost its route'));
+      rejection.catch(() => {});
+      waiter(rejection);
+      await waitForMounted(() => responder.interruptCalls.length === 2, 'route recovery did not replay the retained interruption');
+      await new Promise(resolve => setTimeout(resolve, 80));
+    });
+
+    await act(async () => {
+      await waitForMountedDefault(
+        () => states.at(-1)?.text_status === 'idle',
+        `the fenced foreground kept the route waiting; states=${states
+          .slice(-8)
+          .map(state => `${state.p1_status}/${state.text_status}`)
+          .join(' | ')}`,
+        4_000,
+      );
+    });
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});

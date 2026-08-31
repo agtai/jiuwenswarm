@@ -1630,6 +1630,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const pendingGenerationInterruptRef = useRef<Readonly<{
     owner: ProductWebP2ActivationOwner;
     input: { action_id: string; response_id: string; response_generation: number };
+    // The full retained attempt: recovery replay settles through exactly the
+    // same foreground, capture window, loop generation and refusal identity
+    // as the original request, never through reconstructed state.
+    fence: PendingForegroundPresentationFence;
+    retained: Readonly<{
+      owner: ProductWebP2ActivationOwner;
+      fence: PendingForegroundPresentationFence;
+      loop_generation: number;
+    }>;
+    loop_generation: number;
+    interrupted_response_identity: string;
   }> | null>(null);
   /**
    * Whether this exact activation still owns an interruption that has not
@@ -2813,6 +2824,79 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     return disposition;
   };
 
+  /**
+   * Whether this exact attempt still owns its interruption's UI outcome. An
+   * interruption can settle long after the route that issued it stopped
+   * owning the foreground: the user can Exit, switch Session or hand the
+   * microphone to another tab while it is still on the wire. Its outcome may
+   * therefore only touch UI state that still belongs to that exact activation,
+   * Session and voice loop; a successor must never inherit it.
+   */
+  const ownsGenerationInterruptOutcome = (
+    pending: NonNullable<typeof pendingGenerationInterruptRef.current>,
+  ): boolean =>
+    mountedRef.current &&
+    activationOwnerRef.current === pending.owner &&
+    activeSessionRef.current === pending.fence.session_id &&
+    voiceLoopEnabledRef.current &&
+    voiceLoopGenerationRef.current === pending.loop_generation;
+
+  /**
+   * The one settlement for a generation interruption's outcome. The original
+   * request and every recovery replay route through here so a replayed
+   * `fence_status` clears or withdraws exactly like a first-attempt one.
+   */
+  const settleGenerationInterruptOutcome = (
+    pending: NonNullable<typeof pendingGenerationInterruptRef.current>,
+    outcome: unknown,
+  ): void => {
+    if (recordValue(outcome)?.fence_status !== 'fenced') {
+      // ALREADY_SETTLED: the target finished or was replaced on its own, so
+      // nothing was fenced and nothing was cancelled. That answer is still
+      // coming, so withdraw the optimistic refusal -- unless a successor
+      // submit already owns the foreground, whose refusal must never be
+      // reopened by a late settlement.
+      const foreground = pendingForegroundPresentationRef.current;
+      if (foreground === null || foreground === pending.fence) {
+        interruptedProductResponsesRef.current.delete(pending.interrupted_response_identity);
+      }
+      return;
+    }
+    // The fenced answer can no longer render, speak, be acknowledged or be
+    // written to history, so it stops owning the foreground. The utterance
+    // still being captured becomes an ordinary next turn at EOT.
+    if (pendingForegroundPresentationRef.current === pending.fence) {
+      pendingForegroundPresentationRef.current = null;
+    }
+    if (generationCaptureRef.current === pending.retained) generationCaptureRef.current = null;
+    if (ownsGenerationInterruptOutcome(pending)) {
+      // The fenced answer is gone and the replacement utterance is still
+      // being captured, so the route is waiting for input again, not for a
+      // response that can no longer arrive.
+      setProductOutput(null);
+      setProductTextStatus('idle');
+      setProductTextReason(null);
+    }
+  };
+
+  const settleGenerationInterruptFailure = (
+    pending: NonNullable<typeof pendingGenerationInterruptRef.current>,
+    error: unknown,
+  ): void => {
+    if (isDefinitiveProductOperationError(error)) {
+      // The server definitively refused, so it fenced nothing: the answer is
+      // still live and must not be silently dropped by our optimistic guess.
+      const foreground = pendingForegroundPresentationRef.current;
+      if (foreground === null || foreground === pending.fence) {
+        interruptedProductResponsesRef.current.delete(pending.interrupted_response_identity);
+      }
+    }
+    if (ownsGenerationInterruptOutcome(pending)) {
+      setProductTextReason(stableProductTextReason(error, 'PRODUCT_GENERATION_INTERRUPT_RECOVERY_REQUIRED'));
+      setProductTextStatus('failed');
+    }
+  };
+
   const settleRetainedP2Operations = async (
     owner: ProductWebP2ActivationOwner,
     options: Readonly<{ abandon_pending_notification?: boolean }> = {},
@@ -2906,15 +2990,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // Settled through the exact owner that issued it. `is_current` keeps a
       // retired Session or activation from resurrecting it against a successor.
       try {
-        await retryRetainedProductOperation({
+        const outcome = await retryRetainedProductOperation({
           operation: () => owner.interruptGeneration(pendingGenerationInterrupt.input),
           is_current: isCurrent,
         });
+        // The replayed outcome fences or withdraws exactly like the original
+        // request; ignoring `fence_status` here left the foreground waiting
+        // for a fenced answer or refusing a live one forever.
+        settleGenerationInterruptOutcome(pendingGenerationInterrupt, outcome);
         if (pendingGenerationInterruptRef.current === pendingGenerationInterrupt) {
           pendingGenerationInterruptRef.current = null;
         }
       } catch (error) {
         if (owner.hasPendingGenerationInterrupt()) throw error;
+        settleGenerationInterruptFailure(pendingGenerationInterrupt, error);
         if (pendingGenerationInterruptRef.current === pendingGenerationInterrupt) {
           pendingGenerationInterruptRef.current = null;
         }
@@ -5776,65 +5865,27 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       response_id: fence.response_id,
       response_generation: fence.response_generation,
     });
-    const pending = Object.freeze({ owner: p2Owner, input });
-    const loopGeneration = retained.loop_generation;
-    // An interruption can settle long after the route that issued it stopped
-    // owning the foreground: the user can Exit, switch Session or hand the
-    // microphone to another tab while it is still on the wire. Its outcome may
-    // therefore only touch UI state that still belongs to that exact activation,
-    // Session and voice loop; a successor must never inherit it.
-    const ownsInterruptionOutcome = () =>
-      mountedRef.current &&
-      activationOwnerRef.current === p2Owner &&
-      activeSessionRef.current === fence.session_id &&
-      voiceLoopEnabledRef.current &&
-      voiceLoopGenerationRef.current === loopGeneration;
+    const interruptedResponseIdentity = productResponseGenerationIdentity(input);
+    const pending = Object.freeze({
+      owner: p2Owner,
+      input,
+      fence,
+      retained,
+      loop_generation: retained.loop_generation,
+      interrupted_response_identity: interruptedResponseIdentity,
+    });
     pendingGenerationInterruptRef.current = pending;
     // Optimistic: recorded before the request leaves so an answer that crosses
     // it on the wire is refused by identity. It is only a guess that the server
-    // will fence anything, and it is withdrawn below whenever the server says
-    // it did not -- an answer the server left intact is a legitimate answer.
-    const interruptedResponseIdentity = productResponseGenerationIdentity(input);
+    // will fence anything, and it is withdrawn by the settlement whenever the
+    // server says it did not -- an answer the server left intact is a
+    // legitimate answer.
     retainBoundedPresentedProductResponse(interruptedProductResponsesRef.current, interruptedResponseIdentity);
-    const withdrawOptimisticRefusal = () => {
-      interruptedProductResponsesRef.current.delete(interruptedResponseIdentity);
-    };
     try {
       const outcome = await p2Owner.interruptGeneration(input);
-      if (recordValue(outcome)?.fence_status !== 'fenced') {
-        // ALREADY_SETTLED: the target finished or was replaced on its own, so
-        // nothing was fenced and nothing was cancelled. Its presentation is
-        // still valid, so withdraw the optimistic refusal and leave the
-        // foreground exactly as it was -- that answer is still coming and the
-        // route must stay able to receive, speak and acknowledge it.
-        withdrawOptimisticRefusal();
-        return;
-      }
-      // The fenced answer can no longer render, speak, be acknowledged or be
-      // written to history, so it stops owning the foreground. The utterance
-      // still being captured becomes an ordinary next turn at EOT.
-      if (pendingForegroundPresentationRef.current === fence) {
-        pendingForegroundPresentationRef.current = null;
-      }
-      if (generationCaptureRef.current === retained) generationCaptureRef.current = null;
-      if (ownsInterruptionOutcome()) {
-        // The fenced answer is gone and the replacement utterance is still
-        // being captured, so the route is waiting for input again, not for a
-        // response that can no longer arrive.
-        setProductOutput(null);
-        setProductTextStatus('idle');
-        setProductTextReason(null);
-      }
+      settleGenerationInterruptOutcome(pending, outcome);
     } catch (error) {
-      if (isDefinitiveProductOperationError(error)) {
-        // The server definitively refused, so it fenced nothing: the answer is
-        // still live and must not be silently dropped by our optimistic guess.
-        withdrawOptimisticRefusal();
-      }
-      if (ownsInterruptionOutcome()) {
-        setProductTextReason(stableProductTextReason(error, 'PRODUCT_GENERATION_INTERRUPT_RECOVERY_REQUIRED'));
-        setProductTextStatus('failed');
-      }
+      settleGenerationInterruptFailure(pending, error);
     } finally {
       // A retriable transport failure leaves the request unresolved inside the
       // owner. Clearing the ref here would strand it: only this ref lets
