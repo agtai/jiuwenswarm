@@ -544,3 +544,151 @@ async def test_stale_detached_cleanup_cannot_drop_a_successor_adapter() -> None:
     for _ in range(10):
         await asyncio.sleep(0)
     assert getattr(parent, "_session_adapters").get("sess-stale") is replacement
+
+
+# ---------------------------------------------------------------------------
+# F18 验收矩阵:在 create/start/reload 每个 await 注入失败与取消。
+# 断言:无孤儿残留(缓存清空、initializing 摘除、cleanup 实际执行),
+# 且同一 Session 的下一次调用成功拿到新 child。
+# reload 的"异常"档按既有契约被吞掉(记录 reload_failures、初始化照常成功)。
+# ---------------------------------------------------------------------------
+
+
+class _MatrixChildAdapter(_IdleChildAdapter):
+    """按位点注入 raise/park 的矩阵子适配器。"""
+
+    def __init__(self, behaviors: dict) -> None:
+        super().__init__()
+        self.behaviors = behaviors
+        self.entered: dict[str, asyncio.Event] = {
+            site: asyncio.Event() for site in ("create", "start", "reload")
+        }
+
+    async def _at(self, site: str) -> None:
+        self.entered[site].set()
+        behavior = self.behaviors.get(site)
+        if behavior is None:
+            return
+        kind, payload = behavior
+        if kind == "raise":
+            raise payload
+        if kind == "park":
+            await payload.wait()
+            raise asyncio.CancelledError()
+
+    async def create_instance(self, _config, *, mode, sub_mode) -> None:
+        await self._at("create")
+
+    async def start_interaction(self, *, session_id) -> None:
+        await self._at("start")
+
+    async def reload_agent_config(self, _config_base, _env, *, target_session_id) -> None:
+        await self._at("reload")
+
+
+def _matrix_parent(children: list[object], *, pending_reload: bool = False):
+    parent = _initialization_parent(children)
+    if pending_reload:
+        parent._session_adapter_config_version = 1
+        parent._pending_session_reload_config_base = {"reload": True}
+    return parent
+
+
+async def _settle_ticks(count: int = 10) -> None:
+    for _ in range(count):
+        await asyncio.sleep(0)
+
+
+def _assert_no_orphan(parent, sid: str) -> None:
+    assert getattr(parent, "_session_adapters").get(sid) is None
+    assert sid not in getattr(parent, "_session_adapter_initializing")
+    assert sid not in getattr(parent, "_session_adapter_failed_cleaning")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", ["create", "start"])
+async def test_matrix_exception_at_each_init_await_cleans_and_recovers(site) -> None:
+    failing = _MatrixChildAdapter({site: ("raise", RuntimeError(f"{site}_failed"))})
+    replacement = _ReadyChildAdapter()
+    parent = _matrix_parent([failing, replacement])
+
+    with pytest.raises(RuntimeError, match=f"{site}_failed"):
+        await getattr(parent, "_get_or_create_session_adapter")(f"sess-{site}-exc")
+
+    assert failing.cleaned is True
+    _assert_no_orphan(parent, f"sess-{site}-exc")
+
+    resolved = await getattr(parent, "_get_or_create_session_adapter")(
+        f"sess-{site}-exc"
+    )
+    assert resolved is replacement
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", ["create", "start"])
+async def test_matrix_cancellation_at_each_init_await_cleans_and_recovers(site) -> None:
+    gate = asyncio.Event()
+    parked = _MatrixChildAdapter({site: ("park", gate)})
+    replacement = _ReadyChildAdapter()
+    parent = _matrix_parent([parked, replacement])
+    sid = f"sess-{site}-cancel"
+
+    initialize = asyncio.create_task(
+        getattr(parent, "_get_or_create_session_adapter")(sid)
+    )
+    await asyncio.wait_for(parked.entered[site].wait(), timeout=2)
+    initialize.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await initialize
+    await _settle_ticks()
+
+    assert parked.cleaned is True
+    _assert_no_orphan(parent, sid)
+
+    resolved = await asyncio.wait_for(
+        getattr(parent, "_get_or_create_session_adapter")(sid), timeout=2
+    )
+    assert resolved is replacement
+
+
+@pytest.mark.asyncio
+async def test_matrix_reload_exception_is_swallowed_and_adapter_stays_ready() -> None:
+    """reload 异常按既有契约不失败初始化:记录 reload_failures,child 就绪。"""
+    child = _MatrixChildAdapter({"reload": ("raise", RuntimeError("reload_failed"))})
+    parent = _matrix_parent([child], pending_reload=True)
+    sid = "sess-reload-exc"
+
+    resolved = await getattr(parent, "_get_or_create_session_adapter")(sid)
+
+    assert resolved is child
+    assert child.cleaned is False
+    assert sid in getattr(parent, "_session_adapter_reload_failures")
+    assert getattr(parent, "_session_adapters").get(sid) is child
+    again = await getattr(parent, "_get_or_create_session_adapter")(sid)
+    assert again is child
+
+
+@pytest.mark.asyncio
+async def test_matrix_reload_cancellation_cleans_and_recovers() -> None:
+    gate = asyncio.Event()
+    parked = _MatrixChildAdapter({"reload": ("park", gate)})
+    replacement = _ReadyChildAdapter()
+    parent = _matrix_parent([parked, replacement], pending_reload=True)
+    sid = "sess-reload-cancel"
+
+    initialize = asyncio.create_task(
+        getattr(parent, "_get_or_create_session_adapter")(sid)
+    )
+    await asyncio.wait_for(parked.entered["reload"].wait(), timeout=2)
+    initialize.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await initialize
+    await _settle_ticks()
+
+    assert parked.cleaned is True
+    _assert_no_orphan(parent, sid)
+
+    resolved = await asyncio.wait_for(
+        getattr(parent, "_get_or_create_session_adapter")(sid), timeout=2
+    )
+    assert resolved is replacement
