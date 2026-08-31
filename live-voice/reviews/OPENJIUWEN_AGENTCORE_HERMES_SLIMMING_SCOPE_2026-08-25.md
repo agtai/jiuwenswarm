@@ -151,3 +151,71 @@ The preparation work is isolated on branch
 `hx/0812_live_voice_w3` must remain free of these candidate commits and local
 analysis files. Main remains the sole Integration Owner. No remote update is
 authorized by this scope.
+
+## 9. Zero-baseline flow audit correction — 2026-08-31
+
+The earlier module-disposition pass is not sufficient as a final slimming
+decision. It started from the modules already present in LiveVoice and then
+explained their necessity. That method can confuse a required product
+capability with a requirement for LiveVoice to implement that capability
+itself. The existing disposition, comparison and LOC statements are therefore
+**provisional** until the zero-baseline audit below closes.
+
+The corrective audit starts from observable flows and existing platform
+capabilities, in this order:
+
+1. reconstruct the current executable flow and identify the symbol that owns
+   each transition, state mutation and external effect;
+2. identify the equivalent Hermes client, inbound Adapter, gateway,
+   conversation, task and Agent responsibility on the pinned Hermes source;
+3. prove what JiuwenSwarm and the installed or locally prepared AgentCore
+   already provide through public contracts;
+4. only then decide whether LiveVoice needs a direct call, a thin Adapter, an
+   AgentCore PR candidate, a voice-specific implementation, a host/channel
+   integration, a split or retirement.
+
+The audit covers these complete flows rather than accepting directory names as
+module boundaries:
+
+- startup, configuration, composition and channel attachment;
+- capture, recognition and committed input;
+- Conversation Runtime, Agent invocation and history;
+- synthesis, playback, acknowledgement, interruption and presentation;
+- task intent, confirmation, command and admission;
+- Agent/Tool execution, progress, result and notification;
+- durability, restart recovery, reconnect and cursors; and
+- authority, permission, observability, failure and cleanup.
+
+Every tracked production path in the reproducible LiveVoice footprint must be
+accounted for exactly once. A mixed file is classified by responsibility and
+public symbol instead of being assigned wholesale to one layer. Every resulting
+row receives exactly one current disposition:
+
+- `DIRECT_REUSE`;
+- `ADAPT_REUSE`;
+- `AGENTCORE_PR`;
+- `LIVEVOICE_CORE_KEEP`;
+- `CHANNEL_ADAPTER_KEEP`;
+- `JIUWENSWARM_HOST_KEEP`;
+- `SPLIT_REQUIRED`; or
+- `CONSOLIDATE_RETIRE`.
+
+The LOC report must first verify the claimed aggregate rather than inherit it.
+It separates production, tests, fixtures/support, scripts and
+documentation/evidence, then partitions production into LiveVoice Core,
+channel Adapters, JiuwenSwarm host integration, AgentCore duplicate/candidate,
+legacy/transition and mixed-symbol responsibility. Generated output,
+dependencies and unrelated shared-file content are excluded explicitly. The
+production buckets must sum to the reported production total with zero missing
+or duplicate paths.
+
+Hermes does have browser/channel integration. Its `clients/browser`, Web demo,
+Dashboard plugin and inbound HTTP/WebSocket Adapters are compared with the
+JiuwenSwarm Web carrier as equivalent responsibility groups even though Hermes
+does not use the single label `Channel Adapter`. Browser/channel code may be
+part of the delivered LiveVoice product footprint while remaining outside
+channel-neutral LiveVoice Core.
+
+This correction changes the analysis standard, not product architecture or
+runtime authority. It authorizes no migration, code deletion, composition
+activation, AgentCore integration, remote update or feature-branch change.
