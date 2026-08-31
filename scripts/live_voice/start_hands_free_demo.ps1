@@ -19,6 +19,11 @@ param(
     [int]$GatewayPort = 19001,
     [ValidateRange(0, 65535)]
     [int]$FrontendPort = 0,
+    [ValidateSet('cascade', 'openai-realtime-native')]
+    [string]$InteractionEngine = 'cascade',
+    [ValidateLength(1, 256)]
+    [ValidatePattern('^[^\r\n]+$')]
+    [string]$NativeRealtimeModel = 'gpt-realtime-2.1-mini',
     [switch]$L0Measurement,
     [switch]$L0OrdinaryChromeBatch,
     [switch]$L0ResumeBatch,
@@ -847,6 +852,8 @@ try {
         LIVE_VOICE_SPEECH_PROVIDER                               = 'openai'
         LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED                    = '1'
         LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED                = '1'
+        LIVE_VOICE_INTERACTION_ENGINE                              = $InteractionEngine
+        LIVE_VOICE_NATIVE_REALTIME_MODEL                           = $NativeRealtimeModel
         PYTHONUTF8                                                = '1'
         PYTHONIOENCODING                                          = 'utf-8'
     }
@@ -1111,6 +1118,8 @@ try {
         project_binding_validated = $true
         project_remote_count      = $remotes.Count
         ports                     = $ExpectedPorts
+        interaction_engine        = $InteractionEngine
+        native_realtime_model     = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeRealtimeModel } else { $null }
         required_flags            = $validatedFlags
         executor_profile          = $ExecutorProfile
         credential                = 'ephemeral-process-only'
