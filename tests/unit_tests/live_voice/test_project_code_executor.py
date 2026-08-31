@@ -5897,3 +5897,83 @@ async def test_direct_dispatch_rejects_dirty_submodule_before_any_effect(
         assert adapter._journal.get(item.attempt_id) is None
     finally:
         await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_same_root_inspection_windows_are_serialized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F11: 同一项目根上的检查窗口(快照A→初始化fence→快照B→日志移交)必须
+    串行——当 attempt A 还停在 fence 里时,attempt B 的快照不得开始,否则
+    B 读到的是 A 初始化写到一半的根。"""
+    project = tmp_path / "serialized-project"
+    _git_project(project)
+
+    gate_a = asyncio.Event()
+    fence_entered = asyncio.Event()
+
+    async def gated_fence() -> None:
+        fence_entered.set()
+        await gate_a.wait()
+
+    binding_a = replace(
+        _direct_binding(project, _DirectProjectExecutor(project)),
+        dispatch_fence=gated_fence,
+    )
+    binding_b = _direct_binding(project, _DirectProjectExecutor(project))
+    bindings = iter([binding_a, binding_b])
+
+    class _SequencedResolver:
+        async def resolve(self, _spec, *, for_dispatch: bool):
+            assert for_dispatch is True
+            return next(bindings)
+
+    adapter = DirectProjectCodeExecutorAdapter(
+        _SequencedResolver(), tmp_path / "serialized.sqlite3"
+    )
+
+    windows: list[str] = []
+    original_manifest = project_code_executor._project_manifest
+
+    def observing_manifest(root):
+        windows.append("manifest")
+        return original_manifest(root)
+
+    monkeypatch.setattr(project_code_executor, "_project_manifest", observing_manifest)
+
+    item_a = replace(
+        _item(project),
+        outbox_id="outbox-a",
+        task_id="task-a",
+        attempt_id="attempt-a",
+        command_id="command-a",
+    )
+    item_b = replace(
+        _item(project),
+        outbox_id="outbox-b",
+        task_id="task-b",
+        attempt_id="attempt-b",
+        command_id="command-b",
+    )
+
+    try:
+        task_a = asyncio.create_task(adapter.dispatch(item_a))
+        await asyncio.wait_for(fence_entered.wait(), timeout=30)
+        task_b = asyncio.create_task(adapter.dispatch(item_b))
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+        assert windows == ["manifest"], (
+            f"a second same-root inspection interleaved with an open window: {windows}"
+        )
+        gate_a.set()
+        await asyncio.wait_for(task_a, timeout=60)
+        # B 在 A 之后进入自己的窗口。日志层的同根独占可能仍拒绝 B(A 的
+        # attempt 还在运行)——两种结局都合法,要守的只是"快照不交错"。
+        try:
+            await asyncio.wait_for(task_b, timeout=60)
+        except FormalTaskViolation as refused:
+            assert "active formal mutation attempt" in str(refused)
+        assert len(windows) >= 2
+    finally:
+        gate_a.set()
+        await adapter.close()

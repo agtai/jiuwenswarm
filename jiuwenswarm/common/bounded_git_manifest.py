@@ -158,57 +158,80 @@ class BoundedGitManifest:
         return digest.hexdigest()
 
 
+_MAX_CAPTURE_ATTEMPTS = 3
+
+
+def _capture_envelope(
+    root: Path,
+) -> tuple[str, tuple[GitIndexEntry, ...], tuple[GitStatusEntry, ...]]:
+    """One complete HEAD/index/status snapshot; two equal brackets prove the
+    repository state held still across the worktree reads between them."""
+    return _head_tree(root), _index_entries(root), _status_entries(root)
+
+
 def capture_bounded_git_manifest(root: str | Path) -> BoundedGitManifest:
-    """Capture a read-only Git manifest under the frozen B27 capacities."""
+    """Capture a read-only Git manifest under the frozen B27 capacities.
+
+    The HEAD/index/status envelope is captured before and after the worktree
+    reads and must match exactly. A bounded number of retries absorbs benign
+    concurrent churn; persistent instability fails closed rather than ever
+    returning a mixed snapshot (e.g. an old status bound to a new HEAD).
+    """
 
     canonical_root = Path(root).resolve()
     if not canonical_root.is_dir():
         raise GitManifestInspectionError("target is not a directory")
 
-    status_entries = _status_entries(canonical_root)
-    changed_paths = sorted({path for entry in status_entries for path in entry.paths})
-    if len(changed_paths) > MAX_CHANGED_PATHS:
-        raise GitManifestCapacityExceeded(
-            "changed_paths",
-            limit=MAX_CHANGED_PATHS,
-            observed=len(changed_paths),
+    for _attempt in range(_MAX_CAPTURE_ATTEMPTS):
+        envelope = _capture_envelope(canonical_root)
+        head_tree, index_entries, status_entries = envelope
+        changed_paths = sorted(
+            {path for entry in status_entries for path in entry.paths}
         )
+        if len(changed_paths) > MAX_CHANGED_PATHS:
+            raise GitManifestCapacityExceeded(
+                "changed_paths",
+                limit=MAX_CHANGED_PATHS,
+                observed=len(changed_paths),
+            )
 
-    index_entries = _index_entries(canonical_root)
-    index_modes: dict[str, str] = {}
-    for entry in index_entries:
-        if entry.stage == 0:
-            index_modes[entry.path] = entry.mode
-        elif entry.path not in index_modes and entry.mode == "160000":
-            index_modes[entry.path] = entry.mode
+        index_modes: dict[str, str] = {}
+        for entry in index_entries:
+            if entry.stage == 0:
+                index_modes[entry.path] = entry.mode
+            elif entry.path not in index_modes and entry.mode == "160000":
+                index_modes[entry.path] = entry.mode
 
-    worktree_entries: list[GitWorktreeEntry] = []
-    total_content_bytes = 0
-    for relative in changed_paths:
-        entry = _worktree_entry(
-            canonical_root,
-            relative,
-            index_mode=index_modes.get(relative),
+        worktree_entries: list[GitWorktreeEntry] = []
+        total_content_bytes = 0
+        for relative in changed_paths:
+            entry = _worktree_entry(
+                canonical_root,
+                relative,
+                index_mode=index_modes.get(relative),
+                total_content_bytes=total_content_bytes,
+            )
+            total_content_bytes += entry.content_bytes
+            if total_content_bytes > MAX_TOTAL_CONTENT_BYTES:
+                raise GitManifestCapacityExceeded(
+                    "total_content_bytes",
+                    limit=MAX_TOTAL_CONTENT_BYTES,
+                    observed=total_content_bytes,
+                )
+            worktree_entries.append(entry)
+
+        if _capture_envelope(canonical_root) != envelope:
+            continue
+        return BoundedGitManifest(
+            root=canonical_root,
+            head_tree=head_tree,
+            index_entries=index_entries,
+            status_entries=status_entries,
+            worktree_entries=tuple(worktree_entries),
+            changed_path_count=len(changed_paths),
             total_content_bytes=total_content_bytes,
         )
-        total_content_bytes += entry.content_bytes
-        if total_content_bytes > MAX_TOTAL_CONTENT_BYTES:
-            raise GitManifestCapacityExceeded(
-                "total_content_bytes",
-                limit=MAX_TOTAL_CONTENT_BYTES,
-                observed=total_content_bytes,
-            )
-        worktree_entries.append(entry)
-
-    return BoundedGitManifest(
-        root=canonical_root,
-        head_tree=_head_tree(canonical_root),
-        index_entries=index_entries,
-        status_entries=status_entries,
-        worktree_entries=tuple(worktree_entries),
-        changed_path_count=len(changed_paths),
-        total_content_bytes=total_content_bytes,
-    )
+    raise GitManifestInspectionError("repository changed during inspection")
 
 
 def _new_digest(projection: str) -> "hashlib._Hash":
@@ -447,6 +470,10 @@ def _worktree_entry(
         )
     if not stat.S_ISREG(metadata.st_mode):
         raise GitManifestInspectionError("worktree entry has an unsupported type")
+    if getattr(metadata, "st_reparse_tag", 0):
+        # A reparse point that is not a symlink (junction, mount point) would
+        # redirect the open to a target the lstat never described.
+        raise GitManifestInspectionError("worktree entry is a reparse point")
 
     if metadata.st_size > MAX_CONTENT_BYTES_PER_PATH:
         raise GitManifestCapacityExceeded(
@@ -455,20 +482,45 @@ def _worktree_entry(
             observed=metadata.st_size,
         )
     _enforce_total_capacity(metadata.st_size, total_content_bytes)
-    payload = _read_bounded_file(candidate)
-    _enforce_content_capacity(len(payload), total_content_bytes)
+    descriptor = _open_regular_no_follow(candidate)
     try:
-        after = candidate.lstat()
-    except OSError as error:
-        raise GitManifestInspectionError(
-            "worktree entry changed during inspection"
-        ) from error
-    if (
-        after.st_size != metadata.st_size
-        or after.st_mtime_ns != metadata.st_mtime_ns
-        or after.st_mode != metadata.st_mode
-    ):
-        raise GitManifestInspectionError("worktree entry changed during inspection")
+        opened = os.fstat(descriptor)
+        # The handle must be the exact file the lstat described: a swap with
+        # copied size+mtime still changes the (device, inode) file identity.
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+            or opened.st_size != metadata.st_size
+            or opened.st_mtime_ns != metadata.st_mtime_ns
+        ):
+            raise GitManifestInspectionError(
+                "worktree entry changed during inspection"
+            )
+        payload = _read_bounded_descriptor(descriptor)
+        after = os.fstat(descriptor)
+        if (
+            after.st_size != opened.st_size
+            or after.st_mtime_ns != opened.st_mtime_ns
+            or after.st_mode != opened.st_mode
+        ):
+            raise GitManifestInspectionError(
+                "worktree entry changed during inspection"
+            )
+        try:
+            resolved = os.lstat(candidate)
+        except OSError as error:
+            raise GitManifestInspectionError(
+                "worktree entry changed during inspection"
+            ) from error
+        # The path must still resolve to the file the handle hashed, or the
+        # manifest would describe content the tree no longer contains.
+        if (resolved.st_dev, resolved.st_ino) != (opened.st_dev, opened.st_ino):
+            raise GitManifestInspectionError(
+                "worktree entry changed during inspection"
+            )
+    finally:
+        os.close(descriptor)
+    _enforce_content_capacity(len(payload), total_content_bytes)
     if os.name == "nt" and index_mode in {"100644", "100755"}:
         mode = index_mode
     else:
@@ -482,22 +534,29 @@ def _worktree_entry(
     )
 
 
-def _read_bounded_file(path: Path) -> bytes:
+def _open_regular_no_follow(candidate: Path) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        return os.open(candidate, flags)
+    except OSError as error:
+        raise GitManifestInspectionError("worktree file is unreadable") from error
+
+
+def _read_bounded_descriptor(descriptor: int) -> bytes:
     payload = bytearray()
     try:
-        with path.open("rb") as stream:
-            while True:
-                remaining = MAX_CONTENT_BYTES_PER_PATH - len(payload)
-                chunk = stream.read(min(64 * 1024, remaining + 1))
-                if not chunk:
-                    break
-                payload.extend(chunk)
-                if len(payload) > MAX_CONTENT_BYTES_PER_PATH:
-                    raise GitManifestCapacityExceeded(
-                        "content_bytes_per_path",
-                        limit=MAX_CONTENT_BYTES_PER_PATH,
-                        observed=len(payload),
-                    )
+        while True:
+            remaining = MAX_CONTENT_BYTES_PER_PATH - len(payload)
+            chunk = os.read(descriptor, min(64 * 1024, remaining + 1))
+            if not chunk:
+                break
+            payload.extend(chunk)
+            if len(payload) > MAX_CONTENT_BYTES_PER_PATH:
+                raise GitManifestCapacityExceeded(
+                    "content_bytes_per_path",
+                    limit=MAX_CONTENT_BYTES_PER_PATH,
+                    observed=len(payload),
+                )
     except GitManifestCapacityExceeded:
         raise
     except OSError as error:

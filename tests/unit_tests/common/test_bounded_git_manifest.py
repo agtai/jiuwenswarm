@@ -283,3 +283,95 @@ def test_gitlink_junction_target_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(GitManifestInspectionError):
         capture_bounded_git_manifest(parent)
+
+
+def test_capture_retries_to_a_stable_envelope_when_head_moves_mid_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A HEAD/index/status mutation during the worktree reads must never yield
+    a mixed snapshot (old status bound to new HEAD); the capture retries and
+    returns the post-mutation stable envelope instead."""
+    from jiuwenswarm.common import bounded_git_manifest as module
+
+    project = tmp_path / "project"
+    _project(project)
+    (project / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+
+    original = module._worktree_entry
+    committed = {"done": False}
+
+    def committing_entry(root, relative, *, index_mode, total_content_bytes):
+        if not committed["done"]:
+            committed["done"] = True
+            _git(project, "add", ".")
+            _git(project, "commit", "-q", "-m", "mid-capture commit")
+        return original(
+            root, relative, index_mode=index_mode, total_content_bytes=total_content_bytes
+        )
+
+    monkeypatch.setattr(module, "_worktree_entry", committing_entry)
+
+    manifest = module.capture_bounded_git_manifest(project)
+
+    assert committed["done"] is True
+    assert manifest.status_entries == ()
+    assert manifest.worktree_entries == ()
+    assert manifest.head_tree == _git(project, "rev-parse", "HEAD^{tree}")
+
+
+def test_persistent_envelope_churn_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unbounded concurrent churn must exhaust the bounded retries and raise,
+    never return the last unstable result."""
+    import itertools
+
+    from jiuwenswarm.common import bounded_git_manifest as module
+
+    project = tmp_path / "project"
+    _project(project)
+
+    counter = itertools.count()
+    original_status = module._status_entries
+
+    def churning_status(root):
+        result = original_status(root)
+        (project / f"churn-{next(counter)}.txt").write_text("x\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(module, "_status_entries", churning_status)
+
+    with pytest.raises(GitManifestInspectionError, match="changed during inspection"):
+        module.capture_bounded_git_manifest(project)
+
+
+def test_same_metadata_path_swap_is_detected_by_file_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Swapping a different file over the path with copied size+mtime between
+    the lstat and the open must fail closed via handle/file identity, not pass
+    a metadata-only comparison."""
+    from jiuwenswarm.common import bounded_git_manifest as module
+
+    project = tmp_path / "project"
+    _project(project)
+    victim = project / "victim.txt"
+    victim.write_text("A" * 64, encoding="utf-8")
+
+    original_open = module._open_regular_no_follow
+    swapped = {"done": False}
+
+    def swapping_open(candidate):
+        if not swapped["done"] and Path(candidate).name == "victim.txt":
+            swapped["done"] = True
+            before = os.lstat(candidate)
+            replacement = project / "replacement.txt"
+            replacement.write_text("B" * 64, encoding="utf-8")
+            os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+            os.replace(replacement, candidate)
+        return original_open(candidate)
+
+    monkeypatch.setattr(module, "_open_regular_no_follow", swapping_open)
+
+    with pytest.raises(GitManifestInspectionError, match="changed during inspection"):
+        module.capture_bounded_git_manifest(project)

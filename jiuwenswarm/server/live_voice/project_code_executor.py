@@ -24,6 +24,7 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -2729,6 +2730,10 @@ class _RetainedAttemptCleanup:
     agent_release: Callable[[], Awaitable[None]] | None = None
     agent_acquire: asyncio.Task[AttemptProjectExecutorLease] | None = None
     coordinator: asyncio.Task[None] | None = None
+    # Monotonic instant the coordinator proved cleanup complete; capacity
+    # admission compares against it so a completion that lands mid-dispatch
+    # cannot retroactively free the slot for that same dispatch.
+    settled_at: float | None = None
 
 
 @dataclass(slots=True)
@@ -2881,7 +2886,19 @@ class DirectProjectCodeExecutorAdapter:
         self._retained_worktree_cleanups: dict[str, _RetainedAttemptCleanup] = {}
         self._adjustment_checkpoints: dict[str, _AdjustmentCheckpoint] = {}
         self._lifecycle_lock = asyncio.Lock()
+        # F11: one inspection lock per project root serializes the snapshot ->
+        # initializer fence -> after-snapshot -> journal handover window, so
+        # unrelated attempts against the same root cannot interleave their
+        # inspection reads with each other's initialization writes.
+        self._root_inspection_locks: dict[str, asyncio.Lock] = {}
         self._closed = False
+
+    def _root_inspection_lock(self, root: Path) -> asyncio.Lock:
+        key = _path_key(root)
+        lock = self._root_inspection_locks.get(key)
+        if lock is None:
+            lock = self._root_inspection_locks.setdefault(key, asyncio.Lock())
+        return lock
 
     @property
     def stream_observer_failure_count(self) -> int:
@@ -4562,30 +4579,45 @@ class DirectProjectCodeExecutorAdapter:
                 after_seq=item.source_seq,
                 selection=item.selection,
             )
-        before_manifest = await asyncio.to_thread(_project_manifest, root)
-        _reject_dirty_submodules(before_manifest)
-        before_tree = before_manifest.tree_fingerprint()
-        before_content = before_manifest.content_fingerprint()
-        self._redrive_retained_worktree_cleanups()
-        if len(self._retained_worktree_cleanups) >= _MAX_DIRECT_RUNNING_WORKERS:
-            raise FormalTaskViolation(
-                "EXECUTOR_CAPACITY_EXHAUSTED",
-                "direct project Executor retained-worker capacity is exhausted",
-                ErrorCode.UNAVAILABLE,
-            )
-        retained_workers = set(self._running)
-        retained_workers.update(self._retained_worktree_cleanups)
-        if len(retained_workers) >= _MAX_DIRECT_RUNNING_WORKERS:
-            raise FormalTaskViolation(
-                "EXECUTOR_CAPACITY_EXHAUSTED",
-                "direct project Executor retained-worker capacity is exhausted",
-                ErrorCode.UNAVAILABLE,
-            )
+        # F11: the whole inspection window -- before snapshot, initializer
+        # fence, after snapshot and journal ownership handover -- runs under
+        # the per-root lock so a concurrent attempt cannot interleave its
+        # reads with this attempt's initialization writes.
+        inspection_lock = self._root_inspection_lock(root)
+        await inspection_lock.acquire()
+        inspection_held = True
+        try:
+            admitted_at = time.monotonic()
+            before_manifest = await asyncio.to_thread(_project_manifest, root)
+            _reject_dirty_submodules(before_manifest)
+            before_tree = before_manifest.tree_fingerprint()
+            before_content = before_manifest.content_fingerprint()
+            self._redrive_retained_worktree_cleanups(admitted_at=admitted_at)
+            if len(self._retained_worktree_cleanups) >= _MAX_DIRECT_RUNNING_WORKERS:
+                raise FormalTaskViolation(
+                    "EXECUTOR_CAPACITY_EXHAUSTED",
+                    "direct project Executor retained-worker capacity is exhausted",
+                    ErrorCode.UNAVAILABLE,
+                )
+            retained_workers = set(self._running)
+            retained_workers.update(self._retained_worktree_cleanups)
+            if len(retained_workers) >= _MAX_DIRECT_RUNNING_WORKERS:
+                raise FormalTaskViolation(
+                    "EXECUTOR_CAPACITY_EXHAUSTED",
+                    "direct project Executor retained-worker capacity is exhausted",
+                    ErrorCode.UNAVAILABLE,
+                )
 
-        before_head = await asyncio.to_thread(_git_head, root)
-        protected_support = await asyncio.to_thread(_target_support_fingerprints, root)
-        governance = await asyncio.to_thread(_runtime_support_governance, root)
-        binding = await self._resolver.resolve(item.spec, for_dispatch=True)
+            before_head = await asyncio.to_thread(_git_head, root)
+            protected_support = await asyncio.to_thread(
+                _target_support_fingerprints, root
+            )
+            governance = await asyncio.to_thread(_runtime_support_governance, root)
+            binding = await self._resolver.resolve(item.spec, for_dispatch=True)
+        except BaseException:
+            inspection_lock.release()
+            inspection_held = False
+            raise
         release = (
             _ReleaseOnce(binding.context_release)
             if binding.context_release is not None
@@ -4681,6 +4713,10 @@ class DirectProjectCodeExecutorAdapter:
                     "direct Executor attempt is unavailable",
                     ErrorCode.NOT_FOUND,
                 )
+            # Ownership handover is complete; the worker owns the attempt from
+            # here, so the inspection window closes before the long execution.
+            inspection_held = False
+            inspection_lock.release()
             worker = asyncio.create_task(
                 self._run_attempt(
                     item,
@@ -4753,6 +4789,8 @@ class DirectProjectCodeExecutorAdapter:
                 )
             raise
         finally:
+            if inspection_held:
+                inspection_lock.release()
             if not worker_owns_release and release is not None:
                 release()
             if not worker_owns_ownership and ownership is not None:
@@ -5702,8 +5740,15 @@ class DirectProjectCodeExecutorAdapter:
 
         return tuple(sorted(self._retained_worktree_cleanups))
 
-    def _redrive_retained_worktree_cleanups(self) -> None:
-        """Re-drive settled worker cleanup without releasing unknown ownership."""
+    def _redrive_retained_worktree_cleanups(
+        self, *, admitted_at: float | None = None
+    ) -> None:
+        """Re-drive settled worker cleanup without releasing unknown ownership.
+
+        With ``admitted_at`` set, a cleanup proven complete only after that
+        instant keeps occupying its slot: the admitting dispatch's capacity
+        must not depend on how long its own inspection reads took.
+        """
 
         retained_slice: list[tuple[str, _RetainedAttemptCleanup]] = []
         for item in self._retained_worktree_cleanups.items():
@@ -5724,6 +5769,12 @@ class DirectProjectCodeExecutorAdapter:
                 except BaseException:  # noqa: BLE001 -- retained retry owns failure
                     pass
                 else:
+                    if admitted_at is not None and (
+                        cleanup.settled_at is None
+                        or cleanup.settled_at > admitted_at
+                    ):
+                        occupied_attempts.add(attempt_id)
+                        continue
                     if self._retained_worktree_cleanups.get(attempt_id) is cleanup:
                         self._retained_worktree_cleanups.pop(attempt_id, None)
                     continue
@@ -5768,6 +5819,12 @@ class DirectProjectCodeExecutorAdapter:
             name=f"live-voice-d0-retained-cleanup-{attempt_id}",
         )
         coordinator.add_done_callback(self._consume_attempt_cleanup_result)
+
+        def _record_settlement(task: asyncio.Task[None]) -> None:
+            if not task.cancelled() and task.exception() is None:
+                cleanup.settled_at = time.monotonic()
+
+        coordinator.add_done_callback(_record_settlement)
         cleanup.coordinator = coordinator
         return coordinator
 
