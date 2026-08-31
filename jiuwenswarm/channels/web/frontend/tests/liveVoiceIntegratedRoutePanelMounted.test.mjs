@@ -14355,6 +14355,65 @@ test('mounted already-settled interruption leaves its answer presentable', async
   }
 });
 
+test('mounted definitively-rejected interruption leaves its answer presentable', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-generation-definitive-rejection-session';
+  const controlRef = { current: null };
+  const states = [];
+  const utterances = ['帮我讲一个很长的故事。'];
+  const responder = generationInterruptResponder({
+    utterances,
+    hold_answer_for: utterances,
+    answer_for: () => '很久很久以前，有一座山。',
+  });
+  // The server definitively refused the interruption, so it fenced nothing.
+  // The optimistic refusal must be withdrawn: the answer is still live and
+  // must reach a definite presentation outcome instead of vanishing.
+  responder.interruptRejection = 'GENERATION_INTERRUPT_REFUSED';
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => responder.mediaBinding });
+  let renderer;
+
+  try {
+    const extraProps = {
+      productVoiceControlRef: controlRef,
+      states,
+      onProductVoiceStateChange: state => states.push(state),
+    };
+    await act(async () => {
+      renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
+    });
+    await act(async () => {
+      await browser.emitSpeechStart();
+      await waitForMounted(() => responder.interruptCalls.length === 1, 'speaking during generation did not interrupt it');
+      await new Promise(resolve => setImmediate(resolve));
+    });
+
+    const settledResponse = responder.submits[0].response;
+    const closures = () =>
+      responder.calls.filter(
+        call =>
+          ['live_voice.composition.p2.presentation.ack', 'live_voice.composition.p2.presentation.failed'].includes(call.method) &&
+          call.params.response_id === settledResponse.response_id,
+      ).length;
+    await act(async () => {
+      responder.releaseHeldAnswer(utterances[0]);
+      try {
+        await waitForMounted(() => closures() === 1, 'pending', 1_500);
+      } catch {
+        assert.fail(
+          `a definitively-unfenced answer was silently dropped instead of closed; calls=${responder.calls
+            .map(call => call.method.replace('live_voice.', ''))
+            .join(',')}`,
+        );
+      }
+    });
+    assert.equal(closures(), 1);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
 test('mounted Task notification stands down for the speaker and is spoken once they finish', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-generation-task-session';
