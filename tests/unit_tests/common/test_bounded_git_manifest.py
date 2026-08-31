@@ -253,3 +253,33 @@ def test_unregistered_nested_repository_is_not_a_marker_only_false_negative(
 
     with pytest.raises(GitManifestInspectionError, match="bounded submodule identity"):
         capture_bounded_git_manifest(project)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junction escapes are Windows reparse points")
+def test_gitlink_junction_target_fails_closed(tmp_path: Path) -> None:
+    """A gitlink path replaced by a junction must not run Git in the target."""
+    import shutil
+
+    child = tmp_path / "child"
+    _project(child)
+    parent = tmp_path / "parent"
+    _project(parent)
+    subprocess.run(
+        [
+            "git", "-C", str(parent), "-c", "protocol.file.allow=always",
+            "submodule", "add", child.resolve().as_posix(), "vendor/child",
+        ],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    _git(parent, "commit", "-q", "-m", "add submodule")
+    escape_target = tmp_path / "escape"
+    _project(escape_target)
+    submodule_path = parent / "vendor" / "child"
+    shutil.rmtree(submodule_path)
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(submodule_path), str(escape_target)],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+    with pytest.raises(GitManifestInspectionError):
+        capture_bounded_git_manifest(parent)

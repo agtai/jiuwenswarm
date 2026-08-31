@@ -513,6 +513,34 @@ def _project_tree_fingerprint(root: Path) -> str:
     return _project_manifest(root).tree_fingerprint()
 
 
+def _reject_dirty_submodules(manifest: BoundedGitManifest) -> None:
+    """Refuse dispatch while an initialized submodule holds dirty content.
+
+    The bounded manifest represents a gitlink only by its child HEAD, so
+    tracked modifications or untracked files inside the child are invisible
+    to the executor fingerprint: two different dirty states would replay as
+    the same attempt. A clean child on a different commit is representable
+    and stays dispatchable. Porcelain v2 marks a submodule entry with
+    ``S<c><m><u>``; ``m``/``u`` are the unrepresentable dirty states.
+    """
+
+    for entry in manifest.status_entries:
+        if len(entry.fields) < 2:
+            continue
+        submodule_state = entry.fields[1]
+        if (
+            len(submodule_state) == 4
+            and submodule_state[0] == "S"
+            and (submodule_state[2] == "M" or submodule_state[3] == "U")
+        ):
+            raise FormalTaskViolation(
+                "PROJECT_SUBMODULE_DIRTY",
+                "initialized submodule has uncommitted content the executor "
+                f"fingerprint cannot represent: {entry.path}",
+                ErrorCode.PERMISSION_DENIED,
+            )
+
+
 def _project_manifest(root: Path) -> BoundedGitManifest:
     try:
         return capture_bounded_git_manifest(root)
@@ -4535,6 +4563,7 @@ class DirectProjectCodeExecutorAdapter:
                 selection=item.selection,
             )
         before_manifest = await asyncio.to_thread(_project_manifest, root)
+        _reject_dirty_submodules(before_manifest)
         before_tree = before_manifest.tree_fingerprint()
         before_content = before_manifest.content_fingerprint()
         self._redrive_retained_worktree_cleanups()

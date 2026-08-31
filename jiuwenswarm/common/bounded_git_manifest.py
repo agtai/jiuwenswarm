@@ -419,6 +419,12 @@ def _worktree_entry(
         )
 
     if index_mode == "160000" and stat.S_ISDIR(metadata.st_mode):
+        if getattr(metadata, "st_reparse_tag", 0):
+            # A junction/mount-point at a gitlink path would make the child
+            # HEAD read run inside an arbitrary escape target. Fail closed.
+            raise GitManifestInspectionError(
+                "submodule path is a reparse point"
+            )
         raw_head = _run_git(candidate, "rev-parse", "--verify", "HEAD")
         assert raw_head is not None
         try:

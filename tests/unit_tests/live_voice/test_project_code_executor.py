@@ -5818,3 +5818,82 @@ async def test_missing_journal_stays_fail_closed_without_every_exact_fact(
             assert readiness.reason == "ATTEMPT_JOURNAL_MISSING", label
         assert _journal_dump(adapter) == before_journal, label
         assert _readiness_environment(project) == before_environment, label
+
+
+def _submodule_project(base: Path) -> tuple[Path, Path]:
+    """One parent repo with one initialized submodule checked out at vendor/child."""
+    child_origin = base / "child-origin"
+    _git_project(child_origin)
+    parent = base / "parent"
+    _git_project(parent)
+    _git(
+        parent,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        child_origin.resolve().as_posix(),
+        "vendor/child",
+    )
+    _git(parent, "commit", "-m", "add submodule")
+    return parent, parent / "vendor" / "child"
+
+
+def test_tracked_submodule_modification_is_rejected(tmp_path: Path) -> None:
+    parent, child = _submodule_project(tmp_path)
+    (child / "README.md").write_text("tracked modification\n", encoding="utf-8")
+    manifest = project_code_executor._project_manifest(parent)
+    with pytest.raises(FormalTaskViolation) as raised:
+        project_code_executor._reject_dirty_submodules(manifest)
+    assert raised.value.reason == "PROJECT_SUBMODULE_DIRTY"
+
+
+def test_untracked_submodule_content_is_rejected(tmp_path: Path) -> None:
+    parent, child = _submodule_project(tmp_path)
+    (child / "scratch.txt").write_text("untracked\n", encoding="utf-8")
+    manifest = project_code_executor._project_manifest(parent)
+    with pytest.raises(FormalTaskViolation) as raised:
+        project_code_executor._reject_dirty_submodules(manifest)
+    assert raised.value.reason == "PROJECT_SUBMODULE_DIRTY"
+
+
+def test_clean_submodule_on_new_commit_stays_dispatchable(tmp_path: Path) -> None:
+    """A clean child HEAD is representable by the manifest and must pass."""
+    parent, child = _submodule_project(tmp_path)
+    (child / "README.md").write_text("advanced\n", encoding="utf-8")
+    _git(child, "add", ".")
+    _git(child, "commit", "-m", "advance child")
+    manifest = project_code_executor._project_manifest(parent)
+    project_code_executor._reject_dirty_submodules(manifest)
+
+
+def test_pristine_submodule_project_stays_dispatchable(tmp_path: Path) -> None:
+    parent, _child = _submodule_project(tmp_path)
+    manifest = project_code_executor._project_manifest(parent)
+    project_code_executor._reject_dirty_submodules(manifest)
+
+
+@pytest.mark.asyncio
+async def test_direct_dispatch_rejects_dirty_submodule_before_any_effect(
+    tmp_path: Path,
+) -> None:
+    parent, child = _submodule_project(tmp_path / "repos")
+    (child / "README.md").write_text("tracked modification\n", encoding="utf-8")
+    executor = _DirectProjectExecutor(parent)
+    resolver = _Resolver(_direct_binding(parent, executor))
+    adapter = DirectProjectCodeExecutorAdapter(
+        resolver,
+        tmp_path / "dirty-submodule.sqlite3",
+    )
+    item = replace(_item(parent), selection=_direct_selection())
+
+    try:
+        with pytest.raises(FormalTaskViolation) as rejected:
+            await adapter.dispatch(item)
+
+        assert rejected.value.reason == "PROJECT_SUBMODULE_DIRTY"
+        assert resolver.calls == []
+        assert executor.requests == []
+        assert adapter._journal.get(item.attempt_id) is None
+    finally:
+        await adapter.close()
