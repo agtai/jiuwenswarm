@@ -2789,8 +2789,6 @@ class AgentServerProductCompositionRegistry:
                 reservation_id,
                 phase,
             )
-            if phase == "close" and receipt.active is False:
-                self._task_presentation_runtime_routes.pop(response_ref, None)
             return receipt
 
     def _record_closed_task_presentation(
@@ -2918,6 +2916,7 @@ class AgentServerProductCompositionRegistry:
                 )
                 self._task_presentation_runtime_routes.pop(response_ref, None)
                 self._task_presentation_deliveries.pop(response_ref, None)
+                progress_delivery.closed = True
 
     def _close_task_presentations_for_progress_route(
         self,

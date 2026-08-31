@@ -305,6 +305,21 @@ exact-source Alpha result.
   repository diff checks. Stable patch IDs match for all nine product/test
   commits; the scoped [migration evidence](evidence/P3_9_W3_MIGRATION_EVIDENCE_20260825.md)
   records the exact commands, conflict disposition and invalid diagnostic run.
+- **2026-08-31 terminal-notification cleanup:** assisted logs proved that a
+  Session successor could not activate P3 because old P2 cleanup removed the
+  shared Task presentation while its paired `_ProgressDelivery` remained open;
+  the later P3 cleanup then attempted a deterministic second close. The scoped
+  repair settles that shared delivery exactly once after P2 records the closed
+  fence. It also retains the exact Runtime route across a partial
+  close/closed-record-capacity failure so the same reservation can be replayed
+  and cleaned instead of losing retry authority. Direct close, capacity
+  exhaustion/retry, real audio-ACK race and retained P3 cleanup retry pass
+  `4/4`; the complete Registry file printed `186/186` passed, Integrated Web
+  exited cleanly at `487/487`, and Ruff/compile/diff checks pass. The Registry
+  runner's existing post-suite teardown did not exit after all results printed,
+  so this records completed item output rather than a false clean process exit.
+  Scoped independent repair re-review is `Critical 0 / Important 0 / Minor 0`
+  and `Ready`; it does not replace the final cumulative P3-9 review Gate.
 - **Remaining Gate:** implementation and automated task work are complete. Run
   the required human acceptance, including the visible formal P3 panel and the
   separate user-confirmed real voice journey, then obtain final independent

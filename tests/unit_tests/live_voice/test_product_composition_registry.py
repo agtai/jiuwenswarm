@@ -9775,6 +9775,170 @@ async def test_audio_ack_wins_progress_close_race_and_consumes_once(
     await registry.stop()
 
 
+@pytest.mark.parametrize(
+    "close_capacity_blocked",
+    [False, True],
+    ids=["direct-close", "capacity-retry"],
+)
+@pytest.mark.asyncio
+async def test_p2_close_settles_shared_task_presentation_before_progress_close(
+    tmp_path: Path,
+    close_capacity_blocked: bool,
+) -> None:
+    project, store, task_id, source_events = _running_presentation_store(tmp_path)
+    composition = _P3Composition(project, presentation_store=store)
+    composition.subscription_events = source_events
+    manager = _AgentManager()
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
+        p3_composition=composition,
+        agent_manager=manager,
+        push_text_event=push,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-p2-first-close-p2",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    registry._voice_task_origins[task_id] = _VoiceTaskOrigin(
+        session_id=SCOPE.session_id or "",
+        interaction_id="interaction-1",
+        activation_id="activation-1",
+        activation_generation=1,
+        correlation_id="correlation-p2",
+        response_ref=ResponseRef("interaction-1", "response-origin", 0),
+    )
+    progress_params = _progress_params(
+        task_id=task_id,
+        correlation_id="correlation-p2",
+        origin_id="interaction-1",
+        origin_kind="voice",
+        generation_id="voice-progress-generation-p2-first-close",
+    )
+    activated = await registry.handle_p3_progress_activate(
+        params=progress_params,
+        request_id="request-p2-first-close-progress",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert activated.ok
+    retained_progress = next(iter(registry._progress_routes.values()))
+    for _ in range(200):
+        with registry._task_presentation_state_lock:
+            delivered = bool(registry._task_presentation_deliveries)
+        if (
+            delivered
+            or retained_progress.progress_lease.snapshot().pending_voice_intents
+        ):
+            break
+        await asyncio.sleep(0.01)
+    with registry._task_presentation_state_lock:
+        delivered = bool(registry._task_presentation_deliveries)
+    if not delivered:
+        assert await retained_progress.progress_lease.drain_voice() == 1
+
+    for _ in range(200):
+        with registry._task_presentation_state_lock:
+            if registry._task_presentation_deliveries:
+                break
+        await asyncio.sleep(0.01)
+    with registry._task_presentation_state_lock:
+        assert len(registry._task_presentation_deliveries) == 1
+        progress_delivery, presentation = next(
+            iter(registry._task_presentation_deliveries.values())
+        )
+        assert presentation.presentation_class == "voice"
+        if close_capacity_blocked:
+            for index in range(registry._PROGRESS_DELIVERY_CAPACITY):
+                filler_ref = ResponseRef(
+                    f"closed-capacity-interaction-{index}",
+                    f"closed-capacity-response-{index}",
+                    presentation.response_ref.response_generation,
+                )
+                filler = replace(
+                    presentation,
+                    response_ref=filler_ref,
+                    delivery_id=f"closed-capacity-delivery-{index}",
+                    unit_id=f"closed-capacity-unit-{index}",
+                )
+                registry._closed_task_presentations[filler_ref] = (filler, False)
+    task_before = store.get_task(task_id, SCOPE)
+
+    p2_closed = await registry.handle_p2_close(
+        params=_p2_params(),
+        request_id="request-p2-first-close-p2-close",
+        session_id=SCOPE.session_id,
+    )
+    if close_capacity_blocked:
+        assert not p2_closed.ok
+        assert cast(dict[str, object], p2_closed.payload["error"])["reason"] == (
+            "PRODUCT_P2_CLEANUP_PENDING"
+        )
+        with registry._task_presentation_state_lock:
+            assert (
+                presentation.response_ref
+                in registry._task_presentation_runtime_routes
+            )
+            assert presentation.response_ref in registry._task_presentation_deliveries
+            filler_ref, (filler, _consumed) = next(
+                iter(registry._closed_task_presentations.items())
+            )
+            registry._closed_task_presentations[filler_ref] = (filler, True)
+        assert progress_delivery.closed is False
+        assert store.get_task(task_id, SCOPE) == task_before
+        p2_closed = await registry.handle_p2_close(
+            params=_p2_params(),
+            request_id="request-p2-first-close-p2-close-retry",
+            session_id=SCOPE.session_id,
+        )
+    assert p2_closed.ok
+    assert progress_delivery.closed is True
+    close_params = dict(progress_params)
+    close_params.pop("origin_kind")
+    progress_closed = await registry.handle_p3_progress_close(
+        params=close_params,
+        request_id="request-p2-first-close-progress-close",
+        session_id=SCOPE.session_id,
+    )
+    assert progress_closed.ok
+
+    late_ack = await registry.handle_p2_presentation_ack(
+        params=_p2_params(
+            response_id=presentation.response_ref.response_id,
+            response_generation=presentation.response_ref.response_generation,
+            surface="audio",
+            unit_id=presentation.unit_id,
+            contiguous_cursor=0,
+            presented_at=ACK_NOW,
+        ),
+        request_id="request-p2-first-close-late-ack",
+        session_id=SCOPE.session_id,
+    )
+    assert not late_ack.ok
+    assert cast(dict[str, object], late_ack.payload["error"])["reason"] == (
+        "PRODUCT_P2_ROUTE_NOT_FOUND"
+    )
+    with registry._task_presentation_state_lock:
+        assert presentation.response_ref not in registry._task_presentation_runtime_routes
+        assert presentation.response_ref not in registry._task_presentation_deliveries
+    assert store.get_task(task_id, SCOPE) == task_before
+    assert (
+        store.unread_events_page(
+            task_id, SCOPE, presentation_class="voice", limit=500
+        ).watermark
+        == -1
+    )
+    assert manager.agent.calls == 0
+    await registry.stop()
+
+
 @pytest.mark.asyncio
 async def test_agent_ack_drains_deferred_voice_task_presentation(
     tmp_path: Path,
