@@ -1397,8 +1397,10 @@ class OpenAIRealtimeNativeInteractionEngine:
             field_name="input transcript item id",
         )
         usage = data.get("usage")
-        if data["content_index"] != 0 or (
-            usage is not None and not isinstance(usage, Mapping)
+        if (
+            type(data["content_index"]) is not int
+            or data["content_index"] != 0
+            or (usage is not None and not isinstance(usage, Mapping))
         ):
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_INPUT_TRANSCRIPT_INVALID",
@@ -1412,7 +1414,23 @@ class OpenAIRealtimeNativeInteractionEngine:
             )
         canonical = transcript.strip().replace("\r\n", "\n").replace("\r", "\n")
         canonical = " ".join(canonical.split("\n"))
-        if not canonical or any(
+        if not canonical:
+            try:
+                blank_encoded = transcript.encode("utf-8")
+            except UnicodeEncodeError:
+                blank_encoded = b"x" * 65_537
+            if len(blank_encoded) > 65_536:
+                raise OpenAIRealtimeNativeInteractionError(
+                    "NATIVE_INPUT_TRANSCRIPT_INVALID",
+                    "input transcript is oversized",
+                )
+            # Input transcription is asynchronous guidance rather than the
+            # authoritative audio turn.  A provider may complete it without
+            # usable text; release the ordered terminal without closing audio.
+            return self._record_failed_input_transcription(
+                item_id=item_id, provider_event_id=event.event_id
+            )
+        if any(
             unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
             for character in canonical
         ):
@@ -1479,7 +1497,8 @@ class OpenAIRealtimeNativeInteractionEngine:
         )
         error = data["error"]
         if (
-            data["content_index"] != 0
+            type(data["content_index"]) is not int
+            or data["content_index"] != 0
             or not isinstance(error, Mapping)
             or set(error) != {"type", "code", "message", "param"}
         ):
@@ -1501,6 +1520,13 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_INPUT_TRANSCRIPT_FAILURE_INVALID",
                 "input transcript failure details are invalid",
             )
+        return self._record_failed_input_transcription(
+            item_id=item_id, provider_event_id=event.event_id
+        )
+
+    def _record_failed_input_transcription(
+        self, *, item_id: str, provider_event_id: str
+    ) -> list[NativeEngineEvent]:
         if (
             item_id in self._input_transcripts_by_item
             or item_id in self._pending_input_transcripts
@@ -1511,7 +1537,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             )
         prior = self._failed_input_transcriptions_by_item.get(item_id)
         if prior is not None:
-            if prior == event.event_id:
+            if prior == provider_event_id:
                 return []
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_INPUT_TRANSCRIPT_CONFLICT",
@@ -1529,7 +1555,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             len(self._failed_input_transcriptions_by_item),
             "NATIVE_INPUT_TRANSCRIPT_LEDGER_FULL",
         )
-        self._failed_input_transcriptions_by_item[item_id] = event.event_id
+        self._failed_input_transcriptions_by_item[item_id] = provider_event_id
         return self._release_ordered_input_transcription_terminals()
 
     def _release_ordered_input_transcription_terminals(

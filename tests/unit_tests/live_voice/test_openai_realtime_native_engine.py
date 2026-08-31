@@ -458,6 +458,128 @@ async def test_failed_earlier_transcription_releases_later_completed_turn() -> N
 
 
 @pytest.mark.asyncio
+async def test_blank_completed_transcription_is_nonfatal_and_releases_later_turn() -> (
+    None
+):
+    engine, _socket, _factory = active_engine(
+        speech_started("event-1-start", "user-item-1", 0),
+        speech_stopped("event-1-stop", "user-item-1", 20),
+        input_committed("event-1-commit", "user-item-1"),
+        speech_started("event-2-start", "user-item-2", 20),
+        speech_stopped("event-2-stop", "user-item-2", 40),
+        input_committed("event-2-commit", "user-item-2"),
+        input_transcript_completed("event-transcript-2", "user-item-2", "第二句。"),
+        input_transcript_completed("event-transcript-1-blank", "user-item-1", " \r\n "),
+    )
+    await engine.start()
+    for _ in range(6):
+        assert (await engine.next_event()).action is not None
+
+    assert await engine.next_event() == NativeEngineEvent()
+    released = await engine.next_event()
+
+    assert released.input_transcript is not None
+    assert released.input_transcript.provider_item_id == "user-item-2"
+    assert released.input_transcript.transcript == "第二句。"
+    assert engine.snapshot().state is not NativeProviderState.FAILED
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_nonblank_input_transcript_control_still_fails_closed() -> None:
+    engine, _socket, _factory = active_engine(
+        speech_started("event-1-start", "user-item-1", 0),
+        speech_stopped("event-1-stop", "user-item-1", 20),
+        input_committed("event-1-commit", "user-item-1"),
+        input_transcript_completed(
+            "event-transcript-1-unsafe", "user-item-1", "unsafe\x00transcript"
+        ),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.next_event()
+
+    assert raised.value.reason == "NATIVE_INPUT_TRANSCRIPT_INVALID"
+    assert engine.snapshot().state is NativeProviderState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_oversized_blank_input_transcript_still_fails_closed() -> None:
+    engine, _socket, _factory = active_engine(
+        speech_started("event-1-start", "user-item-1", 0),
+        speech_stopped("event-1-stop", "user-item-1", 20),
+        input_committed("event-1-commit", "user-item-1"),
+        input_transcript_completed(
+            "event-transcript-1-oversized", "user-item-1", " " * 65_537
+        ),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    before = engine.snapshot()
+
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.next_event()
+
+    assert raised.value.reason == "NATIVE_INPUT_TRANSCRIPT_INVALID"
+    assert engine.snapshot().turn_count == before.turn_count
+    assert engine.snapshot().state is NativeProviderState.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_index", [False, 0.0, 1])
+async def test_blank_input_transcript_requires_exact_primary_integer_index(
+    content_index: object,
+) -> None:
+    transcript = input_transcript_completed(
+        "event-transcript-1-index", "user-item-1", " "
+    )
+    transcript["content_index"] = content_index
+    engine, _socket, _factory = active_engine(
+        speech_started("event-1-start", "user-item-1", 0),
+        speech_stopped("event-1-stop", "user-item-1", 20),
+        input_committed("event-1-commit", "user-item-1"),
+        transcript,
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    before = engine.snapshot()
+
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.next_event()
+
+    assert raised.value.reason == "NATIVE_INPUT_TRANSCRIPT_INVALID"
+    assert engine.snapshot().turn_count == before.turn_count
+    assert engine.snapshot().state is NativeProviderState.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_index", [False, 0.0, 1])
+async def test_failed_input_transcript_requires_exact_primary_integer_index(
+    content_index: object,
+) -> None:
+    failure = input_transcript_failed("event-transcript-1-failed", "user-item-1")
+    failure["content_index"] = content_index
+    engine, _socket, _factory = active_engine(
+        speech_started("event-1-start", "user-item-1", 0),
+        speech_stopped("event-1-stop", "user-item-1", 20),
+        input_committed("event-1-commit", "user-item-1"),
+        failure,
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    before = engine.snapshot()
+
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.next_event()
+
+    assert raised.value.reason == "NATIVE_INPUT_TRANSCRIPT_FAILURE_INVALID"
+    assert engine.snapshot().turn_count == before.turn_count
+    assert engine.snapshot().state is NativeProviderState.FAILED
+
+
+@pytest.mark.asyncio
 async def test_provider_input_item_identity_cannot_be_reused_for_another_turn() -> None:
     engine, _socket, _factory = active_engine(
         speech_started("event-1-start", "user-item-1", 0),
