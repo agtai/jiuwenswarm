@@ -718,19 +718,26 @@ class AutoHarnessService:
         self,
         candidate_task_id: str,
         persisted_task_id: str,
-    ) -> bool:
-        """Move a replay candidate binding to one persisted pending task."""
+    ) -> str:
+        """Move a replay candidate binding to one persisted pending task.
+
+        Returns ``"ADOPTED"`` when the caller's own candidate now owns the
+        persisted task, ``"ALREADY_BOUND"`` when another call's binding is
+        already in place (the candidate is released; the existing binding is
+        not the caller's to touch), and ``"MISSING"`` when the caller has no
+        candidate and nothing is bound.
+        """
 
         contexts = getattr(self, "_scheduled_task_execution_contexts", {})
         context = contexts.pop(candidate_task_id, None)
-        if context is None:
-            return False
         if persisted_task_id in contexts:
-            if context.release is not None:
+            if context is not None and context.release is not None:
                 context.release()
-            return False
+            return "ALREADY_BOUND"
+        if context is None:
+            return "MISSING"
         contexts[persisted_task_id] = context
-        return True
+        return "ADOPTED"
 
     def get_scheduled_task_execution_context(
         self,
@@ -3654,27 +3661,44 @@ class AutoHarnessService:
                         and persisted_task_id
                         and replay_status == "pending"
                     ):
-                        adopted = self._adopt_scheduled_task_execution_context(
+                        adoption = self._adopt_scheduled_task_execution_context(
                             task_id,
                             persisted_task_id,
                         )
-                        try:
-                            triggered = bool(
-                                adopted
-                                and self._scheduler is not None
-                                and await self._scheduler.trigger_immediate(
+                        if adoption == "ALREADY_BOUND":
+                            # The winning call's binding is in place and is not
+                            # this follower's to release or trigger.  Hand back
+                            # the idempotent replay and let the winner's own
+                            # dispatch drive the execution.
+                            latest = (
+                                self._task_store.get_task(persisted_task_id) or {}
+                            )
+                            store_result = {**store_result, "task": latest}
+                            return _build_schedule_run_replay_payload(
+                                store_result,
+                                normalized_origin_namespace,
+                            )
+                        if adoption == "ADOPTED":
+                            try:
+                                triggered = bool(
+                                    self._scheduler is not None
+                                    and await self._scheduler.trigger_immediate(
+                                        persisted_task_id
+                                    )
+                                )
+                            except Exception as exc:
+                                # Releasing here touches only the binding this
+                                # call just adopted from its own candidate.
+                                self.release_scheduled_task_execution_context(
                                     persisted_task_id
                                 )
-                            )
-                        except Exception as exc:
-                            self.release_scheduled_task_execution_context(
-                                persisted_task_id
-                            )
-                            return {
-                                "error": f"formal task replay trigger failed: {exc}",
-                                "code": "EXECUTOR_DELIVERY_UNAVAILABLE",
-                                "task_id": persisted_task_id,
-                            }
+                                return {
+                                    "error": f"formal task replay trigger failed: {exc}",
+                                    "code": "EXECUTOR_DELIVERY_UNAVAILABLE",
+                                    "task_id": persisted_task_id,
+                                }
+                        else:
+                            triggered = False
                         latest = self._task_store.get_task(persisted_task_id) or {}
                         is_execution_active = getattr(
                             self._scheduler, "is_execution_active", None
@@ -3684,9 +3708,10 @@ class AutoHarnessService:
                             and is_execution_active(persisted_task_id)
                         )
                         if not triggered and not active:
-                            self.release_scheduled_task_execution_context(
-                                persisted_task_id
-                            )
+                            if adoption == "ADOPTED":
+                                self.release_scheduled_task_execution_context(
+                                    persisted_task_id
+                                )
                             if latest.get("status") not in TERMINAL_STATUSES:
                                 return {
                                     "error": "formal task replay could not resume execution",

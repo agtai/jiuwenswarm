@@ -746,6 +746,59 @@ async def test_live_voice_pending_replay_releases_binding_when_terminal_wins_rac
 
 
 @pytest.mark.asyncio
+async def test_live_voice_pending_replay_leaves_winner_binding_untouched(
+    tmp_path,
+) -> None:
+    """A same-command follower may release only its own candidate context.
+
+    The winner has created the task and still holds its execution-context
+    binding while the scheduler has not started the execution yet.  The
+    follower's replay must return the idempotent replay payload and must not
+    release the winner's binding, trigger the scheduler, or fail the call.
+    """
+    project_dir, execution_target = _create_git_project(tmp_path)
+    project_kwargs = _project_run_kwargs(project_dir, execution_target)
+    store_dir = tmp_path / "store"
+    scheduler = _Scheduler()
+    service = _service(PersistentTaskStore(store_dir), scheduler)
+    winner_agent = object()
+    winner_releases: list[str] = []
+    winner = await service.run_task(
+        "durable formal task",
+        execution_agent=winner_agent,
+        context_release=lambda: winner_releases.append("winner"),
+        owner_scope=_OWNER_SCOPE,
+        origin_namespace="live_voice",
+        idempotency_key="formal-concurrent-command",
+        **project_kwargs,
+    )
+    bound = service.get_scheduled_task_execution_context(winner["task_id"])
+    assert bound is not None and bound.agent is winner_agent
+    triggered_before = list(scheduler.triggered)
+
+    follower_releases: list[str] = []
+    follower = await service.run_task(
+        "durable formal task",
+        execution_agent=object(),
+        context_release=lambda: follower_releases.append("follower"),
+        owner_scope=_OWNER_SCOPE,
+        origin_namespace="live_voice",
+        idempotency_key="formal-concurrent-command",
+        **project_kwargs,
+    )
+
+    assert follower["task_id"] == winner["task_id"]
+    assert follower.get("idempotent_replay") is True
+    assert "error" not in follower
+    retained = service.get_scheduled_task_execution_context(winner["task_id"])
+    assert retained is not None and retained.agent is winner_agent
+    assert winner_releases == []
+    assert follower_releases == ["follower"]
+    assert scheduler.triggered == triggered_before
+    assert len(service._scheduled_task_execution_contexts) == 1
+
+
+@pytest.mark.asyncio
 async def test_idempotency_conflict_releases_candidate_without_overwriting_winner(
     tmp_path,
 ) -> None:
