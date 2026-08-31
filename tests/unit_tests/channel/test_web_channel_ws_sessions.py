@@ -157,7 +157,8 @@ async def test_stop_closes_streaming_owner_before_bounded_diagnostics() -> None:
 
     await channel.stop()
 
-    assert calls == ["streaming_owner", "streaming_diagnostics", "media_tasks"]
+    # F16: 媒体叶子先唤醒并有界 join,之后才轮到 Provider 与诊断。
+    assert calls == ["media_tasks", "streaming_owner", "streaming_diagnostics"]
     assert channel.live_voice_streaming_synthesis_owner is None
 
 
@@ -165,6 +166,8 @@ async def test_stop_closes_streaming_owner_before_bounded_diagnostics() -> None:
 async def test_stop_fails_truthfully_when_media_task_cleanup_is_incomplete() -> None:
     channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
     calls: list[str] = []
+
+    from types import SimpleNamespace
 
     class _MediaRegistry:
         async def close_media_leaf_cleanup(self) -> bool:
@@ -175,12 +178,17 @@ async def test_stop_fails_truthfully_when_media_task_cleanup_is_incomplete() -> 
             calls.append("streaming_diagnostics")
             return True
 
+        @property
+        def media_leaf_cleanup_snapshot(self) -> SimpleNamespace:
+            # F16: 完成度由所有唤醒动作之后的最终快照裁定。
+            return SimpleNamespace(cleanup_complete=False)
+
     channel.live_voice_media_registry = _MediaRegistry()
 
     with pytest.raises(RuntimeError, match="media task cleanup is incomplete"):
         await channel.stop()
 
-    assert calls == ["streaming_diagnostics", "media_tasks"]
+    assert calls == ["media_tasks", "streaming_diagnostics"]
 
 
 @pytest.mark.asyncio
