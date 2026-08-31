@@ -2406,19 +2406,45 @@ def test_changed_replay_of_old_retired_identity_is_conflict() -> None:
     assert raised.value.reason == "TURN_COMMIT_CONFLICT"
 
 
-def test_retirement_capacity_refuses_before_changing_active_state() -> None:
-    ledger = TurnCommitLedger(capacity=8, retired_capacity=4)
-    for index in range(4):
+def test_accept_reserves_retirement_headroom_for_every_active_commit() -> None:
+    """Admission must guarantee an accepted commit can always retire.
+
+    Callers (registry release, task.create finally) run their own side effects
+    around release_origin and cannot handle a capacity refusal there; the only
+    place capacity may surface is accept(), before any state changes anywhere.
+    """
+    ledger = TurnCommitLedger(capacity=8, retired_capacity=2)
+    for index in range(2):
         commit = _minted_ledger_commit(index)
         assert ledger.accept(commit) is True
         assert ledger.release_origin(_ledger_origin(commit), commit.scope) is True
 
-    retained = _minted_ledger_commit(99)
-    assert ledger.accept(retained) is True
-    origin = _ledger_origin(retained)
-    assert ledger.release_origin(origin, retained.scope) is False
-    assert ledger.require_origin(origin, retained.scope).commit_id == retained.commit_id
-    assert ledger.accept(_minted_ledger_commit(99)) is False
+    blocked = _minted_ledger_commit(2)
     with pytest.raises(ContractViolation) as raised:
-        ledger.accept(_minted_ledger_commit(99, text="a different payload"))
-    assert raised.value.reason == "TURN_COMMIT_CONFLICT"
+        ledger.accept(blocked)
+    assert raised.value.reason == "TURN_COMMIT_RETIREMENT_CAPACITY"
+    # Zero state change: the refused commit is neither active nor retired.
+    with pytest.raises(ContractViolation):
+        ledger.require_origin(_ledger_origin(blocked), blocked.scope)
+    with pytest.raises(ContractViolation) as again:
+        ledger.accept(blocked)
+    assert again.value.reason == "TURN_COMMIT_RETIREMENT_CAPACITY"
+
+
+def test_accepted_commit_retirement_never_fails() -> None:
+    """Every accepted commit retires successfully, including at the boundary."""
+    ledger = TurnCommitLedger(capacity=2, retired_capacity=3)
+    first = _minted_ledger_commit(0)
+    second = _minted_ledger_commit(1)
+    assert ledger.accept(first) is True
+    assert ledger.accept(second) is True
+    assert ledger.release_origin(_ledger_origin(first), first.scope) is True
+    assert ledger.release_origin(_ledger_origin(second), second.scope) is True
+
+    third = _minted_ledger_commit(2)
+    assert ledger.accept(third) is True
+    assert ledger.release_origin(_ledger_origin(third), third.scope) is True
+
+    with pytest.raises(ContractViolation) as raised:
+        ledger.accept(_minted_ledger_commit(3))
+    assert raised.value.reason == "TURN_COMMIT_RETIREMENT_CAPACITY"

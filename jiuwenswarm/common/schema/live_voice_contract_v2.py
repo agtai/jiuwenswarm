@@ -3149,6 +3149,20 @@ class TurnCommitLedger:
                     "bounded turn commit authority is full",
                     code=ErrorCode.CAPABILITY_UNAVAILABLE,
                 )
+            # Admission-time retirement reservation: every active commit must
+            # keep a guaranteed tombstone slot, so release_origin can never
+            # fail for an accepted commit.  Callers run registry cleanup and
+            # Agent/Task side effects around retirement and cannot unwind them;
+            # capacity may therefore only surface here, before any state moves.
+            if (
+                len(self._retired_commit_ids) + len(self._by_commit_id) + 1
+                > self._retired_capacity
+            ):
+                raise _violation(
+                    "TURN_COMMIT_RETIREMENT_CAPACITY",
+                    "turn commit retirement reservation is exhausted",
+                    code=ErrorCode.CAPABILITY_UNAVAILABLE,
+                )
             self._by_commit_id[commit.commit_id] = commit
             self._by_turn_id[commit.turn_id] = commit
             return True
@@ -3188,10 +3202,14 @@ class TurnCommitLedger:
             turn_id_digest = self._identity_digest("turn", commit.turn_id)
             commit_digest = self._commit_digest(commit)
             if len(self._retired_commit_ids) >= self._retired_capacity:
-                # Refuse to retire rather than forget the identity: the commit
-                # stays active, and continued pressure surfaces as the typed
-                # TURN_COMMIT_LEDGER_FULL on accept instead of silent replay.
-                return False
+                # Impossible by construction: accept() reserves one tombstone
+                # slot per active commit exactly so retirement cannot fail
+                # after callers have already run their surrounding effects.
+                raise _violation(
+                    "TURN_COMMIT_RETIREMENT_INVARIANT",
+                    "retirement reservation invariant was violated",
+                    code=ErrorCode.INTERNAL,
+                )
             self._by_commit_id.pop(commit.commit_id, None)
             self._by_turn_id.pop(commit.turn_id, None)
             self._retired_commit_ids[commit_id_digest] = commit_digest
