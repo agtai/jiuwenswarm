@@ -388,3 +388,159 @@ async def test_idle_eviction_skips_locked_adapter_without_waiting() -> None:
     assert getattr(parent, "_session_adapter_locks")["sess_locked_idle"] is lock
 
     lock.release()
+
+
+class _ReadyChildAdapter(_IdleChildAdapter):
+    async def create_instance(self, _config, *, mode, sub_mode) -> None:
+        return None
+
+    async def start_interaction(self, *, session_id) -> None:
+        return None
+
+
+class _FailingCreateChildAdapter(_IdleChildAdapter):
+    """create_instance fails; cleanup behavior is scenario-controlled."""
+
+    def __init__(self, *, cleanup_error: BaseException | None = None) -> None:
+        super().__init__()
+        self.cleanup_error = cleanup_error
+        self.cleanup_calls = 0
+
+    async def create_instance(self, _config, *, mode, sub_mode) -> None:
+        raise RuntimeError("CHILD_CREATE_FAILED")
+
+    async def start_interaction(self, *, session_id) -> None:  # pragma: no cover
+        raise AssertionError("start_interaction must not run after failed create")
+
+    async def cleanup(self) -> None:
+        self.cleanup_calls += 1
+        if self.cleanup_error is not None:
+            error = self.cleanup_error
+            self.cleanup_error = None
+            raise error
+        await super().cleanup()
+
+
+class _ParkedCreateChildAdapter(_IdleChildAdapter):
+    """create_instance parks until cancelled; cleanup blocks on a gate."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.create_entered = asyncio.Event()
+        self.cleanup_started = asyncio.Event()
+        self.cleanup_can_finish = asyncio.Event()
+
+    async def create_instance(self, _config, *, mode, sub_mode) -> None:
+        self.create_entered.set()
+        await asyncio.Event().wait()
+
+    async def cleanup(self) -> None:
+        self.cleanup_started.set()
+        await self.cleanup_can_finish.wait()
+        await super().cleanup()
+
+
+def _initialization_parent(children: list[object]) -> JiuWenSwarmDeepAdapter:
+    queue = list(children)
+    parent = _make_adapter(
+        _is_session_scoped_adapter=False,
+        _parent_session_id=None,
+        _session_adapters={},
+        _session_adapter_initializing=set(),
+        _session_adapter_locks={},
+        _session_adapter_last_used={},
+        _session_adapter_config_version=0,
+        _session_adapter_versions={},
+        _session_adapter_reload_failures={},
+        _session_adapter_generations={},
+        _session_adapter_failed_cleaning=set(),
+        _pending_session_reload_config_base=None,
+        _pending_session_reload_env_overrides=None,
+        _session_instance_config=None,
+        _session_instance_mode="agent",
+        _session_instance_sub_mode=None,
+    )
+    setattr(parent, "_new_session_scoped_adapter", lambda _sid: queue.pop(0))
+    return parent
+
+
+@pytest.mark.asyncio
+async def test_failed_init_with_failing_cleanup_recovers_on_retry() -> None:
+    """F18: 非正式档初始化失败且清理也失败时,Session 不得永久卡死——
+    下一次调用先补清理,清理证明完成后重新初始化必须成功。"""
+    first = _FailingCreateChildAdapter(cleanup_error=RuntimeError("CLEANUP_FAILED"))
+    second = _ReadyChildAdapter()
+    parent = _initialization_parent([first, second])
+
+    with pytest.raises(RuntimeError, match="CHILD_CREATE_FAILED"):
+        await getattr(parent, "_get_or_create_session_adapter")("sess-retry")
+    assert first.cleanup_calls == 1
+    assert getattr(parent, "_session_adapters").get("sess-retry") is first
+
+    resolved = await getattr(parent, "_get_or_create_session_adapter")("sess-retry")
+
+    assert resolved is second
+    assert first.cleanup_calls == 2
+    assert first.cleaned is True
+    assert getattr(parent, "_session_adapters").get("sess-retry") is second
+
+
+@pytest.mark.asyncio
+async def test_second_cancellation_cannot_abandon_partial_cleanup() -> None:
+    """F18: 初始化被取消后,清理必须与调用方取消隔离——再次取消调用方
+    不得把清理丢在半路;清理最终完成时,该 Session 必须回到可用状态。"""
+    parked = _ParkedCreateChildAdapter()
+    replacement = _ReadyChildAdapter()
+    parent = _initialization_parent([parked, replacement])
+
+    initialize = asyncio.create_task(
+        getattr(parent, "_get_or_create_session_adapter")("sess-cancel")
+    )
+    await asyncio.wait_for(parked.create_entered.wait(), timeout=2)
+    initialize.cancel()
+    await asyncio.wait_for(parked.cleanup_started.wait(), timeout=2)
+    # 清理还没完成时第二次取消调用方。
+    initialize.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await initialize
+
+    parked.cleanup_can_finish.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert parked.cleaned is True
+
+    resolved = await asyncio.wait_for(
+        getattr(parent, "_get_or_create_session_adapter")("sess-cancel"), timeout=2
+    )
+    assert resolved is replacement
+
+
+@pytest.mark.asyncio
+async def test_stale_detached_cleanup_cannot_drop_a_successor_adapter() -> None:
+    """F18: 迟到的旧代清理只能释放自己那一代——继任 adapter 不受影响。"""
+    parked = _ParkedCreateChildAdapter()
+    replacement = _ReadyChildAdapter()
+    parent = _initialization_parent([parked, replacement])
+
+    initialize = asyncio.create_task(
+        getattr(parent, "_get_or_create_session_adapter")("sess-stale")
+    )
+    await asyncio.wait_for(parked.create_entered.wait(), timeout=2)
+    initialize.cancel()
+    await asyncio.wait_for(parked.cleanup_started.wait(), timeout=2)
+    initialize.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await initialize
+
+    # 旧清理仍挂着;手动腾出缓存位并让继任初始化成功。
+    getattr(parent, "_session_adapters").pop("sess-stale", None)
+    getattr(parent, "_session_adapter_initializing").discard("sess-stale")
+    successor = await asyncio.wait_for(
+        getattr(parent, "_get_or_create_session_adapter")("sess-stale"), timeout=2
+    )
+    assert successor is replacement
+
+    parked.cleanup_can_finish.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert getattr(parent, "_session_adapters").get("sess-stale") is replacement

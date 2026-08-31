@@ -400,6 +400,9 @@ def get_runtime_tool_session_id() -> str | None:
     return _CRON_TOOL_SESSION_ID.get()
 
 logger = logging.getLogger(__name__)
+
+# F18: bounded deadline for a failed session child's shielded cleanup.
+_SESSION_ADAPTER_CLEANUP_TIMEOUT_SECONDS = 30.0
 _FORMAL_ACTIVE_RAW_EVENT_TYPES = frozenset(
     {
         "answer",
@@ -1256,6 +1259,13 @@ class JiuWenSwarmDeepAdapter:
         # set prevents a concurrent lookup from treating that retained owner
         # as ready after partial initialization failed or was cancelled.
         self._session_adapter_initializing: set[str] = set()
+        # F18: per-sid publish generation lets a late detached cleanup release
+        # only its own child, never a successor published for the same sid.
+        self._session_adapter_generations: dict[str, int] = {}
+        # F18: non-formal children whose failure cleanup did not prove
+        # complete (FAILED_CLEANING); a later call retries their cleanup
+        # instead of raising the pending error forever.
+        self._session_adapter_failed_cleaning: set[str] = set()
         self._session_adapter_locks: dict[str, asyncio.Lock] = {}
         self._session_adapter_last_used: dict[str, float] = {}
         self._session_adapter_config_version: int = 0
@@ -1414,9 +1424,18 @@ class JiuWenSwarmDeepAdapter:
         *,
         remove_lock: bool = True,
         remove_runtime_state: bool = True,
+        expected_generation: int | None = None,
     ) -> None:
+        if expected_generation is not None:
+            generations = getattr(self, "_session_adapter_generations", {})
+            if generations.get(session_id) != expected_generation:
+                # A successor generation owns this sid now; the stale cleanup
+                # may release only its own child.
+                return
         self._session_adapters.pop(session_id, None)
         getattr(self, "_session_adapter_initializing", set()).discard(session_id)
+        getattr(self, "_session_adapter_generations", {}).pop(session_id, None)
+        getattr(self, "_session_adapter_failed_cleaning", set()).discard(session_id)
         if remove_lock:
             self._session_adapter_locks.pop(session_id, None)
         self._session_adapter_last_used.pop(session_id, None)
@@ -1596,6 +1615,67 @@ class JiuWenSwarmDeepAdapter:
         waiters = getattr(lock, "_waiters", None)
         return any(not waiter.cancelled() for waiter in list(waiters or ()))
 
+    async def _cleanup_partial_session_adapter(
+        self,
+        sid: str,
+        adapter: "JiuWenSwarmDeepAdapter",
+        generation: int,
+    ) -> bool:
+        """Clean a failed child shielded from caller cancellation (F18).
+
+        Returns True when cleanup proved complete and the exact generation's
+        cache entry was dropped; False retains the owner as FAILED_CLEANING
+        for a later retry.  A caller cancellation detaches the running
+        cleanup, whose completion then settles the cache entry on its own.
+        """
+        cleanup_task = asyncio.ensure_future(adapter.cleanup())
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(cleanup_task),
+                timeout=_SESSION_ADAPTER_CLEANUP_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            cleanup_task.add_done_callback(
+                lambda task: self._settle_detached_session_cleanup(
+                    sid, generation, task
+                )
+            )
+            raise
+        except BaseException as cleanup_error:  # noqa: BLE001 -- retained retry
+            cleanup_task.cancel()
+            self._session_adapter_failed_cleaning.add(sid)
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] session startup cleanup remains "
+                "pending: session_id=%s error=%s",
+                sid,
+                cleanup_error,
+            )
+            return False
+        self._drop_session_adapter_cache_entry(
+            sid, remove_lock=False, expected_generation=generation
+        )
+        return True
+
+    def _settle_detached_session_cleanup(
+        self, sid: str, generation: int, task: "asyncio.Task[None]"
+    ) -> None:
+        if task.cancelled():
+            self._session_adapter_failed_cleaning.add(sid)
+            return
+        error = task.exception()
+        if error is not None:
+            self._session_adapter_failed_cleaning.add(sid)
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] detached session cleanup failed: "
+                "session_id=%s error=%s",
+                sid,
+                error,
+            )
+            return
+        self._drop_session_adapter_cache_entry(
+            sid, remove_lock=False, expected_generation=generation
+        )
+
     async def _get_or_create_session_adapter(self, session_id: str | None) -> "JiuWenSwarmDeepAdapter":
         """Return the session-owned adapter, creating and initializing it once."""
         if self._is_session_scoped_adapter:
@@ -1608,10 +1688,24 @@ class JiuWenSwarmDeepAdapter:
             existing = self._session_adapters.get(sid)
             if existing is not None:
                 if sid in self._session_adapter_initializing:
-                    raise RuntimeError("SESSION_ADAPTER_INITIALIZATION_PENDING")
-                await self._reload_session_adapter_if_stale(sid, existing)
-                self._touch_session_adapter(sid)
-                return existing
+                    # FAILED_CLEANING (non-formal): retry the unproven cleanup
+                    # first; only a proven-complete cleanup reopens this sid.
+                    # A formal-profile child stays retained for its external
+                    # strict-cleanup owner and keeps raising pending.
+                    if sid in self._session_adapter_failed_cleaning:
+                        retained_generation = self._session_adapter_generations.get(
+                            sid, 0
+                        )
+                        if await self._cleanup_partial_session_adapter(
+                            sid, existing, retained_generation
+                        ):
+                            existing = None
+                    if existing is not None:
+                        raise RuntimeError("SESSION_ADAPTER_INITIALIZATION_PENDING")
+                else:
+                    await self._reload_session_adapter_if_stale(sid, existing)
+                    self._touch_session_adapter(sid)
+                    return existing
 
             adapter = self._new_session_scoped_adapter(sid)
             # Publish the exact child before create_instance can produce any
@@ -1619,6 +1713,8 @@ class JiuWenSwarmDeepAdapter:
             # for formal strict cleanup; neither makes it usable.
             self._session_adapters[sid] = adapter
             self._session_adapter_initializing.add(sid)
+            generation = self._session_adapter_generations.get(sid, 0) + 1
+            self._session_adapter_generations[sid] = generation
             config = (
                 dict(self._session_instance_config)
                 if isinstance(self._session_instance_config, dict)
@@ -1654,23 +1750,14 @@ class JiuWenSwarmDeepAdapter:
                 await self._reload_session_adapter_if_stale(sid, adapter)
             except BaseException:  # noqa: BLE001 -- formal owns partial runtime
                 if not formal_profile:
-                    try:
-                        await adapter.cleanup()
-                    except BaseException as cleanup_error:  # noqa: BLE001
-                        # Keep the published owner when cleanup itself is not
-                        # proven complete. A disconnect/explicit cleanup can
-                        # then retry the exact child instead of orphaning it.
-                        logger.warning(
-                            "[JiuWenSwarmDeepAdapter] ordinary session startup cleanup "
-                            "remains pending: session_id=%s error=%s",
-                            sid,
-                            cleanup_error,
-                        )
-                    else:
-                        self._drop_session_adapter_cache_entry(
-                            sid,
-                            remove_lock=False,
-                        )
+                    # Cleanup runs shielded from caller cancellation and drops
+                    # the exact generation on proven completion; an unproven
+                    # cleanup retains the owner as FAILED_CLEANING so the next
+                    # call retries it instead of wedging the Session forever.
+                    cleaned = await self._cleanup_partial_session_adapter(
+                        sid, adapter, generation
+                    )
+                    if cleaned:
                         # No await occurs between pruning this uncontended lock
                         # and releasing it via the exception, so a later caller
                         # cannot race onto a second lock for the same Session.
@@ -1678,6 +1765,7 @@ class JiuWenSwarmDeepAdapter:
                             self._session_adapter_locks.pop(sid, None)
                 raise
             self._session_adapter_initializing.discard(sid)
+            self._session_adapter_failed_cleaning.discard(sid)
             self._touch_session_adapter(sid)
             # Cold-start cost of a session's first turn, split so a slow one can
             # be attributed to agent assembly vs. interaction startup.
@@ -6685,6 +6773,8 @@ class JiuWenSwarmDeepAdapter:
                     )
             self._session_adapters.clear()
             self._session_adapter_initializing.clear()
+            self._session_adapter_generations.clear()
+            self._session_adapter_failed_cleaning.clear()
             self._session_adapter_locks.clear()
             self._session_adapter_last_used.clear()
             self._session_adapter_versions.clear()
