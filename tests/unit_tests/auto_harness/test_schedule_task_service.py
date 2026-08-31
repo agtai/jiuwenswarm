@@ -3092,3 +3092,210 @@ async def test_blocked_task_recovers_to_pending_once_context_is_rebuildable() ->
     assert (
         service.get_scheduled_task_execution_context("sch_blocked_ok") is not None
     )
+
+
+# ---------------------------------------------------------------------------
+# F17-B 验收矩阵:occurrence 占用原子性、重启后 exactly-once、
+# 缺配置零副作用、占用期取消的干净收尾。
+# ---------------------------------------------------------------------------
+
+
+class _MatrixExecutionService(_SchedulerService):
+    """记录 run/rehydrate 的矩阵服务假件;run 可经门控停车。"""
+
+    def __init__(
+        self,
+        contexts: dict[str, ScheduledTaskExecutionContext] | None = None,
+        *,
+        rehydrated_context: ScheduledTaskExecutionContext | None = None,
+        run_gate: asyncio.Event | None = None,
+    ) -> None:
+        super().__init__()
+        self._contexts = dict(contexts or {})
+        self._rehydrated_context = rehydrated_context
+        self._run_gate = run_gate
+        self.rehydrate_calls: list[tuple[str, object]] = []
+        self.started: list[str] = []
+        self.released: list[str] = []
+
+    def get_scheduled_task_execution_context(self, task_id: str):
+        return self._contexts.get(task_id)
+
+    def release_scheduled_task_execution_context(self, task_id: str) -> None:
+        self.released.append(task_id)
+        self._contexts.pop(task_id, None)
+
+    def rehydrate_scheduled_task_execution_context(self, task_id: str, descriptor):
+        self.rehydrate_calls.append((task_id, descriptor))
+        if self._rehydrated_context is None:
+            return None
+        self._contexts[task_id] = self._rehydrated_context
+        return self._rehydrated_context
+
+    async def run(self, request, _session_id, _request_id, **_kwargs):
+        self.started.append(request.session_id)
+        if self._run_gate is not None:
+            await self._run_gate.wait()
+        yield AgentResponseChunk(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            payload={
+                "event_type": "harness.session_finished",
+                "is_terminal": True,
+            },
+            is_complete=False,
+        )
+
+
+class _RecordingTaskStore(PersistentTaskStore):
+    def __init__(self, base) -> None:
+        super().__init__(base)
+        self.status_updates: list[tuple[str, str]] = []
+
+    async def update_task(self, task_id: str, updates: dict) -> None:
+        status = updates.get("status")
+        if isinstance(status, str):
+            self.status_updates.append((task_id, status))
+        await super().update_task(task_id, updates)
+
+
+class _ClaimParkingTaskStore(_RecordingTaskStore):
+    def __init__(self, base) -> None:
+        super().__init__(base)
+        self.claim_entered = asyncio.Event()
+        self.claim_gate = asyncio.Event()
+
+    async def update_task(self, task_id: str, updates: dict) -> None:
+        if updates.get("status") == "running" and not self.claim_gate.is_set():
+            self.claim_entered.set()
+            await self.claim_gate.wait()
+        await super().update_task(task_id, updates)
+
+
+def _running_count(store: _RecordingTaskStore, task_id: str) -> int:
+    return sum(
+        1 for updated_id, status in store.status_updates
+        if updated_id == task_id and status == "running"
+    )
+
+
+async def _add_matrix_task(store, task_id: str, **extra: object) -> None:
+    task: dict[str, object] = {
+        "task_id": task_id,
+        "query": "矩阵任务",
+        "status": "pending",
+        "is_one_time": True,
+        "interval_hours": 0,
+        "execution_history": [],
+    }
+    task.update(extra)
+    await store.add_task(task)
+
+
+@pytest.mark.asyncio
+async def test_matrix_concurrent_triggers_claim_exactly_once(tmp_path) -> None:
+    """occurrence 占用:并发 trigger 恰好一个成功、恰好一次 running 转换。"""
+    task_id = "sch_matrix_claim"
+    run_gate = asyncio.Event()
+    store = _RecordingTaskStore(tmp_path)
+    await _add_matrix_task(store, task_id)
+    context = ScheduledTaskExecutionContext(object(), object())
+    service = _MatrixExecutionService({task_id: context}, run_gate=run_gate)
+    scheduler = Scheduler(service, store)
+    scheduler._resolve_model = lambda _model_name=None: None
+
+    first, second = await asyncio.gather(
+        scheduler.trigger_immediate(task_id),
+        scheduler.trigger_immediate(task_id),
+    )
+
+    assert sorted([first, second]) == [False, True]
+    run_gate.set()
+    await asyncio.wait_for(scheduler._running_executions[task_id], timeout=15)
+    assert len(service.started) == 1
+    assert _running_count(store, task_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_matrix_restart_rehydrates_from_descriptor_and_executes_once(
+    tmp_path,
+) -> None:
+    """重启(进程内上下文全失)后:按描述符 rehydrate 一次并恰好执行一次。"""
+    task_id = "sch_matrix_restart"
+    descriptor = _root_descriptor()
+    store = _RecordingTaskStore(tmp_path)
+    await _add_matrix_task(store, task_id, execution_descriptor=descriptor)
+    context = ScheduledTaskExecutionContext(object(), object())
+    service = _MatrixExecutionService({}, rehydrated_context=context)
+    scheduler = Scheduler(service, store)
+    scheduler._resolve_model = lambda _model_name=None: None
+
+    assert await scheduler.trigger_immediate(task_id) is True
+    await asyncio.wait_for(scheduler._running_executions[task_id], timeout=15)
+
+    assert service.rehydrate_calls == [(task_id, descriptor)]
+    assert len(service.started) == 1
+    assert _running_count(store, task_id) == 1
+    assert store.get_task(task_id)["status"] != "blocked"
+
+
+@pytest.mark.asyncio
+async def test_matrix_missing_configuration_blocks_with_zero_side_effects() -> None:
+    """缺配置:唯一的存储写入是可恢复 blocked;service.run 零调用。"""
+    task_id = "sch_matrix_blocked"
+    task_store = _TaskStore(
+        [
+            {
+                "task_id": task_id,
+                "query": "矩阵任务",
+                "status": "pending",
+            }
+        ]
+    )
+    service = _MatrixExecutionService({})
+    scheduler = Scheduler(service, task_store)
+
+    execution = asyncio.create_task(
+        scheduler._execute_scheduled_task(task_store.tasks[task_id])
+    )
+    scheduler._running_executions[task_id] = execution
+    await execution
+
+    assert service.started == []
+    assert service.rehydrate_calls == [(task_id, None)]
+    assert task_store.tasks[task_id]["status"] == "blocked"
+    task_updates = [u for tid, u in task_store.updates if tid == task_id]
+    assert len(task_updates) == 1
+    assert task_updates[0]["status"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_matrix_cancellation_during_claim_settles_and_next_trigger_runs_once(
+    tmp_path,
+) -> None:
+    """占用写入期取消:干净收尾,后续 trigger 仍恰好执行一次。"""
+    task_id = "sch_matrix_cancel"
+    store = _ClaimParkingTaskStore(tmp_path)
+    await _add_matrix_task(store, task_id)
+    context = ScheduledTaskExecutionContext(object(), object())
+    service = _MatrixExecutionService({task_id: context})
+    scheduler = Scheduler(service, store)
+    scheduler._resolve_model = lambda _model_name=None: None
+
+    assert await scheduler.trigger_immediate(task_id) is True
+    await asyncio.wait_for(store.claim_entered.wait(), timeout=5)
+    execution = scheduler._running_executions[task_id]
+    execution.cancel()
+    store.claim_gate.set()
+    try:
+        await execution
+    except asyncio.CancelledError:
+        pass
+    scheduler._running_executions.pop(task_id, None)
+
+    assert service.started == []
+    await store.update_task(task_id, {"status": "pending", "current_execution_id": None})
+    service._contexts[task_id] = context
+    assert await scheduler.trigger_immediate(task_id) is True
+    await asyncio.wait_for(scheduler._running_executions[task_id], timeout=15)
+    assert len(service.started) == 1
