@@ -1910,13 +1910,14 @@ test('overlap capture publishes its exact binding before playout EOT can race co
 
 test('explicit Live Voice exit fences old playout settlement without blocking its visible-text ACK', async () => {
   const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
-  const start = source.indexOf('const playoutLoopGeneration = voiceLoopGenerationRef.current;');
+  const start = source.indexOf('const foregroundPlayoutLease = ownsForegroundPresentation');
   const end = source.indexOf('const settleRetainedP2Operations', start);
   const handler = source.slice(start, end);
 
   assert.equal(start >= 0 && end > start, true);
   assert.match(handler, /const isCurrentVoicePlayout = \(\) =>[\s\S]*?voiceLoopEnabledRef\.current[\s\S]*?voiceLoopGenerationRef\.current === playoutLoopGeneration/);
-  assert.match(handler, /if \(!isCurrentVoicePlayout\(\)\) \{[\s\S]*?if \(isCurrentPresentationAttempt\(\)\) retainAck\(\)/);
+  assert.match(handler, /const foregroundLeaseRetiredByExit = \(\) =>[\s\S]*?!voiceLoopEnabledRef\.current/);
+  assert.match(handler, /foregroundPlayoutLease === null \|\| foregroundLeaseRetiredByExit\(\)[\s\S]*?retainAck\(\)/);
 });
 
 test('missing Session stays unsupported in the rendered UI rather than inferring a fallback success', async () => {

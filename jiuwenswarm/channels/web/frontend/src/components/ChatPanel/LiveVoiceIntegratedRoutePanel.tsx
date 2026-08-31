@@ -750,6 +750,8 @@ type PendingForegroundPresentationFence = Readonly<{
   activation_generation: number;
   response_id: string;
   response_generation: number;
+  playout_owner: ProductP1VoiceRouteOwner | null;
+  voice_loop_generation: number;
 }>;
 
 type ProductP2NotificationAdmission = Readonly<{
@@ -1519,6 +1521,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const pendingUnifiedFinalRef = useRef<Readonly<{
     receipt: string;
     input: UnifiedAuthoritativeFinal;
+    playout_owner: ProductP1VoiceRouteOwner | null;
+    voice_loop_generation: number;
   }> | null>(null);
   const readPendingUnifiedFinal = () => pendingUnifiedFinalRef.current;
   const pendingForegroundPresentationRef = useRef<PendingForegroundPresentationFence | null>(null);
@@ -2098,6 +2102,19 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             terminalAnnouncementSpeechOwnerRef.current = null;
             updateTerminalAnnouncementState('idle', null);
           }
+          if (
+            foregroundPresentationFenceMatchesResponse(
+              pendingForegroundPresentationRef.current,
+              owner.snapshot().binding,
+              retained.response,
+            )
+          ) {
+            // The lease ends only after playAgentText has emitted its media
+            // receipt and the exact P2 Presentation ACK has succeeded. Any
+            // retained Task fallback is released/settled immediately below,
+            // before the next capture can be scheduled.
+            pendingForegroundPresentationRef.current = null;
+          }
           setProductTextReason(null);
           setProductTextStatus('acknowledged');
           clearProductRecoveryDiagnostic({
@@ -2136,6 +2153,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                 terminalNotificationCheckRequiredRef.current = false;
                 terminalAnnouncementSpeechOwnerRef.current = null;
                 updateTerminalAnnouncementState('idle', null);
+              }
+              if (
+                foregroundPresentationFenceMatchesResponse(
+                  pendingForegroundPresentationRef.current,
+                  owner.snapshot().binding,
+                  retained.response,
+                )
+              ) {
+                pendingForegroundPresentationRef.current = null;
               }
               setProductTextReason(null);
               setProductTextStatus(pendingForegroundPresentationRef.current !== null ? 'waiting' : 'acknowledged');
@@ -2352,15 +2378,27 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
       return disposition;
     }
-    if (disposition.task_notification && pendingUnifiedFinalRef.current !== null) {
+    if (
+      disposition.task_notification &&
+      (pendingUnifiedFinalRef.current !== null ||
+        (pendingForegroundPresentationRef.current !== null &&
+          !foregroundPresentationFenceMatchesResponse(
+            pendingForegroundPresentationRef.current,
+            presentationBinding,
+            disposition.response,
+          )))
+    ) {
       // This poll completed after a newer authoritative voice final took the
-      // foreground. The P2 owner has already dequeued this durable Task
-      // presentation, so retain its exact identity locally without UI, TTS,
-      // ACK or history effects. AUDIO alone has the immediate failure
-      // authority while the foreground is busy: the Registry retains its safe
-      // TEXT fallback, and the authoritative foreground ACK releases that one
-      // deferred server presentation. A legitimate Task TEXT remains retained
-      // until that same ACK owner can acknowledge it without UI or TTS effects.
+      // foreground, either while unified.submit was assigning its response or
+      // after the exact response fence was retained. The P2 owner has already
+      // dequeued this durable Task presentation, so retain its exact identity
+      // locally without UI, TTS, ACK or history effects. AUDIO alone has the
+      // immediate failure authority while the foreground is busy: the Registry
+      // retains its safe TEXT fallback, and the authoritative foreground ACK
+      // releases that one deferred server presentation. A legitimate Task
+      // TEXT remains retained until that same ACK owner can acknowledge it
+      // without UI or TTS effects. In particular, Task fallback must not enter
+      // playAgentText and fail the P1 owner leased by the foreground response.
       retainDeferredTaskPresentation(owner, disposition);
       if (disposition.ack.surface === 'audio' && !settleDeferredTaskPresentationFailure(owner)) {
         setP2NotificationWakeEpoch(epoch => epoch + 1);
@@ -2371,8 +2409,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       updateTerminalAnnouncementState('queued');
     }
     const pending = pendingPresentationAttemptRef.current;
-    if (pending !== null && (pending.owner !== owner || pending.input.response_id !== disposition.response_id)) {
-      throw new Error('a previous presentation ACK is still unresolved');
+    if (pending !== null) {
+      if (pending.owner !== owner || pending.input.response_id !== disposition.response_id) {
+        throw new Error('a previous presentation ACK is still unresolved');
+      }
+      // Multiple effect continuations may share one pop-on-read notification
+      // result. Once its exact attempt owns UI, TTS and ACK, a coalesced replay
+      // must have zero duplicate projection, synthesis or settlement effects.
+      return disposition;
     }
     const foregroundPresentationFence = pendingForegroundPresentationRef.current;
     const ownsForegroundPresentation = foregroundPresentationFenceMatchesResponse(
@@ -2395,7 +2439,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         // remain available while Live Voice is idle.
         return disposition;
       }
-      if (ownsForegroundPresentation) pendingForegroundPresentationRef.current = null;
       retainBoundedPresentedProductResponse(presentedProductResponsesRef.current, disposition.response_id);
     }
     setProductOutput(disposition.text);
@@ -2450,7 +2493,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
     const presentationAttempt = pendingPresentationAttemptRef.current;
     if (presentationAttempt === null) throw new Error('presentation ACK owner was not retained');
-    const playoutLoopGeneration = voiceLoopGenerationRef.current;
+    const foregroundPlayoutLease = ownsForegroundPresentation ? foregroundPresentationFence : null;
+    const playoutLoopGeneration = foregroundPlayoutLease?.voice_loop_generation ?? voiceLoopGenerationRef.current;
     activeVoiceResponseRef.current = disposition.replayed && !disposition.task_notification ? null : disposition.response;
     const isCurrentPresentationAttempt = () =>
       mountedRef.current &&
@@ -2465,7 +2509,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const isCurrentVoicePlayout = () =>
       isCurrentPresentationAttempt() &&
       voiceLoopEnabledRef.current &&
-      voiceLoopGenerationRef.current === playoutLoopGeneration;
+      voiceLoopGenerationRef.current === playoutLoopGeneration &&
+      (foregroundPlayoutLease === null ||
+        (pendingForegroundPresentationRef.current === foregroundPlayoutLease &&
+          foregroundPlayoutLease.playout_owner !== null &&
+          p1VoiceOwnerRef.current === foregroundPlayoutLease.playout_owner));
+    const foregroundLeaseRetiredByExit = () =>
+      foregroundPlayoutLease !== null &&
+      pendingForegroundPresentationRef.current !== foregroundPlayoutLease &&
+      (!voiceLoopEnabledRef.current || voiceLoopGenerationRef.current !== foregroundPlayoutLease.voice_loop_generation);
     const retainAck = (playoutFailed = false) => {
       presentationAttempt.markPlayoutSettled();
       if (!isCurrentPresentationAttempt()) return;
@@ -2474,7 +2526,34 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       setPendingPresentationAck(disposition.ack);
       void settleProductPresentationAck(presentationAttempt);
     };
-    const voiceOwner = p1VoiceOwnerRef.current;
+    const voiceOwner = foregroundPlayoutLease !== null
+      ? foregroundPlayoutLease.playout_owner
+      : p1VoiceOwnerRef.current;
+    if (
+      foregroundPlayoutLease !== null &&
+      (voiceOwner === null ||
+        p1VoiceOwnerRef.current !== voiceOwner ||
+        voiceLoopGenerationRef.current !== foregroundPlayoutLease.voice_loop_generation)
+    ) {
+      presentationAttempt.markPlayoutSettled();
+      if (activeVoiceResponseRef.current?.response_id === disposition.response_id) {
+        activeVoiceResponseRef.current = null;
+      }
+      const reason = 'PRODUCT_FOREGROUND_PLAYOUT_OWNER_LOST';
+      setProductTextReason(reason);
+      setProductTextStatus('failed');
+      publishProductRecoveryDiagnostic({
+        seam: 'tts',
+        disposition: 'terminal',
+        reason,
+        binding: presentationBinding,
+        response: disposition.response,
+      });
+      // The response remains deliberately unacknowledged. Only Exit/session
+      // teardown may retire a genuinely lost foreground lease; text display is
+      // not proof of the requested voice presentation.
+      return disposition;
+    }
     if (voiceOwner !== null && (!disposition.replayed || disposition.task_notification)) {
       if (disposition.task_notification) updateTerminalAnnouncementState('playing');
       void voiceOwner
@@ -2486,7 +2565,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         .then(() => {
           if (!isCurrentVoicePlayout()) {
             presentationAttempt.markPlayoutSettled();
-            if (isCurrentPresentationAttempt()) retainAck();
+            if (
+              isCurrentPresentationAttempt() &&
+              (foregroundPlayoutLease === null || foregroundLeaseRetiredByExit())
+            ) retainAck();
             return;
           }
           if (activeVoiceResponseRef.current?.response_id === disposition.response_id) {
@@ -2519,10 +2601,29 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             return;
           }
           if (!isCurrentVoicePlayout()) {
-            if (isCurrentPresentationAttempt()) retainAck();
+            if (
+              isCurrentPresentationAttempt() &&
+              (foregroundPlayoutLease === null || foregroundLeaseRetiredByExit())
+            ) retainAck();
             return;
           }
           if (activeVoiceResponseRef.current?.response_id === disposition.response_id) activeVoiceResponseRef.current = null;
+          if (foregroundPlayoutLease !== null) {
+            const reason = stableProductTextReason(error, 'PRODUCT_FOREGROUND_PLAYOUT_FAILED');
+            setProductTextReason(reason);
+            setProductTextStatus('failed');
+            publishProductRecoveryDiagnostic({
+              seam: 'tts',
+              disposition: 'terminal',
+              reason,
+              binding: presentationBinding,
+              response: disposition.response,
+            });
+            // Keep both the exact response fence and its P2 attempt. A failed
+            // foreground voice presentation must never be converted into an
+            // immediate TEXT ACK or permit a successor capture.
+            return;
+          }
           const reason = stableProductTextReason(
             error,
             disposition.task_notification
@@ -2694,7 +2795,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       on_device_invalidated: reason => {
         console.warn(`live_voice_audio_device_selection_failure reason=${reason} fallback=text visible=true`);
         const voiceOwner = p1VoiceOwnerRef.current;
-        if (voiceOwner !== null && !['starting', 'capturing', 'recognizing', 'playing', 'cleanup_pending'].includes(voiceOwner.status().status)) {
+        const ownsForegroundPlayout =
+          voiceOwner !== null &&
+          (pendingUnifiedFinalRef.current?.playout_owner === voiceOwner ||
+            pendingForegroundPresentationRef.current?.playout_owner === voiceOwner);
+        if (
+          voiceOwner !== null &&
+          !ownsForegroundPlayout &&
+          !['starting', 'capturing', 'recognizing', 'playing', 'cleanup_pending'].includes(voiceOwner.status().status)
+        ) {
           void voiceOwner
             .close()
             .then(() => {
@@ -4467,7 +4576,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
 
   const applyProductAudioDevices = async () => {
     const selectionOwner = deviceSelectionOwnerRef.current;
-    if (selectionOwner === null || ['starting', 'capturing', 'recognizing', 'playing', 'cleanup_pending'].includes(p1VoiceStatus)) return;
+    if (
+      selectionOwner === null ||
+      pendingUnifiedFinalRef.current !== null ||
+      pendingForegroundPresentationRef.current !== null ||
+      pendingPresentationAttemptRef.current !== null ||
+      ['starting', 'capturing', 'recognizing', 'playing', 'cleanup_pending'].includes(p1VoiceStatus)
+    ) return;
     const voiceOwner = p1VoiceOwnerRef.current;
     if (voiceOwner !== null) {
       try {
@@ -4578,6 +4693,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       voice_commit_receipt: recognized.voice_commit_receipt,
     });
     const originVoiceLoopGeneration = voiceLoopGenerationRef.current;
+    // The recognized capture owner is also the only P1 authority allowed to
+    // synthesize and play the response to this committed final. Retain it
+    // before unified.submit so a Task notification or an automatic successor
+    // capture cannot rotate the foreground playout authority while the server
+    // is assigning the exact response generation.
+    const foregroundPlayoutOwner = p1VoiceOwnerRef.current;
     const operation = (async () => {
       let presentationFence: PendingForegroundPresentationFence | null = null;
       let owner = unifiedInputOwnerRef.current;
@@ -4590,6 +4711,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingUnifiedFinalRef.current = Object.freeze({
         receipt: recognized.voice_commit_receipt,
         input,
+        playout_owner: foregroundPlayoutOwner,
+        voice_loop_generation: originVoiceLoopGeneration,
       });
       setProductOutput(null);
       setProductTextReason(null);
@@ -4625,6 +4748,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           activation_generation: binding.activation_generation,
           response_id: acceptedResponse.response_id,
           response_generation: acceptedResponse.response_generation as number,
+          playout_owner: foregroundPlayoutOwner,
+          voice_loop_generation: originVoiceLoopGeneration,
         });
         const retainsCurrentSession = mountedRef.current && activeSessionRef.current === binding.session_id;
         const retainsOriginVoiceLoop =
