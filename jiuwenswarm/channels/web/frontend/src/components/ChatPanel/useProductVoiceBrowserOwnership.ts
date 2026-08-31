@@ -6,6 +6,8 @@ import {
   type BrowserLiveVoiceOwnership,
   type BrowserLiveVoiceOwnershipBarrier,
 } from '../../features/live-voice/formal/browserLiveVoiceOwnership';
+import { acquireLiveVoiceTtsOutputOwnership } from '../../utils/ttsOutputOwnership';
+import { stopAllTts } from '../../utils/ttsPlayback';
 import type { ProductLiveVoiceSurfaceControl } from './LiveVoiceIntegratedRoutePanel';
 
 export type ProductVoiceBrowserOwnershipOptions = Readonly<{
@@ -37,11 +39,28 @@ export function useProductVoiceBrowserOwnership(
   const cleanupRef = useRef<Promise<void>>(Promise.resolve());
   const cleanupSessionRef = useRef<string | null>(null);
   const cleanupControlRef = useRef<ProductLiveVoiceSurfaceControl | null>(null);
+  const ttsOutputLeaseRef = useRef<(() => void) | null>(null);
   const unmountedRef = useRef(false);
   const sessionRef = useRef(options.activeSessionId);
   const getActiveSessionIdRef = useRef(options.getActiveSessionId);
   getActiveSessionIdRef.current = options.getActiveSessionId;
   const [active, setActive] = useState(false);
+
+  const acquireTtsOutputLease = useCallback(() => {
+    // The lease is acquired before stopAllTts so no ordinary TTS can start in
+    // the gap, and only one token is ever held per hook instance: a restart
+    // after a failed start keeps the existing token instead of leaking one.
+    if (ttsOutputLeaseRef.current === null) {
+      ttsOutputLeaseRef.current = acquireLiveVoiceTtsOutputOwnership();
+    }
+    stopAllTts();
+  }, []);
+
+  const releaseTtsOutputLease = useCallback(() => {
+    const release = ttsOutputLeaseRef.current;
+    ttsOutputLeaseRef.current = null;
+    release?.();
+  }, []);
 
   const closeSessionForBrowserOwnership = useCallback(async (sessionId: string) => {
     const cleanupSessionId = cleanupSessionRef.current ?? sessionId;
@@ -133,6 +152,7 @@ export function useProductVoiceBrowserOwnership(
           } else {
             cleanedControl = await closeSessionForBrowserOwnership(cleanupSessionId);
           }
+          releaseTtsOutputLease();
           await browserOwnership.release();
           if (cleanedControl !== null && cleanupControlRef.current === cleanedControl) {
             cleanupControlRef.current = null;
@@ -153,6 +173,7 @@ export function useProductVoiceBrowserOwnership(
         intentRef.current += 1;
         setActive(false);
         await closeForBrowserOwnership();
+        releaseTtsOutputLease();
         if (unmountedRef.current) browserOwnership.disposeAfterRelease();
       });
     } catch {
@@ -171,6 +192,7 @@ export function useProductVoiceBrowserOwnership(
       try {
         await ownershipBarrier.run(async () => {
           await closeForBrowserOwnership();
+          releaseTtsOutputLease();
           await browserOwnership.release();
         });
       } catch {
@@ -181,15 +203,20 @@ export function useProductVoiceBrowserOwnership(
     if (cleanupControlRef.current === null) {
       cleanupControlRef.current = control;
     }
+    // Formal owns every audible output from here: the lease fences ordinary
+    // server TTS and history-message speech, and stopAllTts silences whatever
+    // is already playing before capture opens.
+    acquireTtsOutputLease();
     setActive(true);
     try {
       await control.start();
     } catch {
       // The formal route publishes the exact retryable/terminal failure state.
-      // Retain browser ownership until Exit or takeover so another tab cannot
-      // race a still-cleaning local capture.
+      // Retain browser ownership and the TTS lease until Exit or takeover so
+      // another tab cannot race a still-cleaning local capture and ordinary
+      // TTS cannot speak over an uncertain formal surface.
     }
-  }, [closeForBrowserOwnership, closeSessionForBrowserOwnership, options.activeSessionId, options.controlRef]);
+  }, [acquireTtsOutputLease, closeForBrowserOwnership, closeSessionForBrowserOwnership, options.activeSessionId, options.controlRef, releaseTtsOutputLease]);
 
   const stop = useCallback(async () => {
     intentRef.current += 1;
@@ -200,12 +227,13 @@ export function useProductVoiceBrowserOwnership(
     try {
       await ownershipBarrier.run(async () => {
         await closeForBrowserOwnership();
+        releaseTtsOutputLease();
         await browserOwnership?.release();
       });
     } catch {
       return;
     }
-  }, [closeForBrowserOwnership]);
+  }, [closeForBrowserOwnership, releaseTtsOutputLease]);
 
   const stopSessionAndReleaseBrowserOwnership = useCallback(async (sessionId: string | null) => {
     intentRef.current += 1;
@@ -218,6 +246,7 @@ export function useProductVoiceBrowserOwnership(
         const cleanedControl = sessionId === null
           ? null
           : await closeSessionForBrowserOwnership(sessionId);
+        releaseTtsOutputLease();
         await browserOwnership?.release();
         if (cleanedControl !== null && cleanupControlRef.current === cleanedControl) {
           cleanupControlRef.current = null;
@@ -226,7 +255,7 @@ export function useProductVoiceBrowserOwnership(
     } catch {
       return;
     }
-  }, [closeSessionForBrowserOwnership]);
+  }, [closeSessionForBrowserOwnership, releaseTtsOutputLease]);
 
   useEffect(() => {
     setActive(false);
@@ -247,15 +276,19 @@ export function useProductVoiceBrowserOwnership(
         cleanupControlRef.current = cleanupControl;
       }
       void closeForBrowserOwnership().then(
-        () => browserOwnership?.disposeAfterRelease(),
         () => {
-          // Keep the exact control, coordinator, Web Lock and takeover callback
-          // alive. A later takeover retries this same cleanup owner and only a
-          // proven success may release and dispose the browser-wide authority.
+          releaseTtsOutputLease();
+          browserOwnership?.disposeAfterRelease();
+        },
+        () => {
+          // Keep the exact control, coordinator, Web Lock, TTS lease and
+          // takeover callback alive. A later takeover retries this same cleanup
+          // owner and only a proven success may release and dispose the
+          // browser-wide authority.
         },
       );
     };
-  }, [closeForBrowserOwnership, options.controlRef]);
+  }, [closeForBrowserOwnership, options.controlRef, releaseTtsOutputLease]);
 
   return useMemo(() => Object.freeze({ active, start, stop }), [active, start, stop]);
 }
