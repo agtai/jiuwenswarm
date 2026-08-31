@@ -1260,7 +1260,66 @@ def test_native_notification_interception_cannot_steal_forwarded_agent_sequence(
     )
 
 
-def test_native_notification_fence_maps_monotonic_client_sequence_after_local_projection() -> (
+@pytest.mark.parametrize(
+    "local_kinds",
+    [
+        ("native.audio", "native.user_transcript"),
+        ("native.user_transcript", "native.audio"),
+    ],
+)
+def test_all_gateway_local_notification_orders_are_sequence_neutral(
+    local_kinds: tuple[str, str],
+) -> None:
+    registry = DedicatedMediaProductRegistry(enabled=True)
+    params = _params()
+    _trust_product_activation(registry, params, connection_id="connection-1")
+    queue_owner: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    for index, kind in enumerate(local_kinds, start=1):
+        queue_owner.put_nowait(
+            {
+                "status": "notification",
+                "kind": kind,
+                "request_id": f"provider-local-{index}",
+            }
+        )
+    registry._native_notifications[
+        ("session-1", "interaction-1", "connection-1")
+    ] = queue_owner
+    binding = {
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+        "connection_id": "connection-1",
+    }
+
+    for index, kind in enumerate(local_kinds, start=1):
+        response = registry.take_native_notification_response(
+            request_id=f"browser-local-{index}",
+            notification_sequence=1,
+            **binding,
+        )
+        assert response is not None
+        assert response["result"] == {
+            "status": "notification",
+            "kind": kind,
+            "request_id": f"browser-local-{index}",
+            "sequence_effect": "neutral",
+        }
+
+    assert queue_owner.qsize() == 0
+    assert (
+        registry.mark_native_notification_forwarded(
+            request_id="agent-notification-still-next",
+            notification_sequence=1,
+            **binding,
+        )
+        == 1
+    )
+
+
+def test_native_notification_fence_forwards_committed_candidate_without_mapping() -> (
     None
 ):
     registry = DedicatedMediaProductRegistry(enabled=True)
@@ -1303,32 +1362,31 @@ def test_native_notification_fence_maps_monotonic_client_sequence_after_local_pr
         is not None
     )
 
-    # The local projection consumed Browser sequence 2 without reaching
-    # AgentServer.  A monotonic Browser sequence 3 must therefore map to the
-    # still-next AgentServer sequence 2, never fail the formal P2 route.
+    # The local projection is neutral, so the unchanged still-next Browser
+    # candidate is the exact sequence forwarded to AgentServer.
     assert (
         registry.mark_native_notification_forwarded(
-            request_id="agent-notification-3",
-            notification_sequence=3,
+            request_id="agent-notification-2",
+            notification_sequence=2,
             **binding,
         )
-        == 2
+        is True
     )
     assert (
         registry.mark_native_notification_forwarded(
-            request_id="agent-notification-3",
-            notification_sequence=3,
+            request_id="agent-notification-2",
+            notification_sequence=2,
             **binding,
         )
-        == 2
+        is True
     )
     assert (
         registry.mark_native_notification_forwarded(
-            request_id="agent-notification-3",
-            notification_sequence=4,
+            request_id="agent-notification-2",
+            notification_sequence=3,
             **binding,
         )
-        is None
+        is False
     )
     queue_owner.put_nowait(
         {
@@ -1339,7 +1397,7 @@ def test_native_notification_fence_maps_monotonic_client_sequence_after_local_pr
     )
     assert (
         registry.take_native_notification_response(
-            request_id="agent-notification-3",
+            request_id="agent-notification-2",
             notification_sequence=3,
             **binding,
         )
@@ -1348,35 +1406,35 @@ def test_native_notification_fence_maps_monotonic_client_sequence_after_local_pr
     assert queue_owner.qsize() == 1
     assert (
         registry.mark_native_notification_forwarded(
-            request_id="agent-notification-4",
-            notification_sequence=4,
+            request_id="agent-notification-3",
+            notification_sequence=3,
             **binding,
         )
-        == 3
+        is True
     )
     assert (
         registry.take_native_notification_response(
-            request_id="local-notification-5",
-            notification_sequence=5,
+            request_id="local-notification-4",
+            notification_sequence=4,
             **binding,
         )
         is not None
     )
     assert (
         registry.mark_native_notification_forwarded(
-            request_id="agent-notification-6",
-            notification_sequence=6,
+            request_id="agent-notification-4",
+            notification_sequence=4,
             **binding,
         )
-        == 4
+        is True
     )
     assert (
         registry.mark_native_notification_forwarded(
-            request_id="gap-notification-8",
-            notification_sequence=8,
+            request_id="gap-notification-6",
+            notification_sequence=6,
             **binding,
         )
-        is None
+        is False
     )
 
 
@@ -1406,7 +1464,7 @@ def test_native_notification_fence_rejects_cross_activation_binding() -> None:
     assert queue_owner.qsize() == 1
 
 
-def test_notification_sequence_gap_permanently_disables_local_projection() -> None:
+def test_notification_sequence_gap_does_not_poison_later_local_projection() -> None:
     registry = DedicatedMediaProductRegistry(enabled=True)
     params = _params()
     _trust_product_activation(registry, params, connection_id="connection-1")
@@ -1435,15 +1493,14 @@ def test_notification_sequence_gap_permanently_disables_local_projection() -> No
         ("session-1", "interaction-1", "connection-1")
     ] = queue_owner
 
-    assert (
-        registry.take_native_notification_response(
-            request_id="gap-notification-2",
-            notification_sequence=2,
-            **binding,
-        )
-        is None
+    response = registry.take_native_notification_response(
+        request_id="gap-notification-2",
+        notification_sequence=2,
+        **binding,
     )
-    assert queue_owner.qsize() == 1
+    assert response is not None
+    assert response["result"]["sequence_effect"] == "neutral"
+    assert queue_owner.qsize() == 0
 
 
 @pytest.mark.asyncio
@@ -1569,6 +1626,7 @@ async def test_native_user_transcript_uses_existing_notification_queue_once(
         "audio": None,
         "error_reason": None,
         "publish_seq": None,
+        "sequence_effect": "neutral",
         "session_id": "session-1",
         "correlation_id": "correlation-1",
         "interaction_id": "interaction-1",
@@ -2385,6 +2443,202 @@ async def test_native_playback_stop_admits_later_item_before_provider_cancel(
         audio_end_ms=20,
     )
     assert shared_actions == [("runtime", cursor), ("provider", cursor)]
+
+    await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
+async def test_native_interruption_preserves_activation_input_and_notification_cursor() -> (
+    None
+):
+    activation_handle = _native_activation()
+    client = _FakeNativeRuntimeClient(activation_handle)
+    engine = _FakeNativeEngine()
+    shared_actions: list[tuple[str, object]] = []
+    client.playback_actions = shared_actions
+    engine.playback_actions = shared_actions
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine,
+    )
+    activated = _activate(
+        registry,
+        params=_params(sample_rate_hz=24_000),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    assert uplink is not None
+    await registry.begin_native_interaction(uplink)
+    session = next(iter(registry._native_sessions.values()))
+    notification_binding = {
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+        "connection_id": "connection-1",
+    }
+
+    response = ResponseRef("interaction-1", "native-response-1", 1)
+    await engine.events.put(
+        NativeEngineEvent(
+            audio=NativeAudioOutput(
+                provider_event_id="provider-audio-before-interruption",
+                provider_response_id="provider-response-1",
+                provider_item_id="provider-item-1",
+                content_index=0,
+                sequence=0,
+                pcm16=b"\x01\x00" * 480,
+                response=response,
+            )
+        )
+    )
+    await client.audio_proposed.wait()
+    audio_response = registry.take_native_notification_response(
+        request_id="browser-local-audio-1",
+        notification_sequence=1,
+        **notification_binding,
+    )
+    assert audio_response is not None
+    assert audio_response["result"]["sequence_effect"] == "neutral"
+    audio = audio_response["result"]["audio"]
+    assert isinstance(audio, dict)
+    downlink = registry.consume_ticket(_media_ticket(audio), request_origin=ORIGIN)
+    assert downlink is not None
+
+    speech_start = asyncio.create_task(registry.wait_native_speech_start(uplink))
+    await engine.events.put(
+        NativeEngineEvent(
+            action=InteractionAction(
+                action_id="native-listen-during-playback",
+                operation="LISTEN",
+                interaction_id=activation_handle.binding.interaction_id,
+                scope=activation_handle.binding.scope,
+                payload=(("provider_start_ms", "120"),),
+            )
+        )
+    )
+    speech_control = await asyncio.wait_for(speech_start, timeout=1.0)
+    assert speech_control.create_response is False
+    assert speech_control.interrupt_response is False
+
+    assert await registry.accept_native_playback_stop(
+        downlink,
+        create_playback_stop_receipt(
+            downlink.binding,
+            outcome=MediaPlaybackStopOutcome.LOCAL_FENCE_ESTABLISHED,
+            confirmed_through_seq=0,
+        ),
+    )
+    cursor = NativePresentationCursor(
+        response=response,
+        provider_item_id="provider-item-1",
+        content_index=0,
+        audio_end_ms=20,
+    )
+    assert shared_actions == [("runtime", cursor), ("provider", cursor)]
+
+    registry.accept_native_frame(
+        uplink,
+        MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.0,) * 480),
+    )
+    end_of_turn = asyncio.create_task(registry.wait_native_end_of_turn(uplink))
+    commit = NativeTurnCommit(
+        contract_version=NATIVE_INTERACTION_CONTRACT_VERSION,
+        commit_id="native-commit-after-interruption",
+        binding=activation_handle.binding,
+        turn_id="native-turn-after-interruption",
+        provider_session_id="provider-session-1",
+        provider_item_id="provider-user-item-after-interruption",
+        provider_event_id="provider-commit-after-interruption",
+        causation_id="provider-commit-after-interruption",
+        input_audio_start_ms=120,
+        input_audio_end_ms=780,
+        committed_audio_ms=660,
+    )
+    await engine.events.put(
+        NativeEngineEvent(
+            action=InteractionAction(
+                action_id="native-turn-after-interruption",
+                operation="TURN_COMMIT",
+                interaction_id=activation_handle.binding.interaction_id,
+                scope=activation_handle.binding.scope,
+                payload=(
+                    ("turn_id", commit.turn_id),
+                    ("provider_item_id", commit.provider_item_id),
+                ),
+            ),
+            turn_commit=commit,
+        )
+    )
+    transcript = NativeInputTranscript(
+        binding=activation_handle.binding,
+        turn_id=commit.turn_id,
+        commit_id=commit.commit_id,
+        provider_session_id=commit.provider_session_id,
+        provider_item_id=commit.provider_item_id,
+        provider_event_id="provider-transcript-after-interruption",
+        transcript="打断后继续处理。",
+    )
+    await engine.events.put(NativeEngineEvent(input_transcript=transcript))
+
+    turn_control = await asyncio.wait_for(end_of_turn, timeout=1.0)
+    assert turn_control.provider_start_ms == 120
+    assert turn_control.provider_end_ms == 780
+
+    async def wait_for_continuous_input_and_transcript() -> None:
+        while not engine.offered_audio or not any(
+            item.input_transcript is not None for item in client.proposals
+        ):
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_continuous_input_and_transcript(), timeout=1.0)
+    transcript_response = registry.take_native_notification_response(
+        request_id="browser-local-transcript-1",
+        notification_sequence=1,
+        **notification_binding,
+    )
+    assert transcript_response is not None
+    assert transcript_response["result"]["kind"] == "native.user_transcript"
+    assert transcript_response["result"]["sequence_effect"] == "neutral"
+    assert (
+        registry.take_native_notification_response(
+            request_id="browser-local-transcript-1",
+            notification_sequence=1,
+            **notification_binding,
+        )
+        == transcript_response
+    )
+    assert registry.mark_native_notification_forwarded(
+        request_id="browser-agent-still-next-1",
+        notification_sequence=1,
+        **notification_binding,
+    )
+    assert registry.mark_native_notification_forwarded(
+        request_id="browser-agent-still-next-1",
+        notification_sequence=1,
+        **notification_binding,
+    )
+    assert not registry.mark_native_notification_forwarded(
+        request_id="browser-agent-still-next-1",
+        notification_sequence=2,
+        **notification_binding,
+    )
+
+    assert registry._native_sessions[session.key] is session
+    assert session.record_id == uplink.record_id
+    assert session.activation is activation_handle
+    assert session.engine is engine
+    assert session.closed is False
+    assert session.event_task is not None and session.event_task.done() is False
+    assert engine.offered_audio == [
+        NativeInputAudioFrame(seq=0, sample_cursor=0, pcm16=b"\x00\x00" * 480)
+    ]
+    assert sum(item.input_transcript is not None for item in client.proposals) == 1
+    assert client.close_calls == 0
+    assert engine.closed is False
 
     await registry.close_native_interaction(uplink)
 

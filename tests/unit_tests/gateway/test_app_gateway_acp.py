@@ -314,7 +314,7 @@ def test_gateway_marks_exact_native_notification_before_agent_forward() -> None:
 
         def mark_native_notification_forwarded(self, **kwargs):
             self.calls.append(kwargs)
-            return 1
+            return True
 
     class Channel:
         def __init__(self) -> None:
@@ -342,7 +342,7 @@ def test_gateway_marks_exact_native_notification_before_agent_forward() -> None:
     )
 
     assert _mark_live_voice_native_notification_forwarded(msg, channel) is True
-    assert msg.params["notification_sequence"] == 1
+    assert msg.params["notification_sequence"] == 2
     assert channel.live_voice_media_registry.calls == [
         {
             "request_id": "req-agent-notification",
@@ -358,7 +358,7 @@ def test_gateway_marks_exact_native_notification_before_agent_forward() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gateway_delivers_mapped_native_notification_sequence() -> None:
+async def test_gateway_forwards_native_notification_sequence_unchanged() -> None:
     class Registry:
         @staticmethod
         def take_native_notification_response(**kwargs):
@@ -366,7 +366,7 @@ async def test_gateway_delivers_mapped_native_notification_sequence() -> None:
 
         @staticmethod
         def mark_native_notification_forwarded(**kwargs):
-            return 1
+            return True
 
     class Channel:
         def __init__(self) -> None:
@@ -418,7 +418,7 @@ async def test_gateway_delivers_mapped_native_notification_sequence() -> None:
         is True
     )
     assert len(channel_manager.delivered) == 1
-    assert channel_manager.delivered[0].params["notification_sequence"] == 1
+    assert channel_manager.delivered[0].params["notification_sequence"] == 2
 
 
 @pytest.mark.parametrize(

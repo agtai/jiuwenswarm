@@ -316,6 +316,7 @@ function notificationBatch(notifications, changes = {}) {
 function nativeAudioNotification(changes = {}) {
   return response('notification', {
     kind: 'native.audio',
+    sequence_effect: 'neutral',
     request_id: 'request-native-audio-1',
     round_id: null,
     response: {
@@ -343,8 +344,56 @@ function nativeAudioNotification(changes = {}) {
   });
 }
 
+function nativeUserTranscriptNotification(changes = {}) {
+  return response('notification', {
+    kind: 'native.user_transcript',
+    sequence_effect: 'neutral',
+    request_id: 'request-native-user-transcript-1',
+    round_id: null,
+    response: null,
+    agent_event: {
+      event_type: 'chat.final',
+      message: {
+        id: 'live-voice:commit-native-1:native-user',
+        role: 'user',
+        content: '继续说。',
+        timestamp: 1788170401,
+      },
+      binding: {
+        turn_id: 'turn-native-1',
+        commit_id: 'commit-native-1',
+      },
+    },
+    source_event: null,
+    progress_event: null,
+    presentation_unit: null,
+    audio: null,
+    error_reason: null,
+    publish_seq: null,
+    ...changes,
+  });
+}
+
 function webError(message, code, retriable = false) {
   return Object.assign(new Error(message), { code, retriable });
+}
+
+function notificationSequenceMismatch(expectedSequence) {
+  const reason = 'PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH';
+  return Object.assign(webError('notification polls must use the next exact sequence', 'CONFLICT'), {
+    reason,
+    payload: {
+      request_id: 'request-notification-mismatch',
+      ok: false,
+      result: null,
+      error: {
+        code: 'CONFLICT',
+        reason,
+        message: 'notification polls must use the next exact sequence',
+        details: { expected_sequence: expectedSequence },
+      },
+    },
+  });
 }
 
 test('feature-off owner allocates and calls nothing', async () => {
@@ -661,23 +710,154 @@ test('Gateway-local Native audio does not consume the AgentServer notification s
   assert.equal(new Set(calls.map(([, requestId]) => requestId)).size, 3);
 });
 
-test('noncanonical Native audio cannot reuse an AgentServer notification sequence', async () => {
+for (const [name, localReplies] of [
+  ['audio then user transcript', [nativeAudioNotification(), nativeUserTranscriptNotification()]],
+  ['user transcript then audio', [nativeUserTranscriptNotification(), nativeAudioNotification()]],
+]) {
+  test(`all Gateway-local notification kinds keep the same AgentServer candidate: ${name}`, async () => {
+    const calls = [];
+    const replies = [...localReplies, response('notification', { kind: 'agent.output' })];
+    const owner = new ProductWebP2ActivationOwner({
+      enabled: true,
+      request: async (method, params, requestId) => {
+        if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+        assert.equal(method, PRODUCT_P2_NOTIFICATION_NEXT_METHOD);
+        calls.push([params.notification_sequence, requestId]);
+        return replies.shift();
+      },
+    });
+    await owner.start(binding);
+
+    assert.equal((await owner.nextNotification()).kind, localReplies[0].result.kind);
+    assert.equal((await owner.nextNotification()).kind, localReplies[1].result.kind);
+    assert.equal((await owner.nextNotification()).kind, 'agent.output');
+
+    assert.deepEqual(
+      calls.map(([sequence]) => sequence),
+      [1, 1, 1],
+    );
+    assert.equal(new Set(calls.map(([, requestId]) => requestId)).size, 3);
+  });
+}
+
+test('notification mismatch resynchronizes once inside the current activation', async () => {
+  const calls = [];
+  let notificationAttempts = 0;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method !== PRODUCT_P2_NOTIFICATION_NEXT_METHOD) {
+        throw new Error(`forbidden activation effect: ${method}`);
+      }
+      notificationAttempts += 1;
+      if (notificationAttempts === 1) throw notificationSequenceMismatch(2);
+      return response('notification', { kind: 'agent.output' });
+    },
+  });
+  await owner.start(binding);
+
+  assert.equal((await owner.nextNotification()).kind, 'agent.output');
+  const notificationCalls = calls.filter(([method]) => method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD);
+  assert.deepEqual(
+    notificationCalls.map(([, params]) => params.notification_sequence),
+    [1, 2],
+  );
+  assert.equal(new Set(notificationCalls.map(([, , requestId]) => requestId)).size, 2);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P2_ACTIVATE_METHOD).length, 1);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P2_CLOSE_METHOD).length, 0);
+  assert.equal(owner.snapshot().binding.activation_generation, 1);
+  assert.equal(owner.snapshot().status, 'active');
+});
+
+test('repeated notification mismatch never closes or rebuilds the activation', async () => {
+  const calls = [];
+  let settledOperations = 0;
+  let successorActivations = 0;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD) throw notificationSequenceMismatch(1);
+      if (method === PRODUCT_P2_CLOSE_METHOD) return response('closed');
+      throw new Error(`forbidden product effect: ${method}`);
+    },
+  });
+  await owner.start(binding);
+
+  await assert.rejects(
+    pollProductP2RouteWithRecovery({
+      owner,
+      is_current: () => true,
+      settle_retained_operations: async () => {
+        settledOperations += 1;
+      },
+      can_activate_successor: () => true,
+      activate_successor: async () => {
+        successorActivations += 1;
+        return null;
+      },
+    }),
+    /notification polls must use the next exact sequence/,
+  );
+
+  assert.equal(settledOperations, 0);
+  assert.equal(successorActivations, 0);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P2_CLOSE_METHOD).length, 0);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P2_ACTIVATE_METHOD).length, 1);
+  assert.equal(owner.snapshot().status, 'active');
+});
+
+test('malformed notification mismatch cursor fails closed without activation effects', async () => {
+  const calls = [];
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD) {
+        throw notificationSequenceMismatch(0);
+      }
+      throw new Error(`forbidden activation effect: ${method}`);
+    },
+  });
+  await owner.start(binding);
+
+  await assert.rejects(
+    pollProductP2RouteWithRecovery({
+      owner,
+      is_current: () => true,
+      settle_retained_operations: async () => assert.fail('must not settle mismatch'),
+      can_activate_successor: () => true,
+      activate_successor: async () => assert.fail('must not activate successor'),
+    }),
+    /notification polls must use the next exact sequence/,
+  );
+
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P2_CLOSE_METHOD).length, 0);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P2_ACTIVATE_METHOD).length, 1);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD).length, 1);
+  assert.equal(owner.snapshot().status, 'active');
+});
+
+test('noncanonical neutral notification fails closed before reusing a sequence', async () => {
   const sequences = [];
-  const replies = [nativeAudioNotification({ publish_seq: 1 }), response('notification', { kind: 'agent.output' })];
   const owner = new ProductWebP2ActivationOwner({
     enabled: true,
     request: async (method, params) => {
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
       sequences.push(params.notification_sequence);
-      return replies.shift();
+      return nativeAudioNotification({ publish_seq: 1 });
     },
   });
   await owner.start(binding);
 
-  await owner.nextNotification();
-  await owner.nextNotification();
+  await assert.rejects(owner.nextNotification(), /notification sequence effect is invalid/);
 
-  assert.deepEqual(sequences, [1, 2]);
+  assert.deepEqual(sequences, [1]);
+  assert.equal(owner.snapshot().status, 'active');
 });
 
 test('bounded P2 notification owner delivers eighteen ordered items through two RPCs', async () => {

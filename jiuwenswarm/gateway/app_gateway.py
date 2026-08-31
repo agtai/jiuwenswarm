@@ -357,25 +357,20 @@ def _mark_live_voice_native_notification_forwarded(
     if not callable(mark):
         return False
     try:
-        mapped_sequence = mark(
-            request_id=msg.id,
-            session_id=msg.session_id,
-            correlation_id=correlation_id,
-            interaction_id=interaction_id,
-            activation_id=activation_id,
-            activation_generation=activation_generation,
-            connection_id=ws_id,
-            notification_sequence=notification_sequence,
+        return bool(
+            mark(
+                request_id=msg.id,
+                session_id=msg.session_id,
+                correlation_id=correlation_id,
+                interaction_id=interaction_id,
+                activation_id=activation_id,
+                activation_generation=activation_generation,
+                connection_id=ws_id,
+                notification_sequence=notification_sequence,
+            )
         )
     except ValueError:
         return False
-    if type(mapped_sequence) is not int or mapped_sequence <= 0:
-        return False
-    if mapped_sequence != notification_sequence:
-        params = dict(msg.params)
-        params["notification_sequence"] = mapped_sequence
-        msg.params = params
-    return True
 
 
 async def _normalize_and_forward_gateway_message(

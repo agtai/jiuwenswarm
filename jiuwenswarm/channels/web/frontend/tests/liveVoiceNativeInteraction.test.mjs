@@ -18,6 +18,7 @@ function nativeNotification(overrides = {}) {
   return {
     status: 'notification',
     kind: 'native.audio',
+    sequence_effect: 'neutral',
     request_id: 'notification-native-1',
     round_id: null,
     response,
@@ -69,6 +70,7 @@ function nativeUserTranscriptNotification(overrides = {}) {
   return {
     status: 'notification',
     kind: 'native.user_transcript',
+    sequence_effect: 'neutral',
     request_id: 'notification-native-transcript-1',
     round_id: null,
     response: null,

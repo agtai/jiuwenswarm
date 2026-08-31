@@ -833,10 +833,6 @@ class _NativeNotificationSequenceFence:
     """Bound one serialized Browser notification poll to its serving authority."""
 
     agent_high_water: int = 0
-    client_sequence_mode: Literal["reuse", "monotonic"] | None = None
-    client_sequence_offset: int = 0
-    local_projection_debt: int = 0
-    local_projection_disabled: bool = False
     local_request_id: str | None = None
     local_sequence: int | None = None
     local_response: dict[str, object] | None = field(default=None, repr=False)
@@ -1564,26 +1560,11 @@ class DedicatedMediaProductRegistry:
             fence.local_request_id = None
             fence.local_sequence = None
             fence.local_response = None
-            if fence.local_projection_disabled:
-                return None
-            # A Gateway-local projection may either reuse the still-next
-            # AgentServer sequence (the original Browser owner behaviour) or
-            # consume a monotonic Browser sequence.  Both remain bounded by the
-            # exact number of projections that never reached AgentServer.
+            # Gateway-local projections never consume AgentServer's committed
+            # cursor.  The Browser therefore keeps using the still-next
+            # candidate until an AgentServer response explicitly consumes it.
             expected_agent_sequence = fence.agent_high_water + 1
-            reuse_sequence = expected_agent_sequence
-            monotonic_sequence = (
-                expected_agent_sequence
-                + fence.client_sequence_offset
-                + fence.local_projection_debt
-            )
-            if fence.client_sequence_mode == "reuse":
-                accepted_sequences = {reuse_sequence}
-            elif fence.client_sequence_mode == "monotonic":
-                accepted_sequences = {monotonic_sequence}
-            else:
-                accepted_sequences = {reuse_sequence, monotonic_sequence}
-            if parsed_notification_sequence not in accepted_sequences:
+            if parsed_notification_sequence != expected_agent_sequence:
                 return None
             queue_owner = self._native_notifications.get(
                 (parsed_session_id, parsed_interaction_id, parsed_connection_id)
@@ -1599,6 +1580,7 @@ class DedicatedMediaProductRegistry:
             )
             projected = dict(notification)
             projected["request_id"] = parsed_request_id
+            projected["sequence_effect"] = "neutral"
             response = {
                 "request_id": parsed_request_id,
                 "ok": True,
@@ -1611,7 +1593,6 @@ class DedicatedMediaProductRegistry:
             fence.local_response = json.loads(
                 canonical_json_bytes(response).decode("utf-8")
             )
-            fence.local_projection_debt += 1
             return response
 
     def mark_native_notification_forwarded(
@@ -1625,8 +1606,8 @@ class DedicatedMediaProductRegistry:
         activation_generation: int,
         connection_id: str,
         notification_sequence: int,
-    ) -> int | None:
-        """Map one Browser poll to its exact AgentServer sequence before forwarding."""
+    ) -> bool:
+        """Fence one unchanged Browser candidate before AgentServer forwarding."""
 
         parsed_request_id = _required_id(request_id, "request_id")
         parsed_session_id = _required_id(session_id, "session_id")
@@ -1641,7 +1622,7 @@ class DedicatedMediaProductRegistry:
             notification_sequence, "notification_sequence"
         )
         if parsed_notification_sequence == 0:
-            return None
+            return False
         with self._lock:
             authority = self._product_activations.get(
                 (parsed_session_id, parsed_connection_id, parsed_interaction_id)
@@ -1653,7 +1634,7 @@ class DedicatedMediaProductRegistry:
                 or authority.activation_id != parsed_activation_id
                 or authority.activation_generation != parsed_activation_generation
             ):
-                return None
+                return False
             fence = authority.notification_fence
             if fence.local_request_id != parsed_request_id:
                 fence.local_request_id = None
@@ -1664,46 +1645,24 @@ class DedicatedMediaProductRegistry:
                     fence.forwarded_client_sequence != parsed_notification_sequence
                     or fence.forwarded_agent_sequence is None
                 ):
-                    return None
-                return fence.forwarded_agent_sequence
+                    return False
+                return True
             fence.forwarded_request_id = None
             fence.forwarded_client_sequence = None
             fence.forwarded_agent_sequence = None
             if parsed_notification_sequence <= fence.agent_high_water:
-                return parsed_notification_sequence
+                return True
             expected_agent_sequence = fence.agent_high_water + 1
-            reuse_sequence = expected_agent_sequence
-            monotonic_sequence = (
-                expected_agent_sequence
-                + fence.client_sequence_offset
-                + fence.local_projection_debt
-            )
-            if fence.client_sequence_mode == "reuse":
-                accepted_sequences = {reuse_sequence}
-            elif fence.client_sequence_mode == "monotonic":
-                accepted_sequences = {monotonic_sequence}
-            else:
-                accepted_sequences = {reuse_sequence, monotonic_sequence}
-            if parsed_notification_sequence not in accepted_sequences:
-                # Do not duplicate AgentServer's sequence policy at Gateway.
-                # The request still forwards for its authoritative rejection,
-                # but this activation can no longer safely serve local polls.
-                fence.local_projection_disabled = True
-                return None
-            if fence.client_sequence_mode is None and fence.local_projection_debt:
-                fence.client_sequence_mode = (
-                    "reuse"
-                    if parsed_notification_sequence == reuse_sequence
-                    else "monotonic"
-                )
-            if fence.client_sequence_mode == "monotonic":
-                fence.client_sequence_offset += fence.local_projection_debt
+            if parsed_notification_sequence != expected_agent_sequence:
+                # AgentServer remains the strict sequence authority.  Forward
+                # the unchanged candidate so it can return its exact cursor;
+                # do not poison later local projections for this activation.
+                return False
             fence.forwarded_request_id = parsed_request_id
             fence.forwarded_client_sequence = parsed_notification_sequence
-            fence.forwarded_agent_sequence = expected_agent_sequence
-            fence.agent_high_water = expected_agent_sequence
-            fence.local_projection_debt = 0
-            return expected_agent_sequence
+            fence.forwarded_agent_sequence = parsed_notification_sequence
+            fence.agent_high_water = parsed_notification_sequence
+            return True
 
     async def close_native_interaction(self, record: _MediaAuthority) -> bool:
         key = self._native_session_keys_by_record.get(record.record_id)

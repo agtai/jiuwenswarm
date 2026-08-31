@@ -31,6 +31,7 @@ import {
   PRODUCT_P3_TASK_EVENTS_METHOD,
   PRODUCT_P3_TASK_STATUS_METHOD,
   ProductWebP2ActivationOwner,
+  isProductNotificationSequenceMismatch,
   ProductWebP3MutationOwner,
   ProductWebP3ProgressOwner,
   isDefinitiveProductOperationError,
@@ -1283,9 +1284,10 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
         'status', 'kind', 'request_id', 'round_id', 'response', 'agent_event',
         'source_event', 'progress_event', 'presentation_unit', 'audio',
         'error_reason', 'publish_seq', 'session_id', 'correlation_id',
-        'interaction_id', 'activation_id', 'activation_generation',
+        'interaction_id', 'activation_id', 'activation_generation', 'sequence_effect',
       ]) &&
       notification.status === 'notification' &&
+      notification.sequence_effect === 'neutral' &&
       typeof notification.request_id === 'string' && notification.request_id.trim().length > 0 &&
       notification.round_id === null &&
       notification.response === null &&
@@ -1413,9 +1415,10 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
         'status', 'kind', 'request_id', 'round_id', 'response', 'agent_event',
         'source_event', 'progress_event', 'presentation_unit', 'audio',
         'error_reason', 'publish_seq', 'session_id', 'correlation_id',
-        'interaction_id', 'activation_id', 'activation_generation',
+        'interaction_id', 'activation_id', 'activation_generation', 'sequence_effect',
       ]) &&
       notification.status === 'notification' &&
+      notification.sequence_effect === 'neutral' &&
       typeof notification.request_id === 'string' && notification.request_id.trim().length > 0 &&
       notification.round_id === null &&
       notification.agent_event === null &&
@@ -4373,6 +4376,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             if (cancelled || activationOwnerRef.current !== owner) return;
           }
         } catch (error) {
+          if (!cancelled && isProductNotificationSequenceMismatch(error)) {
+            const reason = stableProductTextReason(error, 'PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH');
+            setProductTextReason(reason);
+            setProductTextStatus('failed');
+            return;
+          }
           const retained = activationOwnerRef.current;
           if (
             !cancelled &&
