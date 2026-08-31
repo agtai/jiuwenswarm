@@ -984,9 +984,13 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
   implemented and verified on `f24dd17d`; later P1/P2 and P3 packages must
   preserve them. Exact
   itinerary/checkpoint/bypass and other launcher scenario values retire after a
-  clean journey during generalization. Protocol constants and accepted safety
-  bounds stay; the capture-duration contract must be decided before changing its
-  value.
+  clean journey during generalization. The 2026-08-31 assisted P3-9 journey
+  confirmed that running-task adjustment still depends on the controlled Demo
+  task name/prompt and can otherwise return `ADJUSTMENT_CHECKPOINT_CLOSED`.
+  This fixture-dependent gap is deferred until after the current bounded journey
+  and grants no generalized Task-language claim. Protocol constants and accepted
+  safety bounds stay; the capture-duration contract must be decided before
+  changing its value.
 - **Duplicates:** combine registry generation-index traversal only if its owner
   is touched by the defect repair. Formal validators/snapshots wait for the code
   organization batch; authority handlers remain explicit unless semantics match.
@@ -994,11 +998,18 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
   defined in the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md).
   The first physical diagnosis found the dominant P2 one-notification-per-RPC
   tail; the bounded pull is now repaired, physically accepted in a small sample
-  and default-on under D-094. The accepted warm L0 baseline now decomposes STT,
-  Agent, TTS, WebAudio first-start and full-round p50/p95. VAD finalization,
-  first-audio startup and formal sentence-level Agent→TTS overlap may be
-  evaluated under a separately activated quality packet; they are not needed to
-  reopen the completed bounded L0 scope.
+  and default-on under D-094. A 2026-08-31 P3-9-assisted run nevertheless took
+  `44.657 s` and `45.524 s` to present two ordinary dialogue answers even though
+  unified submission and Agent work completed within `3.85 s`; about `41 s` in
+  each round remained in post-Agent P2 notification delivery. Requests declared
+  `max_notifications=16`, but the observed sequence advanced one item per pull.
+  This is the D-094 failure class, while the exact notification barrier versus
+  browser capture/playout-arbitration contribution remains to be isolated in a
+  later latency repair. The accepted warm L0 baseline now decomposes STT, Agent,
+  TTS, WebAudio first-start and full-round p50/p95. VAD finalization, first-audio
+  startup and formal sentence-level Agent→TTS overlap may be evaluated under a
+  separately activated quality packet; they are not needed to reopen the
+  completed bounded L0 scope.
 - **Reviews:** reproduce findings against current source; fix confirmed issues
   only and rerun affected checks. Feature closure requires one independent
   cross-module review after competitor-gap decisions.
