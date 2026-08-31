@@ -180,6 +180,7 @@ CURRENT = CurrentBackgroundTaskContext(
             UnifiedCommittedInputRoute.BACKGROUND_QUERY,
         ),
         ("后台现在做到哪了？", UnifiedCommittedInputRoute.BACKGROUND_STATUS),
+        ("后台任务现在到哪儿了？", UnifiedCommittedInputRoute.BACKGROUND_STATUS),
         (
             "顺便问一下，后台现在做到哪了？",
             UnifiedCommittedInputRoute.BACKGROUND_STATUS,
@@ -319,6 +320,7 @@ def test_unified_negated_cancel_has_no_cancel_route(
     [
         "帮我介绍杭州。",
         "杭州有什么特色菜？",
+        "杭州现在到哪儿了？",
         "可以改一下吗？",
         "不要修改当前后台任务。",
         "Don't change the current background task.",

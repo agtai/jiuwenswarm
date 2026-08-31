@@ -94,6 +94,7 @@ from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCor
 from jiuwenswarm.server.live_voice.p2_response_generation_store import (
     SqliteP2ResponseGenerationOwner,
 )
+from jiuwenswarm.server.live_voice.product_p2_interaction_adapter import P2LeaseState
 from jiuwenswarm.server.live_voice.p3_confirmation import (
     BoundedP3ConfirmationOwner,
     P3ConfirmationBinding,
@@ -4857,7 +4858,7 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
     terminal_status = await registry.handle_unified_submit(
         params=_unified_final_params(
             stem="status-cancelled",
-            text="后台现在做到哪了？",
+            text="后台任务现在到哪儿了？",
         ),
         request_id="request-status-cancelled",
         session_id=SCOPE.session_id,
@@ -4876,6 +4877,430 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
     assert composition.create_effects == 0
     assert composition.adjust_effects == 0
     await _close_unified_route(registry, stem="status-current")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_timing",
+    [
+        "before_owner_close",
+        "before_owner_close_capacity_retry",
+        "during_owner_close",
+        "after_owner_close",
+        "after_owner_close_capacity_replay",
+        "after_owner_close_capacity_progress_close_retry",
+        "after_owner_close_capacity_disconnect_retry",
+    ],
+)
+async def test_terminal_after_voice_playout_failure_replays_on_successor_p2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_timing: str,
+) -> None:
+    project, store, task_id, source_events = _running_presentation_store(tmp_path)
+    task = store.get_task(task_id, SCOPE)
+    attempt = store.get_attempt(task.attempt_id)
+    assert attempt.executor_ref is not None
+    executor_ref = attempt.executor_ref
+
+    def complete_task() -> PersistentTaskEvent:
+        artifact = TaskResultArtifact(
+            relative_path="itinerary.md",
+            sha256=hashlib.sha256(b"completed itinerary").hexdigest(),
+        )
+        store.apply_observations(
+            (
+                ExecutorObservation(
+                    resolution=ExecutorResolution.KNOWN,
+                    executor_id=attempt.executor_id,
+                    executor_ref=executor_ref,
+                    task_id=task_id,
+                    attempt_id=attempt.attempt_id,
+                    source_event_id=f"{executor_ref}:2",
+                    source_seq=2,
+                    attempt_state=FormalAttemptState.TERMINAL,
+                    attempt_outcome=TerminalOutcome.COMPLETED,
+                    occurred_at=ACK_NOW,
+                    raw_status="completed",
+                    result_text="杭州三日行程已完成。",
+                    result_artifacts=(artifact,),
+                ),
+            )
+        )
+        completed = store.events(task_id, SCOPE)[-1]
+        assert completed.event_type == "task.terminal"
+        return completed
+
+    terminal_event = (
+        complete_task() if terminal_timing.startswith("before") else None
+    )
+
+    composition = _P3Composition(project, presentation_store=store)
+    composition.subscription_events = (source_events[0],)
+
+    async def read_notification_facts(**_kwargs: object):
+        current = store.get_task(task_id, SCOPE)
+        availability, result, reason = store.task_result(task_id, SCOPE)
+        return current, availability, result, reason
+
+    monkeypatch.setattr(
+        composition,
+        "read_task_notification_facts",
+        read_notification_facts,
+    )
+    pushed: list[dict[str, object]] = []
+
+    async def push(message: dict[str, object]) -> bool:
+        pushed.append(message)
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-terminal-replay-p2-old",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    registry._voice_task_origins[task_id] = _VoiceTaskOrigin(
+        session_id=SCOPE.session_id or "",
+        interaction_id="interaction-1",
+        activation_id="activation-1",
+        activation_generation=1,
+        correlation_id="correlation-p2",
+        response_ref=ResponseRef("interaction-1", "response-origin", 0),
+    )
+    progress_params = _progress_params(
+        task_id=task_id,
+        correlation_id="correlation-p2",
+        origin_id="interaction-1",
+        origin_kind="voice",
+        generation_id="voice-progress-terminal-replay",
+    )
+    assert (
+        await registry.handle_p3_progress_activate(
+            params=progress_params,
+            request_id="request-terminal-replay-progress",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    for _ in range(200):
+        with registry._task_presentation_state_lock:
+            if registry._task_presentation_deliveries:
+                break
+        await asyncio.sleep(0.01)
+    with registry._task_presentation_state_lock:
+        _delivery, audio_presentation = next(
+            iter(registry._task_presentation_deliveries.values())
+        )
+    audio_notification: dict[str, object] | None = None
+    for sequence in range(1, 5):
+        polled = await registry.handle_p2_notification_next(
+            params=_p2_params(notification_sequence=sequence),
+            request_id=f"request-terminal-replay-old-next-{sequence}",
+            session_id=SCOPE.session_id,
+        )
+        assert polled.ok
+        candidate = cast(dict[str, object], polled.payload["result"])
+        if isinstance(candidate.get("presentation_unit"), dict):
+            audio_notification = candidate
+            break
+    assert audio_notification is not None
+    audio_response = cast(dict[str, object], audio_notification["response"])
+    audio_unit = cast(dict[str, object], audio_notification["presentation_unit"])
+    assert audio_presentation.presentation_class == "voice"
+    failed = await registry.handle_p2_presentation_failed(
+        params=_p2_params(
+            response_id=audio_response["response_id"],
+            response_generation=audio_response["response_generation"],
+            surface=audio_unit["surface"],
+            unit_id=audio_unit["unit_id"],
+            failure_reason="task_audio_playout_failed",
+        ),
+        request_id="request-terminal-replay-audio-failed",
+        session_id=SCOPE.session_id,
+    )
+    assert failed.ok
+    assert len(pushed) == 1
+
+    retained_progress = next(iter(registry._progress_routes.values()))
+
+    def complete_terminal_intent() -> tuple[
+        PersistentTaskEvent,
+        TaskProgressNotificationIntent,
+    ]:
+        completed = complete_task()
+        projection = project_task_progress_event(
+            completed, retained_progress.binding
+        )
+        terminal_intent = TaskProgressNotificationIntent(
+            origin=retained_progress.binding,
+            task_event=completed,
+            source_event=projection.source_event,
+            progress_event=projection.progress_event,
+            decision=cast(object, None),
+            evidence_id=_evidence_id(retained_progress.binding, completed),
+        )
+        return completed, terminal_intent
+
+    async def complete_and_emit_terminal() -> PersistentTaskEvent:
+        completed, terminal_intent = complete_terminal_intent()
+        await registry._emit_voice_progress(terminal_intent)
+        return completed
+
+    if terminal_timing.startswith("before"):
+        assert terminal_event is not None
+        terminal_pending = next(
+            pending
+            for pending in retained_progress.pending_presentations.values()
+            if pending.event.task_event.event_id == terminal_event.event_id
+        )
+        assert terminal_pending is not None
+        assert any(
+            pending.event.task_event.event_id == terminal_event.event_id
+            for pending in retained_progress.pending_presentations.values()
+        )
+        assert registry._pending_terminal_notifications == {}
+        if terminal_timing == "before_owner_close_capacity_retry":
+            terminal_text = registry._terminal_text_event(terminal_pending.event)
+            assert terminal_text is not None
+            monkeypatch.setattr(registry, "_PRODUCT_OPERATION_CAPACITY", 1)
+            registry._pending_terminal_notifications["capacity-filler"] = terminal_text
+
+    if terminal_timing == "during_owner_close":
+        retained_p2 = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+        lease_type = type(retained_p2.lease)
+        original_close = lease_type.close
+        close_entered = asyncio.Event()
+        release_close = asyncio.Event()
+
+        async def gated_close(lease: object) -> None:
+            if lease is retained_p2.lease:
+                close_entered.set()
+                await release_close.wait()
+            await original_close(lease)
+
+        monkeypatch.setattr(lease_type, "close", gated_close)
+        close_task = asyncio.create_task(
+            registry.handle_p2_close(
+                params=_p2_params(),
+                request_id="request-terminal-replay-old-close",
+                session_id=SCOPE.session_id,
+            )
+        )
+        await asyncio.wait_for(close_entered.wait(), timeout=1.0)
+        terminal_event = await complete_and_emit_terminal()
+        release_close.set()
+        closed = await asyncio.wait_for(close_task, timeout=1.0)
+    else:
+        closed = await registry.handle_p2_close(
+            params=_p2_params(),
+            request_id="request-terminal-replay-old-close",
+            session_id=SCOPE.session_id,
+        )
+    if terminal_timing == "before_owner_close_capacity_retry":
+        assert not closed.ok
+        assert cast(dict[str, object], closed.payload["error"])["reason"] == (
+            "PRODUCT_P2_CLEANUP_PENDING"
+        )
+        assert (SCOPE.session_id, "interaction-1") in registry._p2_routes
+        assert task_id in registry._voice_task_origins
+        assert (
+            registry._p2_routes[
+                (SCOPE.session_id, "interaction-1")
+            ].activation_lease.snapshot().state
+            is P2LeaseState.OPEN
+        )
+        assert tuple(registry._pending_terminal_notifications) == (
+            "capacity-filler",
+        )
+        registry._pending_terminal_notifications.pop("capacity-filler")
+        closed = await registry.handle_p2_close(
+            params=_p2_params(),
+            request_id="request-terminal-replay-old-close-retry",
+            session_id=SCOPE.session_id,
+        )
+    assert closed.ok
+    successor_binding = _p2_params(
+        correlation_id="correlation-p2-successor",
+        interaction_id="interaction-2",
+        activation_id="activation-2",
+        activation_generation=2,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=successor_binding,
+            request_id="request-terminal-replay-p2-successor",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    successor_history = _HistoryWriter()
+    registry._p2_routes[
+        (SCOPE.session_id, "interaction-2")
+    ].activation_lease._runtime._history_writer = successor_history
+
+    if terminal_timing == "after_owner_close":
+        terminal_event = await complete_and_emit_terminal()
+    elif terminal_timing.startswith("after_owner_close_capacity"):
+        terminal_event, terminal_intent = complete_terminal_intent()
+        fallback = TaskProgressTextEvent(
+            origin=terminal_intent.origin,
+            task_event=terminal_intent.task_event,
+            source_event=terminal_intent.source_event,
+            progress_event=terminal_intent.progress_event,
+            evidence_id=terminal_intent.evidence_id,
+        )
+        monkeypatch.setattr(registry, "_PRODUCT_OPERATION_CAPACITY", 1)
+        registry._pending_terminal_notifications["capacity-filler"] = fallback
+        await asyncio.wait_for(
+            registry._emit_voice_progress(terminal_intent),
+            timeout=1.0,
+        )
+        assert retained_progress.orphaned_terminal is not None
+        assert (
+            retained_progress.orphaned_terminal.task_event.event_id
+            == terminal_event.event_id
+        )
+        if terminal_timing.endswith("progress_close_retry"):
+            progress_close_params = dict(progress_params)
+            progress_close_params.pop("origin_kind")
+            blocked_progress_close = await asyncio.wait_for(
+                registry.handle_p3_progress_close(
+                    params=progress_close_params,
+                    request_id="request-terminal-replay-progress-close-blocked",
+                    session_id=SCOPE.session_id,
+                ),
+                timeout=1.0,
+            )
+            assert not blocked_progress_close.ok
+            assert cast(
+                dict[str, object], blocked_progress_close.payload["error"]
+            )["reason"] == "PRODUCT_P3_PROGRESS_CLEANUP_PENDING"
+            assert retained_progress.progress_lease.snapshot().state is (
+                TaskProgressReturnState.ACTIVE
+            )
+        if terminal_timing.endswith("progress_close_retry"):
+            registry._pending_terminal_notifications.pop("capacity-filler")
+            closed_progress = await registry.handle_p3_progress_close(
+                params=progress_close_params,
+                request_id="request-terminal-replay-progress-close-retry",
+                session_id=SCOPE.session_id,
+            )
+            assert closed_progress.ok
+        elif terminal_timing.endswith("disconnect_retry"):
+            with pytest.raises(
+                RuntimeError,
+                match="Live Voice product route cleanup remains pending",
+            ):
+                await asyncio.wait_for(
+                    registry.close_active_routes(),
+                    timeout=1.0,
+                )
+            assert retained_progress.progress_lease.snapshot().state is (
+                TaskProgressReturnState.ACTIVE
+            )
+            assert registry._p2_routes == {}
+            registry._pending_terminal_notifications.pop("capacity-filler")
+            await asyncio.wait_for(registry.close_active_routes(), timeout=1.0)
+            assert registry._progress_routes == {}
+            successor_binding = _p2_params(
+                correlation_id="correlation-p2-successor-reconnected",
+                interaction_id="interaction-3",
+                activation_id="activation-3",
+                activation_generation=3,
+            )
+            assert (
+                await registry.handle_p2_activate(
+                    params=successor_binding,
+                    request_id="request-terminal-replay-p2-reconnected",
+                    session_id=SCOPE.session_id,
+                    channel_id="web",
+                )
+            ).ok
+            successor_history = _HistoryWriter()
+            registry._p2_routes[
+                (SCOPE.session_id, "interaction-3")
+            ].activation_lease._runtime._history_writer = successor_history
+        else:
+            registry._pending_terminal_notifications.pop("capacity-filler")
+    assert terminal_event is not None
+    if terminal_timing == "after_owner_close_capacity_replay":
+        assert registry._pending_terminal_notifications == {}
+        assert retained_progress.orphaned_terminal is not None
+    else:
+        assert tuple(registry._pending_terminal_notifications) == (
+            terminal_event.event_id,
+        )
+
+    terminal_notification = await registry.handle_p2_notification_next(
+        params={**successor_binding, "notification_sequence": 1},
+        request_id="request-terminal-replay-successor-next",
+        session_id=SCOPE.session_id,
+    )
+    assert terminal_notification.ok
+    assert retained_progress.orphaned_terminal is None
+    payload = cast(dict[str, object], terminal_notification.payload["result"])
+    response = cast(dict[str, object], payload["response"])
+    unit = cast(dict[str, object], payload["presentation_unit"])
+    event = cast(dict[str, object], payload["agent_event"])
+    assert event["source_provenance"] == "server.task_notification"
+    assert event["text"] == "后台任务已完成，结果已经生成。"
+    acknowledged = await registry.handle_p2_presentation_ack(
+        params={
+            **successor_binding,
+            "response_id": response["response_id"],
+            "response_generation": response["response_generation"],
+            "surface": unit["surface"],
+            "unit_id": unit["unit_id"],
+            "contiguous_cursor": unit["seq"],
+            "presented_at": ACK_NOW,
+        },
+        request_id="request-terminal-replay-successor-ack",
+        session_id=SCOPE.session_id,
+    )
+    assert acknowledged.ok
+    assert registry._pending_terminal_notifications == {}
+    keepalive = await registry.handle_p2_notification_next(
+        params={**successor_binding, "notification_sequence": 2},
+        request_id="request-terminal-replay-successor-next-2",
+        session_id=SCOPE.session_id,
+    )
+    assert keepalive.ok
+    assert cast(dict[str, object], keepalive.payload["result"])["kind"] == (
+        "transport.keepalive"
+    )
+    assert len(successor_history.assistants) == 1
+    assert (
+        store.unread_events_page(
+            task_id, SCOPE, presentation_class="text", limit=500
+        ).watermark
+        == -1
+    )
+    progress_close_params = dict(progress_params)
+    progress_close_params.pop("origin_kind")
+    assert (
+        await registry.handle_p3_progress_close(
+            params=progress_close_params,
+            request_id="request-terminal-replay-progress-close",
+            session_id=SCOPE.session_id,
+        )
+    ).ok
+    assert (
+        await registry.handle_p2_close(
+            params=successor_binding,
+            request_id="request-terminal-replay-successor-close",
+            session_id=SCOPE.session_id,
+        )
+    ).ok
+    await registry.stop()
 
 
 @pytest.mark.asyncio
@@ -7211,6 +7636,9 @@ async def test_superseded_cr_voice_response_projects_visible_text_with_stable_re
         reason = "TASK_PROGRESS_RESPONSE_SUPERSEDED"
 
     class _Lease:
+        def snapshot(self):
+            return SimpleNamespace(state=P2LeaseState.OPEN)
+
         async def deliver_task_progress(self, *_args: object) -> None:
             raise _Superseded("old response generation")
 

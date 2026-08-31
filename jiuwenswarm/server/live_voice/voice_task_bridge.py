@@ -350,7 +350,7 @@ class BoundedAlphaTaskIntentResolver:
         re.compile(
             rf"^\s*{_UNIFIED_CHINESE_DISCOURSE_PREFIX}"
             r"(?:后台|后台任务|刚才的任务|当前(?:的)?(?:后台)?任务|这个任务|这个行程|行程规划)"
-            r"(?:现在)?(?:做到哪(?:里|儿)?了|进度(?:怎么样|如何|是多少)?|进展(?:怎么样|如何)?|情况(?:怎么样|如何)?|什么状态)\s*[？?。.]?\s*$"
+            r"(?:现在)?(?:(?:做到|到)哪(?:里|儿)?了|进度(?:怎么样|如何|是多少)?|进展(?:怎么样|如何)?|情况(?:怎么样|如何)?|什么状态)\s*[？?。.]?\s*$"
         ),
         re.compile(
             r"^\s*(?:how\s+far\s+is|what(?:'s|\s+is)\s+the\s+(?:progress|status)\s+of)"

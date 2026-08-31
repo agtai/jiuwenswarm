@@ -320,8 +320,37 @@ exact-source Alpha result.
   so this records completed item output rather than a false clean process exit.
   Scoped independent repair re-review is `Critical 0 / Important 0 / Minor 0`
   and `Ready`; it does not replace the final cumulative P3-9 review Gate.
+- **2026-08-31 terminal-notification successor replay:** the assisted Session
+  log and Store showed that the expected `59998e2c` source was active, but a
+  Task AUDIO fallback could leave the ordered P3 presentation prefix
+  unconsumed when its owning P2 generation closed. A terminal fact arriving
+  immediately before or after that close could therefore remain behind the old
+  generation and never enter the existing P2 terminal-notification replay
+  ledger. The scoped repair retains only an exact same-scope, same-correlation
+  voice terminal fact when its owner closes, and sends a later terminal fact
+  directly to that ledger once the exact voice owner is gone. A successor P2
+  presents it once and its exact ACK removes it; stale ACK and durable Task
+  completion authority remain unchanged. The observed phrase
+  `后台任务现在到哪儿了？` is also included in the bounded current-Task status
+  corpus, while the non-Task near miss remains ordinary dialogue. Deterministic
+  before/after-close branches and a barrier-controlled close race cover the
+  terminal timing boundary. A full replay ledger now fails P2 close closed with
+  `PRODUCT_P2_CLEANUP_PENDING`, retaining the exact open old route/origin until
+  capacity is released and the close succeeds. A terminal arriving only after
+  its owner closed uses the existing bounded progress route as its one-event
+  retry owner when the replay ledger is full; successor polling promotes it
+  after capacity is released. P3 close and Gateway disconnect return bounded
+  cleanup-pending truth rather than blocking, retain that route, and succeed on
+  retry without losing or duplicating the terminal. The successor replay,
+  exact ACK, no-duplicate path, authoritative status query and affected
+  negative corpus pass; the affected registry suite is `193 passed`, the
+  bounded bridge corpus is `79 passed`, and scoped independent re-review is
+  `Critical 0 / Important 0 / Minor 0`, `Ready`. This is not a deployment or
+  human acceptance result, and it does not generalize or retire the deferred
+  Demo language hardcodes recorded below.
 - **Remaining Gate:** implementation and automated task work are complete. Run
-  the required human acceptance, including the visible formal P3 panel and the
+  the required human acceptance on the exact committed source containing the
+  successor-replay repair, including the visible formal P3 panel and the
   separate user-confirmed real voice journey, then obtain final independent
   Tier-3 review over the integrated candidate. Record one sanitized cumulative
   evidence result and synchronize STATUS only after those Gates actually run.

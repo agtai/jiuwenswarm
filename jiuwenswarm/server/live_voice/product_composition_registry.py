@@ -461,6 +461,7 @@ class _ProgressRoute:
     pending_presentations: dict[tuple[str, str], "_PendingProgressPresentation"] = (
         field(default_factory=dict)
     )
+    orphaned_terminal: TaskProgressTextEvent | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1983,6 +1984,10 @@ class AgentServerProductCompositionRegistry:
         key: tuple[str, str, str, str],
         retained: _ProgressRoute,
     ) -> bool:
+        if retained.orphaned_terminal is not None:
+            if not self._stopped:
+                return False
+            retained.orphaned_terminal = None
         deliveries = self._progress_deliveries.get(key, {})
         if self._p3_presentation_consumption_available:
             try:
@@ -2580,10 +2585,10 @@ class AgentServerProductCompositionRegistry:
         delivery.presentation = reserved
         return reserved
 
-    def _remember_terminal_notification(self, event: TaskProgressTextEvent) -> None:
+    def _remember_terminal_notification(self, event: TaskProgressTextEvent) -> bool:
         event_id = event.task_event.event_id
         if event_id in self._pending_terminal_notifications:
-            return
+            return True
         if (
             len(self._pending_terminal_notifications)
             >= self._PRODUCT_OPERATION_CAPACITY
@@ -2592,8 +2597,112 @@ class AgentServerProductCompositionRegistry:
                 "[LiveVoiceProduct] terminal notification capacity is unavailable",
                 extra={"live_voice_event": "task_terminal_notification_deferred"},
             )
-            return
+            return False
         self._pending_terminal_notifications[event_id] = event
+        return True
+
+    @staticmethod
+    def _terminal_text_event(
+        event: TaskProgressTextEvent | TaskProgressNotificationIntent,
+    ) -> TaskProgressTextEvent | None:
+        if event.task_event.event_type != "task.terminal":
+            return None
+        if isinstance(event, TaskProgressTextEvent):
+            return event
+        return TaskProgressTextEvent(
+            origin=event.origin,
+            task_event=event.task_event,
+            source_event=event.source_event,
+            progress_event=event.progress_event,
+            evidence_id=event.evidence_id,
+        )
+
+    def _remember_terminal_notifications_for_p2_route(
+        self,
+        retained: _P2Route,
+        *,
+        commit: bool = True,
+    ) -> bool:
+        """Preserve unconsumed terminal facts when their voice owner closes."""
+
+        candidates: list[TaskProgressTextEvent] = []
+        orphaned_routes: list[_ProgressRoute] = []
+        for key, progress in self._progress_routes.items():
+            binding = progress.binding
+            origin = self._voice_task_origins.get(binding.task_id)
+            if (
+                binding.origin_kind is not TaskProgressOriginKind.VOICE
+                or binding.session_id != retained.binding.session_id
+                or binding.scope != retained.binding.scope
+                or binding.correlation_id != retained.binding.correlation_id
+                or binding.origin_id != retained.binding.interaction_id
+                or origin is None
+                or origin.session_id != retained.binding.session_id
+                or origin.interaction_id != retained.binding.interaction_id
+                or origin.correlation_id != retained.binding.correlation_id
+                or origin.activation_id != retained.binding.activation_id
+                or origin.activation_generation
+                != retained.binding.activation_generation
+            ):
+                continue
+            for pending in progress.pending_presentations.values():
+                terminal = self._terminal_text_event(pending.event)
+                if terminal is not None:
+                    candidates.append(terminal)
+            for delivery in self._progress_deliveries.get(key, {}).values():
+                if delivery.acknowledged or delivery.fallback_event is None:
+                    continue
+                terminal = self._terminal_text_event(delivery.fallback_event)
+                if terminal is not None:
+                    candidates.append(terminal)
+            if progress.orphaned_terminal is not None:
+                candidates.append(progress.orphaned_terminal)
+                orphaned_routes.append(progress)
+        pending = self._pending_terminal_notifications
+        missing = {
+            candidate.task_event.event_id: candidate
+            for candidate in candidates
+            if candidate.task_event.event_id not in pending
+        }
+        if len(pending) + len(missing) > self._PRODUCT_OPERATION_CAPACITY:
+            logger.error(
+                "[LiveVoiceProduct] terminal notification capacity blocks P2 close",
+                extra={"live_voice_event": "task_terminal_notification_deferred"},
+            )
+            return False
+        if commit:
+            pending.update(missing)
+            for progress in orphaned_routes:
+                progress.orphaned_terminal = None
+        return True
+
+    def _preserve_orphaned_terminal_for_progress_route(
+        self,
+        retained: _ProgressRoute,
+    ) -> bool:
+        event = retained.orphaned_terminal
+        if event is None:
+            return True
+        if not self._remember_terminal_notification(event):
+            return False
+        retained.orphaned_terminal = None
+        return True
+
+    def _promote_orphaned_terminal_notifications(
+        self,
+        retained: _P2Route,
+    ) -> None:
+        for progress in self._progress_routes.values():
+            event = progress.orphaned_terminal
+            if (
+                event is None
+                or event.origin.session_id != retained.binding.session_id
+                or event.origin.scope != retained.binding.scope
+            ):
+                continue
+            if not self._remember_terminal_notification(event):
+                return
+            progress.orphaned_terminal = None
 
     def _current_task_presentation_route(
         self,
@@ -3348,6 +3457,7 @@ class AgentServerProductCompositionRegistry:
             and retained.binding.activation_id == origin.activation_id
             and retained.binding.activation_generation == origin.activation_generation
             and retained.binding.scope == binding.scope
+            and retained.activation_lease.snapshot().state is P2LeaseState.OPEN
         )
         voice_key: tuple[str, str, str, str] | None = None
         voice_deliveries: dict[str, _ProgressDelivery] | None = None
@@ -3557,6 +3667,38 @@ class AgentServerProductCompositionRegistry:
                     fallback_reason=fallback_reason,
                 )
                 return
+        fallback_event = TaskProgressTextEvent(
+            origin=binding,
+            task_event=intent.task_event,
+            source_event=intent.source_event,
+            progress_event=intent.progress_event,
+            evidence_id=intent.evidence_id,
+        )
+        if intent.task_event.event_type == "task.terminal":
+            # The immutable Task terminal fact outlives the short-lived P2
+            # generation that created the voice Task.  Once that exact owner
+            # has gone, the old ordered progress stream cannot legally bind a
+            # successor generation.  Retain the fact in the existing P2 ACK
+            # replay ledger instead of stranding it behind the old stream.
+            if self._remember_terminal_notification(fallback_event):
+                return
+            progress_key = (
+                binding.session_id,
+                binding.task_id,
+                binding.origin_id,
+                binding.generation_id,
+            )
+            progress = self._progress_routes.get(progress_key)
+            if progress is None or progress.binding != binding:
+                raise RuntimeError("terminal notification retry owner is unavailable")
+            prior = progress.orphaned_terminal
+            if (
+                prior is not None
+                and prior.task_event.event_id != fallback_event.task_event.event_id
+            ):
+                raise RuntimeError("terminal notification retry owner is occupied")
+            progress.orphaned_terminal = fallback_event
+            return
         logger.info(
             "[LiveVoiceProduct] Task progress origin fell back to text",
             extra={
@@ -3567,13 +3709,7 @@ class AgentServerProductCompositionRegistry:
             },
         )
         await self._emit_text_progress(
-            TaskProgressTextEvent(
-                origin=binding,
-                task_event=intent.task_event,
-                source_event=intent.source_event,
-                progress_event=intent.progress_event,
-                evidence_id=intent.evidence_id,
-            ),
+            fallback_event,
             fallback_reason="TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE",
         )
 
@@ -4087,6 +4223,16 @@ class AgentServerProductCompositionRegistry:
                 if replay_authority.lease is not None:
                     await replay_authority.lease.close()
                 cleanup_pending = False
+                if not self._remember_terminal_notifications_for_p2_route(
+                    existing,
+                    commit=False,
+                ):
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_P2_CLEANUP_PENDING",
+                        code=ErrorCode.UNAVAILABLE,
+                        manifest=existing.manifest,
+                    )
                 try:
                     self._close_task_presentations_for_p2_route(
                         existing,
@@ -4107,6 +4253,13 @@ class AgentServerProductCompositionRegistry:
                     self._retire_p2_root_cleanup(exc.lease)
                     cleanup_pending = True
                 except TaskPresentationViolation:
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_P2_CLEANUP_PENDING",
+                        code=ErrorCode.UNAVAILABLE,
+                        manifest=existing.manifest,
+                    )
+                if not self._remember_terminal_notifications_for_p2_route(existing):
                     return _error_result(
                         request_id,
                         reason="PRODUCT_P2_CLEANUP_PENDING",
@@ -7594,6 +7747,7 @@ class AgentServerProductCompositionRegistry:
         max_notifications: int,
     ) -> P3RouteResult:
         try:
+            self._promote_orphaned_terminal_notifications(retained)
             pending_terminal = next(
                 (
                     event
@@ -8682,6 +8836,16 @@ class AgentServerProductCompositionRegistry:
                     reason="ACTIVATION_BINDING_MISMATCH",
                     code=ErrorCode.PERMISSION_DENIED,
                 )
+            if not self._remember_terminal_notifications_for_p2_route(
+                retained,
+                commit=False,
+            ):
+                if authority.lease is not None:
+                    await authority.lease.close()
+                return _error_result(
+                    request_id,
+                    reason="PRODUCT_P2_CLEANUP_PENDING",
+                )
             try:
                 self._close_task_presentations_for_p2_route(
                     retained,
@@ -8709,6 +8873,11 @@ class AgentServerProductCompositionRegistry:
             finally:
                 if authority.lease is not None:
                     await authority.lease.close()
+            if not self._remember_terminal_notifications_for_p2_route(retained):
+                return _error_result(
+                    request_id,
+                    reason="PRODUCT_P2_CLEANUP_PENDING",
+                )
             key = (routed_session, interaction_id)
             self._p2_routes.pop(key, None)
             self._drop_voice_task_origins_for_route_locked(key)
@@ -12747,6 +12916,13 @@ class AgentServerProductCompositionRegistry:
                     progress_snapshot.state is TaskProgressReturnState.ACTIVE
                     and progress_snapshot.worker_pending
                 )
+                if not self._preserve_orphaned_terminal_for_progress_route(existing):
+                    if preauthorized_authority.lease is not None:
+                        await preauthorized_authority.lease.close()
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_SETTLED_CLEANUP_PENDING",
+                    )
                 if not route_is_active:
                     try:
                         await existing.lease.close()
@@ -13798,6 +13974,13 @@ class AgentServerProductCompositionRegistry:
                     reason="TASK_PROGRESS_BINDING_MISMATCH",
                     code=ErrorCode.PERMISSION_DENIED,
                 )
+            if not self._preserve_orphaned_terminal_for_progress_route(retained):
+                if authority.lease is not None:
+                    await authority.lease.close()
+                return _error_result(
+                    request_id,
+                    reason="PRODUCT_P3_PROGRESS_CLEANUP_PENDING",
+                )
             try:
                 if self._p3_presentation_consumption_available:
                     self._close_task_presentations_for_progress_route(
@@ -13841,6 +14024,17 @@ class AgentServerProductCompositionRegistry:
             for progress_key, progress_retained in reversed(
                 tuple(self._progress_routes.items())
             ):
+                if (
+                    not self._stopped
+                    and not self._preserve_orphaned_terminal_for_progress_route(
+                        progress_retained
+                    )
+                ):
+                    failures = True
+                    logger.error(
+                        "[LiveVoiceProduct] progress disconnect terminal replay pending"
+                    )
+                    continue
                 try:
                     if self._p3_presentation_consumption_available:
                         self._close_task_presentations_for_progress_route(
@@ -13860,6 +14054,18 @@ class AgentServerProductCompositionRegistry:
                         "[LiveVoiceProduct] progress tombstone capacity pending"
                     )
             for p2_key, p2_retained in reversed(tuple(self._p2_routes.items())):
+                if (
+                    not self._stopped
+                    and not self._remember_terminal_notifications_for_p2_route(
+                        p2_retained,
+                        commit=False,
+                    )
+                ):
+                    failures = True
+                    logger.error(
+                        "[LiveVoiceProduct] P2 disconnect terminal replay capacity pending"
+                    )
+                    continue
                 try:
                     self._close_task_presentations_for_p2_route(
                         p2_retained,
@@ -13869,6 +14075,17 @@ class AgentServerProductCompositionRegistry:
                 except Exception:
                     failures = True
                     logger.exception("[LiveVoiceProduct] P2 disconnect cleanup pending")
+                    continue
+                if (
+                    not self._stopped
+                    and not self._remember_terminal_notifications_for_p2_route(
+                        p2_retained
+                    )
+                ):
+                    failures = True
+                    logger.error(
+                        "[LiveVoiceProduct] P2 disconnect terminal replay pending"
+                    )
                     continue
                 self._p2_routes.pop(p2_key, None)
                 self._drop_voice_task_origins_for_route_locked(p2_key)
