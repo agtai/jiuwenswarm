@@ -889,6 +889,7 @@ test('P2 notification classification isolates exact Native audio from text prese
   const notification = {
     status: 'notification',
     kind: 'native.audio',
+    sequence_effect: 'neutral',
     request_id: 'native-notification-1',
     round_id: null,
     response,

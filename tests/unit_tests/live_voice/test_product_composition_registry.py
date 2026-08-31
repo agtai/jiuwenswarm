@@ -16580,18 +16580,28 @@ async def test_notification_polls_require_exact_serial_sequence(
     )
 
     assert gap.ok is False
-    assert cast(dict, gap.payload["error"])["reason"] == (
+    gap_error = cast(dict[str, object], gap.payload["error"])
+    assert gap_error["reason"] == (
         "PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH"
     )
+    assert gap_error["details"] == {"expected_sequence": 1}
     assert concurrent.ok is False
     assert cast(dict, concurrent.payload["error"])["reason"] == (
         "PRODUCT_NOTIFICATION_POLL_PENDING"
     )
     assert reordered.ok is False
-    assert cast(dict, reordered.payload["error"])["reason"] == (
+    reordered_error = cast(dict[str, object], reordered.payload["error"])
+    assert reordered_error["reason"] == (
         "PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH"
     )
+    assert reordered_error["details"] == {"expected_sequence": 2}
     assert len(registry._p2_notification_operations) == 1
+    assert (
+        registry._p2_routes[
+            ("session-product", "interaction-1")
+        ].notification_admitted_sequence
+        == 1
+    )
 
     await registry.close_active_routes()
     await asyncio.wait_for(first_waiter, timeout=1)

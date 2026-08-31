@@ -843,16 +843,20 @@ def _error_result(
     code: ErrorCode = ErrorCode.UNAVAILABLE,
     message: str = "Live Voice product composition is unavailable",
     manifest: ProductCompositionManifest | None = None,
+    details: Mapping[str, object] | None = None,
 ) -> P3RouteResult:
+    error: dict[str, object] = {
+        "code": code.value,
+        "reason": reason,
+        "message": message,
+    }
+    if details is not None:
+        error["details"] = dict(details)
     payload: dict[str, object] = {
         "request_id": request_id,
         "ok": False,
         "result": None,
-        "error": {
-            "code": code.value,
-            "reason": reason,
-            "message": message,
-        },
+        "error": error,
     }
     if manifest is not None:
         payload["product_composition"] = _serialize_manifest(manifest)
@@ -9554,10 +9558,12 @@ class AgentServerProductCompositionRegistry:
                         )
                     expected_sequence = retained.notification_admitted_sequence + 1
                     if notification_sequence != expected_sequence:
-                        raise FormalTaskViolation(
-                            "PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH",
-                            "notification polls must use the next exact sequence",
-                            ErrorCode.CONFLICT,
+                        return _error_result(
+                            request_id,
+                            reason="PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH",
+                            code=ErrorCode.CONFLICT,
+                            message="notification polls must use the next exact sequence",
+                            details={"expected_sequence": expected_sequence},
                         )
                     if retained.notification_admitted_sequence > 0:
                         previous = next(
