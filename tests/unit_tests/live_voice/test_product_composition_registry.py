@@ -4394,6 +4394,7 @@ async def test_terminal_notification_claims_completion_only_with_exact_valid_res
 @pytest.mark.asyncio
 async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_replay(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry, composition, manager = _unified_registry(tmp_path)
     terminal = _background_task(
@@ -4577,16 +4578,114 @@ async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_repla
     assert history.users == []
     assert history.assistants == []
     assert len(successor_history.assistants) == 1
+
+    retained_route = next(iter(registry._p2_routes.values()))
+    notification_buffer = retained_route.activation_lease._runtime._notifications
+    notification_wait_entered = asyncio.Event()
+    original_notification_get = notification_buffer.get
+
+    async def observed_notification_get(**kwargs: object):
+        notification_wait_entered.set()
+        return await original_notification_get(**kwargs)
+
+    monkeypatch.setattr(notification_buffer, "get", observed_notification_get)
+    waiting_poll = asyncio.create_task(
+        registry.handle_p2_notification_next(
+            params={**successor_binding, "notification_sequence": 2},
+            request_id="request-terminal-notification-next-in-flight",
+            session_id=SCOPE.session_id,
+        )
+    )
+    await notification_wait_entered.wait()
+    assert not waiting_poll.done()
+    in_flight_terminal = _background_task(
+        tmp_path,
+        state=FormalTaskState.TERMINAL,
+        outcome=TerminalOutcome.COMPLETED,
+        task_id="task-terminal-notification-in-flight",
+        attempt_id="attempt-terminal-notification-in-flight",
+    )
+    composition.current = in_flight_terminal
+    composition.known_tasks[in_flight_terminal.task_id] = in_flight_terminal
+    composition.result_record = {
+        **composition.result_record,
+        "task_id": in_flight_terminal.task_id,
+        "attempt_id": in_flight_terminal.attempt_id,
+        "source_event_id": "executor-terminal-notification-in-flight",
+    }
+    in_flight_binding = replace(
+        binding,
+        task_id=in_flight_terminal.task_id,
+        correlation_id=in_flight_terminal.correlation_id,
+    )
+    in_flight_event = replace(
+        task_event,
+        event_id="event-terminal-notification-in-flight",
+        task_id=in_flight_terminal.task_id,
+        attempt_id=in_flight_terminal.attempt_id,
+        seq=in_flight_terminal.event_head,
+        causation_id="attempt-terminal-notification-in-flight",
+        correlation_id=in_flight_terminal.correlation_id,
+        occurred_at=ACK_NOW,
+    )
+    in_flight_projection = project_task_progress_event(
+        in_flight_event, in_flight_binding
+    )
+    await registry._emit_voice_progress(
+        TaskProgressNotificationIntent(
+            origin=in_flight_binding,
+            task_event=in_flight_event,
+            source_event=in_flight_projection.source_event,
+            progress_event=in_flight_projection.progress_event,
+            decision=cast(object, None),
+            evidence_id=_evidence_id(binding, in_flight_event),
+        )
+    )
+    in_flight_result = await waiting_poll
+    assert in_flight_result.ok
+    in_flight_notification = cast(
+        dict[str, object], in_flight_result.payload["result"]
+    )
+    in_flight_response = cast(dict[str, object], in_flight_notification["response"])
+    in_flight_agent_event = cast(
+        dict[str, object], in_flight_notification["agent_event"]
+    )
+    in_flight_unit = cast(
+        dict[str, object], in_flight_notification["presentation_unit"]
+    )
+    assert in_flight_notification["kind"] == "agent.output"
+    assert in_flight_agent_event["source_provenance"] == "server.task_notification"
+    assert tuple(registry._pending_terminal_notifications) == (
+        in_flight_event.event_id,
+    )
+    in_flight_ack = await registry.handle_p2_presentation_ack(
+        params={
+            **successor_binding,
+            "response_id": in_flight_response["response_id"],
+            "response_generation": in_flight_response["response_generation"],
+            "surface": in_flight_unit["surface"],
+            "unit_id": in_flight_unit["unit_id"],
+            "contiguous_cursor": in_flight_unit["seq"],
+            "presented_at": ACK_NOW,
+        },
+        request_id="request-terminal-notification-ack-in-flight",
+        session_id=SCOPE.session_id,
+    )
+    assert in_flight_ack.ok
+    assert registry._pending_terminal_notifications == {}
+    assert registry._terminal_notification_responses == {}
+    assert len(successor_history.assistants) == 2
+
     keepalive = await registry.handle_p2_notification_next(
-        params={**successor_binding, "notification_sequence": 2},
-        request_id="request-terminal-notification-next-2",
+        params={**successor_binding, "notification_sequence": 3},
+        request_id="request-terminal-notification-next-3",
         session_id=SCOPE.session_id,
     )
     assert keepalive.ok
     assert cast(dict, keepalive.payload["result"])["kind"] == "transport.keepalive"
     assert composition.handle_calls == []
     assert manager.agent.calls == 0
-    assert composition.current is terminal
+    assert composition.current is in_flight_terminal
     closed_successor = await registry.handle_p2_close(
         params=successor_binding,
         request_id="request-terminal-notification-close-successor",

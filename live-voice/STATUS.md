@@ -348,13 +348,34 @@ exact-source Alpha result.
   `Critical 0 / Important 0 / Minor 0`, `Ready`. This is not a deployment or
   human acceptance result, and it does not generalize or retire the deferred
   Demo language hardcodes recorded below.
+- **2026-09-01 P2 terminal-notification liveness repair:** assisted acceptance
+  logs proved that the Task terminal/result facts and replay ledger were
+  correct, but the Web owner stopped issuing `notification.next` while idle
+  capture was active. A terminal fact published after the last pull therefore
+  had no transport wake, and it was presented only after later user speech
+  restarted P2. The scoped repair keeps one current P2 receive subscription for
+  an outstanding voice-created Task while leaving capture/playout ordering with
+  the existing terminal-announcement arbiter. If the notification arrives
+  during capture, Web retains its exact response locally without UI, TTS or ACK,
+  suspends only idle capture through the existing P1 path, then presents it at
+  the safe `fetching` boundary. Registry terminal fallback now also publishes
+  the retained fact to a current valid P2 route, waking an already waiting
+  long-poll; the existing ledger still removes it only after the exact P2 ACK.
+  No Task/Store authority, protocol/schema, result generation, general TTS
+  policy or unsupported-operation boundary changes. Formal Web passes
+  `489/489`; the focused Registry terminal/replay matrix passes `9/9`, including
+  a terminal fact arriving after `notification.next` is already waiting. This
+  repairs the reproduced automation boundary but grants no human, physical or
+  final-review credit; the interrupted P3-9 acceptance must run again on the
+  committed repair source.
 - **Remaining Gate:** implementation and automated task work are complete. Run
   the required human acceptance on the exact committed source containing the
-  successor-replay repair, including the visible formal P3 panel and the
-  separate user-confirmed real voice journey, then obtain final independent
-  Tier-3 review over the integrated candidate. Record one sanitized cumulative
-  evidence result and synchronize STATUS only after those Gates actually run.
-  Any unexplained failure or flake keeps the packet PARTIAL/FAIL.
+  successor-replay and P2 terminal-notification liveness repairs, including the
+  visible formal P3 panel and the separate user-confirmed real voice journey,
+  then obtain final independent Tier-3 review over the integrated candidate.
+  Record one sanitized cumulative evidence result and synchronize STATUS only
+  after those Gates actually run. Any unexplained failure or flake keeps the
+  packet PARTIAL/FAIL.
 - **Resume boundary:** re-read actual Git, the controlled runtime contract,
   Store/lease state and the normal Chrome page before acceptance; process
   liveness, credentials, browser state and private runtime paths are not

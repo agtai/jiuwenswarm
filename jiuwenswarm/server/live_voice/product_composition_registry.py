@@ -3681,6 +3681,14 @@ class AgentServerProductCompositionRegistry:
             # successor generation.  Retain the fact in the existing P2 ACK
             # replay ledger instead of stranding it behind the old stream.
             if self._remember_terminal_notification(fallback_event):
+                # A current P2 notification.next may already be blocked inside
+                # the Runtime when this terminal fact arrives.  Publishing the
+                # retained presentation here wakes that exact receive owner;
+                # the ledger still keeps the fact until its normal P2 ACK.
+                await self._deliver_terminal_notification(
+                    fallback_event,
+                    retained=None,
+                )
                 return
             progress_key = (
                 binding.session_id,

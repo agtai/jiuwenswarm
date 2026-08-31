@@ -12597,6 +12597,10 @@ test('mounted voice-created Task AUDIO failure falls back without local replay o
     const progress = mountedTerminalProgress(taskBinding, progressActivation, 'completed', taskId, 'attempt-a', 2);
     assert.notEqual(parseProductTextProgressEvent(progress), null);
     await act(async () => {
+      await waitForMounted(
+        () => notificationWaiters.length > 0,
+        'silent capture did not retain one terminal notification receive subscription',
+      );
       progressListener(progress);
       await waitForMounted(
         () => states.at(-1)?.p1_status === 'recognized',

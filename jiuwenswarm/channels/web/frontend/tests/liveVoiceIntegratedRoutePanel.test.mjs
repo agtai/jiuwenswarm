@@ -35,7 +35,7 @@ import {
   productTaskProgressTranslationKey,
   resolveProductTaskCreateOrigin,
   retainBoundedPresentedProductResponse,
-  shouldYieldProductP2PollToVoiceCapture,
+  productP2NotificationTransportBlockedByP1,
   terminalAnnouncementArbitrationAction,
   webReconnectDelayMs,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
@@ -890,16 +890,16 @@ test('terminal announcement arbitration preserves speech and every foreground P1
   assert.equal(terminalAnnouncementArbitrationAction({ ...input, p1_status: 'recognized', connected: false }), 'defer');
 });
 
-test('foreground response waiting retains P2 polling ahead of a queued terminal notification check', () => {
+test('terminal notification receive transport remains subscribed during idle capture', () => {
   const input = {
-    voice_loop_enabled: true,
+    p1_status: 'capturing',
     terminal_notification_check_required: true,
-    foreground_response_waiting: false,
   };
-  assert.equal(shouldYieldProductP2PollToVoiceCapture(input), true);
-  assert.equal(shouldYieldProductP2PollToVoiceCapture({ ...input, foreground_response_waiting: true }), false);
-  assert.equal(shouldYieldProductP2PollToVoiceCapture({ ...input, voice_loop_enabled: false }), false);
-  assert.equal(shouldYieldProductP2PollToVoiceCapture({ ...input, terminal_notification_check_required: false }), false);
+  assert.equal(productP2NotificationTransportBlockedByP1(input), false);
+  assert.equal(productP2NotificationTransportBlockedByP1({ ...input, terminal_notification_check_required: false }), true);
+  assert.equal(productP2NotificationTransportBlockedByP1({ ...input, p1_status: 'recognizing' }), true);
+  assert.equal(productP2NotificationTransportBlockedByP1({ ...input, p1_status: 'playing' }), true);
+  assert.equal(productP2NotificationTransportBlockedByP1({ ...input, p1_status: 'recognized' }), false);
   assert.equal(
     productP2NotificationRepollDelayMs({
       disposition: { kind: 'continue' },
@@ -914,6 +914,14 @@ test('foreground response waiting retains P2 polling ahead of a queued terminal 
       disposition: { kind: 'continue' },
       terminal_notification_check_required: false,
       foreground_response_waiting: true,
+    }),
+    0,
+  );
+  assert.equal(
+    productP2NotificationRepollDelayMs({
+      disposition: { kind: 'continue' },
+      terminal_notification_check_required: true,
+      foreground_response_waiting: false,
     }),
     0,
   );
