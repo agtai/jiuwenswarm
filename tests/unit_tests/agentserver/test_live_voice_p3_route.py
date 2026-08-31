@@ -828,10 +828,13 @@ async def test_generation_cleanup_owner_survives_provider_self_cancellation(
     assert registry.calls == 1
 
 
-@pytest.mark.asyncio
-async def test_drain_terminates_on_settled_cleanup_whose_discard_never_ran(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+_DRAIN_SUBPROCESS_SCRIPT = """
+import asyncio
+
+from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+
+async def main() -> None:
     server = object.__new__(AgentWebSocketServer)
 
     async def completed_cleanup() -> None:
@@ -845,26 +848,40 @@ async def test_drain_terminates_on_settled_cleanup_whose_discard_never_ran(
     # itself instead of busy-spinning without ever yielding to the loop.
     server._gateway_generation_cleanups = {task}
 
-    # A busy-spinning drain starves the loop, so wait_for's timer would
-    # never fire; bound the spin itself so a regression fails fast instead
-    # of hanging the whole session.
-    real_shield = asyncio.shield
-    shield_rounds = 0
-
-    def bounded_shield(awaitable):
-        nonlocal shield_rounds
-        shield_rounds += 1
-        if shield_rounds > 4:
-            raise AssertionError(
-                "drain re-gathered settled cleanups without removing them"
-            )
-        return real_shield(awaitable)
-
-    monkeypatch.setattr(asyncio, "shield", bounded_shield)
-
-    await asyncio.wait_for(server._drain_gateway_generation_cleanups(), timeout=1)
+    await server._drain_gateway_generation_cleanups()
 
     assert server._gateway_generation_cleanups == set()
+    print("DRAIN_OK", flush=True)
+
+
+asyncio.run(main())
+"""
+
+
+def test_drain_terminates_on_settled_cleanup_whose_discard_never_ran() -> None:
+    """Run the drain scenario in an isolated child killed by wall-clock time.
+
+    The defect under guard busy-spins the child's event loop without ever
+    yielding, which starves every in-process timer (wait_for included) and a
+    same-loop watchdog with it.  Only a parent process enforcing a wall-clock
+    timeout and killing the child is a trustworthy oracle here: a regression
+    fails this test via TimeoutExpired instead of hanging the suite.
+    """
+    import os
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[3]
+    completed = subprocess.run(
+        [sys.executable, "-c", _DRAIN_SUBPROCESS_SCRIPT],
+        cwd=repo_root,
+        env={**os.environ, "PYTHONPATH": str(repo_root)},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "DRAIN_OK" in completed.stdout
 
 
 @pytest.mark.asyncio
