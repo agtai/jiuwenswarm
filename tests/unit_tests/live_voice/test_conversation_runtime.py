@@ -144,17 +144,26 @@ def test_terminal_turns_release_heavy_commit_capacity_but_keep_replay_fence() ->
 
     assert first_commit is not None
     before_replay = runtime.events()
-    with pytest.raises(ContractViolation) as replay:
-        runtime.commit_turn(first_commit)
-    assert replay.value.reason == "TURN_COMMIT_CONFLICT"
+    # A same-payload replay of a retired commit is an idempotent no-op with
+    # zero events; a changed payload on the retired identity is a conflict.
+    accepted, event = runtime.commit_turn(first_commit)
+    assert accepted is False
+    assert event is None
+    assert runtime.events() == before_replay
+    with pytest.raises(ContractViolation) as changed:
+        runtime.commit_turn(
+            TurnCommit.from_dict({**first_commit.to_dict(), "text": "changed"})
+        )
+    assert changed.value.reason == "TURN_COMMIT_CONFLICT"
     assert runtime.events() == before_replay
 
     ledger = runtime._commit_ledger
     assert ledger._by_commit_id == {}
     assert ledger._by_turn_id == {}
-    assert len(ledger._retired_commits) <= ledger._capacity
-    assert len(ledger._retired_commit_ids) <= ledger._capacity
-    assert len(ledger._retired_turn_ids) <= ledger._capacity
+    # Exact tombstones are retained for every retired identity within the
+    # bounded retirement horizon; retiring never evicts an identity.
+    assert len(ledger._retired_commit_ids) == 129
+    assert len(ledger._retired_turn_ids) == 129
 
 
 def test_closed_interactions_release_commits_that_never_opened_a_response() -> None:
@@ -185,9 +194,15 @@ def test_closed_interactions_release_commits_that_never_opened_a_response() -> N
 
     assert first_commit is not None
     before_replay = runtime.events()
-    with pytest.raises(ContractViolation) as replay:
-        runtime.commit_turn(first_commit)
-    assert replay.value.reason == "TURN_COMMIT_CONFLICT"
+    accepted, event = runtime.commit_turn(first_commit)
+    assert accepted is False
+    assert event is None
+    assert runtime.events() == before_replay
+    with pytest.raises(ContractViolation) as changed:
+        runtime.commit_turn(
+            TurnCommit.from_dict({**first_commit.to_dict(), "text": "changed"})
+        )
+    assert changed.value.reason == "TURN_COMMIT_CONFLICT"
     assert runtime.events() == before_replay
 
 
