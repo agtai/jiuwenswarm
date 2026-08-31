@@ -1401,6 +1401,435 @@ channels:
       # 过期清理间隔（秒）
       cleanup_interval_sec: 60
 
+# ========== scopes: per-conversation rules ==========
+#
+# Rules about *requests* -- which platform, which conversation -- as against
+# channels.<platform>, which holds properties of the connector itself. Each
+# entry pairs a match with the sections it sets, and later layers win per key:
+#
+#   layer 0   channels.<platform>.*        connector defaults
+#   layer 1   a scope matching {channel}
+#   layer 2   a scope matching {channel, chat}
+#   layer 3   a scope matching {channel, chat, user}
+#
+# So a scope that sets only the prompt keeps the model and the triggers it did
+# not name, which is the point of resolving them one key at a time.
+#
+# The layer is how many axes the match names, and user, role and not count as
+# one axis between them: adding "not:" to a rule carves an exemption out of it
+# without promoting it above the rules it was sitting under. Two scopes can
+# name the same number of axes without one being narrower -- {channel, user}
+# is this person anywhere, {channel, chat} is everyone in one conversation --
+# and neither wins on shape. Those tie, and a tie is settled by the order they
+# are written in: later wins.
+#
+# A match can also name who is asking:
+#
+#   match: {channel: slack, chat: "C0…", user: ["U0…", "U0…"]}
+#     the named senders, in that conversation
+#   match: {channel: slack, chat: "C0…", role: admin}
+#     anyone in the admin role, in that conversation
+#   match: {channel: slack, chat: "C0…", not: {role: admin}}
+#     everyone in that conversation except the admins
+#
+# user is a list even when it names one person, and an id is quoted for the
+# same reason a conversation id is. role names a set of people defined under
+# the roles: block below; it is the same axis as user, spelled by name instead
+# of by id, so the two OR: {user: ["U0…"], role: admin} is that person OR an
+# admin, never both at once. The halves combine the same way -- a positive with
+# a "not" carved out of it is "these people, minus that one", which is how "the
+# team except one person" is written without enumerating the team.
+#
+# Naming a sender never adds a layer of its own however it is spelled:
+# {channel, chat, user} and {channel, chat, role} are both layer 3, so
+# rewriting a list of ids as a role cannot change which rule wins.
+#
+# Every spelling needs channel: alongside it, because an id only means someone
+# on the platform that issued it -- and a role resolves to different ids on
+# each platform its members are on, so it needs to be told which one.
+#
+# What happens when the platform did not say who sent a message decides both
+# halves, and it is the same rule for each: an unidentified sender is in no
+# list. So a rule written for named people does not apply to them, and a rule
+# written to exclude named people still does. Restrictions hold where nobody
+# could be identified, rather than lapsing.
+#
+# Rules only ever narrow: there is no directive that re-opens something a rule
+# above already closed. "Restricted, except for these people" is written as the
+# restriction with a "not:" on it, which is why the exemption lives in the rule
+# it exempts from and can be read there. That holds for every section that is
+# given the sender. permissions is not given one, so it is addressed on the
+# conversation alone and an exemption cannot be written into it -- see
+# permissions below.
+#
+# A role that the roles: block does not declare is reported and the whole rule
+# is dropped, rather than being read as naming nobody: a rule written as
+# "not: {role: admin}" whose role name was mistyped would otherwise exclude
+# nobody and apply the restriction to exactly the people it was written to
+# exempt. Dropping it leaves that conversation on the layer below instead --
+# which for a restricting rule means the restriction is not applied, so a
+# warning about an unknown role is worth reading.
+#
+# "not:" on anything but identity is not read; write the conversations out.
+#
+# A rule's settings are grouped by who acts on them, one section each:
+#
+#   delivery      the connector: whether and how a message is answered
+#                   mode          which messages the bot picks up
+#                   prompt        standing text appended after the user's own
+#                                 message, and prompt_append to add to it
+#                   mid_turn      what a message does when that conversation is
+#                                 already working
+#   agent         the runtime: how the turn is run
+#                   model_name    the model that conversation's turns run on
+#                   history       how far the Slack history tool may read
+#   permissions   the permission engine, before every tool call
+#                   tools         per-tool allow/ask/deny, tightening only
+#   clicks        the connector, when a button is pressed
+#                   approve       who may answer a permission request
+#                   stop          who may stop a running turn
+#
+# delivery.prompt is appended to the message, not given to the model as a
+# system prompt: it is visible in the transcript and anything else in the
+# message can contradict it. Write it as a request, not as a rule.
+#
+# What each setting means:
+#
+#   delivery.mode is the list of triggers that wake the bot in the matched
+#   conversations, and any one of them matching is enough:
+#     mention  - the bot is @mentioned
+#     reply    - a thread reply under a message the bot itself started
+#     all      - every channel message
+#     url      - the message contains an http(s) link
+#     has_file - the message carries an attachment
+#   "mention" is NOT implicit: a mode that omits it means the bot ignores
+#   @mentions in that conversation, which is a legitimate ingest-only setup but
+#   is far more often a slip, so it is logged as a warning naming the
+#   conversation. An empty list means the bot answers nothing there. An entry
+#   that is not one of the five above refuses the whole list with a warning,
+#   which leaves that conversation on the layer below rather than on a set
+#   nobody wrote. One misspelled trigger therefore drops the rule entirely,
+#   and with group_chat_mode: all on the layer below that leaves the
+#   conversation answering more than the rule asked for, not less.
+#
+#   delivery.prompt is appended to every message that triggers there, after the
+#   user's own text. Whenever a prompt is appended it is preceded by a line
+#   naming which trigger fired -- "[trigger: url]", "[trigger: mention]", and so
+#   on, using the same names mode takes. That line is emitted by the connector
+#   rather than configured, so a prompt can be written to branch on it and can
+#   rely on it always being there. With no prompt to precede it, only "url" and
+#   "has_file" are labelled: those are the two that wake the bot for a reason
+#   the message does not state, while a mention is in the text and a reply is in
+#   the thread. A plain @mention with no prompt gets nothing appended at all.
+#
+#   delivery.mid_turn says what happens to a message that arrives while that
+#   conversation is already running a turn. Chat has one gesture for two
+#   intents -- "stop, this is wrong" and "here is one more detail" are both just
+#   a message -- and this is where a conversation says which of the two its
+#   traffic mostly is:
+#     cancel  - the running turn is stopped and the new message starts a fresh
+#               one. The default, and what every conversation did before this
+#               key existed. Often what the sender meant: the usual reason
+#               somebody types while the agent is working is to stop it, and
+#               this is the path that kills a runaway command.
+#     steer   - the text joins the turn already running, before its next model
+#               call. Nothing is stopped and nothing is started; whoever asked
+#               for the work stays the person it belongs to, so a rule about
+#               who may stop that turn still names them and not the person who
+#               steered it.
+#     queue   - the message waits, and runs as its own turn once the one in
+#               flight ends. Nothing is interrupted and nothing is lost. On
+#               Slack the waiting message is marked with channels.slack's
+#               queued_emoji so its sender can see it was held; the queue is
+#               bounded, and a message arriving when it is full is refused with
+#               the rejected_emoji rather than silently dropped.
+#   Only "cancel" acts when nothing is running -- and it acts by doing nothing
+#   in particular, because there is no turn to cancel. Under either of the other
+#   two an arriving message with no turn in flight is sent normally: there is
+#   nothing to steer and nothing to wait for.
+#   The three are not grammatically parallel on purpose: cancel and steer act on
+#   the turn already running, queue acts on the message that just arrived. A
+#   value that is not one of the three is refused with a warning, which leaves
+#   that conversation on the layer below rather than on a behaviour nobody
+#   wrote -- and the layer below the last of them is "cancel".
+#   Note what a shared session means here. On Slack a channel thread is one
+#   session for everyone in it, so a queue there is shared: four people typing
+#   during a long turn are four turns that will run one after another, in the
+#   order they were sent. A DM is keyed on the person and is theirs alone.
+#
+#   agent.model_name must name one of the models under models.defaults -- either
+#   its "model_name" or its "alias". A name that is not configured is dropped
+#   with a warning naming the conversation, the valid names, and the model it
+#   will run on instead, because an unknown name would otherwise fall back to
+#   the default silently. models.defaults can also be edited from the Web UI: if
+#   a model a scope points at is later renamed or removed, that conversation
+#   returns to the default and says so once in the log.
+#
+#   agent.history is how far the Slack history tool may read, in the same four
+#   words channels.slack.history takes, each wider than the one before it:
+#     disabled - no history tool at all
+#     origin   - the conversation the request arrived in, and only that one
+#     members  - another conversation may be named, and every named one is
+#                checked at read time against everybody in the conversation the
+#                request arrived in: they must all be in it as well
+#     open     - as members, except that a public channel as the target skips
+#                that check
+#   channels.slack.history is the same setting one layer down, and is where a
+#   deployment that wants one answer everywhere says so without writing a scope
+#   at all. Setting both is reported in the usual way, and the scope wins.
+#
+#   It may only be written on a rule that matches the channel alone:
+#   {channel: slack} and nothing else. A rule that also names a chat, a user or
+#   a role is reported at startup and the key does nothing -- so a restriction
+#   written on the wrong axis is never quietly read as a grant.
+#
+#   That is a fact about the setting rather than about Slack, which does
+#   populate a sender and does match model_name on one. Who is asking is
+#   already settled, per request, by the membership rule above; a second and
+#   static answer on the same axis is redundant where it agrees and grants what
+#   membership was withholding where it does not. It is also what keeps "not:"
+#   safe here, since a role that resolves to nobody excludes nobody and would
+#   hand the grant to exactly the people the rule was written to exempt. A
+#   conversation is not the unit either: the membership rule already decides
+#   per target, which is finer than any list of rooms could be.
+#
+#   permissions.tools narrows what the agent may do in the matched
+#   conversations: {bash: ask} turns an allowed bash into one that asks first,
+#   {bash: deny} refuses it outright. It can only tighten -- writing allow
+#   grants nothing and is warned about -- so a scope can never be used to open
+#   a tool the permissions block below has closed. Levels from several matching
+#   scopes combine to the strictest of them, whatever order they are written in.
+#   On a channel where nobody can answer an approval, cron and the heartbeat
+#   being the two, ask is enforced as deny: a scheduled job that touches a
+#   restricted tool fails with a reason rather than waiting for a click that
+#   never comes.
+#
+#   One limit worth knowing before relying on it. The permissions block below
+#   is evaluated in a fixed order, and only a deny is checked first: an
+#   approval_overrides entry (what "always allow" writes) or a rules entry with
+#   action: allow is consulted before a tool's own level. Narrowing a tool to
+#   deny therefore always holds. Narrowing it to ask holds against
+#   approval_overrides -- those are set aside for the tools a scope narrowed --
+#   but a rules entry that allows the same tool still wins, and that case is
+#   logged as a warning naming the rule. Use deny when the restriction has to be
+#   certain.
+#
+#   permissions is matched on channel and chat, and not on who is asking. The
+#   permission engine settles it at the tool call, where the conversation is
+#   known and the sender is not, so an identity axis on such a rule is read by
+#   nobody -- and the two spellings fail differently. A positive user: or role:
+#   never fires at all, so the narrowing an operator wrote is simply absent. A
+#   "not:" fires for everybody including the people it names, so an exemption
+#   written as "everyone except the admins" takes the tool away from the admins
+#   too. Neither is visible from this file, so a rule that names a sender and
+#   carries a permissions section is reported at startup and the section is
+#   dropped, leaving that conversation on the layer below. Write it on the
+#   channel or the conversation; a tool taken away from one person is written in
+#   the permissions block below rather than in a scope.
+#
+#   That bar is on today's runtime rather than on the section, and it lifts when
+#   the sender reaches the permission path. "Restricted, except for the admins"
+#   is the shape this section is designed for and the matcher already
+#   understands it, so the rule that cannot be written now is expected back.
+#
+#   clicks says who may press the buttons the bot posts in the matched
+#   conversations. It is a different question from everything above it: those
+#   settle what a *message* causes, and a click is not a message -- it arrives
+#   against a turn that already exists, from someone who may not have started
+#   it, and it carries its own principal. Two buttons exist:
+#     approve  - the yes/no on a tool call the agent stopped at
+#     stop     - the red button on the activity card of a running turn
+#   Each names people the way a match does, by id or by role, and the two OR:
+#     clicks:
+#       approve: {role: operator}
+#       stop:    {role: [operator, member]}
+#   With no clicks rule, the conversation is gated by whatever it was gated by
+#   before -- on Slack that is channels.slack.allow_from, which is empty by
+#   default and means anyone who can see the message can press the button. A
+#   clicks rule only ever narrows that; it can never let someone through who
+#   allow_from keeps out.
+#
+#   Two things follow from that and are worth knowing before writing one.
+#
+#   Whoever started a turn may always stop it. That is not conferred by
+#   clicks.stop and cannot be taken away by it: a rule narrows who *else* may.
+#   There is deliberately no equivalent on approve -- starting a turn is no
+#   claim to answer what it goes on to ask.
+#
+#   Where a rule is written and the platform did not say who clicked, the click
+#   is refused. That is the opposite of the rule for an unidentified *sender*
+#   above, which falls out of positive lists and stays inside restrictions, and
+#   it is deliberate: a written restriction must not quietly become no
+#   restriction because a fact went missing. The same answer covers a role
+#   whose members have no id on that platform -- they are not in the role
+#   there, so the rule admits nobody and every click is refused, which is
+#   warned about at startup naming the conversation. A role name the roles:
+#   block does not declare is different again: the clause is dropped and the
+#   click goes back to being gated by allow_from alone, so that warning is one
+#   to read.
+#
+#   A rule that also names a sender cannot carry a clicks section: the match's
+#   user and role name whoever sent a message, which is not who pressed the
+#   button, and nothing resolves the two together. Write clicks on a rule that
+#   matches the channel or the conversation.
+#
+#   A channel that renders no buttons -- cron and the heartbeat -- reports a
+#   clicks section as having no effect, in the ordinary way it reports any
+#   section it does not read. That is a rule written against the wrong channel,
+#   and it is a different report from the one above.
+#
+#   There is deliberately no per-conversation reasoning level. A reasoning level
+#   is fixed when a model entry is built, so the way to give a conversation a
+#   different one is to add a second models.defaults entry with that level and
+#   point the scope at it by name.
+#
+#   There is deliberately no per-conversation work_mode, for a related reason:
+#   it is not a per-turn setting either. The runtime writes a session's
+#   work_mode the first time it sees that session and never changes it
+#   afterwards, so that a conversation cannot switch which project it belongs
+#   to halfway through. A scope setting it would apply only to conversations
+#   that have not spoken yet, be ignored for every one that has, and say
+#   nothing either way -- and on Slack a session is keyed on the thread in a
+#   channel and on the person in a DM, so the conversations already in use
+#   would never pick it up at all.
+#
+# How a value composes is decided by its type, not by its name:
+#   scalar        replaces        model_name: "deepseek-v3"
+#                                 mid_turn: steer
+#   list          a set: replaces by default, or mutates the inherited set when
+#                 every entry is signed
+#                     mode: [mention, url]   replace
+#                     mode: [+has_file]      inherit, plus has_file
+#                     mode: [-mention]       inherit, minus mention
+#                 Every entry signed or none of them: [mention, +has_file] is
+#                 ambiguous and is ignored with a warning.
+#   prose         replaces; <key>_append appends to whatever layer set it
+#                     prompt: "..."          replace
+#                     prompt_append: "..."   add a paragraph
+#
+# A channel only reads the settings it declares; a scope naming a channel that
+# does not support scopes, an axis it cannot fill, or a setting it ignores is
+# reported at startup and does nothing. Nothing here can fail a start.
+#
+# This version matches on every axis there is -- channel, chat, user, role and
+# not -- and reads all four sections: delivery, agent, permissions and clicks.
+#
+#   scopes:
+#     - match:    {channel: slack}
+#       delivery: {mode: [mention, url]}
+#       agent:    {history: origin}
+#     - match:    {channel: slack, chat: "C000000AAAA"}
+#       delivery:
+#         mode: [+has_file]
+#         prompt: "Fetch the linked page first. Answer in English."
+#       agent:
+#         model_name: "deepseek-v3"
+#     - match:    {channel: slack, chat: "C000000BBBB"}
+#       delivery:
+#         prompt_append: "This is a support channel. Be terse."
+#         mid_turn: queue
+#       clicks:
+#         approve: {user: ["U000000AAAA"]}
+#     - match:    {channel: slack, chat: "C000000BBBB", user: ["U000000AAAA"]}
+#       delivery: {prompt_append: "Answer this person in French."}
+#     - match:
+#         channel: slack
+#         chat:    "C000000BBBB"
+#         not:     {user: ["U000000AAAA"]}
+#       delivery: {mode: [mention]}
+#
+# A scope that sets only permissions or only clicks does not opt its
+# conversation into being answered: the ids that exempt a Slack channel from
+# allowed_channel_ids come from the delivery and agent sections alone, so a rule
+# written to take something away cannot hand something else out.
+#
+# Quote conversation ids, or YAML may reinterpret one that looks numeric.
+# An empty list rather than a bare key: entries are whole rules rather than
+# operator-named sub-keys, so a config upgrade carries the list across intact.
+scopes: []
+
+# ========== people / roles ==========
+#
+# Who a name in a scope refers to. Two blocks, and neither of them grants
+# anything: people: maps a person to their id on each platform, roles: groups
+# those people under a name, and every rule about what may happen stays in
+# scopes: above. A role with a tools: block under it is refused with that
+# reason -- authority in two places is how "who can actually do this here"
+# stops being answerable by reading one list.
+#
+#   people:
+#     alice: {slack: "U000000AAAA", feishu: "ou_a1b2c3"}
+#     bob:   {slack: "U000000BBBB"}
+#
+#   roles:
+#     admin: [alice, bob]
+#
+# Written that way, the last two rules of the scopes example above become one
+# rule that reads as what it does, and stops needing an edit every time
+# somebody joins:
+#
+#   scopes:
+#     - match:
+#         channel: slack
+#         chat:    "C000000BBBB"
+#         not:     {role: admin}
+#       delivery: {mode: [mention]}
+#
+# -- everyone in that conversation except an admin has to @mention the bot, and
+# an admin matches no restricting rule and keeps whatever the layer below gives
+# them. That is how "restricted, except for these people" is written: there is
+# no directive that re-opens something, so the exemption lives in the rule it
+# exempts from, where it can be read.
+#
+# The same shape cannot carry a permissions section today. That one is settled
+# at the tool call with no sender, so a "not:" written into it would fire for
+# the admins as well and take the tool away from exactly the people the rule
+# exempts. It is reported and dropped rather than applied -- the reason is with
+# permissions above -- and it comes back when the sender reaches the permission
+# path. Until then, a tool taken away from everyone but the admins is written
+# in the permissions block below and not as a scope.
+#
+# Why the platform id lives with the person rather than with the role: one
+# human has one entry, so adding a platform to somebody is a single line and
+# every role they are in follows. The name on the left is yours -- it is never
+# shown to anyone and never matched against anything, it only has to be the
+# same word the roles: block uses.
+#
+# A platform whose several ids can both identify one person -- Feishu's open_id
+# and union_id are the standing case -- takes a list, and whichever of them the
+# event carried matches:
+#
+#   people:
+#     carol: {feishu: ["ou_a1b2c3", "on_d4e5f6"]}
+#
+# Two rules that decide what happens when something is missing, both erring the
+# same way -- a rule reaches no further than it was written to reach:
+#
+#   A person with no id for a platform is not in the role there. So a rule
+#   written as "everyone except the admins" does apply to an admin whose id for
+#   that platform is not listed here: restrictions hold where nobody could be
+#   identified, rather than lapsing. This is logged at startup naming the role
+#   and the platform, because it is the one that silently restricts the wrong
+#   person.
+#
+#   A role named in a scope but not declared here drops that whole scope, and
+#   so does a roles: entry naming somebody who is not in people:. Both are
+#   configs that cannot be honoured rather than configs that mean "nobody", and
+#   dropping leaves the conversation on the layer below -- which for a
+#   restricting rule means the restriction is not applied at all. Both are
+#   logged.
+#
+# Role nesting is not supported: a role holds people, not other roles. A
+# hierarchy is where "who can actually do this" stops being answerable by
+# reading, and listing the people out costs a line.
+#
+# Left bare rather than written as {}: the names under them are yours, and this
+# template doubles as the key allow-list on upgrade -- an empty mapping would
+# be read as the complete set of names allowed and would delete every one you
+# wrote.
+people:
+roles:
+
 # ========== 细粒度权限管控（tiered_policy）==========
 #
 # schema: tiered_policy（或兼容 v_cc / v4.2）时由 tiered_policy.evaluate_tiered_policy 求值；
