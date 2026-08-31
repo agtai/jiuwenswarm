@@ -1,7 +1,8 @@
 # OpenJiuwen LiveVoice 零基线模块审计 — 2026-08-31
 
-> 状态：准备分支上的源码事实与迁移决策材料；不执行迁移、不改产品代码、
-> 不激活 composition、不提交 AgentCore PR、不更新远端。
+> 状态（D-096，2026-09-01）：准备分支上的源码事实与冻结后激活 handoff 已完成；
+> 不执行迁移、不改产品代码、不激活 composition、不实现或包装 AgentCore PR、
+> 不更新远端。
 
 ## 1. 结论先行
 
@@ -35,7 +36,7 @@
 
 - 调用 JiuwenSwarm/AgentCore 已有公共能力；
 - 用薄 Adapter 连接已有能力；
-- 只把确属通用缺口的合同准备为 AgentCore PR；
+- 只把确属通用缺口的合同记录为未来 AgentCore 下沉要求；
 - 保留 channel-neutral 的语音语义、Web 媒体叶子和 Jiuwen 产品策略；
 - Gate 后退休 legacy、测试替身和重复 authority。
 
@@ -44,7 +45,7 @@
 | 对象 | 固定事实 | 用途 |
 |---|---|---|
 | LiveVoice/JiuwenSwarm 产品事实 | 冻结 commit object：`hx/0812_live_voice_w3@59998e2c5724257bd410885b35e59e1b37027030`；相对 upstream ahead 4；后续并发工作区改动不计入本快照 | 当前路径、调用、LOC 和 authority |
-| 准备分支 | `codex/livevoice-agentcore-hermes-prep` | 只保存审计、映射和 PR 准备材料 |
+| 准备分支 | `codex/livevoice-agentcore-hermes-prep` | 只保存审计、映射、历史候选证据和未来激活 handoff |
 | Hermes Live Voice | `bielcarpi/hermes-live-voice@3dd8af386b845a1486b05b088bbc2b5a642a5b28` | 主要架构对标；不复制源码 |
 | NousResearch Hermes | `fc9cbc872d8050c22f1192b16bc5ff4aed471e10` | 说明 Hermes Agent/Session/官方 Voice seam；不是上述集成仓库 |
 | LiveVoice 锁定 AgentCore | `openjiuwen 0.1.16@94e10cb6102c36fe78a64547957c0def97299273` | 只有该版本的公共能力可称“当前可直接调用” |
@@ -159,7 +160,7 @@ frontend asset 搜索分组；这些分组存在重叠，现已撤出加法口�
 | 文件 | LOC | 当前多职责 |
 |---|---:|---|
 | `task_store.py` | 14,951 | Task/Attempt/Command/Event/Outbox/Result/Cursor/Checkpoint/Effect + schema/migration |
-| `product_composition_registry.py` | 14,016 | P1/P2/P3 入口、配置、生命周期、route/replay/presentation 编排 |
+| `product_composition_registry.py` | 14,015 | P1/P2/P3 入口、配置、生命周期、route/replay/presentation 编排 |
 | `LiveVoiceIntegratedRoutePanel.tsx` | 7,527 | Browser voice、P2、P3、recovery、presentation、diagnostics UI |
 | `project_code_executor.py` | 6,491 | Agent worker、attempt journal、worktree/patch、result、D1/D2、cleanup |
 
@@ -276,7 +277,7 @@ checkpoint 发布 authority。直接复用、Adapter 和 PR 候选必须逐 API 
 | Task event/progress | event subscription、progress return | Task snapshot/progress/notification | `ADAPT_REUSE` + `LIVEVOICE_CORE_KEEP` | event/source/cursor 通用；spoken/text arbitration 是语音产品语义 |
 | Presentation/history | presentation ledger、generation store、formal history、browser ACK | Browser task cache/notification ACK + audio interrupt（partial） | `LIVEVOICE_CORE_KEEP`/`JIUWENSWARM_HOST_KEEP` | DOM、audio 和 history adoption 必须由真实 surface/产品规则证明 |
 | Formal Web product UI | 7,527-line Panel、P1/P2/P3 owners/journals | Dashboard UI + browser SDK + terminal | `SPLIT_REQUIRED` | Hermes 也有 UI/SDK；当前 Panel 聚合过多 state machine 和 diagnostics |
-| Composition/config | 14,016-line registry、root、declaration、host registrations | server composition/config/setup | `SPLIT_REQUIRED` | 能力声明与生命周期必要，但不应由一个 registry 实现所有 handler/policy |
+| Composition/config | 14,015-line registry、root、declaration、host registrations | server composition/config/setup | `SPLIT_REQUIRED` | 能力声明与生命周期必要，但不应由一个 registry 实现所有 handler/policy |
 | Observability/deployment/privacy | OTel adapter、diagnostics、preflight、probe/conformance | logger/readiness/doctor/setup/security support（partial） | runtime leaf `JIUWENSWARM_HOST_KEEP`；support `CONSOLIDATE_RETIRE` | 运行诊断必要；benchmark/fault harness/alpha probe 应迁到支持树或在 oracle 搬迁后删除 |
 | Schema/protocol | Python v2 + frontend local schemas + method allowlists | protocol domain + browser validation | `SPLIT_REQUIRED`/generate | 需要 wire contract，但当前跨语言复制和超大统一 schema 扩大维护面 |
 | Legacy/compatibility | `useLiveVoiceDemo`、old Task bridge/client/monitor、AutoHarness segments | 无需对应 | `CONSOLIDATE_RETIRE` after Gate | 与 formal lane 并存形成重复 capture/Task/poll/history authority |
@@ -330,15 +331,17 @@ cancel channel。区别主要是 owner 位置和 failure model，不是“有/�
 1. 冻结本文的 152-path/8-flow/五层责任基线；
 2. 纠正所有 Hermes 列和 LOC 结论；
 3. 锁定 AgentCore 公共 API 证据，区分 installed、local candidate 和 absent；
-   PR09/PR10 历史 facade 有严重审查问题，只保留需求/oracle，公共 grant/facade
-   必须重实现；
+   PR09/PR10 历史 facade 有严重审查问题，只保留需求/oracle，未来公共
+   grant/facade 如仍需要必须重新实现，但不在本准备分支实现或包装；
 4. 先形成薄 Channel registration、Agent invocation 和 Task facade 设计；
-5. 形成 AgentCore PR 包：只含通用 contract、非 Voice conformance 和最小 owner
-   扩展，不复制 LiveVoice Store/schema；
+5. 形成 AgentCore 下沉 handoff：记录通用 contract、非 Voice conformance、最小
+   owner、依赖、风险和 LiveVoice consumer seam，不复制 LiveVoice Store/schema，
+   也不把 PR replay/包装列为本分支完成条件；
 6. 在特性开发稳定后，另开迁移包做 single-writer cutover、canary、rollback 和
    legacy retirement；
-7. 最后才计算目标 LiveVoice LOC。现在给出一个“必然瘦到多少行”的精确数字
-   会把尚未决定的 shared-symbol allocation 和 Gate-retirement 当成既成事实。
+7. 将 LOC 只保留为激活时重算的规划区间。现在给出一个“必然瘦到多少行”的
+   精确数字会把尚未决定的 shared-symbol allocation 和 Gate-retirement 当成
+   既成事实。
 
 ### 8.1 本轮完成边界
 
@@ -347,7 +350,7 @@ cancel channel。区别主要是 owner 位置和 failure model，不是“有/�
 | 零基线生产/支持 LOC、五层责任与八条当前流程 | 本轮审计已形成；原子归属独立复核为 `Critical 0 / Important 0 / Minor 10` | 不等于运行时迁移、内部重构或产品验收；10 项同 owner 结构债务仍未实现 |
 | Hermes 模块逐项比较 | pinned snapshot 审查已关闭，独立复核为 `Critical 0 / Important 0 / Minor 0` | 不把 Hermes 当目标架构或源码复用来源 |
 | AgentCore/JiuwenSwarm 复用、适配、下沉候选 | installed/local-candidate/absent 已分开；设计与 replay 证据已准备 | 不表示候选 API 已安装、已 composition 或已被 AgentCore 接受 |
-| 可提交的 AgentCore 本地 PR 包 | **未完成** | PR03 工作树仍未封装；PR04–PR10 仍需 preflight；PR09/PR10 必须重实现并重新审查 |
+| AgentCore 下沉 handoff | **完成**：13 个 `AGENTCORE_PR` 原子责任、公共缺口、依赖、历史缺陷/oracle 和未来 Gate 已记录 | 本分支不要求 PR 实现、replay、issue metadata、包装或提交；历史 packet 只作可选证据 |
 | LiveVoice 迁移、single-writer cutover、canary、旧实现退休 | **未开始**，按用户范围刻意排除 | 没有迁移产品代码、删除 Store/schema、运行 canary 或提交远端 PR |
 
 ### 8.2 已披露但不阻断归属决策的 10 项结构债务
@@ -367,8 +370,9 @@ AgentCore PR / 保留 / 退休”的准备结论；但它们仍是实际的收�
 9. `progress_notification_arbiter.py` 的纯 policy 与 queue/ACK mechanics；
 10. `product_observability_adapter.py` 的 activation/route facts 与 consumer/lease mechanics。
 
-因此，能关闭的是“零基线审计与迁移前决策准备”这一批；完整 LiveVoice 瘦身
-计划尚未完成，也不能因为文档齐全就宣称代码已经瘦身。
+因此，“零基线审计与迁移前 handoff”可以关闭；真正的 LiveVoice/AgentCore
+瘦身实现尚未开始，也不能因为文档齐全就宣称代码已经瘦身。正式开发冻结后只
+增量重基线受影响责任，再形成绑定当时源码和测试的实施包。
 
 ## 9. 覆盖与限制
 

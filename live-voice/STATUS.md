@@ -318,117 +318,34 @@ minimum AgentCore PR packet re-scopes it. Exact evidence, commands, ownership
 and exclusions are in the [OJ-G1-A packet](reviews/OPENJIUWEN_G1_A_EXECUTION_OWNERSHIP_CONFORMANCE_PACKET_2026-08-23.md).
 
 The accepted [AgentCore reuse and Hermes comparison scope](reviews/OPENJIUWEN_AGENTCORE_HERMES_SLIMMING_SCOPE_2026-08-25.md)
-limits the current slimming work to direct-reuse, thin-Adapter, AgentCore PR
-candidate and LiveVoice module-disposition preparation. The accompanying
+and D-096 close the isolated slimming preparation branch as a future handoff:
+direct reuse, thin Adapter, AgentCore downshift requirements and LiveVoice/
+JiuwenSwarm module dispositions are recorded without requiring PR replay or
+packaging. The accompanying
 [symbol migration map](reviews/OPENJIUWEN_LIVEVOICE_SYMBOL_MIGRATION_MAP_2026-08-24.md)
 is a design inventory rather than a migration or product-delivery claim.
 The [slimming convergence review](reviews/OPENJIUWEN_LIVEVOICE_SLIMMING_FINAL_REVIEW_2026-08-25.md)
-now closes the 152-path module/Hermes analysis and the future LiveVoice
-allowlist/exclusion decision. AgentCore PR design packets are complete, but PR
-01–03 packaging and PR 04–10 formal replay remain unfinished; no preparation
-implementation, migration or deletion receives product credit.
+and [activation handoff](reviews/OPENJIUWEN_LIVEVOICE_HERMES_ALIGNED_SLIMMING_BUDGET_2026-08-31.md)
+close the 152-path/228-responsibility module/Hermes analysis, future LiveVoice
+allowlist/exclusions, delta-rebaseline procedure and dependency-ordered package
+families. Historical AgentCore candidates/packets remain optional evidence,
+not unfinished current work. No preparation implementation, migration or
+deletion receives product credit.
 
-EventEnvelope/order/cursor-ACK, D2 receipt/reconcile, real Agent/file-Tool crash
-injection, migration, canary and duplicate deletion remain later packets and
-receive no credit here. Main is the sole shared-semantics, integration,
-documentation and Git-history owner; parallel workers are read-only.
+After the feature-complete boundary passes on one exact clean source, a new
+execution branch must delta-rebaseline `59998e2c..frozen source`, revalidate
+only changed responsibilities and installed AgentCore public APIs, then form
+risk-tiered implementation packages. EventEnvelope/order/cursor-ACK, D2
+receipt/reconcile, real Agent/file-Tool crash injection, migration, canary and
+duplicate deletion receive no credit here.
 
-The isolated AgentCore replay has now advanced through PR 03 technical closure.
-The durable execution-ownership candidate passes `573` affected tests plus `130`
-key race repetitions, and an independent Tier-3 cold review reports
-`0 Critical / 0 Important`. It is not committed or submission-ready because the
-repository requires a real issue reference on the consecutive source/test/docs
-package. PR 04 command/result preflight is complete, but formal replay is held
-until PR 03 has that reviewable base. The preflight records current-contract
-adaptations for runtime quiescence, review-round CAS, version-0 terminal ABA,
-Team-clean reservation/tombstones, terminal consumers, command ordering and
-SessionFileStore zero-effect behaviour in
-the [PR 04 packet](reviews/agentcore-pr-preparation/2026-08-25-pr04-command-result.md).
-PR 05 event/dispatch preflight is also complete. It found that the historical
-candidate cannot preserve its canonical-stream claim while event/dispatch rows
-cascade with ordinary Team deletion, ordinary Team clean omits per-Task
-retirement facts, deleted Task identity is fenced only by an accidental
-sequence collision, and permanent rejection or an under-specified accepted
-receipt can leave execution truth without a safe recovery/quiescence boundary.
-The replay must also freeze Task-incarnation, legacy stream-baseline and
-authorization-expiry semantics, serialize the complete current writer inventory
-against Team deletion reservation, and close or explicitly narrow the existing
-SessionFileStore pre-transaction file-write gap while retaining current DDL
-behaviour.
-Exact requirements are in the
-[PR 05 packet](reviews/agentcore-pr-preparation/2026-08-25-pr05-event-dispatch.md).
-PR 06 checkpoint preflight is now complete as well. The historical payload-first
-candidate permits initially invalid callers to write an external store, loses
-checkpoint history through ordinary cascades, does not bind runtime launch,
-review phase or Task incarnation, and does not verify its canonical source event
-before payload reads. Its independent preflight reports `4 Critical / 2
-Important`. Formal replay must first freeze a one-use preauthorization -> scoped
-payload write -> atomic finalize topology, durable/reapable post-authorization
-orphans, PR 07 overlap, tombstone identity and the PR 09 public boundary. Exact
-requirements are in the
-[PR 06 packet](reviews/agentcore-pr-preparation/2026-08-25-pr06-checkpoint.md).
-PR 07 external-effect-journal preflight is also complete. Its historical suite
-allows an unconsumed CALL/RECONCILE token to manufacture receipt or observation
-facts without calling the provider, repeats OBSERVE authorization, trusts
-corrupt unchecked projection state, leaks live claim tokens through an
-authority-free record and destroys effect history on normal Team clean. The
-independent preflight reports `5 Critical / 6 Important`. Formal replay must
-rebuild purpose-specific one-use CALL/OBSERVE/result finalization, exact runtime/
-phase/incarnation/prefix/provider binding, reconstructible authority-free
-lifecycle/provenance truth anchored by a PR 07-owned effect-intent event appended
-through the accepted PR 05 canonical Task-event writer, per-dispatch evidence,
-reservation-aware tombstones and PR 10's bound public surface. PR 07 has no
-formal dependency on PR 06; its accepted internal continuation may later serve
-PR 06 only if a checkpoint payload authorization
-cannot become general provider-call authority. Exact requirements are in the
-[PR 07 packet](reviews/agentcore-pr-preparation/2026-08-25-pr07-effect-journal.md).
-PR 08 Task-event consumer-cursor preflight is now complete. The historical
-candidate destroys cursor/advance-receipt truth on normal Team clean and checks
-for a live Team before exact replay. Its mutable cursor is not anchored to the
-immutable forward receipt that established the current version, so deleting
-that receipt can let the old `advance_id` return a different covered-ACK result.
-The independent preflight reports `2 Critical / 4 Important`. Formal replay
-must inherit PR 05's stream-incarnation/legacy-baseline policy, rebuild the
-cursor as a receipt-chain/head-verified projection, preserve normal-clean
-tombstones, bind advance IDs to the full logical cursor, keep raw mutation seams
-internal until PR 09, and freeze typed read, registration/retirement and bounded
-receipt-growth semantics. Exact requirements are in the
-[PR 08 packet](reviews/agentcore-pr-preparation/2026-08-25-pr08-event-cursor.md).
-PR 09 bound TeamTask/checkpoint-authority preflight is now complete. The
-historical facade still exposes raw `TeamAgent.task_manager`, exports directly
-constructible binding/authority machinery and binds a handle only to textual
-session/Team/member values. Same-ID rebinding can therefore preserve stale
-authority, release is not linearized with in-flight writes, and every member
-receives one monolithic read/update/cursor/checkpoint surface without a real
-capability matrix. Its caller-selected cursor identity violates PR 08, while
-its raw locator/digest/size checkpoint finalizer and payload-first orphan tests
-violate PR 06. Formal replay must rebuild an opaque lease/incarnation model,
-structural reader/command/cursor/checkpoint grants, bounded/redacted projections,
-same-ID and in-flight revocation fencing, opaque cursor construction and the PR
-06 safe checkpoint orchestration while reusing accepted subordinate validators.
-The independent preflight reports `5 Critical / 4 Important`.
-Exact requirements are in the
-[PR 09 packet](reviews/agentcore-pr-preparation/2026-08-25-pr09-bound-task.md).
-PR 10 bound external-effect-authority preflight is now complete. The historical
-facade independently recreates PR 09's string-bound construction bypass and
-gives every member raw plan/claim/dispatch/receipt/observation/settlement
-methods. Public records/results leak live claim/CALL/OBSERVE tokens; the
-Coordinator invokes any caller-injected Adapter, returns its value without
-finalizing it, and collapses pre-call rejection with a possibly executed
-Provider exception into the same `None`. Receipt/observation/settlement writers
-also accept wrong-purpose tokens, so callers can manufacture durable success
-without a Provider call. Normal Team clean can then cascade every audit row
-while an external call is in flight. The independent preflight reports `5
-Critical / 4 Important`. Formal replay must inherit PR 09's exact lease and
-capability grants, compose PR 07's one-use/result-bound internals, use a trusted
-Adapter registry with registry-derived namespace/key and token-free requests,
-finalize typed results
-inside the coordinator, compose PR 07 effect-in-flight state with the PR 03/05
-Team-clean reservation, expose only redacted bounded views and preserve
-normal-clean tombstones. Exact requirements are in the
-[PR 10 packet](reviews/agentcore-pr-preparation/2026-08-25-pr10-bound-effect.md).
-No result changes Live Voice authority, performs composition/migration, or
-grants deletion credit.
+The dated feasibility record is retained in the optional
+[AgentCore packet index](reviews/agentcore-pr-preparation/README.md): PR 01–03
+had local technical candidates and PR 04–10 completed read-only preflight,
+including disclosed Critical/Important defects in the historical PR 06–10
+implementations. Those facts prove gaps and unsafe replay paths only; they do
+not create a current PR queue, installed replacement, migration or deletion
+credit.
 
 ### P1/P2 lifecycle repair closure
 
@@ -943,6 +860,16 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
 
 ## Tracked cleanup and review work
 
+- **Post-freeze LiveVoice/AgentCore slimming handoff — COMPLETE AS
+  PREPARATION (2026-09-01):** D-096 closes the isolated preparation branch with
+  the 152-path/228-responsibility inventory, Hermes explanation, direct/Adapter/
+  downshift/keep/retire dispositions, ten disclosed same-owner split debts,
+  planning envelope, delta-rebaseline procedure, dependency-ordered future
+  packages and deletion Gates. It deliberately does not prepare AgentCore PRs
+  or grant implementation, migration, canary, deletion or product credit.
+  Activation waits for feature-complete PASS on an exact clean source, then
+  uses a new execution branch and an affected-responsibility delta rather than
+  repeating the complete audit or deleting by old paths.
 - **Module code-fact audit — COMPLETE (2026-08-17):** see
   [module code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md). It
   audited all 15 capability domains and the six known blockers on HEAD

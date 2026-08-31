@@ -1,5 +1,11 @@
 # OpenJiuwen AgentCore local PR preparation review — 2026-08-25
 
+Routing status (2026-09-01): historical candidate/preflight evidence under
+D-096. Completing or packaging these PRs is not part of the LiveVoice slimming
+preparation-branch closure. Future AgentCore implementation, if still selected
+after the frozen LiveVoice rebaseline, requires its own current-source scope,
+tests, review and authority.
+
 Status: local review and packaging decision only. No PR has been created, no
 remote ref has been updated, the installed OpenJiuwen dependency has not changed,
 and no LiveVoice migration or cutover is authorized by this document.
@@ -288,9 +294,10 @@ For every PR:
 - do not push or create a remote PR without the user's exact remote-ref
   authorization.
 
-## 7. Remaining preparation work
+## 7. Historical submission work — not current branch scope
 
-Before the AgentCore PR packages can be called ready for submission:
+If a future AgentCore owner independently selects these capabilities for
+submission, that separate task would need to:
 
 - compare each group with the then-current `develop` and resolve upstream API,
   schema and migration drift;

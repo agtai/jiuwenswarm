@@ -209,9 +209,9 @@ Retired after Gates
   = legacy Demo/Task lane + duplicate schema/state + production-tree test support
 ```
 
-迁移前只完成映射、PR 准备、single-writer/canary/rollback 和 retirement Gate
-设计。当前特性分支继续开发期间不移动 authority，也不把本准备分支的分析代码
-合入产品分支。
+迁移前只完成映射、AgentCore 下沉需求、single-writer/canary/rollback 和
+retirement Gate 设计；不要求实现或包装 PR。当前特性分支继续开发期间不移动
+authority，也不把本准备分支的分析代码合入产品分支。
 
 ## 8. 证据入口
 

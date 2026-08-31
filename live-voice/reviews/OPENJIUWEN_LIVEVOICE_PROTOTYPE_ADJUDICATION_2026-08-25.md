@@ -126,12 +126,12 @@ The isolated files remain available as local recovery/evidence while this task
 runs. Future accepted tests or seams are ported deliberately; the preparation
 branch is never merged as a unit.
 
-## 7. Remaining preparation boundary
+## 7. Deferred implementation boundary
 
 This adjudication closes prototype selection only. The ten dependency-ordered,
-separately reviewable AgentCore replay plans and the final LiveVoice
-allowlist/discard index are now prepared. Remaining work is technical PR
-packaging: finish the real-issue and reviewable-history package for PR 01–03,
-then formally replay and verify PR 04–10 on accepted dependency tips.
-Migration, dual write, default-on composition, canary, Store retirement and
-source deletion remain explicitly deferred.
+separately reviewable AgentCore replay plans remain dated gap/oracle evidence;
+D-096 does not require their implementation or packaging. The final LiveVoice
+allowlist/discard index and future AgentCore downshift requirements are part of
+the closed handoff. Migration, dual write, default-on composition, canary,
+Store retirement and source deletion remain explicitly deferred until the
+post-freeze execution branch.

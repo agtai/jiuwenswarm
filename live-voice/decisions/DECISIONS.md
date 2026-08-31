@@ -1079,3 +1079,14 @@
 - 非声明：一次人工验收不能把后续自动样本升级为逐轮物理确认；自动 Browser 数值也不是声压传感器测得的 physical-first-audible 或 physical-silence。没有外部声学 oracle 时，严格物理声学 p95、AEC/double-talk、跨设备/房间泛化和 release 稳定性保持开放。本决定不改变 product-readiness、feature-complete、Production 或 remote-ref 状态。
 - 完成门：上述人工记录、两个温度的两类最小样本序列、sanitized 聚合、runner 适用自动化和风险相称 review 必须绑定同一个接受 source 后，L0 才可按本决定记工程测量闭环。当前 runner 若仍要求受控端点或逐轮 operator verdict，先在独立实施包中收敛该差异；不得通过自动输入 `pass`、普通 Chrome 冒充受控 provenance 或更名指标绕过门槛。
 - 重新评估条件：需要严格物理声学 p95；引入参考麦克风、可信硬件/OS loopback 或原始音频保留；改变 corpus、里程碑端点、样本最低数、成功资格或 cold epoch 定义；或把该 L0 工程测量闭环升级为产品/发布 Gate。
+
+## D-096 关闭准备分支为冻结后瘦身 handoff，不要求准备 AgentCore PR
+
+- 日期：2026-09-01。
+- 状态：Accepted preparation-closure decision（用户明确要求完成当前独立准备分支的收尾，不继续准备 AgentCore PR；本分支的唯一目的，是在 LiveVoice 特性分支开发完成后，为 LiveVoice 自身瘦身以及通用责任下沉 AgentCore 提供足够、可追溯且不绑定源码行号的信息）。
+- 准备输出：保留 152 路径/228 项 stable-symbol 责任、八条真实流程、五层架构、Hermes 解释、直接复用、薄 Adapter、AgentCore 下沉要求、LiveVoice/JiuwenSwarm 保留责任、结构债务、retirement Gate 和规划区间。`AGENTCORE_PR` 继续作为原子处置代码，但只表示未来通用 owner/public-contract gap，不要求本分支实现、replay、包装、提交或推送 PR。
+- 历史候选边界：既有 AgentCore candidate、PR01–PR10 packet 和 preflight 只保留为 dated gap/risk/oracle evidence；它们不是 installed capability、当前执行队列、cherry-pick 输入或本分支完成条件。未来若同一缺口仍存在，由届时的 AgentCore owner 在 current source 和 accepted dependency 上重新定界、实现、测试和审查。
+- 激活边界：只有 `STATUS.md` 记录 feature-complete 边界在一个 exact clean LiveVoice source 上通过并显式激活 slimming packet 后，才开始代码调整。实际修改从该冻结产品源新建 execution branch/worktree；不得在准备分支实施迁移，也不得 wholesale merge 准备分支或实验候选。
+- 增量重基线：激活时必须对 `59998e2c..冻结 source` 枚举新增、删除、重命名和拆分的 stable symbols，映射到现有原子责任，只复审受影响 owner/caller/disposition，重新计算 attributable L1–L5 LOC，并验证届时安装的 AgentCore public API。该步骤是有界 delta，不重做完整 Hermes/模块审计，也不能跳过后直接按旧路径删除。
+- LOC 判读：`45,100` 中心和 `36,600–56,900` 只作工程规划区间，不是 accepted architecture、删除承诺或完成 Gate。最终 PASS 由行为、安全、single-writer、migration/canary/rollback、oracle 保留和独立审查决定；实际 LOC 必须如实分层报告并解释偏差，低于区间不失败，高于区间须对新增责任重新定界但不自动失败。
+- 重新评估条件：用户要求在特性冻结前迁移；要求本分支交付可提交 PR；feature-complete 激活边界改变；原子责任无法表达冻结后的新 authority/协议；AgentCore installed API 使下沉处置根本变化；或瘦身必须引入新的产品政策、shared schema/migration、第二 writer 或更宽平台承诺。

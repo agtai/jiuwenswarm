@@ -1,5 +1,13 @@
 # AgentCore local PR replay packets — 2026-08-25
 
+Routing status (2026-09-01): retained as dated candidate/preflight evidence
+only. D-096 closes the LiveVoice slimming preparation branch without requiring
+any PR implementation, replay, issue metadata, packaging or submission. A
+future AgentCore owner may consult these packets only after the frozen
+LiveVoice rebaseline still selects the corresponding `AGENTCORE_PR`
+requirement; the then-current AgentCore source and accepted dependencies remain
+authoritative.
+
 Status: ten implementation plans are prepared. PR 01 has a local three-commit
 technical replay on the refreshed base; PR 02 and PR 03 have isolated local
 technical candidates. PR 03 is Tier-3 technical-ready (`573` affected tests,

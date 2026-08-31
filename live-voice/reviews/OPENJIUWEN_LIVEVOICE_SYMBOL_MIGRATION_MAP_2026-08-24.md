@@ -4,6 +4,11 @@ Status: local evidence map and proposed OJ-G1-MAP classification. It is the
 authoritative factual inventory for this review, not an accepted architecture
 decision, installed dependency claim, or product-readiness claim.
 
+D-096 closure rule (2026-09-01): `AGENTCORE_PR` rows below are future
+downshift requirements, not unfinished PR-preparation tasks. Historical local
+candidates and replay packets remain gap/oracle evidence only; this branch does
+not implement, rebase, package or submit them.
+
 2026-08-31 zero-baseline correction: the installed dependency remains
 `openjiuwen 0.1.16@94e10cb6102c36fe78a64547957c0def97299273`. It directly
 provides Agent, Tool, Runner, DeepAgent/Harness, Checkpointer and Session VCS,

@@ -1,9 +1,13 @@
-# OpenJiuwen LiveVoice Hermes 对标瘦身预算与执行合同 — 2026-08-31
+# OpenJiuwen LiveVoice 冻结后瘦身激活 handoff 与 Hermes 规划区间 — 2026-08-31
 
-状态：**未来执行约束，尚未实施。** 本文件不改变 `STATUS.md` 的当前优先级，
-不授予迁移、删除、AgentCore PR、产品验收或远端提交信用。只有当正式 LiveVoice
-开发完成、产品验收通过，并且 `STATUS.md` 明确激活瘦身包时，才可把本文件作为
-该包的目标预算和大方向约束。
+状态（D-096，2026-09-01 修订）：**准备分支收尾入口，尚未实施。** 本文件不改变
+`STATUS.md` 的当前优先级，不授予迁移、删除、AgentCore 实现、产品验收或远端
+提交信用。只有当 `STATUS.md` 记录 feature-complete 边界在一个 exact clean source
+上通过并显式激活瘦身包时，未来执行者才使用本文件启动增量重基线。
+
+本准备分支不实现、replay、包装或提交 AgentCore PR。历史候选和 preflight 只保留
+为缺口、风险和测试 oracle 证据。实际 LiveVoice 与 AgentCore 代码调整必须在冻结
+后的产品源码和届时的 AgentCore 权威源码上分别建立新的实施分支/worktree。
 
 风险：本文档本身为 root `TESTING.md` 下的 Tier 0 文档；未来每个代码改动仍按其
 实际 authority、协议、安全、状态、并发、恢复和副作用边界独立定级，不继承
@@ -11,200 +15,212 @@ Tier 0。
 
 ## 1. 本文件拥有什么
 
-本文件是以下内容的唯一未来预算记录：
+本文件是未来瘦身工作的单一入口，负责：
 
-1. Hermes 对标后的 18 个责任模块 LOC 预算；
-2. 正确收敛后的层级规模和总规模上限；
-3. 正式开发完成后的重新基线方法；
-4. 小方向允许调整、大方向必须保持的边界；
-5. AgentCore 下沉、single-writer cutover、legacy 退休和删除 Gate。
+1. 固定当前可复现的总量、Hermes 对标事实和规划口径；
+2. 给出 18 个责任模块的非约束规划区间；
+3. 规定特性冻结后的增量重基线输入、输出和失败条件；
+4. 将 LiveVoice 直接复用、薄 Adapter、AgentCore 下沉、内部收敛和退休组织成
+   依赖有序的实施包；
+5. 固定迁移、single-writer、canary、rollback 和删除 Gate；
+6. 说明最终如何报告真实 LiveVoice、JiuwenSwarm Host、AgentCore 和 support 成本。
 
-本文件不取代其他 authority：
+本文件是唯一入口，不是唯一事实来源：
 
-- 当前产品状态、完成边界和激活包仍由 [`STATUS.md`](../STATUS.md) 管理；
-- 当前 228 项 symbol 责任的唯一去留由
+- 当前产品状态、完成边界和激活包由 [`STATUS.md`](../STATUS.md) 管理；
+- 228 项 stable-symbol 责任和当前去留由
   [原子责任表](OPENJIUWEN_LIVEVOICE_ATOMIC_DISPOSITION_2026-08-31.md) 管理；
-- 当前 152 路径、caller 和 Hermes 证据由
+- 152 路径、caller 和 Hermes 证据由
   [完整模块处置表](OPENJIUWEN_LIVEVOICE_MODULE_DISPOSITION_AND_HERMES_COMPARISON_2026-08-25.md)
   支持；
 - 当前物理 LOC、五层架构和八条调用链由
   [零基线审计](OPENJIUWEN_LIVEVOICE_ZERO_BASE_MODULE_AUDIT_2026-08-31.md)
   管理；
-- 风险、正负场景、零禁止副作用和独立审查要求由 root `TESTING.md` 管理。
+- 复用、适配和下沉的 symbol/capability 证据由
+  [迁移映射](OPENJIUWEN_LIVEVOICE_SYMBOL_MIGRATION_MAP_2026-08-24.md) 管理；
+- 风险、正负场景、零禁止副作用和独立审查由 root `TESTING.md` 管理。
 
-如果路径、文件或 API 在正式开发中改变，先重新映射到原子责任和本文件的 18 个
-模块，不得把路径变化解释为 owner、Gate 或预算已经失效。
+## 2. 固定事实与禁止推断
 
-## 2. 固定比较事实与 LOC 口径
-
-| 对象 | 固定 source | 口径 |
+| 对象 | 固定 source | 可复现事实 |
 |---|---|---|
-| LiveVoice 当前产品事实 | `hx/0812_live_voice_w3@59998e2c5724257bd410885b35e59e1b37027030` | 128 个专属生产路径 159,210 physical LOC，加 24 个共享宿主中可归因的 4,054 symbol/segment LOC，共 163,264 |
-| 归属判断 | `codex/livevoice-agentcore-hermes-prep@cfb7f030d0e7ceb08d1a15c94c0ba631334e8bf3` | 零基线、Hermes 比较、228 项原子责任；该 commit 只修改文档，未实施瘦身 |
-| Hermes Live Voice | `bielcarpi/hermes-live-voice@3dd8af386b845a1486b05b088bbc2b5a642a5b28` | 62 个 shipped 文件 25,254 physical LOC；去除插件内完全重复的 Browser SDK/worklet 后为 22,530 |
+| LiveVoice 产品审计基线 | `hx/0812_live_voice_w3@59998e2c5724257bd410885b35e59e1b37027030` | 128 个专属生产路径 159,210 physical LOC，加 24 个共享宿主中可归因的 4,054 symbol/segment LOC，共 163,264；共享宿主其余 53,534 行排除 |
+| 原子归属基线 | `codex/livevoice-agentcore-hermes-prep@cfb7f030d0e7ceb08d1a15c94c0ba631334e8bf3` | 152/152 路径、228 项责任、48 个多责任路径；13 项 `AGENTCORE_PR` 只表示未来下沉要求 |
+| Hermes Live Voice | `bielcarpi/hermes-live-voice@3dd8af386b845a1486b05b088bbc2b5a642a5b28` | 62 个 shipped 文件 25,254 physical LOC；去除插件内完全重复 Browser SDK/worklet 后为 22,530 |
 
-`physical LOC` 包含空行和注释，目的是复现仓库物理 footprint，不代表复杂度、质量
-或可删除量。当前多职责文件为了闭合 163,264 总数，整文件只记入一个主责任模块；
-真实迁移和删除仍必须按原子 symbol 处置，不能按整文件主责任粗暴删除。
+`physical LOC` 包含空行和注释，只用于复现 footprint，不代表复杂度、质量或可删除
+量。冻结审计仍保留 38,215 行 truly mixed symbol group，以避免虚假分层归属。
+因此当前只有 **163,264 总量**可作为生产责任事实；不存在已经证实的 18 模块当前
+LOC、最终层级 owner 精确 LOC 或“必然删除 118,164 行”的事实。
 
-## 3. 18 个模块的当前值与目标预算
+任何未来执行不得：
 
-“中心目标”是正式瘦身的工程预算；“允许区间”用于适配最终验收代码。低端不是
-强制删减指标，高端不是自动许可。模块超过高端、总量超过 56,900，或者出现新的
-authority、共享协议、迁移或产品策略时，必须重新记录范围、理由、owner、风险和
-验收，不能以实现细节变化默许扩张。
+- 按旧文件路径或整文件主责任直接删除；
+- 把 local candidate、preflight 或内部 AgentCore API 当成 installed replacement；
+- 把移动到 AgentCore/test/support 的代码都报告为 OpenJiuwen 多仓库净删除；
+- 为达到 LOC 数字损害正向行为、fail-closed、恢复、隐私、安全或零副作用。
 
-| 责任模块 | 当前 LiveVoice LOC | Hermes shipped LOC | 中心目标 LOC | 允许区间 | 目标处置与合理差异 |
-|---|---:|---:|---:|---:|---|
-| Browser Audio Edge | 6,941 | 5,763 | 5,000 | 4,500–5,500 | 保留设备、capture/playout、浏览器全局 owner 和真实播放 ACK；合并重复 queue、fence 和兼容输出。Hermes shipped 含重复打包的 Browser SDK/worklet，去重浏览器实现约 3,039 行。 |
-| Web/Gateway media transport | 10,834 | 937 | 4,200 | 3,500–5,000 | 保留已有 WebChannel/Gateway 的窄 LiveVoice 插件、identity、sequence、ACK、backpressure、reconnect 和 cleanup；合并前后端重复 codec，注册和资源关闭只有一个 owner。 |
-| Speech provider layer | 13,195 | 1,803 | 5,800 | 5,000–6,500 | 保留 batch/streaming STT/TTS、Provider-neutral port、fallback 和 TEXT 降级；合并 contract、provider、route 和 capability。若最终不再要求 batch fallback，本模块预算应再下降而非保留。 |
-| Committed input/product authority | 10,182 | 763 | 3,600 | 3,000–4,500 | 保留 voice/text unified commit、principal/project scope、确认、模型和 intent policy；这些属于 Jiuwen 产品边界，不进入 AgentCore，也不得分散成第二套 P2/P3 authority。 |
-| Conversation Runtime | 8,453 | 1,942 | 3,500 | 3,000–4,500 | 保留一套 turn/response/generation/presentation authority 和 late-output fence；删除平行 Runtime、无生产 caller 的 replica 和 subordinate coordinator 重复状态。 |
-| Agent Bridge | 3,568 | 1,140 | 1,000 | 700–1,300 | 直接复用 Agent/Tool/Runner/DeepAgent/Harness；只保留 committed context、Jiuwen Agent 选择、输出投影和生命周期薄适配，退休 thread-pool/fake Agent lane。 |
-| Task domain/control | 4,759 | 2,075 | 1,000 | 700–1,300 | 通用 Task/Attempt/Command/Result authority 下沉 AgentCore；LiveVoice 只保留产品 intent/control 映射。Hermes 的 TaskSupervisor 证明该责任存在，不证明 LiveVoice 应重建它。 |
-| Task Store/outbox/result | 14,951 | 1,075 | 600 | 300–800 | AgentCore 成为唯一 Task/Event/Outbox/Result/Cursor truth；LiveVoice 最多保留只读、版本校验的 importer/rollback reader，不允许双写或永久兼容 Store。 |
-| Project executor | 7,131 | 0 | 3,000 | 2,500–4,000 | Hermes Voice 把实际执行交给外部 Hermes Agent；Jiuwen 仍需 project/worktree/Git patch/file Tool/symlink/cleanup Adapter。通用 Attempt、Result、worker 和 Effect journal 必须移出。该模块属于 Jiuwen Host，不属于语音核心。 |
-| Checkpoint/effect recovery | 2,953 | 0 | 800 | 500–1,200 | 仅在最终 D1/D2 产品合同仍要求跨 crash window 的安全恢复时保留 project codec、probe、compensation；通用 checkpoint publication、effect journal 和 continuation token 归 AgentCore。 |
-| Task event/progress | 6,000 | 312 | 1,500 | 1,000–2,000 | AgentCore 提供 event/head/cursor；LiveVoice 保留 cancellation-aware subscription、可说进度投影、TEXT fallback 和前台语音/后台 Task 仲裁。 |
-| Presentation/history | 5,413 | 0（嵌入其他模块） | 2,200 | 1,800–3,000 | Jiuwen 的 DOM、audio、Chat history 和 Task notification 是不同 adoption fact，保留一个明确 owner；网络发送、synthesis 成功和真实呈现不得互相冒充。 |
-| Formal Web/UI | 12,788 | 4,701 | 5,200 | 4,500–6,500 | 保留正式 P1/P2/P3 产品表面、设备选择、恢复和 Task presentation；拆除 7,527 行 Panel 的多状态机，停止构造并退休 legacy 产品。 |
-| Composition/configuration | 23,907 | 1,172 | 2,500 | 1,800–3,500 | 保留一个薄 composition root、能力声明、feature gate 和 host registration；14,016 行 registry 不得继续拥有 handler、policy、replay、presentation 和 lifecycle 的实现。 |
-| Observability/deployment/privacy | 12,186 | 2,668 | 3,500 | 2,800–4,500 | 保留 runtime correlation、privacy projection、bounded exporter、readiness 和必要 preflight；benchmark、fault harness、Alpha conformance、离线报表和物理验收 recorder 迁 validation/support。 |
-| Schema/protocol | 4,731 | 742 | 1,500 | 1,000–2,000 | 保留按 authority 分域的一份 canonical schema 和 Jiuwen Web envelope；Python/TypeScript client、method catalog、allowlist 和状态值从单一源生成，v1 和无 caller contract 退休。 |
-| Legacy/compatibility | 5,914 | 0 | 0 | 0–300（仅 cutover 过渡） | `useLiveVoiceDemo`、旧 P1、旧 Task bridge/client/monitor 和 AutoHarness LiveVoice 分支在 Gate 后停止分配并退休；过渡代码不得成为永久预算。 |
-| Test/reference in production | 9,358 | 161 | 200 | 0–500 | 只允许极小 runtime smoke/readiness leaf；replica、fake、benchmark、fault harness、L0 UI/recorder 和未调用 contract/result route 迁 test/validation/support 或删除。 |
-| **合计** | **163,264** | **25,254** | **45,100** | **36,600–56,900** | 相对当前中心目标减少 118,164 行（72.4%）；相对 Hermes shipped 为 1.79 倍，相对 Hermes 去重实现为 2.00 倍。 |
+## 3. 18 个责任模块的规划区间
 
-## 4. 正确收敛后的层级预算
+下表是 activation-time planning hypothesis，不是当前模块 LOC、accepted architecture
+或完成 Gate。中心值之和为 45,100，区间之和为 36,600–56,900；最终实施可低于
+低端，也可在责任有证据且经重新定界后高于高端。冻结后必须先按 stable symbol
+重算，才能将任何数字用于排包。
 
-| 最终 owner | 中心预算 | 包含的上表模块 |
+| 责任模块 | Hermes shipped LOC | 规划中心 | 规划区间 | 冻结后应保留或收敛的责任 |
+|---|---:|---:|---:|---|
+| Browser Audio Edge | 5,763 | 5,000 | 4,500–5,500 | 设备、capture/playout、浏览器全局 owner、真实播放 ACK；合并重复 queue/fence/兼容输出 |
+| Web/Gateway media transport | 937 | 4,200 | 3,500–5,000 | 既有 Channel/Gateway 窄插件、identity、sequence、ACK、backpressure、reconnect、cleanup；合并 codec 和资源 owner |
+| Speech provider layer | 1,803 | 5,800 | 5,000–6,500 | Batch/Streaming STT/TTS、Provider-neutral port、fallback/TEXT 降级；合并 contract/provider/route/capability |
+| Committed input/product authority | 763 | 3,600 | 3,000–4,500 | voice/text commit、principal/project scope、确认、模型和 intent policy；不下沉 Jiuwen 产品策略 |
+| Conversation Runtime | 1,942 | 3,500 | 3,000–4,500 | 一套 turn/response/generation/presentation authority 与 late-output fence；退休平行 runtime/replica |
+| Agent Bridge | 1,140 | 1,000 | 700–1,300 | 复用 Agent/Tool/Runner/DeepAgent/Harness；只留 committed context、Jiuwen Agent 选择和薄投影 |
+| Task domain/control | 2,075 | 1,000 | 700–1,300 | 通用 Task/Attempt/Command/Result 目标为 AgentCore；LiveVoice 留产品 intent/control 映射 |
+| Task Store/outbox/result | 1,075 | 600 | 300–800 | AgentCore 成为唯一通用 truth 后，只保留有版本校验的 importer/rollback reader；禁止永久双写 Store |
+| Project executor | 0 | 3,000 | 2,500–4,000 | Jiuwen Host 留 project/worktree/Git patch/file Tool/symlink/cleanup；通用 lifecycle/result/effect 外移 |
+| Checkpoint/effect recovery | 0 | 800 | 500–1,200 | 若最终 D1/D2 仍要求跨 crash window，留 project codec/probe/compensation；通用 publication/journal 下沉 |
+| Task event/progress | 312 | 1,500 | 1,000–2,000 | 通用 event/head/cursor 下沉；留可说进度、TEXT fallback 和前台语音/后台 Task 仲裁 |
+| Presentation/history | 0（嵌入其他模块） | 2,200 | 1,800–3,000 | 区分 DOM、audio、Chat history、Task notification adoption；网络发送、合成与真实呈现不互相冒充 |
+| Formal Web/UI | 4,701 | 5,200 | 4,500–6,500 | 正式 P1/P2/P3 表面、设备选择、恢复和 Task presentation；拆除 Panel 多状态机与 legacy allocation |
+| Composition/configuration | 1,172 | 2,500 | 1,800–3,500 | 一处薄 composition root、能力声明、feature gate、host registration；14,015 行 registry 不再承载具体 policy/state machine |
+| Observability/deployment/privacy | 2,668 | 3,500 | 2,800–4,500 | runtime correlation、privacy projection、bounded exporter、readiness/preflight；harness/recorder 迁 support |
+| Schema/protocol | 742 | 1,500 | 1,000–2,000 | 按 authority 分域的一份 canonical schema；Python/TypeScript client、method catalog、allowlist 从单一源生成 |
+| Legacy/compatibility | 0 | 0 | 0–300（cutover 过渡） | replacement Gate 后停止分配并退休；过渡代码不得成为永久 owner |
+| Test/reference in production | 161 | 200 | 0–500 | 只留极小 runtime smoke/readiness leaf；fake/benchmark/fault/L0 recorder 迁 test/validation/support |
+| **规划合计** | **25,254** | **45,100** | **36,600–56,900** | 与当前 163,264 总量只作规模级比较，不构成删除承诺 |
+
+## 4. 五层最终归属的重算规则
+
+最终不能先按整模块分配给一个 owner。冻结后按每个 stable responsibility 重新
+归入下列层，层级 LOC 由原子分账求和：
+
+| 层 | 最终责任 | 计量规则 |
+|---|---|---|
+| L1 LiveVoice Core | channel-neutral turn/speech/presentation policy | 只计真正由 LiveVoice 独占的 symbol/segment |
+| L2 Channel Adapter | Browser、WebChannel、Gateway、Audio Device、宿主 envelope | 共享宿主只计 LiveVoice segment，不把整个 Web/Channel 算入语音核心 |
+| L3 JiuwenSwarm Host/Product | project、principal、confirmation、UI、composition、project executor、诊断 | 单独报告，不与 L1/L2 合称 Core |
+| L4 AgentCore shared foundation | Agent、Tool、Task、execution、event、cursor、checkpoint/effect 的通用 owner | AgentCore 公共实现不计入 LiveVoice；薄 consumer Adapter 计入其实际 L1/L2/L3 owner |
+| L5 Transition/Support | legacy、compat、test/reference/benchmark/validation | 分别报告迁移、暂留和最终退休量，不冒充生产 Core |
+
+若需要 OpenJiuwen 多仓库总成本，必须另做 AgentCore + JiuwenSwarm 同口径审计；
+LiveVoice footprint 减少不等于多仓库净删除相同数量。
+
+## 5. 为什么规划中心仍比 Hermes 多
+
+下面只是 `45,100 - 25,254 = 19,846` 的可核算解释，不是完成门槛：
+
+| 差异来源 | 规划中心相对 Hermes | 必要性条件 |
 |---|---:|---|
-| LiveVoice Core + Channel | 23,700 | Browser Audio、Web/Gateway media、Speech、Conversation、Task 语音进度、Presentation、语音/媒体协议 |
-| JiuwenSwarm Host/Product/UI | 18,000 | committed/product policy、Project Executor、Formal Web/UI、composition、runtime observability 和最小 support |
-| AgentCore thin bridges | 3,400 | Agent、Task、Store、checkpoint/effect Adapter/importer；不包含 AgentCore 自身公共实现 LOC |
-| Legacy | 0 | cutover 结束后无永久 owner |
-| **完整可归因集成** | **45,100** | 不是全部放在 `server/live_voice`；真正 Core + Channel 约 23,700 |
-
-AgentCore 公共实现不计入 LiveVoice 模块预算，正如 Hermes Voice 不把 Hermes Agent
-自身实现计入 25,254 行。未来若评估整个 OpenJiuwen 多仓库总成本，应另建同口径
-跨仓审计，不能把共享 AgentCore LOC重新记回每个消费者。
-
-## 5. 为什么目标仍比 Hermes 多
-
-45,100 相比 Hermes shipped 多 19,846 行。允许存在的主要差额必须由下列已命名
-责任解释，不允许再用笼统的“Jiuwen 更复杂”解释：
-
-| 差异来源 | 目标相对 Hermes 的主要净差额 | 必要性条件 |
-|---|---:|---|
-| WebChannel/Gateway 独立媒体协议 | +3,263 | 继续使用既有多宿主 Channel，且 identity/ACK/backpressure/reconnect/cleanup 合同仍是验收要求 |
-| Batch + Streaming STT/TTS 和降级 | +3,997 | 双路径、Provider-neutral 和 TEXT fallback 仍是正式功能；否则降低预算 |
-| Jiuwen commit/auth/confirmation/model policy | +2,837 | voice/text unified commit、project scope 和高风险操作确认仍属于产品合同 |
+| Browser Audio Edge 去重 | -763 | Hermes shipped 含重复打包的 Browser SDK/worklet；Jiuwen 保留一份真实 Browser owner |
+| WebChannel/Gateway 独立媒体协议 | +3,263 | 多宿主 Channel 的 identity/ACK/backpressure/reconnect/cleanup 仍是验收合同 |
+| Batch + Streaming STT/TTS 和降级 | +3,997 | 双路径、Provider-neutral 和 TEXT fallback 仍为正式功能 |
+| Jiuwen commit/auth/confirmation/model policy | +2,837 | unified commit、project scope 和高风险操作确认仍属于产品合同 |
 | 更严格的 turn/response/generation fence | +1,558 | late output、barge-in 和跨 surface 零禁止副作用仍需证明 |
-| project/worktree/Git patch Executor | +3,000 | LiveVoice 产品仍直接承载项目级 Code Agent 结果和安全清理 |
-| D1/D2 project recovery Adapter | +800 | 跨 crash window checkpoint/effect 要求仍存在；通用 authority 已在 AgentCore |
-| Task spoken progress 和独立 presentation truth | +3,388 | TEXT/voice 仲裁、DOM/audio/history adoption 和 ACK 仍是独立事实 |
-| 多宿主 composition、隐私观测和跨语言协议 | +3,417 | 只包括薄 host leaf、运行诊断和 generated contract，不包括 validation harness |
-| Agent/Task/Store 下沉节省 | -1,690 | AgentCore 已被接受、安装并成为唯一 authority |
-| 最小 runtime smoke 差额 | +39 | 不得扩张成生产树测试框架 |
-| **净差额** | **+19,846** | 任一前提取消时，同步降低对应模块预算 |
+| project/worktree/Git patch Executor | +3,000 | Jiuwen 产品仍承载项目级 Code Agent 结果和安全清理 |
+| D1/D2 project recovery Adapter | +800 | 最终产品仍要求跨 crash window checkpoint/effect |
+| Task spoken progress 与独立 presentation truth | +3,388 | TEXT/voice 仲裁、DOM/audio/history adoption 和 ACK 仍是独立事实 |
+| Formal Web、composition、隐私观测和跨语言协议 | +3,417 | 只含薄 host/UI、诊断和 generated contract，不含 validation harness |
+| Agent/Task/Store 下沉规划节省 | -1,690 | AgentCore 公共能力被接受、安装并成为唯一通用 authority |
+| 最小 runtime smoke | +39 | 不得扩张成生产树测试框架 |
+| **净差额** | **+19,846** | 任一前提取消时同步调整相应规划，不保留无责任代码 |
 
-## 6. 不可通过“小调整”改变的大方向
+## 6. 激活时需要接受的默认方向
 
-正式开发完成后的路径、symbol 名称、Adapter API 和模块内 LOC 可以重新映射，
-但以下方向不可作为普通适配调整：
+以下是本次审计支持的默认方向。除 single-writer 和 fail-closed 等既有安全约束外，
+它们不是由本 Tier 0 文档新设的产品/架构决定；激活时由对应实施包引用既有
+Decision，或在缺失时新增并接受 Decision：
 
-1. **AgentCore owns generic truth。** LiveVoice 不得永久拥有第二套 Task、Attempt、
-   Command、Event、Outbox、Result、Cursor、Checkpoint 或 Effect authority。
-2. **一个事实一个 writer。** 迁移期间禁止无明确事务和回滚合同的双写；cutover
-   后旧 Store/Core 不再分配新记录。
-3. **正式路线唯一。** formal 与 legacy capture/Task/TTS owner 不得在最终产品同时
-   构造；隐藏 UI 不等于停止 runtime allocation。
-4. **Host 只有窄插件。** WebChannel、Gateway、AgentServer、Deep adapter 和
-   ChatPanel 只保留 registration/facade/leaf，不再内嵌新的 LiveVoice policy。
-5. **协议单源生成。** Python/TypeScript schema、method catalog、allowlist 和状态值
-   不得继续手工多份维护。
-6. **测试退出生产路径。** test/reference/benchmark/fault/physical-validation 代码迁到
-   test、validation 或 support；测试价值不能成为生产 owner。
-7. **预算是警戒线，不是删除 KPI。** 不得为达到 LOC 破坏正向行为、失败关闭、
-   恢复、隐私、安全或零禁止副作用；确有新产品责任时必须正式重新定界，而不是
-   隐藏超支。
+1. 通用 Agent/Task/Execution/Event/Cursor/Checkpoint/Effect truth 优先由已安装
+   AgentCore 公共能力拥有，LiveVoice 不永久保留第二 authority。
+2. 一个事实一个 writer；迁移期间不得无事务/回滚合同双写，cutover 后旧 owner
+   不再分配新记录。
+3. formal 与 legacy capture/Task/TTS owner 最终只构造一套；隐藏 UI 不等于停止
+   runtime allocation。
+4. WebChannel、Gateway、AgentServer、Deep Adapter、ChatPanel 只留窄
+   registration/facade/leaf，不内嵌新的通用 LiveVoice state machine。
+5. Python/TypeScript schema、method catalog、allowlist 和状态值从一份 canonical
+   source 生成。
+6. test/reference/benchmark/fault/physical-validation 迁到明确的
+   test/validation/support owner，仍有效 oracle 先迁后删。
+7. LOC 是解释工具，不是删除 KPI；低于规划区间不失败，高于规划区间也不自动
+   失败，但必须说明新增责任、owner、风险和验收。
 
-改变上述任一方向需要一个新的架构/authority 决策、更新的 Hermes/AgentCore
-证据、独立风险定级和明确用户接受；普通文件移动、API 适配或新代码合入不能自动
-改变它们。
+## 7. 特性冻结后的增量重基线
 
-## 7. 正式开发完成后的重新基线流程
+未来执行者必须完成一次有界增量重基线；不重做全部历史审计，也不能跳过：
 
-未来执行者不得直接拿 `59998e2c` 的旧路径做删除列表。必须按以下顺序启动：
+1. 从 Git 固定通过 feature-complete 边界的 exact clean LiveVoice commit，记录
+   branch、HEAD、upstream 和验收来源；机器私有运行状态不由 Git 恢复。
+2. 新建基于该产品 commit 的 slimming execution branch/worktree；不得在本准备
+   分支上实施 100K 级代码调整，也不得 wholesale merge 本准备分支。
+3. 对 `59998e2c..冻结 commit` 枚举新增、删除、重命名和拆分的生产 symbol，逐项
+   映射到现有 228 项责任；只为真实新增责任创建新的 stable key。
+4. 重新验证受影响 caller、authority、provider、positive/negative oracle 和
+   disposition；未受影响的原子责任继承，不做全量重新解释。
+5. 重算完整 attributable production LOC：专属文件计整文件；共享宿主只计稳定
+   symbol/segment；共享余量继续排除。分别报告 L1–L5，不预设 owner 总量。
+6. 读取届时实际安装的 AgentCore 版本和 public exports，将每项需求标为
+   `installed`、`adaptable` 或 `absent`；local branch、internal API 和 preflight
+   仍不能作为 replacement。
+7. 为受影响责任生成依赖有序的实施包；每包声明 capability/module、risk tier、
+   dependencies、source/test surfaces、scope、exclusions、acceptance 和 rollback。
+8. 若冻结代码已自然删除某项责任，只记录事实与证据，不重建兼容层来匹配旧清单。
 
-1. 从 Git 固定正式开发和产品验收通过的精确 clean commit，记录 branch、HEAD 和
-   upstream；运行时凭据、设备、数据库和项目状态不由 Git 恢复。
-2. 读取当前 `README.md`、`STATUS.md`、本文件、228 项原子责任表和 root
-   `TESTING.md` 的适用风险部分；旧计划不得覆盖当前激活包。
-3. 对 `59998e2c..验收 commit` 做增量清单，将每个新增、删除、重命名和拆分的
-   stable symbol 映射到 18 个模块及一个原子 disposition。
-4. 重新计算 physical LOC：专属文件计整文件；共享宿主只计稳定
-   symbol/segment；共享宿主余量继续排除。
-5. 记录每个模块的新当前值、中心目标、允许区间和差额。路径/API/最终 Provider
-   适配属于小方向；新的 authority、协议、产品策略或超过高端属于重新定界。
-6. 形成依赖有序的实际瘦身包；每包声明 capability、owner、风险、依赖、范围、
-   排除和验收，不把 18 个模块一次性作为一个巨大改动。
+增量重基线的必需输出是一张 changed-responsibility delta：`stable key`、冻结后的
+symbol、当前 caller/owner、复用/适配/下沉/保留/退休处置、replacement 状态、
+实施包、风险和 Gate。缺少任一列时不得开始对应删除。
 
-如果最终验收代码已经自然删除某项责任，只记录事实和证据，不重新制造兼容层来
-匹配旧清单。
+## 8. 依赖有序的未来实施包
 
-## 8. 迁移和删除顺序
+具体文件/API 由增量重基线填写；包边界现在按稳定责任固定：
 
-推荐依赖顺序如下；具体并行度由当时的 disjoint owner 和活动包决定：
+| 顺序 | 包 | 主要结果 | 启动/关闭条件 |
+|---:|---|---|---|
+| S0 | 冻结、原子 delta 与 canonical schema | 冻结 source、changed-responsibility delta、单一 schema/method catalog 计划 | feature-complete PASS；差异和跨语言 contract 可复现 |
+| S1 | 现有公共能力直接复用 | Agent/Tool/Runner/DeepAgent/Harness 及 Jiuwen shared host 改为直接调用；删除竞争 facade/fixture lane | installed public API 和真实 caller 证明；正负 Agent/Tool 场景通过 |
+| S2 | AgentCore 缺口与薄 consumer Adapter | 对仍为 absent 的通用责任建立独立 AgentCore 实施包；只在能力 accepted/installed 后组合薄 Task/Event/Cursor Adapter | 不复用历史候选源码；generic non-Voice tests、public API、版本锁定和独立 review 通过 |
+| S3 | Task/Store/Event/Result single-writer cutover | 新 owner 先通过共同 oracle，再 quiesced cutover；旧 Store/outbox/result 停止分配 | migration/importer、old-version read、race/restart/corruption、canary/rollback 和零副作用通过 |
+| S4 | Checkpoint/effect 与 Project Executor 拆分 | 通用 publication/journal/reconcile 下沉；Jiuwen 留 project/worktree/Git/Tool/probe/cleanup | AgentCore replacement installed；D1/D2 truth、ambiguous effect、crash window 和 compensation 通过 |
+| S5 | LiveVoice Core 与 Channel 收敛 | 合并 Speech/Media/Conversation/Progress/Presentation 重复 owner，拆十项 same-owner 结构债务 | 行为保持、Provider fallback、barge-in、ACK、reconnect 和完整音频链回归通过 |
+| S6 | Host/Web/Composition/Protocol 收敛 | registry/Panel/shared host 只留窄 registration/facade/leaf；协议单源生成 | formal Web P1/P2/P3、feature-off、multi-Task、refresh/reconnect 与跨语言 contract 通过 |
+| S7 | Legacy 与 production-test 退休 | legacy allocation 为零；oracle 迁 test/validation/support；删除无 caller/重复 schema | replacement、caller scan、feature-on/off、rollback 和测试发现率 Gate 通过 |
+| S8 | 累积 canary、验收与计量 | 全产品 Journey、独立跨模块 review、最终 L1–L5 与多仓口径报告 | 所有前置包关闭；exact clean source 上自动化、集成、人测和回滚演练通过 |
 
-1. 冻结 canonical schema 和 AgentCore public capability/API；本地候选、preflight
-   或未安装 PR 不能作为替换事实。
-2. 先建立薄 Agent、Task、event/cursor、checkpoint/effect 和 project Adapter，并
-   让新旧实现通过同一正向/负向/恢复 oracle。
-3. 对 Task/Store/Result/Event/Checkpoint/Effect 执行 quiesced single-writer
-   cutover；保留版本校验 importer/rollback reader，不保留第二 writer。
-4. 拆 Project Executor，只把 project/worktree/Git/Tool/probe/cleanup 留在 Jiuwen
-   Host；通用 lifecycle/journal/result 进入 AgentCore。
-5. 收敛 Conversation、Presentation 和 Channel owner，再拆 registry、Panel 和
-   shared-host segment；行为保持由测试证明，不以文件拆分本身记完成。
-6. formal P1/P2/P3 全链验收后停止 legacy allocation，证明 feature-off、隐藏 UI、
-   reconnect 和 rollback 均无旧 owner 副作用，再删除旧 lane。
-7. 将 validation/reference 代码迁出生产路径，迁移仍有效的 oracle 后删除无 caller
-   模块和重复 schema。
-8. 运行逐模块 canary、回滚演练、完整产品 Journey 和最终独立跨模块审查，再记录
-   实测最终 LOC；预算本身不授予完成信用。
+S2 若需要 AgentCore 代码，AgentCore owner 在届时源码上另建实施分支；本准备分支的
+十个历史 packet 只能提供风险/oracle 线索，不能作为 cherry-pick 或完成信用。
 
-## 9. 每个删除 Gate 的最低证据
-
-任一旧实现、表、schema、compatibility branch 或文件删除前，至少必须满足：
+## 9. 任一迁移或删除的最低 Gate
 
 - replacement public API 已在锁定依赖中安装，而不是只存在本地 worktree；
-- 所有生产 caller 已迁移，静态扫描和运行 composition 均证明旧 owner 不再分配；
+- 所有生产 caller 已迁移，静态扫描和实际 composition 均证明旧 owner 不再分配；
 - 正向业务场景成功，错误 scope、stale generation、重复 command、cancel race、
   reconnect、crash window、corruption 和 feature-off 等适用负向场景失败关闭；
 - Agent、Tool、Task、audio/history、project/file 和受保护状态的禁止副作用显式为零；
 - 持久化迁移、旧版本读取、single-writer、canary 和 rollback 通过；
-- 仍有效的测试 oracle 已迁到新 owner，删除不是通过丢失覆盖获得；
-- 受影响模块按 root `TESTING.md` 完成风险相称的 focused/affected regression 和
-  独立审查；
-- 当前 `STATUS.md`、本文件的实测预算表和相关 source/evidence 一致。
+- 仍有效测试 oracle 已迁到新 owner，删除不是通过丢失覆盖获得；
+- root `TESTING.md` 要求的 focused/affected regression、风险相称独立审查和真实
+  产品路径证据完成；
+- `STATUS.md`、Decision、source、tests、evidence 和实测计量一致。
 
-未满足 Gate 时只能标记 `PARTIAL` 或 `BLOCKED`；不得将“计划删除”“已下沉设计”或
-“LOC 已分配给目标模块”报告为已删除、已迁移或已验收。
+未满足 Gate 时只能标记 `PARTIAL` 或 `BLOCKED`；“计划下沉”“已有候选”“LOC 已
+分配”均不等于已经替换或可以删除。
 
-## 10. 完成判定
+## 10. 最终完成与报告
 
 一次 Hermes 对标瘦身只有同时满足以下条件才算完成：
 
-1. 产品验收通过的行为保持，所有受影响安全/恢复/零副作用合同重新通过；
-2. AgentCore 是通用 authority 的已安装唯一 owner，LiveVoice 只持有允许的薄桥接；
-3. legacy 最终分配为零，测试/reference 不再伪装成生产模块；
-4. shared host 只含窄 registration/facade/leaf；schema 和 method catalog 单源生成；
-5. 实测完整可归因 LOC 位于 36,600–56,900，中心目标约 45,100；任何高端超支已
-   经新的正式责任决策，而不是未解释的实现膨胀；
-6. 最终报告同时给出完整集成 LOC 和真正 Core + Channel LOC，不再把 Jiuwen
-   Host、AgentCore 或 validation 责任统称为“语音核心”。
+1. 冻结产品行为保持，受影响安全、恢复和零副作用合同重新通过；
+2. 已选择的 AgentCore 通用责任由 accepted/installed public capability 唯一拥有，
+   LiveVoice/JiuwenSwarm 只保留允许的薄 consumer Adapter；
+3. legacy 最终 allocation 为零，test/reference 不再伪装成生产模块；
+4. shared host 只含窄 registration/facade/leaf，schema/method catalog 单源生成；
+5. 最终报告给出实际 L1 Core、L2 Channel、L3 Host、薄 Adapter、L5 transition/
+   support 以及 AgentCore 新增/复用成本，不再把它们统称为“语音核心”；
+6. 最终实际 LOC 与 36,600–56,900 规划区间比较并解释差异，但区间本身不决定
+   PASS/FAIL，也不存在为了不低于低端而保留代码的要求；
+7. 累积 canary、rollback、完整产品 Journey 和独立跨模块审查绑定同一个 exact
+   clean source。
 
-本合同允许未来实现适配代码事实，但不允许通过重新命名、移动目录、复制生成物或
-改变统计口径规避已经接受的收敛方向。
+本准备分支在上述信息、路由和 Tier 0 一致性检查关闭后即可封存。真正的代码瘦身
+从未来冻结产品源的新分支开始；执行者只做增量重基线，不重新发明本次已经关闭的
+模块、Hermes 和 AgentCore 归属分析。

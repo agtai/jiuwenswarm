@@ -1,6 +1,7 @@
 # OpenJiuwen LiveVoice slimming preparation convergence review — 2026-08-25
 
-Status (corrected 2026-08-31): this is a preparation decision index. The earlier
+Status (closed under D-096 on 2026-09-01): this is a preparation handoff index.
+The earlier
 Hermes explanation and the claim that every old disposition was converged are
 superseded by the
 [zero-baseline audit](OPENJIUWEN_LIVEVOICE_ZERO_BASE_MODULE_AUDIT_2026-08-31.md).
@@ -9,17 +10,16 @@ The current exclusive decisions are recorded in the
 the older path register remains supporting source/caller/Hermes evidence rather
 than an alternative disposition authority.
 The later
-[Hermes-aligned slimming budget and execution contract](OPENJIUWEN_LIVEVOICE_HERMES_ALIGNED_SLIMMING_BUDGET_2026-08-31.md)
-records the future 18-module LOC budget, rebaseline rules and migration/deletion
-Gates. It is dormant until formal product acceptance completes and `STATUS.md`
-activates a slimming packet; it does not convert this preparation review into
-current implementation work.
-The AgentCore PR **design and replay packets** exist, but complete accepted PR
-source/test/docs packages do not: PR 01–03 have local technical candidates,
-PR 04–10 have preflight only, and historical PR09/PR10 facade implementations
-must be reimplemented. This document grants no migration, deletion,
-product-readiness or PR submission approval. `STATUS.md` remains the authority
-for mutable project state.
+[Hermes-aligned slimming activation handoff and planning envelope](OPENJIUWEN_LIVEVOICE_HERMES_ALIGNED_SLIMMING_BUDGET_2026-08-31.md)
+records the future responsibility budget, delta-rebaseline route and
+migration/deletion Gates. It is dormant until the feature-complete boundary
+passes on an exact clean source and `STATUS.md` activates a slimming packet; it
+does not convert this preparation review into current implementation work.
+Historical AgentCore candidate and replay packets remain optional gap/oracle
+evidence. D-096 explicitly removes their implementation, issue metadata,
+packaging and submission from this branch's completion boundary. This document
+grants no migration, deletion, product-readiness or PR submission approval.
+`STATUS.md` remains the authority for mutable project state.
 
 Risk: Tier 0 documentation under root `TESTING.md`. Every later code boundary
 retains its independently assigned risk and evidence requirements.
@@ -54,8 +54,9 @@ LiveVoice look like Hermes.” The selected result is:
    already owns the generic operation;
 2. keep only thin JiuwenSwarm/LiveVoice translation and policy Adapters where
    AgentCore owns, or will own, the generic truth;
-3. prepare ten dependency-ordered, separately reviewable AgentCore capability
-   PRs for generic gaps instead of keeping those state machines in LiveVoice;
+3. record generic AgentCore downshift requirements, public-contract gaps,
+   dependencies and retained oracles instead of keeping those state machines in
+   LiveVoice or preparing PRs on this branch;
 4. retain genuinely voice-, browser-, product- and Jiuwen-specific owners,
    while consolidating, splitting, re-homing or retiring their internal
    duplication after explicit Gates; and
@@ -71,7 +72,7 @@ the
 [152-path module disposition](OPENJIUWEN_LIVEVOICE_MODULE_DISPOSITION_AND_HERMES_COMPARISON_2026-08-25.md),
 the
 [prototype adjudication](OPENJIUWEN_LIVEVOICE_PROTOTYPE_ADJUDICATION_2026-08-25.md)
-and the
+and, only for dated candidate evidence, the
 [AgentCore PR preparation review](OPENJIUWEN_AGENTCORE_PR_PREPARATION_REVIEW_2026-08-25.md).
 
 ## 2. AgentCore outcome by capability
@@ -111,12 +112,14 @@ These are future boundary shapes, not selected implementations. The moving
 feature branch must revalidate each seam against the accepted AgentCore public
 contract before code is written or ported.
 
-### 2.3 AgentCore PR candidates
+### 2.3 AgentCore downshift requirements and historical candidate evidence
 
-The ten candidates are dependency-ordered, separately reviewable generic
-AgentCore changes, not one LiveVoice PR:
+The 13 `AGENTCORE_PR` atomic responsibilities are the authoritative downstream
+requirement set. The historical work grouped related gaps into ten possible
+AgentCore changes; this table preserves feasibility and defect evidence, not
+unfinished work required to close this branch:
 
-| PR | Capability | Current preparation state |
+| Historical group | Capability | Preserved evidence state |
 |---:|---|---|
 | 01 | mandatory TeamTask scope (`SCOPE-01`) | local technical replay; real issue metadata and reviewable history package pending |
 | 02 | monotonic AsyncTool cancellation (`A1`) | isolated local technical candidate; issue metadata/package pending |
@@ -129,11 +132,12 @@ AgentCore changes, not one LiveVoice PR:
 | 09 | lifecycle-bound TeamTask/checkpoint authority | preflight complete with `5 Critical / 4 Important` historical findings; reimplement opaque lease and structural capability grants after dependencies |
 | 10 | lifecycle-bound external-effect authority | preflight complete with `5 Critical / 4 Important` historical findings; reimplement trusted registration and token-free typed coordination after PR 07/09 |
 
-All ten have dedicated test-first replay packets in the
+All ten have dated test-first replay packets in the
 [packet index](agentcore-pr-preparation/README.md). “Preflight complete” means
 the historical candidate was inspected and the safe target contract was
 recorded; it does not mean the defect is fixed or the PR is ready. No candidate
-has been pushed or submitted.
+has been pushed or submitted, and D-096 requires no further replay or packaging
+for this preparation closure.
 
 ### 2.4 LiveVoice/JiuwenSwarm ownership that remains
 
@@ -214,12 +218,14 @@ documentation after comparison with the then-current product source:
 - the accepted
   [scope](OPENJIUWEN_AGENTCORE_HERMES_SLIMMING_SCOPE_2026-08-25.md);
 - this convergence review;
-- the symbol migration map and complete module/Hermes disposition;
+- the 228-row atomic responsibility manifest, symbol migration map and complete
+  module/Hermes disposition;
 - the prototype adjudication; and
-- only the user-relevant summary of the AgentCore PR preparation review.
+- the post-freeze activation handoff and planning envelope.
 
-The AgentCore replay packets belong with the AgentCore preparation work. They
-are not LiveVoice product documentation or product implementation.
+The AgentCore replay packets are retained only as optional dated evidence. They
+are not a current preparation queue, LiveVoice product documentation or product
+implementation.
 
 The following are explicitly excluded from wholesale integration into
 `hx/0812_live_voice_w3`:
@@ -233,8 +239,9 @@ The following are explicitly excluded from wholesale integration into
 - the historical `codex/ac-pr01-*` through `codex/ac-pr10-*` stacked review
   refs as a single AgentCore merge unit;
 - the aggregate `codex/oj-g2-local-base@50c065dc` candidate workspace as a
-  33-commit, 73-file, 31,828-insertion merge unit; its accepted capability
-  fragments must be replayed into their owning PRs;
+  33-commit, 73-file, 31,828-insertion merge unit; any future AgentCore owner
+  must rederive the selected capability from current source and accepted
+  contracts rather than merge this stack;
 - experimental implementation packets and tests merely because they pass; and
 - the `codex/livevoice-agentcore-hermes-prep` branch or its history as a whole.
 
@@ -264,9 +271,12 @@ no production code. Existing technical test counts remain attached to their
 exact candidate sources in the PR review and packet index; they do not transfer
 submission readiness to another base.
 
-After the zero-baseline correction, unfinished preparation work includes
-replaying/accepting PR dependencies, reimplementing PR09/10 public grants,
-preparing per-PR source/test/docs packages, and later designing thin Channel,
-Agent and Task facades against the then-current product source. LiveVoice
-Adapter implementation and all migration/cutover work remain intentionally
-outside this preparation task.
+After the zero-baseline correction and D-096 scope clarification, this
+preparation handoff is complete when the activation document, scope, STATUS,
+atomic manifest and routing index are synchronized and pass Tier 0 review. PR
+replay/packaging is not a remaining preparation item. After the feature-complete
+source is accepted and frozen, the future execution owner must delta-rebaseline
+changed responsibilities, verify installed AgentCore APIs, and only then design
+exact Channel, Agent and Task facades and risk-tiered implementation packets.
+LiveVoice Adapter implementation and all migration/cutover work remain outside
+this preparation branch.

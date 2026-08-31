@@ -1,7 +1,7 @@
 # Atomic responsibility disposition manifest
 
 Date: 2026-08-31
-Product fact: `C:\Users\admin\Desktop\live voice hx@59998e2c5724257bd410885b35e59e1b37027030` (accepted moving-branch baseline; this lane performed no Git operation)
+Product fact: `hx/0812_live_voice_w3@59998e2c5724257bd410885b35e59e1b37027030` (accepted moving-branch baseline; this lane performed no Git operation)
 Status: read-only responsibility classification; no migration, deletion, branch or future-LOC decision
 
 ## Outcome
@@ -456,4 +456,9 @@ This tracked register retains the current caller evidence, provider/target statu
 
 ## Decision boundary
 
-This manifest decides current atomic ownership/disposition only. It does not authorize migration, physical deletion, exact future module shape or LOC. `AGENTCORE_PR` remains conditional on an accepted and installed public capability; `CONSOLIDATE_RETIRE` remains conditional on its row gate.
+This manifest decides current atomic ownership/disposition only. It does not
+authorize migration, physical deletion, exact future module shape or LOC.
+`AGENTCORE_PR` is a stable code for a future AgentCore downshift requirement;
+it does not require this preparation branch to implement, replay, package or
+submit a PR, and replacement remains conditional on an accepted and installed
+public capability. `CONSOLIDATE_RETIRE` remains conditional on its row gate.

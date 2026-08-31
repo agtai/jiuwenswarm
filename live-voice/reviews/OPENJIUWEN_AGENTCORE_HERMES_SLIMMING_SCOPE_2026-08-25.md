@@ -1,17 +1,17 @@
 # OpenJiuwen AgentCore reuse and Hermes comparison scope — 2026-08-25
 
-Status: accepted scope for the preparation-only LiveVoice slimming analysis.
-This record defines what the isolated preparation branch may produce and what
-must not flow into the moving LiveVoice feature branch without a later,
-separately accepted implementation decision.
+Status: accepted scope for the preparation-only LiveVoice slimming handoff,
+clarified by D-096 on 2026-09-01. This record defines what the isolated
+preparation branch may produce and what must not flow into the moving LiveVoice
+feature branch without a later, separately accepted implementation decision.
 
 Execution follows the
 [slimming preparation implementation plan](OPENJIUWEN_AGENTCORE_HERMES_SLIMMING_EXECUTION_PLAN_2026-08-25.md),
-which closes inventory and classification before prototype adjudication or
-AgentCore PR preparation.
+which closes inventory, classification, prototype adjudication and the future
+activation handoff without requiring AgentCore PR implementation or packaging.
 
 The resulting classifications, integration allowlist, exclusions and honest
-PR-readiness boundary are indexed by the
+downstream-capability boundary are indexed by the
 [convergence review](OPENJIUWEN_LIVEVOICE_SLIMMING_FINAL_REVIEW_2026-08-25.md).
 
 ## 1. Goal
@@ -22,8 +22,8 @@ performing the migration now:
 1. which LiveVoice capabilities duplicate AgentCore and can call its public
    boundary directly;
 2. which capabilities can reuse AgentCore through a thin LiveVoice Adapter;
-3. which generic capabilities are missing from AgentCore and should be prepared
-   as AgentCore PR candidates rather than remain in JiuwenSwarm; and
+3. which generic capabilities are missing from AgentCore and should be recorded
+   for eventual AgentCore ownership rather than remain in JiuwenSwarm; and
 4. why every current LiveVoice module exists, whether its responsibility is
    necessary, and whether it should be retained, consolidated, refactored,
    replaced or removed.
@@ -42,10 +42,12 @@ receives exactly one of the following ownership answers:
 - **Adapter reuse:** AgentCore owns the generic capability; LiveVoice retains
   only the minimum product-specific translation, validation or fault fence.
   The Adapter must not become another generic state machine.
-- **AgentCore PR candidate:** AgentCore lacks a generally useful capability
-  that should be implemented and reviewed in the AgentCore repository. The
-  work product is a locally prepared PR candidate; this task does not submit or
-  push the PR.
+- **AgentCore downshift requirement (`AGENTCORE_PR`):** AgentCore lacks a
+  generally useful capability that should eventually be implemented and
+  reviewed in the AgentCore repository. This branch records the required
+  public contract, owner, dependency, failing oracle and acceptance boundary;
+  it does not implement, package, submit or push that future change. The
+  historical code name remains stable so the 228-row register does not churn.
 - **LiveVoice-owned:** the responsibility is genuinely voice-product-specific
   and remains in LiveVoice, subject to consolidation or refactoring analysis.
 
@@ -92,8 +94,9 @@ The preparation task closes only after it produces:
 2. a module disposition register that explains every LiveVoice module's role,
    necessity, complexity and proposed outcome;
 3. a Hermes-based architectural comparison supporting those explanations;
-4. locally prepared AgentCore PR candidates for the generic gaps selected for
-   downstream ownership, kept in the AgentCore repository; and
+4. an AgentCore downshift requirement map for generic gaps, including public
+   contract, owner, dependencies, risks and acceptance evidence, without local
+   PR implementation or packaging; and
 5. a minimal future LiveVoice integration list containing only the selected
    thin Adapters or seams, with their dependencies and acceptance requirements.
 
@@ -108,7 +111,8 @@ This task does not:
 - migrate data or authority, introduce dual writes, run a canary, retire a
   Store, or delete the current canonical implementation;
 - perform feature-branch integration while LiveVoice is still moving;
-- submit or push an AgentCore PR or update any remote ref;
+- implement, replay, package, submit or push an AgentCore PR, or update any
+  remote ref;
 - reproduce Hermes behaviour merely for parity;
 - preserve source line numbers as durable migration truth; or
 - merge experimental candidate code wholesale into the LiveVoice feature
@@ -153,7 +157,8 @@ only:
 - separately accepted, minimal LiveVoice code that remains necessary after
   direct AgentCore reuse and AgentCore PR ownership are accounted for.
 
-Generic downstream implementation belongs in the AgentCore PR candidate.
+Generic downstream implementation belongs in a future AgentCore-owned change
+only if activation-time evidence still selects that disposition.
 Unselected prototypes, duplicate validation scaffolding and superseded
 implementation packets do not flow into LiveVoice. The isolated preparation
 branch remains an analysis and recovery source; it is not merged wholesale.
@@ -182,10 +187,10 @@ capabilities, in this order:
    each transition, state mutation and external effect;
 2. identify the equivalent Hermes client, inbound Adapter, gateway,
    conversation, task and Agent responsibility on the pinned Hermes source;
-3. prove what JiuwenSwarm and the installed or locally prepared AgentCore
-   already provide through public contracts;
+3. prove what JiuwenSwarm and the installed AgentCore already provide through
+   public contracts, while treating local candidates only as gap evidence;
 4. only then decide whether LiveVoice needs a direct call, a thin Adapter, an
-   AgentCore PR candidate, a voice-specific implementation, a host/channel
+   AgentCore downshift requirement, a voice-specific implementation, a host/channel
    integration, a split or retirement.
 
 The audit covers these complete flows rather than accepting directory names as

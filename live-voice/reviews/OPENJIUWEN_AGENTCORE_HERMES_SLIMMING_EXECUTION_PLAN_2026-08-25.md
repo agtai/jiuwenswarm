@@ -1,21 +1,26 @@
 # LiveVoice AgentCore/Hermes slimming preparation implementation plan
 
+Status (D-096, 2026-09-01): complete as an analysis and post-freeze activation
+handoff. AgentCore PR implementation/packaging is not a deliverable of this
+plan; historical candidate packets remain optional evidence.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > `superpowers:subagent-driven-development` or `superpowers:executing-plans` to
 > execute this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for
 > tracking.
 
-**Goal:** Produce a complete, line-number-independent decision package that
-explains every LiveVoice module, classifies AgentCore reuse, prepares generic
-AgentCore PR candidates, and identifies the minimal future LiveVoice change
-set without performing migration.
+**Goal:** Produce a complete, line-number-independent handoff that explains
+every LiveVoice module, classifies direct reuse, Adapter reuse and future
+AgentCore downshift requirements, and identifies the minimal future LiveVoice
+change set without implementing PRs or performing migration.
 
 **Architecture:** Treat the moving `hx/0812_live_voice_w3` worktree as read-only
 product fact, the isolated preparation branch as the analysis/evidence owner,
-the local AgentCore branch as the PR-candidate owner, and the pinned Hermes
-checkout as an architecture-only reference. Close inventory first, then
-classification, candidate adjudication, PR preparation and final convergence;
-no candidate implementation is integrated merely because it exists.
+local AgentCore candidates as non-authoritative gap evidence, and the pinned
+Hermes checkout as an architecture-only reference. Close inventory first, then
+classification, candidate adjudication, activation requirements and final
+convergence; no candidate implementation is required or integrated merely
+because it exists.
 
 **Tech stack:** Git worktrees, Python 3.11 via locked `uv` environment,
 PowerShell, Python AST inspection, Markdown decision records, JiuwenSwarm
@@ -33,9 +38,9 @@ LiveVoice, OpenJiuwen AgentCore, and a read-only Hermes Agent checkout.
 - All tracked JiuwenSwarm findings live on
   `codex/livevoice-agentcore-hermes-prep` in
   `C:\Users\admin\Desktop\live voice hx-agentcore-hermes-prep`.
-- Generic AgentCore candidates live only in
-  `C:\Users\admin\Desktop\openjiuwen\agent-core-oj-g2-local-base` or later
-  explicitly created AgentCore worktrees.
+- Existing generic AgentCore candidates remain read-only evidence in their
+  original isolated worktrees; this plan creates no new AgentCore implementation
+  or packaging work.
 - Hermes at `C:\Users\admin\Desktop\hermes-agent-analysis-20260821` is
   read-only; no source is copied and no dependency is introduced.
 - Long-lived mappings use files, symbols, contracts, capability IDs and module
@@ -226,35 +231,35 @@ LiveVoice, OpenJiuwen AgentCore, and a read-only Hermes Agent checkout.
   test oracle after event/cursor classification.
 - [x] Verify the preparation branch is still not a wholesale merge candidate.
 
-### Task 7: Prepare coherent local AgentCore PR candidates
+### Task 7: Record future AgentCore downshift requirements
 
 **Files:**
 
-- Create or modify only inside the isolated AgentCore repository after Task 5
-  selects an `AgentCore PR candidate` row.
-- Create:
+- Modify:
+  `live-voice/reviews/OPENJIUWEN_LIVEVOICE_SYMBOL_MIGRATION_MAP_2026-08-24.md`
+- Modify:
+  `live-voice/reviews/OPENJIUWEN_LIVEVOICE_ATOMIC_DISPOSITION_2026-08-31.md`
+- Retain as optional historical evidence:
   `live-voice/reviews/OPENJIUWEN_AGENTCORE_PR_PREPARATION_REVIEW_2026-08-25.md`
 
 **Interfaces:**
 
-- Consumes: selected AgentCore PR candidate rows and the existing local
-  AgentCore commit stack.
-- Produces: locally reviewable AgentCore commit series, test evidence and PR
-  descriptions with no remote update.
+- Consumes: selected `AGENTCORE_PR` rows, installed AgentCore API evidence and
+  the existing local candidate/preflight record.
+- Produces: one stable requirement per future downstream capability: generic
+  owner, public contract gap, LiveVoice consumer seam, dependencies, retained
+  oracle, risk and activation Gate. It produces no AgentCore source branch.
 
-- [x] Audit the existing AgentCore commits against selected rows; mark each
-  retain, revise, split, squash-with-owner, or discard in the review before
-  rewriting local history.
-- [x] Split candidates by the smallest coherent AgentCore owner and shared
-  contract so one PR does not couple unrelated scope, execution, event, cursor,
-  checkpoint or effect changes.
-- [x] For each candidate, create a dedicated implementation plan containing
-  exact source/tests, public signatures, red/green commands and compatibility
-  checks before changing code.
-- [ ] Implement and verify each candidate in its AgentCore worktree; exclude
-  LiveVoice imports, voice policy, product identity heuristics and migration.
-- [ ] Prepare local PR title/body, dependency order, test evidence, risk and
-  exclusions; do not push or submit.
+- [x] Distinguish installed public APIs from internal/raw surfaces, local
+  candidates and absent capabilities.
+- [x] Record the smallest generic owner and public contract needed for every
+  `AGENTCORE_PR` row without treating a historical candidate as authority.
+- [x] Preserve useful candidate/preflight findings as requirements and test
+  oracles, including the Critical/Important defects that forbid blind replay.
+- [x] Record the thin LiveVoice/JiuwenSwarm consumer seam and the replacement,
+  single-writer, migration, canary and retirement Gates.
+- [x] Explicitly exclude AgentCore implementation, issue metadata, local PR
+  packaging, submission and remote updates from this preparation closure.
 
 ### Task 8: Converge the final preparation package
 
@@ -268,11 +273,11 @@ LiveVoice, OpenJiuwen AgentCore, and a read-only Hermes Agent checkout.
 **Interfaces:**
 
 - Consumes: all closed module, Hermes, AgentCore and prototype decisions.
-- Produces: a minimal future LiveVoice allowlist, AgentCore PR list and explicit
-  discard list that can be reviewed without reading the experimental ten
-  thousand lines.
+- Produces: a minimal future LiveVoice allowlist, AgentCore downshift requirement
+  list, explicit discard list and post-freeze activation route that can be
+  reviewed without reading the experimental ten thousand lines.
 
-- [x] Summarize direct reuse, Adapter reuse, AgentCore PR and LiveVoice-owned
+- [x] Summarize direct reuse, Adapter reuse, AgentCore downshift and LiveVoice-owned
   outcomes by capability, linking rather than duplicating detailed tables.
 - [x] List the only LiveVoice documents and separately accepted minimal seams
   eligible for later feature-branch integration.
@@ -285,4 +290,5 @@ LiveVoice, OpenJiuwen AgentCore, and a read-only Hermes Agent checkout.
   apply; exact historical code evidence remains attached to its source.
 - [x] Perform scoped diff review and commit this coherent convergence
   documentation batch locally; report its hash/status without updating a
-  remote ref. AgentCore PR packaging remains separately tracked in Task 7.
+  remote ref. Historical PR packets remain optional evidence, not unfinished
+  work in this plan.
