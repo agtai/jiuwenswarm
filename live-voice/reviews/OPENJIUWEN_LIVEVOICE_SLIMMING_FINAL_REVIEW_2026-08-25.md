@@ -8,6 +8,12 @@ The current exclusive decisions are recorded in the
 [228-row atomic responsibility manifest](OPENJIUWEN_LIVEVOICE_ATOMIC_DISPOSITION_2026-08-31.md);
 the older path register remains supporting source/caller/Hermes evidence rather
 than an alternative disposition authority.
+The later
+[Hermes-aligned slimming budget and execution contract](OPENJIUWEN_LIVEVOICE_HERMES_ALIGNED_SLIMMING_BUDGET_2026-08-31.md)
+records the future 18-module LOC budget, rebaseline rules and migration/deletion
+Gates. It is dormant until formal product acceptance completes and `STATUS.md`
+activates a slimming packet; it does not convert this preparation review into
+current implementation work.
 The AgentCore PR **design and replay packets** exist, but complete accepted PR
 source/test/docs packages do not: PR 01–03 have local technical candidates,
 PR 04–10 have preflight only, and historical PR09/PR10 facade implementations
