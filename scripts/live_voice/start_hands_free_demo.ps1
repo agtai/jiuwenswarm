@@ -560,6 +560,12 @@ try {
     if (($L0ResumeBatch -or $L0ReuseValidatedBuild) -and -not $L0OrdinaryChromeBatch) {
         Fail 'L0ResumeBatch/L0ReuseValidatedBuild 只适用于普通 Chrome 自动批次。'
     }
+    if ($L0ReuseValidatedBuild) {
+        # F13 止损：构建复用合同尚未记录任何编译期 Vite 旗标
+        # (VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION 等)，复用会让运行合同
+        # 对实际 bundle 内容撒谎、污染 L0 证据。合同补全旗标绑定之前一律全量重建。
+        Fail 'BUILD_REUSE_DISABLED_PENDING_F13: 构建合同尚未绑定编译期旗标，-L0ReuseValidatedBuild 暂不可用；请去掉该开关走全量构建。'
+    }
     if ($L0Enabled) {
         $l0LogsRoot = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot 'logs'))
         if ($RuntimeProfile -ne 'formal-web-validation') {
