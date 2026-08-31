@@ -1094,6 +1094,9 @@ channels:
     # Unlike the Telegram field of the same name these are cumulative: Slack
     # delivers mentions through a separate app_mention subscription, so "reply"
     # and "all" keep answering mentions rather than replacing them.
+    # This is the connector-wide default. To give one channel a different set,
+    # or a standing prompt, or its own model, write a scope for it -- see the
+    # scopes block at the end of this file.
     group_chat_mode: mention
     # How to confirm an accepted request before agent processing begins:
     #   reaction - add acknowledgement_emoji to the request (default, quietest)
@@ -1693,6 +1696,11 @@ channels:
 #   channel and on the person in a DM, so the conversations already in use
 #   would never pick it up at all.
 #
+# A conversation a scope names is opted in by that alone. On Slack it is
+# therefore exempt from channels.slack.allowed_channel_ids: both are
+# hand-written ids in this file, and requiring the same conversation in two
+# lists before the bot would answer there is redundancy rather than protection.
+#
 # How a value composes is decided by its type, not by its name:
 #   scalar        replaces        model_name: "deepseek-v3"
 #                                 mid_turn: steer
@@ -1728,6 +1736,8 @@ channels:
 #       delivery:
 #         prompt_append: "This is a support channel. Be terse."
 #         mid_turn: queue
+#       permissions:
+#         tools: {bash: ask}
 #       clicks:
 #         approve: {user: ["U000000AAAA"]}
 #     - match:    {channel: slack, chat: "C000000BBBB", user: ["U000000AAAA"]}
@@ -1737,6 +1747,9 @@ channels:
 #         chat:    "C000000BBBB"
 #         not:     {user: ["U000000AAAA"]}
 #       delivery: {mode: [mention]}
+#     - match:       {channel: "__cron__"}
+#       permissions:
+#         tools: {bash: deny}
 #
 # A scope that sets only permissions or only clicks does not opt its
 # conversation into being answered: the ids that exempt a Slack channel from

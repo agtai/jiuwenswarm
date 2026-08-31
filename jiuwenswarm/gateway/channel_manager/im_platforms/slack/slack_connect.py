@@ -9,7 +9,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlparse
 
 import httpx
@@ -29,6 +29,24 @@ from jiuwenswarm.common.slack_history_policy import (
     KEY_HISTORY,
     history_policy_metadata,
     normalize_history_policy,
+)
+from jiuwenswarm.common.scopes import (
+    CLICK_APPROVE,
+    CLICK_STOP,
+    KEY_MID_TURN,
+    MID_TURN_CANCEL,
+    MID_TURN_QUEUE,
+    MID_TURN_STEER,
+    MID_TURN_VALUES,
+    PEOPLE_KEY,
+    ROLES_KEY,
+    SECTION_AGENT,
+    SECTION_DELIVERY,
+    Scope,
+    click_rule,
+    compile_scopes,
+    compose_section,
+    scoped_chats,
 )
 from jiuwenswarm.common.utils import get_agent_sessions_dir
 from jiuwenswarm.gateway.channel_manager.base import (
@@ -119,28 +137,6 @@ ACK_MODE_BOTH = "both"
 ACK_MODE_OFF = "off"
 ACKNOWLEDGE_MODES = (ACK_MODE_REACTION, ACK_MODE_TEXT, ACK_MODE_BOTH, ACK_MODE_OFF)
 
-# What becomes of a message that arrives while that session is already running a
-# turn. Slack has one gesture for two intents -- posting a message is the only
-# ambient action there is -- so "stop, this is wrong" and "here is one more
-# detail" arrive identically, and this is where a deployment says which of the
-# two its traffic mostly is.
-#
-# ``cancel`` is today's behaviour and stays the default: an ordinary chat.send
-# reaching the gateway finishes the stream that session already had and runs the
-# new request in its place. It is also often what the sender meant -- the
-# dominant reason someone types while the agent is working is to stop it -- and
-# it is the path that SIGKILLs a runaway shell.
-#
-# The three are not grammatically parallel on purpose. ``cancel`` and ``steer``
-# act on the turn already running; ``queue`` acts on the message that just
-# arrived. Each names the mechanism a reader can grep for, which matters more
-# than the symmetry: ``join``/``wait`` were considered and rejected because in
-# concurrency vocabulary ``join`` *means* wait, so the pair reads as synonyms
-# while behaving as opposites.
-MID_TURN_CANCEL = "cancel"
-MID_TURN_STEER = "steer"
-MID_TURN_QUEUE = "queue"
-MID_TURN_MODES = (MID_TURN_CANCEL, MID_TURN_STEER, MID_TURN_QUEUE)
 
 # Message subtypes that carry a user's own content rather than a system notice.
 # Slack tags an upload as ``file_share``: the poster stays in ``user``, the
@@ -785,6 +781,12 @@ _STOP_STALE_NOTICE = (
     "That turn has already finished, so there is nothing left to stop."
 )
 _STOP_REFUSED_NOTICE = "You are not permitted to stop this turn."
+
+# The same courtesy on the answer path, where a clicks rule is the only thing
+# that can produce it. The allow-list refusal beside it stays silent, as it
+# always has; this notice belongs to the new gate and does not reach back to
+# change the old one.
+_ANSWER_REFUSED_NOTICE = "You are not permitted to answer this request."
 
 # The blocks a question's answering machinery lives in, and therefore the ones a
 # rewrite takes away when the question stops being answerable. Option buttons and
@@ -1962,6 +1964,7 @@ class SlackChannelOverride:
     mode: frozenset[str] | None = None
     prompt: str | None = None
     model_name: str | None = None
+    mid_turn: str | None = None
     history: str | None = None
 
 
@@ -2068,6 +2071,225 @@ def configured_models() -> ConfiguredModels:
         )
         return ConfiguredModels()
 
+
+def _slack_layer0_triggers(group_chat_mode: Any) -> frozenset[str]:
+    """The triggers a conversation would have with no scope at all.
+
+    Layer 0 of the cascade, and the only thing a signed ``mode`` list has to
+    mutate: ``mode: [+has_file]`` on a conversation means "whatever it already
+    answered, plus files", and the answer to "already" is ``group_chat_mode``.
+
+    The same step ``channel_triggers`` takes once an override has declined to
+    answer, so it is also the last fallback. It is per platform rather than per
+    conversation -- ``group_chat_mode`` is one global string -- so nothing here
+    needs to know which conversation is being composed.
+
+    Both composition paths call it: the settled platform layer built once per
+    config apply, and the per-sender fold ``settled_override`` does when a rule
+    names people. They have to agree, because each is the seed the same signed
+    ``mode`` list mutates, and two seeds would compose one channel's ``+has_file``
+    into two different trigger sets depending on whether a message's sender
+    happened to be named by a rule.
+    """
+    mode = str(group_chat_mode or "").strip().lower()
+    return _LEGACY_MODE_TRIGGERS.get(mode, _LEGACY_MODE_TRIGGERS[GROUP_MODE_MENTION])
+
+
+def _as_trigger_set(value: Any) -> frozenset[str]:
+    """A settled ``mode`` value as a set of trigger names.
+
+    Defensive about a bare string for one reason: ``frozenset("all")`` is
+    ``{"a", "l"}``, which would be a silent, unreadable corruption of a
+    channel's triggers rather than an error anybody could see.
+    """
+    if isinstance(value, str):
+        return _LEGACY_MODE_TRIGGERS.get(value.strip().lower(), frozenset())
+    if isinstance(value, (frozenset, set, list, tuple)):
+        return frozenset(str(item) for item in value)
+    return frozenset()
+
+
+def sections_as_override(
+    sections: Mapping[str, Mapping[str, Any]]
+) -> SlackChannelOverride:
+    """Composed sections as the entry the connector already reads.
+
+    Keeping ``SlackChannelOverride`` as the carrier is what makes this change
+    small: every place that consumes a per-channel setting goes on reading the
+    same dataclass, and ``None`` goes on meaning "no layer spoke, so the global
+    applies". Composition produces exactly that -- a key nothing set is missing
+    from the mapping rather than present and empty.
+
+    That the carrier spans two sections is a property of this connector, not a
+    hole in the split. It is the one object every per-conversation reader
+    already takes its answer from, and the alternative -- a second per-channel
+    map for the two ``agent`` keys -- would double the plumbing to express
+    something no caller asks separately.
+    """
+    delivery = sections.get(SECTION_DELIVERY) or {}
+    agent = sections.get(SECTION_AGENT) or {}
+    mode = delivery.get("mode")
+    prompt = delivery.get("prompt")
+    mid_turn = delivery.get(KEY_MID_TURN)
+    model_name = agent.get("model_name")
+    history = agent.get(KEY_HISTORY)
+    return SlackChannelOverride(
+        mode=_as_trigger_set(mode) if mode is not None else None,
+        prompt=str(prompt) if prompt is not None else None,
+        # Taken as settled. The loader refuses anything that is not one of the
+        # three and drops the key, so a value arriving here is canonical and
+        # re-checking it would be a second copy of a list this module does not
+        # own -- the copy that goes stale when a fourth value is added.
+        mid_turn=str(mid_turn) if mid_turn is not None else None,
+        model_name=(str(model_name).strip() or None) if model_name is not None else None,
+        # Re-checked, unlike mid_turn, and the difference is deliberate. This is
+        # a *read* gate: a word the loader has not vetted -- because the Slack
+        # capability declaration that vets it is a separate change, or because
+        # something other than the loader built this mapping -- must land on the
+        # narrow side rather than be carried through as canonical. An
+        # unrecognised word is dropped to None, which leaves layer 0 answering.
+        history=normalize_history_policy(history) or None,
+    )
+
+
+def load_slack_scopes() -> tuple[Scope, ...]:
+    """Compile the top-level ``scopes:`` list, or nothing if it cannot be read.
+
+    Read here rather than handed down from ``_apply_channel_config``, which is
+    given the ``channels`` block alone and has no top-level config to pass. The
+    idiom is the one ``configured_models`` already uses for ``models.defaults``:
+    the connector asks the config module for the section it needs, once per
+    config apply rather than once per message.
+
+    ``people:`` and ``roles:`` are read alongside, and must be: a ``role:`` on a
+    scope resolves against them, and compiling without them would leave every
+    role undeclared and drop every scope naming one -- loudly, but for a config
+    that was perfectly good.
+    """
+    try:
+        from jiuwenswarm.common.config import get_config
+
+        data = get_config()
+    except Exception:
+        logger.warning(
+            "channels.slack could not read the top-level scopes list; no scope"
+            " applies and every channel follows channels.slack alone",
+            exc_info=True,
+        )
+        return ()
+    if not isinstance(data, Mapping):
+        return ()
+    channels = data.get("channels")
+    return compile_scopes(
+        data.get("scopes"),
+        channels_config=channels if isinstance(channels, Mapping) else None,
+        people=data.get(PEOPLE_KEY),
+        roles=data.get(ROLES_KEY),
+    )
+
+
+def apply_scopes_to_slack_overrides(
+    slack_conf: Mapping[str, Any],
+    *,
+    scopes: "Sequence[Scope] | None" = None,
+) -> tuple[SlackChannelOverride, dict[str, SlackChannelOverride]]:
+    """Fold ``scopes`` into the two things this connector reads per conversation.
+
+    Returns the platform-wide layer and the per-conversation map. The first is
+    what a scope matching ``{channel: slack}`` settled -- layer 1, above
+    ``group_chat_mode`` and below anything naming a conversation. The second
+    carries every conversation a scope names.
+
+    **With nothing written, nothing is returned.** No scopes means an empty map
+    and an empty platform layer, which is the connector following
+    ``channels.slack`` alone.
+
+    ``prompt_append`` composes over scope layers only: there is no connector-wide
+    prompt for it to inherit, so ``delivery.prompt`` has no layer 0. ``mode``
+    does, because ``group_chat_mode`` is exactly that and ``+has_file`` means
+    nothing without a set to add to.
+
+    Two sections are folded, separately, and only ``delivery`` is given a layer
+    0. ``agent`` needs none. ``model_name`` has no ``channels.slack`` key
+    beneath it at all; ``history`` does -- ``channels.slack.history``, registered
+    as its layer-0 twin -- but it is a word from a closed vocabulary with no
+    append form, so there is no base for a scope to mutate. Its fallback to the
+    connector key is taken where it is read, in
+    :func:`slack_history_request_metadata`.
+    """
+    if not scopes:
+        return SlackChannelOverride(), {}
+
+    def _compose(chat: "str | None") -> dict[str, Mapping[str, Any]]:
+        return {
+            SECTION_DELIVERY: compose_section(
+                scopes,
+                channel="slack",
+                chat=chat,
+                section=SECTION_DELIVERY,
+                layer0={
+                    "mode": _slack_layer0_triggers(slack_conf.get("group_chat_mode"))
+                },
+            ),
+            SECTION_AGENT: compose_section(
+                scopes, channel="slack", chat=chat, section=SECTION_AGENT
+            ),
+        }
+
+    platform = sections_as_override(_compose(None))
+
+    resolved: dict[str, SlackChannelOverride] = {}
+    for channel_id in sorted(scoped_chats(scopes, channel="slack")):
+        override = sections_as_override(_compose(channel_id))
+        # A conversation whose scopes settle to nothing is kept all the same:
+        # the id is what the startup summary lists and what exempts the channel
+        # from allowed_channel_ids, and a rule that names a conversation and
+        # sets nothing is worth showing rather than dropping.
+        resolved[channel_id] = override
+        if override.mode is not None:
+            _warn_if_mode_is_unusual(f"scopes for {channel_id}", override.mode)
+
+    if platform.mode is not None:
+        _warn_if_mode_is_unusual("the scope for channel slack", platform.mode)
+
+    return platform, resolved
+
+
+def _warn_if_mode_is_unusual(label: str, triggers: frozenset[str]) -> None:
+    """Say when a composed trigger set is legal but probably not what was meant.
+
+    Deliberately not refusals. A channel that watches for links or files without
+    being conversational is a legitimate pure-ingest configuration, and silence
+    is a legitimate thing to ask for; refusing either would refuse a use case
+    this exists to support. They are unusual enough to be worth one line,
+    because the same result is more often a slip -- particularly here, where it
+    can be the *composition* of two correct-looking layers rather than anything
+    an operator wrote in one place.
+    """
+    if not triggers:
+        logger.warning(
+            "%s settle on no triggers at all; that conversation is now silent"
+            " and answers nothing, not even @mentions of the bot",
+            label,
+        )
+        return
+    if TRIGGER_ALL in triggers:
+        redundant = sorted(triggers & {TRIGGER_REPLY, TRIGGER_URL, TRIGGER_HAS_FILE})
+        if redundant:
+            logger.warning(
+                "%s settle on all alongside %s; all already matches every"
+                " channel message, so those entries add nothing",
+                label,
+                ", ".join(redundant),
+            )
+    if TRIGGER_MENTION not in triggers:
+        logger.warning(
+            "%s settle on [%s] and do not list mention; that conversation"
+            " ignores @mentions of the bot. Add mention, or +mention, to keep"
+            " answering them",
+            label,
+            ", ".join(sorted(triggers)),
+        )
 
 
 @dataclass(frozen=True)
@@ -3226,6 +3448,32 @@ class SlackChannelConfig:
     conversation_overrides: dict[str, SlackChannelOverride] = field(
         default_factory=dict
     )
+    # What a scope matching {channel: slack} and naming no conversation
+    # settled, across both sections it can speak in: layer 1, above
+    # group_chat_mode and below anything that names a conversation. Every field
+    # is None when no such scope exists, which is the default and is
+    # indistinguishable from the connector with no scopes written at all.
+    #
+    # Named for the carrier rather than for a section, because it is not one:
+    # mode and prompt come from delivery and model_name from agent. The earlier
+    # name, platform_delivery, said the connector settles a delivery block and
+    # stopped there -- which is the reading that put model_name in the wrong
+    # section to begin with.
+    platform_override: SlackChannelOverride = field(
+        default_factory=SlackChannelOverride
+    )
+    # The compiled scopes themselves, kept so that a rule naming a sender can be
+    # settled when there is a sender to settle it for.
+    #
+    # The two fields above are settled once, when the config is applied, and a
+    # conversation is all they are keyed on. That is the whole answer while a
+    # rule can only name a conversation; it stops being the whole answer the
+    # moment one can name a person, because the identity axis has no value until
+    # a message arrives. So the settled maps stay -- they remain the answer for
+    # every conversation no rule names a sender in, and for every caller that
+    # has no sender to offer -- and this is what the per-message path folds
+    # again for the ones that do. See ``settled_override``.
+    scopes: tuple[Scope, ...] = ()
     default_channel_id: str = ""
     reply_in_thread: bool = True
     # "mention" | "reply" | "all" | "off", controlling what the bot reads in
@@ -3344,6 +3592,101 @@ class SlackChannelConfig:
     activity_card_min_edit_seconds: float = 10.0
 
 
+def _scopes_name_a_sender(scopes: "Sequence[Scope] | None") -> bool:
+    """Whether any compiled scope constrains the identity axis.
+
+    The switch between the two paths below. With nothing naming a sender there
+    is nothing a sender could change, so the settled maps are the whole answer
+    and the per-message fold never runs -- which keeps this change free for
+    every deployment that has not written such a rule, and byte-for-byte
+    identical for them.
+    """
+    return any(scope.match.constrains_identity for scope in (scopes or ()))
+
+
+def settled_override(
+    config: "SlackChannelConfig",
+    channel_id: str,
+    *,
+    user_id: str = "",
+) -> SlackChannelOverride:
+    """What the scopes settle for one message: one conversation, one sender.
+
+    Every per-conversation setting this connector reads comes through here --
+    mode, prompt, mid_turn, model_name and history -- so there is one place
+    where "which layer won" is decided rather than a copy of the same two-line
+    cascade at each reader.
+
+    **Two paths, and the fast one is the old one.** With no rule naming a sender
+    -- every deployment that has not written one -- this is the settled
+    per-conversation entry laid over the settled platform layer, per key, which
+    is exactly what each reader did before and produces exactly what they
+    produced. With a rule naming a sender, the scopes are folded again for
+    this ``(conversation, sender)`` pair, because the identity axis has no value
+    until a message arrives and a map keyed on the conversation cannot hold the
+    answer.
+
+    **An unidentified sender takes the fast path deliberately.** Folding again
+    for an empty sender would give the same answer the matcher gives for one --
+    a rule naming people does not fire, a rule excluding them does -- and the
+    settled maps were composed with no sender, so they already are that answer.
+
+    The composed result is not re-warned about here. ``_warn_if_mode_is_unusual``
+    speaks once per config apply, naming the conversation; saying it again per
+    message would be the same line at message rate, which is how a warning worth
+    reading gets filtered out.
+    """
+    if user_id and _scopes_name_a_sender(config.scopes):
+        return sections_as_override(
+            {
+                SECTION_DELIVERY: compose_section(
+                    config.scopes,
+                    channel="slack",
+                    chat=channel_id or None,
+                    user=user_id,
+                    section=SECTION_DELIVERY,
+                    layer0={"mode": _slack_layer0_triggers(config.group_chat_mode)},
+                ),
+                SECTION_AGENT: compose_section(
+                    config.scopes,
+                    channel="slack",
+                    chat=channel_id or None,
+                    user=user_id,
+                    section=SECTION_AGENT,
+                ),
+            }
+        )
+
+    conversation = (config.conversation_overrides or {}).get(channel_id)
+    platform = config.platform_override
+    if conversation is None:
+        return platform
+    # Per key, not per entry. A conversation whose scope set only a prompt keeps
+    # the platform layer's model and triggers rather than being read as having
+    # declined every other key.
+    return SlackChannelOverride(
+        mode=conversation.mode if conversation.mode is not None else platform.mode,
+        prompt=(
+            conversation.prompt if conversation.prompt is not None else platform.prompt
+        ),
+        mid_turn=(
+            conversation.mid_turn
+            if conversation.mid_turn is not None
+            else platform.mid_turn
+        ),
+        history=(
+            conversation.history
+            if conversation.history is not None
+            else platform.history
+        ),
+        model_name=(
+            conversation.model_name
+            if conversation.model_name is not None
+            else platform.model_name
+        ),
+    )
+
+
 def slack_history_request_metadata(
     config: SlackChannelConfig,
     channel_id: str,
@@ -3380,25 +3723,34 @@ def channel_triggers(
     channel_id: str,
     *,
     group_chat_mode: str,
+    user_id: str = "",
 ) -> frozenset[str]:
-    """Which triggers wake the bot in ``channel_id``.
+    """Which triggers wake the bot in ``channel_id``, for ``user_id``.
 
     The cascade, read from the most specific layer down:
 
-    1. What a scope naming this conversation settled -> use it, stop. It is
-       total for that conversation; nothing below is consulted for it.
+    1. What the scopes settled for this conversation and this sender -> use it,
+       stop. It is total for them; nothing below is consulted for it.
     2. Otherwise what a scope naming the platform settled, which is the same
        rule one layer up and total for every conversation that did not name
        itself.
     3. Otherwise the global ``group_chat_mode``, coerced through
        ``_LEGACY_MODE_TRIGGERS``.
 
+    The first two are :func:`settled_override`'s job, and the layering between
+    them is stated there rather than repeated here.
+
     ``mode`` is settled per key, so a conversation whose scope set only a prompt
     or a model falls through to the layer below for its triggers rather than
     being taken as silent.
+
+    ``user_id`` is optional because two callers genuinely have none: the startup
+    summary settles a conversation before anyone has spoken in it, and a caller
+    that omits it gets the answer for an unidentified sender rather than an
+    answer for everybody.
     """
-    override = (config.conversation_overrides or {}).get(channel_id)
-    if override is not None and override.mode is not None:
+    override = settled_override(config, channel_id, user_id=user_id)
+    if override.mode is not None:
         return override.mode
 
     return _LEGACY_MODE_TRIGGERS.get(
@@ -3420,45 +3772,74 @@ def describe_configured_channels(config: SlackChannelConfig) -> str:
     if mode not in _LEGACY_MODE_TRIGGERS:
         mode = GROUP_MODE_MENTION
 
+    # What a channel nobody named actually follows. A platform scope is layer 1
+    # and beats group_chat_mode, so naming the global here when a scope has
+    # replaced it would print the one value that is no longer in force -- and
+    # this line exists to be the place an operator checks that against what they
+    # meant. Only mode is reported here. prompt, model and mid_turn have no
+    # connector-wide key beneath them to be misread. history has one,
+    # channels.slack.history, and this line has never named history at all.
+    fallback = f"group_chat_mode={mode}"
+    platform = config.platform_override
+    if platform.mode is not None:
+        fallback = (
+            "the scope for channel slack:"
+            f" mode=[{','.join(sorted(platform.mode)) or 'silent'}]"
+        )
+
     channel_ids = sorted(config.conversation_overrides or {})
     if not channel_ids:
         message = (
             "channels.slack has no per-channel configuration; every channel"
-            f" follows group_chat_mode={mode}"
+            f" follows {fallback}"
         )
         logger.info(message)
         return message
 
     entries: list[str] = []
     for channel_id in channel_ids:
-        override = (config.conversation_overrides or {}).get(channel_id)
+        # The settled override, which lays the conversation layer over the
+        # platform one. A platform scope is layer 1 and is in force in every
+        # conversation that did not override it, so reading the conversation
+        # entry on its own here would print "no prompt" and "default model" for
+        # a channel that has both. One read serves the whole line: every field
+        # below asks the same question of it.
+        override = settled_override(config, channel_id)
         triggers = sorted(channel_triggers(config, channel_id, group_chat_mode=mode))
-        # Deliberately coarse: it names where this conversation was spoken
-        # about, not which layer settled each of mode, prompt and model.
+        # Per entry rather than per key, and deliberately coarse: it names where
+        # this conversation was spoken about, not which layer settled each of
+        # mode, prompt and model. Splitting it per key would be a provenance
+        # table rather than a summary line -- §12's resolver CLI is the place
+        # for that, and it is where the per-key answer belongs.
         via = "scopes"
-        prompt = (
-            via if override is not None and override.prompt is not None else "none"
-        )
+        prompt = via if override.prompt is not None else "none"
         # Named rather than reduced to a yes/no, for the same reason the channel
         # ids themselves are listed: a model name that is subtly wrong reads as
         # wrong beside the ones that are right, and "default" beside a channel
         # the operator believes they pinned is the one line that would tell them
         # the setting was dropped. Written from the settled override, which is
         # the answer rather than the route to it.
-        model = (
-            override.model_name
-            if override is not None and override.model_name
-            else "default"
+        model = override.model_name or "default"
+        # Named only when it is not the default, which is the opposite of how
+        # mode, prompt and model are reported and is the right way round for
+        # this one. Those three answer "what is in force here", where the
+        # default is as worth reading as anything else. This one answers "does
+        # this conversation depart from what every conversation has always
+        # done", and printing cancel on every line of every deployment would
+        # bury the one line where it says something.
+        mid_turn = (
+            f" mid_turn={override.mid_turn}"
+            if override.mid_turn and override.mid_turn != MID_TURN_CANCEL
+            else ""
         )
         entries.append(
             f"{channel_id} mode=[{','.join(triggers) or 'silent'}]"
-            f" prompt={prompt} model={model} via={via}"
+            f" prompt={prompt} model={model}{mid_turn} via={via}"
         )
 
     message = (
         f"channels.slack is configured for {len(entries)} channel(s):"
-        f" {'; '.join(entries)}; every other channel follows"
-        f" group_chat_mode={mode}"
+        f" {'; '.join(entries)}; every other channel follows {fallback}"
     )
     logger.info(message)
     return message
@@ -7895,21 +8276,28 @@ class SlackChannel(BaseChannel):
         One place, so that the three branches on the dispatch path read a single
         answer rather than three copies of a cascade.
 
-        ``cancel`` for every conversation today, which is exactly the behaviour
-        this connector has always had: an ordinary ``chat.send`` reaching the
-        gateway finishes the stream that session already had and runs the new
-        request in its place. The other two are reachable but not yet
-        selectable, and that split is deliberate -- the mechanism is worth
-        having on its own merits and is testable on its own, and what chooses
-        between the three is a per-conversation setting that belongs to the
-        layer that already settles per-conversation settings.
+        The cascade, read from the most specific layer down:
 
-        ``user_id`` is taken and not yet read for the same reason the other
-        per-conversation lookups take it: the answer is per conversation *and*
-        per sender the moment a rule can name a person, and a signature that
-        cannot carry the sender would have to change everywhere at once.
+        1. What the scopes settled for this conversation and this sender -> use
+           it, stop.
+        2. Otherwise what a scope naming the platform settled.
+        3. Otherwise ``cancel``, which is exactly what this connector did before
+           the key existed: an ordinary ``chat.send`` reaching the gateway
+           finishes the stream that session already had and runs the new request
+           in its place.
+
+        The first two are :func:`settled_override`'s job, and the layering
+        between them is stated there rather than repeated here.
+
+        There is no ``channels.slack`` key under this, unlike ``mode``, which
+        has ``group_chat_mode`` beneath it. That is deliberate and is why
+        ``layer0_keys`` names none: inventing a connector-wide key would give
+        one value two homes for the sake of a setting nobody has asked for
+        connector-wide, and cancel-for-everything is already what "unset"
+        means.
         """
-        return MID_TURN_CANCEL
+        settled = settled_override(self.config, channel_id, user_id=user_id).mid_turn
+        return settled if settled in MID_TURN_VALUES else MID_TURN_CANCEL
 
     @staticmethod
     def _is_runtime_accepted(msg: Message) -> bool:
@@ -8272,22 +8660,30 @@ class SlackChannel(BaseChannel):
             )
         return GROUP_MODE_MENTION
 
-    def _channel_triggers(self, channel_id: str) -> frozenset[str]:
+    def _channel_triggers(self, channel_id: str, user_id: str = "") -> frozenset[str]:
         return channel_triggers(
-            self.config, channel_id, group_chat_mode=self._group_chat_mode()
+            self.config,
+            channel_id,
+            group_chat_mode=self._group_chat_mode(),
+            user_id=user_id,
         )
 
-    def _channel_prompt(self, channel_id: str) -> str:
+    def _channel_prompt(self, channel_id: str, user_id: str = "") -> str:
         """The standing instruction appended to a message from ``channel_id``.
 
-        Two layers, most specific first, and both cover every trigger in the
-        conversations they match: a scope's prompt was written knowing no
+        The layers, most specific first, and all of them cover every trigger in
+        the conversations they match: a scope's prompt was written knowing no
         trigger in particular, so scoping it to one would be this code choosing
         a narrower meaning than the operator wrote.
 
-        1. what a scope naming this conversation settled
+        1. what the scopes settled for this conversation and this sender
         2. what a scope naming the platform settled
         3. nothing
+
+        The first two are :func:`settled_override`'s job. ``user_id`` is the
+        sender, and it is optional: a caller with none gets the answer for an
+        unidentified sender, which is the answer a rule naming people does not
+        contribute to.
 
         Exactly one prompt is appended, never two: a conversation's prompt
         replaces the platform's outright rather than stacking with it, because
@@ -8304,13 +8700,18 @@ class SlackChannel(BaseChannel):
         text, which helps compliance, and the ordering operators have already
         written against.
         """
-        override = (self.config.conversation_overrides or {}).get(channel_id)
-        if override is not None and override.prompt is not None:
-            return override.prompt
-        return ""
+        override = settled_override(self.config, channel_id, user_id=user_id)
+        return override.prompt if override.prompt is not None else ""
 
-    def _channel_model_name(self, channel_id: str) -> str:
+    def _channel_model_name(self, channel_id: str, user_id: str = "") -> str:
         """The model a message from ``channel_id`` should run on, or ``""``.
+
+        **This check is connector-side and stays connector-side**, whichever
+        section declares the key. ``model_name`` is an ``agent`` setting because
+        the runtime is what acts on it; this is not the connector acting on it,
+        it is the connector deciding whether to put it on the wire at all, and
+        the reason it has to decide lives here -- see the next paragraph. Moving
+        it to follow the section would move it away from the fact it depends on.
 
         Checked again here, against the config as it stands now, rather than
         trusting what the scope loader settled at load. The two are
@@ -8336,9 +8737,13 @@ class SlackChannel(BaseChannel):
 
         Costs one config read per message, and only for the channels that
         actually name a model -- every other channel returns before the check.
+
+        ``user_id`` is whoever the model is being chosen *for*, which is not
+        always whoever caused this call: a turn resumed by a click is still the
+        turn its initiator started, and the click carries a different person.
+        See the resume path, which passes the initiator rather than the clicker.
         """
-        override = (self.config.conversation_overrides or {}).get(channel_id)
-        name = (override.model_name if override is not None else None) or ""
+        name = settled_override(self.config, channel_id, user_id=user_id).model_name or ""
         if not name:
             return ""
 
@@ -8353,8 +8758,8 @@ class SlackChannel(BaseChannel):
                 "channels.slack: the model pinned for %s (%r) is no longer in"
                 " models.defaults (%s); it was there when the channel was"
                 " configured, so a model has been renamed or removed since."
-                " That channel runs on %s until the setting or the model list"
-                " is corrected",
+                " That channel runs on %s until the setting -- a scope's"
+                " agent.model_name -- or the model list is corrected",
                 channel_id,
                 name,
                 known.describe(),
@@ -8529,7 +8934,11 @@ class SlackChannel(BaseChannel):
     ) -> str:
         self._remember_bot_user_id(body)
         channel_id = str(event.get("channel") or "").strip()
-        if TRIGGER_MENTION not in self._channel_triggers(channel_id):
+        # The sender, because a scope may name one. Read straight off the event
+        # rather than from anything the turn later carries: this is the earliest
+        # point at which it exists and the only writer of it is Slack.
+        sender_id = str(event.get("user") or "").strip()
+        if TRIGGER_MENTION not in self._channel_triggers(channel_id, sender_id):
             return "ignored:mention-not-a-trigger-here"
         return await self._handle_slack_event(
             event, body, is_dm=False, trigger="mention"
@@ -8579,7 +8988,9 @@ class SlackChannel(BaseChannel):
         # this point is channel traffic, and what wakes the bot in it is decided
         # per channel rather than once for the whole connector.
         channel_id = str(event.get("channel") or "").strip()
-        triggers = self._channel_triggers(channel_id)
+        triggers = self._channel_triggers(
+            channel_id, str(event.get("user") or "").strip()
+        )
         if not triggers:
             return "ignored:no-trigger-configured-for-channel"
 
@@ -8615,6 +9026,16 @@ class SlackChannel(BaseChannel):
         up while the answer travels invites the second click this exists to
         prevent. The record of the question is claimed before either, which is
         what makes two clicks that raced resolve to one answer.
+
+        Who may press the button is settled before any of that, in two clauses.
+        The allow list is the first and is unchanged. The second is a
+        ``clicks.approve`` rule for this conversation, which narrows the allow
+        list and can never widen it -- and which refuses a click it cannot place
+        a clicker for, rather than waving it through (F2). There is deliberately
+        no starter's allowance here of the kind the stop button carries: a
+        wrongly permitted stop wastes work, whereas a wrongly permitted approval
+        is the tool call the question existed to stop, and starting a turn is no
+        claim to answer what it goes on to ask.
 
         A question the session has already moved past is the one case that
         answers nothing at all. It is checked before the record is claimed and
@@ -8680,6 +9101,28 @@ class SlackChannel(BaseChannel):
                 "user=%s request_id=%s",
                 user_id,
                 request_id,
+            )
+            return
+
+        chat_id, _clicked_ts = self._click_target(body)
+        verdict = self._clicks_verdict(CLICK_APPROVE, chat_id, user_id)
+        if verdict is not None and not verdict[0]:
+            # F2. The approval is the security-relevant click -- it is the gate
+            # on a tool call the agent was told to stop at -- so a rule that
+            # matches and a clicker it cannot place is refused, and the reason
+            # names the conversation the rule was written for. The question is
+            # left standing and its buttons are left up: this click answered
+            # nothing, and somebody the rule does name still can.
+            logger.warning(
+                "Slack answer refused by a clicks rule: user=%s chat=%s "
+                "request_id=%s reason=%s",
+                user_id or "-",
+                chat_id or "-",
+                request_id,
+                verdict[1],
+            )
+            await self._notify_clicker(
+                body, user_id, _ANSWER_REFUSED_NOTICE, notice="answer-refused"
             )
             return
 
@@ -8830,9 +9273,10 @@ class SlackChannel(BaseChannel):
 
         **May this person stop it.** The floor first: whoever started a turn may
         stop it, which is an invariant and not a rule anyone wrote. Then the
-        allow list, which is what layer 0 already gates and what any later
-        per-conversation rule will narrow. A refusal is told to the clicker and
-        to nobody else, because for everyone else nothing happened.
+        allow list, which is what layer 0 already gates. Then a ``clicks.stop``
+        rule if the conversation has one, which narrows who *else* may and
+        cannot reach the floor above it. A refusal is told to the clicker and to
+        nobody else, because for everyone else nothing happened.
 
         **Is there still a turn to stop.** The record for the request, claimed
         under the lock, is this connector's own statement that the turn is
@@ -8899,7 +9343,7 @@ class SlackChannel(BaseChannel):
             (user.get("id") if isinstance(user, Mapping) else "") or ""
         ).strip()
 
-        permitted, ground = self._may_stop(session_id, user_id)
+        permitted, ground = self._may_stop(session_id, user_id, channel_id)
         if not permitted:
             logger.warning(
                 "Slack stop refused: user=%s session_id=%s request_id=%s "
@@ -8946,7 +9390,54 @@ class SlackChannel(BaseChannel):
         await self._stop_open_stream(record)
         await self._release_stopped_turn(session_id, request_id)
 
-    def _may_stop(self, session_id: str, user_id: str) -> tuple[bool, str]:
+    def _clicks_verdict(
+        self, kind: str, channel_id: str, user_id: str
+    ) -> "tuple[bool, str] | None":
+        """What a ``clicks`` rule says about this click, or ``None`` if none does.
+
+        ``None`` is F1 and is the whole of it: with no rule matching this
+        conversation, whatever gated the click before still gates it and nothing
+        here has an opinion. Every deployment that has written no ``clicks:``
+        block takes that branch, so this method cannot change what any of them
+        do.
+
+        A rule that does match answers on the identity the payload carried, and
+        **an unidentified clicker is refused rather than waved through** (F2).
+        That is the opposite direction from an unidentified *sender*, which falls
+        out of positive lists and stays inside restrictions, and the asymmetry is
+        deliberate: identity goes missing by degradation -- a payload shape that
+        changed, a field that was never populated, an id blanked because it was
+        serving a second purpose -- and under the permissive reading each of
+        those quietly converts a written restriction into no restriction while
+        the config still says otherwise. Both of section 8.5's two cases arrive
+        here as the same fact: an id that is in no list, either because none came
+        or because no ``people:`` entry maps it into the role the rule names.
+
+        The reason is returned rather than logged, because the two callers name
+        different things -- an answer names its request, a stop names its
+        session -- and one log line that named neither would be the one worth
+        reading and the one nobody could act on.
+        """
+        rule = click_rule(
+            self.config.scopes,
+            channel="slack",
+            chat=channel_id or None,
+            kind=kind,
+        )
+        if rule is None:
+            return None
+        if rule.permits(user_id):
+            return True, f"clicks.{kind}={rule.describe()}"
+        if not user_id:
+            return False, (
+                f"clicks.{kind}={rule.describe()} and the payload named no"
+                " clicker"
+            )
+        return False, f"clicks.{kind}={rule.describe()}"
+
+    def _may_stop(
+        self, session_id: str, user_id: str, channel_id: str = ""
+    ) -> tuple[bool, str]:
         """Whether ``user_id`` may stop the turn on ``session_id``, and on what ground.
 
         Two clauses, and only the second is policy.
@@ -8977,11 +9468,23 @@ class SlackChannel(BaseChannel):
         one, which is the opposite of what the sibling gate on the answer path
         does; that inconsistency is known and is not this method's to resolve,
         but a new control that destroys work does not inherit it.
+
+        **And then a ``clicks.stop`` rule, if the conversation has one.** It is
+        asked last of the three and it can only refuse, which is what keeps the
+        floor above it un-removable: a rule that named nobody, or that named
+        somebody other than the starter, is never reached on the starter's own
+        click (D15). It is ANDed with the allow list rather than replacing it,
+        so a rule can never admit someone layer 0 keeps out.
         """
         initiator = self.turn_initiator(session_id)
         if initiator is not None and user_id and initiator.user_id == user_id:
             return True, "starter"
-        return self.is_allowed(user_id), "allow_from"
+        if not self.is_allowed(user_id):
+            return False, "allow_from"
+        verdict = self._clicks_verdict(CLICK_STOP, channel_id, user_id)
+        if verdict is None:
+            return True, "allow_from"
+        return verdict
 
     @staticmethod
     def _decode_stop_value(action: Mapping[str, Any]) -> tuple[str, str, str] | None:
@@ -9785,7 +10288,20 @@ class SlackChannel(BaseChannel):
             # adapter's answer handler, which resolves standalone approvals and
             # never selects a model at all, so a model_name there would be
             # written to the session's metadata and applied to nothing.
-            model_name = self._channel_model_name(channel_id)
+            # The initiator, never the clicker. A click is not a turn (D13): it
+            # arrives against one that already exists, from someone who may not
+            # have started it and routinely did not -- a permission prompt is
+            # answered by whoever is watching. Resolving the model against the
+            # person who pressed the button would switch the model of somebody
+            # else's turn halfway through, which is the failure the paragraph
+            # above spends its length preventing in the other direction.
+            #
+            # Falls back to no sender rather than to the clicker when no
+            # initiator was on record: the unidentified answer is the layer
+            # below, and the layer below is the right place to land.
+            model_name = self._channel_model_name(
+                channel_id, pending.initiator_user_id
+            )
             if model_name:
                 params["model_name"] = model_name
 
@@ -9961,7 +10477,7 @@ class SlackChannel(BaseChannel):
         text = str(event.get("text") or "").strip()
         if not is_dm and trigger == "mention":
             text = self._strip_leading_bot_mention(text).strip()
-        prompt = self._channel_prompt(channel_id)
+        prompt = self._channel_prompt(channel_id, user_id)
         # The membership test avoids appending an instruction the user happened
         # to paste in themselves. It does not gate the label: the label states
         # which predicate fired, which no user paste can make true or false, and
@@ -10097,7 +10613,7 @@ class SlackChannel(BaseChannel):
         # Sent only when the name is non-empty, because an empty value would be
         # a claim this connector should not make on behalf of the channels that
         # never asked for a model.
-        model_name = self._channel_model_name(channel_id)
+        model_name = self._channel_model_name(channel_id, user_id)
         if model_name:
             params["model_name"] = model_name
 
@@ -11550,6 +12066,7 @@ class SlackChannel(BaseChannel):
                             ("mode", sorted(override.mode) if override.mode is not None else None),
                             ("prompt", override.prompt),
                             ("model_name", override.model_name),
+                            ("mid_turn", override.mid_turn),
                             ("history", override.history),
                         )
                         if value is not None

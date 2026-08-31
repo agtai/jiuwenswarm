@@ -440,6 +440,9 @@ channels:
     history_digest_channel_ids: []
     default_channel_id:
     reply_in_thread: true
+    # The connector-wide default for what the bot reads in channels. To give one
+    # conversation a different set of triggers, a standing prompt, or its own
+    # model, write a scope for it -- see the scopes block below.
     group_chat_mode: mention
     acknowledge_mode: reaction
     # Deprecated predecessor of acknowledge_mode: true means text, false means

@@ -422,6 +422,9 @@ answers nothing rather than guessing.
   The bot always derives the current channel from the request and returns the digest in that request's thread. It never accepts a channel ID from the prompt. "All" means history still retained by Slack that the bot can access, subject to built-in message, API, size, and 90-second scan limits. The digest reports partial coverage when retention, permissions, limits, or API failures prevent a complete scan. The bot must be a member of the channel; private channels additionally require `groups:history`.
 
   Channel history selected for the digest is sent to the configured model provider. Only add conversations whose members and data policies permit that processing. The explicit `['*']` wildcard opts in every conversation the bot can access; an empty `history_digest_channel_ids` list keeps bulk history access disabled.
+- `group_chat_mode` is the connector-wide default. To give one conversation a different set of triggers, a standing prompt, or its own model, write a rule for it in the top-level `scopes:` list. A rule can also name who is asking — `user: ["U0…"]` for the senders it applies to, or `not: {user: ["U0…"]}` for everyone in the conversation except them — so one person can be given a different prompt, or everyone but them a narrower trigger set. The shipped `config.yaml` documents the block, including the five trigger names — `mention`, `reply`, `all`, `url`, `has_file` — and a worked example.
+- A conversation whose triggers include `url` processes member messages containing an HTTP/HTTPS link without a mention, and replies in a thread; plain text is still ignored. A conversation a scope names is opted in by that alone and is exempt from `allowed_channel_ids`.
+- A link-triggered message carries the URL, not the page behind it. A `delivery.prompt` that asks for analysis without asking for the link to be fetched requests work on material nothing has retrieved, and tools that take a local path rather than a URL are then given a filename invented to fit. Begin the instructions with fetching the link.
 - Accepted mentions, direct messages, and automatic links are confirmed before agent processing begins. The default `reaction` mode adds `acknowledgement_emoji` to the request itself, which is far quieter in a shared channel than an extra message; `text` posts `acknowledgement_text` instead, `both` does both, and `off` disables confirmation. Requests refused by `allow_from` get `rejected_emoji`, while a channel excluded by `allowed_channel_ids` is ignored silently.
 - Reactions require the `reactions:write` scope. If it is missing, the failure is logged and the request is still handled. The deprecated `acknowledge_requests` boolean is still honoured when `acknowledge_mode` is absent: `true` maps to `text`, `false` to `off`, matching the single text acknowledgement it switched on and off before the mode existed. Setting `acknowledge_mode` decides on its own, so a config carrying both keys never reads the boolean; the boolean written with no value after the colon is read as unset and leaves the default in place.
 - With `enable_streaming: true` the bot posts as soon as the first text arrives and edits that message about once a second until the reply is complete, which is also the rate Slack meters message operations at per channel. Edits are best effort: one that fails costs a moment of staleness, and the completed reply always replaces the whole text. A reply too long for one message keeps its first part in the streamed message and posts the rest afterwards. Editing requires no scope beyond the `chat:write` the bot already uses to reply.
@@ -532,6 +535,13 @@ Slack user IDs and channel IDs are available from the member profile and channel
 
 - Confirm the app has `im:history` and subscribes to `message.im`.
 - Reinstall the app to the workspace after changing scopes or event subscriptions.
+
+**Links in an automatic channel do not trigger the bot**
+
+- Confirm a scope names the conversation with `url` among its `delivery.mode` triggers, and that the bot is a member of the channel.
+- Confirm the app has `channels:history` and subscribes to `message.channels`.
+- Confirm the message is from a human, contains an HTTP/HTTPS link, and the sender passes `allow_from`.
+- Reinstall the app after changing scopes or event subscriptions.
 
 **A channel digest is empty, shows user IDs, or reports partial coverage**
 

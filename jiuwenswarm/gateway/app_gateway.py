@@ -1643,6 +1643,7 @@ async def _run(
         resolve_blockkit_allow_interactive, \
         resolve_blockkit_allowed_block_types, resolve_blockkit_tables_mode, \
         resolve_blockkit_validate, \
+        apply_scopes_to_slack_overrides, load_slack_scopes, \
         resolve_render_tables, \
         resolve_sdk_log_level, resolve_streaming_enabled, \
         slack_default_channel_id_from_config, warn_if_heartbeat_relay_unreachable
@@ -2681,6 +2682,24 @@ async def _run(
                         slack_conf
                     )
                     acknowledge_mode = resolve_acknowledge_mode(slack_conf)
+                    # Per-conversation behaviour comes from the top-level
+                    # scopes: list and nothing else. A config with no scopes
+                    # written settles to an empty map, which is the connector
+                    # following channels.slack alone.
+                    #
+                    # Two sections are settled here, not one. delivery gives
+                    # the connector mode, prompt and mid_turn, which it acts on
+                    # itself; agent gives it model_name and history, which it
+                    # only carries onto the request for the runtime to act on.
+                    # All five land in the same SlackChannelOverride carrier
+                    # because settled_override is the one place that decides
+                    # which layer won for any of them.
+                    slack_scopes = load_slack_scopes()
+                    platform_override, conversation_overrides = (
+                        apply_scopes_to_slack_overrides(
+                            slack_conf, scopes=slack_scopes
+                        )
+                    )
 
                     def _slack_seconds(key: str, default: float) -> float:
                         """A non-negative number of seconds, or the default.
@@ -2734,6 +2753,14 @@ async def _run(
                         history_exempt_members=resolve_history_exempt_members(
                             slack_conf
                         ),
+                        conversation_overrides=conversation_overrides,
+                        platform_override=platform_override,
+                        # The compiled rules as well as what they settled. A
+                        # rule naming a sender cannot be settled here -- there
+                        # is no sender at config time -- so the connector keeps
+                        # them and folds again when a message arrives. With no
+                        # such rule written it never does.
+                        scopes=slack_scopes,
                         default_channel_id=str(slack_conf.get("default_channel_id") or "").strip(),
                         reply_in_thread=reply_in_thread,
                         group_chat_mode=str(

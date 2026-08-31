@@ -3379,6 +3379,107 @@ async def test_reaction_success_is_logged_at_debug_and_stays_best_effort(
 
 
 
+# --- the standing prompt a scope settled ------------------------------------
+#
+# _channel_prompt is two layers deep and both are silent when wrong: a prompt
+# resolved from the layer below, or from no layer at all, is a message that
+# looks entirely normal and simply never carries the instruction the operator
+# wrote. So the chain is pinned per layer here, and the platform layer is
+# followed all the way onto a dispatched message.
+
+
+def _prompt_channel(**overrides: Any) -> tuple[SlackChannel, list[Message]]:
+    channel = SlackChannel(
+        SlackChannelConfig(
+            enabled=True,
+            group_chat_mode="all",
+            **overrides,
+        ),
+        RobotMessageRouter(),
+    )
+    channel._running = True
+    channel._bot_user_id = "U-BOT"
+    received: list[Message] = []
+    channel.on_message(received.append)
+    return channel, received
+
+
+def test_a_conversation_scope_prompt_is_what_that_conversation_gets() -> None:
+    channel, _ = _prompt_channel(
+        conversation_overrides={"C-A": SlackChannelOverride(prompt="Be terse.")},
+        platform_override=SlackChannelOverride(prompt="Answer in English."),
+    )
+
+    assert channel._channel_prompt("C-A") == "Be terse."
+
+
+def test_the_platform_scope_prompt_covers_a_conversation_nobody_named() -> None:
+    channel, _ = _prompt_channel(
+        platform_override=SlackChannelOverride(prompt="Answer in English."),
+    )
+
+    assert channel._channel_prompt("C-UNNAMED") == "Answer in English."
+
+
+def test_the_platform_scope_prompt_covers_a_conversation_that_set_other_keys() -> None:
+    # The layers settle per key. A conversation whose scope named only a mode
+    # has said nothing about the prompt, so the platform layer still applies --
+    # the mistake this guards is reading "the conversation has an entry" as
+    # "the conversation has a prompt".
+    channel, _ = _prompt_channel(
+        conversation_overrides={"C-A": SlackChannelOverride(mode=frozenset({"all"}))},
+        platform_override=SlackChannelOverride(prompt="Answer in English."),
+    )
+
+    assert channel._channel_prompt("C-A") == "Answer in English."
+
+
+def test_a_conversation_that_asked_for_no_prompt_does_not_fall_back() -> None:
+    # "" is a value, not an absence: a scope that wrote prompt: "" asked for
+    # nothing to be appended there, and falling through to the platform layer
+    # would answer with the opposite of what it asked for.
+    channel, _ = _prompt_channel(
+        conversation_overrides={"C-A": SlackChannelOverride(prompt="")},
+        platform_override=SlackChannelOverride(prompt="Answer in English."),
+    )
+
+    assert channel._channel_prompt("C-A") == ""
+
+
+def test_no_scope_at_all_appends_nothing() -> None:
+    channel, _ = _prompt_channel()
+
+    assert channel._channel_prompt("C-A") == ""
+
+
+@pytest.mark.asyncio
+async def test_the_platform_scope_prompt_reaches_a_dispatched_message() -> None:
+    # The end of the chain, because every failure above it is invisible: the
+    # message is dispatched either way and only the instruction goes missing.
+    channel, received = _prompt_channel(
+        platform_override=SlackChannelOverride(prompt="Answer in English."),
+    )
+
+    await channel._handle_message_event(
+        {
+            "type": "message",
+            "channel_type": "channel",
+            "channel": "C-UNNAMED",
+            "user": "U1",
+            "text": "team status update",
+            "ts": "1710000040.000100",
+        },
+        {"event_id": "EvPlatformPrompt", "team_id": "T1"},
+    )
+
+    # The trigger label appears because a prompt does: a prompt may be written
+    # to branch on which predicate woke the bot, so it is always told.
+    assert len(received) == 1
+    assert received[0].params["content"] == (
+        "team status update\n\n[trigger: all]\n\nAnswer in English."
+    )
+
+
 # --- allowed_channel_ids and the conversation a scope opts in ---------------
 #
 # The exemption runs in both directions and each is silent when wrong. A
