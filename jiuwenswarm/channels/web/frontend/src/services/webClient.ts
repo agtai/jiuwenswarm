@@ -10,6 +10,10 @@ import {
 } from '../types';
 import { getWsBase } from '../utils/env';
 import { resolveUserId } from '../utils/userId';
+import {
+  INVALID_DEV_WS_PAYLOAD_REDACTION,
+  redactRawAudioForDevLog,
+} from '../../devWsTrafficPrivacy';
 import i18n from '../i18n';
 import { GoalRecord } from '../types/goal';
 
@@ -75,8 +79,17 @@ function logDevWsTraffic(entry: DevWsLogEntry): void {
     return;
   }
 
+  // 第一道脱敏在浏览器内完成：私密语音/任务内容不得离开页面进程；
+  // vite dev server 落盘前还有第二道（prepareDevWsTrafficPayloadForPersistence）。
+  let sanitizedData: unknown;
+  try {
+    sanitizedData = redactRawAudioForDevLog(entry.data);
+  } catch {
+    sanitizedData = INVALID_DEV_WS_PAYLOAD_REDACTION;
+  }
   const body = {
     ...entry,
+    data: sanitizedData,
     at: new Date().toISOString(),
   };
 

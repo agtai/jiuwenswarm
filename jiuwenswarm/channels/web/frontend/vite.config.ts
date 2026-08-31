@@ -346,10 +346,24 @@ function devWsTrafficLogger(): Plugin {
       fs.mkdirSync(logDir, { recursive: true })
       // 每次前端 dev 服务启动时清空日志，避免历史数据干扰排查。
       fs.writeFileSync(logFile, '', 'utf8')
+      // F12：读端点需要本地访问令牌。令牌只落在本机日志目录，读取方
+      // （开发者/排查脚本）从文件取用；没有令牌的 GET 一律 403。
+      const readTokenFile = path.resolve(logDir, 'ws-dev.read-token')
+      const readToken = createHash('sha256')
+        .update(`${process.pid}:${Date.now()}:${Math.random()}`)
+        .digest('hex')
+      fs.writeFileSync(readTokenFile, readToken, { encoding: 'utf8', mode: 0o600 })
 
       server.middlewares.use('/__dev/ws-log', (req, res) => {
         if (req.method === 'GET') {
           const url = new URL(req.url || '/__dev/ws-log', 'http://localhost')
+          const presented = String(req.headers['x-dev-ws-log-token'] || url.searchParams.get('token') || '')
+          if (presented.length !== readToken.length || !timingSafeEqual(Buffer.from(presented), Buffer.from(readToken))) {
+            res.statusCode = 403
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.end(JSON.stringify({ ok: false, error: 'token_required', hint: 'agent/.logs/ws-dev.read-token' }))
+            return
+          }
           const limitRaw = Number(url.searchParams.get('limit') || '300')
           const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(2000, Math.floor(limitRaw))) : 300
           fs.readFile(logFile, 'utf8', (error, content) => {

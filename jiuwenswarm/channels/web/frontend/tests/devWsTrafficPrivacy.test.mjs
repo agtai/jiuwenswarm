@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   INVALID_DEV_WS_PAYLOAD_REDACTION,
   MEDIA_TICKET_REDACTION,
+  PRIVATE_CONTENT_REDACTION,
   RAW_AUDIO_REDACTION,
   RAW_TRANSPORT_DATA_REDACTION,
   SPEECH_TEXT_REDACTION,
@@ -397,7 +398,8 @@ test('real incoming response sanitizes JSON-wrapped payload without changing nor
   assert.equal(typeof sanitized.data.payload, 'string');
   assert.deepEqual(JSON.parse(sanitized.data.payload), {
     audio: { data_base64: RAW_AUDIO_REDACTION },
-    text: 'kept',
+    // F12 收紧：text 是承载已提交语音的真实线上字段，任何上下文一律脱敏。
+    text: PRIVATE_CONTENT_REDACTION,
   });
   assert.equal(JSON.stringify(sanitized).includes(rawAudio), false);
   assert.equal(reportedEnvelope.data.payload, wrappedPayload);
@@ -519,4 +521,61 @@ test('actual persistence-boundary output contains no raw audio or speech text an
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('committed speech, task names, instructions and adjustments never reach the dev log', () => {
+  const canaries = {
+    text: 'CANARY_COMMITTED_SPEECH',
+    name: 'CANARY_TASK_NAME',
+    instruction: 'CANARY_TASK_INSTRUCTION',
+    adjustment: 'CANARY_TASK_ADJUSTMENT',
+    message: 'CANARY_CHAT_MESSAGE',
+    content: 'CANARY_CHAT_CONTENT',
+    query: 'CANARY_CHAT_QUERY',
+  };
+  const source = {
+    direction: 'outgoing',
+    messageType: 'req',
+    data: {
+      type: 'req',
+      id: 'req-1',
+      method: 'live_voice.composition.unified.submit',
+      params: {
+        session_id: 'session-1',
+        text: canaries.text,
+        name: canaries.name,
+        task_name: canaries.name,
+        instruction: canaries.instruction,
+        instructions: [canaries.instruction],
+        adjustment: canaries.adjustment,
+        adjustments: [canaries.adjustment],
+        message: canaries.message,
+        content: canaries.content,
+        query: canaries.query,
+        nested: JSON.stringify({ instruction: canaries.instruction, task_name: canaries.name }),
+      },
+    },
+  };
+
+  const sanitized = prepareDevWsTrafficPayloadForPersistence(JSON.stringify(source));
+  const serialized = JSON.stringify(sanitized);
+  for (const [key, canary] of Object.entries(canaries)) {
+    assert.equal(serialized.includes(canary), false, `${key} canary leaked: ${serialized}`);
+  }
+  // 诊断价值保留：方法名与非敏感标识仍然可见。
+  assert.equal(serialized.includes('live_voice.composition.unified.submit'), true);
+  assert.equal(serialized.includes('session-1'), true);
+  assert.equal(serialized.includes('req-1'), true);
+});
+
+test('a throwing payload fails closed to the fixed marker, never the original data', () => {
+  const source = {};
+  Object.defineProperty(source, 'boom', {
+    enumerable: true,
+    get() {
+      throw new Error('CANARY_THROWING_GETTER');
+    },
+  });
+  const sanitized = redactRawAudioForDevLog({ data: source });
+  assert.equal(sanitized, INVALID_DEV_WS_PAYLOAD_REDACTION);
 });
