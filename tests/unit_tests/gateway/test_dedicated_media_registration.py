@@ -1108,8 +1108,12 @@ async def test_native_audio_reuses_uplink_session_and_allocates_fenced_downlink(
     notification_response = registry.take_native_notification_response(
         request_id="browser-notification-1",
         session_id="session-1",
+        correlation_id="correlation-1",
         interaction_id="interaction-1",
+        activation_id="activation-1",
+        activation_generation=1,
         connection_id="connection-1",
+        notification_sequence=1,
     )
 
     assert notification_response is not None
@@ -1159,6 +1163,149 @@ async def test_native_audio_reuses_uplink_session_and_allocates_fenced_downlink(
     assert all(proposal.delegate is None for proposal in client.proposals)
     assert sum(proposal.provider_done is not None for proposal in client.proposals) == 1
     await registry.close_native_interaction(uplink)
+
+
+def test_native_notification_interception_cannot_steal_forwarded_agent_sequence() -> (
+    None
+):
+    registry = DedicatedMediaProductRegistry(enabled=True)
+    params = _params()
+    _trust_product_activation(registry, params, connection_id="connection-1")
+    queue_owner: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    queue_owner.put_nowait(
+        {
+            "status": "notification",
+            "kind": "native.audio",
+            "request_id": "provider-native-audio-1",
+        }
+    )
+    registry._native_notifications[
+        ("session-1", "interaction-1", "connection-1")
+    ] = queue_owner
+    binding = {
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+        "connection_id": "connection-1",
+    }
+
+    assert registry.mark_native_notification_forwarded(
+        request_id="agent-notification-1",
+        notification_sequence=1,
+        **binding,
+    )
+    _trust_product_activation(registry, params, connection_id="connection-1")
+    assert (
+        registry.take_native_notification_response(
+            request_id="agent-notification-1",
+            notification_sequence=1,
+            **binding,
+        )
+        is None
+    )
+    assert queue_owner.qsize() == 1
+
+    local = registry.take_native_notification_response(
+        request_id="local-notification-2",
+        notification_sequence=2,
+        **binding,
+    )
+    assert local is not None
+    assert local["request_id"] == "local-notification-2"
+    assert local["result"]["request_id"] == "local-notification-2"
+    assert queue_owner.qsize() == 0
+
+    assert (
+        registry.take_native_notification_response(
+            request_id="local-notification-2",
+            notification_sequence=2,
+            **binding,
+        )
+        == local
+    )
+    assert queue_owner.qsize() == 0
+
+    assert (
+        registry.take_native_notification_response(
+            request_id="agent-notification-2",
+            notification_sequence=2,
+            **binding,
+        )
+        is None
+    )
+    assert registry.mark_native_notification_forwarded(
+        request_id="agent-notification-2",
+        notification_sequence=2,
+        **binding,
+    )
+
+
+def test_native_notification_fence_rejects_cross_activation_binding() -> None:
+    registry = DedicatedMediaProductRegistry(enabled=True)
+    params = _params()
+    _trust_product_activation(registry, params, connection_id="connection-1")
+    queue_owner: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    queue_owner.put_nowait({"status": "notification", "kind": "native.audio"})
+    registry._native_notifications[
+        ("session-1", "interaction-1", "connection-1")
+    ] = queue_owner
+
+    assert (
+        registry.take_native_notification_response(
+            request_id="foreign-notification-1",
+            session_id="session-1",
+            correlation_id="correlation-1",
+            interaction_id="interaction-1",
+            activation_id="foreign-activation",
+            activation_generation=1,
+            connection_id="connection-1",
+            notification_sequence=1,
+        )
+        is None
+    )
+    assert queue_owner.qsize() == 1
+
+
+def test_notification_sequence_gap_permanently_disables_local_projection() -> None:
+    registry = DedicatedMediaProductRegistry(enabled=True)
+    params = _params()
+    _trust_product_activation(registry, params, connection_id="connection-1")
+    binding = {
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+        "connection_id": "connection-1",
+    }
+
+    assert not registry.mark_native_notification_forwarded(
+        request_id="gap-notification-2",
+        notification_sequence=2,
+        **binding,
+    )
+    assert registry.mark_native_notification_forwarded(
+        request_id="agent-notification-1",
+        notification_sequence=1,
+        **binding,
+    )
+    queue_owner: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    queue_owner.put_nowait({"status": "notification", "kind": "native.audio"})
+    registry._native_notifications[
+        ("session-1", "interaction-1", "connection-1")
+    ] = queue_owner
+
+    assert (
+        registry.take_native_notification_response(
+            request_id="gap-notification-2",
+            notification_sequence=2,
+            **binding,
+        )
+        is None
+    )
+    assert queue_owner.qsize() == 1
 
 
 @pytest.mark.asyncio
@@ -1228,8 +1375,12 @@ async def test_native_user_transcript_uses_existing_notification_queue_once(
     response = registry.take_native_notification_response(
         request_id="browser-native-user-transcript-1",
         session_id="session-1",
+        correlation_id="correlation-1",
         interaction_id="interaction-1",
+        activation_id="activation-1",
+        activation_generation=1,
         connection_id="connection-1",
+        notification_sequence=1,
     )
 
     assert response is not None and response["ok"] is True
@@ -1855,8 +2006,12 @@ async def test_native_media_resamples_browser_48khz_to_provider_24khz_and_back()
     notification_response = registry.take_native_notification_response(
         request_id="browser-notification-48k",
         session_id="session-1",
+        correlation_id="correlation-1",
         interaction_id="interaction-1",
+        activation_id="activation-1",
+        activation_generation=1,
         connection_id="connection-1",
+        notification_sequence=1,
     )
     assert notification_response is not None
     notification = notification_response["result"]
@@ -3219,8 +3374,12 @@ async def test_native_notification_is_not_dropped_without_live_product_authority
         registry.take_native_notification_response(
             request_id="notification-without-authority-1",
             session_id="session-1",
+            correlation_id="correlation-1",
             interaction_id="interaction-1",
+            activation_id="activation-1",
+            activation_generation=1,
             connection_id="connection-1",
+            notification_sequence=1,
         )
         is None
     )

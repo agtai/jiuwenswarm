@@ -272,8 +272,23 @@ async def _serve_live_voice_native_notification(
     ):
         return False
     ws_id = msg.metadata.get("ws_id")
+    parameter_session_id = msg.params.get("session_id")
+    correlation_id = msg.params.get("correlation_id")
     interaction_id = msg.params.get("interaction_id")
-    if not isinstance(ws_id, str) or not ws_id or not isinstance(interaction_id, str):
+    activation_id = msg.params.get("activation_id")
+    activation_generation = msg.params.get("activation_generation")
+    notification_sequence = msg.params.get("notification_sequence")
+    if (
+        not isinstance(ws_id, str)
+        or not ws_id
+        or not isinstance(msg.session_id, str)
+        or parameter_session_id != msg.session_id
+        or not isinstance(correlation_id, str)
+        or not isinstance(interaction_id, str)
+        or not isinstance(activation_id, str)
+        or type(activation_generation) is not int
+        or type(notification_sequence) is not int
+    ):
         return False
     sockets = getattr(web_channel, "_ws_by_id", None)
     ws = sockets.get(ws_id) if isinstance(sockets, dict) else None
@@ -282,17 +297,80 @@ async def _serve_live_voice_native_notification(
     send_response = getattr(web_channel, "send_response", None)
     if ws is None or not callable(take) or not callable(send_response):
         return False
-    payload = take(
-        request_id=msg.id,
-        session_id=msg.session_id,
-        interaction_id=interaction_id,
-        connection_id=ws_id,
-    )
+    try:
+        payload = take(
+            request_id=msg.id,
+            session_id=msg.session_id,
+            correlation_id=correlation_id,
+            interaction_id=interaction_id,
+            activation_id=activation_id,
+            activation_generation=activation_generation,
+            connection_id=ws_id,
+            notification_sequence=notification_sequence,
+        )
+    except ValueError:
+        return False
     if payload is None:
         return False
     logger.info("live_voice_native_audio_notification_served")
     await send_response(ws, msg.id, ok=True, payload=payload)
     return True
+
+
+def _mark_live_voice_native_notification_forwarded(
+    msg: Message, web_channel: Any
+) -> bool:
+    """Fence an exact notification poll before it can reach AgentServer."""
+
+    method = getattr(getattr(msg, "req_method", None), "value", "")
+    if (
+        msg.channel_id != "web"
+        or method != ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT.value
+        or not isinstance(msg.params, dict)
+        or not isinstance(msg.metadata, dict)
+    ):
+        return False
+    ws_id = msg.metadata.get("ws_id")
+    parameter_session_id = msg.params.get("session_id")
+    correlation_id = msg.params.get("correlation_id")
+    interaction_id = msg.params.get("interaction_id")
+    activation_id = msg.params.get("activation_id")
+    activation_generation = msg.params.get("activation_generation")
+    notification_sequence = msg.params.get("notification_sequence")
+    if (
+        not isinstance(ws_id, str)
+        or not ws_id
+        or not isinstance(msg.session_id, str)
+        or parameter_session_id != msg.session_id
+        or not isinstance(correlation_id, str)
+        or not isinstance(interaction_id, str)
+        or not isinstance(activation_id, str)
+        or type(activation_generation) is not int
+        or type(notification_sequence) is not int
+    ):
+        return False
+    sockets = getattr(web_channel, "_ws_by_id", None)
+    if not isinstance(sockets, dict) or sockets.get(ws_id) is None:
+        return False
+    registry = getattr(web_channel, "live_voice_media_registry", None)
+    mark = getattr(registry, "mark_native_notification_forwarded", None)
+    if not callable(mark):
+        return False
+    try:
+        return bool(
+            mark(
+                request_id=msg.id,
+                session_id=msg.session_id,
+                correlation_id=correlation_id,
+                interaction_id=interaction_id,
+                activation_id=activation_id,
+                activation_generation=activation_generation,
+                connection_id=ws_id,
+                notification_sequence=notification_sequence,
+            )
+        )
+    except ValueError:
+        return False
 
 
 async def _normalize_and_forward_message(msg, channel_manager) -> bool:
@@ -2081,6 +2159,8 @@ async def _run(
             # fallback _session_create 返回 BAD_REQUEST。
             if method_val == "session.create":
                 _inject_session_work_mode(normalized)
+            if source_label == "Web":
+                _mark_live_voice_native_notification_forwarded(msg, web_channel)
             await channel_manager.deliver_to_message_handler(normalized)
             logger.info("[App] %s 入站 -> MessageHandler: id=%s channel_id=%s", source_label, msg.id, msg.channel_id)
             if method_val in no_local_methods:

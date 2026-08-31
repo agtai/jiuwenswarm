@@ -13,6 +13,7 @@ from jiuwenswarm.gateway.app_gateway import (
     _inject_live_voice_gateway_voice_claim,
     _inject_live_voice_interaction_engine,
     _inject_live_voice_web_alpha_credential,
+    _mark_live_voice_native_notification_forwarded,
     _normalize_gateway_message,
     _serve_live_voice_native_notification,
 )
@@ -247,8 +248,12 @@ async def test_gateway_native_notification_short_circuits_only_exact_socket_queu
             assert kwargs == {
                 "request_id": "req-native-audio",
                 "session_id": "session-1",
+                "correlation_id": "correlation-1",
                 "interaction_id": "interaction-1",
+                "activation_id": "activation-1",
+                "activation_generation": 1,
                 "connection_id": "web-socket-1",
+                "notification_sequence": 1,
             }
             return projected
 
@@ -268,7 +273,14 @@ async def test_gateway_native_notification_short_circuits_only_exact_socket_queu
         type="req",
         channel_id="web",
         session_id="session-1",
-        params={"session_id": "session-1", "interaction_id": "interaction-1"},
+        params={
+            "session_id": "session-1",
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+            "notification_sequence": 1,
+        },
         timestamp=time.time(),
         ok=True,
         req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
@@ -287,6 +299,60 @@ async def test_gateway_native_notification_short_circuits_only_exact_socket_queu
     msg.metadata = {"ws_id": "web-socket-foreign"}
     assert await _serve_live_voice_native_notification(msg, channel) is False
     assert len(channel.responses) == 1
+
+    msg.metadata = {"ws_id": "web-socket-1"}
+    msg.params["session_id"] = "foreign-session"
+    assert await _serve_live_voice_native_notification(msg, channel) is False
+    assert len(channel.responses) == 1
+
+
+def test_gateway_marks_exact_native_notification_before_agent_forward() -> None:
+    class Registry:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def mark_native_notification_forwarded(self, **kwargs):
+            self.calls.append(kwargs)
+            return True
+
+    class Channel:
+        def __init__(self) -> None:
+            self._ws_by_id = {"web-socket-1": object()}
+            self.live_voice_media_registry = Registry()
+
+    channel = Channel()
+    msg = Message(
+        id="req-agent-notification",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={
+            "session_id": "session-1",
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+            "notification_sequence": 2,
+        },
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
+        metadata={"ws_id": "web-socket-1"},
+    )
+
+    assert _mark_live_voice_native_notification_forwarded(msg, channel) is True
+    assert channel.live_voice_media_registry.calls == [
+        {
+            "request_id": "req-agent-notification",
+            "session_id": "session-1",
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+            "connection_id": "web-socket-1",
+            "notification_sequence": 2,
+        }
+    ]
 
 
 @pytest.mark.parametrize(

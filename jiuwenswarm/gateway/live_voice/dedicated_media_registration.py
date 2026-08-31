@@ -828,6 +828,17 @@ def _l0_media_binding(
         return None
 
 
+@dataclass(slots=True)
+class _NativeNotificationSequenceFence:
+    """Bound one serialized Browser notification poll to its serving authority."""
+
+    agent_high_water: int = 0
+    local_projection_disabled: bool = False
+    local_request_id: str | None = None
+    local_sequence: int | None = None
+    local_response: dict[str, object] | None = field(default=None, repr=False)
+
+
 @dataclass(frozen=True, slots=True)
 class _ProductActivationAuthority:
     session_id: str
@@ -838,6 +849,11 @@ class _ProductActivationAuthority:
     activation_generation: int
     product_composition: dict[str, object] = field(repr=False)
     expires_at: float
+    notification_fence: _NativeNotificationSequenceFence = field(
+        default_factory=_NativeNotificationSequenceFence,
+        repr=False,
+        compare=False,
+    )
 
 
 @dataclass(slots=True)
@@ -1490,18 +1506,59 @@ class DedicatedMediaProductRegistry:
         *,
         request_id: str,
         session_id: str,
+        correlation_id: str,
         interaction_id: str,
+        activation_id: str,
+        activation_generation: int,
         connection_id: str,
+        notification_sequence: int,
     ) -> dict[str, object] | None:
         parsed_request_id = _required_id(request_id, "request_id")
         parsed_session_id = _required_id(session_id, "session_id")
+        parsed_correlation_id = _required_id(correlation_id, "correlation_id")
         parsed_interaction_id = _required_id(interaction_id, "interaction_id")
+        parsed_activation_id = _required_id(activation_id, "activation_id")
+        parsed_activation_generation = _safe_uint(
+            activation_generation, "activation_generation"
+        )
         parsed_connection_id = _required_id(connection_id, "connection_id")
+        parsed_notification_sequence = _safe_uint(
+            notification_sequence, "notification_sequence"
+        )
+        if parsed_notification_sequence == 0:
+            raise MediaTransportViolation(
+                "MEDIA_INVALID_ACTIVATION", "notification_sequence is invalid"
+            )
         with self._lock:
             authority = self._product_activations.get(
                 (parsed_session_id, parsed_connection_id, parsed_interaction_id)
             )
-            if authority is None or self._monotonic() > authority.expires_at:
+            if (
+                authority is None
+                or self._monotonic() > authority.expires_at
+                or authority.correlation_id != parsed_correlation_id
+                or authority.activation_id != parsed_activation_id
+                or authority.activation_generation != parsed_activation_generation
+            ):
+                return None
+            fence = authority.notification_fence
+            if fence.local_request_id == parsed_request_id:
+                if (
+                    fence.local_sequence != parsed_notification_sequence
+                    or fence.local_response is None
+                ):
+                    return None
+                return json.loads(
+                    canonical_json_bytes(fence.local_response).decode("utf-8")
+                )
+            fence.local_request_id = None
+            fence.local_sequence = None
+            fence.local_response = None
+            if fence.local_projection_disabled:
+                return None
+            # Once a sequence may have reached AgentServer, an exact replay must
+            # stay on that authority.  A later Native frame cannot steal it.
+            if parsed_notification_sequence != fence.agent_high_water + 1:
                 return None
             queue_owner = self._native_notifications.get(
                 (parsed_session_id, parsed_interaction_id, parsed_connection_id)
@@ -1515,15 +1572,77 @@ class DedicatedMediaProductRegistry:
             manifest = json.loads(
                 canonical_json_bytes(authority.product_composition).decode("utf-8")
             )
-        projected = dict(notification)
-        projected["request_id"] = parsed_request_id
-        return {
-            "request_id": parsed_request_id,
-            "ok": True,
-            "result": projected,
-            "error": None,
-            "product_composition": manifest,
-        }
+            projected = dict(notification)
+            projected["request_id"] = parsed_request_id
+            response = {
+                "request_id": parsed_request_id,
+                "ok": True,
+                "result": projected,
+                "error": None,
+                "product_composition": manifest,
+            }
+            fence.local_request_id = parsed_request_id
+            fence.local_sequence = parsed_notification_sequence
+            fence.local_response = json.loads(
+                canonical_json_bytes(response).decode("utf-8")
+            )
+            return response
+
+    def mark_native_notification_forwarded(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        correlation_id: str,
+        interaction_id: str,
+        activation_id: str,
+        activation_generation: int,
+        connection_id: str,
+        notification_sequence: int,
+    ) -> bool:
+        """Fence a notification sequence immediately before AgentServer forwarding."""
+
+        parsed_request_id = _required_id(request_id, "request_id")
+        parsed_session_id = _required_id(session_id, "session_id")
+        parsed_correlation_id = _required_id(correlation_id, "correlation_id")
+        parsed_interaction_id = _required_id(interaction_id, "interaction_id")
+        parsed_activation_id = _required_id(activation_id, "activation_id")
+        parsed_activation_generation = _safe_uint(
+            activation_generation, "activation_generation"
+        )
+        parsed_connection_id = _required_id(connection_id, "connection_id")
+        parsed_notification_sequence = _safe_uint(
+            notification_sequence, "notification_sequence"
+        )
+        if parsed_notification_sequence == 0:
+            return False
+        with self._lock:
+            authority = self._product_activations.get(
+                (parsed_session_id, parsed_connection_id, parsed_interaction_id)
+            )
+            if (
+                authority is None
+                or self._monotonic() > authority.expires_at
+                or authority.correlation_id != parsed_correlation_id
+                or authority.activation_id != parsed_activation_id
+                or authority.activation_generation != parsed_activation_generation
+            ):
+                return False
+            fence = authority.notification_fence
+            if fence.local_request_id != parsed_request_id:
+                fence.local_request_id = None
+                fence.local_sequence = None
+                fence.local_response = None
+            if parsed_notification_sequence <= fence.agent_high_water:
+                return True
+            if parsed_notification_sequence != fence.agent_high_water + 1:
+                # Do not duplicate AgentServer's sequence policy at Gateway.
+                # The request still forwards for its authoritative rejection,
+                # but this activation can no longer safely serve local polls.
+                fence.local_projection_disabled = True
+                return False
+            fence.agent_high_water = parsed_notification_sequence
+            return True
 
     async def close_native_interaction(self, record: _MediaAuthority) -> bool:
         key = self._native_session_keys_by_record.get(record.record_id)
@@ -4492,6 +4611,18 @@ class DedicatedMediaProductRegistry:
                         self._product_activations.pop(key, None)
                         self._revoke_media_for_product_activation(existing)
                     return
+                existing = self._product_activations.get(key)
+                same_activation = existing is not None and (
+                    existing.connection_id,
+                    existing.correlation_id,
+                    existing.activation_id,
+                    existing.activation_generation,
+                ) == (
+                    owner_connection_id,
+                    correlation_id,
+                    activation_id,
+                    activation_generation,
+                )
                 authority = _ProductActivationAuthority(
                     session_id=session_id,
                     connection_id=owner_connection_id,
@@ -4501,19 +4632,13 @@ class DedicatedMediaProductRegistry:
                     activation_generation=activation_generation,
                     product_composition=manifest,
                     expires_at=self._monotonic() + self._authority_ttl,
+                    notification_fence=(
+                        existing.notification_fence
+                        if same_activation and existing is not None
+                        else _NativeNotificationSequenceFence()
+                    ),
                 )
-                existing = self._product_activations.get(key)
-                if existing is not None and (
-                    existing.connection_id,
-                    existing.correlation_id,
-                    existing.activation_id,
-                    existing.activation_generation,
-                ) != (
-                    authority.connection_id,
-                    authority.correlation_id,
-                    authority.activation_id,
-                    authority.activation_generation,
-                ):
+                if existing is not None and not same_activation:
                     self._revoke_media_for_product_activation(existing)
                 self._product_activations[key] = authority
                 self._product_activations.move_to_end(key)
@@ -4687,6 +4812,7 @@ class DedicatedMediaProductRegistry:
                 activation_generation=activation.activation_generation,
                 product_composition=activation.product_composition,
                 expires_at=now + self._authority_ttl,
+                notification_fence=activation.notification_fence,
             )
             self._product_activations.move_to_end(activation_key)
             for record in self._records.values():
