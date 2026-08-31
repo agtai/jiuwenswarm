@@ -25,6 +25,34 @@ logger = logging.getLogger(__name__)
 _BROADCAST_FALLBACK_CHANNEL_IDS: frozenset[str] = frozenset()
 
 
+def _res_serialization_failure_envelope(frame: dict) -> str | None:
+    """为无法序列化的 res 帧合成内容无关的终态错误信封。
+
+    丢弃 res 帧会让请求方一直等到超时；这里只携带单独校验过的请求 id，
+    不复制任何原载荷内容。非 res 帧（event 等）没有等待方，返回 None 照旧丢弃。
+    """
+    if frame.get("type") != "res":
+        return None
+    frame_id = frame.get("id")
+    if not isinstance(frame_id, str) or not frame_id or len(frame_id) > 256:
+        return None
+    try:
+        frame_id.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    envelope = {
+        "type": "res",
+        "id": frame_id,
+        "ok": False,
+        "payload": {},
+        "error": "FRAME_SERIALIZATION_FAILED",
+    }
+    try:
+        return json.dumps(envelope, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):  # pragma: no cover - envelope is static
+        return None
+
+
 class BaseWsChannel(BaseWebChannel):
     """WebSocket 通道共享基类。
 
@@ -284,10 +312,15 @@ class BaseWsChannel(BaseWebChannel):
                         wire = json.dumps(frame, ensure_ascii=False, allow_nan=False)
                     except (TypeError, ValueError) as e:
                         logger.warning(
-                            "[%s] frame serialize failed, dropping ws_id=%s err=%s",
+                            "[%s] frame serialize failed ws_id=%s err=%s",
                             self.channel_id, ws_id, e,
                         )
-                        continue
+                        # res 帧有等待方：丢弃会让请求方无终态直到超时，改发
+                        # 内容无关错误信封；其余帧照旧只丢这一帧。
+                        fallback = _res_serialization_failure_envelope(frame)
+                        if fallback is None:
+                            continue
+                        wire = fallback
                 else:
                     wire = frame
                 try:
