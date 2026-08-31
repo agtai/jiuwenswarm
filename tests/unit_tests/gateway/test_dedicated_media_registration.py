@@ -1227,6 +1227,24 @@ def test_native_notification_interception_cannot_steal_forwarded_agent_sequence(
     )
     assert queue_owner.qsize() == 0
 
+    queue_owner.put_nowait(
+        {
+            "status": "notification",
+            "kind": "native.audio",
+            "request_id": "provider-native-audio-2",
+        }
+    )
+    assert (
+        registry.take_native_notification_response(
+            request_id="local-notification-2",
+            notification_sequence=3,
+            **binding,
+        )
+        is None
+    )
+    assert queue_owner.qsize() == 1
+    assert queue_owner.get_nowait()["request_id"] == "provider-native-audio-2"
+
     assert (
         registry.take_native_notification_response(
             request_id="agent-notification-2",
@@ -1239,6 +1257,126 @@ def test_native_notification_interception_cannot_steal_forwarded_agent_sequence(
         request_id="agent-notification-2",
         notification_sequence=2,
         **binding,
+    )
+
+
+def test_native_notification_fence_maps_monotonic_client_sequence_after_local_projection() -> (
+    None
+):
+    registry = DedicatedMediaProductRegistry(enabled=True)
+    params = _params()
+    _trust_product_activation(registry, params, connection_id="connection-1")
+    queue_owner: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    queue_owner.put_nowait(
+        {
+            "status": "notification",
+            "kind": "native.audio",
+            "request_id": "provider-native-audio-1",
+        }
+    )
+    registry._native_notifications[
+        ("session-1", "interaction-1", "connection-1")
+    ] = queue_owner
+    binding = {
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+        "connection_id": "connection-1",
+    }
+
+    assert (
+        registry.mark_native_notification_forwarded(
+            request_id="agent-notification-1",
+            notification_sequence=1,
+            **binding,
+        )
+        == 1
+    )
+    assert (
+        registry.take_native_notification_response(
+            request_id="local-notification-2",
+            notification_sequence=2,
+            **binding,
+        )
+        is not None
+    )
+
+    # The local projection consumed Browser sequence 2 without reaching
+    # AgentServer.  A monotonic Browser sequence 3 must therefore map to the
+    # still-next AgentServer sequence 2, never fail the formal P2 route.
+    assert (
+        registry.mark_native_notification_forwarded(
+            request_id="agent-notification-3",
+            notification_sequence=3,
+            **binding,
+        )
+        == 2
+    )
+    assert (
+        registry.mark_native_notification_forwarded(
+            request_id="agent-notification-3",
+            notification_sequence=3,
+            **binding,
+        )
+        == 2
+    )
+    assert (
+        registry.mark_native_notification_forwarded(
+            request_id="agent-notification-3",
+            notification_sequence=4,
+            **binding,
+        )
+        is None
+    )
+    queue_owner.put_nowait(
+        {
+            "status": "notification",
+            "kind": "native.audio",
+            "request_id": "provider-native-audio-2",
+        }
+    )
+    assert (
+        registry.take_native_notification_response(
+            request_id="agent-notification-3",
+            notification_sequence=3,
+            **binding,
+        )
+        is None
+    )
+    assert queue_owner.qsize() == 1
+    assert (
+        registry.mark_native_notification_forwarded(
+            request_id="agent-notification-4",
+            notification_sequence=4,
+            **binding,
+        )
+        == 3
+    )
+    assert (
+        registry.take_native_notification_response(
+            request_id="local-notification-5",
+            notification_sequence=5,
+            **binding,
+        )
+        is not None
+    )
+    assert (
+        registry.mark_native_notification_forwarded(
+            request_id="agent-notification-6",
+            notification_sequence=6,
+            **binding,
+        )
+        == 4
+    )
+    assert (
+        registry.mark_native_notification_forwarded(
+            request_id="gap-notification-8",
+            notification_sequence=8,
+            **binding,
+        )
+        is None
     )
 
 
