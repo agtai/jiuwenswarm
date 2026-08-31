@@ -646,7 +646,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._delegates: dict[str, _DelegateWait] = {}
         self._delegate_results: dict[str, _DelegateResult] = {}
         self._cancelled: dict[
-            str, tuple[NativePresentationCursor, tuple[str, str]]
+            str, tuple[NativePresentationCursor, tuple[str | None, str]]
         ] = {}
         self._locally_fenced: set[str] = set()
 
@@ -920,14 +920,14 @@ class OpenAIRealtimeNativeInteractionEngine:
 
     async def cancel_response(
         self, cursor: NativePresentationCursor
-    ) -> tuple[str, str]:
+    ) -> tuple[str | None, str]:
         self._require_operational()
         async with self._cancel_lock:
             return await self._cancel_response_locked(cursor)
 
     async def _cancel_response_locked(
         self, cursor: NativePresentationCursor
-    ) -> tuple[str, str]:
+    ) -> tuple[str | None, str]:
         self._require_operational()
         if not isinstance(cursor, NativePresentationCursor):
             raise OpenAIRealtimeNativeInteractionError(
@@ -964,8 +964,12 @@ class OpenAIRealtimeNativeInteractionEngine:
             )
         self._state = NativeProviderState.CANCELLING
         try:
-            cancel_id = await self._session.send_event(
-                "response.cancel", {"response_id": response.provider_response_id}
+            cancel_id = (
+                None
+                if response.done
+                else await self._session.send_event(
+                    "response.cancel", {"response_id": response.provider_response_id}
+                )
             )
             truncate_id = await self._session.send_event(
                 "conversation.item.truncate",
@@ -1255,11 +1259,6 @@ class OpenAIRealtimeNativeInteractionEngine:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_INPUT_COMMIT_BEFORE_STOP",
                 "input commit requires one stopped speech interval",
-            )
-        if any(request.runtime_ref is None for request in self._response_request_queue):
-            raise OpenAIRealtimeNativeInteractionError(
-                "NATIVE_DIRECT_RESPONSE_PENDING",
-                "only one committed direct turn may await Provider response creation",
             )
         self._require_action_capacity(1)
         self._turn_count += 1

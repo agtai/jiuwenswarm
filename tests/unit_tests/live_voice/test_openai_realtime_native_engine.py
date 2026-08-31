@@ -1032,6 +1032,82 @@ async def test_rapid_semantic_vad_commits_serialize_direct_response_creation() -
 
 
 @pytest.mark.asyncio
+async def test_three_rapid_commits_queue_exact_direct_responses_without_session_failure() -> (
+    None
+):
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        speech_started("event-7", "user-item-2", 20),
+        speech_stopped("event-8", "user-item-2", 40),
+        input_committed("event-9", "user-item-2"),
+        speech_started("event-10", "user-item-3", 40),
+        speech_stopped("event-11", "user-item-3", 60),
+        input_committed("event-12", "user-item-3"),
+        response_done("event-13", "provider-response-1"),
+        response_created("event-14", "provider-response-2"),
+        response_done("event-15", "provider-response-2"),
+        response_created("event-16", "provider-response-3"),
+        response_done("event-17", "provider-response-3"),
+    )
+    await engine.start()
+    try:
+        _, _, first_commit = await accept_basic_turn(engine)
+        first_speak = await engine.next_event()
+        assert action_payload(first_speak)["turn_id"] == "native-turn-00000001"
+        await engine.admit_response("provider-response-1", response_ref(1))
+
+        first_stop = await engine.next_event()
+        second_listen = await engine.next_event()
+        second_silence = await engine.next_event()
+        second_commit = await engine.next_event()
+        assert first_stop.action is not None and first_stop.action.operation == "STOP"
+        assert (
+            second_listen.action is not None
+            and second_listen.action.operation == "LISTEN"
+        )
+        assert (
+            second_silence.action is not None
+            and second_silence.action.operation == "SILENCE"
+        )
+        assert second_commit.turn_commit is not None
+        assert second_commit.turn_commit.turn_id == "native-turn-00000002"
+
+        second_stop = await engine.next_event()
+        third_listen = await engine.next_event()
+        third_silence = await engine.next_event()
+        third_commit = await engine.next_event()
+        assert second_stop.action is not None and second_stop.action.operation == "STOP"
+        assert (
+            third_listen.action is not None
+            and third_listen.action.operation == "LISTEN"
+        )
+        assert (
+            third_silence.action is not None
+            and third_silence.action.operation == "SILENCE"
+        )
+        assert third_commit.turn_commit is not None
+        assert third_commit.turn_commit.turn_id == "native-turn-00000003"
+        assert [event["type"] for event in socket.sent].count("response.create") == 1
+
+        assert (await engine.next_event()).provider_done is not None
+        second_speak = await engine.next_event()
+        assert action_payload(second_speak)["turn_id"] == "native-turn-00000002"
+        await engine.admit_response("provider-response-2", response_ref(2))
+        assert (await engine.next_event()).provider_done is not None
+        third_speak = await engine.next_event()
+        assert action_payload(third_speak)["turn_id"] == "native-turn-00000003"
+        await engine.admit_response("provider-response-3", response_ref(3))
+        assert (await engine.next_event()).provider_done is not None
+        assert [event["type"] for event in socket.sent].count("response.create") == 3
+        assert engine.snapshot().state is NativeProviderState.READY
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_unsolicited_second_direct_response_in_one_turn_has_zero_new_effect() -> (
     None
 ):
@@ -1902,6 +1978,54 @@ async def test_cancel_response_sends_exact_cancel_then_truncate_once() -> None:
         await engine.cancel_response(replace(cursor, audio_end_ms=9))
     assert changed.value.reason == "NATIVE_CANCEL_CONFLICT"
     assert tuple(socket.sent) == sent
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_barge_after_provider_done_sends_truncate_without_stale_cancel() -> None:
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x00\x00" * 480,
+        ),
+        response_done("event-8", "provider-response-1"),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    ref = response_ref(1)
+    await engine.admit_response("provider-response-1", ref)
+    assert (await engine.next_event()).audio is not None
+    assert (await engine.next_event()).provider_done is not None
+    cursor = NativePresentationCursor(
+        response=ref,
+        provider_item_id="assistant-item-1",
+        content_index=0,
+        audio_end_ms=10,
+    )
+    before = len(socket.sent)
+
+    ids = await engine.cancel_response(cursor)
+
+    assert ids[0] is None
+    assert [event["type"] for event in socket.sent[before:]] == [
+        "conversation.item.truncate"
+    ]
+    assert socket.sent[-1] == {
+        "type": "conversation.item.truncate",
+        "event_id": ids[1],
+        "item_id": "assistant-item-1",
+        "content_index": 0,
+        "audio_end_ms": 10,
+    }
+    assert await engine.cancel_response(cursor) == ids
     await engine.close()
 
 

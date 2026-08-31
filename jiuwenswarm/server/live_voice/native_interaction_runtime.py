@@ -1074,11 +1074,17 @@ class NativeInteractionRuntimeOwner:
                 or retained is not self._current_response
                 or cursor.response != response
                 or retained.cancelled
-                or retained.done is not None
             ):
                 raise NativeInteractionRuntimeError(
                     "NATIVE_BARGE_RESPONSE_STALE",
                     "barge-in requires the exact current active response",
+                )
+            if retained.done is not None and await self._runtime.presentation_complete(
+                response, PresentationSurface.AUDIO
+            ):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_BARGE_RESPONSE_STALE",
+                    "barge-in cannot change a fully presented response",
                 )
             cursor_item = (cursor.provider_item_id, cursor.content_index)
             received_samples = retained.audio_samples_by_item.get(cursor_item)
@@ -1094,24 +1100,18 @@ class NativeInteractionRuntimeOwner:
                     "played cursor cannot exceed received Native audio",
                 )
             result = await self._runtime.barge_in(
-                parsed_action_id, response, cancel_response=True
-            )
-            effects = {
-                record.effect.effect_id: record.effect
-                for record in self._runtime.snapshot().effects
-            }
-            applied = any(
-                effects[effect_id].effect_type == "response.cancel"
-                for effect_id in result.effect_ids
+                parsed_action_id,
+                response,
+                cancel_response=retained.done is None,
             )
             admission = NativeBargeAdmission(
-                applied=applied,
+                applied=result.applied,
                 response=response,
                 cursor=cursor,
                 cancel_command_id=parsed_action_id,
             )
             self._barges[parsed_action_id] = (response, cursor, admission)
-            if applied:
+            if result.applied:
                 retained.cancelled = True
             return admission
 
@@ -1144,31 +1144,31 @@ class NativeInteractionRuntimeOwner:
                 retained is None
                 or retained is not self._current_response
                 or retained.cancelled
-                or retained.done is not None
             ):
                 raise NativeInteractionRuntimeError(
                     "NATIVE_BARGE_RESPONSE_STALE",
                     "cursorless fence requires the exact current active response",
                 )
+            if retained.done is not None and await self._runtime.presentation_complete(
+                response, PresentationSurface.AUDIO
+            ):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_BARGE_RESPONSE_STALE",
+                    "cursorless fence cannot change a fully presented response",
+                )
             result = await self._runtime.barge_in(
-                parsed_action_id, response, cancel_response=True
-            )
-            effects = {
-                record.effect.effect_id: record.effect
-                for record in self._runtime.snapshot().effects
-            }
-            applied = any(
-                effects[effect_id].effect_type == "response.cancel"
-                for effect_id in result.effect_ids
+                parsed_action_id,
+                response,
+                cancel_response=retained.done is None,
             )
             admission = NativeBargeAdmission(
-                applied=applied,
+                applied=result.applied,
                 response=response,
                 cursor=None,
                 cancel_command_id=parsed_action_id,
             )
             self._barges[parsed_action_id] = (response, None, admission)
-            if applied:
+            if result.applied:
                 retained.cancelled = True
             return admission
 
