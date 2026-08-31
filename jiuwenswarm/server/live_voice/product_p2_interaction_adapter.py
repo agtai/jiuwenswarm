@@ -48,7 +48,10 @@ from .conversation_runtime_loop import BargeInResult
 from .interaction_engine import InteractionAction, InteractionEnginePort
 from .native_interaction_contract import NativeInteractionBinding
 from .native_interaction_runtime import NativeInteractionRuntimeOwner
-from .native_interaction_runtime import NativeHistoryAdmission
+from .native_interaction_runtime import (
+    NativeHistoryAdmission,
+    NativeUserHistoryAdmission,
+)
 from .presentation_ledger import (
     PresentationAck,
     PresentationSurface,
@@ -761,9 +764,7 @@ class P2ActivationLease:
                 context=context,
                 channel_id=channel_id,
                 allow_tools=allow_tools,
-                answer_from_selected_task_result=(
-                    answer_from_selected_task_result
-                ),
+                answer_from_selected_task_result=(answer_from_selected_task_result),
             )
             if type(outcome) is not str or not outcome.strip():
                 raise _violation(
@@ -801,6 +802,34 @@ class P2ActivationLease:
                 raise _violation(
                     "NATIVE_HISTORY_RUNTIME_UNAVAILABLE",
                     "retained Runtime returned no exact Native history outcome",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+            return written
+
+    async def persist_native_user_history(
+        self,
+        binding: P2InteractionBinding,
+        admission: NativeUserHistoryAdmission,
+        *,
+        channel_id: str = "web",
+    ) -> bool:
+        """Consume one Native user-history admission through the retained Runtime."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            persist = getattr(self._runtime, "persist_native_user_history", None)
+            if not callable(persist):
+                raise _violation(
+                    "NATIVE_USER_HISTORY_RUNTIME_UNAVAILABLE",
+                    "retained Runtime has no canonical Native user history writer",
+                    ErrorCode.UNAVAILABLE,
+                )
+            written = await persist(admission, channel_id=channel_id)
+            if type(written) is not bool:
+                raise _violation(
+                    "NATIVE_USER_HISTORY_RUNTIME_UNAVAILABLE",
+                    "retained Runtime returned no exact Native user history outcome",
                     ErrorCode.RESULT_UNKNOWN,
                 )
             return written

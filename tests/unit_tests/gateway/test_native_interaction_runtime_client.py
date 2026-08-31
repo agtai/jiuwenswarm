@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 
 import pytest
 
@@ -29,6 +30,7 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeDelegateProposal,
     NativeInteractionBinding,
+    NativeInputTranscript,
 )
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
     NativeAudioOutput,
@@ -101,6 +103,20 @@ def delegate_event() -> NativeEngineEvent:
             ),
         ),
         delegate=delegate,
+    )
+
+
+def input_transcript_event() -> NativeEngineEvent:
+    return NativeEngineEvent(
+        input_transcript=NativeInputTranscript(
+            binding=BINDING,
+            turn_id="native-turn-1",
+            commit_id="native-commit-1",
+            provider_session_id="provider-session-1",
+            provider_item_id="provider-input-1",
+            provider_event_id="provider-transcript-1",
+            transcript="介绍你自己。",
+        )
     )
 
 
@@ -397,6 +413,82 @@ async def test_gateway_native_proposal_sends_one_closed_internal_e2a_request() -
         "proposal",
     }
     assert envelope.params["capability"] == CAPABILITY
+
+
+@pytest.mark.asyncio
+async def test_gateway_accepts_ordered_user_then_assistant_chat_projection() -> None:
+    client, agent, _sanitized = observed_client()
+    transcript = input_transcript_event().input_transcript
+    assert transcript is not None
+    assistant = "我是 JiuwenSwarm。"
+    digest = hashlib.sha256(assistant.encode("utf-8")).hexdigest()
+    agent.result_override = {
+        "kind": "input_transcript",
+        "status": "observed",
+        "accepted": True,
+        "history": {
+            "message": {
+                "id": "live-voice:native-commit-1:native-user",
+                "role": "user",
+                "content": transcript.transcript,
+                "timestamp": 1788170401.0,
+            },
+            "binding": {
+                **BINDING.to_dict(),
+                "turn_id": transcript.turn_id,
+                "commit_id": transcript.commit_id,
+                "provider_session_id": transcript.provider_session_id,
+                "provider_item_id": transcript.provider_item_id,
+                "provider_event_id": transcript.provider_event_id,
+            },
+            "following_assistant": [
+                {
+                    "turn_id": transcript.turn_id,
+                    "response": {
+                        "interaction_id": BINDING.interaction_id,
+                        "response_id": "native-response-1",
+                        "response_generation": 1,
+                    },
+                    "transcript": assistant,
+                    "presented_at": "2026-08-31T10:00:02Z",
+                    "message": {
+                        "id": (
+                            "live-voice:interaction-native:native-response-1:1:"
+                            f"native-audio:{digest}"
+                        ),
+                        "role": "assistant",
+                        "content": assistant,
+                        "timestamp": 1788170402.0,
+                    },
+                }
+            ],
+        },
+    }
+
+    result = await client.propose(
+        binding=BINDING,
+        capability=CAPABILITY,
+        event=input_transcript_event(),
+        request_id="native-input-transcript-ordered-1",
+    )
+
+    assert result == agent.result_override
+
+    malformed = dict(agent.result_override)
+    malformed_history = dict(malformed["history"])
+    malformed_following = [dict(malformed_history["following_assistant"][0])]
+    malformed_following[0]["turn_id"] = "wrong-turn"
+    malformed_history["following_assistant"] = malformed_following
+    malformed["history"] = malformed_history
+    agent.result_override = malformed
+    with pytest.raises(NativeRuntimeClientError) as raised:
+        await client.propose(
+            binding=BINDING,
+            capability=CAPABILITY,
+            event=input_transcript_event(),
+            request_id="native-input-transcript-ordered-2",
+        )
+    assert raised.value.reason == "NATIVE_RUNTIME_RESPONSE_INVALID"
 
 
 @pytest.mark.asyncio
@@ -776,3 +868,50 @@ async def test_gateway_activation_abort_reuses_closed_native_close_variant() -> 
     assert agent.requests[0].method == ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_CLOSE.value
     assert agent.requests[0].params["disposition"] == "activation_aborted"
     assert client.snapshot().activation_count == 0
+
+
+@pytest.mark.asyncio
+async def test_gateway_accepts_exact_native_assistant_chat_projection_on_ack() -> None:
+    client, agent, _sanitized = observed_client()
+    response = ResponseRef(BINDING.interaction_id, "native-response-1", 1)
+    transcript = "Canonical native answer."
+    digest = hashlib.sha256(transcript.encode("utf-8")).hexdigest()
+    agent.result_override = {
+        "kind": "presentation_ack",
+        "status": "observed",
+        "history_eligible": True,
+        "history": {
+            "response": {
+                "interaction_id": response.interaction_id,
+                "response_id": response.response_id,
+                "response_generation": response.response_generation,
+            },
+            "transcript": transcript,
+            "presented_at": "2026-08-31T10:00:01.000Z",
+            "message": {
+                "id": (
+                    "live-voice:interaction-native:native-response-1:"
+                    f"1:native-audio:{digest}"
+                ),
+                "role": "assistant",
+                "content": transcript,
+                "timestamp": 1788170401.0,
+            },
+        },
+    }
+    ack = PresentationAck(
+        ref=response,
+        surface=PresentationSurface.AUDIO,
+        unit_id="native-audio-unit-1",
+        contiguous_cursor=0,
+        presented_at="2026-08-31T10:00:01.000Z",
+    )
+
+    result = await client.presentation_ack(
+        binding=BINDING,
+        capability=CAPABILITY,
+        request_id="native-assistant-projection-1",
+        ack=ack,
+    )
+
+    assert result == agent.result_override

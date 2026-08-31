@@ -36,6 +36,7 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeContractLedger,
     NativeDelegateProposal,
+    NativeInputTranscript,
     NativeInteractionBinding,
     NativeInteractionContractViolation,
     NativePresentationCursor,
@@ -158,6 +159,7 @@ class NativeProviderDone:
 class NativeEngineEvent:
     action: InteractionAction | None = None
     turn_commit: NativeTurnCommit | None = None
+    input_transcript: NativeInputTranscript | None = None
     audio: NativeAudioOutput | None = field(default=None, repr=False)
     delegate: NativeDelegateProposal | None = field(default=None, repr=False)
     provider_done: NativeProviderDone | None = None
@@ -249,6 +251,12 @@ _EVENT_KEYS = {
     "input_audio_buffer.committed": frozenset(
         {"type", "event_id", "previous_item_id", "item_id"}
     ),
+    "conversation.item.input_audio_transcription.completed": frozenset(
+        {"type", "event_id", "item_id", "content_index", "transcript", "usage"}
+    ),
+    "conversation.item.input_audio_transcription.failed": frozenset(
+        {"type", "event_id", "item_id", "content_index", "error"}
+    ),
     "response.created": frozenset({"type", "event_id", "response"}),
     "response.output_audio.delta": frozenset(
         {
@@ -319,9 +327,7 @@ _HARMLESS_EVENT_TYPES = frozenset(
         "conversation.created",
         "conversation.item.added",
         "conversation.item.done",
-        "conversation.item.input_audio_transcription.completed",
         "conversation.item.input_audio_transcription.delta",
-        "conversation.item.input_audio_transcription.failed",
         "conversation.item.truncated",
         "input_audio_buffer.cleared",
         "input_audio_buffer.timeout_triggered",
@@ -373,6 +379,7 @@ def _session_update() -> dict[str, object]:
         "audio": {
             "input": {
                 "format": {"type": "audio/pcm", "rate": NATIVE_PCM_SAMPLE_RATE},
+                "transcription": {"model": "gpt-live-transcribe"},
                 "turn_detection": {
                     "type": "semantic_vad",
                     "eagerness": "auto",
@@ -486,7 +493,10 @@ def _closed_event(event: OpenAIRealtimeEvent) -> dict[str, object]:
             "NATIVE_PROVIDER_EVENT_UNSUPPORTED",
             "Provider event type is outside the Native allowlist",
         )
-    if set(data) != expected:
+    accepted_keys = {expected}
+    if event.event_type == "conversation.item.input_audio_transcription.completed":
+        accepted_keys.add(expected - {"usage"})
+    if frozenset(data) not in accepted_keys:
         raise OpenAIRealtimeNativeInteractionError(
             "NATIVE_PROVIDER_EVENT_NOT_CLOSED",
             "Provider event fields must match the closed Native mapping",
@@ -638,6 +648,11 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._input_start_ms: int | None = None
         self._input_end_ms: int | None = None
         self._current_turn_id: str | None = None
+        self._input_commits_by_item: dict[str, NativeTurnCommit] = {}
+        self._input_transcripts_by_item: dict[str, NativeInputTranscript] = {}
+        self._pending_input_transcripts: dict[str, tuple[str, str]] = {}
+        self._failed_input_transcriptions_by_item: dict[str, str] = {}
+        self._input_transcript_release_order: deque[str] = deque()
         self._direct_response_requested_turn_ids: set[str] = set()
         self._response_request_queue: deque[_ProviderResponseRequest] = deque()
         self._inflight_response_request: _ProviderResponseRequest | None = None
@@ -1083,6 +1098,10 @@ class OpenAIRealtimeNativeInteractionEngine:
             return self._speech_stopped(event, data)
         if event_type == "input_audio_buffer.committed":
             return self._input_committed(event, data)
+        if event_type == "conversation.item.input_audio_transcription.completed":
+            return self._input_transcript_completed(event, data)
+        if event_type == "conversation.item.input_audio_transcription.failed":
+            return self._input_transcript_failed(event, data)
         if event_type == "response.created":
             return self._response_created(event, data)
         if event_type == "response.output_audio.delta":
@@ -1143,10 +1162,20 @@ class OpenAIRealtimeNativeInteractionEngine:
             reason="NATIVE_PROVIDER_AUDIO_TIMING_INVALID",
             field_name="audio_start_ms",
         )
+        if item_id in self._input_commits_by_item:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_PROVIDER_ITEM_REUSED",
+                "Provider input item identity cannot start another Native turn",
+            )
         if self._input_item_id is not None and self._input_end_ms is None:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_PROVIDER_SPEECH_OVERLAP",
                 "speech start requires the prior interval to stop",
+            )
+        if self._input_item_id == item_id and self._input_end_ms is not None:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_PROVIDER_ITEM_REUSED",
+                "a stopped Provider input item cannot start another speech interval",
             )
         operations: list[tuple[str, tuple[tuple[str, str], ...]]] = []
         if self._input_item_id is not None and self._input_end_ms is not None:
@@ -1260,6 +1289,11 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_INPUT_COMMIT_BEFORE_STOP",
                 "input commit requires one stopped speech interval",
             )
+        if item_id in self._input_commits_by_item:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_PROVIDER_ITEM_REUSED",
+                "Provider input item identity cannot commit another Native turn",
+            )
         self._require_action_capacity(1)
         self._turn_count += 1
         turn_id = f"native-turn-{self._turn_count:08d}"
@@ -1286,6 +1320,11 @@ class OpenAIRealtimeNativeInteractionEngine:
             committed_audio_ms=self._input_end_ms - self._input_start_ms,
         )
         self._contract_ledger.accept_commit(commit)
+        self._require_input_fact_capacity(
+            len(self._input_commits_by_item), "NATIVE_INPUT_COMMIT_LEDGER_FULL"
+        )
+        self._input_commits_by_item[item_id] = commit
+        self._input_transcript_release_order.append(item_id)
         action = self._action(
             event.event_id,
             0,
@@ -1310,7 +1349,219 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._input_start_ms = None
         self._input_end_ms = None
         self._state = NativeProviderState.TURN_COMMITTED
-        return [NativeEngineEvent(action=action, turn_commit=commit)]
+        results = [NativeEngineEvent(action=action, turn_commit=commit)]
+        results.extend(self._release_ordered_input_transcription_terminals())
+        return results
+
+    def _input_transcript_completed(
+        self, event: OpenAIRealtimeEvent, data: dict[str, object]
+    ) -> list[NativeEngineEvent]:
+        item_id = _identity(
+            data["item_id"],
+            reason="NATIVE_PROVIDER_ITEM_INVALID",
+            field_name="input transcript item id",
+        )
+        usage = data.get("usage")
+        if data["content_index"] != 0 or (
+            usage is not None and not isinstance(usage, Mapping)
+        ):
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_INPUT_TRANSCRIPT_INVALID",
+                "input transcript must target the primary audio content",
+            )
+        transcript = data["transcript"]
+        if type(transcript) is not str:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_INPUT_TRANSCRIPT_INVALID",
+                "input transcript must be canonical text",
+            )
+        canonical = transcript.strip().replace("\r\n", "\n").replace("\r", "\n")
+        canonical = " ".join(canonical.split("\n"))
+        if not canonical or any(
+            unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+            for character in canonical
+        ):
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_INPUT_TRANSCRIPT_INVALID",
+                "input transcript must be canonical text",
+            )
+        try:
+            encoded = canonical.encode("utf-8")
+        except UnicodeEncodeError:
+            encoded = b"x" * 65_537
+        if len(encoded) > 65_536:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_INPUT_TRANSCRIPT_INVALID",
+                "input transcript is oversized",
+            )
+        prior_bound = self._input_transcripts_by_item.get(item_id)
+        candidate = (event.event_id, canonical)
+        if prior_bound is not None:
+            if (
+                prior_bound.provider_event_id == event.event_id
+                and prior_bound.transcript == canonical
+            ):
+                return []
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_INPUT_TRANSCRIPT_CONFLICT",
+                "input transcript item cannot change its meaning",
+            )
+        if item_id in self._failed_input_transcriptions_by_item:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_INPUT_TRANSCRIPT_CONFLICT",
+                "input transcript item cannot change its terminal outcome",
+            )
+        if (
+            item_id not in self._input_commits_by_item
+            and item_id != self._input_item_id
+        ):
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_INPUT_TRANSCRIPT_ITEM_STALE",
+                "input transcript does not match a current or retained Native item",
+            )
+        prior = self._pending_input_transcripts.get(item_id)
+        if prior is not None:
+            if prior == candidate:
+                return []
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_INPUT_TRANSCRIPT_CONFLICT",
+                "input transcript item cannot change its meaning",
+            )
+        self._require_input_fact_capacity(
+            len(self._pending_input_transcripts),
+            "NATIVE_INPUT_TRANSCRIPT_LEDGER_FULL",
+        )
+        self._pending_input_transcripts[item_id] = candidate
+        return self._release_ordered_input_transcription_terminals()
+
+    def _input_transcript_failed(
+        self, event: OpenAIRealtimeEvent, data: dict[str, object]
+    ) -> list[NativeEngineEvent]:
+        item_id = _identity(
+            data["item_id"],
+            reason="NATIVE_PROVIDER_ITEM_INVALID",
+            field_name="input transcript item id",
+        )
+        error = data["error"]
+        if (
+            data["content_index"] != 0
+            or not isinstance(error, Mapping)
+            or set(error) != {"type", "code", "message", "param"}
+        ):
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_INPUT_TRANSCRIPT_FAILURE_INVALID",
+                "input transcript failure must be a closed primary-content terminal",
+            )
+        if (
+            type(error["type"]) is not str
+            or not error["type"]
+            or type(error["message"]) is not str
+            or not error["message"]
+            or any(
+                error[field] is not None and type(error[field]) is not str
+                for field in ("code", "param")
+            )
+        ):
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_INPUT_TRANSCRIPT_FAILURE_INVALID",
+                "input transcript failure details are invalid",
+            )
+        if (
+            item_id in self._input_transcripts_by_item
+            or item_id in self._pending_input_transcripts
+        ):
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_INPUT_TRANSCRIPT_CONFLICT",
+                "input transcript item cannot change its terminal outcome",
+            )
+        prior = self._failed_input_transcriptions_by_item.get(item_id)
+        if prior is not None:
+            if prior == event.event_id:
+                return []
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_INPUT_TRANSCRIPT_CONFLICT",
+                "input transcript failure identity cannot change its meaning",
+            )
+        if (
+            item_id not in self._input_commits_by_item
+            and item_id != self._input_item_id
+        ):
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_INPUT_TRANSCRIPT_ITEM_STALE",
+                "input transcript failure does not match a current or retained Native item",
+            )
+        self._require_input_fact_capacity(
+            len(self._failed_input_transcriptions_by_item),
+            "NATIVE_INPUT_TRANSCRIPT_LEDGER_FULL",
+        )
+        self._failed_input_transcriptions_by_item[item_id] = event.event_id
+        return self._release_ordered_input_transcription_terminals()
+
+    def _release_ordered_input_transcription_terminals(
+        self,
+    ) -> list[NativeEngineEvent]:
+        released: list[NativeEngineEvent] = []
+        while self._input_transcript_release_order:
+            item_id = self._input_transcript_release_order[0]
+            pending = self._pending_input_transcripts.get(item_id)
+            if pending is not None:
+                commit = self._input_commits_by_item[item_id]
+                provider_event_id, transcript = pending
+                released.append(
+                    NativeEngineEvent(
+                        input_transcript=self._bind_input_transcript(
+                            commit,
+                            provider_event_id=provider_event_id,
+                            transcript=transcript,
+                        )
+                    )
+                )
+                self._pending_input_transcripts.pop(item_id, None)
+                self._input_transcript_release_order.popleft()
+                continue
+            if item_id in self._failed_input_transcriptions_by_item:
+                self._input_transcript_release_order.popleft()
+                continue
+            break
+        return released
+
+    def _bind_input_transcript(
+        self,
+        commit: NativeTurnCommit,
+        *,
+        provider_event_id: str,
+        transcript: str,
+    ) -> NativeInputTranscript:
+        candidate = NativeInputTranscript(
+            binding=self._binding,
+            turn_id=commit.turn_id,
+            commit_id=commit.commit_id,
+            provider_session_id=commit.provider_session_id,
+            provider_item_id=commit.provider_item_id,
+            provider_event_id=provider_event_id,
+            transcript=transcript,
+        )
+        prior = self._input_transcripts_by_item.get(commit.provider_item_id)
+        if prior is not None:
+            if prior == candidate:
+                return prior
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_INPUT_TRANSCRIPT_CONFLICT",
+                "input transcript item cannot change its meaning",
+            )
+        self._require_input_fact_capacity(
+            len(self._input_transcripts_by_item),
+            "NATIVE_INPUT_TRANSCRIPT_LEDGER_FULL",
+        )
+        self._input_transcripts_by_item[commit.provider_item_id] = candidate
+        return candidate
+
+    @staticmethod
+    def _require_input_fact_capacity(count: int, reason: str) -> None:
+        if count >= _MAX_ENGINE_CAPACITY:
+            raise OpenAIRealtimeNativeInteractionError(
+                reason, "bounded Native input fact ledger is full"
+            )
 
     def _response_created(
         self, event: OpenAIRealtimeEvent, data: dict[str, object]

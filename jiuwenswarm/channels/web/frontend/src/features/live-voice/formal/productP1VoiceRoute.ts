@@ -106,6 +106,13 @@ export interface ProductP1NativeAudioInput {
   readonly audio: unknown;
 }
 
+export type ProductP1NativeChatMessage = Readonly<{
+  id: string;
+  role: 'assistant';
+  content: string;
+  timestamp: string;
+}>;
+
 type ProductP1Request = (
   method: string,
   params: Record<string, unknown>,
@@ -190,6 +197,68 @@ function exactMediaActivation(value: unknown): Record<string, unknown> {
     ],
     'media_activation'
   );
+}
+
+function unixSecondsToIso(value: unknown, field: string): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${field} must be a finite non-negative Unix timestamp`);
+  }
+  const date = new Date(value * 1_000);
+  if (!Number.isFinite(date.getTime())) throw new Error(`${field} is outside the supported timestamp range`);
+  return date.toISOString();
+}
+
+export function parseProductP1NativeChatProjection(
+  value: unknown,
+  expectedResponse: Readonly<AudioResponseRef>,
+): ProductP1NativeChatMessage {
+  const projection = exactObject(value, ['message', 'binding'], 'native_chat_projection');
+  const message = exactObject(
+    projection.message,
+    ['id', 'role', 'content', 'timestamp'],
+    'native_chat_projection.message',
+  );
+  const binding = exactObject(
+    projection.binding,
+    ['response', 'surface', 'presented_at'],
+    'native_chat_projection.binding',
+  );
+  const response = exactObject(
+    binding.response,
+    ['interaction_id', 'response_id', 'response_generation'],
+    'native_chat_projection.binding.response',
+  );
+  if (
+    response.interaction_id !== expectedResponse.interaction_id ||
+    response.response_id !== expectedResponse.response_id ||
+    response.response_generation !== expectedResponse.response_generation ||
+    binding.surface !== 'native_audio'
+  ) {
+    throw new Error('native chat projection response binding mismatch');
+  }
+  if (
+    typeof binding.presented_at !== 'string' ||
+    !binding.presented_at.trim() ||
+    !Number.isFinite(Date.parse(binding.presented_at))
+  ) {
+    throw new Error('native chat projection presented_at is invalid');
+  }
+  if (
+    typeof message.id !== 'string' ||
+    !message.id.trim() ||
+    message.role !== 'assistant' ||
+    typeof message.content !== 'string' ||
+    !message.content.trim() ||
+    message.content !== message.content.trim()
+  ) {
+    throw new Error('native chat projection message is invalid');
+  }
+  return Object.freeze({
+    id: message.id,
+    role: 'assistant',
+    content: message.content,
+    timestamp: unixSecondsToIso(message.timestamp, 'native_chat_projection.message.timestamp'),
+  });
 }
 
 export function parseProductP1NativeInteractionActivation(value: unknown): Readonly<NativeInteractionActivation> {
@@ -1101,7 +1170,7 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
-  async playNativeAudio(input: Readonly<ProductP1NativeAudioInput>): Promise<void> {
+  async playNativeAudio(input: Readonly<ProductP1NativeAudioInput>): Promise<ProductP1NativeChatMessage | null> {
     if (this.#nativeInteraction === null) {
       throw new Error('native audio requires a server-selected Native interaction');
     }
@@ -1122,7 +1191,7 @@ export class ProductP1VoiceRouteOwner {
     this.#pendingNativeAudio = delivery;
     try {
       try {
-        await this.playAgentText({
+        return await this.playAgentText({
           response: delivery.response,
           unit_id: delivery.unit_id,
           text: 'Native audio delivery',
@@ -1146,7 +1215,7 @@ export class ProductP1VoiceRouteOwner {
       unit_id: string;
       text: string;
     }>
-  ): Promise<void> {
+  ): Promise<ProductP1NativeChatMessage | null> {
     const nativeDelivery = this.#pendingNativeAudio;
     const native = nativeDelivery !== null;
     if (this.#speech === null || this.#playout === null || this.#closed || this.#closeRequested) {
@@ -1321,16 +1390,17 @@ export class ProductP1VoiceRouteOwner {
       // synchronously changes the operation generation; fence it before minting
       // a render receipt in both the overlapping and deferred cases.
       this.#requireCurrent(operationGeneration);
+      let chatProjection: ProductP1NativeChatMessage | null = null;
       if (native) {
         await this.#freezeNativeCaptureReceipt(pendingPlayout, operationGeneration);
         try {
-          await this.#acknowledgePlayout(pendingPlayout);
+          chatProjection = await this.#acknowledgePlayout(pendingPlayout, true);
         } finally {
           this.#nativeCaptureSendPaused = false;
           this.#drainCaptureFrames();
         }
       } else {
-        await this.#acknowledgePlayout(pendingPlayout);
+        await this.#acknowledgePlayout(pendingPlayout, false);
       }
       this.#requireCurrent(operationGeneration);
       const completed = this.#currentL0PlayoutCompletion();
@@ -1365,6 +1435,7 @@ export class ProductP1VoiceRouteOwner {
         if (this.#settlingPlayout === pendingPlayout) this.#settlingPlayout = null;
         this.#setStatus('recognized', null);
       }
+      return chatProjection;
     } catch (error) {
       this.#nativeCaptureSendPaused = false;
       if (native) this.#drainCaptureFrames();
@@ -1383,7 +1454,7 @@ export class ProductP1VoiceRouteOwner {
             }
           });
         }
-        return;
+        return null;
       }
       if (this.#closeRequested) {
         throw Object.assign(new Error('formal playout was cancelled by route close'), {
@@ -2217,7 +2288,10 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
-  async #acknowledgePlayout(pending: PendingProductPlayout): Promise<void> {
+  async #acknowledgePlayout(
+    pending: PendingProductPlayout,
+    allowNativeChatProjection: boolean,
+  ): Promise<ProductP1NativeChatMessage | null> {
     const authority = pending.receiptAuthority;
     const throughSeq = pending.expected.get(pending.unitId);
     if (
@@ -2230,7 +2304,7 @@ export class ProductP1VoiceRouteOwner {
       pending.peakDepth > PRODUCT_P1_PLAYOUT_QUEUE_CAPACITY
     )
       throw new Error('formal browser playout receipt is incomplete');
-    const receipt = exactObject(
+    const receiptValue = objectValue(
       await this.#request(PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD, {
         session_id: authority.session_id,
         subject_id: authority.subject_id,
@@ -2247,6 +2321,14 @@ export class ProductP1VoiceRouteOwner {
         capture_control_ack: 'capture_flush_acked',
         playout_state: 'render_completed',
       }),
+      'media_playout_receipt',
+    );
+    const hasChatProjection = Object.prototype.hasOwnProperty.call(receiptValue, 'chat_projection');
+    if (hasChatProjection && !allowNativeChatProjection) {
+      throw new Error('Cascade media playout receipt cannot project Native chat');
+    }
+    const receipt = exactObject(
+      receiptValue,
       [
         'status',
         'reason_id',
@@ -2266,6 +2348,7 @@ export class ProductP1VoiceRouteOwner {
         'capture_control_ack',
         'playout_state',
         'duplex_media_observed',
+        ...(hasChatProjection ? ['chat_projection'] : []),
       ],
       'media_playout_receipt'
     );
@@ -2290,6 +2373,8 @@ export class ProductP1VoiceRouteOwner {
       typeof receipt.duplex_media_observed !== 'boolean'
     )
       throw new Error('media playout receipt binding mismatch');
+    if (!hasChatProjection) return null;
+    return parseProductP1NativeChatProjection(receipt.chat_projection, pending.response);
   }
 
   #scheduleDownlinkAck(pending: PendingProductPlayout, throughSeq: number): void {

@@ -76,6 +76,7 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
 from jiuwenswarm.server.live_voice.native_interaction_runtime import (
     NativeHistoryAdmission,
     NativeInteractionRuntimeOwner,
+    NativeUserHistoryAdmission,
 )
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     HistorySurfacePolicy,
@@ -482,6 +483,14 @@ class FormalHistoryWriter(Protocol):
         channel_id: str,
     ) -> bool: ...
 
+    async def persist_native_user(
+        self,
+        admission: NativeUserHistoryAdmission,
+        *,
+        session_id: str,
+        channel_id: str,
+    ) -> bool: ...
+
 
 @dataclass(slots=True)
 class _AdmissionOutcome:
@@ -699,6 +708,12 @@ class AgentConversationRuntime:
         ] = {}
         self._pending_native_history: dict[
             ResponseRef, tuple[NativeHistoryAdmission, str, str]
+        ] = {}
+        self._native_user_history_results: dict[
+            str, tuple[NativeUserHistoryAdmission, str, bool]
+        ] = {}
+        self._pending_native_user_history: dict[
+            str, tuple[NativeUserHistoryAdmission, str, str]
         ] = {}
         self._native_history_write_tasks: dict[
             ResponseRef, tuple[NativeHistoryAdmission, str, asyncio.Task[None]]
@@ -952,9 +967,7 @@ class AgentConversationRuntime:
                 facade=self._facade,
                 channel_id=channel_id,
                 allow_tools=allow_tools,
-                answer_from_selected_task_result=(
-                    answer_from_selected_task_result
-                ),
+                answer_from_selected_task_result=(answer_from_selected_task_result),
             )
             submission = self._bridge.commit_dispatch(
                 bridge_reservation,
@@ -3228,6 +3241,109 @@ class AgentConversationRuntime:
             self._native_history_results[key] = (admission, channel_id, written)
             return written
 
+    async def persist_native_user_history(
+        self,
+        admission: NativeUserHistoryAdmission,
+        *,
+        channel_id: str,
+    ) -> bool:
+        """Persist one Runtime-admitted Native user final exactly once."""
+
+        self._require_started()
+        if not isinstance(admission, NativeUserHistoryAdmission):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_USER_HISTORY_ADMISSION_INVALID",
+                "Native user history requires one Runtime-issued admission",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            not isinstance(channel_id, str)
+            or not channel_id
+            or channel_id != channel_id.strip()
+        ):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_USER_HISTORY_CHANNEL_INVALID",
+                "Native user history requires one exact channel identity",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if admission.binding.scope != self._scope or not any(
+            item.interaction_id == admission.binding.interaction_id
+            for item in self._cr.snapshot().conversation.interactions
+        ):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_USER_HISTORY_TURN_STALE",
+                "Native user history is not owned by this Runtime",
+                ErrorCode.STALE,
+            )
+        session_id = self._scope.session_id
+        assert isinstance(session_id, str)
+        key = admission.commit_id
+        async with self._ack_lock:
+            completed = self._native_user_history_results.get(key)
+            if completed is not None:
+                if completed[0] != admission or completed[1] != channel_id:
+                    raise AgentConversationRuntimeViolation(
+                        "NATIVE_USER_HISTORY_REPLAY_CONFLICT",
+                        "Native user history replay cannot change its admission",
+                        ErrorCode.CONFLICT,
+                    )
+                return completed[2]
+            pending = self._pending_native_user_history.get(key)
+            if pending is not None and pending != (admission, session_id, channel_id):
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_USER_HISTORY_REPLAY_CONFLICT",
+                    "Native user history retry cannot change its admission",
+                    ErrorCode.CONFLICT,
+                )
+            if (
+                pending is None
+                and len(self._native_user_history_results)
+                + len(self._pending_native_user_history)
+                >= self._max_requests
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_USER_HISTORY_LEDGER_FULL",
+                    "bounded Native user history ledger is full",
+                    ErrorCode.UNAVAILABLE,
+                )
+            try:
+                written = await self._history_writer.persist_native_user(
+                    admission,
+                    session_id=session_id,
+                    channel_id=channel_id,
+                )
+            except BaseException as error:  # noqa: BLE001
+                self._pending_native_user_history[key] = (
+                    admission,
+                    session_id,
+                    channel_id,
+                )
+                if isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                    raise
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_USER_HISTORY_WRITE_FAILED",
+                    "canonical Native user history remains pending",
+                    ErrorCode.UNAVAILABLE,
+                ) from error
+            if type(written) is not bool:
+                self._pending_native_user_history[key] = (
+                    admission,
+                    session_id,
+                    channel_id,
+                )
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_USER_HISTORY_WRITE_FAILED",
+                    "canonical Native user history returned no exact outcome",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+            self._pending_native_user_history.pop(key, None)
+            self._native_user_history_results[key] = (
+                admission,
+                channel_id,
+                written,
+            )
+            return written
+
     async def schedule_native_assistant_history(
         self,
         admission: NativeHistoryAdmission,
@@ -3489,6 +3605,7 @@ class AgentConversationRuntime:
             pending_history_intents=(
                 len(self._pending_history)
                 + len(self._pending_native_history)
+                + len(self._pending_native_user_history)
                 + len(self._pending_user_history)
             ),
             conversation=self._cr.snapshot(),
@@ -3878,6 +3995,7 @@ class AgentConversationRuntime:
             if (
                 self._pending_history
                 or self._pending_native_history
+                or self._pending_native_user_history
                 or self._pending_user_history
             ):
                 return AgentConversationShutdownResult(

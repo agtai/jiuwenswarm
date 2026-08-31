@@ -63,6 +63,7 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeDelegateProposal,
     NativeInteractionBinding,
+    NativeInputTranscript,
     NativePresentationCursor,
     NativeTurnCommit,
 )
@@ -319,6 +320,9 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
         self.playback_actions: list[tuple[str, object]] = []
         self.close_calls = 0
         self.close_request_ids: list[str] = []
+        self.input_transcript_items: set[str] = set()
+        self.input_transcript_following_assistant: list[dict[str, object]] = []
+        self.presentation_history: dict[str, object] | None = None
 
     async def propose(
         self,
@@ -333,6 +337,36 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
         assert capability == self.activation.capability
         assert request_id
         self.proposals.append(event)
+        if event.input_transcript is not None:
+            transcript = event.input_transcript
+            accepted = transcript.provider_item_id not in self.input_transcript_items
+            self.input_transcript_items.add(transcript.provider_item_id)
+            history: dict[str, object] = {
+                "message": {
+                    "id": f"live-voice:{transcript.commit_id}:native-user",
+                    "role": "user",
+                    "content": transcript.transcript,
+                    "timestamp": 1788170401.0,
+                },
+                "binding": {
+                    **binding.to_dict(),
+                    "turn_id": transcript.turn_id,
+                    "commit_id": transcript.commit_id,
+                    "provider_session_id": transcript.provider_session_id,
+                    "provider_item_id": transcript.provider_item_id,
+                    "provider_event_id": transcript.provider_event_id,
+                },
+            }
+            if self.input_transcript_following_assistant:
+                history["following_assistant"] = list(
+                    self.input_transcript_following_assistant
+                )
+            return {
+                "kind": "input_transcript",
+                "status": "observed",
+                "accepted": accepted,
+                "history": history,
+            }
         if event.turn_commit is not None:
             return {"kind": "turn", "status": "observed", "accepted": True}
         if event.action is not None and event.action.operation == "SPEAK":
@@ -437,11 +471,14 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
         if ack is not None:
             assert cursor is None and fence_response is None and action_id is None
             self.playback_actions.append(("presentation", ack))
-            return {
+            result: dict[str, object] = {
                 "kind": "presentation_ack",
                 "status": "observed",
-                "history_eligible": False,
+                "history_eligible": self.presentation_history is not None,
             }
+            if self.presentation_history is not None:
+                result["history"] = self.presentation_history
+            return result
         assert action_id is not None
         if fence_response is not None:
             assert cursor is None
@@ -1111,6 +1148,155 @@ async def test_native_audio_reuses_uplink_session_and_allocates_fenced_downlink(
     assert all(proposal.delegate is None for proposal in client.proposals)
     assert sum(proposal.provider_done is not None for proposal in client.proposals) == 1
     await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_following_assistant", [False, True])
+async def test_native_user_transcript_uses_existing_notification_queue_once(
+    with_following_assistant: bool,
+) -> None:
+    activation_handle = _native_activation()
+    client = _FakeNativeRuntimeClient(activation_handle)
+    assistant_transcript = "我是 JiuwenSwarm。"
+    assistant_response = {
+        "interaction_id": "interaction-1",
+        "response_id": "native-response-1",
+        "response_generation": 1,
+    }
+    assistant_message = {
+        "id": (
+            "live-voice:interaction-1:native-response-1:1:native-audio:"
+            + hashlib.sha256(assistant_transcript.encode("utf-8")).hexdigest()
+        ),
+        "role": "assistant",
+        "content": assistant_transcript,
+        "timestamp": 1788170402.0,
+    }
+    if with_following_assistant:
+        client.input_transcript_following_assistant = [
+            {
+                "turn_id": "native-turn-1",
+                "response": assistant_response,
+                "transcript": assistant_transcript,
+                "presented_at": "2026-08-31T10:00:02Z",
+                "message": assistant_message,
+            }
+        ]
+    engine = _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine,
+    )
+    activated = _activate(
+        registry,
+        params=_params(sample_rate_hz=24_000),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    assert uplink is not None
+    await registry.begin_native_interaction(uplink)
+    transcript = NativeInputTranscript(
+        binding=activation_handle.binding,
+        turn_id="native-turn-1",
+        commit_id="native-commit-1",
+        provider_session_id="provider-session-1",
+        provider_item_id="provider-user-item-1",
+        provider_event_id="provider-user-transcript-1",
+        transcript="介绍你自己。",
+    )
+    event = NativeEngineEvent(input_transcript=transcript)
+    await engine.events.put(event)
+
+    async def wait_for_proposal() -> None:
+        while not any(item.input_transcript is not None for item in client.proposals):
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_proposal(), timeout=1.0)
+    response = registry.take_native_notification_response(
+        request_id="browser-native-user-transcript-1",
+        session_id="session-1",
+        interaction_id="interaction-1",
+        connection_id="connection-1",
+    )
+
+    assert response is not None and response["ok"] is True
+    notification = response["result"]
+    assert notification == {
+        "status": "notification",
+        "kind": "native.user_transcript",
+        "request_id": "browser-native-user-transcript-1",
+        "round_id": None,
+        "response": None,
+        "agent_event": {
+            "event_type": "chat.final",
+            "message": {
+                "id": "live-voice:native-commit-1:native-user",
+                "role": "user",
+                "content": "介绍你自己。",
+                "timestamp": 1788170401.0,
+            },
+            "binding": {
+                **activation_handle.binding.to_dict(),
+                "turn_id": "native-turn-1",
+                "commit_id": "native-commit-1",
+                "provider_session_id": "provider-session-1",
+                "provider_item_id": "provider-user-item-1",
+                "provider_event_id": "provider-user-transcript-1",
+            },
+            **(
+                {
+                    "following_assistant": [
+                        {
+                            "message": assistant_message,
+                            "binding": {
+                                "turn_id": "native-turn-1",
+                                "response": assistant_response,
+                                "surface": "native_audio",
+                                "presented_at": "2026-08-31T10:00:02Z",
+                            },
+                        }
+                    ]
+                }
+                if with_following_assistant
+                else {}
+            ),
+        },
+        "source_event": None,
+        "progress_event": None,
+        "presentation_unit": None,
+        "audio": None,
+        "error_reason": None,
+        "publish_seq": None,
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+    }
+
+    await engine.events.put(event)
+
+    async def wait_for_replay() -> None:
+        while (
+            len(
+                [item for item in client.proposals if item.input_transcript is not None]
+            )
+            < 2
+        ):
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_replay(), timeout=1.0)
+    assert (
+        registry.take_native_notification(
+            session_id="session-1",
+            interaction_id="interaction-1",
+            connection_id="connection-1",
+        )
+        is None
+    )
+    await registry.close_native_interaction(uplink)
     assert engine.closed is True
 
 
@@ -1140,6 +1326,26 @@ async def test_native_three_second_response_reuses_one_route_and_acks_last_runti
         MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.0,) * 960),
     )
     response = ResponseRef("interaction-1", "native-response-1", 1)
+    transcript = "Canonical native answer."
+    transcript_digest = hashlib.sha256(transcript.encode("utf-8")).hexdigest()
+    client.presentation_history = {
+        "response": {
+            "interaction_id": response.interaction_id,
+            "response_id": response.response_id,
+            "response_generation": response.response_generation,
+        },
+        "transcript": transcript,
+        "presented_at": "2026-08-31T10:00:01.000Z",
+        "message": {
+            "id": (
+                "live-voice:interaction-1:native-response-1:"
+                f"1:native-audio:{transcript_digest}"
+            ),
+            "role": "assistant",
+            "content": transcript,
+            "timestamp": 1788170401.0,
+        },
+    }
     for sequence in range(150):
         await engine.events.put(
             NativeEngineEvent(
@@ -1175,8 +1381,8 @@ async def test_native_three_second_response_reuses_one_route_and_acks_last_runti
                 provider_response_id="provider-response-stream-1",
                 response=response,
                 completed=True,
-                transcript=None,
-                transcript_event_id=None,
+                transcript=transcript,
+                transcript_event_id="provider-transcript-presentation-1",
             )
         )
     )
@@ -1239,11 +1445,22 @@ async def test_native_three_second_response_reuses_one_route_and_acks_last_runti
         request_origin=ORIGIN,
     )
 
-    assert await registry.acknowledge_native_playout(
+    projected_receipt = await registry.acknowledge_native_playout(
         receipt=receipt,
         routed_session_id="session-1",
         connection_id="connection-1",
     )
+    assert projected_receipt == {
+        **receipt,
+        "chat_projection": {
+            "message": client.presentation_history["message"],
+            "binding": {
+                "response": client.presentation_history["response"],
+                "surface": "native_audio",
+                "presented_at": client.presentation_history["presented_at"],
+            },
+        },
+    }
     presentation = client.playback_actions[-1]
     assert presentation[0] == "presentation"
     assert presentation[1].unit_id == "native-audio-unit-149"
@@ -1384,7 +1601,9 @@ async def test_native_delivery_splits_audio_batches_at_response_and_item_boundar
         for proposal in client.proposals
         if proposal.action is not None
     ]
-    delivery_live = session.delivery_task is not None and not session.delivery_task.done()
+    delivery_live = (
+        session.delivery_task is not None and not session.delivery_task.done()
+    )
     event_live = session.event_task is not None and not session.event_task.done()
     await registry.close_native_interaction(uplink)
 

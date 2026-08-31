@@ -19,6 +19,7 @@ from jiuwenswarm.server.live_voice.native_interaction_carrier import (
 )
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
+    NativeInputTranscript,
     NativeInteractionBinding,
     NativeTurnCommit,
 )
@@ -75,6 +76,30 @@ def test_native_proposal_round_trips_one_closed_engine_event() -> None:
     assert proposal.turn_commit is not None
     assert proposal.delegate is None
     assert proposal.provider_done is None
+
+
+def test_native_proposal_round_trips_closed_input_transcript_without_audit_authority() -> (
+    None
+):
+    transcript = NativeInputTranscript(
+        binding=BINDING,
+        turn_id="turn-native-1",
+        commit_id="commit-native-1",
+        provider_session_id="provider-session-1",
+        provider_item_id="provider-item-1",
+        provider_event_id="provider-transcript-1",
+        transcript="介绍你自己。",
+    )
+
+    proposal = NativeInteractionProposal.from_engine_event(
+        BINDING, NativeEngineEvent(input_transcript=transcript)
+    )
+    payload = proposal.to_dict()
+
+    assert NativeInteractionProposal.from_dict(payload) == proposal
+    assert proposal.input_transcript == transcript
+    assert payload["input_transcript"] == transcript.to_dict()
+    assert "audit_transcript" not in json.dumps(payload, sort_keys=True)
 
 
 def test_native_proposal_rejects_unknown_fields() -> None:

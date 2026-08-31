@@ -48,6 +48,55 @@ function nativeNotification(overrides = {}) {
   };
 }
 
+function nativeUserTranscriptNotification(overrides = {}) {
+  const binding = {
+    scope: {
+      subject_id: 'subject-native-1',
+      project_id: null,
+      session_id: 'session-native-1',
+      assurance: 'authenticated',
+    },
+    interaction_id: 'interaction-native-1',
+    activation_id: 'activation-native-1',
+    activation_generation: 1,
+    correlation_id: 'correlation-native-1',
+    turn_id: 'turn-native-1',
+    commit_id: 'commit-native-1',
+    provider_session_id: 'provider-session-native-1',
+    provider_item_id: 'provider-item-native-1',
+    provider_event_id: 'provider-event-native-1',
+  };
+  return {
+    status: 'notification',
+    kind: 'native.user_transcript',
+    request_id: 'notification-native-transcript-1',
+    round_id: null,
+    response: null,
+    agent_event: {
+      event_type: 'chat.final',
+      message: {
+        id: 'live-voice:commit-native-1:native-user',
+        role: 'user',
+        content: '介绍你自己',
+        timestamp: 1_788_134_400.125,
+      },
+      binding,
+    },
+    source_event: null,
+    progress_event: null,
+    presentation_unit: null,
+    audio: null,
+    error_reason: null,
+    publish_seq: null,
+    session_id: 'session-native-1',
+    correlation_id: 'correlation-native-1',
+    interaction_id: 'interaction-native-1',
+    activation_id: 'activation-native-1',
+    activation_generation: 1,
+    ...overrides,
+  };
+}
+
 test('Native activation is a closed server-selected Engine descriptor', () => {
   assert.deepEqual(
     parseProductP1NativeInteractionActivation({
@@ -90,6 +139,103 @@ test('Native audio is isolated from text presentation and malformed carriers fai
         response_generation: 1,
       },
     },
+  );
+});
+
+test('Native user transcript is an exact current-binding chat projection', () => {
+  assert.deepEqual(
+    classifyProductP2Notification(nativeUserTranscriptNotification()),
+    {
+      kind: 'native_user_transcript',
+      session_id: 'session-native-1',
+      correlation_id: 'correlation-native-1',
+      interaction_id: 'interaction-native-1',
+      activation_id: 'activation-native-1',
+      activation_generation: 1,
+      message: {
+        id: 'live-voice:commit-native-1:native-user',
+        role: 'user',
+        content: '介绍你自己',
+        timestamp: '2026-08-31T00:00:00.125Z',
+      },
+      following_assistant: [],
+    },
+  );
+
+  const base = nativeUserTranscriptNotification();
+  assert.deepEqual(
+    classifyProductP2Notification({
+      ...base,
+      agent_event: {
+        ...base.agent_event,
+        following_assistant: [
+          {
+            message: {
+              id: 'live-voice:interaction-native-1:response-native-1:1:native-audio:digest',
+              role: 'assistant',
+              content: '你好，我是 JiuwenSwarm。',
+              timestamp: 1_788_134_401.5,
+            },
+            binding: {
+              turn_id: 'turn-native-1',
+              response: {
+                interaction_id: 'interaction-native-1',
+                response_id: 'response-native-1',
+                response_generation: 1,
+              },
+              surface: 'native_audio',
+              presented_at: '2026-08-31T00:00:01.500Z',
+            },
+          },
+        ],
+      },
+    }),
+    {
+      kind: 'native_user_transcript',
+      session_id: 'session-native-1',
+      correlation_id: 'correlation-native-1',
+      interaction_id: 'interaction-native-1',
+      activation_id: 'activation-native-1',
+      activation_generation: 1,
+      message: {
+        id: 'live-voice:commit-native-1:native-user',
+        role: 'user',
+        content: '介绍你自己',
+        timestamp: '2026-08-31T00:00:00.125Z',
+      },
+      following_assistant: [
+        {
+          id: 'live-voice:interaction-native-1:response-native-1:1:native-audio:digest',
+          role: 'assistant',
+          content: '你好，我是 JiuwenSwarm。',
+          timestamp: '2026-08-31T00:00:01.500Z',
+        },
+      ],
+    },
+  );
+  assert.deepEqual(
+    classifyProductP2Notification({ ...base, forged_text: 'not authoritative' }),
+    { kind: 'failed', reason: 'PRODUCT_NATIVE_USER_TRANSCRIPT_NOTIFICATION_INVALID' },
+  );
+  assert.deepEqual(
+    classifyProductP2Notification({
+      ...base,
+      agent_event: {
+        ...base.agent_event,
+        binding: { ...base.agent_event.binding, activation_generation: 2 },
+      },
+    }),
+    { kind: 'failed', reason: 'PRODUCT_NATIVE_USER_TRANSCRIPT_NOTIFICATION_INVALID' },
+  );
+  assert.deepEqual(
+    classifyProductP2Notification({
+      ...base,
+      agent_event: {
+        ...base.agent_event,
+        message: { ...base.agent_event.message, timestamp: Number.POSITIVE_INFINITY },
+      },
+    }),
+    { kind: 'failed', reason: 'PRODUCT_NATIVE_USER_TRANSCRIPT_NOTIFICATION_INVALID' },
   );
 });
 

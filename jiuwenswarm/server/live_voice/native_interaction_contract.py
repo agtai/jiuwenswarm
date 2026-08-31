@@ -478,6 +478,91 @@ class NativeTurnCommit:
         return canonical_json_bytes(self.to_dict())
 
 
+_INPUT_TRANSCRIPT_KEYS = frozenset(
+    {
+        "contract_version",
+        "binding",
+        "turn_id",
+        "commit_id",
+        "provider_session_id",
+        "provider_item_id",
+        "provider_event_id",
+        "transcript",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class NativeInputTranscript:
+    """One final Provider transcript bound to an accepted Native input item."""
+
+    binding: NativeInteractionBinding
+    turn_id: str
+    commit_id: str
+    provider_session_id: str
+    provider_item_id: str
+    provider_event_id: str
+    transcript: str
+    contract_version: str = NATIVE_INTERACTION_CONTRACT_VERSION
+
+    def __post_init__(self) -> None:
+        if self.contract_version != NATIVE_INTERACTION_CONTRACT_VERSION:
+            raise NativeInteractionContractViolation(
+                "NATIVE_CONTRACT_VERSION_UNSUPPORTED",
+                f"expected {NATIVE_INTERACTION_CONTRACT_VERSION}",
+                ErrorCode.UNSUPPORTED,
+            )
+        if not isinstance(self.binding, NativeInteractionBinding):
+            raise NativeInteractionContractViolation(
+                "NATIVE_BINDING_INVALID",
+                "binding must use NativeInteractionBinding",
+            )
+        for field, value in (
+            ("turn_id", self.turn_id),
+            ("commit_id", self.commit_id),
+            ("provider_session_id", self.provider_session_id),
+            ("provider_item_id", self.provider_item_id),
+            ("provider_event_id", self.provider_event_id),
+        ):
+            _identity(value, field)
+        if _optional_transcript(self.transcript) is None:
+            raise NativeInteractionContractViolation(
+                "NATIVE_TRANSCRIPT_INVALID",
+                "input transcript must be canonical text",
+            )
+
+    @classmethod
+    def from_dict(cls, value: object) -> NativeInputTranscript:
+        data = _closed_mapping(
+            value,
+            keys=_INPUT_TRANSCRIPT_KEYS,
+            reason="NATIVE_INPUT_TRANSCRIPT_FIELDS_NOT_CLOSED",
+            field="native input transcript",
+        )
+        return cls(
+            contract_version=data["contract_version"],  # type: ignore[arg-type]
+            binding=NativeInteractionBinding.from_dict(data["binding"]),
+            turn_id=data["turn_id"],  # type: ignore[arg-type]
+            commit_id=data["commit_id"],  # type: ignore[arg-type]
+            provider_session_id=data["provider_session_id"],  # type: ignore[arg-type]
+            provider_item_id=data["provider_item_id"],  # type: ignore[arg-type]
+            provider_event_id=data["provider_event_id"],  # type: ignore[arg-type]
+            transcript=data["transcript"],  # type: ignore[arg-type]
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "contract_version": self.contract_version,
+            "binding": self.binding.to_dict(),
+            "turn_id": self.turn_id,
+            "commit_id": self.commit_id,
+            "provider_session_id": self.provider_session_id,
+            "provider_item_id": self.provider_item_id,
+            "provider_event_id": self.provider_event_id,
+            "transcript": self.transcript,
+        }
+
+
 _DELEGATE_KEYS = frozenset(
     {
         "contract_version",
@@ -761,6 +846,7 @@ __all__ = [
     "NativeDelegateProposal",
     "NativeInteractionBinding",
     "NativeInteractionContractViolation",
+    "NativeInputTranscript",
     "NativePresentationCursor",
     "NativeTurnCommit",
 ]

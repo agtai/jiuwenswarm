@@ -343,7 +343,13 @@ class ConversationRuntimeLoop:
         history_policy: HistorySurfacePolicy = HistorySurfacePolicy.TEXT,
         response_generation: int | None = None,
         minimum_generation: int = 0,
+        preserve_terminal_predecessor_presentation: bool = False,
     ) -> tuple[ResponseRef, RuntimeEvent]:
+        if type(preserve_terminal_predecessor_presentation) is not bool:
+            raise TypeError(
+                "preserve_terminal_predecessor_presentation must be boolean"
+            )
+
         def apply() -> tuple[ResponseRef, RuntimeEvent]:
             policy = self._history_policy(history_policy)
             turn = next(
@@ -366,7 +372,13 @@ class ConversationRuntimeLoop:
                 minimum_generation=minimum_generation,
             )
             self._presentation.begin_response(ref, policy)
-            if prior is not None:
+            preserve_prior = (
+                preserve_terminal_predecessor_presentation
+                and prior is not None
+                and prior.state is ResponseState.TERMINAL
+                and prior.outcome is TerminalOutcome.COMPLETED
+            )
+            if prior is not None and not preserve_prior:
                 self._fence_presentation(prior.ref, reason="response_replaced")
                 if prior.state is not ResponseState.TERMINAL:
                     self._emit_playback_stop_once(prior.ref)
@@ -714,7 +726,7 @@ class ConversationRuntimeLoop:
                 "presentation acknowledgement has an unsupported type",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        self._require_acknowledgeable_output(ack.ref)
+        self._require_acknowledgeable_output(ack.ref, ack.surface)
         accepted, _ = self._presentation.acknowledge(ack)
         if accepted:
             self._mark_effect_presented(ack)
@@ -731,7 +743,7 @@ class ConversationRuntimeLoop:
                 "presentation acknowledgement has an unsupported type",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        self._require_acknowledgeable_output(ack.ref)
+        self._require_acknowledgeable_output(ack.ref, ack.surface)
         prepared: list[PresentedHistoryContent] = []
         if ack.surface is PresentationSurface.TEXT:
             snapshot = self._presentation.snapshot()
@@ -1029,7 +1041,9 @@ class ConversationRuntimeLoop:
             )
         return record
 
-    def _require_acknowledgeable_output(self, ref: ResponseRef) -> ResponseRecord:
+    def _require_acknowledgeable_output(
+        self, ref: ResponseRef, surface: PresentationSurface
+    ) -> ResponseRecord:
         record = self._response_record(ref)
         interaction = next(
             (
@@ -1049,6 +1063,13 @@ class ConversationRuntimeLoop:
             return self._require_current_output(ref)
         latest = self._latest_response_record(ref.interaction_id)
         if latest is None or latest.ref != ref:
+            if not any(
+                closed_ref == ref and closed_surface is surface
+                for closed_ref, closed_surface, _reason in (
+                    self._presentation.snapshot().closed_surfaces
+                )
+            ):
+                return record
             raise ConversationRuntimeLoopViolation(
                 "STALE_RESPONSE_OUTPUT",
                 "presentation acknowledgement requires the latest exact response",

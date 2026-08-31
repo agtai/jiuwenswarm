@@ -58,6 +58,7 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
 from jiuwenswarm.server.live_voice.native_interaction_runtime import (
     NativeHistoryAdmission,
     NativeInteractionRuntimeOwner,
+    NativeUserHistoryAdmission,
 )
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationAck,
@@ -177,6 +178,7 @@ class RecordingHistoryWriter:
         self.users = []
         self.assistant_intents = []
         self.native_assistant_intents = []
+        self.native_user_intents = []
         self.fail_assistant_once = fail_assistant_once
         self.fail_native_assistant_once = fail_native_assistant_once
 
@@ -200,6 +202,12 @@ class RecordingHistoryWriter:
             self.fail_native_assistant_once = False
             raise OSError("native history unavailable")
         self.native_assistant_intents.append((admission, session_id, channel_id))
+        return True
+
+    async def persist_native_user(
+        self, admission, *, session_id: str, channel_id: str
+    ) -> bool:
+        self.native_user_intents.append((admission, session_id, channel_id))
         return True
 
 
@@ -378,6 +386,7 @@ async def test_native_history_admission_uses_canonical_writer_once() -> None:
             "response-native-history",
             1,
         ),
+        turn_id="native-turn-history",
         transcript="Canonical native answer.",
         presented_at="2026-08-25T10:00:01Z",
     )
@@ -420,6 +429,7 @@ async def test_session_history_writer_projects_native_admission_without_audio(
     )
     admission = NativeHistoryAdmission(
         response=ResponseRef("interaction-native", "response-native", 2),
+        turn_id="native-turn-history",
         transcript="Canonical native transcript.",
         presented_at="2026-08-25T10:00:01Z",
     )
@@ -440,6 +450,7 @@ async def test_session_history_writer_projects_native_admission_without_audio(
     assert record["event_type"] == "chat.final"
     assert record["formal_binding"] == {
         "interaction_id": admission.response.interaction_id,
+        "turn_id": admission.turn_id,
         "response_id": admission.response.response_id,
         "response_generation": admission.response.response_generation,
         "surface": "native_audio",
@@ -448,6 +459,102 @@ async def test_session_history_writer_projects_native_admission_without_audio(
         ).hexdigest(),
     }
     assert "audio" not in record
+
+
+@pytest.mark.asyncio
+async def test_session_history_writer_projects_native_user_admission_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records: list[tuple[str, dict[str, object]]] = []
+
+    def append(*, session_id: str, record: dict[str, object]) -> bool:
+        records.append((session_id, record))
+        return True
+
+    monkeypatch.setattr(
+        history_writer_module,
+        "append_formal_history_record_idempotent",
+        append,
+    )
+    admission = NativeUserHistoryAdmission(
+        binding=NativeInteractionBinding(
+            scope=scope(),
+            interaction_id="interaction-native-user",
+            activation_id="activation-native-user",
+            activation_generation=1,
+            correlation_id="correlation-native-user",
+        ),
+        turn_id="native-turn-user-1",
+        commit_id="native-commit-user-1",
+        provider_session_id="provider-session-1",
+        provider_item_id="provider-user-item-1",
+        provider_event_id="provider-user-transcript-1",
+        transcript="介绍你自己。",
+        observed_at="2026-08-31T10:00:01.000Z",
+    )
+
+    assert await SessionFormalHistoryWriter().persist_native_user(
+        admission,
+        session_id="session-formal",
+        channel_id="web",
+    )
+
+    assert len(records) == 1
+    session_id, record = records[0]
+    assert session_id == "session-formal"
+    assert record == {
+        "id": "live-voice:native-commit-user-1:native-user",
+        "role": "user",
+        "request_id": "native-commit-user-1",
+        "channel_id": "web",
+        "timestamp": 1788170401.0,
+        "content": "介绍你自己。",
+        "event_type": "chat.final",
+        "formal_binding": {
+            "interaction_id": "interaction-native-user",
+            "turn_id": "native-turn-user-1",
+            "commit_id": "native-commit-user-1",
+            "provider_session_id": "provider-session-1",
+            "provider_item_id": "provider-user-item-1",
+            "provider_event_id": "provider-user-transcript-1",
+            "source": "openai_realtime_input_audio_transcription",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_user_history_runtime_persists_exact_admission_once() -> None:
+    history = RecordingHistoryWriter()
+    current = runtime(LowerFormalAdapter(), history)
+    assert await current.start() is True
+    await current.open_interaction("interaction-native-user-history")
+    admission = NativeUserHistoryAdmission(
+        binding=NativeInteractionBinding(
+            scope=scope(),
+            interaction_id="interaction-native-user-history",
+            activation_id="activation-native-user-history",
+            activation_generation=1,
+            correlation_id="correlation-native-user-history",
+        ),
+        turn_id="native-turn-user-history-1",
+        commit_id="native-commit-user-history-1",
+        provider_session_id="provider-session-1",
+        provider_item_id="provider-user-item-1",
+        provider_event_id="provider-user-transcript-1",
+        transcript="介绍你自己。",
+        observed_at="2026-08-31T10:00:01.000Z",
+    )
+
+    assert await current.persist_native_user_history(admission, channel_id="web")
+    assert await current.persist_native_user_history(admission, channel_id="web")
+    assert history.native_user_intents == [(admission, scope().session_id, "web")]
+
+    with pytest.raises(AgentConversationRuntimeViolation) as changed:
+        await current.persist_native_user_history(
+            replace(admission, transcript="Changed transcript."), channel_id="web"
+        )
+    assert changed.value.reason == "NATIVE_USER_HISTORY_REPLAY_CONFLICT"
+    assert history.native_user_intents == [(admission, scope().session_id, "web")]
 
 
 @pytest.mark.asyncio
@@ -464,6 +571,7 @@ async def test_native_history_writer_failure_is_retained_and_exact_retry_recover
             "response-native-history-retry",
             1,
         ),
+        turn_id="native-turn-history-retry",
         transcript="Canonical retry answer.",
         presented_at="2026-08-25T10:00:02Z",
     )
@@ -500,6 +608,7 @@ async def test_scheduled_native_history_is_bounded_and_drained_during_close() ->
             "response-native-history-drain",
             1,
         ),
+        turn_id="native-turn-history-drain",
         transcript="Canonical drain answer.",
         presented_at="2026-08-25T10:00:03Z",
     )
@@ -521,9 +630,7 @@ async def test_scheduled_native_history_is_bounded_and_drained_during_close() ->
     history.native_release.set()
     closed = await current.close(timeout_seconds=0.2)
     assert closed.status is AgentConversationShutdownStatus.CLOSED
-    assert history.native_assistant_intents == [
-        (admission, scope().session_id, "web")
-    ]
+    assert history.native_assistant_intents == [(admission, scope().session_id, "web")]
 
 
 async def _prepare_native_delegate_execution(

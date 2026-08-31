@@ -127,6 +127,7 @@ from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
 )
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
+    NativeInteractionBinding,
     NativePresentationCursor,
 )
 from jiuwenswarm.server.live_voice.presentation_ledger import (
@@ -863,6 +864,7 @@ class _NativeMediaSession:
     barge_fenced_responses: OrderedDict[ResponseRef, None] = field(
         default_factory=OrderedDict, repr=False
     )
+    projected_input_transcript_items: set[str] = field(default_factory=set, repr=False)
     runtime_close_request_id: str | None = field(default=None, repr=False)
     runtime_close_complete: bool = False
     provider_close_complete: bool = False
@@ -1664,6 +1666,7 @@ class DedicatedMediaProductRegistry:
                 for item in (
                     event.action,
                     event.turn_commit,
+                    event.input_transcript,
                     event.audio,
                     event.delegate,
                     event.provider_done,
@@ -1876,6 +1879,8 @@ class DedicatedMediaProductRegistry:
             raise
         if event.delegate is not None:
             await self._return_native_delegate_result(session, event, result)
+        elif event.input_transcript is not None:
+            self._queue_native_user_transcript(session, event, result)
         elif event.action is not None:
             if event.action.operation == "SPEAK":
                 await self._admit_native_response(session, event, result)
@@ -1887,6 +1892,224 @@ class DedicatedMediaProductRegistry:
             await self._allocate_native_downlink(session, event.audio, result)
         elif event.provider_done is not None:
             await self._seal_native_downlink(session, event.provider_done, result)
+
+    def _queue_native_user_transcript(
+        self,
+        session: _NativeMediaSession,
+        event: NativeEngineEvent,
+        result: Mapping[str, object],
+    ) -> None:
+        transcript = event.input_transcript
+        assert transcript is not None
+        history = result.get("history")
+        following = (
+            history.get("following_assistant") if isinstance(history, Mapping) else None
+        )
+        if (
+            set(result) != {"kind", "status", "accepted", "history"}
+            or result.get("kind") != "input_transcript"
+            or result.get("status") != "observed"
+            or type(result.get("accepted")) is not bool
+            or not isinstance(history, Mapping)
+            or set(history)
+            not in (
+                {"message", "binding"},
+                {"message", "binding", "following_assistant"},
+            )
+            or (
+                following is not None
+                and (not isinstance(following, list) or not following)
+            )
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_INPUT_TRANSCRIPT_INVALID",
+                "Native input transcript result is not exact",
+            )
+        message = history.get("message")
+        history_binding = history.get("binding")
+        timestamp = message.get("timestamp") if isinstance(message, Mapping) else None
+        binding_keys = {
+            "scope",
+            "interaction_id",
+            "activation_id",
+            "activation_generation",
+            "correlation_id",
+            "turn_id",
+            "commit_id",
+            "provider_session_id",
+            "provider_item_id",
+            "provider_event_id",
+        }
+        if (
+            not isinstance(message, Mapping)
+            or set(message) != {"id", "role", "content", "timestamp"}
+            or message.get("id") != f"live-voice:{transcript.commit_id}:native-user"
+            or message.get("role") != "user"
+            or message.get("content") != transcript.transcript
+            or isinstance(timestamp, bool)
+            or not isinstance(timestamp, (int, float))
+            or not math.isfinite(timestamp)
+            or timestamp < 0
+            or not isinstance(history_binding, Mapping)
+            or set(history_binding) != binding_keys
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_INPUT_TRANSCRIPT_INVALID",
+                "Native input transcript history is not exact",
+            )
+        following_projection: list[dict[str, object]] = []
+        for candidate in following or ():
+            if not isinstance(candidate, Mapping) or set(candidate) != {
+                "turn_id",
+                "response",
+                "transcript",
+                "presented_at",
+                "message",
+            }:
+                raise MediaTransportViolation(
+                    "MEDIA_NATIVE_INPUT_TRANSCRIPT_INVALID",
+                    "following Native assistant history is not exact",
+                )
+            assistant_response = candidate.get("response")
+            assistant_message = candidate.get("message")
+            assistant_transcript = candidate.get("transcript")
+            presented_at = candidate.get("presented_at")
+            assistant_timestamp = (
+                assistant_message.get("timestamp")
+                if isinstance(assistant_message, Mapping)
+                else None
+            )
+            if (
+                candidate.get("turn_id") != transcript.turn_id
+                or not isinstance(assistant_response, Mapping)
+                or set(assistant_response)
+                != {"interaction_id", "response_id", "response_generation"}
+                or assistant_response.get("interaction_id")
+                != transcript.binding.interaction_id
+                or type(assistant_response.get("response_id")) is not str
+                or not assistant_response.get("response_id")
+                or isinstance(assistant_response.get("response_generation"), bool)
+                or not isinstance(assistant_response.get("response_generation"), int)
+                or assistant_response.get("response_generation", 0) <= 0
+                or type(assistant_transcript) is not str
+                or not assistant_transcript
+                or assistant_transcript != assistant_transcript.strip()
+                or type(presented_at) is not str
+                or not presented_at
+                or not isinstance(assistant_message, Mapping)
+                or set(assistant_message) != {"id", "role", "content", "timestamp"}
+                or assistant_message.get("role") != "assistant"
+                or assistant_message.get("content") != assistant_transcript
+                or assistant_message.get("id")
+                != (
+                    "live-voice:"
+                    f"{assistant_response.get('interaction_id')}:"
+                    f"{assistant_response.get('response_id')}:"
+                    f"{assistant_response.get('response_generation')}:native-audio:"
+                    f"{hashlib.sha256(assistant_transcript.encode('utf-8')).hexdigest()}"
+                )
+                or isinstance(assistant_timestamp, bool)
+                or not isinstance(assistant_timestamp, (int, float))
+                or not math.isfinite(assistant_timestamp)
+                or assistant_timestamp < 0
+            ):
+                raise MediaTransportViolation(
+                    "MEDIA_NATIVE_INPUT_TRANSCRIPT_INVALID",
+                    "following Native assistant history is invalid",
+                )
+            following_projection.append(
+                {
+                    "message": dict(assistant_message),
+                    "binding": {
+                        "turn_id": transcript.turn_id,
+                        "response": dict(assistant_response),
+                        "surface": "native_audio",
+                        "presented_at": presented_at,
+                    },
+                }
+            )
+        raw_activation_binding = {
+            key: history_binding[key]
+            for key in (
+                "scope",
+                "interaction_id",
+                "activation_id",
+                "activation_generation",
+                "correlation_id",
+            )
+        }
+        try:
+            parsed_binding = NativeInteractionBinding.from_dict(raw_activation_binding)
+        except Exception as error:
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_INPUT_TRANSCRIPT_INVALID",
+                "Native input transcript binding is invalid",
+            ) from error
+        if (
+            parsed_binding != session.activation.binding
+            or history_binding.get("turn_id") != transcript.turn_id
+            or history_binding.get("commit_id") != transcript.commit_id
+            or history_binding.get("provider_session_id")
+            != transcript.provider_session_id
+            or history_binding.get("provider_item_id") != transcript.provider_item_id
+            or history_binding.get("provider_event_id") != transcript.provider_event_id
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_INPUT_TRANSCRIPT_INVALID",
+                "Native input transcript history does not match its Provider fact",
+            )
+        if result.get("accepted") is False or (
+            transcript.provider_item_id in session.projected_input_transcript_items
+        ):
+            return
+        parent = self._records.get(session.record_id)
+        notification_key = (
+            session.activation.binding.scope.session_id or "",
+            session.activation.binding.interaction_id,
+            session.activation.connection_id,
+        )
+        notifications = self._native_notifications.get(notification_key)
+        if (
+            parent is None
+            or parent.route_completed
+            or parent.native_activation != session.activation
+            or notifications is None
+            or notifications.full()
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_NOTIFICATION_BACKPRESSURE",
+                "Native user transcript notification route is unavailable",
+            )
+        notification = {
+            "status": "notification",
+            "kind": "native.user_transcript",
+            "request_id": self._native_request_id(session, "input-transcript"),
+            "round_id": None,
+            "response": None,
+            "agent_event": {
+                "event_type": "chat.final",
+                "message": dict(message),
+                "binding": dict(history_binding),
+                **(
+                    {"following_assistant": following_projection}
+                    if following_projection
+                    else {}
+                ),
+            },
+            "source_event": None,
+            "progress_event": None,
+            "presentation_unit": None,
+            "audio": None,
+            "error_reason": None,
+            "publish_seq": None,
+            "session_id": parent.binding.session_id,
+            "correlation_id": parent.binding.correlation_id,
+            "interaction_id": parent.binding.interaction_id,
+            "activation_id": parent.product_activation_id,
+            "activation_generation": parent.product_activation_generation,
+        }
+        notifications.put_nowait(notification)
+        session.projected_input_transcript_items.add(transcript.provider_item_id)
 
     @staticmethod
     def _native_stop_response(action: InteractionAction) -> ResponseRef:
@@ -5337,7 +5560,7 @@ class DedicatedMediaProductRegistry:
         receipt: Mapping[str, object],
         routed_session_id: str,
         connection_id: str,
-    ) -> bool:
+    ) -> dict[str, object] | None:
         """Forward one accepted Native render receipt to Runtime exactly once."""
 
         response = ResponseRef(
@@ -5392,10 +5615,10 @@ class DedicatedMediaProductRegistry:
                         or session.closed
                         or replay.receipt != dict(receipt)
                     ):
-                        return False
+                        return None
                     assert replay_key is not None
                     self._native_playout_replays.move_to_end(replay_key)
-                    return True
+                    return dict(replay.receipt)
                 downlink = next(
                     (
                         candidate
@@ -5418,7 +5641,7 @@ class DedicatedMediaProductRegistry:
                     or downlink.native_final_unit_id is None
                     or downlink.native_final_unit_seq is None
                 ):
-                    return False
+                    return None
                 ack = PresentationAck(
                     ref=response,
                     surface=PresentationSurface.AUDIO,
@@ -5461,6 +5684,78 @@ class DedicatedMediaProductRegistry:
                     "MEDIA_NATIVE_PRESENTATION_ACK_INVALID",
                     "Native Runtime presentation result is not exact",
                 )
+            projected_receipt = dict(receipt)
+            if result.get("history_eligible") is True:
+                history = result.get("history")
+                if not isinstance(history, Mapping) or set(history) != {
+                    "response",
+                    "transcript",
+                    "presented_at",
+                    "message",
+                }:
+                    raise MediaTransportViolation(
+                        "MEDIA_NATIVE_PRESENTATION_ACK_INVALID",
+                        "Native assistant history projection is not closed",
+                    )
+                history_response = history.get("response")
+                message = history.get("message")
+                transcript = history.get("transcript")
+                presented_at = history.get("presented_at")
+                timestamp = (
+                    message.get("timestamp") if isinstance(message, Mapping) else None
+                )
+                if (
+                    not isinstance(history_response, Mapping)
+                    or set(history_response)
+                    != {"interaction_id", "response_id", "response_generation"}
+                    or ResponseRef(
+                        _required_id(
+                            history_response.get("interaction_id"),
+                            "history.response.interaction_id",
+                        ),
+                        _required_id(
+                            history_response.get("response_id"),
+                            "history.response.response_id",
+                        ),
+                        _safe_uint(
+                            history_response.get("response_generation"),
+                            "history.response.response_generation",
+                        ),
+                    )
+                    != response
+                    or type(transcript) is not str
+                    or not transcript
+                    or transcript != transcript.strip()
+                    or type(presented_at) is not str
+                    or not presented_at
+                    or not isinstance(message, Mapping)
+                    or set(message) != {"id", "role", "content", "timestamp"}
+                    or message.get("role") != "assistant"
+                    or message.get("content") != transcript
+                    or message.get("id")
+                    != (
+                        "live-voice:"
+                        f"{response.interaction_id}:{response.response_id}:"
+                        f"{response.response_generation}:native-audio:"
+                        f"{hashlib.sha256(transcript.encode('utf-8')).hexdigest()}"
+                    )
+                    or isinstance(timestamp, bool)
+                    or not isinstance(timestamp, (int, float))
+                    or not math.isfinite(timestamp)
+                    or timestamp < 0
+                ):
+                    raise MediaTransportViolation(
+                        "MEDIA_NATIVE_PRESENTATION_ACK_INVALID",
+                        "Native assistant history projection is not exact",
+                    )
+                projected_receipt["chat_projection"] = {
+                    "message": dict(message),
+                    "binding": {
+                        "response": dict(history_response),
+                        "surface": "native_audio",
+                        "presented_at": presented_at,
+                    },
+                }
             with self._lock:
                 if (
                     self._native_sessions.get(session_key) is not session
@@ -5477,7 +5772,7 @@ class DedicatedMediaProductRegistry:
                     session_key=session_key,
                     response=response,
                     unit_id=unit_id,
-                    receipt=receipt,
+                    receipt=projected_receipt,
                 )
                 self._records.pop(downlink.record_id, None)
                 self._drop_pending_for_record_id(downlink.record_id)
@@ -5490,7 +5785,7 @@ class DedicatedMediaProductRegistry:
                 self._release_stream_source(downlink)
                 downlink.downlink_overlap_record_id = None
                 downlink.pcm.clear()
-            return True
+            return projected_receipt
 
     def _drop_pending_for_record_id(self, record_id: str) -> None:
         for ticket, pending_record_id in tuple(self._pending_tickets.items()):
@@ -5775,11 +6070,13 @@ def register_dedicated_media_rpc_handlers(
                 user_id=user_id,
                 request_origin=_request_origin(ws),
             )
-            await registry.acknowledge_native_playout(
+            native_payload = await registry.acknowledge_native_playout(
                 receipt=payload,
                 routed_session_id=session_id,
                 connection_id=str(getattr(ws, "_jiuwen_ws_id", "") or id(ws)),
             )
+            if native_payload is not None:
+                payload = native_payload
             await channel.send_response(ws, req_id, ok=True, payload=payload)
         except MediaTransportViolation as exc:
             await channel.send_response(

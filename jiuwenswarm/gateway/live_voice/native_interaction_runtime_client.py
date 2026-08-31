@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import hmac
+import math
 import unicodedata
 from dataclasses import dataclass
 from typing import Any
@@ -217,6 +219,129 @@ def _canonical_transcript(value: object) -> bool:
         return False
 
 
+def _canonical_native_assistant_projection(
+    value: object, *, require_turn_id: bool = False
+) -> bool:
+    expected = {
+        "response",
+        "transcript",
+        "presented_at",
+        "message",
+    }
+    if require_turn_id:
+        expected.add("turn_id")
+    if not isinstance(value, dict) or set(value) != expected:
+        return False
+    response = value.get("response")
+    transcript = value.get("transcript")
+    presented_at = value.get("presented_at")
+    message = value.get("message")
+    timestamp = message.get("timestamp") if isinstance(message, dict) else None
+    if not _canonical_response_ref(response) or not _canonical_transcript(transcript):
+        return False
+    assert isinstance(response, dict) and isinstance(transcript, str)
+    expected_message_id = (
+        "live-voice:"
+        f"{response.get('interaction_id')}:{response.get('response_id')}:"
+        f"{response.get('response_generation')}:native-audio:"
+        f"{hashlib.sha256(transcript.encode('utf-8')).hexdigest()}"
+    )
+    return (
+        (not require_turn_id or _canonical_result_identity(value.get("turn_id")))
+        and _canonical_result_identity(presented_at)
+        and isinstance(message, dict)
+        and set(message) == {"id", "role", "content", "timestamp"}
+        and message.get("id") == expected_message_id
+        and message.get("role") == "assistant"
+        and message.get("content") == transcript
+        and not isinstance(timestamp, bool)
+        and isinstance(timestamp, (int, float))
+        and math.isfinite(timestamp)
+        and timestamp >= 0
+    )
+
+
+def _canonical_native_user_history(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) not in (
+        {"message", "binding"},
+        {"message", "binding", "following_assistant"},
+    ):
+        return False
+    message = value.get("message")
+    binding = value.get("binding")
+    if not isinstance(message, dict) or set(message) != {
+        "id",
+        "role",
+        "content",
+        "timestamp",
+    }:
+        return False
+    timestamp = message.get("timestamp")
+    if (
+        message.get("role") != "user"
+        or not _canonical_result_identity(message.get("id"))
+        or not _canonical_transcript(message.get("content"))
+        or isinstance(timestamp, bool)
+        or not isinstance(timestamp, (int, float))
+        or not math.isfinite(timestamp)
+        or timestamp < 0
+    ):
+        return False
+    if not isinstance(binding, dict) or set(binding) != {
+        "scope",
+        "interaction_id",
+        "activation_id",
+        "activation_generation",
+        "correlation_id",
+        "turn_id",
+        "commit_id",
+        "provider_session_id",
+        "provider_item_id",
+        "provider_event_id",
+    }:
+        return False
+    try:
+        NativeInteractionBinding.from_dict(
+            {
+                key: binding[key]
+                for key in (
+                    "scope",
+                    "interaction_id",
+                    "activation_id",
+                    "activation_generation",
+                    "correlation_id",
+                )
+            }
+        )
+    except Exception:
+        return False
+    binding_valid = all(
+        _canonical_result_identity(binding.get(key))
+        for key in (
+            "turn_id",
+            "commit_id",
+            "provider_session_id",
+            "provider_item_id",
+            "provider_event_id",
+        )
+    )
+    following = value.get("following_assistant")
+    return binding_valid and (
+        following is None
+        or (
+            isinstance(following, list)
+            and bool(following)
+            and all(
+                _canonical_native_assistant_projection(item, require_turn_id=True)
+                and item.get("turn_id") == binding.get("turn_id")
+                for item in following
+                if isinstance(item, dict)
+            )
+            and all(isinstance(item, dict) for item in following)
+        )
+    )
+
+
 def _canonical_delegate_result(value: object) -> bool:
     if (
         type(value) is not str
@@ -244,6 +369,16 @@ def _validate_method_result(
             valid = (
                 result.get("status") == "observed"
                 and type(result.get("accepted")) is bool
+            )
+        elif kind == "input_transcript":
+            _closed_result(
+                result,
+                frozenset({"kind", "status", "accepted", "history"}),
+            )
+            valid = (
+                result.get("status") == "observed"
+                and type(result.get("accepted")) is bool
+                and _canonical_native_user_history(result.get("history"))
             )
         elif kind == "response":
             _closed_result(
@@ -326,6 +461,17 @@ def _validate_method_result(
             presented_at = (
                 history.get("presented_at") if isinstance(history, dict) else None
             )
+            message = history.get("message") if isinstance(history, dict) else None
+            response = history.get("response") if isinstance(history, dict) else None
+            timestamp = message.get("timestamp") if isinstance(message, dict) else None
+            expected_message_id = None
+            if isinstance(response, dict) and type(transcript) is str:
+                expected_message_id = (
+                    "live-voice:"
+                    f"{response.get('interaction_id')}:{response.get('response_id')}:"
+                    f"{response.get('response_generation')}:native-audio:"
+                    f"{hashlib.sha256(transcript.encode('utf-8')).hexdigest()}"
+                )
             valid = (
                 result.get("status") == "observed"
                 and type(eligible) is bool
@@ -333,10 +479,20 @@ def _validate_method_result(
                     eligible is False
                     or (
                         isinstance(history, dict)
-                        and set(history) == {"response", "transcript", "presented_at"}
-                        and _canonical_response_ref(history.get("response"))
+                        and set(history)
+                        == {"response", "transcript", "presented_at", "message"}
+                        and _canonical_response_ref(response)
                         and _canonical_transcript(transcript)
                         and _canonical_result_identity(presented_at)
+                        and isinstance(message, dict)
+                        and set(message) == {"id", "role", "content", "timestamp"}
+                        and message.get("id") == expected_message_id
+                        and message.get("role") == "assistant"
+                        and message.get("content") == transcript
+                        and not isinstance(timestamp, bool)
+                        and isinstance(timestamp, (int, float))
+                        and math.isfinite(timestamp)
+                        and timestamp >= 0
                     )
                 )
             )
@@ -575,6 +731,7 @@ class GatewayNativeInteractionRuntimeClient:
                 audio is None
                 or event.action is not None
                 or event.turn_commit is not None
+                or event.input_transcript is not None
                 or event.delegate is not None
                 or event.provider_done is not None
                 or audio.response != first_audio.response

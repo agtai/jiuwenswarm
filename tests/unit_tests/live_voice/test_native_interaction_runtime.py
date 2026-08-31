@@ -30,6 +30,7 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeAudioObservation,
     NativeDelegateProposal,
+    NativeInputTranscript,
     NativeInteractionBinding,
     NativePresentationCursor,
     NativeTurnCommit,
@@ -38,6 +39,7 @@ from jiuwenswarm.server.live_voice.native_interaction_runtime import (
     NativeHistoryAdmission,
     NativeInteractionRuntimeError,
     NativeInteractionRuntimeOwner,
+    NativeUserHistoryAdmission,
 )
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
     MAX_NATIVE_AUDIO_DELTA_BYTES,
@@ -82,6 +84,19 @@ def turn_commit(turn_number: int = 1) -> NativeTurnCommit:
         input_audio_start_ms=(turn_number - 1) * 20,
         input_audio_end_ms=turn_number * 20,
         committed_audio_ms=20,
+    )
+
+
+def input_transcript(turn_number: int = 1) -> NativeInputTranscript:
+    commit = turn_commit(turn_number)
+    return NativeInputTranscript(
+        binding=commit.binding,
+        turn_id=commit.turn_id,
+        commit_id=commit.commit_id,
+        provider_session_id=commit.provider_session_id,
+        provider_item_id=commit.provider_item_id,
+        provider_event_id=f"provider-input-transcript-{turn_number}",
+        transcript=f"Native user transcript {turn_number}.",
     )
 
 
@@ -132,6 +147,72 @@ async def active_owner() -> tuple[
     assert await owner.start() is True
     assert await owner.accept_turn(turn_commit()) is True
     return owner, runtime
+
+
+@pytest.mark.asyncio
+async def test_exact_final_input_transcript_admits_user_history_once() -> None:
+    owner, runtime = await active_owner()
+    transcript = input_transcript()
+
+    accepted, admission = await owner.accept_input_transcript(transcript)
+    replayed, replay_admission = await owner.accept_input_transcript(transcript)
+
+    assert accepted is True
+    assert replayed is False
+    assert replay_admission == admission
+    assert isinstance(admission, NativeUserHistoryAdmission)
+    assert admission.binding == binding()
+    assert admission.turn_id == turn_commit().turn_id
+    assert admission.commit_id == turn_commit().commit_id
+    assert admission.provider_item_id == turn_commit().provider_item_id
+    assert admission.provider_event_id == transcript.provider_event_id
+    assert admission.transcript == transcript.transcript
+    assert admission.observed_at.endswith("Z")
+    snapshot = runtime.snapshot()
+    assert snapshot.conversation.responses == ()
+    assert snapshot.presentation.records == ()
+
+
+@pytest.mark.asyncio
+async def test_provider_item_identity_cannot_bind_a_second_native_turn() -> None:
+    owner, runtime = await active_owner()
+    changed = replace(
+        turn_commit(2),
+        provider_item_id=turn_commit(1).provider_item_id,
+    )
+    before = runtime.snapshot()
+
+    with pytest.raises(NativeInteractionRuntimeError) as raised:
+        await owner.accept_turn(changed)
+
+    assert raised.value.reason == "NATIVE_TURN_PROVIDER_ITEM_CONFLICT"
+    assert runtime.snapshot() == before
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_changed_or_wrong_input_transcript_has_zero_runtime_effect() -> None:
+    owner, runtime = await active_owner()
+    transcript = input_transcript()
+    assert (await owner.accept_input_transcript(transcript))[0] is True
+    before = runtime.snapshot()
+
+    with pytest.raises(NativeInteractionRuntimeError) as changed:
+        await owner.accept_input_transcript(
+            replace(transcript, transcript="Changed transcript.")
+        )
+    assert changed.value.reason == "NATIVE_INPUT_TRANSCRIPT_CONFLICT"
+
+    with pytest.raises(NativeInteractionRuntimeError) as wrong_item:
+        await owner.accept_input_transcript(
+            replace(
+                transcript,
+                provider_event_id="provider-input-transcript-wrong-item",
+                provider_item_id="provider-user-item-foreign",
+            )
+        )
+    assert wrong_item.value.reason == "NATIVE_INPUT_TRANSCRIPT_TURN_MISMATCH"
+    assert runtime.snapshot() == before
 
 
 def delegate_proposal(response: ResponseRef) -> NativeDelegateProposal:
@@ -423,6 +504,7 @@ async def test_native_turn_response_audio_done_and_history_positive_journey() ->
 
     assert history == NativeHistoryAdmission(
         response=admission.response,
+        turn_id=turn_commit().turn_id,
         transcript="Canonical answer.",
         presented_at="2026-08-25T10:00:01Z",
     )
@@ -430,6 +512,40 @@ async def test_native_turn_response_audio_done_and_history_positive_journey() ->
         record.effect.effect_type != "history.append"
         for record in runtime.snapshot().effects
     )
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_predecessor_full_ack_admits_history_after_successor_starts() -> (
+    None
+):
+    owner, runtime = await active_owner()
+    first = await owner.accept_provider_response(
+        "provider-response-1", "native-response-1"
+    )
+    assert await owner.accept_audio(
+        audio(first.response, first.provider_response_id, 0)
+    )
+    assert await owner.accept_provider_done(
+        done(first.response, first.provider_response_id)
+    )
+    second = await owner.accept_provider_response(
+        "provider-response-2", "native-response-2"
+    )
+
+    ack = ack_for(runtime, first.response, 0)
+    history = await owner.acknowledge_audio(ack)
+    replay = await owner.acknowledge_audio(ack)
+
+    assert history == NativeHistoryAdmission(
+        response=first.response,
+        turn_id=turn_commit().turn_id,
+        transcript="Canonical answer.",
+        presented_at="2026-08-25T10:00:01Z",
+    )
+    assert replay == history
+    assert second.response.response_generation > first.response.response_generation
+    assert await owner.history_admission(first.response) == history
     await owner.close()
 
 
@@ -591,6 +707,7 @@ async def test_final_ack_before_done_reconciles_when_done_arrives_without_ack_re
     )
     assert await owner.history_admission(admission.response) == NativeHistoryAdmission(
         admission.response,
+        turn_commit().turn_id,
         "Canonical answer.",
         "2026-08-25T10:00:01Z",
     )

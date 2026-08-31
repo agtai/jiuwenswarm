@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,
@@ -36,6 +37,7 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NativeAudioObservation,
     NativeDelegateProposal,
     NativeInteractionBinding,
+    NativeInputTranscript,
     NativePresentationCursor,
     NativeTurnCommit,
 )
@@ -93,8 +95,21 @@ class NativeBargeAdmission:
 @dataclass(frozen=True, slots=True)
 class NativeHistoryAdmission:
     response: ResponseRef
+    turn_id: str
     transcript: str
     presented_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class NativeUserHistoryAdmission:
+    binding: NativeInteractionBinding
+    turn_id: str
+    commit_id: str
+    provider_session_id: str
+    provider_item_id: str
+    provider_event_id: str
+    transcript: str
+    observed_at: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +240,11 @@ class NativeInteractionRuntimeOwner:
         self._closed = False
         self._turns_by_id: dict[str, NativeTurnCommit] = {}
         self._turns_by_commit: dict[str, NativeTurnCommit] = {}
+        self._turns_by_provider_item: dict[str, NativeTurnCommit] = {}
+        self._input_transcripts_by_item: dict[
+            str, tuple[NativeInputTranscript, NativeUserHistoryAdmission]
+        ] = {}
+        self._input_transcript_event_items: dict[str, str] = {}
         self._current_turn_id: str | None = None
         self._responses_by_provider: dict[str, _RuntimeResponse] = {}
         self._responses_by_ref: dict[ResponseRef, _RuntimeResponse] = {}
@@ -296,9 +316,25 @@ class NativeInteractionRuntimeOwner:
                 )
             prior_turn = self._turns_by_id.get(commit.turn_id)
             prior_commit = self._turns_by_commit.get(commit.commit_id)
-            if prior_turn is not None or prior_commit is not None:
-                if prior_turn == commit and prior_commit == commit:
+            prior_provider_item = self._turns_by_provider_item.get(
+                commit.provider_item_id
+            )
+            if (
+                prior_turn is not None
+                or prior_commit is not None
+                or prior_provider_item is not None
+            ):
+                if (
+                    prior_turn == commit
+                    and prior_commit == commit
+                    and prior_provider_item == commit
+                ):
                     return False
+                if prior_provider_item is not None and prior_provider_item != commit:
+                    raise NativeInteractionRuntimeError(
+                        "NATIVE_TURN_PROVIDER_ITEM_CONFLICT",
+                        "Provider input item identity cannot bind another Native turn",
+                    )
                 raise NativeInteractionRuntimeError(
                     "NATIVE_TURN_COMMIT_CONFLICT",
                     "Native turn or commit identity cannot change its meaning",
@@ -315,8 +351,79 @@ class NativeInteractionRuntimeOwner:
                 )
             self._turns_by_id[commit.turn_id] = commit
             self._turns_by_commit[commit.commit_id] = commit
+            self._turns_by_provider_item[commit.provider_item_id] = commit
             self._current_turn_id = commit.turn_id
             return True
+
+    async def accept_input_transcript(
+        self, transcript: NativeInputTranscript
+    ) -> tuple[bool, NativeUserHistoryAdmission]:
+        """Admit one final transcript only for its exact retained Native turn."""
+
+        async with self._lock:
+            self._require_open()
+            if not isinstance(transcript, NativeInputTranscript):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_INPUT_TRANSCRIPT_INVALID",
+                    "Native input transcript must use the closed contract",
+                )
+            if transcript.binding != self._binding:
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_INPUT_TRANSCRIPT_BINDING_MISMATCH",
+                    "Native input transcript must match the exact activation binding",
+                )
+            prior = self._input_transcripts_by_item.get(transcript.provider_item_id)
+            prior_event_item = self._input_transcript_event_items.get(
+                transcript.provider_event_id
+            )
+            if prior is not None or prior_event_item is not None:
+                if (
+                    prior is not None
+                    and prior[0] == transcript
+                    and prior_event_item == transcript.provider_item_id
+                ):
+                    return False, prior[1]
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_INPUT_TRANSCRIPT_CONFLICT",
+                    "Native input transcript identity cannot change its meaning",
+                )
+            commit = self._turns_by_id.get(transcript.turn_id)
+            if (
+                commit is None
+                or self._turns_by_commit.get(transcript.commit_id) is not commit
+                or commit.provider_session_id != transcript.provider_session_id
+                or commit.provider_item_id != transcript.provider_item_id
+            ):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_INPUT_TRANSCRIPT_TURN_MISMATCH",
+                    "Native input transcript must bind one exact accepted turn",
+                )
+            self._require_record_capacity(
+                len(self._input_transcripts_by_item),
+                "NATIVE_INPUT_TRANSCRIPT_LEDGER_FULL",
+            )
+            admission = NativeUserHistoryAdmission(
+                binding=self._binding,
+                turn_id=commit.turn_id,
+                commit_id=commit.commit_id,
+                provider_session_id=commit.provider_session_id,
+                provider_item_id=commit.provider_item_id,
+                provider_event_id=transcript.provider_event_id,
+                transcript=transcript.transcript,
+                observed_at=(
+                    datetime.now(UTC)
+                    .isoformat(timespec="milliseconds")
+                    .replace("+00:00", "Z")
+                ),
+            )
+            self._input_transcripts_by_item[transcript.provider_item_id] = (
+                transcript,
+                admission,
+            )
+            self._input_transcript_event_items[transcript.provider_event_id] = (
+                transcript.provider_item_id
+            )
+            return True, admission
 
     async def admit_delegate(
         self,
@@ -537,6 +644,7 @@ class NativeInteractionRuntimeOwner:
                 runtime_response_id,
                 history_policy=HistorySurfacePolicy.NATIVE_AUDIO,
                 minimum_generation=1,
+                preserve_terminal_predecessor_presentation=True,
             )
             await self._runtime.transition_response(ref, ResponseState.GENERATING)
             self._retire_terminal_predecessor_audio_locked()
@@ -963,8 +1071,8 @@ class NativeInteractionRuntimeOwner:
             retained = self._responses_by_ref.get(ack.ref)
             if (
                 retained is None
-                or retained is not self._current_response
                 or retained.cancelled
+                or (retained is not self._current_response and retained.done is None)
             ):
                 return None
             if self._delegate_successor_fenced_source_locked(ack.ref):
@@ -999,7 +1107,11 @@ class NativeInteractionRuntimeOwner:
                     "Native history lookup requires one exact ResponseRef",
                 )
             retained = self._responses_by_ref.get(response)
-            if retained is None or retained is not self._current_response:
+            if (
+                retained is None
+                or retained.cancelled
+                or self._delegate_successor_fenced_source_locked(response)
+            ):
                 return None
             return retained.history
 
@@ -1037,6 +1149,7 @@ class NativeInteractionRuntimeOwner:
         assert presented_at is not None
         admission = NativeHistoryAdmission(
             response,
+            retained.turn_id,
             retained.done.transcript,
             presented_at,
         )
@@ -1336,4 +1449,5 @@ __all__ = [
     "NativeInteractionRuntimeOwner",
     "NativeInteractionRuntimeSnapshot",
     "NativeResponseAdmission",
+    "NativeUserHistoryAdmission",
 ]

@@ -10,6 +10,7 @@ import {
   PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
   PRODUCT_P1_MEDIA_CLOSE_METHOD,
   PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD,
+  parseProductP1NativeChatProjection,
   ProductP1VoiceRouteOwner,
   parseProductP1NativeInteractionActivation,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productP1VoiceRoute.js';
@@ -30,6 +31,48 @@ const MANUAL_EOT_FALLBACK = Object.freeze({
   reason_id: 'MEDIA_END_OF_TURN_FEATURE_OFF',
   fallback: 'manual',
   visible: true,
+});
+
+test('formal P1 Native chat projection is exact and response-bound', () => {
+  const response = Object.freeze({
+    interaction_id: 'interaction-native-1',
+    response_id: 'response-native-1',
+    response_generation: 1,
+  });
+  const projection = {
+    message: {
+      id: 'live-voice:interaction-native-1:response-native-1:1:native-audio:digest',
+      role: 'assistant',
+      content: '你好，我是 JiuwenSwarm。',
+      timestamp: 1_788_134_401.5,
+    },
+    binding: {
+      response,
+      surface: 'native_audio',
+      presented_at: '2026-08-31T00:00:01.500Z',
+    },
+  };
+
+  assert.deepEqual(parseProductP1NativeChatProjection(projection, response), {
+    id: projection.message.id,
+    role: 'assistant',
+    content: projection.message.content,
+    timestamp: '2026-08-31T00:00:01.500Z',
+  });
+  assert.throws(
+    () => parseProductP1NativeChatProjection({ ...projection, forged: true }, response),
+    /fields are not closed/,
+  );
+  assert.throws(
+    () => parseProductP1NativeChatProjection({
+      ...projection,
+      binding: {
+        ...projection.binding,
+        response: { ...response, response_generation: 2 },
+      },
+    }, response),
+    /response binding mismatch/,
+  );
 });
 
 test('formal P1 buffers the bounded downlink handshake window before playout ownership is installed', () => {
@@ -4789,7 +4832,7 @@ test('formal P1 initial and successor Speech adapters forward the exact request 
 test('formal P1 L0 success waits for the authoritative playout receipt and retains render time', () => {
   assert.match(
     productP1VoiceRouteSource,
-    /await this\.#acknowledgePlayout\(pendingPlayout\);[\s\S]*?this\.#l0Record\([\s\S]*?'playout_completed'[\s\S]*?'success'[\s\S]*?completed/s,
+    /await this\.#acknowledgePlayout\(pendingPlayout, (?:true|false)\);[\s\S]*?this\.#l0Record\([\s\S]*?'playout_completed'[\s\S]*?'success'[\s\S]*?completed/s,
   );
   assert.doesNotMatch(
     productP1VoiceRouteSource,
@@ -6398,6 +6441,23 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
           receipt_id: 'native-playout-receipt-1',
           duplex_media_observed: true,
           ...params,
+          chat_projection: {
+            message: {
+              id: 'live-voice:interaction-1:native-response-1:1:native-audio:digest',
+              role: 'assistant',
+              content: '我是 JiuwenSwarm。',
+              timestamp: 1_788_170_401,
+            },
+            binding: {
+              response: {
+                interaction_id: params.interaction_id,
+                response_id: params.response_id,
+                response_generation: params.response_generation,
+              },
+              surface: 'native_audio',
+              presented_at: '2026-08-31T10:00:01.000Z',
+            },
+          },
         };
       }
       if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
@@ -6532,7 +6592,12 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
   assert.ok(uplink.sent.filter(value => typeof value !== 'string').length > uplinkFramesBeforePlayout);
   environment.contexts[0].deferSourceEnds = false;
   environment.contexts[0].releaseSourceEnds();
-  await normalPlayout;
+  assert.deepEqual(await normalPlayout, {
+    id: 'live-voice:interaction-1:native-response-1:1:native-audio:digest',
+    role: 'assistant',
+    content: '我是 JiuwenSwarm。',
+    timestamp: '2026-08-31T10:00:01.000Z',
+  });
 
   assert.equal(unexpectedBargeStarts, 0);
   assert.equal(forbiddenCascadeStopCalls, 0);

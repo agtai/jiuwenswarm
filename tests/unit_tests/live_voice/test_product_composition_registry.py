@@ -85,6 +85,7 @@ from jiuwenswarm.server.live_voice.native_interaction_config import (
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeDelegateProposal,
+    NativeInputTranscript,
     NativeInteractionBinding,
     NativeTurnCommit,
 )
@@ -391,6 +392,8 @@ class _HistoryWriter:
         self.users: list[object] = []
         self.assistants: list[object] = []
         self.native_assistants: list[object] = []
+        self.native_users: list[object] = []
+        self.native_order: list[str] = []
         self.native_attempts = 0
         self.fail_native_once = fail_native_once
         self.native_written = asyncio.Event()
@@ -413,7 +416,15 @@ class _HistoryWriter:
             self.fail_native_once = False
             raise OSError("native history unavailable")
         self.native_assistants.append((admission, session_id, channel_id))
+        self.native_order.append("assistant")
         self.native_written.set()
+        return True
+
+    async def persist_native_user(
+        self, admission, *, session_id: str, channel_id: str
+    ) -> bool:
+        self.native_users.append((admission, session_id, channel_id))
+        self.native_order.append("user")
         return True
 
 
@@ -1810,6 +1821,25 @@ def _native_turn_proposal(
     )
 
 
+def _native_input_transcript_proposal(
+    binding: NativeInteractionBinding, *, ordinal: int = 1
+) -> NativeInteractionProposal:
+    return NativeInteractionProposal.from_engine_event(
+        binding,
+        NativeEngineEvent(
+            input_transcript=NativeInputTranscript(
+                binding=binding,
+                turn_id=f"native-turn-{ordinal}",
+                commit_id=f"native-commit-{ordinal}",
+                provider_session_id="provider-session-native",
+                provider_item_id=f"provider-item-{ordinal}",
+                provider_event_id=f"provider-input-transcript-{ordinal}",
+                transcript=f"Native user transcript {ordinal}.",
+            )
+        ),
+    )
+
+
 def _native_action_proposal(
     binding: NativeInteractionBinding, *, ordinal: int
 ) -> NativeInteractionProposal:
@@ -2904,9 +2934,11 @@ async def test_native_current_task_status_uses_authoritative_native_route(
         outcome=TerminalOutcome.COMPLETED,
     )
     composition.known_tasks[composition.current.task_id] = composition.current
-    status_binding, status_capability, status_source = (
-        await _activate_native_delegate_source(registry, stem="native-current-status")
-    )
+    (
+        status_binding,
+        status_capability,
+        status_source,
+    ) = await _activate_native_delegate_source(registry, stem="native-current-status")
     status = await registry.handle_native_propose(
         params=_native_propose_params(
             status_binding,
@@ -2940,10 +2972,12 @@ async def test_native_reproduced_status_asr_uses_authoritative_native_route(
     )
     composition.current = _background_task(tmp_path)
     composition.known_tasks[composition.current.task_id] = composition.current
-    status_binding, status_capability, status_source = (
-        await _activate_native_delegate_source(
-            registry, stem="native-reproduced-current-status"
-        )
+    (
+        status_binding,
+        status_capability,
+        status_source,
+    ) = await _activate_native_delegate_source(
+        registry, stem="native-reproduced-current-status"
     )
     status = await registry.handle_native_propose(
         params=_native_propose_params(
@@ -3010,10 +3044,12 @@ async def test_native_reproduced_adjustment_status_asr_uses_authoritative_events
             },
         )
     )
-    status_binding, status_capability, status_source = (
-        await _activate_native_delegate_source(
-            registry, stem="native-reproduced-adjustment-status"
-        )
+    (
+        status_binding,
+        status_capability,
+        status_source,
+    ) = await _activate_native_delegate_source(
+        registry, stem="native-reproduced-adjustment-status"
     )
     status = await registry.handle_native_propose(
         params=_native_propose_params(
@@ -3064,9 +3100,11 @@ async def test_native_available_result_uses_toolless_agent_delegate(
     }
 
     manager.agent = _Facade(final="第二天最早的固定安排是\n08:30 参观博物馆。")
-    query_binding, query_capability, query_source = (
-        await _activate_native_delegate_source(registry, stem="native-current-result")
-    )
+    (
+        query_binding,
+        query_capability,
+        query_source,
+    ) = await _activate_native_delegate_source(registry, stem="native-current-result")
     queried = await registry.handle_native_propose(
         params=_native_propose_params(
             query_binding,
@@ -3859,6 +3897,15 @@ async def test_native_ack_before_done_reconciles_and_retries_history_without_ack
         request_id="request-native-history-turn",
         session_id=SCOPE.session_id,
     )
+    user_transcript = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding,
+            capability,
+            _native_input_transcript_proposal(binding),
+        ),
+        request_id="request-native-history-input-transcript",
+        session_id=SCOPE.session_id,
+    )
     response = await registry.handle_native_propose(
         params=_native_propose_params(
             binding,
@@ -3868,7 +3915,7 @@ async def test_native_ack_before_done_reconciles_and_retries_history_without_ack
         request_id="request-native-history-response",
         session_id=SCOPE.session_id,
     )
-    assert turn.ok is response.ok is True
+    assert turn.ok is user_transcript.ok is response.ok is True
     response_payload = cast(
         dict[str, object],
         cast(dict[str, object], response.payload["result"])["response"],
@@ -3942,6 +3989,187 @@ async def test_native_ack_before_done_reconciles_and_retries_history_without_ack
     assert channel_id == "web"
     assert history.assistants == []
     assert route.activation_lease._runtime.snapshot().pending_history_intents == 0
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_assistant_ack_waits_for_same_turn_user_history(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(
+        tmp_path,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    history = _HistoryWriter()
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_engine="openai-realtime-native"),
+        request_id="request-native-ordered-history-activate",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    descriptor = cast(
+        dict[str, object],
+        cast(dict[str, object], activated.payload["result"])["_native_gateway"],
+    )
+    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
+    capability = cast(str, descriptor["capability"])
+    route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
+    route.activation_lease._runtime._history_writer = history
+
+    turn = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_turn_proposal(binding)
+        ),
+        request_id="request-native-ordered-history-turn",
+        session_id=SCOPE.session_id,
+    )
+    response = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_speak_proposal(binding)
+        ),
+        request_id="request-native-ordered-history-response",
+        session_id=SCOPE.session_id,
+    )
+    assert turn.ok is response.ok is True
+    response_payload = cast(
+        dict[str, object],
+        cast(dict[str, object], response.payload["result"])["response"],
+    )
+    response_ref = ResponseRef(
+        cast(str, response_payload["interaction_id"]),
+        cast(str, response_payload["response_id"]),
+        cast(int, response_payload["response_generation"]),
+    )
+    audio = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_audio_proposal(binding, response_ref)
+        ),
+        request_id="request-native-ordered-history-audio",
+        session_id=SCOPE.session_id,
+    )
+    unit = cast(
+        dict[str, object],
+        cast(dict[str, object], audio.payload["result"])["presentation_unit"],
+    )
+    done = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_done_proposal(binding, response_ref)
+        ),
+        request_id="request-native-ordered-history-done",
+        session_id=SCOPE.session_id,
+    )
+    acknowledgement = await registry.handle_native_presentation_ack(
+        params=_native_ack_params(
+            binding,
+            capability,
+            response_ref,
+            unit_id=cast(str, unit["unit_id"]),
+        ),
+        request_id="request-native-ordered-history-ack",
+        session_id=SCOPE.session_id,
+    )
+
+    assert done.ok is acknowledgement.ok is True
+    assert cast(dict, acknowledgement.payload["result"])["history_eligible"] is False
+    assert history.native_order == []
+    assert tuple(route.native_pending_assistant_history) == (response_ref,)
+    assert (
+        route.native_pending_assistant_history[response_ref].turn_id == "native-turn-1"
+    )
+
+    transcript = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_input_transcript_proposal(binding)
+        ),
+        request_id="request-native-ordered-history-transcript",
+        session_id=SCOPE.session_id,
+    )
+
+    assert transcript.ok is True
+    transcript_result = cast(dict[str, object], transcript.payload["result"])
+    transcript_history = cast(dict[str, object], transcript_result["history"])
+    following = cast(list[dict[str, object]], transcript_history["following_assistant"])
+    assert len(following) == 1
+    assert following[0]["turn_id"] == "native-turn-1"
+    assert cast(dict, following[0]["message"])["role"] == "assistant"
+    await asyncio.wait_for(history.native_written.wait(), timeout=1.0)
+    assert history.native_order == ["user", "assistant"]
+    assert route.native_pending_assistant_history == {}
+    assert manager.agent.calls == 0
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_input_transcript_persists_and_returns_exact_chat_projection_once(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(
+        tmp_path,
+        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
+    )
+    history = _HistoryWriter()
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(interaction_engine="openai-realtime-native"),
+        request_id="request-native-user-activate",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    descriptor = cast(
+        dict[str, object],
+        cast(dict[str, object], activated.payload["result"])["_native_gateway"],
+    )
+    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
+    capability = cast(str, descriptor["capability"])
+    route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
+    route.activation_lease._runtime._history_writer = history
+    turn = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_turn_proposal(binding)
+        ),
+        request_id="request-native-user-turn",
+        session_id=SCOPE.session_id,
+    )
+    assert turn.ok is True
+
+    first = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_input_transcript_proposal(binding)
+        ),
+        request_id="request-native-user-transcript",
+        session_id=SCOPE.session_id,
+    )
+    replay = await registry.handle_native_propose(
+        params=_native_propose_params(
+            binding, capability, _native_input_transcript_proposal(binding)
+        ),
+        request_id="request-native-user-transcript",
+        session_id=SCOPE.session_id,
+    )
+
+    assert first.ok is replay.ok is True
+    assert first.payload == replay.payload
+    result = cast(dict[str, object], first.payload["result"])
+    assert result["kind"] == "input_transcript"
+    assert result["status"] == "observed"
+    assert result["accepted"] is True
+    history_payload = cast(dict[str, object], result["history"])
+    assert history_payload["message"] == {
+        "id": "live-voice:native-commit-1:native-user",
+        "role": "user",
+        "content": "Native user transcript 1.",
+        "timestamp": cast(dict, history_payload["message"])["timestamp"],
+    }
+    assert history_payload["binding"] == {
+        **binding.to_dict(),
+        "turn_id": "native-turn-1",
+        "commit_id": "native-commit-1",
+        "provider_session_id": "provider-session-native",
+        "provider_item_id": "provider-item-1",
+        "provider_event_id": "provider-input-transcript-1",
+    }
+    assert len(history.native_users) == 1
+    assert manager.agent.calls == 0
+    assert registry._voice_task_origins == {}
     await registry.stop()
 
 

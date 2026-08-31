@@ -30,6 +30,7 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeAudioObservation,
     NativeDelegateProposal,
+    NativeInputTranscript,
     NativeInteractionBinding,
     NativeTurnCommit,
 )
@@ -46,6 +47,7 @@ _PROPOSAL_KEYS = frozenset(
         "binding",
         "action",
         "turn_commit",
+        "input_transcript",
         "audio_observation",
         "delegate",
         "provider_done",
@@ -291,6 +293,7 @@ class NativeInteractionProposal:
     binding: NativeInteractionBinding
     action: InteractionAction | None = None
     turn_commit: NativeTurnCommit | None = None
+    input_transcript: NativeInputTranscript | None = None
     audio_observation: NativeAudioObservation | None = None
     delegate: NativeDelegateProposal | None = None
     provider_done: NativeProviderDone | None = None
@@ -305,6 +308,7 @@ class NativeInteractionProposal:
             for item in (
                 self.action,
                 self.turn_commit,
+                self.input_transcript,
                 self.audio_observation,
                 self.delegate,
                 self.provider_done,
@@ -317,6 +321,25 @@ class NativeInteractionProposal:
             _action_from_dict(_action_to_dict(self.action), self.binding)
         if self.turn_commit is not None and self.turn_commit.binding != self.binding:
             self._binding_mismatch()
+        if (
+            self.input_transcript is not None
+            and self.input_transcript.binding != self.binding
+        ):
+            self._binding_mismatch()
+        if self.input_transcript is not None and any(
+            value is not None
+            for value in (
+                self.action,
+                self.turn_commit,
+                self.audio_observation,
+                self.delegate,
+                self.provider_done,
+            )
+        ):
+            raise NativeCarrierViolation(
+                "NATIVE_INPUT_TRANSCRIPT_NOT_STANDALONE",
+                "input transcript must be one standalone Native observation",
+            )
         if (
             self.audio_observation is not None
             and self.audio_observation.response.interaction_id
@@ -382,6 +405,7 @@ class NativeInteractionProposal:
             binding=binding,
             action=event.action,
             turn_commit=event.turn_commit,
+            input_transcript=event.input_transcript,
             audio_observation=audio_observation,
             delegate=event.delegate,
             provider_done=event.provider_done,
@@ -413,6 +437,11 @@ class NativeInteractionProposal:
                 if data["turn_commit"] is None
                 else NativeTurnCommit.from_dict(data["turn_commit"])
             )
+            input_transcript = (
+                None
+                if data["input_transcript"] is None
+                else NativeInputTranscript.from_dict(data["input_transcript"])
+            )
             audio_observation = (
                 None
                 if data["audio_observation"] is None
@@ -432,6 +461,7 @@ class NativeInteractionProposal:
                 binding=binding,
                 action=action,
                 turn_commit=turn,
+                input_transcript=input_transcript,
                 audio_observation=audio_observation,
                 delegate=delegate,
                 provider_done=done,
@@ -451,6 +481,11 @@ class NativeInteractionProposal:
             "action": None if self.action is None else _action_to_dict(self.action),
             "turn_commit": (
                 None if self.turn_commit is None else self.turn_commit.to_dict()
+            ),
+            "input_transcript": (
+                None
+                if self.input_transcript is None
+                else self.input_transcript.to_dict()
             ),
             "audio_observation": (
                 None

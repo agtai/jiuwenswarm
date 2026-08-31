@@ -60,6 +60,10 @@ from .critical_token_safety import (
     ProtectedRoute,
     SpeechAlternativeEvidence,
 )
+from .formal_history_writer import (
+    native_assistant_history_record,
+    native_user_history_record,
+)
 from .formal_task_models import (
     FormalTaskState,
     FormalTaskViolation,
@@ -90,6 +94,7 @@ from .native_interaction_contract import (
     NativePresentationCursor,
 )
 from .native_interaction_runtime import (
+    NativeHistoryAdmission,
     NativeInteractionRuntimeError,
     NativeInteractionRuntimeOwner,
 )
@@ -467,6 +472,10 @@ class _P2Route:
     native_capability: str | None = field(default=None, repr=False)
     native_close_retry: tuple[str, bytes] | None = field(default=None, repr=False)
     native_closed: bool = False
+    native_user_history_turns: set[str] = field(default_factory=set, repr=False)
+    native_pending_assistant_history: dict[ResponseRef, NativeHistoryAdmission] = field(
+        default_factory=dict, repr=False
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -4569,6 +4578,81 @@ class AgentServerProductCompositionRegistry:
             "capability": capability,
         }
 
+    @staticmethod
+    def _native_assistant_history_projection(
+        history: NativeHistoryAdmission,
+    ) -> dict[str, object]:
+        record = native_assistant_history_record(history, channel_id="web")
+        return {
+            "response": {
+                "interaction_id": history.response.interaction_id,
+                "response_id": history.response.response_id,
+                "response_generation": history.response.response_generation,
+            },
+            "transcript": history.transcript,
+            "presented_at": history.presented_at,
+            "message": {
+                "id": record["id"],
+                "role": record["role"],
+                "content": record["content"],
+                "timestamp": record["timestamp"],
+            },
+        }
+
+    async def _persist_or_retain_native_assistant_history(
+        self,
+        route: _P2Route,
+        history: NativeHistoryAdmission,
+    ) -> bool:
+        if history.turn_id not in route.native_user_history_turns:
+            prior = route.native_pending_assistant_history.get(history.response)
+            if prior is not None:
+                if prior != history:
+                    raise NativeInteractionRuntimeError(
+                        "NATIVE_HISTORY_REPLAY_CONFLICT",
+                        "pending Native assistant history cannot change its meaning",
+                    )
+                return False
+            if (
+                len(route.native_pending_assistant_history)
+                >= self._TURN_COMMIT_CAPACITY
+            ):
+                raise NativeInteractionRuntimeError(
+                    "NATIVE_HISTORY_LEDGER_FULL",
+                    "bounded Native assistant history wait ledger is full",
+                )
+            route.native_pending_assistant_history[history.response] = history
+            return False
+        await route.activation_lease.persist_native_assistant_history(
+            route.binding,
+            history,
+            channel_id="web",
+        )
+        return True
+
+    async def _release_native_assistant_history_after_user(
+        self,
+        route: _P2Route,
+        turn_id: str,
+    ) -> list[dict[str, object]]:
+        released: list[dict[str, object]] = []
+        for response, history in sorted(
+            tuple(route.native_pending_assistant_history.items()),
+            key=lambda item: item[0].response_generation,
+        ):
+            if history.turn_id != turn_id:
+                continue
+            await route.activation_lease.persist_native_assistant_history(
+                route.binding,
+                history,
+                channel_id="web",
+            )
+            route.native_pending_assistant_history.pop(response, None)
+            projection = self._native_assistant_history_projection(history)
+            projection["turn_id"] = history.turn_id
+            released.append(projection)
+        return released
+
     async def handle_native_propose(
         self,
         *,
@@ -4633,6 +4717,7 @@ class AgentServerProductCompositionRegistry:
                         or audio is None
                         or candidate.action is not None
                         or candidate.turn_commit is not None
+                        or candidate.input_transcript is not None
                         or candidate.delegate is not None
                         or candidate.provider_done is not None
                         or audio.response != first_audio.response
@@ -4846,6 +4931,7 @@ class AgentServerProductCompositionRegistry:
                         or proposal.audio_observation is not None
                         or proposal.delegate is not None
                         or proposal.provider_done is not None
+                        or proposal.input_transcript is not None
                     ):
                         raise NativeInteractionRuntimeError(
                             "NATIVE_TURN_PROPOSAL_INVALID",
@@ -4857,11 +4943,68 @@ class AgentServerProductCompositionRegistry:
                         "status": "observed",
                         "accepted": accepted,
                     }
+                elif proposal.input_transcript is not None:
+                    if any(
+                        value is not None
+                        for value in (
+                            proposal.action,
+                            proposal.turn_commit,
+                            proposal.audio_observation,
+                            proposal.delegate,
+                            proposal.provider_done,
+                        )
+                    ):
+                        raise NativeInteractionRuntimeError(
+                            "NATIVE_INPUT_TRANSCRIPT_PROPOSAL_INVALID",
+                            "Native input transcript must be a standalone observation",
+                        )
+                    accepted, admission = await owner.accept_input_transcript(
+                        proposal.input_transcript
+                    )
+                    await route.activation_lease.persist_native_user_history(
+                        route.binding,
+                        admission,
+                        channel_id="web",
+                    )
+                    route.native_user_history_turns.add(admission.turn_id)
+                    following_assistant = (
+                        await self._release_native_assistant_history_after_user(
+                            route,
+                            admission.turn_id,
+                        )
+                    )
+                    record = native_user_history_record(admission, channel_id="web")
+                    result_payload = {
+                        "kind": "input_transcript",
+                        "status": "observed",
+                        "accepted": accepted,
+                        "history": {
+                            "message": {
+                                "id": record["id"],
+                                "role": record["role"],
+                                "content": record["content"],
+                                "timestamp": record["timestamp"],
+                            },
+                            "binding": {
+                                **admission.binding.to_dict(),
+                                "turn_id": admission.turn_id,
+                                "commit_id": admission.commit_id,
+                                "provider_session_id": admission.provider_session_id,
+                                "provider_item_id": admission.provider_item_id,
+                                "provider_event_id": admission.provider_event_id,
+                            },
+                        },
+                    }
+                    if following_assistant:
+                        history_payload = result_payload["history"]
+                        assert isinstance(history_payload, dict)
+                        history_payload["following_assistant"] = following_assistant
                 elif proposal.provider_done is not None:
                     if (
                         proposal.action is not None
                         or proposal.audio_observation is not None
                         or proposal.delegate is not None
+                        or proposal.input_transcript is not None
                     ):
                         raise NativeInteractionRuntimeError(
                             "NATIVE_DONE_PROPOSAL_INVALID",
@@ -4872,10 +5015,8 @@ class AgentServerProductCompositionRegistry:
                         proposal.provider_done.response
                     )
                     if history is not None:
-                        await route.activation_lease.persist_native_assistant_history(
-                            route.binding,
-                            history,
-                            channel_id="web",
+                        await self._persist_or_retain_native_assistant_history(
+                            route, history
                         )
                     result_payload = {
                         "kind": "done",
@@ -4887,6 +5028,7 @@ class AgentServerProductCompositionRegistry:
                         proposal.action is not None
                         or proposal.turn_commit is not None
                         or proposal.delegate is not None
+                        or proposal.input_transcript is not None
                         or proposal.provider_done is not None
                     ):
                         raise NativeInteractionRuntimeError(
@@ -5132,6 +5274,7 @@ class AgentServerProductCompositionRegistry:
                 or proposal.action is None
                 or proposal.action.operation != "DELEGATE"
                 or proposal.turn_commit is not None
+                or proposal.input_transcript is not None
                 or proposal.audio_observation is not None
                 or proposal.provider_done is not None
                 or dict(proposal.action.payload)
@@ -5584,30 +5727,21 @@ class AgentServerProductCompositionRegistry:
                     try:
                         if ack is not None:
                             history = await owner.acknowledge_audio(ack)
+                            history_eligible = (
+                                history is not None
+                                and await self._persist_or_retain_native_assistant_history(
+                                    route, history
+                                )
+                            )
                             result_payload: dict[str, object] = {
                                 "kind": "presentation_ack",
                                 "status": "observed",
-                                "history_eligible": history is not None,
+                                "history_eligible": history_eligible,
                             }
-                            if history is not None:
-                                await route.activation_lease.persist_native_assistant_history(
-                                    route.binding,
-                                    history,
-                                    channel_id="web",
+                            if history is not None and history_eligible:
+                                result_payload["history"] = (
+                                    self._native_assistant_history_projection(history)
                                 )
-                                result_payload["history"] = {
-                                    "response": {
-                                        "interaction_id": (
-                                            history.response.interaction_id
-                                        ),
-                                        "response_id": history.response.response_id,
-                                        "response_generation": (
-                                            history.response.response_generation
-                                        ),
-                                    },
-                                    "transcript": history.transcript,
-                                    "presented_at": history.presented_at,
-                                }
                         elif cursor is not None:
                             assert action_id is not None
                             barge = await owner.barge_in(
@@ -6905,7 +7039,10 @@ class AgentServerProductCompositionRegistry:
         """
 
         reason = cls._frozen_one_current_task_status_reason(commit.text)
-        if resolution.route is not UnifiedCommittedInputRoute.DIALOGUE or reason is None:
+        if (
+            resolution.route is not UnifiedCommittedInputRoute.DIALOGUE
+            or reason is None
+        ):
             return resolution
         task_id = None if current_task is None else current_task.task_id
         target_binding = None if current_task is None else "current_background_task"
@@ -7673,9 +7810,7 @@ class AgentServerProductCompositionRegistry:
         has_native_p3_authority = native_p3_authority is not None
         has_native_delegate_source = native_delegate_source_response is not None
         if not (
-            native_result_only
-            == has_native_p3_authority
-            == has_native_delegate_source
+            native_result_only == has_native_p3_authority == has_native_delegate_source
         ):
             raise FormalTaskViolation(
                 "NATIVE_DELEGATE_AUTHORITY_INCOMPLETE",
@@ -8534,18 +8669,16 @@ class AgentServerProductCompositionRegistry:
         )
         if native_result_only:
             assert native_delegate_source_response is not None
-            canonical_text = (
-                await retained.activation_lease.execute_native_delegate(
-                    retained.binding,
-                    request_id=f"native-result-agent-{voice_identity[:40]}",
-                    source_response=native_delegate_source_response,
-                    correlation_id=retained.binding.correlation_id,
-                    commit=agent_commit,
-                    context=agent_context,
-                    channel_id=channel_id,
-                    allow_tools=False,
-                    answer_from_selected_task_result=True,
-                )
+            canonical_text = await retained.activation_lease.execute_native_delegate(
+                retained.binding,
+                request_id=f"native-result-agent-{voice_identity[:40]}",
+                source_response=native_delegate_source_response,
+                correlation_id=retained.binding.correlation_id,
+                commit=agent_commit,
+                context=agent_context,
+                channel_id=channel_id,
+                allow_tools=False,
+                answer_from_selected_task_result=True,
             )
             return await finish_text(
                 retained=retained,

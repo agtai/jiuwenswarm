@@ -138,6 +138,37 @@ def input_committed(event_id: str, item_id: str) -> dict[str, object]:
     )
 
 
+def input_transcript_completed(
+    event_id: str, item_id: str, transcript: str, *, include_usage: bool = True
+) -> dict[str, object]:
+    event = provider_event(
+        "conversation.item.input_audio_transcription.completed",
+        event_id,
+        item_id=item_id,
+        content_index=0,
+        transcript=transcript,
+        usage=None,
+    )
+    if not include_usage:
+        event.pop("usage")
+    return event
+
+
+def input_transcript_failed(event_id: str, item_id: str) -> dict[str, object]:
+    return provider_event(
+        "conversation.item.input_audio_transcription.failed",
+        event_id,
+        item_id=item_id,
+        content_index=0,
+        error={
+            "type": "transcription_error",
+            "code": "audio_unintelligible",
+            "message": "The audio could not be transcribed.",
+            "param": None,
+        },
+    )
+
+
 def response_created(event_id: str, response_id: str) -> dict[str, object]:
     return provider_event(
         "response.created",
@@ -333,6 +364,176 @@ async def accept_basic_turn(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transcript_before_commit", [True, False])
+async def test_final_input_transcript_binds_exact_turn_before_or_after_commit(
+    transcript_before_commit: bool,
+) -> None:
+    transcript_event = input_transcript_completed(
+        "event-transcript-1",
+        "user-item-1",
+        "  介绍你自己。  ",
+        include_usage=transcript_before_commit,
+    )
+    turn_events = [
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 640),
+    ]
+    if transcript_before_commit:
+        turn_events.append(transcript_event)
+    turn_events.append(input_committed("event-5", "user-item-1"))
+    if not transcript_before_commit:
+        turn_events.append(transcript_event)
+    engine, _socket, _factory = active_engine(*turn_events)
+    await engine.start()
+
+    assert (await engine.next_event()).action.operation == "LISTEN"  # type: ignore[union-attr]
+    assert (await engine.next_event()).action.operation == "SILENCE"  # type: ignore[union-attr]
+    if transcript_before_commit:
+        assert await engine.next_event() == NativeEngineEvent()
+    commit = await engine.next_event()
+    transcript = await asyncio.wait_for(engine.next_event(), timeout=0.05)
+
+    assert commit.turn_commit is not None
+    assert transcript.input_transcript is not None
+    assert transcript.input_transcript.binding == binding()
+    assert transcript.input_transcript.turn_id == commit.turn_commit.turn_id
+    assert transcript.input_transcript.commit_id == commit.turn_commit.commit_id
+    assert transcript.input_transcript.provider_item_id == "user-item-1"
+    assert transcript.input_transcript.provider_event_id == "event-transcript-1"
+    assert transcript.input_transcript.transcript == "介绍你自己。"
+
+
+@pytest.mark.asyncio
+async def test_input_transcripts_release_in_committed_turn_order() -> None:
+    engine, _socket, _factory = active_engine(
+        speech_started("event-1-start", "user-item-1", 0),
+        speech_stopped("event-1-stop", "user-item-1", 20),
+        input_committed("event-1-commit", "user-item-1"),
+        speech_started("event-2-start", "user-item-2", 20),
+        speech_stopped("event-2-stop", "user-item-2", 40),
+        input_committed("event-2-commit", "user-item-2"),
+        input_transcript_completed("event-transcript-2", "user-item-2", "第二句。"),
+        input_transcript_completed("event-transcript-1", "user-item-1", "第一句。"),
+    )
+    await engine.start()
+    for _ in range(6):
+        assert (await engine.next_event()).action is not None
+
+    assert await engine.next_event() == NativeEngineEvent()
+    first = await engine.next_event()
+    second = await engine.next_event()
+
+    assert first.input_transcript is not None
+    assert first.input_transcript.provider_item_id == "user-item-1"
+    assert first.input_transcript.transcript == "第一句。"
+    assert second.input_transcript is not None
+    assert second.input_transcript.provider_item_id == "user-item-2"
+    assert second.input_transcript.transcript == "第二句。"
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_earlier_transcription_releases_later_completed_turn() -> None:
+    engine, _socket, _factory = active_engine(
+        speech_started("event-1-start", "user-item-1", 0),
+        speech_stopped("event-1-stop", "user-item-1", 20),
+        input_committed("event-1-commit", "user-item-1"),
+        speech_started("event-2-start", "user-item-2", 20),
+        speech_stopped("event-2-stop", "user-item-2", 40),
+        input_committed("event-2-commit", "user-item-2"),
+        input_transcript_completed("event-transcript-2", "user-item-2", "第二句。"),
+        input_transcript_failed("event-transcript-1-failed", "user-item-1"),
+    )
+    await engine.start()
+    for _ in range(6):
+        assert (await engine.next_event()).action is not None
+
+    assert await engine.next_event() == NativeEngineEvent()
+    released = await engine.next_event()
+
+    assert released.input_transcript is not None
+    assert released.input_transcript.provider_item_id == "user-item-2"
+    assert released.input_transcript.transcript == "第二句。"
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_input_item_identity_cannot_be_reused_for_another_turn() -> None:
+    engine, _socket, _factory = active_engine(
+        speech_started("event-1-start", "user-item-1", 0),
+        speech_stopped("event-1-stop", "user-item-1", 20),
+        input_committed("event-1-commit", "user-item-1"),
+        speech_started("event-2-start", "user-item-1", 20),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    before = engine.snapshot()
+
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.next_event()
+
+    assert raised.value.reason == "NATIVE_PROVIDER_ITEM_REUSED"
+    assert engine.snapshot().turn_count == before.turn_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stopped_provider_item_cannot_restart_before_commit() -> None:
+    engine, _socket, _factory = active_engine(
+        speech_started("event-1-start", "user-item-1", 0),
+        speech_stopped("event-1-stop", "user-item-1", 20),
+        speech_started("event-1-restarted", "user-item-1", 20),
+    )
+    await engine.start()
+    assert (await engine.next_event()).action is not None
+    assert (await engine.next_event()).action is not None
+    before = engine.snapshot()
+
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.next_event()
+
+    assert raised.value.reason == "NATIVE_PROVIDER_ITEM_REUSED"
+    assert engine.snapshot().turn_count == before.turn_count == 0
+
+
+@pytest.mark.asyncio
+async def test_changed_input_transcript_replay_fails_closed() -> None:
+    engine, _socket, _factory = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 640),
+        input_committed("event-5", "user-item-1"),
+        input_transcript_completed("event-transcript-1", "user-item-1", "介绍你自己。"),
+        input_transcript_completed(
+            "event-transcript-2", "user-item-1", "改变后的文字。"
+        ),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    assert (await engine.next_event()).input_transcript is not None
+
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.next_event()
+
+    assert raised.value.reason == "NATIVE_INPUT_TRANSCRIPT_CONFLICT"
+    assert engine.snapshot().state is NativeProviderState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_input_transcript_for_unknown_provider_item_fails_closed() -> None:
+    engine, _socket, _factory = active_engine(
+        input_transcript_completed(
+            "event-transcript-foreign", "foreign-item", "不应接受。"
+        )
+    )
+    await engine.start()
+
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.next_event()
+
+    assert raised.value.reason == "NATIVE_INPUT_TRANSCRIPT_ITEM_STALE"
+    assert engine.snapshot().turn_count == 0
+
+
+@pytest.mark.asyncio
 async def test_native_session_direct_audio_does_not_require_transcript_or_bridge() -> (
     None
 ):
@@ -388,6 +589,9 @@ async def test_native_session_direct_audio_does_not_require_transcript_or_bridge
         "eagerness": "auto",
         "create_response": False,
         "interrupt_response": False,
+    }
+    assert socket.sent[0]["session"]["audio"]["input"]["transcription"] == {
+        "model": "gpt-live-transcribe"
     }
     assert socket.sent[0]["session"]["tools"] == [
         {
