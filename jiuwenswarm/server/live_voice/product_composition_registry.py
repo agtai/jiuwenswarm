@@ -9102,7 +9102,17 @@ class AgentServerProductCompositionRegistry:
                             return _success_result(
                                 request_id,
                                 {
-                                    "status": "generation_interrupted",
+                                    # A fence whose round cancel conflicted or
+                                    # was rejected is not a full interruption
+                                    # success: the round may still be
+                                    # generating, so the status says so and
+                                    # round_id/round_cancel_reason stay the
+                                    # recovery handle (F03).
+                                    "status": (
+                                        "generation_interrupted"
+                                        if outcome.round_cancel_settled
+                                        else "generation_interrupted_round_unsettled"
+                                    ),
                                     "session_id": retained.binding.session_id,
                                     "correlation_id": retained.binding.correlation_id,
                                     "interaction_id": retained.binding.interaction_id,
@@ -9119,6 +9129,9 @@ class AgentServerProductCompositionRegistry:
                                     "fence_status": outcome.fence_status.value,
                                     "fence_reason": outcome.fence_reason,
                                     "round_id": outcome.round_id,
+                                    "round_cancel_settled": (
+                                        outcome.round_cancel_settled
+                                    ),
                                     "round_cancel_accepted": (
                                         None
                                         if outcome.round_cancel is None

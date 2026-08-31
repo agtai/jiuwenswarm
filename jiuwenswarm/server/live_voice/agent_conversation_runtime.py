@@ -158,6 +158,11 @@ class AgentGenerationInterruption:
     round_id: str | None
     round_cancel: RoundCancelResult | None
     round_cancel_reason: str | None = None
+    # Whether the round-cancel side reached an allowed terminal state. A fence
+    # that applied while the cancel conflicted or was rejected is NOT a fully
+    # successful interruption: the round may still be generating, and the
+    # product layer must report that honestly with a recovery handle.
+    round_cancel_settled: bool = True
     replayed: bool = False
     cancel_scope: str = CancelScope.ROUND_CANCEL.value
 
@@ -3181,6 +3186,7 @@ class AgentConversationRuntime:
                 round_id=None if handle is None else handle.round_id,
                 round_cancel=None,
                 round_cancel_reason="GENERATION_ALREADY_SETTLED",
+                round_cancel_settled=True,
             )
         # A presentation that was already queued for delivery is output of the
         # response this call just fenced.  The CR fence stops anything further
@@ -3199,6 +3205,7 @@ class AgentConversationRuntime:
         self._notifications.discard_presentation(ref)
         round_cancel: RoundCancelResult | None = None
         round_cancel_reason: str | None = None
+        round_cancel_settled = True
         if handle is None:
             round_cancel_reason = "NO_AGENT_ROUND"
         else:
@@ -3208,6 +3215,9 @@ class AgentConversationRuntime:
                 )
             except HarnessRoundViolation as error:
                 round_cancel_reason = error.reason
+                round_cancel_settled = False
+            else:
+                round_cancel_settled = self._round_cancel_settled(round_cancel)
         return AgentGenerationInterruption(
             action_id=action_id,
             response_ref=ref,
@@ -3218,7 +3228,25 @@ class AgentConversationRuntime:
             round_id=None if handle is None else handle.round_id,
             round_cancel=round_cancel,
             round_cancel_reason=round_cancel_reason,
+            round_cancel_settled=round_cancel_settled,
         )
+
+    @staticmethod
+    def _round_cancel_settled(result: RoundCancelResult) -> bool:
+        """Whether the round cancel reached an allowed terminal state.
+
+        Accepted delivery, an already-terminal round and an already-requested
+        cancel all mean the round's end is owned. A conflict, capacity
+        rejection or binding mismatch leaves the round possibly still
+        generating, so the interruption must not report full success.
+        """
+
+        if result.accepted or result.terminal_observed:
+            return True
+        return result.reason in {
+            "ROUND_ALREADY_TERMINAL",
+            "ROUND_CANCEL_ALREADY_REQUESTED",
+        }
 
     def _generation_round_cancel_command(
         self, action_id: str, handle: HarnessRoundHandle

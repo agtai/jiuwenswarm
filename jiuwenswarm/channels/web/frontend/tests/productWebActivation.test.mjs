@@ -2029,6 +2029,7 @@ test('generation interruption retains only ambiguous transport loss for exact re
           fence_status: 'fenced',
           applied: true,
           replayed: true,
+          round_cancel_settled: true,
           effect_ids: ['effect-response-fence'],
         });
       }
@@ -2050,6 +2051,78 @@ test('generation interruption retains only ambiguous transport loss for exact re
   assert.equal(interruptCalls.length, 2);
   assert.equal(interruptCalls[0][1], interruptCalls[1][1]);
   assert.deepEqual(interruptCalls[0][0], interruptCalls[1][0]);
+});
+
+test('generation interruption reports an unsettled round cancel honestly', async () => {
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_INTERRUPT_GENERATION_METHOD) {
+        return durableResponse(requestId, 'generation_interrupted_round_unsettled', {
+          action_id: params.action_id,
+          response_id: params.response_id,
+          response_generation: params.response_generation,
+          cancel_scope: 'round.cancel',
+          fence_status: 'fenced',
+          applied: true,
+          replayed: false,
+          round_cancel_settled: false,
+          round_id: 'round-unsettled-1',
+          round_cancel_reason: 'IDEMPOTENCY_CONFLICT',
+          effect_ids: ['effect-response-fence'],
+        });
+      }
+      return response('closed');
+    },
+  });
+  await owner.start(binding);
+
+  const outcome = await owner.interruptGeneration({
+    action_id: 'generation-interrupt-unsettled',
+    response_id: 'response-unsettled',
+    response_generation: 4,
+  });
+  assert.equal(outcome.status, 'generation_interrupted_round_unsettled');
+  assert.equal(outcome.round_cancel_settled, false);
+  assert.equal(outcome.fence_status, 'fenced');
+  assert.equal(outcome.round_cancel_reason, 'IDEMPOTENCY_CONFLICT');
+  assert.equal(owner.hasPendingGenerationInterrupt(), false);
+});
+
+test('generation interruption refuses a success status whose round cancel is not settled', async () => {
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_INTERRUPT_GENERATION_METHOD) {
+        return durableResponse(requestId, 'generation_interrupted', {
+          action_id: params.action_id,
+          response_id: params.response_id,
+          response_generation: params.response_generation,
+          cancel_scope: 'round.cancel',
+          fence_status: 'fenced',
+          applied: true,
+          replayed: false,
+          // A plain success status must carry a settled round cancel.
+          round_cancel_settled: false,
+          effect_ids: ['effect-response-fence'],
+        });
+      }
+      return response('closed');
+    },
+  });
+  await owner.start(binding);
+
+  await assert.rejects(
+    owner.interruptGeneration({
+      action_id: 'generation-interrupt-dishonest',
+      response_id: 'response-dishonest',
+      response_generation: 5,
+    }),
+    /generation interruption response binding/,
+  );
+  assert.equal(owner.hasPendingGenerationInterrupt(), false);
 });
 
 test('stock Web P3 owner binds exact committed voice origin and rejects borrowing', async () => {

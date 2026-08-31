@@ -459,7 +459,8 @@ function requireP2BoundOperationResult(
     | 'presentation_acknowledged'
     | 'presentation_failed_fallback_text'
     | 'barge_in_applied'
-    | 'generation_interrupted',
+    | 'generation_interrupted'
+    | 'generation_interrupted_round_unsettled',
   binding: Readonly<ProductWebP2ActivationBinding>,
 ): JsonObject {
   const payload = objectValue(value);
@@ -656,7 +657,16 @@ function requireDurableP2OperationResult(operation: Readonly<ProductP2DurableOpe
     return result;
   }
   if (operation.method === PRODUCT_P2_INTERRUPT_GENERATION_METHOD) {
-    const interrupted = requireP2BoundOperationResult(payload, 'generation_interrupted', binding);
+    // A fence whose round cancel did not settle is a distinct, honest status:
+    // the answer is fenced but its round may still be generating server-side.
+    const observedStatus = objectValue(objectValue(payload)?.result)?.status;
+    const interrupted = requireP2BoundOperationResult(
+      payload,
+      observedStatus === 'generation_interrupted_round_unsettled'
+        ? 'generation_interrupted_round_unsettled'
+        : 'generation_interrupted',
+      binding,
+    );
     if (
       interrupted.action_id !== params.action_id ||
       interrupted.response_id !== params.response_id ||
@@ -667,6 +677,9 @@ function requireDurableP2OperationResult(operation: Readonly<ProductP2DurableOpe
       (interrupted.fence_status !== 'fenced' && interrupted.fence_status !== 'already_settled') ||
       typeof interrupted.applied !== 'boolean' ||
       typeof interrupted.replayed !== 'boolean' ||
+      typeof interrupted.round_cancel_settled !== 'boolean' ||
+      (interrupted.status === 'generation_interrupted') !== (interrupted.round_cancel_settled === true) ||
+      (interrupted.status === 'generation_interrupted_round_unsettled' && interrupted.fence_status !== 'fenced') ||
       !Array.isArray(interrupted.effect_ids) ||
       interrupted.effect_ids.some(item => typeof item !== 'string' || !item)
     ) {

@@ -15985,6 +15985,7 @@ async def test_product_p2_generation_interrupt_reaches_the_runtime_round(
     assert result["applied"] is True
     assert result["cancel_scope"] == "round.cancel"
     assert result["round_cancel_accepted"] is True
+    assert result["round_cancel_settled"] is True
     assert result["response_id"] == "response-generation-interrupt"
     assert "cancel_response" not in result
     assert replayed.payload == interrupted.payload
@@ -18621,4 +18622,86 @@ async def test_unified_conflict_admission_has_zero_interrupt_side_effect(
     assert effect_types.count("playback.stop") == 1
     assert runtime.snapshot().harness.cancel_effects == 1
 
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_generation_interrupt_cancel_conflict_is_not_reported_as_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F03: FENCED plus a cancel conflict must not read as a full success.
+
+    The fence applied, but the round cancel conflicted, so the round may still
+    be generating. The result keeps ok=True (the fence is real) with the
+    distinct unsettled status and the round_id/reason recovery handle.
+    """
+    from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
+        HarnessRoundViolation,
+    )
+
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    blocking = _BlockingFacade()
+    manager.agent = blocking
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-cancel-conflict",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    submitted = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-cancel-conflict",
+            turn_id="turn-cancel-conflict",
+            response_id="response-cancel-conflict",
+            committed_at=NOW,
+            text="keep generating while the cancel conflicts",
+            dispatch_target="agent",
+        ),
+        request_id="request-submit-cancel-conflict",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+    await asyncio.wait_for(blocking.started.wait(), timeout=1)
+
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    runtime = route.activation_lease._runtime
+
+    def conflicted_cancel(handle, command):
+        raise HarnessRoundViolation(
+            "IDEMPOTENCY_CONFLICT",
+            "command_id cannot change its exact round cancel binding",
+            ErrorCode.CONFLICT,
+        )
+
+    monkeypatch.setattr(runtime._harness, "cancel_round", conflicted_cancel)
+
+    params = _p2_params(
+        action_id="cancel-conflict-action-1",
+        response_id="response-cancel-conflict",
+        response_generation=0,
+    )
+    interrupted = await registry.handle_p2_interrupt_generation(
+        params=params,
+        request_id="request-cancel-conflict-1",
+        session_id="session-product",
+    )
+    assert interrupted.ok is True
+    result = cast(dict, interrupted.payload["result"])
+    assert result["status"] == "generation_interrupted_round_unsettled"
+    assert result["round_cancel_settled"] is False
+    assert result["fence_status"] == "fenced"
+    assert result["round_cancel_reason"] == "IDEMPOTENCY_CONFLICT"
+    assert result["round_id"] is not None
+
+    replayed = await registry.handle_p2_interrupt_generation(
+        params=params,
+        request_id="request-cancel-conflict-1",
+        session_id="session-product",
+    )
+    assert replayed.payload == interrupted.payload
+
+    blocking.release.set()
     await registry.close_active_routes()
