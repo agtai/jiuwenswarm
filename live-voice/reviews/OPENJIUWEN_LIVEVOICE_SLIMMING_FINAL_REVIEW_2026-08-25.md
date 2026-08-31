@@ -12,6 +12,14 @@ state.
 Risk: Tier 0 documentation under root `TESTING.md`. Every later code boundary
 retains its independently assigned risk and evidence requirements.
 
+Current-baseline reconciliation (2026-08-31): the product branch advanced from
+the original review baseline to
+`c019da1873762f496454ebec203dba4ba08d880b`. Three existing production modules
+and their tests changed, without changing the 152-path manifest or the
+AgentCore/Hermes classifications. Their stronger Task-notification synthesis
+transfer and bounded presentation fallback are reflected in the
+[Chinese module architecture view](OPENJIUWEN_LIVEVOICE_HERMES_MODULE_ARCHITECTURE_ZH_2026-08-31.md).
+
 ## 1. Converged answer
 
 The slimming target is not “merge the preparation branch” and is not “make
@@ -31,6 +39,8 @@ LiveVoice look like Hermes.” The selected result is:
    one minimal seam.
 
 The detailed, stable decisions live in the
+[Chinese module architecture view](OPENJIUWEN_LIVEVOICE_HERMES_MODULE_ARCHITECTURE_ZH_2026-08-31.md),
+the
 [symbol migration map](OPENJIUWEN_LIVEVOICE_SYMBOL_MIGRATION_MAP_2026-08-24.md),
 the
 [152-path module disposition](OPENJIUWEN_LIVEVOICE_MODULE_DISPOSITION_AND_HERMES_COMPARISON_2026-08-25.md),

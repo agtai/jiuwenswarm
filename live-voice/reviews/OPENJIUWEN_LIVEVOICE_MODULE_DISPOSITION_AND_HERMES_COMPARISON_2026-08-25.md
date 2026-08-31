@@ -7,6 +7,17 @@ classification under the accepted
 [execution plan](OPENJIUWEN_AGENTCORE_HERMES_SLIMMING_EXECUTION_PLAN_2026-08-25.md).
 This is a preparation review, not product progress or migration approval.
 
+Current-baseline reconciliation (2026-08-31): the product branch advanced to
+`c019da1873762f496454ebec203dba4ba08d880b`. The delta changed three existing
+production paths—`dedicated_media_registration.py`,
+`product_composition_registry.py` and `LiveVoiceIntegratedRoutePanel.tsx`—plus
+their tests, with no added or removed manifest path. The changes strengthen
+Task-notification synthesis-authority transfer and bounded TEXT fallback/
+presentation recovery; they do not change any module ownership or disposition
+below. The 152-path projection was rerun with zero missing and zero extra.
+The Chinese reader-oriented view is
+[here](OPENJIUWEN_LIVEVOICE_HERMES_MODULE_ARCHITECTURE_ZH_2026-08-31.md).
+
 Risk: Tier 0 documentation. Any later code change keeps the risk assigned by
 root `TESTING.md`.
 
@@ -14,7 +25,7 @@ root `TESTING.md`.
 
 | Source | Observed branch / source | Observed HEAD | Use |
 |---|---|---|---|
-| Moving LiveVoice product fact | `hx/0812_live_voice_w3` | `acd873d0e93b2e82424e0d90a650df2c3515c34c` | read-only inventory and semantic truth |
+| Moving LiveVoice product fact | `hx/0812_live_voice_w3` | `c019da1873762f496454ebec203dba4ba08d880b` | read-only inventory and semantic truth; reconciled from the original full-audit baseline |
 | Isolated preparation evidence | `codex/livevoice-agentcore-hermes-prep` | `a663cec2b09a3daa18cbbe449fe5d9e71cf5f27e` before this review batch | tracked analysis and candidate evidence |
 | Local AgentCore candidate | `codex/oj-g2-local-base` | `50c065dc7fb5e0c21903128d1a033c52968be97e` | reviewed public-boundary and PR-candidate stack |
 | Hermes architecture mirror | `main` | `fc9cbc872d8050c22f1192b16bc5ff4aed471e10` | read-only responsibility comparison |
@@ -695,9 +706,10 @@ generic Agent-launch lease is not justified by the observed LiveVoice code.
 ## 24. Inventory closure and complete module-level conclusion
 
 The semantic set now equals the machine manifest: **152/152 production paths,
-0 missing, 0 extra**. This closes the explanation/classification task at the
-module-path level for observed feature HEAD `acd873d0`; moving-branch changes
-still require incremental reconciliation by path/symbol/capability.
+0 missing, 0 extra**. This closed the original explanation/classification task
+at module-path level on `acd873d0`; the dated reconciliation at the top confirms
+the same set and dispositions on `c019da18`. Later moving-branch changes still
+require incremental reconciliation by path/symbol/capability.
 
 The five preparation-only LiveVoice commits and the ignored EVT-02 archive are
 outside that 152-path product manifest. Their separate
