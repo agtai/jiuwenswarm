@@ -419,6 +419,23 @@ async function sendFirstFrameToNextWorklet(environment, priorWorklet, overrides 
   });
 }
 
+function sendNextFrameFromCurrentWorklet(environment, seq = 1) {
+  const worklet = environment.worklet;
+  const handler = worklet?.port.onmessage;
+  assert.equal(typeof handler, 'function');
+  handler({
+    data: {
+      kind: 'frame',
+      capture_generation: worklet.captureGeneration,
+      seq,
+      sample_rate_hz: 48_000,
+      sample_cursor: seq * 960,
+      context_time_s: seq * 0.02,
+      samples: new Float32Array(960).fill(0.25),
+    },
+  });
+}
+
 async function sendCaptureToDurationBoundary(
   environment,
   samples,
@@ -3630,6 +3647,9 @@ async function runConcurrentCaptureJourney(options = {}) {
   let request = null;
   let receiptSubjectId = null;
   let finalDownlinkAckResolve;
+  let pendingSecondCaptureFirstAck = null;
+  let pendingSecondCaptureNextAck = null;
+  let secondCaptureAckStillPendingAtReady = null;
   const finalDownlinkAckObserved = new Promise(resolve => {
     finalDownlinkAckResolve = resolve;
   });
@@ -3712,7 +3732,11 @@ async function runConcurrentCaptureJourney(options = {}) {
       if (this.serverBinding.direction === 'uplink' && typeof value !== 'string') {
         if (options.ackSecondCapture !== false || this.serverBinding.generation.id !== 'capture-2') {
           const throughSeq = decodeAudioFrame(this.serverBinding, value).seq;
-          const acknowledge = () =>
+          const acknowledge = () => {
+            if (this.serverBinding.generation.id === 'capture-2' && throughSeq === 0) {
+              this.secondCaptureFramesInFlightAtFirstAck =
+                this.sent.filter(sent => typeof sent !== 'string').length - 1;
+            }
             this.onmessage?.({
               data: serializeMediaControl({
                 type: 'media.ack',
@@ -3721,6 +3745,23 @@ async function runConcurrentCaptureJourney(options = {}) {
                 through_seq: throughSeq,
               }),
             });
+          };
+          if (
+            options.holdSecondCaptureFirstAckUntilNextFrame === true
+            && this.serverBinding.generation.id === 'capture-2'
+          ) {
+            if (throughSeq === 0) {
+              pendingSecondCaptureFirstAck = acknowledge;
+              return;
+            }
+            if (throughSeq === 1 && pendingSecondCaptureFirstAck !== null) {
+              const releaseFirstAck = pendingSecondCaptureFirstAck;
+              pendingSecondCaptureFirstAck = null;
+              queueMicrotask(releaseFirstAck);
+              pendingSecondCaptureNextAck = acknowledge;
+              return;
+            }
+          }
           if (
             this.serverBinding.generation.id === 'capture-2'
             && Number.isFinite(options.secondCaptureAckDelayMs)
@@ -3788,6 +3829,12 @@ async function runConcurrentCaptureJourney(options = {}) {
     },
     on_concurrent_capture_started: () => {
       concurrentCaptureStartedCalls += 1;
+      if (options.holdSecondCaptureFirstAckUntilNextFrame === true) {
+        secondCaptureAckStillPendingAtReady = pendingSecondCaptureNextAck !== null;
+        const releaseNextAck = pendingSecondCaptureNextAck;
+        pendingSecondCaptureNextAck = null;
+        if (releaseNextAck !== null) queueMicrotask(releaseNextAck);
+      }
     },
     ...(options.triggerBargeInEot === true
       ? {
@@ -4112,6 +4159,9 @@ async function runConcurrentCaptureJourney(options = {}) {
           ? { samples: new Float32Array(960) }
           : {},
       );
+      if (options.holdSecondCaptureFirstAckUntilNextFrame === true) {
+        sendNextFrameFromCurrentWorklet(environment);
+      }
     }
   }
   const activeCaptureFailureReason =
@@ -4614,6 +4664,7 @@ async function runConcurrentCaptureJourney(options = {}) {
     activationCountAtFinalDownlinkAck,
     transportAckBeforeRenderSnapshot,
     concurrentCaptureStartedCalls,
+    secondCaptureAckStillPendingAtReady,
     bargeInSpeechStartCalls,
     bargeInEotCalls,
     bargeInStopped,
@@ -6306,6 +6357,35 @@ test('formal P1 accepts a delayed successor ACK inside the readiness window', as
   assert.equal(journey.owner.captureDiagnostics().successor_readiness_reason, null);
   assert.ok(journey.owner.captureDiagnostics().successor_readiness_elapsed_ms >= 450);
   assert.ok(journey.owner.captureDiagnostics().successor_readiness_elapsed_ms < 1_000);
+  await journey.owner.close();
+});
+
+test('formal P1 accepts an acknowledged first successor frame while later live frames remain pending', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    holdSecondCaptureFirstAckUntilNextFrame: true,
+  });
+  const successorSocket = journey.sockets.find(
+    socket => socket.serverBinding?.generation?.id === 'capture-2',
+  );
+
+  assert.ok(successorSocket);
+  assert.ok(successorSocket.secondCaptureFramesInFlightAtFirstAck > 0);
+  assert.equal(journey.secondCaptureAckStillPendingAtReady, true);
+  assert.equal(journey.playError, null);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(journey.concurrentCaptureStartedCalls, 1);
+  assert.equal(journey.owner.captureDiagnostics().successor_readiness, 'ready');
+  assert.equal(journey.owner.captureDiagnostics().successor_readiness_reason, null);
+  assert.equal(journey.calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
+  assert.equal(journey.calls.filter(([method]) => method === 'live_voice.speech.synthesize_batch').length, 1);
+  assert.equal(journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+  assert.equal(journey.environment.contexts[0].sourceStartCount, 1);
+  assert.equal(
+    journey.calls.some(
+      ([method]) => method.includes('agent') || method.includes('tool') || method.includes('task') || method.includes('history'),
+    ),
+    false,
+  );
   await journey.owner.close();
 });
 

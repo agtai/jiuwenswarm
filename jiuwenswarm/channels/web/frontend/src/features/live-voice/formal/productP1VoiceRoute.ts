@@ -15,6 +15,7 @@ import {
   type BrowserDedicatedMediaRouteActivation,
   type DedicatedMediaTerminalEvent,
   type DedicatedMediaSocketFactory,
+  type MediaFirstFrameDiagnostic,
 } from './adapters/browserDedicatedMediaRoute.js';
 import {
   MEDIA_END_OF_TURN_CAPABILITY,
@@ -360,6 +361,8 @@ export class ProductP1VoiceRouteOwner {
   #lastCaptureRotation: Readonly<ProductP1CaptureRotationDiagnostics> | null = null;
   #captureActualProcessing: Readonly<ProductP1CaptureProcessingDiagnostics> | null = null;
   #mediaSentFrames = 0;
+  #captureFirstFrameAcknowledged = false;
+  #captureFirstFrameDiagnostic: Readonly<MediaFirstFrameDiagnostic> | null = null;
   #captureFramesAcked = 0;
   #route: ActiveBrowserDedicatedMediaRoute | null = null;
   #speech: GatewayBatchSpeechClient | null = null;
@@ -624,6 +627,8 @@ export class ProductP1VoiceRouteOwner {
     this.#captureLocalActivityRecencyFrames = 0;
     this.#captureUtteranceStartFrameIndex = null;
     this.#mediaSentFrames = 0;
+    this.#captureFirstFrameAcknowledged = false;
+    this.#captureFirstFrameDiagnostic = null;
     this.#captureFramesAcked = 0;
     this.#route = null;
     this.#speech = null;
@@ -741,6 +746,12 @@ export class ProductP1VoiceRouteOwner {
                 },
               }
             : {}),
+          on_uplink_frame_acknowledged: (throughSeq: number) => {
+            if (ownedRoute !== null) this.#observeUplinkFrameAcknowledged(ownedRoute, throughSeq);
+          },
+          on_first_frame_diagnostic: (fact: Readonly<MediaFirstFrameDiagnostic>) => {
+            if (ownedRoute !== null) this.#observeFirstFrameDiagnostic(ownedRoute, fact);
+          },
           on_terminal: event => {
             if (ownedRoute !== null) this.#observeMediaTerminal(ownedRoute, event);
           },
@@ -866,6 +877,8 @@ export class ProductP1VoiceRouteOwner {
       this.#captureLocalActivityRecencyFrames = 0;
       this.#captureUtteranceStartFrameIndex = null;
       this.#mediaSentFrames = 0;
+      this.#captureFirstFrameAcknowledged = false;
+      this.#captureFirstFrameDiagnostic = null;
       if (this.#route === route) this.#route = null;
       this.#endOfTurnHandler = null;
       this.#pendingSpeechStart = null;
@@ -978,6 +991,8 @@ export class ProductP1VoiceRouteOwner {
       this.#captureLocalActivityRecencyFrames = 0;
       this.#captureUtteranceStartFrameIndex = null;
       this.#mediaSentFrames = 0;
+      this.#captureFirstFrameAcknowledged = false;
+      this.#captureFirstFrameDiagnostic = null;
       this.#route = null;
       this.#requireCurrent(operationGeneration);
       if (result === null) throw new Error('formal recognition was fenced');
@@ -1000,6 +1015,8 @@ export class ProductP1VoiceRouteOwner {
         this.#captureLocalActivityRecencyFrames = 0;
         this.#captureUtteranceStartFrameIndex = null;
         this.#mediaSentFrames = 0;
+        this.#captureFirstFrameAcknowledged = false;
+        this.#captureFirstFrameDiagnostic = null;
         this.#route = null;
         this.#setStatus('idle', PRODUCT_P1_EMPTY_TRANSCRIPT_REASON);
         throw error;
@@ -1340,6 +1357,7 @@ export class ProductP1VoiceRouteOwner {
     } catch (error) {
       this.#requireCurrent(operationGeneration);
       const reason = stableFailureReason(error);
+      const failureDiagnostic = this.#captureFirstFrameDiagnostic;
       await this.#releaseDegradedConcurrentCapture(
         operationGeneration,
         priorAuthority,
@@ -1355,8 +1373,9 @@ export class ProductP1VoiceRouteOwner {
       );
       this.#reason = reason;
       this.#publish();
+      const failureObservedAtMs = monotonicNowMs();
       console.warn(
-        `live_voice_successor_capture_degradation reason=${reason} elapsed_ms=${Math.round(this.#successorCaptureReadinessElapsedMs)} fallback=no_barge_in visible=true`
+        `live_voice_successor_capture_degradation stage=browser_readiness_failed scope_sha256=${failureDiagnostic?.scope_sha256 ?? 'unavailable'} generation=${failureDiagnostic?.capture_generation ?? 'unavailable'} seq=${failureDiagnostic?.frame_seq ?? 'unavailable'} monotonic_ms=${failureObservedAtMs.toFixed(3)} stage_elapsed_ms=${Math.max(0, failureObservedAtMs - (failureDiagnostic?.monotonic_ms ?? failureObservedAtMs)).toFixed(3)} outcome=failure reason=${reason} elapsed_ms=${Math.round(this.#successorCaptureReadinessElapsedMs)} fallback=no_barge_in visible=true`
       );
       return Object.freeze({ ready: false, reason });
     }
@@ -1397,6 +1416,8 @@ export class ProductP1VoiceRouteOwner {
     this.#captureLocalActivityRecencyFrames = 0;
     this.#captureUtteranceStartFrameIndex = null;
     this.#mediaSentFrames = 0;
+    this.#captureFirstFrameAcknowledged = false;
+    this.#captureFirstFrameDiagnostic = null;
     this.#captureFramesAcked = 0;
     this.#endOfTurnNegotiated = false;
     this.#pendingSpeechStart = null;
@@ -1448,6 +1469,8 @@ export class ProductP1VoiceRouteOwner {
     this.#captureLocalActivityRecencyFrames = 0;
     this.#captureUtteranceStartFrameIndex = null;
     this.#mediaSentFrames = 0;
+    this.#captureFirstFrameAcknowledged = false;
+    this.#captureFirstFrameDiagnostic = null;
     this.#captureFramesAcked = 0;
     this.#route = null;
     this.#speech = null;
@@ -1555,6 +1578,12 @@ export class ProductP1VoiceRouteOwner {
               },
             }
           : {}),
+        on_uplink_frame_acknowledged: (throughSeq: number) => {
+          if (ownedRoute !== null) this.#observeUplinkFrameAcknowledged(ownedRoute, throughSeq);
+        },
+        on_first_frame_diagnostic: (fact: Readonly<MediaFirstFrameDiagnostic>) => {
+          if (ownedRoute !== null) this.#observeFirstFrameDiagnostic(ownedRoute, fact);
+        },
         on_terminal: event => {
           if (ownedRoute !== null) this.#observeMediaTerminal(ownedRoute, event);
         },
@@ -1652,6 +1681,8 @@ export class ProductP1VoiceRouteOwner {
     this.#captureLocalActivityRecencyFrames = 0;
     this.#captureUtteranceStartFrameIndex = null;
     this.#mediaSentFrames = 0;
+    this.#captureFirstFrameAcknowledged = false;
+    this.#captureFirstFrameDiagnostic = null;
     this.#captureFramesAcked = 0;
     if (this.#route === route) this.#route = null;
     this.#speech = null;
@@ -1716,6 +1747,8 @@ export class ProductP1VoiceRouteOwner {
     this.#captureLocalActivityRecencyFrames = 0;
     this.#captureUtteranceStartFrameIndex = null;
     this.#mediaSentFrames = 0;
+    this.#captureFirstFrameAcknowledged = false;
+    this.#captureFirstFrameDiagnostic = null;
     this.#captureFramesAcked = 0;
     if (this.#route === route) this.#route = null;
     this.#speech = null;
@@ -2332,16 +2365,16 @@ export class ProductP1VoiceRouteOwner {
     }
     this.#drainCaptureFrames();
     const firstFrameDeadline = Date.now() + CAPTURE_FIRST_FRAME_TIMEOUT_MS;
-    let pending = route.leaf.flush();
+    route.leaf.flush();
     while (
-      (this.#frames.length === 0 || this.#mediaSentFrames === 0 || pending.pending_frames !== 0) &&
+      (this.#frames.length === 0 || this.#mediaSentFrames === 0 || !this.#captureFirstFrameAcknowledged) &&
       !route.leaf.closed &&
       Date.now() < firstFrameDeadline
     ) {
       await waitTurn();
       this.#requireHealthyCaptureReadiness(operationGeneration);
       this.#drainCaptureFrames();
-      pending = route.leaf.flush();
+      route.leaf.flush();
     }
     this.#requireHealthyCaptureReadiness(operationGeneration);
     if (this.#audio.captureState() !== 'active') {
@@ -2359,7 +2392,7 @@ export class ProductP1VoiceRouteOwner {
         reason: 'AUDIO_CAPTURE_NO_FRAMES',
       });
     }
-    if (pending.pending_frames !== 0) {
+    if (!this.#captureFirstFrameAcknowledged) {
       throw Object.assign(new Error('formal media route did not acknowledge capture readiness'), {
         reason: 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED',
       });
@@ -2393,6 +2426,30 @@ export class ProductP1VoiceRouteOwner {
       || seq >= this.#frames.length
     ) return;
     this.#l0LastFrameSentClock = l0ClockNow();
+  }
+
+  #observeUplinkFrameAcknowledged(
+    route: ActiveBrowserDedicatedMediaRoute,
+    throughSeq: number,
+  ): void {
+    if (
+      route !== this.#route
+      || route.leaf.closed
+      || !Number.isSafeInteger(throughSeq)
+      || throughSeq < 0
+    ) return;
+    this.#captureFirstFrameAcknowledged = true;
+  }
+
+  #observeFirstFrameDiagnostic(
+    route: ActiveBrowserDedicatedMediaRoute,
+    fact: Readonly<MediaFirstFrameDiagnostic>,
+  ): void {
+    if (route !== this.#route || route.leaf.closed) return;
+    this.#captureFirstFrameDiagnostic = fact;
+    console.info(
+      `live_voice_media_first_frame stage=${fact.stage} scope_sha256=${fact.scope_sha256} generation=${fact.capture_generation} seq=${fact.frame_seq} monotonic_ms=${fact.monotonic_ms.toFixed(3)} elapsed_ms=${fact.elapsed_ms.toFixed(3)} outcome=${fact.outcome} reason=${fact.reason}`,
+    );
   }
 
   async #fail(error: unknown): Promise<void> {
@@ -2477,6 +2534,8 @@ export class ProductP1VoiceRouteOwner {
     this.#captureUtteranceStartFrameIndex = null;
     this.#captureRotationSourceId = null;
     this.#mediaSentFrames = 0;
+    this.#captureFirstFrameAcknowledged = false;
+    this.#captureFirstFrameDiagnostic = null;
     this.#captureFramesAcked = 0;
     this.#playout = null;
     try {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
@@ -163,6 +164,8 @@ function active({
   deferDownlinkAck,
   onTerminal,
   onUplinkFrameSent,
+  onUplinkFrameAcknowledged,
+  onFirstFrameDiagnostic,
   drainRetryDelayMs,
   maxDrainStallRetries,
   drainScheduler,
@@ -193,6 +196,8 @@ function active({
     defer_downlink_ack: deferDownlinkAck,
     on_terminal: onTerminal,
     on_uplink_frame_sent: onUplinkFrameSent,
+    on_uplink_frame_acknowledged: onUplinkFrameAcknowledged,
+    on_first_frame_diagnostic: onFirstFrameDiagnostic,
     drain_retry_delay_ms: drainRetryDelayMs,
     max_drain_stall_retries: maxDrainStallRetries,
     schedule_drain_retry: drainScheduler?.schedule,
@@ -284,7 +289,11 @@ test('EOT cross-language fixture round trips without cursor, item, transcript, o
 });
 
 test('uplink requires server attach then sends bounded LVM1 frames retained through ACK', () => {
-  const route = active({ maxPendingFrames: 1 });
+  const acknowledgedSequences = [];
+  const route = active({
+    maxPendingFrames: 1,
+    onUplinkFrameAcknowledged: throughSeq => acknowledgedSequences.push(throughSeq),
+  });
   assert.equal(route.socket.binaryType, 'arraybuffer');
   assert.deepEqual(route.factoryCalls, [
     {
@@ -315,12 +324,107 @@ test('uplink requires server attach then sends bounded LVM1 frames retained thro
       through_seq: 0,
     })
   );
+  assert.deepEqual(acknowledgedSequences, [0]);
   assert.equal(route.activation.leaf.sendCaptureFrame(capturedFrame(1)).accepted, true);
   assert.equal(decodeAudioFrame(route.activation.binding, route.socket.sent[1]).seq, 1);
   assert.equal(route.effects.audio, 0);
   assert.equal(route.activation.capability.registered_route_observed, false);
   assert.equal(route.activation.capability.route_to_disk_zero_persistence_observed, false);
   assert.equal(route.activation.capability.formal_route_ready, false);
+});
+
+test('uplink first-frame diagnostics correlate socket send and applied ACK without authority contents', async () => {
+  const diagnostics = [];
+  const route = active({ onFirstFrameDiagnostic: fact => diagnostics.push(fact) });
+  attach(route);
+  assert.equal(route.activation.leaf.sendCaptureFrame(capturedFrame()).accepted, true);
+  route.socket.message(
+    serializeMediaControl({
+      type: 'media.ack',
+      lease_id: route.activation.binding.lease_id,
+      generation: route.activation.binding.generation.value,
+      through_seq: 0,
+    }),
+  );
+  for (let turn = 0; turn < 10 && diagnostics.length < 2; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+
+  assert.deepEqual(diagnostics.map(fact => fact.stage), [
+    'browser_frame_sent',
+    'browser_ack_released',
+  ]);
+  const expectedScope = createHash('sha256')
+    .update([
+      route.activation.binding.session_id,
+      route.activation.binding.interaction_id,
+      route.activation.binding.correlation_id,
+      route.activation.binding.media_session_id,
+      route.activation.binding.track_id,
+      route.activation.binding.lease_id,
+      route.activation.binding.generation.kind,
+      route.activation.binding.generation.id,
+      String(route.activation.binding.generation.value),
+    ].join('\u001f'))
+    .digest('hex')
+    .slice(0, 16);
+  assert.equal(diagnostics.every(fact => /^[0-9a-f]{16}$/.test(fact.scope_sha256)), true);
+  assert.equal(diagnostics.every(fact => fact.scope_sha256 === expectedScope), true);
+  assert.equal(diagnostics.every(fact => fact.capture_generation === route.activation.binding.generation.value), true);
+  assert.equal(diagnostics.every(fact => fact.frame_seq === 0), true);
+  assert.equal(diagnostics.every(fact => fact.outcome === 'success'), true);
+  assert.equal(diagnostics.every(fact => Number.isFinite(fact.monotonic_ms)), true);
+  assert.equal(diagnostics.every(fact => Number.isFinite(fact.elapsed_ms) && fact.elapsed_ms >= 0), true);
+  assert.deepEqual(diagnostics.map(fact => fact.reason), [
+    'MEDIA_SOCKET_SEND_ACCEPTED',
+    'MEDIA_ACK_APPLIED',
+  ]);
+  const serialized = JSON.stringify(diagnostics);
+  for (const secret of [
+    route.activation.binding.session_id,
+    route.activation.binding.interaction_id,
+    route.activation.binding.correlation_id,
+    route.activation.binding.lease_id,
+    'transcript',
+  ]) {
+    assert.equal(serialized.includes(secret), false);
+  }
+
+  const successorDiagnostics = [];
+  const successor = active({
+    exactBinding: {
+      ...route.activation.binding,
+      media_session_id: 'media-session-successor',
+      track_id: 'track-successor',
+      lease_id: 'media-lease-successor-1234567890',
+      generation: {
+        ...route.activation.binding.generation,
+        id: 'capture-successor',
+      },
+    },
+    onFirstFrameDiagnostic: fact => successorDiagnostics.push(fact),
+  });
+  attach(successor);
+  assert.equal(successor.activation.leaf.sendCaptureFrame(capturedFrame(0, {
+    capture: {
+      capture_id: 'capture-successor',
+      track_id: 'track-successor',
+    },
+  })).accepted, true);
+  successor.socket.message(
+    serializeMediaControl({
+      type: 'media.ack',
+      lease_id: successor.activation.binding.lease_id,
+      generation: successor.activation.binding.generation.value,
+      through_seq: 0,
+    }),
+  );
+  for (let turn = 0; turn < 10 && successorDiagnostics.length < 2; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(successorDiagnostics.length, 2);
+  assert.notEqual(successorDiagnostics[0].scope_sha256, expectedScope);
+  assert.equal(JSON.stringify(successorDiagnostics).includes('media-lease-successor'), false);
 });
 
 test('socket leaf cannot bypass the same-origin activation factory', () => {

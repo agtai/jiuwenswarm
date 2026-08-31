@@ -81,6 +81,40 @@ const DETACH_REASONS: ReadonlySet<string> = new Set([
   'MEDIA_TRANSPORT_SEND_FAILED',
 ]);
 
+function monotonicNowMs(): number {
+  return typeof globalThis.performance?.now === 'function' ? globalThis.performance.now() : Date.now();
+}
+
+async function mediaScopeSummary(binding: Readonly<MediaAuthorityBinding>): Promise<string> {
+  try {
+    const source = new TextEncoder().encode(
+      [
+        binding.session_id,
+        binding.interaction_id,
+        binding.correlation_id,
+        binding.media_session_id,
+        binding.track_id,
+        binding.lease_id,
+        binding.generation.kind,
+        binding.generation.id,
+        String(binding.generation.value),
+      ].join('\u001f'),
+    );
+    const subtle = globalThis.crypto?.subtle;
+    if (subtle === undefined) return 'unavailable';
+    const digest = new Uint8Array(await subtle.digest('SHA-256', source));
+    return [...digest.subarray(0, 8)].map(value => value.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return 'unavailable';
+  }
+}
+
+function logFirstFrameDiagnostic(fact: Readonly<MediaFirstFrameDiagnostic>): void {
+  console.info(
+    `live_voice_media_first_frame stage=${fact.stage} scope_sha256=${fact.scope_sha256} generation=${fact.capture_generation} seq=${fact.frame_seq} monotonic_ms=${fact.monotonic_ms.toFixed(3)} elapsed_ms=${fact.elapsed_ms.toFixed(3)} outcome=${fact.outcome} reason=${fact.reason}`,
+  );
+}
+
 export interface DedicatedMediaSocketMessageEventLike {
   readonly data: unknown;
 }
@@ -118,6 +152,17 @@ export interface DedicatedMediaTerminalEvent {
   readonly attached_before_close: boolean;
 }
 
+export interface MediaFirstFrameDiagnostic {
+  readonly stage: 'browser_frame_sent' | 'browser_ack_released';
+  readonly scope_sha256: string;
+  readonly capture_generation: number;
+  readonly frame_seq: 0;
+  readonly monotonic_ms: number;
+  readonly elapsed_ms: number;
+  readonly outcome: 'success';
+  readonly reason: 'MEDIA_SOCKET_SEND_ACCEPTED' | 'MEDIA_ACK_APPLIED';
+}
+
 export interface BrowserDedicatedMediaRouteRequest {
   readonly enabled: boolean;
   readonly expected_origin: string;
@@ -129,6 +174,8 @@ export interface BrowserDedicatedMediaRouteRequest {
   readonly socket_factory: DedicatedMediaSocketFactory;
   readonly on_audio_frame: (frame: MediaAudioFrame) => void;
   readonly on_uplink_frame_sent?: (seq: number) => void;
+  readonly on_uplink_frame_acknowledged?: (throughSeq: number) => void;
+  readonly on_first_frame_diagnostic?: (fact: Readonly<MediaFirstFrameDiagnostic>) => void;
   readonly on_terminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void;
   readonly end_of_turn_capability?: 'media.end_of_turn.v1';
   readonly on_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
@@ -479,6 +526,12 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
   if (request.on_uplink_frame_sent !== undefined && typeof request.on_uplink_frame_sent !== 'function') {
     throw new TypeError('on_uplink_frame_sent must be a function');
   }
+  if (request.on_uplink_frame_acknowledged !== undefined && typeof request.on_uplink_frame_acknowledged !== 'function') {
+    throw new TypeError('on_uplink_frame_acknowledged must be a function');
+  }
+  if (request.on_first_frame_diagnostic !== undefined && typeof request.on_first_frame_diagnostic !== 'function') {
+    throw new TypeError('on_first_frame_diagnostic must be a function');
+  }
   if (
     (request.end_of_turn_capability === undefined) !== (request.on_speech_start === undefined) ||
     (request.end_of_turn_capability === undefined) !== (request.on_end_of_turn === undefined) ||
@@ -551,6 +604,8 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
       authenticationFrame,
       request.on_terminal,
       request.on_uplink_frame_sent,
+      request.on_uplink_frame_acknowledged,
+      request.on_first_frame_diagnostic,
       request.end_of_turn_capability,
       request.on_speech_start,
       request.on_end_of_turn,
@@ -590,6 +645,10 @@ export class BrowserDedicatedMediaSocketLeaf {
   #pendingAuthenticationFrame: string | null;
   readonly #onTerminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void;
   readonly #onUplinkFrameSent?: (seq: number) => void;
+  readonly #onUplinkFrameAcknowledged?: (throughSeq: number) => void;
+  readonly #onFirstFrameDiagnostic: (fact: Readonly<MediaFirstFrameDiagnostic>) => void;
+  readonly #diagnosticScopeSummary: Promise<string>;
+  readonly #diagnosticStartedAtMs: number;
   readonly #endOfTurnCapability?: 'media.end_of_turn.v1';
   readonly #onSpeechStart?: (event: Readonly<MediaSpeechStart>) => void;
   readonly #onEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void;
@@ -607,6 +666,7 @@ export class BrowserDedicatedMediaSocketLeaf {
   #scheduledDrainRetry: ScheduledDrainRetry | null = null;
   #drainRetryGeneration = 0;
   #drainStallRetries = 0;
+  #lastUplinkAckNotified = -1;
 
   constructor(
     activation: ActiveMediaActivation,
@@ -622,6 +682,8 @@ export class BrowserDedicatedMediaSocketLeaf {
     authenticationFrame: string | null,
     onTerminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void,
     onUplinkFrameSent?: (seq: number) => void,
+    onUplinkFrameAcknowledged?: (throughSeq: number) => void,
+    onFirstFrameDiagnostic?: (fact: Readonly<MediaFirstFrameDiagnostic>) => void,
     endOfTurnCapability?: 'media.end_of_turn.v1',
     onSpeechStart?: (event: Readonly<MediaSpeechStart>) => void,
     onEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void,
@@ -644,6 +706,10 @@ export class BrowserDedicatedMediaSocketLeaf {
     this.#pendingAuthenticationFrame = authenticationFrame;
     this.#onTerminal = onTerminal;
     this.#onUplinkFrameSent = onUplinkFrameSent;
+    this.#onUplinkFrameAcknowledged = onUplinkFrameAcknowledged;
+    this.#onFirstFrameDiagnostic = onFirstFrameDiagnostic ?? logFirstFrameDiagnostic;
+    this.#diagnosticScopeSummary = mediaScopeSummary(activation.binding);
+    this.#diagnosticStartedAtMs = monotonicNowMs();
     this.#endOfTurnCapability = endOfTurnCapability;
     this.#onSpeechStart = onSpeechStart;
     this.#onEndOfTurn = onEndOfTurn;
@@ -754,7 +820,7 @@ export class BrowserDedicatedMediaSocketLeaf {
         this.#socket.send(binary);
         return 'sent';
       },
-      seq => this.#onUplinkFrameSent?.(seq)
+      seq => this.#observeUplinkFrameSent(seq)
     );
     if (this.#activation.owner.closed) {
       const reasonId = closeReasonFrom({ reasonId: drained.reason_id });
@@ -1043,11 +1109,59 @@ export class BrowserDedicatedMediaSocketLeaf {
         this.#sendControl(detach);
         this.#terminate(detach.reason_id, false);
       } else {
+        if (control.through_seq > this.#lastUplinkAckNotified) {
+          const acknowledgesFirstFrame = this.#lastUplinkAckNotified < 0 && control.through_seq >= 0;
+          this.#lastUplinkAckNotified = control.through_seq;
+          try {
+            this.#onUplinkFrameAcknowledged?.(control.through_seq);
+          } catch {
+            // Optional ACK diagnostics/readiness observation cannot alter media ownership.
+          }
+          if (acknowledgesFirstFrame) {
+            this.#emitFirstFrameDiagnostic('browser_ack_released', 'MEDIA_ACK_APPLIED');
+          }
+        }
         this.flush();
       }
       return;
     }
     this.#terminate('MEDIA_TRANSPORT_PROTOCOL_ERROR');
+  }
+
+  #observeUplinkFrameSent(seq: number): void {
+    try {
+      this.#onUplinkFrameSent?.(seq);
+    } catch {
+      // Optional transport diagnostics cannot alter sender ownership.
+    }
+    if (seq === 0) {
+      this.#emitFirstFrameDiagnostic('browser_frame_sent', 'MEDIA_SOCKET_SEND_ACCEPTED');
+    }
+  }
+
+  #emitFirstFrameDiagnostic(
+    stage: MediaFirstFrameDiagnostic['stage'],
+    reason: MediaFirstFrameDiagnostic['reason'],
+  ): void {
+    if (this.binding.direction !== 'uplink' || this.binding.generation.kind !== 'capture') return;
+    const observedAtMs = monotonicNowMs();
+    void this.#diagnosticScopeSummary.then(scopeSha256 => {
+      const fact: Readonly<MediaFirstFrameDiagnostic> = Object.freeze({
+        stage,
+        scope_sha256: scopeSha256,
+        capture_generation: this.binding.generation.value,
+        frame_seq: 0,
+        monotonic_ms: observedAtMs,
+        elapsed_ms: Math.max(0, observedAtMs - this.#diagnosticStartedAtMs),
+        outcome: 'success',
+        reason,
+      });
+      try {
+        this.#onFirstFrameDiagnostic(fact);
+      } catch {
+        // Content-free diagnostics cannot alter the media path.
+      }
+    });
   }
 
   #sendControl(control: MediaControl): void {

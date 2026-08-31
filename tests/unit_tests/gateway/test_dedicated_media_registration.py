@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import base64
+import hashlib
 import io
 import json
 import logging
@@ -1035,6 +1036,86 @@ def test_optional_l0_binding_never_rejects_wider_product_media_identity(
 
     assert record.route_completed is True
     assert [item["binding"] for item in emitted] == [None, None]
+
+
+def test_first_frame_diagnostics_hash_scope_and_record_accept_then_ack_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    diagnostics: list[object] = []
+    monkeypatch.setattr(
+        dedicated_media_registration._MEDIA_FIRST_FRAME_DIAGNOSTIC_WORKER,
+        "submit",
+        lambda item: diagnostics.append(item) or True,
+    )
+    registry = DedicatedMediaProductRegistry(enabled=True, monotonic=lambda: 10.25)
+    registry.set_provider_available(True)
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-owner",
+    )
+    record = _pending_record(registry, _media_ticket(activation))
+    registry.accept_frame(
+        record,
+        MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.25,) * 320),
+    )
+    acknowledgement = MediaAck(
+        record.binding.lease_id,
+        record.binding.generation.value,
+        0,
+    )
+
+    registry.observe_uplink_frame_accepted(record, acknowledgement, 10.25)
+    registry.observe_uplink_ack_sent(record, acknowledgement)
+
+    expected_scope = hashlib.sha256(
+        "\x1f".join(
+            (
+                record.binding.session_id,
+                record.binding.interaction_id,
+                record.binding.correlation_id,
+                record.binding.media_session_id,
+                record.binding.track_id,
+                record.binding.lease_id,
+                record.binding.generation.kind.value,
+                record.binding.generation.id,
+                str(record.binding.generation.value),
+            )
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    assert len(diagnostics) == 2
+    assert [item.stage for item in diagnostics] == [
+        "gateway_frame_accepted",
+        "gateway_ack_sent",
+    ]
+    assert all(item.scope_sha256 == expected_scope for item in diagnostics)
+    assert all(
+        item.capture_generation == 0 and item.frame_seq == 0
+        for item in diagnostics
+    )
+    assert all(item.outcome == "success" for item in diagnostics)
+    assert diagnostics[0].monotonic_ms == 10_250.0
+    assert diagnostics[0].elapsed_ms == 0.0
+    assert diagnostics[0].reason == "MEDIA_FRAME_ACCEPTED"
+    assert diagnostics[1].reason == "MEDIA_ACK_SEND_SUCCEEDED"
+    serialized = repr(diagnostics)
+    assert "session-1" not in serialized
+    assert "interaction-1" not in serialized
+    assert "correlation-1" not in serialized
+    assert record.binding.lease_id not in serialized
+
+    successor_activation = _activate(
+        registry,
+        params=_params(capture_id="capture-2", track_id="track-2"),
+        request_origin=ORIGIN,
+        connection_id="connection-owner",
+    )
+    successor = _pending_record(registry, _media_ticket(successor_activation))
+    assert (
+        registry._first_frame_scope_sha256(successor)
+        != registry._first_frame_scope_sha256(record)
+    )
 
 
 @pytest.mark.asyncio

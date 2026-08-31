@@ -1894,6 +1894,8 @@ test('product barge-in stops local playout before any response cancel request', 
   assert.match(handler, /cancel_response: true/);
   assert.match(handler, /p2Owner\.hasPendingBargeIn\(\)/);
   assert.match(handler, /pendingBargeInRef\.current === retained/);
+  assert.doesNotMatch(handler, /successor_readiness|captureDiagnostics/);
+  assert.doesNotMatch(handler, /task\.cancel|task\.mutate/);
 });
 
 test('overlap capture publishes its exact binding before playout EOT can race completion', async () => {

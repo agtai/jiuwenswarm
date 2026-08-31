@@ -187,6 +187,7 @@ _P2_NOTIFICATION_ITEM_KEYS = frozenset(
 )
 _STREAMING_DIAGNOSTIC_QUEUE_CAPACITY = 16
 _STREAMING_DIAGNOSTIC_CLOSE_BUDGET_SECONDS = 0.05
+_MEDIA_FIRST_FRAME_DIAGNOSTIC_QUEUE_CAPACITY = 64
 _FORMAL_P2_EVIDENCE = frozenset(
     {
         "TRUSTED_AUTHORITY_RESOLVED",
@@ -196,6 +197,73 @@ _FORMAL_P2_EVIDENCE = frozenset(
     }
 )
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _MediaFirstFrameDiagnosticItem:
+    stage: str
+    scope_sha256: str
+    capture_generation: int
+    frame_seq: int
+    monotonic_ms: float
+    elapsed_ms: float
+    outcome: str
+    reason: str
+
+
+class _MediaFirstFrameDiagnosticWorker:
+    """Bounded process-wide logger that never occupies the media ACK path."""
+
+    def __init__(self) -> None:
+        self._queue: queue.Queue[_MediaFirstFrameDiagnosticItem] = queue.Queue(
+            maxsize=_MEDIA_FIRST_FRAME_DIAGNOSTIC_QUEUE_CAPACITY
+        )
+        self._start_lock = threading.Lock()
+        self._worker: threading.Thread | None = None
+
+    def submit(self, item: _MediaFirstFrameDiagnosticItem) -> bool:
+        self._ensure_started()
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            return False
+        return True
+
+    def _ensure_started(self) -> None:
+        with self._start_lock:
+            if self._worker is not None:
+                return
+            self._worker = threading.Thread(
+                target=self._run,
+                name="live-voice-media-first-frame-diagnostics",
+                daemon=True,
+            )
+            self._worker.start()
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            try:
+                _LOGGER.info(
+                    "live_voice_media_first_frame "
+                    "stage=%s scope_sha256=%s generation=%d seq=%d "
+                    "monotonic_ms=%.3f elapsed_ms=%.3f outcome=%s reason=%s",
+                    item.stage,
+                    item.scope_sha256,
+                    item.capture_generation,
+                    item.frame_seq,
+                    item.monotonic_ms,
+                    item.elapsed_ms,
+                    item.outcome,
+                    item.reason,
+                )
+            except BaseException:
+                pass
+            finally:
+                self._queue.task_done()
+
+
+_MEDIA_FIRST_FRAME_DIAGNOSTIC_WORKER = _MediaFirstFrameDiagnosticWorker()
 
 StreamingXObsEvent = Literal["failure.observed", "degradation.activated"]
 StreamingXObsMetric = Literal[
@@ -597,6 +665,8 @@ class _MediaAuthority:
     last_uplink_ack_observed_at: str | None = None
     last_uplink_ack_monotonic_ms: float | None = None
     last_uplink_ack_duration_ms: float | None = None
+    first_uplink_frame_accepted_diagnostic: bool = False
+    first_uplink_ack_sent_diagnostic: bool = False
     pcm: bytearray = field(default_factory=bytearray, repr=False)
     recognition_content_sha256: str | None = None
     streaming_recognition_handle: StreamingRecognitionHandle | None = field(
@@ -2273,6 +2343,38 @@ class DedicatedMediaProductRegistry:
             record.pcm.extend(encoded)
             record.accepted_frames += 1
 
+    def observe_uplink_frame_accepted(
+        self,
+        record: _MediaAuthority,
+        acknowledgement: MediaAck,
+        accepted_monotonic: float,
+    ) -> None:
+        """Log the content-free boundary after seq=0 is accepted."""
+
+        if not isinstance(accepted_monotonic, (int, float)) or not math.isfinite(
+            accepted_monotonic
+        ):
+            return
+        with self._lock:
+            if (
+                self._records.get(record.record_id) is not record
+                or record.route_completed
+                or record.binding.direction is not MediaDirection.UPLINK
+                or record.first_uplink_frame_accepted_diagnostic
+                or acknowledgement.lease_id != record.binding.lease_id
+                or acknowledgement.generation != record.binding.generation.value
+                or acknowledgement.through_seq != 0
+                or record.accepted_frames <= 0
+            ):
+                return
+            record.first_uplink_frame_accepted_diagnostic = True
+        self._log_first_frame_diagnostic(
+            record,
+            stage="gateway_frame_accepted",
+            observed_monotonic=float(accepted_monotonic),
+            reason="MEDIA_FRAME_ACCEPTED",
+        )
+
     def observe_uplink_ack_sent(
         self, record: _MediaAuthority, acknowledgement: MediaAck
     ) -> None:
@@ -2284,6 +2386,7 @@ class DedicatedMediaProductRegistry:
             .isoformat(timespec="milliseconds")
             .replace("+00:00", "Z")
         )
+        log_first_ack = False
         with self._lock:
             if (
                 self._records.get(record.record_id) is not record
@@ -2306,6 +2409,59 @@ class DedicatedMediaProductRegistry:
             record.last_uplink_ack_duration_ms = max(
                 0.0, (observed_monotonic - record.issued_at) * 1_000.0
             )
+            if (
+                acknowledgement.through_seq == 0
+                and not record.first_uplink_ack_sent_diagnostic
+            ):
+                record.first_uplink_ack_sent_diagnostic = True
+                log_first_ack = True
+        if log_first_ack:
+            self._log_first_frame_diagnostic(
+                record,
+                stage="gateway_ack_sent",
+                observed_monotonic=observed_monotonic,
+                reason="MEDIA_ACK_SEND_SUCCEEDED",
+            )
+
+    @staticmethod
+    def _first_frame_scope_sha256(record: _MediaAuthority) -> str:
+        source = "\x1f".join(
+            (
+                record.binding.session_id,
+                record.binding.interaction_id,
+                record.binding.correlation_id,
+                record.binding.media_session_id,
+                record.binding.track_id,
+                record.binding.lease_id,
+                record.binding.generation.kind.value,
+                record.binding.generation.id,
+                str(record.binding.generation.value),
+            )
+        )
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+
+    def _log_first_frame_diagnostic(
+        self,
+        record: _MediaAuthority,
+        *,
+        stage: str,
+        observed_monotonic: float,
+        reason: str,
+    ) -> None:
+        _MEDIA_FIRST_FRAME_DIAGNOSTIC_WORKER.submit(
+            _MediaFirstFrameDiagnosticItem(
+                stage=stage,
+                scope_sha256=self._first_frame_scope_sha256(record),
+                capture_generation=record.binding.generation.value,
+                frame_seq=0,
+                monotonic_ms=observed_monotonic * 1_000.0,
+                elapsed_ms=max(
+                    0.0, (observed_monotonic - record.issued_at) * 1_000.0
+                ),
+                outcome="success",
+                reason=reason,
+            )
+        )
 
     def complete_route(
         self, record: _MediaAuthority, result: DedicatedMediaSocketLeafResult
@@ -4088,6 +4244,11 @@ async def handle_registered_media_socket(
                 socket=ws,
                 on_audio_frame=retain_uplink_frame,
                 on_complete=retain_uplink_completion,
+                on_uplink_frame_accepted=lambda acknowledgement, accepted_at: (
+                    registry.observe_uplink_frame_accepted(
+                        record, acknowledgement, accepted_at
+                    )
+                ),
                 on_uplink_ack_sent=lambda acknowledgement: (
                     registry.observe_uplink_ack_sent(record, acknowledgement)
                 ),

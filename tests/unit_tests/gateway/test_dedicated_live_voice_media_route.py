@@ -64,6 +64,7 @@ class _FakeDedicatedSocket:
         self.sent: list[str | bytes] = []
         self.close_calls: list[tuple[int, str]] = []
         self.fail_send_at = fail_send_at
+        self.send_attempts = 0
 
     async def recv(self) -> str | bytes:
         if not self.incoming:
@@ -74,6 +75,7 @@ class _FakeDedicatedSocket:
         return value  # type: ignore[return-value]
 
     async def send(self, message: str | bytes) -> None:
+        self.send_attempts += 1
         if self.fail_send_at is not None and len(self.sent) == self.fail_send_at:
             raise ConnectionError("private send failure")
         self.sent.append(message)
@@ -906,15 +908,26 @@ async def test_uplink_ack_observer_runs_only_after_successful_socket_send() -> N
         fail_send_at=1,
     )
     sent_acknowledgements: list[MediaAck] = []
+    accepted_acknowledgements: list[tuple[MediaAck, int, float]] = []
 
     result = await run_dedicated_media_socket_leaf(
         _request(binding),
         socket=socket,
         on_audio_frame=lambda _frame: None,
+        on_uplink_frame_accepted=(
+            lambda acknowledgement, accepted_at: accepted_acknowledgements.append(
+                (acknowledgement, socket.send_attempts, accepted_at)
+            )
+        ),
         on_uplink_ack_sent=sent_acknowledgements.append,
     )
 
     assert result.reason_id is MediaDetachReason.TRANSPORT_SEND_FAILED
+    assert len(accepted_acknowledgements) == 1
+    acknowledgement, send_attempts, accepted_at = accepted_acknowledgements[0]
+    assert acknowledgement == MediaAck(binding.lease_id, binding.generation.value, 0)
+    assert send_attempts == 2
+    assert accepted_at > 0
     assert sent_acknowledgements == []
 
 

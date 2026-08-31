@@ -14,13 +14,19 @@ import pytest
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MEDIA_END_OF_TURN_CAPABILITY,
     MediaAudioFrame,
+    MediaAck,
     MediaAuthorityBinding,
+    MediaAttach,
+    MediaDetach,
     MediaDirection,
     MediaFrameFormat,
     MediaGenerationBinding,
     MediaGenerationKind,
     MediaDetachReason,
     MediaTransportViolation,
+    deserialize_media_control,
+    encode_audio_frame,
+    serialize_media_control,
 )
 from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
     DedicatedMediaProductRegistry,
@@ -296,6 +302,36 @@ class _AuthenticatedMediaSocket:
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         self.closes.append((code, reason))
+
+
+class _AuthenticatedMediaExchangeSocket(_AuthenticatedMediaSocket):
+    def __init__(
+        self,
+        activation: dict[str, object],
+        binding: MediaAuthorityBinding,
+    ) -> None:
+        super().__init__(activation)
+        self._incoming: list[str | bytes] = [
+            encode_audio_frame(binding, _frame(0)),
+            serialize_media_control(
+                MediaDetach(
+                    lease_id=binding.lease_id,
+                    generation=binding.generation.value,
+                    reason_id=MediaDetachReason.PEER_CLOSE,
+                    through_seq=0,
+                )
+            ),
+        ]
+        self.sent: list[str | bytes] = []
+
+    async def recv(self) -> str | bytes:
+        if self.recv_count == 0:
+            return await super().recv()
+        self.recv_count += 1
+        return self._incoming.pop(0)
+
+    async def send(self, message: str | bytes) -> None:
+        self.sent.append(message)
 
 
 @pytest.mark.asyncio
@@ -2383,6 +2419,78 @@ async def test_slow_streaming_open_never_delays_media_attach_or_omits_early_audi
     record = next(iter(registry._records.values()))
     assert record.recognition_content_sha256 is not None
     assert record.accepted_frames == 2
+
+
+@pytest.mark.asyncio
+async def test_slow_streaming_open_never_delays_real_socket_first_frame_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    diagnostic_started = threading.Event()
+    diagnostic_release = threading.Event()
+
+    def blocking_first_frame_log(message: str, *_args: object) -> None:
+        if message.startswith("live_voice_media_first_frame"):
+            diagnostic_started.set()
+            diagnostic_release.wait(timeout=2.0)
+
+    monkeypatch.setattr(
+        dedicated_media_registration._LOGGER,
+        "info",
+        blocking_first_frame_log,
+    )
+    provider = _DelayedOpenProvider()
+    owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
+        )
+    )
+    registry = DedicatedMediaProductRegistry(enabled=True)
+    registry.set_provider_available(True)
+    registry.configure_streaming_recognition(
+        owner,
+        receipt_issuer=lambda **_binding: asyncio.sleep(
+            0, result="unused-streaming-receipt-12345678901234567890"
+        ),
+    )
+    await registry.prepare_streaming_provider()
+    _trust_activation(registry)
+    activation = registry.activate(
+        params=_activation_params(),
+        request_origin="https://voice.example.test",
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    record = next(iter(registry._records.values()))
+    socket = _AuthenticatedMediaExchangeSocket(activation, record.binding)
+
+    started = asyncio.get_running_loop().time()
+    operation = asyncio.create_task(
+        handle_registered_media_socket(registry, socket, MEDIA_ROUTE_PATH)
+    )
+    completed = False
+    try:
+        await asyncio.wait_for(provider.open_started.wait(), timeout=0.5)
+        for _turn in range(100):
+            controls = [deserialize_media_control(item) for item in socket.sent]
+            if any(isinstance(control, MediaAck) for control in controls):
+                break
+            await asyncio.sleep(0.005)
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert any(isinstance(control, MediaAttach) for control in controls)
+        assert [control for control in controls if isinstance(control, MediaAck)] == [
+            MediaAck(record.binding.lease_id, record.binding.generation.value, 0)
+        ]
+        assert elapsed < 0.5
+        assert not operation.done()
+        assert await asyncio.to_thread(diagnostic_started.wait, 0.5)
+    finally:
+        provider.open_release.set()
+        completed = await asyncio.wait_for(operation, timeout=1.0)
+        diagnostic_release.set()
+        await owner.close()
+    assert completed
 
 
 @pytest.mark.asyncio

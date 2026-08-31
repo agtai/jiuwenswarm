@@ -698,6 +698,7 @@ async def run_dedicated_media_socket_leaf(
     socket: DedicatedMediaSocket,
     on_audio_frame: Callable[[MediaAudioFrame], None],
     on_complete: Callable[[DedicatedMediaSocketLeafResult], None] | None = None,
+    on_uplink_frame_accepted: Callable[[MediaAck, float], None] | None = None,
     on_uplink_ack_sent: Callable[[MediaAck], None] | None = None,
     next_speech_start: Callable[[], Awaitable[MediaSpeechStart]] | None = None,
     next_end_of_turn: Callable[[], Awaitable[MediaEndOfTurn]] | None = None,
@@ -732,6 +733,12 @@ async def run_dedicated_media_socket_leaf(
     if on_uplink_ack_sent is not None and not callable(on_uplink_ack_sent):
         raise MediaTransportViolation(
             "MEDIA_INVALID_CONSUMER", "uplink ACK observer must be callable"
+        )
+    if on_uplink_frame_accepted is not None and not callable(
+        on_uplink_frame_accepted
+    ):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER", "uplink frame observer must be callable"
         )
     if next_end_of_turn is not None and not callable(next_end_of_turn):
         raise MediaTransportViolation(
@@ -1170,7 +1177,23 @@ async def run_dedicated_media_socket_leaf(
             return await terminate(closed)
 
         control = session.accept_binary(message)
-        if not await send_control(control):
+        first_frame_accepted_at = (
+            asyncio.get_running_loop().time()
+            if isinstance(control, MediaAck) and control.through_seq == 0
+            else None
+        )
+        control_sent = await send_control(control)
+        if (
+            first_frame_accepted_at is not None
+            and on_uplink_frame_accepted is not None
+        ):
+            try:
+                on_uplink_frame_accepted(control, first_frame_accepted_at)
+            except BaseException:
+                # Observation runs only after the ACK send attempt and cannot
+                # alter media authority or the already-completed send.
+                pass
+        if not control_sent:
             closed = session.close(MediaDetachReason.TRANSPORT_SEND_FAILED)
             return await terminate(closed)
         if isinstance(control, MediaAck) and on_uplink_ack_sent is not None:
