@@ -692,7 +692,7 @@ class _DedicatedMediaRouteSession:
         )
 
 
-async def run_dedicated_media_socket_leaf(
+async def _run_dedicated_media_socket_leaf_inner(
     request: DedicatedMediaRouteRequest,
     *,
     socket: DedicatedMediaSocket,
@@ -1241,7 +1241,7 @@ async def run_dedicated_media_socket_leaf(
             raise
 
 
-async def run_dedicated_media_downlink_socket_leaf(
+async def _run_dedicated_media_downlink_socket_leaf_inner(
     request: DedicatedMediaRouteRequest,
     *,
     socket: DedicatedMediaSocket,
@@ -1587,3 +1587,141 @@ __all__ = [
     "run_dedicated_media_socket_leaf",
     "run_dedicated_media_downlink_socket_leaf",
 ]
+
+
+async def _run_leaf_with_stop_fence(
+    inner: "Awaitable[DedicatedMediaSocketLeafResult]",
+    *,
+    socket: DedicatedMediaSocket,
+    stop_event: asyncio.Event | None,
+    deadline_remaining: Callable[[], float] | None,
+) -> DedicatedMediaSocketLeafResult:
+    """F06: 叶子的停车栅栏与绝对期限。
+
+    停车事件置位或权限期限归零时:先关 socket 唤醒一切收/发/来源/ACK/EOT
+    等待,再有界 join;传输在预算内仍不停则 cancel 一次,最后返回诚实的
+    cleanup_complete=False 结果,绝不无限等待也绝不谎报完成。
+    """
+
+    if stop_event is None and deadline_remaining is None:
+        return await inner
+    leaf: asyncio.Task[DedicatedMediaSocketLeafResult] = asyncio.ensure_future(inner)
+    stop_wait: asyncio.Task[bool] | None = None
+    if stop_event is not None:
+        stop_wait = asyncio.create_task(
+            stop_event.wait(), name="live-voice-media-leaf-stop"
+        )
+    try:
+        while True:
+            budget: float | None = None
+            if deadline_remaining is not None:
+                budget = max(0.0, float(deadline_remaining()))
+            waiters: set[asyncio.Task[object]] = {leaf}
+            if stop_wait is not None:
+                waiters.add(stop_wait)
+            done, _pending = await asyncio.wait(
+                waiters, timeout=budget, return_when=asyncio.FIRST_COMPLETED
+            )
+            if leaf in done:
+                return leaf.result()
+            stop_hit = stop_wait is not None and stop_wait.done()
+            deadline_hit = (
+                deadline_remaining is not None
+                and float(deadline_remaining()) <= 0.0
+            )
+            if not stop_hit and not deadline_hit:
+                # 期限被续期或虚假超时:继续守望。
+                continue
+            try:
+                await socket.close(code=1001, reason="media authority stopped")
+            except BaseException:
+                pass
+            done_after_close, _p = await asyncio.wait(
+                {leaf}, timeout=_SOCKET_CLOSE_TIMEOUT_SECONDS
+            )
+            if leaf in done_after_close:
+                return leaf.result()
+            leaf.cancel()
+            done_after_cancel, _p = await asyncio.wait(
+                {leaf}, timeout=_SOCKET_CLOSE_TIMEOUT_SECONDS
+            )
+            if leaf in done_after_cancel and not leaf.cancelled():
+                try:
+                    return leaf.result()
+                except BaseException:
+                    pass
+            return DedicatedMediaSocketLeafResult(
+                activated=True,
+                socket_touched=True,
+                attach_sent=False,
+                accepted_frames=0,
+                close_result=None,
+                reason_id=MediaDetachReason.TRANSPORT_CLOSED,
+                cleanup_complete=False,
+                cleanup_pending_tasks=1,
+            )
+    finally:
+        if stop_wait is not None and not stop_wait.done():
+            stop_wait.cancel()
+
+
+async def run_dedicated_media_socket_leaf(
+    request: DedicatedMediaRouteRequest,
+    *,
+    socket: DedicatedMediaSocket,
+    on_audio_frame: Callable[[MediaAudioFrame], None],
+    on_complete: Callable[[DedicatedMediaSocketLeafResult], None] | None = None,
+    on_uplink_ack_sent: Callable[[MediaAck], None] | None = None,
+    next_speech_start: Callable[[], Awaitable[MediaSpeechStart]] | None = None,
+    next_end_of_turn: Callable[[], Awaitable[MediaEndOfTurn]] | None = None,
+    cleanup_owner: DedicatedMediaLeafCleanupOwner | None = None,
+    stop_event: asyncio.Event | None = None,
+    deadline_remaining: Callable[[], float] | None = None,
+) -> DedicatedMediaSocketLeafResult:
+    """Run one injected uplink WebSocket leaf under the F06 stop fence."""
+
+    return await _run_leaf_with_stop_fence(
+        _run_dedicated_media_socket_leaf_inner(
+            request,
+            socket=socket,
+            on_audio_frame=on_audio_frame,
+            on_complete=on_complete,
+            on_uplink_ack_sent=on_uplink_ack_sent,
+            next_speech_start=next_speech_start,
+            next_end_of_turn=next_end_of_turn,
+            cleanup_owner=cleanup_owner,
+        ),
+        socket=socket,
+        stop_event=stop_event,
+        deadline_remaining=deadline_remaining,
+    )
+
+
+async def run_dedicated_media_downlink_socket_leaf(
+    request: DedicatedMediaRouteRequest,
+    *,
+    socket: DedicatedMediaSocket,
+    frames: "Iterable[MediaAudioFrame] | AsyncIterable[MediaAudioFrame]",
+    on_playback_stop: Callable[[MediaPlaybackStopReceipt], None],
+    on_complete: Callable[[DedicatedMediaSocketLeafResult], None] | None = None,
+    max_pending_frames: int = 8,
+    max_pending_bytes: int = 131_072,
+    stop_event: asyncio.Event | None = None,
+    deadline_remaining: Callable[[], float] | None = None,
+) -> DedicatedMediaSocketLeafResult:
+    """Send one downlink lease under the F06 stop fence."""
+
+    return await _run_leaf_with_stop_fence(
+        _run_dedicated_media_downlink_socket_leaf_inner(
+            request,
+            socket=socket,
+            frames=frames,
+            on_playback_stop=on_playback_stop,
+            on_complete=on_complete,
+            max_pending_frames=max_pending_frames,
+            max_pending_bytes=max_pending_bytes,
+        ),
+        socket=socket,
+        stop_event=stop_event,
+        deadline_remaining=deadline_remaining,
+    )

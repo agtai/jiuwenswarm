@@ -636,7 +636,18 @@ class WebChannel(BaseWsChannel):
         await self._server.wait_closed()
 
     async def stop(self) -> None:
-        """停止 WebSocket 服务并清理连接."""
+        """停止 WebSocket 服务并清理连接(F16: 单飞 + 相位化)."""
+        stop_lock = getattr(self, "_stop_lock", None)
+        if stop_lock is None:
+            stop_lock = asyncio.Lock()
+            self._stop_lock = stop_lock
+        async with stop_lock:
+            if getattr(self, "_stop_completed", False):
+                return
+            await self._stop_phases()
+            self._stop_completed = True
+
+    async def _stop_phases(self) -> None:
         self._running = False
 
         shutdown_failure: BaseException | None = None
@@ -646,6 +657,40 @@ class WebChannel(BaseWsChannel):
             if shutdown_failure is None:
                 shutdown_failure = error
             logger.warning(message)
+
+        media_registry = self.live_voice_media_registry
+        # F16 相位一:先建停车栅栏——拒绝新准入并唤醒每一片叶子,
+        # 然后才允许关闭叶子还在用的任何依赖(Speech Provider 等)。
+        if media_registry is not None:
+            stop_all_leaves = getattr(media_registry, "stop_all_leaves", None)
+            if callable(stop_all_leaves):
+                try:
+                    stop_all_leaves()
+                except BaseException as error:
+                    retain_failure(
+                        error, "WebChannel live voice leaf stop fence failed"
+                    )
+            close_sweeper = getattr(media_registry, "close_expiry_sweeper", None)
+            if callable(close_sweeper):
+                try:
+                    await close_sweeper()
+                except BaseException as error:
+                    retain_failure(
+                        error, "WebChannel live voice expiry sweeper cleanup failed"
+                    )
+            # F16 相位二:被唤醒的叶子做有界 join;完成度的最终裁定推迟到
+            # 所有唤醒动作之后(见方法末尾),这里只记录中间异常。
+            close_media_leaf_cleanup = getattr(
+                media_registry, "close_media_leaf_cleanup", None
+            )
+            if callable(close_media_leaf_cleanup):
+                try:
+                    await close_media_leaf_cleanup()
+                except BaseException as error:
+                    retain_failure(
+                        error,
+                        "WebChannel live voice media task cleanup failed",
+                    )
 
         streaming_owner = self.live_voice_streaming_synthesis_owner
         if streaming_owner is not None:
@@ -689,7 +734,6 @@ class WebChannel(BaseWsChannel):
             # external owner retains its lifetime authority.
             self.live_voice_speech_service = None
 
-        media_registry = self.live_voice_media_registry
         if media_registry is not None:
             close_streaming_observability = getattr(
                 media_registry, "close_streaming_observability", None
@@ -745,24 +789,6 @@ class WebChannel(BaseWsChannel):
                             close_result,
                             "WebChannel client cleanup failed",
                         )
-        if media_registry is not None:
-            close_media_leaf_cleanup = getattr(
-                media_registry, "close_media_leaf_cleanup", None
-            )
-            if callable(close_media_leaf_cleanup):
-                try:
-                    media_cleanup_complete = await close_media_leaf_cleanup()
-                except BaseException as error:
-                    retain_failure(
-                        error,
-                        "WebChannel live voice media task cleanup failed",
-                    )
-                else:
-                    if media_cleanup_complete is not True:
-                        retain_failure(
-                            RuntimeError("live voice media task cleanup is incomplete"),
-                            "WebChannel live voice media task cleanup incomplete",
-                        )
         self._clients_by_key.clear()
 
         server = self._server
@@ -785,6 +811,15 @@ class WebChannel(BaseWsChannel):
             await self._shutdown_all_writers()
         except BaseException as error:
             retain_failure(error, "WebChannel writer cleanup failed")
+
+        # F16: CLOSED / CLEANUP_INCOMPLETE 由所有唤醒动作之后的最终状态裁定。
+        if media_registry is not None:
+            snapshot = getattr(media_registry, "media_leaf_cleanup_snapshot", None)
+            if snapshot is not None and snapshot.cleanup_complete is not True:
+                retain_failure(
+                    RuntimeError("live voice media task cleanup is incomplete"),
+                    "WebChannel live voice media task cleanup incomplete",
+                )
 
         if shutdown_failure is not None:
             logger.warning("WebChannel cleanup incomplete")

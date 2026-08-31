@@ -10,6 +10,7 @@ memory-only audit facts needed by the W2 Web composition.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import base64
 import hashlib
 import hmac
@@ -590,6 +591,9 @@ class _MediaAuthority:
     issued_at: float
     ticket_expires_at: float
     authority_expires_at: float
+    # F06: 叶子停车栅栏——撤销/过期/关停置位后,停在 recv/send/source/ACK/EOT
+    # 的叶子被唤醒并走终止路径,而不是永远挂在无期限的等待里。
+    stop: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     barge_in_capture: bool = False
     ticket_consumed: bool = False
     route_completed: bool = False
@@ -899,6 +903,7 @@ class DedicatedMediaProductRegistry:
         capacity: int = _MAX_RECORDS,
         end_of_turn_enabled: bool = False,
         streaming_observability: LiveVoiceObservabilityCollector | None = None,
+        expiry_sweep_interval_seconds: float = 30.0,
     ) -> None:
         self.enabled = enabled is True
         self._monotonic = monotonic
@@ -918,6 +923,10 @@ class DedicatedMediaProductRegistry:
             OrderedDict()
         )
         self._lock = threading.RLock()
+        # F06: 过期不再依赖"恰好有别的注册表调用"——后台清扫器按此间隔跑 _prune。
+        self._sweep_interval = float(expiry_sweep_interval_seconds)
+        self._expiry_sweeper: asyncio.Task[None] | None = None
+        self._admissions_closed = False
         self._batch_provider_available = False
         self._streaming_provider_available = False
         self._streaming_selection_degradation: dict[str, object] | None = None
@@ -1510,8 +1519,11 @@ class DedicatedMediaProductRegistry:
         request_origin: str | None,
         claimed_binding: MediaAuthorityBinding | None = None,
     ) -> _MediaAuthority | None:
+        self._ensure_expiry_sweeper()
         now = self._monotonic()
         with self._lock:
+            if self._admissions_closed:
+                return None
             self._prune(now)
             # Ticket lookup scans the bounded pending index and uses a
             # constant-time comparison. A successful capability is removed
@@ -2651,6 +2663,7 @@ class DedicatedMediaProductRegistry:
                     owned.downlink_frames = ()
                     self._release_stream_source(owned)
                     owned.pcm.clear()
+                    owned.stop.set()
                     self._schedule_streaming_abort(owned)
                 self._remember_revoked(subject_id, binding)
         return {
@@ -3944,6 +3957,50 @@ class DedicatedMediaProductRegistry:
             record.playout_receipt_content_sha256[key] = content_sha256
             return dict(payload)
 
+    def record_deadline_remaining(self, record: _MediaAuthority) -> float:
+        """F06: 该叶子距绝对权限期限剩余的秒数(注册表时基)。"""
+        return max(0.0, record.authority_expires_at - self._monotonic())
+
+    def _ensure_expiry_sweeper(self) -> None:
+        if not self.enabled or self._sweep_interval <= 0:
+            return
+        sweeper = self._expiry_sweeper
+        if sweeper is not None and not sweeper.done():
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._expiry_sweeper = asyncio.create_task(
+            self._run_expiry_sweeper(), name="live-voice-media-expiry-sweeper"
+        )
+
+    async def _run_expiry_sweeper(self) -> None:
+        while True:
+            await asyncio.sleep(self._sweep_interval)
+            with self._lock:
+                self._prune(self._monotonic())
+
+    async def close_expiry_sweeper(self) -> None:
+        sweeper = self._expiry_sweeper
+        self._expiry_sweeper = None
+        if sweeper is None:
+            return
+        sweeper.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await sweeper
+
+    def stop_all_leaves(self) -> int:
+        """F16: 关停第一相——拒绝新准入并唤醒每一片仍在册的叶子。"""
+        with self._lock:
+            self._admissions_closed = True
+            woken = 0
+            for record in self._records.values():
+                if not record.stop.is_set():
+                    record.stop.set()
+                    woken += 1
+            return woken
+
     def _drop_pending_for_record_id(self, record_id: str) -> None:
         for ticket, pending_record_id in tuple(self._pending_tickets.items()):
             if pending_record_id == record_id:
@@ -3960,6 +4017,7 @@ class DedicatedMediaProductRegistry:
         ]
         for record_id in expired:
             record = self._records.pop(record_id)
+            record.stop.set()
             self._drop_pending_for_record_id(record_id)
             subject_key = (record.binding.session_id, record.subject_id)
             if self._subjects.get(subject_key) == record_id:
@@ -4054,6 +4112,7 @@ class DedicatedMediaProductRegistry:
             self._release_stream_source(record)
             record.downlink_overlap_record_id = None
             record.pcm.clear()
+            record.stop.set()
             self._schedule_streaming_abort(record)
 
     def _schedule_streaming_abort(self, record: _MediaAuthority) -> None:
@@ -4371,6 +4430,8 @@ async def handle_registered_media_socket(
                 on_complete=retain_downlink_completion,
                 max_pending_frames=8,
                 max_pending_bytes=131_072,
+                stop_event=record.stop,
+                deadline_remaining=lambda: registry.record_deadline_remaining(record),
             )
         else:
             registry.start_streaming_recognition(record)
@@ -4428,6 +4489,8 @@ async def handle_registered_media_socket(
                     if record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
                     else None
                 ),
+                stop_event=record.stop,
+                deadline_remaining=lambda: registry.record_deadline_remaining(record),
             )
             if (
                 result.activated

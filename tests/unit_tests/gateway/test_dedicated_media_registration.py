@@ -3661,3 +3661,113 @@ def test_product_tts_identity_budget_is_aligned_with_the_synthesis_route() -> No
     """
 
     assert MAX_STREAMING_IDENTITY_LEDGER == _MAX_ROUTE_IDENTITIES
+
+
+@pytest.mark.asyncio
+async def test_silent_socket_expires_via_background_sweeper() -> None:
+    """F06: 静默 socket 的权限过期不依赖任何其他注册表调用——
+    后台清扫器按间隔跑 _prune,置位停车栅栏并移除记录。"""
+    clock = {"now": 0.0}
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        monotonic=lambda: clock["now"],
+        authority_ttl_seconds=5.0,
+        expiry_sweep_interval_seconds=0.02,
+    )
+    registry.set_provider_available(True)
+    params = _params()
+    activation = _activate(
+        registry, params=params, request_origin=ORIGIN, connection_id="connection-1"
+    )
+    ticket = _media_ticket(activation)
+    record = registry.consume_ticket(ticket, request_origin=ORIGIN)
+    assert record is not None
+    assert record.stop.is_set() is False
+
+    clock["now"] = 100.0
+    await asyncio.sleep(0.15)
+
+    assert record.stop.is_set() is True
+    assert registry._records == {}
+    await registry.close_expiry_sweeper()
+
+
+@pytest.mark.asyncio
+async def test_stop_all_leaves_wakes_records_and_refuses_new_admissions() -> None:
+    """F16 相位一:停车栅栏唤醒在册叶子并拒绝新的票据消费。"""
+    registry = _active_registry()
+    params = _params()
+    activation = _activate(
+        registry, params=params, request_origin=ORIGIN, connection_id="connection-1"
+    )
+    ticket = _media_ticket(activation)
+
+    woken = registry.stop_all_leaves()
+    assert woken >= 1
+
+    assert registry.consume_ticket(ticket, request_origin=ORIGIN) is None
+    await registry.close_expiry_sweeper()
+
+
+class _ParkedMediaSocket:
+    """recv 永远停车、close 只记录——模拟最不合作的传输。"""
+
+    def __init__(self) -> None:
+        self.closed_codes: list[int] = []
+        self.sent: list[object] = []
+
+    async def recv(self):
+        await asyncio.Event().wait()
+
+    async def send(self, message) -> None:
+        self.sent.append(message)
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.closed_codes.append(code)
+
+
+@pytest.mark.asyncio
+async def test_revoked_leaf_parked_in_recv_terminates_with_honest_incomplete() -> None:
+    """F06: 停车栅栏必须唤醒停在 recv 的叶子;传输在预算内仍不停时,
+    返回诚实的 cleanup_complete=False,绝不无限挂起。"""
+    from jiuwenswarm.gateway.live_voice.dedicated_media_route import (
+        DedicatedMediaRouteRequest,
+        run_dedicated_media_socket_leaf,
+    )
+
+    registry = _active_registry()
+    params = _params()
+    activation = _activate(
+        registry, params=params, request_origin=ORIGIN, connection_id="connection-1"
+    )
+    ticket = _media_ticket(activation)
+    record = registry.consume_ticket(ticket, request_origin=ORIGIN)
+    assert record is not None
+
+    request = DedicatedMediaRouteRequest(
+        enabled=True,
+        expected_origin=ORIGIN,
+        request_origin=ORIGIN,
+        binding=record.binding,
+        provider_available=True,
+        binary_transport_available=True,
+    )
+    socket = _ParkedMediaSocket()
+    leaf = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            request,
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            stop_event=record.stop,
+            deadline_remaining=lambda: registry.record_deadline_remaining(record),
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert leaf.done() is False
+
+    record.stop.set()
+    result = await asyncio.wait_for(leaf, timeout=30)
+
+    assert 1001 in socket.closed_codes
+    assert result.cleanup_complete is False
+    await registry.close_expiry_sweeper()
