@@ -560,12 +560,6 @@ try {
     if (($L0ResumeBatch -or $L0ReuseValidatedBuild) -and -not $L0OrdinaryChromeBatch) {
         Fail 'L0ResumeBatch/L0ReuseValidatedBuild 只适用于普通 Chrome 自动批次。'
     }
-    if ($L0ReuseValidatedBuild) {
-        # F13 止损：构建复用合同尚未记录任何编译期 Vite 旗标
-        # (VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION 等)，复用会让运行合同
-        # 对实际 bundle 内容撒谎、污染 L0 证据。合同补全旗标绑定之前一律全量重建。
-        Fail 'BUILD_REUSE_DISABLED_PENDING_F13: 构建合同尚未绑定编译期旗标，-L0ReuseValidatedBuild 暂不可用；请去掉该开关走全量构建。'
-    }
     if ($L0Enabled) {
         $l0LogsRoot = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot 'logs'))
         if ($RuntimeProfile -ne 'formal-web-validation') {
@@ -986,11 +980,24 @@ try {
     $frontendTree = (& git rev-parse 'HEAD:jiuwenswarm/channels/web/frontend').Trim()
     $packageLockPath = Join-Path $FrontendRoot 'package-lock.json'
     $packageLockSha256 = (Get-FileHash -LiteralPath $packageLockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    # F13：构建合同 v2 绑定全部编译期 Vite 输入；复用要求逐项精确相等，
+    # 运行合同的旗标声明只从已验证的合同/实际构建环境派生。
+    Import-Module -Name (Join-Path $PSScriptRoot 'build_contract.psm1') -Force
+    $contractViteEnv = $null
     if ($L0ReuseValidatedBuild) {
         if (-not (Test-Path -LiteralPath $l0BuildContractPath -PathType Leaf)) {
             Fail '找不到 L0 已验证前端构建合同；必须先完成一次不带 L0ReuseValidatedBuild 的启动。'
         }
         $buildContract = Get-Content -Raw -LiteralPath $l0BuildContractPath -Encoding UTF8 | ConvertFrom-Json
+        $reuseRefusal = Test-LiveVoiceBuildContractReuse `
+            -Contract $buildContract `
+            -SourceHead ((& git rev-parse HEAD).Trim()) `
+            -FrontendTree $frontendTree `
+            -PackageLockSha256 $packageLockSha256 `
+            -CurrentViteEnv (Get-LiveVoiceViteBuildInputs)
+        if ($null -ne $reuseRefusal) {
+            Fail $reuseRefusal
+        }
         $bundleRelativePath = [string]$buildContract.bundle_relative_path
         if ($bundleRelativePath -notmatch '^dist\\assets\\index-[A-Za-z0-9_-]+\.js$') {
             Fail 'L0 已验证前端构建合同包含无效 bundle 路径。'
@@ -1001,17 +1008,16 @@ try {
             Fail 'L0 已验证前端构建合同的 bundle 路径越界。'
         }
         if (
-            $buildContract.schema_version -ne 1 -or
-            $buildContract.source_head -ne (& git rev-parse HEAD).Trim() -or
-            $buildContract.frontend_tree -ne $frontendTree -or
-            $buildContract.package_lock_sha256 -ne $packageLockSha256 -or
             -not (Test-Path -LiteralPath $builtAsset -PathType Leaf) -or
             (Get-FileHash -LiteralPath $builtAsset -Algorithm SHA256).Hash.ToLowerInvariant() -ne $buildContract.bundle_sha256
         ) {
-            Fail 'L0 已验证前端构建合同与当前源码/依赖/产物不一致；拒绝复用。'
+            Fail 'L0 已验证前端构建合同与当前产物不一致；拒绝复用。'
         }
-        Write-Pass '已复用与当前 HEAD、前端 tree、lockfile 和 bundle 摘要精确绑定的构建'
+        $contractViteEnv = Get-LiveVoiceContractViteEnv -Contract $buildContract
+        Write-Pass '已复用与当前 HEAD、前端 tree、lockfile、bundle 摘要和全部编译期 Vite 旗标精确绑定的构建'
     } else {
+        # 在构建开始前采集编译期输入快照；写合同与运行合同都只使用这份快照。
+        $viteBuildInputs = Get-LiveVoiceViteBuildInputs
         Push-Location -LiteralPath $FrontendRoot
         try {
             & $NpmCommand install
@@ -1025,6 +1031,7 @@ try {
         } finally {
             Pop-Location
         }
+        $contractViteEnv = $viteBuildInputs
         if ($L0OrdinaryChromeBatch) {
             $distIndexPath = Join-Path $FrontendRoot 'dist\index.html'
             $distIndex = Get-Content -Raw -LiteralPath $distIndexPath -Encoding UTF8
@@ -1034,15 +1041,15 @@ try {
             }
             $bundleRelativePath = ('dist/' + $distAssetMatch.Groups[1].Value.TrimStart('/')).Replace('/', '\')
             $bundleFile = Join-Path $FrontendRoot $bundleRelativePath
-            [ordered]@{
-                schema_version = 1
-                source_head = (& git rev-parse HEAD).Trim()
-                frontend_tree = $frontendTree
-                package_lock_sha256 = $packageLockSha256
-                bundle_relative_path = $bundleRelativePath
-                bundle_sha256 = (Get-FileHash -LiteralPath $bundleFile -Algorithm SHA256).Hash.ToLowerInvariant()
-            } | ConvertTo-Json | Set-Content -LiteralPath $l0BuildContractPath -Encoding UTF8
-            Write-Pass '已写入 L0 精确源码/依赖/bundle 构建合同'
+            $newContract = New-LiveVoiceBuildContract `
+                -SourceHead ((& git rev-parse HEAD).Trim()) `
+                -FrontendTree $frontendTree `
+                -PackageLockSha256 $packageLockSha256 `
+                -BundleRelativePath $bundleRelativePath `
+                -BundleSha256 ((Get-FileHash -LiteralPath $bundleFile -Algorithm SHA256).Hash.ToLowerInvariant()) `
+                -ViteEnv $viteBuildInputs
+            $newContract | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $l0BuildContractPath -Encoding UTF8
+            Write-Pass '已写入含全部编译期 Vite 旗标的 v2 构建合同'
         }
     }
     & $Python -m jiuwenswarm.start_services debug --skip-build
@@ -1134,8 +1141,12 @@ try {
         ports                     = $ExpectedPorts
         required_flags            = $validatedFlags
         frontend_flags            = [ordered]@{
-            VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION = $generationInterruptionEnabled
+            # F13：从已验证构建合同/实际构建环境派生，绝不取当前命令行参数。
+            VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION = (
+                [string]$contractViteEnv['VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION'] -eq 'true'
+            )
         }
+        frontend_vite_env         = $contractViteEnv
         executor_profile          = $ExecutorProfile
         credential                = 'ephemeral-process-only'
         speech_provider           = 'openai'
