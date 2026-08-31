@@ -38,6 +38,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Knowledge,
     LifecycleKind,
     MAX_SAFE_INTEGER,
+    OriginRef,
     QueryEnvelope,
     ResponseFence,
     ResponseRef,
@@ -2333,3 +2334,91 @@ def test_strict_review_p2_durable_text_corpus_has_exact_python_utf8_and_canonica
     with pytest.raises(ContractViolation) as surrogate:
         canonical_json_bytes(invalid)
     assert surrogate.value.reason == "INVALID_UNICODE_SCALAR"
+
+
+def _minted_ledger_commit(index: int, *, text: str = "inventory please") -> TurnCommit:
+    return TurnCommit.from_dict(
+        {
+            "contract_version": "live-voice.contract.v2",
+            "commit_id": f"commit-ledger-{index}",
+            "turn_id": f"turn-ledger-{index}",
+            "interaction_id": "interaction-ledger",
+            "text": text,
+            "hypothesis_provenance": {
+                "provider": "test.sr",
+                "hypothesis_id": f"hypothesis-ledger-{index}",
+            },
+            "scope": {
+                "subject_id": "subject-1",
+                "project_id": "project-1",
+                "session_id": "session-1",
+                "assurance": "authenticated",
+            },
+            "context_refs": [],
+            "committed_at": "2026-08-04T08:00:00Z",
+        }
+    )
+
+
+def _ledger_origin(commit: TurnCommit) -> OriginRef:
+    return OriginRef.from_dict(
+        {
+            "kind": "committed_turn",
+            "turn_id": commit.turn_id,
+            "commit_id": commit.commit_id,
+        }
+    )
+
+
+def test_retired_turn_commit_replay_stays_noop_beyond_the_exact_window() -> None:
+    """Same-payload replay of an old retired identity is a no-op, never a conflict."""
+    ledger = TurnCommitLedger()
+    for index in range(200):
+        commit = _minted_ledger_commit(index)
+        assert ledger.accept(commit) is True
+        assert ledger.release_origin(_ledger_origin(commit), commit.scope) is True
+
+    assert ledger.accept(_minted_ledger_commit(0)) is False
+    assert ledger.accept(_minted_ledger_commit(199)) is False
+
+
+def test_large_fresh_stream_has_zero_probabilistic_rejection() -> None:
+    """10k fresh accept+retire cycles must never reject a fresh identity."""
+    ledger = TurnCommitLedger()
+    for index in range(10_000):
+        commit = _minted_ledger_commit(index)
+        assert ledger.accept(commit) is True
+        assert ledger.release_origin(_ledger_origin(commit), commit.scope) is True
+
+    fresh = _minted_ledger_commit(10_000)
+    assert ledger.accept(fresh) is True
+
+
+def test_changed_replay_of_old_retired_identity_is_conflict() -> None:
+    ledger = TurnCommitLedger()
+    for index in range(200):
+        commit = _minted_ledger_commit(index)
+        assert ledger.accept(commit) is True
+        assert ledger.release_origin(_ledger_origin(commit), commit.scope) is True
+
+    with pytest.raises(ContractViolation) as raised:
+        ledger.accept(_minted_ledger_commit(0, text="a different payload"))
+    assert raised.value.reason == "TURN_COMMIT_CONFLICT"
+
+
+def test_retirement_capacity_refuses_before_changing_active_state() -> None:
+    ledger = TurnCommitLedger(capacity=8, retired_capacity=4)
+    for index in range(4):
+        commit = _minted_ledger_commit(index)
+        assert ledger.accept(commit) is True
+        assert ledger.release_origin(_ledger_origin(commit), commit.scope) is True
+
+    retained = _minted_ledger_commit(99)
+    assert ledger.accept(retained) is True
+    origin = _ledger_origin(retained)
+    assert ledger.release_origin(origin, retained.scope) is False
+    assert ledger.require_origin(origin, retained.scope).commit_id == retained.commit_id
+    assert ledger.accept(_minted_ledger_commit(99)) is False
+    with pytest.raises(ContractViolation) as raised:
+        ledger.accept(_minted_ledger_commit(99, text="a different payload"))
+    assert raised.value.reason == "TURN_COMMIT_CONFLICT"

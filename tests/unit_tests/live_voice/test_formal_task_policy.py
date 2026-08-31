@@ -148,7 +148,7 @@ def test_turn_commit_ledger_is_bounded_and_exact_release_recovers_capacity() -> 
     assert ledger.accept(second)
 
 
-def test_released_turn_commit_keeps_bounded_exact_and_conservative_replay_fences() -> (
+def test_released_turn_commit_keeps_exact_replay_tombstones() -> (
     None
 ):
     ledger = TurnCommitLedger(capacity=1)
@@ -177,18 +177,17 @@ def test_released_turn_commit_keeps_bounded_exact_and_conservative_replay_fences
             commit.scope,
         )
 
-    retired_commits = getattr(ledger, "_retired_commits", None)
     retired_commit_ids = getattr(ledger, "_retired_commit_ids", None)
     retired_turn_ids = getattr(ledger, "_retired_turn_ids", None)
-    assert retired_commits is not None
     assert retired_commit_ids is not None
     assert retired_turn_ids is not None
-    assert len(retired_commits) == 1
-    assert len(retired_commit_ids) == 1
-    assert len(retired_turn_ids) == 1
-    with pytest.raises(ContractViolation) as replay:
-        ledger.accept(first)
-    assert replay.value.reason == "TURN_COMMIT_CONFLICT"
+    # Exact tombstones are retained for every retired identity within the
+    # bounded retirement horizon; retiring must never evict an identity.
+    assert len(retired_commit_ids) == 2
+    assert len(retired_turn_ids) == 2
+    # A same-payload replay of a retired commit is a no-op, never a conflict.
+    assert ledger.accept(first) is False
+    assert ledger.accept(second) is False
 
     commit_replay = TurnCommit.from_dict(
         {**candidate(3).to_dict(), "commit_id": first.commit_id}

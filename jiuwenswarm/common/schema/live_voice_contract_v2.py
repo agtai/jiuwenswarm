@@ -3079,25 +3079,32 @@ class TurnCommit:
 class TurnCommitLedger:
     """Atomic, once-only commit ownership for a turn and commit identifier."""
 
-    def __init__(self, *, capacity: int = 128) -> None:
+    def __init__(self, *, capacity: int = 128, retired_capacity: int = 32_768) -> None:
         if type(capacity) is not int or not 1 <= capacity <= 65_536:
             raise _violation(
                 "INVALID_TURN_COMMIT_CAPACITY",
                 "turn commit capacity must be a bounded positive integer",
                 code=ErrorCode.INVALID_ARGUMENT,
             )
+        if type(retired_capacity) is not int or not 1 <= retired_capacity <= 1_048_576:
+            raise _violation(
+                "INVALID_TURN_COMMIT_CAPACITY",
+                "turn commit retirement capacity must be a bounded positive integer",
+                code=ErrorCode.INVALID_ARGUMENT,
+            )
         self._lock = threading.RLock()
         self._capacity = capacity
+        self._retired_capacity = retired_capacity
         self._by_commit_id: dict[str, TurnCommit] = {}
         self._by_turn_id: dict[str, TurnCommit] = {}
-        self._retired_commits: deque[tuple[bytes, bytes, bytes]] = deque()
+        # Retired identities keep exact digest tombstones for the whole bounded
+        # horizon: a same-payload replay stays a no-op and a changed payload is
+        # a conflict.  A probabilistic structure is deliberately absent -- it
+        # rejected fresh identities at a rate that grew with server lifetime.
+        # At retirement capacity the ledger refuses to retire (release returns
+        # False and the commit stays active) instead of forgetting an identity.
         self._retired_commit_ids: dict[bytes, bytes] = {}
         self._retired_turn_ids: dict[bytes, bytes] = {}
-        digest_size = hashlib.sha256().digest_size
-        # Retired exact identities retain duplicate semantics for one existing
-        # ledger-capacity window.  This fixed-size conservative fence keeps
-        # older identities fail-closed without retaining full commit payloads.
-        self._retired_replay_fence = bytearray(capacity * digest_size)
 
     @staticmethod
     def _identity_digest(kind: str, value: str) -> bytes:
@@ -3106,25 +3113,6 @@ class TurnCommitLedger:
     @staticmethod
     def _commit_digest(commit: TurnCommit) -> bytes:
         return hashlib.sha256(commit.canonical_bytes()).digest()
-
-    def _replay_fence_indices(self, digest: bytes) -> tuple[int, ...]:
-        bit_capacity = len(self._retired_replay_fence) * 8
-        return tuple(
-            int.from_bytes(digest[offset:] + digest[:offset], "big") % bit_capacity
-            for offset in range(len(digest))
-        )
-
-    def _add_replay_fence(self, digest: bytes) -> None:
-        for index in self._replay_fence_indices(digest):
-            self._retired_replay_fence[index >> 3] |= 1 << (index & 7)
-
-    def _replay_fence_contains(self, digest: bytes) -> bool:
-        # False positives are permitted only in the safe direction: reject a
-        # fresh identity instead of re-authorizing a retired one.
-        return all(
-            self._retired_replay_fence[index >> 3] & (1 << (index & 7))
-            for index in self._replay_fence_indices(digest)
-        )
 
     @staticmethod
     def _raise_commit_conflict() -> None:
@@ -3154,10 +3142,6 @@ class TurnCommitLedger:
                     and retired_by_turn == commit_digest
                 ):
                     return False
-                self._raise_commit_conflict()
-            if self._replay_fence_contains(
-                commit_id_digest
-            ) or self._replay_fence_contains(turn_id_digest):
                 self._raise_commit_conflict()
             if len(self._by_commit_id) >= self._capacity:
                 raise _violation(
@@ -3200,22 +3184,16 @@ class TurnCommitLedger:
                 or commit.scope != scope
             ):
                 return False
-            self._by_commit_id.pop(commit.commit_id, None)
-            self._by_turn_id.pop(commit.turn_id, None)
             commit_id_digest = self._identity_digest("commit", commit.commit_id)
             turn_id_digest = self._identity_digest("turn", commit.turn_id)
             commit_digest = self._commit_digest(commit)
-            self._add_replay_fence(commit_id_digest)
-            self._add_replay_fence(turn_id_digest)
-            if len(self._retired_commits) >= self._capacity:
-                old_commit_id, old_turn_id, old_commit = self._retired_commits.popleft()
-                if self._retired_commit_ids.get(old_commit_id) == old_commit:
-                    self._retired_commit_ids.pop(old_commit_id, None)
-                if self._retired_turn_ids.get(old_turn_id) == old_commit:
-                    self._retired_turn_ids.pop(old_turn_id, None)
-            self._retired_commits.append(
-                (commit_id_digest, turn_id_digest, commit_digest)
-            )
+            if len(self._retired_commit_ids) >= self._retired_capacity:
+                # Refuse to retire rather than forget the identity: the commit
+                # stays active, and continued pressure surfaces as the typed
+                # TURN_COMMIT_LEDGER_FULL on accept instead of silent replay.
+                return False
+            self._by_commit_id.pop(commit.commit_id, None)
+            self._by_turn_id.pop(commit.turn_id, None)
             self._retired_commit_ids[commit_id_digest] = commit_digest
             self._retired_turn_ids[turn_id_digest] = commit_digest
             return True
