@@ -154,6 +154,28 @@ class LowerFormalAdapter:
         yield  # pragma: no cover
 
 
+class ScriptedFormalAdapter(LowerFormalAdapter):
+    def __init__(self, payloads: tuple[dict[str, object], ...]) -> None:
+        super().__init__(final=None)
+        self.payloads = payloads
+
+    async def process_formal_live_voice_stream_impl(
+        self, request, inputs
+    ) -> AsyncIterator[AgentResponseChunk]:
+        self.calls += 1
+        self.requests.append(request)
+        self.inputs.append(inputs)
+        self.started.set()
+        for payload in self.payloads:
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload=payload,
+                is_complete=payload.get("event_type")
+                in {"chat.final", "chat.error"},
+            )
+
+
 class RecordingHistoryWriter:
     def __init__(self, *, fail_assistant_once: bool = False) -> None:
         self.users = []
@@ -321,6 +343,40 @@ async def dispatch(
         commit=selected,
         context=FormalContextSnapshot(selected.scope),
     )
+
+
+async def run_scripted_harness(
+    payloads: tuple[dict[str, object], ...], *, allow_tools: bool
+):
+    lower = ScriptedFormalAdapter(payloads)
+    real_facade = facade(lower)
+    harness = JiuWenSwarmRoundHarness(
+        instance_id="scripted-output-harness",
+        id_factory=id_factory(),
+    )
+    selected = commit()
+    binding = HarnessRoundBinding(
+        request_id="request-scripted-output",
+        response_id="response-scripted-output",
+        correlation_id="correlation-scripted-output",
+        commit=selected,
+    )
+    reservation = harness.reserve_round(binding, facade=real_facade)
+    assert harness.begin_round_commit(reservation) is True
+    handle = harness.commit_round(
+        reservation,
+        response_ref=ResponseRef(
+            interaction_id=selected.interaction_id,
+            response_id=binding.response_id,
+            response_generation=0,
+        ),
+        context=FormalContextSnapshot(selected.scope),
+        facade=real_facade,
+        allow_tools=allow_tools,
+    )
+    events = [event async for event in handle.events()]
+    await harness.close()
+    return events
 
 
 async def acknowledge_formal_round(
@@ -4554,6 +4610,62 @@ async def test_adapter_exception_emits_only_harness_failed_terminal() -> None:
     assert (await current.close(timeout_seconds=1)).status is (
         AgentConversationShutdownStatus.CLOSED
     )
+
+
+@pytest.mark.asyncio
+async def test_no_tool_round_releases_buffered_plain_text_only_after_clean_final() -> (
+    None
+):
+    events = await run_scripted_harness(
+        (
+            {"event_type": "chat.delta", "content": "ordinary "},
+            {"event_type": "chat.delta", "content": "answer"},
+            {"event_type": "chat.final", "content": "ordinary answer"},
+        ),
+        allow_tools=False,
+    )
+
+    chunks = [event for event in events if isinstance(event, AgentResponseChunk)]
+    assert [chunk.payload["event_type"] for chunk in chunks] == [
+        "chat.delta",
+        "chat.delta",
+        "chat.final",
+    ]
+    assert events[-1].payload == {"state": "terminal", "outcome": "completed"}
+
+
+@pytest.mark.asyncio
+async def test_no_tool_round_rejects_split_dsml_without_leaking_partial_output() -> (
+    None
+):
+    events = await run_scripted_harness(
+        (
+            {"event_type": "chat.delta", "content": "我来读取。\n<｜｜DS"},
+            {
+                "event_type": "chat.delta",
+                "content": "ML｜｜tool_calls><｜｜DSML｜｜invoke>",
+            },
+            {"event_type": "chat.final", "content": "我来读取行程文件。"},
+        ),
+        allow_tools=False,
+    )
+
+    assert not any(isinstance(event, AgentResponseChunk) for event in events)
+    assert events[-1].payload == {"state": "terminal", "outcome": "failed"}
+
+
+@pytest.mark.asyncio
+async def test_no_tool_round_bounds_prevalidation_output_without_partial_leak() -> None:
+    events = await run_scripted_harness(
+        (
+            {"event_type": "chat.delta", "content": "x" * 32_769},
+            {"event_type": "chat.final", "content": "must not complete"},
+        ),
+        allow_tools=False,
+    )
+
+    assert not any(isinstance(event, AgentResponseChunk) for event in events)
+    assert events[-1].payload == {"state": "terminal", "outcome": "failed"}
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import secrets
 import time
 from collections.abc import AsyncIterator, Callable
@@ -34,6 +35,20 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
 
 _STREAM_CLOSE_WAIT_SLICE_SECONDS = 5.0
 _ROUND_CONTROL_QUEUE_RESERVE = 4
+_NO_TOOL_OUTPUT_BUFFER_MAX_BYTES = 32_768
+_NO_TOOL_DSML_MARKUP = re.compile(
+    r"<\s*/?\s*\|{2}\s*dsml\s*\|{2}",
+    flags=re.IGNORECASE,
+)
+_CONTROL_MARKUP_TRANSLATION = str.maketrans(
+    {
+        "｜": "|",
+        "\u200b": None,
+        "\u200c": None,
+        "\u200d": None,
+        "\ufeff": None,
+    }
+)
 
 
 class HarnessRoundViolation(ValueError):
@@ -59,6 +74,11 @@ def _require_text(value: object, field_name: str) -> str:
             ErrorCode.INVALID_ARGUMENT,
         ) from error
     return value
+
+
+def _contains_no_tool_control_markup(value: str) -> bool:
+    normalized = value.translate(_CONTROL_MARKUP_TRANSLATION)
+    return _NO_TOOL_DSML_MARKUP.search(normalized) is not None
 
 
 class HarnessReservationState(StrEnum):
@@ -786,6 +806,9 @@ class JiuWenSwarmRoundHarness:
         execution_reported_error = False
         outcome = TerminalOutcome.UNKNOWN
         source_stream: AsyncIterator[AgentResponseChunk] | None = None
+        pending_no_tool_deltas: list[AgentResponseChunk] = []
+        pending_no_tool_text: list[str] = []
+        pending_no_tool_bytes = 0
         record.started.set()
         try:
             accepted = self._round_event(
@@ -811,8 +834,49 @@ class JiuWenSwarmRoundHarness:
             async for chunk in source_stream:
                 self._validate_chunk(chunk, execution)
                 payload = chunk.payload if isinstance(chunk.payload, dict) else {}
-                if payload.get("event_type") == "chat.final":
+                event_type = payload.get("event_type")
+                if not execution.allow_tools and event_type == "chat.delta":
                     content = payload.get("content")
+                    if not isinstance(content, str):
+                        raise HarnessRoundViolation(
+                            "INVALID_FORMAL_AGENT_OUTPUT",
+                            "formal Agent text delta must be a string",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                    try:
+                        pending_no_tool_bytes += len(content.encode("utf-8"))
+                    except UnicodeEncodeError as error:
+                        raise HarnessRoundViolation(
+                            "INVALID_FORMAL_AGENT_OUTPUT",
+                            "formal Agent output is not valid UTF-8",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        ) from error
+                    if pending_no_tool_bytes > _NO_TOOL_OUTPUT_BUFFER_MAX_BYTES:
+                        raise HarnessRoundViolation(
+                            "FORMAL_NO_TOOL_OUTPUT_TOO_LARGE",
+                            "no-tool formal Agent output exceeds its closed bound",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                    pending_no_tool_text.append(content)
+                    pending_no_tool_deltas.append(chunk)
+                    continue
+                if event_type == "chat.final":
+                    content = payload.get("content")
+                    if not execution.allow_tools:
+                        candidate = "".join(pending_no_tool_text)
+                        if isinstance(content, str):
+                            candidate += content
+                        if _contains_no_tool_control_markup(candidate):
+                            raise HarnessRoundViolation(
+                                "FORMAL_NO_TOOL_CONTROL_MARKUP_REJECTED",
+                                "no-tool formal Agent output contained control markup",
+                                ErrorCode.PROTOCOL_VIOLATION,
+                            )
+                        for pending_chunk in pending_no_tool_deltas:
+                            await handle._put(pending_chunk)
+                        pending_no_tool_deltas.clear()
+                        pending_no_tool_text.clear()
+                        pending_no_tool_bytes = 0
                     is_usable = isinstance(content, str) and bool(content.strip())
                     if usable_final and is_usable:
                         raise HarnessRoundViolation(
@@ -821,7 +885,10 @@ class JiuWenSwarmRoundHarness:
                             ErrorCode.PROTOCOL_VIOLATION,
                         )
                     usable_final = usable_final or is_usable
-                elif payload.get("event_type") == "chat.error":
+                elif event_type == "chat.error":
+                    pending_no_tool_deltas.clear()
+                    pending_no_tool_text.clear()
+                    pending_no_tool_bytes = 0
                     execution_reported_error = True
                 await handle._put(chunk)
             if execution_reported_error:

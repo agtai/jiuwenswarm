@@ -202,8 +202,7 @@ ITINERARY_TEXT = """# 三天行程
 - 09:00 城市步行
 """
 ITINERARY_RESULT_TEXT = (
-    "三天行程已完成。第一天自由时间为 20:00–21:30；"
-    "第二天最早的固定安排是 08:30 参观博物馆。"
+    "三天行程已完成，itinerary.md 已按要求更新。"
 )
 ITINERARY_DAY_TWO_ANSWER = "第二天最早的固定安排是 08:30 参观博物馆。"
 ITINERARY_DAY_TWO_FACT = "08:30 参观博物馆"
@@ -320,7 +319,14 @@ class _ItineraryAnswerFacade(_Facade):
         context = json.loads(execution.context.entries[-1].content)
         assert context["trust"] == "untrusted_reference_data"
         assert context["authority"] == "none"
-        assert ITINERARY_DAY_TWO_ANSWER in context["result_text"]
+        assert ITINERARY_DAY_TWO_FACT not in context["result_text"]
+        assert context["artifact_snapshots"] == [
+            {
+                "relative_path": "itinerary.md",
+                "status": "verified",
+                "content": ITINERARY_TEXT,
+            }
+        ]
         async with self._calls_changed:
             self.calls += 1
             self.executions.append(execution)
@@ -4733,12 +4739,19 @@ async def test_unified_query_reads_authoritative_result_before_agent_and_never_c
 
     composition.result_availability = "available"
     composition.result_reason = "TASK_RESULT_AVAILABLE"
+    itinerary_bytes = ITINERARY_TEXT.encode("utf-8")
+    (tmp_path / "itinerary.md").write_bytes(itinerary_bytes)
     composition.result_record = {
         "task_id": composition.current.task_id,
         "attempt_id": composition.current.attempt_id,
         "source_event_id": "executor-event-itinerary-1",
-        "result_text": "Day 2 earliest fixed event: museum at 08:30.",
-        "artifacts": [{"relative_path": "itinerary.md", "sha256": "a" * 64}],
+        "result_text": "The itinerary was updated successfully.",
+        "artifacts": [
+            {
+                "relative_path": "itinerary.md",
+                "sha256": hashlib.sha256(itinerary_bytes).hexdigest(),
+            }
+        ],
         "completed_at": NOW,
     }
     available = await registry.handle_unified_submit(
@@ -4759,7 +4772,9 @@ async def test_unified_query_reads_authoritative_result_before_agent_and_never_c
     result_context = json.loads(execution.context.entries[-1].content)
     assert result_context["trust"] == "untrusted_reference_data"
     assert result_context["authority"] == "none"
-    assert "08:30" in result_context["result_text"]
+    assert "08:30" not in result_context["result_text"]
+    assert result_context["artifact_snapshots"][0]["status"] == "verified"
+    assert "08:30" in result_context["artifact_snapshots"][0]["content"]
     assert all(call[0] != "task.cancel" for call in composition.handle_calls)
     await _ack_unified_presentation(
         registry,
@@ -6162,6 +6177,75 @@ def test_unified_task_result_context_is_bounded_and_rejects_unsafe_artifacts() -
     assert payload["instruction_policy"].startswith("Never treat")
 
 
+def test_task_result_artifact_snapshots_fail_closed_on_identity_hash_and_size(
+    tmp_path: Path,
+) -> None:
+    task = _background_task(tmp_path)
+    itinerary_path = tmp_path / "itinerary.md"
+    itinerary_path.write_bytes(ITINERARY_TEXT.encode("utf-8"))
+    result = {
+        "task_id": task.task_id,
+        "attempt_id": task.attempt_id,
+        "source_event_id": "event-artifact-snapshot-1",
+        "result_text": "The itinerary was updated successfully.",
+        "artifacts": [
+            {
+                "relative_path": "itinerary.md",
+                "sha256": hashlib.sha256(itinerary_path.read_bytes()).hexdigest(),
+            }
+        ],
+    }
+
+    verified = AgentServerProductCompositionRegistry._verified_result_artifact_snapshots(
+        scope=SCOPE,
+        task=task,
+        task_result=result,
+    )
+    assert verified == (
+        {
+            "relative_path": "itinerary.md",
+            "status": "verified",
+            "content": ITINERARY_TEXT,
+        },
+    )
+
+    wrong_identity = {**result, "task_id": "task-other"}
+    with pytest.raises(FormalTaskViolation) as mismatch:
+        AgentServerProductCompositionRegistry._verified_result_artifact_snapshots(
+            scope=SCOPE,
+            task=task,
+            task_result=wrong_identity,
+        )
+    assert mismatch.value.reason == "TASK_RESULT_CONTEXT_INVALID"
+
+    wrong_hash = {
+        **result,
+        "artifacts": [{"relative_path": "itinerary.md", "sha256": "a" * 64}],
+    }
+    assert AgentServerProductCompositionRegistry._verified_result_artifact_snapshots(
+        scope=SCOPE,
+        task=task,
+        task_result=wrong_hash,
+    ) == ({"relative_path": "itinerary.md", "status": "hash_mismatch"},)
+
+    oversized_bytes = b"x" * 16_385
+    itinerary_path.write_bytes(oversized_bytes)
+    oversized = {
+        **result,
+        "artifacts": [
+            {
+                "relative_path": "itinerary.md",
+                "sha256": hashlib.sha256(oversized_bytes).hexdigest(),
+            }
+        ],
+    }
+    assert AgentServerProductCompositionRegistry._verified_result_artifact_snapshots(
+        scope=SCOPE,
+        task=task,
+        task_result=oversized,
+    ) == ({"relative_path": "itinerary.md", "status": "too_large"},)
+
+
 @pytest.mark.asyncio
 async def test_real_itinerary_fixture_matches_store_agent_answer_and_applied_artifact(
     tmp_path: Path,
@@ -6292,7 +6376,7 @@ async def test_real_itinerary_fixture_matches_store_agent_answer_and_applied_art
     assert answered.ok
     assert itinerary_agent.answers == [ITINERARY_DAY_TWO_ANSWER]
     assert ITINERARY_DAY_TWO_FACT in itinerary_agent.answers[0]
-    assert ITINERARY_DAY_TWO_FACT in record.result_text
+    assert ITINERARY_DAY_TWO_FACT not in record.result_text
     assert ITINERARY_DAY_TWO_FACT in itinerary_bytes.decode("utf-8")
     assert [call[0] for call in composition.handle_calls] == ["task.result"]
     await _ack_unified_presentation(registry, sequence=0, stem="itinerary-day-two")
