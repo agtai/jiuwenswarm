@@ -6437,6 +6437,7 @@ class AgentServerProductCompositionRegistry:
         auth_token: object,
         channel_id: str,
         l0_commit_admission: _L0CommitAdmissionClock,
+        supersedes: ResponseRef | None = None,
     ) -> P3RouteResult:
         journal = self._unified_journal
         if journal is None:
@@ -6469,6 +6470,18 @@ class AgentServerProductCompositionRegistry:
                 "UNIFIED_FOREGROUND_EFFECT_RESULT_UNKNOWN",
                 "a prior foreground effect may already have been published",
                 ErrorCode.RESULT_UNKNOWN,
+            )
+        if supersedes is not None:
+            # Fence the replaced answer only now, after durable admission chose
+            # this exact input as the executing owner: a conflicting or
+            # replayed identity never reaches this point, so it has zero
+            # interrupt side effects (F01). The action identifier derives from
+            # the exact voice identity, so an admitted owner re-running after
+            # response loss fences at most once through the action ledger.
+            await retained.activation_lease.interrupt_generation(
+                retained.binding,
+                action_id=f"unified-interrupt-{voice_identity[:40]}",
+                response=supersedes,
             )
         response_id = f"response-unified-{voice_identity[:32]}"
         route = resolution.route
@@ -7406,16 +7419,10 @@ class AgentServerProductCompositionRegistry:
                 context = await retained.activation_lease.select_formal_context(
                     retained.binding
                 )
-            if supersedes is not None:
-                # Fence before any semantic routing so the replaced answer can
-                # never keep speaking while the new input is still being
-                # classified.  The action identifier is derived from the exact
-                # voice identity, so replay of this committed final fences once.
-                await retained.activation_lease.interrupt_generation(
-                    retained.binding,
-                    action_id=f"unified-interrupt-{voice_identity[:40]}",
-                    response=supersedes,
-                )
+            # The generation interrupt deliberately waits for durable journal
+            # admission (F01): a conflicting or replayed identity must have
+            # zero interrupt side effects, so only the admitted NEW owner
+            # fences the replaced answer, inside _run_unified_submit.
             commit = TurnCommit.from_dict(
                 {
                     "contract_version": CONTRACT_VERSION,
@@ -7590,6 +7597,7 @@ class AgentServerProductCompositionRegistry:
                                 auth_token=params.get("auth_token"),
                                 channel_id=channel_id,
                                 l0_commit_admission=l0_commit_admission,
+                                supersedes=supersedes,
                             ),
                             name=f"live-voice-unified-submit:{voice_identity[:16]}",
                         )

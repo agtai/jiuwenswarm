@@ -18500,3 +18500,125 @@ async def test_missing_bearer_stays_an_authentication_failure_for_every_mutation
     assert cast(dict, structural.payload["error"])["reason"] == (
         "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
     )
+
+
+@pytest.mark.asyncio
+async def test_unified_conflict_admission_has_zero_interrupt_side_effect(
+    tmp_path: Path,
+) -> None:
+    """F01: journal admission owns the interrupt boundary.
+
+    A negative admission (identity reused with different content) must have
+    zero interrupt, Agent and Tool side effects; only the admitted NEW owner
+    may fence the superseded response, exactly once.
+    """
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
+    blocking = _BlockingFacade()
+    manager.agent = blocking
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-unified-f01-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok
+
+    # Bind the request identity once; the facade passes this turn through.
+    blocking.release.set()
+    first = await registry.handle_unified_submit(
+        params=_unified_final_params(stem="f01-first", text="第一句对话。"),
+        request_id="request-unified-f01",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert first.ok
+    # Re-arm the facade so the next Agent round stays generating.
+    blocking.started = asyncio.Event()
+    blocking.release = asyncio.Event()
+
+    # A live generating response the conflicting submit claims to supersede.
+    submitted = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-f01-generating",
+            turn_id="turn-f01-generating",
+            response_id="response-f01-generating",
+            committed_at=NOW,
+            text="keep generating while the conflict arrives",
+            dispatch_target="agent",
+        ),
+        request_id="request-f01-generating",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok
+    await asyncio.wait_for(blocking.started.wait(), timeout=1)
+
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    runtime = route.activation_lease._runtime
+    generating = next(
+        record
+        for record in runtime._cr.snapshot().conversation.responses
+        if record.ref.response_id == "response-f01-generating"
+    )
+    supersedes_target = {
+        "response_id": generating.ref.response_id,
+        "response_generation": generating.ref.response_generation,
+    }
+
+    conflicting = _unified_final_params(stem="f01-conflict", text="不同的内容。")
+    conflicting["supersedes_response"] = dict(supersedes_target)
+    conflict = await registry.handle_unified_submit(
+        params=conflicting,
+        request_id="request-unified-f01",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert not conflict.ok
+    assert cast(dict, conflict.payload["error"])["reason"] == (
+        "UNIFIED_INPUT_ID_CONFLICT"
+    )
+
+    effect_types = [
+        record.effect.effect_type for record in runtime._cr.snapshot().effects
+    ]
+    assert not {
+        "playback.stop",
+        "response.cancel",
+        "round.cancel",
+        "task.cancel",
+    } & set(effect_types), f"conflict admission produced interrupt effects: {effect_types}"
+    assert runtime.snapshot().harness.cancel_effects == 0
+
+    # The admitted NEW owner still fences the superseded response exactly once.
+    admitted_params = _unified_final_params(stem="f01-admitted", text="换个问题。")
+    admitted_params["supersedes_response"] = dict(supersedes_target)
+    admitted = asyncio.create_task(
+        registry.handle_unified_submit(
+            params=admitted_params,
+            request_id="request-unified-f01-admitted",
+            session_id="session-product",
+            channel_id="web",
+        )
+    )
+    async def _fence_applied() -> None:
+        while True:
+            effects = [
+                record.effect.effect_type
+                for record in runtime._cr.snapshot().effects
+            ]
+            if effects.count("response.cancel") == 1:
+                return
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_fence_applied(), timeout=2)
+    blocking.release.set()
+    result = await asyncio.wait_for(admitted, timeout=5)
+    assert result.ok
+    effect_types = [
+        record.effect.effect_type for record in runtime._cr.snapshot().effects
+    ]
+    assert effect_types.count("response.cancel") == 1
+    assert effect_types.count("playback.stop") == 1
+    assert runtime.snapshot().harness.cancel_effects == 1
+
+    await registry.close_active_routes()
