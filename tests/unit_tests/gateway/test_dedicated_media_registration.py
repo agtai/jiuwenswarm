@@ -1819,6 +1819,54 @@ async def test_task_notification_speech_transfer_claims_one_successor_operation(
 
 
 @pytest.mark.asyncio
+async def test_task_notification_reobservation_authorizes_late_media_owner() -> None:
+    registry = _active_registry()
+    params = _params()
+    _trust_product_activation(registry, params)
+    response = _observe_task_notification(registry)
+
+    activation = registry.activate(
+        params=params,
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    current = registry.consume_ticket(_media_ticket(activation), request_origin=ORIGIN)
+    assert current is not None
+    current.route_completed = True
+    provider = _CountingBatchSpeechProvider()
+    service = FormalBatchSpeechService(provider, authorization_resolver=registry)
+    context = SpeechRpcContext(
+        str(activation["subject_id"]), "session-1", Assurance.AUTHENTICATED
+    )
+
+    before_reobservation = await service.synthesize(
+        _task_synthesis_request(
+            subject_id=str(activation["subject_id"]),
+            response=response,
+            request_id="request-before-reobservation",
+            operation_id="operation-before-reobservation",
+        ),
+        context,
+    )
+    assert before_reobservation["error"]["reason"] == "SPEECH_OPERATION_NOT_AUTHORIZED"
+    assert provider.synthesize_calls == 0
+
+    assert _observe_task_notification(registry) == response
+    after_reobservation = await service.synthesize(
+        _task_synthesis_request(
+            subject_id=str(activation["subject_id"]),
+            response=response,
+            request_id="request-after-reobservation",
+            operation_id="operation-after-reobservation",
+        ),
+        context,
+    )
+    assert after_reobservation["ok"] is True
+    assert provider.synthesize_calls == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
     [

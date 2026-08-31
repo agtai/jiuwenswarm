@@ -903,6 +903,12 @@ export class ProductWebP2ActivationOwner {
   private notificationSequence = 0;
   private notificationQueue: JsonObject[] = [];
   private lastNotificationPublishSeq: number | null = null;
+  private replayableNotificationBatch: Readonly<{
+    requestId: string;
+    params: Readonly<Record<string, unknown>>;
+    priorPublishSeq: number | null;
+    notifications: readonly JsonObject[];
+  }> | null = null;
 
   constructor(input: {
     enabled: boolean;
@@ -1181,13 +1187,14 @@ export class ProductWebP2ActivationOwner {
       notification_sequence: this.notificationSequence,
       ...(this.notificationBatchSize > 1 ? { max_notifications: this.notificationBatchSize } : {}),
     };
+    const priorPublishSeq = this.lastNotificationPublishSeq;
     let promise: Promise<JsonObject>;
     promise = this.request(PRODUCT_P2_NOTIFICATION_NEXT_METHOD, params, requestId)
       .then(value => {
         if (this.closing || this.binding === null || !sameBinding(this.binding, binding)) {
           throw new Error('product P2 notification owner is no longer current');
         }
-        const notifications = requireP2NotificationResult(value, binding, this.notificationBatchSize, this.lastNotificationPublishSeq);
+        const notifications = requireP2NotificationResult(value, binding, this.notificationBatchSize, priorPublishSeq);
         const [result, ...tail] = notifications;
         if (result === undefined) throw new Error('product P2 notification batch is empty');
         for (let index = notifications.length - 1; index >= 0; index -= 1) {
@@ -1198,6 +1205,12 @@ export class ProductWebP2ActivationOwner {
           }
         }
         this.notificationQueue.push(...tail);
+        this.replayableNotificationBatch = Object.freeze({
+          requestId,
+          params: Object.freeze({ ...params }),
+          priorPublishSeq,
+          notifications,
+        });
         this.notificationRequestId = null;
         return result;
       })
@@ -1210,6 +1223,56 @@ export class ProductWebP2ActivationOwner {
       });
     this.notificationPromise = promise;
     return promise;
+  }
+
+  /**
+   * Re-observe one already-delivered presentation after a successor media
+   * owner exists. The original request identity and result must replay
+   * exactly, so this cannot advance notification state or widen authority.
+   */
+  async replayNotificationForMediaAuthorization(input: {
+    interaction_id: string;
+    response_id: string;
+    response_generation: number;
+    unit_id: string;
+  }): Promise<void> {
+    const binding = this.requireActiveBinding();
+    const target = {
+      interaction_id: requiredText(input.interaction_id, 'interaction_id'),
+      response_id: requiredText(input.response_id, 'response_id'),
+      response_generation: input.response_generation,
+      unit_id: requiredText(input.unit_id, 'unit_id'),
+    };
+    if (!Number.isSafeInteger(target.response_generation) || target.response_generation < 0) {
+      throw new Error('product P2 notification replay target is invalid');
+    }
+    const retained = this.replayableNotificationBatch;
+    const matchesTarget = (notification: JsonObject): boolean => {
+      const response = objectValue(notification.response);
+      const event = objectValue(notification.agent_event);
+      const unit = objectValue(notification.presentation_unit);
+      return (
+        notification.kind === 'agent.output' &&
+        event?.event_type === 'chat.final' &&
+        event.source_provenance === 'server.task_notification' &&
+        response?.interaction_id === target.interaction_id &&
+        response.response_id === target.response_id &&
+        response.response_generation === target.response_generation &&
+        unit?.surface === 'text' &&
+        unit.unit_id === target.unit_id
+      );
+    };
+    if (retained === null || !retained.notifications.some(matchesTarget)) {
+      throw new Error('product P2 notification replay target is not retained');
+    }
+    const value = await this.request(PRODUCT_P2_NOTIFICATION_NEXT_METHOD, { ...retained.params }, retained.requestId);
+    if (this.closing || this.binding === null || !sameBinding(this.binding, binding)) {
+      throw new Error('product P2 notification owner is no longer current');
+    }
+    const replayed = requireP2NotificationResult(value, binding, this.notificationBatchSize, retained.priorPublishSeq);
+    if (JSON.stringify(replayed) !== JSON.stringify(retained.notifications) || !replayed.some(matchesTarget)) {
+      throw new Error('product P2 notification replay result changed');
+    }
   }
 
   async bargeIn(input: { action_id: string; response_id: string; response_generation: number; cancel_response: boolean }): Promise<JsonObject> {
@@ -1410,11 +1473,13 @@ export class ProductWebP2ActivationOwner {
     if (!this.enabled) {
       this.notificationQueue = [];
       this.lastNotificationPublishSeq = null;
+      this.replayableNotificationBatch = null;
       this.status = 'disabled';
       return Promise.resolve(this.publish());
     }
     this.notificationQueue = [];
     this.lastNotificationPublishSeq = null;
+    this.replayableNotificationBatch = null;
     this.notificationRequestId = null;
     if (this.closePromise) return this.closePromise;
     // Publish the lifecycle fence synchronously. Awaited activation/authority

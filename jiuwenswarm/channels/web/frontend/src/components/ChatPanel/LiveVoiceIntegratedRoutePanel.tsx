@@ -5225,6 +5225,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       p1VoiceCaptureBindingRef.current = null;
       updateTerminalAnnouncementState('playing');
       activeVoiceResponseRef.current = terminal.disposition.response;
+      await activationOwner.replayNotificationForMediaAuthorization({
+        ...terminal.disposition.response,
+        unit_id: terminal.disposition.unit_id,
+      });
       await retryOwner.playAgentText({
         response: terminal.disposition.response,
         unit_id: terminal.disposition.unit_id,

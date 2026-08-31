@@ -9130,6 +9130,196 @@ test('mounted response-generation failure projects exact terminal recovery ident
   }
 });
 
+test('mounted terminal notification replays its exact P2 observation after Live Voice creates a media owner', async () => {
+  const i18n = await createI18n('zh');
+  const sessionId = 'mounted-terminal-media-handoff-session';
+  const controlRef = { current: null };
+  const states = [];
+  const calls = [];
+  let activeMediaBinding = null;
+  let notificationRequestId = null;
+  let notificationParams = null;
+  let notificationResponse = null;
+  let speechAuthorized = false;
+  let renderer;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const activateP2 = createMountedP2ActivationResponder();
+
+  const request = async (method, params, options) => {
+    const requestId = options?.requestId ?? null;
+    calls.push({ method, params: { ...params }, requestId });
+    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') {
+      if (notificationRequestId === null) {
+        notificationRequestId = requestId;
+        notificationParams = { ...params };
+        notificationResponse = {
+          ok: true,
+          result: {
+            status: 'notification',
+            ...params,
+            kind: 'agent.output',
+            response: {
+              interaction_id: params.interaction_id,
+              response_id: 'mounted-terminal-media-handoff-response',
+              response_generation: 12,
+            },
+            agent_event: {
+              event_type: 'chat.final',
+              source_provenance: 'server.task_notification',
+              text: '后台任务已完成，结果已经生成。',
+            },
+            presentation_unit: {
+              surface: 'text',
+              unit_id: 'mounted-terminal-media-handoff-unit',
+              seq: 0,
+              content_ref: `sha256:${'a'.repeat(64)}`,
+            },
+          },
+        };
+        return notificationResponse;
+      }
+      if (requestId === notificationRequestId) {
+        assert.deepEqual(params, notificationParams);
+        assert.notEqual(activeMediaBinding, null, 'notification replay must follow media activation');
+        speechAuthorized = true;
+        return notificationResponse;
+      }
+      return new Promise(() => {});
+    }
+    if (method === 'live_voice.composition.p2.presentation.ack') {
+      return {
+        request_id: requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'presentation_acknowledged',
+          ...params,
+          accepted: true,
+          replayed: false,
+          history_records_written: 1,
+          history_pending: false,
+        },
+      };
+    }
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.media.activate') {
+      activeMediaBinding = mountedMediaBinding(params, 1);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'mounted-terminal-media-handoff-subject',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'H'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    if (method === 'live_voice.media.playout_receipt') {
+      return {
+        status: 'media_playout_acknowledged',
+        reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
+        receipt_id: 'mounted-terminal-media-handoff-receipt',
+        ...params,
+        duplex_media_observed: false,
+      };
+    }
+    if (method === 'live_voice.speech.synthesize_batch') {
+      if (!speechAuthorized) {
+        throw Object.assign(new Error('speech operation is not authorized'), {
+          reason: 'SPEECH_OPERATION_NOT_AUTHORIZED',
+        });
+      }
+      return {
+        contract_version: 'live-voice.contract.v2',
+        request_id: params.request_id,
+        operation_id: params.operation_id,
+        ok: true,
+        error: null,
+        result: {
+          operation: 'speech.synthesize.batch',
+          response: params.response,
+          unit_id: params.unit_id,
+          audio: {
+            format: 'wav_pcm16_mono',
+            sample_rate_hz: 48_000,
+            channel_count: 1,
+            data_base64: mountedWavBase64(),
+          },
+          provider: {
+            provider_id: 'mounted-provider',
+            implementation_class: 'formal',
+            fallback_from: null,
+            model: 'mounted-tts',
+            voice: 'mounted-voice',
+          },
+          presented: false,
+        },
+      };
+    }
+    throw new Error(`unexpected mounted terminal media handoff request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(
+        mountedFullyEnabledElement(i18n, sessionId, request, true, {
+          productVoiceControlRef: controlRef,
+          onProductVoiceStateChange: state => states.push(state),
+        }),
+      );
+      await waitForMounted(
+        () => states.at(-1)?.terminal_announcement_state === 'recovering',
+        'terminal notification was not retained while Live Voice was off',
+      );
+      assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 0);
+      assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 0);
+      void controlRef.current.start();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'terminal recovery did not start a media owner');
+      await browser.emitFirstFrame(0);
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.notification.next' && call.requestId === notificationRequestId).length === 2,
+        'terminal recovery did not replay the exact notification request',
+      );
+      await waitForMounted(() => states.at(-1)?.p1_status === 'playing', 'authorized terminal announcement did not play');
+      await waitForMounted(() => browser.counts.sourceStarts === 1, 'terminal audio did not reach browser playout');
+      browser.endLatestSource();
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length === 1,
+        'terminal presentation was not ACKed exactly once',
+      );
+    });
+
+    const exactNotificationCalls = calls.filter(
+      call => call.method === 'live_voice.composition.p2.notification.next' && call.requestId === notificationRequestId,
+    );
+    assert.equal(exactNotificationCalls.length, 2);
+    assert.deepEqual(exactNotificationCalls[1].params, exactNotificationCalls[0].params);
+    assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.playout_receipt').length, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 0);
+    assert.equal(
+      calls.some(call => call.method.includes('task.cancel') || call.method.includes('task.mutate') || call.method === 'live_voice.composition.p3.mutate'),
+      false,
+    );
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
 test('mounted TTS failure and ACK transport loss keep text visible, replay one ACK identity, and resume one capture', async () => {
   const i18n = await createI18n('zh');
   const sessionId = 'mounted-tts-failure-recovery-session';

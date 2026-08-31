@@ -661,6 +661,80 @@ test('bounded P2 notification owner delivers eighteen ordered items through two 
   await owner.close();
 });
 
+test('P2 notification replay re-observes an exact retained presentation without advancing the poll cursor', async () => {
+  const calls = [];
+  const retained = new Map();
+  const terminal = notificationItem(1, {
+    response: {
+      interaction_id: binding.interaction_id,
+      response_id: 'response-terminal',
+      response_generation: 12,
+    },
+    agent_event: {
+      ...notificationItem(1).agent_event,
+      event_type: 'chat.final',
+      source_provenance: 'server.task_notification',
+      text: '后台任务已完成',
+    },
+    presentation_unit: {
+      surface: 'text',
+      unit_id: 'unit-terminal',
+      seq: 0,
+      source_start_utf8: 0,
+      source_end_utf8: 24,
+      content_ref: 'sha256:fixture',
+    },
+  });
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    notification_batch_size: 16,
+    request: async (method, params, requestId) => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_CLOSE_METHOD) return response('closed');
+      assert.equal(method, PRODUCT_P2_NOTIFICATION_NEXT_METHOD);
+      calls.push({ params: { ...params }, requestId });
+      const replay = retained.get(requestId);
+      if (replay !== undefined) return replay;
+      const value =
+        params.notification_sequence === 1
+          ? notificationBatch([notificationItem(0), terminal])
+          : notificationBatch([notificationItem(2)]);
+      retained.set(requestId, value);
+      return value;
+    },
+  });
+  await owner.start(binding);
+
+  assert.equal((await owner.nextNotification()).publish_seq, 0);
+  assert.equal((await owner.nextNotification()).response.response_id, 'response-terminal');
+  assert.equal(calls.length, 1);
+  await assert.rejects(
+    owner.replayNotificationForMediaAuthorization({
+      interaction_id: binding.interaction_id,
+      response_id: 'response-foreign',
+      response_generation: 12,
+      unit_id: 'unit-terminal',
+    }),
+    /target is not retained/,
+  );
+  assert.equal(calls.length, 1);
+
+  await owner.replayNotificationForMediaAuthorization({
+    interaction_id: binding.interaction_id,
+    response_id: 'response-terminal',
+    response_generation: 12,
+    unit_id: 'unit-terminal',
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].requestId, calls[0].requestId);
+  assert.deepEqual(calls[1].params, calls[0].params);
+
+  assert.equal((await owner.nextNotification()).publish_seq, 2);
+  assert.equal(calls[2].params.notification_sequence, 2);
+  assert.notEqual(calls[2].requestId, calls[0].requestId);
+  await owner.close();
+});
+
 test('bounded P2 notification owner rejects malformed or authority-crossing batches', async () => {
   const cases = [
     ['empty', []],
