@@ -579,6 +579,22 @@ def _streaming_error_envelope(
 
 
 @dataclass(slots=True)
+class _VoiceSessionLease:
+    """D1: 网关级"单活动 Session"强制租约(DISPOSITIONED BY ENFORCED EXCLUSION)。
+
+    并发 Session 共享同一个流式 Provider 会互踩(F04 全量隔离另行排期);
+    在那之前,第二个 Session 必须在任何 Provider/账本/音频副作用之前被拒绝,
+    且旧 Session 迟到的清理不能释放继任者的租约(token+generation)。
+    """
+
+    session_id: str
+    connection_id: str
+    token: str
+    generation: int
+    acquired_at: float
+
+
+@dataclass(slots=True)
 class _MediaAuthority:
     record_id: str
     subject_id: str
@@ -594,6 +610,8 @@ class _MediaAuthority:
     # F06: 叶子停车栅栏——撤销/过期/关停置位后,停在 recv/send/source/ACK/EOT
     # 的叶子被唤醒并走终止路径,而不是永远挂在无期限的等待里。
     stop: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    # D1: 该记录隶属的独占语音租约代;迟到的旧代清理不得释放继任租约。
+    lease_generation: int = 0
     barge_in_capture: bool = False
     ticket_consumed: bool = False
     route_completed: bool = False
@@ -927,6 +945,8 @@ class DedicatedMediaProductRegistry:
         self._sweep_interval = float(expiry_sweep_interval_seconds)
         self._expiry_sweeper: asyncio.Task[None] | None = None
         self._admissions_closed = False
+        self._voice_session_lease: _VoiceSessionLease | None = None
+        self._voice_session_generation = 0
         self._batch_provider_available = False
         self._streaming_provider_available = False
         self._streaming_selection_degradation: dict[str, object] | None = None
@@ -1350,6 +1370,9 @@ class DedicatedMediaProductRegistry:
                     "MEDIA_PRODUCT_ACTIVATION_UNTRUSTED",
                     "media activation requires the exact accepted product P2 route",
                 )
+            lease = self._acquire_voice_session_lease_locked(
+                session_id, owner_connection_id
+            )
         ticket = secrets.token_urlsafe(32)
         record_id = f"media-record-{secrets.token_hex(16)}"
         subject_id = f"live-voice-media:{secrets.token_hex(16)}"
@@ -1389,6 +1412,7 @@ class DedicatedMediaProductRegistry:
             issued_at=now,
             ticket_expires_at=now + self._ticket_ttl,
             authority_expires_at=now + self._authority_ttl,
+            lease_generation=lease.generation,
         )
         with self._lock:
             self._prune(now)
@@ -1498,6 +1522,7 @@ class DedicatedMediaProductRegistry:
         return {
             "status": "active",
             "reason_id": "MEDIA_ROUTE_TICKET_ISSUED",
+            "session_exclusive": True,
             "subject_id": subject_id,
             **route_descriptor,
             "subprotocol": MEDIA_SUBPROTOCOL,
@@ -2666,6 +2691,7 @@ class DedicatedMediaProductRegistry:
                     owned.stop.set()
                     self._schedule_streaming_abort(owned)
                 self._remember_revoked(subject_id, binding)
+                self._maybe_release_voice_session_lease_locked(session_id)
         return {
             "status": "closed",
             "reason_id": "MEDIA_ROUTE_REVOKED",
@@ -3957,6 +3983,54 @@ class DedicatedMediaProductRegistry:
             record.playout_receipt_content_sha256[key] = content_sha256
             return dict(payload)
 
+    def _acquire_voice_session_lease_locked(
+        self, session_id: str, connection_id: str
+    ) -> _VoiceSessionLease:
+        lease = self._voice_session_lease
+        if lease is not None and lease.session_id != session_id:
+            # D1 条件一:在任何 Provider/账本/音频副作用之前拒绝第二个 Session;
+            # 含前任清理未证完成期(条件三:继任必须等清理完成)。
+            raise MediaTransportViolation(
+                "MEDIA_SESSION_LEASE_HELD",
+                "another Session holds the exclusive voice lease",
+            )
+        if lease is None:
+            self._voice_session_generation += 1
+            lease = _VoiceSessionLease(
+                session_id=session_id,
+                connection_id=connection_id,
+                token=secrets.token_hex(16),
+                generation=self._voice_session_generation,
+                acquired_at=self._monotonic(),
+            )
+            self._voice_session_lease = lease
+        return lease
+
+    def _maybe_release_voice_session_lease_locked(self, session_id: str) -> None:
+        """记录清理推进后按最终状态放租约:该 Session 无任何在册记录才释放。"""
+        lease = self._voice_session_lease
+        if lease is None or lease.session_id != session_id:
+            return
+        for record in self._records.values():
+            if record.binding.session_id == session_id:
+                return
+        self._voice_session_lease = None
+
+    def release_voice_session_lease(
+        self, session_id: str, *, generation: int
+    ) -> bool:
+        """显式释放:必须携带获取时的 generation——旧代的迟到释放是 no-op。"""
+        with self._lock:
+            lease = self._voice_session_lease
+            if (
+                lease is None
+                or lease.session_id != session_id
+                or lease.generation != generation
+            ):
+                return False
+            self._voice_session_lease = None
+            return True
+
     def record_deadline_remaining(self, record: _MediaAuthority) -> float:
         """F06: 该叶子距绝对权限期限剩余的秒数(注册表时基)。"""
         return max(0.0, record.authority_expires_at - self._monotonic())
@@ -3994,6 +4068,7 @@ class DedicatedMediaProductRegistry:
         """F16: 关停第一相——拒绝新准入并唤醒每一片仍在册的叶子。"""
         with self._lock:
             self._admissions_closed = True
+            self._voice_session_lease = None
             woken = 0
             for record in self._records.values():
                 if not record.stop.is_set():
@@ -4015,8 +4090,10 @@ class DedicatedMediaProductRegistry:
             if now > record.authority_expires_at
             or (not record.ticket_consumed and now > record.ticket_expires_at)
         ]
+        expired_sessions: set[str] = set()
         for record_id in expired:
             record = self._records.pop(record_id)
+            expired_sessions.add(record.binding.session_id)
             record.stop.set()
             self._drop_pending_for_record_id(record_id)
             subject_key = (record.binding.session_id, record.subject_id)
@@ -4041,6 +4118,8 @@ class DedicatedMediaProductRegistry:
             self._release_stream_source(record)
             record.downlink_overlap_record_id = None
             self._schedule_streaming_abort(record)
+        for expired_session_id in expired_sessions:
+            self._maybe_release_voice_session_lease_locked(expired_session_id)
         expired_activations = [
             key
             for key, authority in self._product_activations.items()

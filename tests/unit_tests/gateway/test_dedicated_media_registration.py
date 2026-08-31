@@ -417,6 +417,9 @@ async def test_streaming_preopen_retention_obeys_capture_resident_byte_budget(
     )
     record = registry.consume_ticket(_media_ticket(activation), request_origin=ORIGIN)
     assert record is not None
+    # D1 独占租约下并发第二 Session 经 activate 已不可达;此处显式清除租约,
+    # 仅为保留共享预算这层纵深防御的覆盖。
+    registry._voice_session_lease = None
     foreign_activation = _activate(
         registry,
         params=_params(
@@ -3771,3 +3774,133 @@ async def test_revoked_leaf_parked_in_recv_terminates_with_honest_incomplete() -
     assert 1001 in socket.closed_codes
     assert result.cleanup_complete is False
     await registry.close_expiry_sweeper()
+
+
+def test_second_session_is_refused_before_any_side_effect() -> None:
+    """D1 条件一:第二个 Session 在任何票据/账本副作用之前被拒绝。"""
+    registry = _active_registry()
+    first_params = _params()
+    _activate(
+        registry,
+        params=first_params,
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    records_before = dict(registry._records)
+    tickets_before = dict(registry._pending_tickets)
+
+    second_params = _params(
+        session_id="session-2",
+        correlation_id="correlation-2",
+        interaction_id="interaction-2",
+    )
+    with pytest.raises(MediaTransportViolation) as refused:
+        _activate(
+            registry,
+            params=second_params,
+            request_origin=ORIGIN,
+            connection_id="connection-2",
+        )
+    assert refused.value.reason_id == "MEDIA_SESSION_LEASE_HELD"
+    assert dict(registry._records) == records_before
+    assert dict(registry._pending_tickets) == tickets_before
+
+
+def test_successor_session_waits_for_predecessor_cleanup() -> None:
+    """D1 条件三:前任记录仍在册(清理未证完成)时继任被拒;
+    撤销完成、记录清空后继任获取新一代租约。"""
+    registry = _active_registry()
+    first_params = _params()
+    activation = _activate(
+        registry,
+        params=first_params,
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+
+    second_params = _params(
+        session_id="session-2",
+        correlation_id="correlation-2",
+        interaction_id="interaction-2",
+    )
+    with pytest.raises(MediaTransportViolation):
+        _activate(
+            registry,
+            params=second_params,
+            request_origin=ORIGIN,
+            connection_id="connection-2",
+        )
+
+    registry.revoke(
+        params=_media_close_params(activation, first_params),
+        routed_session_id=str(first_params["session_id"]),
+        connection_id="connection-1",
+    )
+    assert registry._voice_session_lease is None
+
+    successor = _activate(
+        registry,
+        params=second_params,
+        request_origin=ORIGIN,
+        connection_id="connection-2",
+    )
+    assert successor["status"] == "active"
+    assert registry._voice_session_lease is not None
+    assert registry._voice_session_lease.session_id == "session-2"
+    assert registry._voice_session_lease.generation == 2
+
+
+def test_stale_generation_release_cannot_free_a_successor_lease() -> None:
+    """D1 条件二:旧代迟到的显式释放是 no-op,不能放掉继任者的租约。"""
+    registry = _active_registry()
+    first_params = _params()
+    activation = _activate(
+        registry,
+        params=first_params,
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    first_generation = registry._voice_session_lease.generation
+
+    registry.revoke(
+        params=_media_close_params(activation, first_params),
+        routed_session_id=str(first_params["session_id"]),
+        connection_id="connection-1",
+    )
+    second_params = _params(
+        session_id="session-2",
+        correlation_id="correlation-2",
+        interaction_id="interaction-2",
+    )
+    _activate(
+        registry,
+        params=second_params,
+        request_origin=ORIGIN,
+        connection_id="connection-2",
+    )
+
+    assert (
+        registry.release_voice_session_lease(
+            str(first_params["session_id"]), generation=first_generation
+        )
+        is False
+    )
+    assert registry._voice_session_lease is not None
+    assert registry._voice_session_lease.session_id == "session-2"
+
+
+def test_same_session_reactivation_shares_the_lease() -> None:
+    """双标签同 Session:同 session_id 的再次激活共享租约,不被拒绝。"""
+    registry = _active_registry()
+    params = _params()
+    first = _activate(
+        registry, params=params, request_origin=ORIGIN, connection_id="connection-1"
+    )
+    assert first["session_exclusive"] is True
+    generation = registry._voice_session_lease.generation
+
+    replay = _activate(
+        registry, params=params, request_origin=ORIGIN, connection_id="connection-1"
+    )
+    assert replay["status"] == "active"
+    assert registry._voice_session_lease.generation == generation
