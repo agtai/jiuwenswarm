@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from datetime import date, datetime, timezone
 from enum import Enum
@@ -156,7 +157,12 @@ def _projected_scalar(
     if type(value) is str and not _is_exact_utf8_text(value):
         return _projected_null(budget)
     try:
-        encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
+        # allow_nan=False: NaN/Infinity would serialize into tokens browser
+        # JSON.parse rejects, so they fall into the same null projection as
+        # every other unencodable scalar.
+        encoded = json.dumps(value, ensure_ascii=False, allow_nan=False).encode(
+            "utf-8"
+        )
     except Exception:
         encoded = b"null"
         value = None
@@ -180,7 +186,10 @@ def _json_object_key_size(value: Any) -> int | None:
     elif value_type is bool:
         key_text = "true" if value else "false"
     else:
-        key_text = json.dumps(value, ensure_ascii=False)
+        try:
+            key_text = json.dumps(value, ensure_ascii=False, allow_nan=False)
+        except Exception:
+            return None
     failed = False
     encoded = b""
     try:
@@ -350,7 +359,10 @@ def _legacy_json_project(
 def _exact_legacy_scalar(value: Any) -> Any:
     """Keep exact JSON scalars and replace subclasses/objects without hooks."""
     value_type = type(value)
-    if value is None or value_type is float or value_type is bool:
+    if value_type is float:
+        # NaN/Infinity have no JSON representation a browser accepts.
+        return value if math.isfinite(value) else None
+    if value is None or value_type is bool:
         return value
     if value_type is str:
         return value if _is_exact_utf8_text(value) else ""

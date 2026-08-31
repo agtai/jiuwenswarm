@@ -279,7 +279,9 @@ class BaseWsChannel(BaseWebChannel):
                 # 与 send 共用下方兜底：任一失败都只丢这一帧，不杀 writer。
                 if isinstance(frame, dict):
                     try:
-                        wire = json.dumps(frame, ensure_ascii=False)
+                        # allow_nan=False: NaN/Infinity 会生成浏览器 JSON.parse
+                        # 必拒的帧，落入下面既有的丢帧兜底而不是发出坏帧。
+                        wire = json.dumps(frame, ensure_ascii=False, allow_nan=False)
                     except (TypeError, ValueError) as e:
                         logger.warning(
                             "[%s] frame serialize failed, dropping ws_id=%s err=%s",

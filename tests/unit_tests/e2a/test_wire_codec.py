@@ -1601,3 +1601,42 @@ def test_collapse_phase_keeps_child_meta() -> None:
     assert ph.get("phase_type") == "child"
     assert ph.get("nested_phase") == "▸ intro #0"
     assert ph.get("parent_phase") == "review"
+
+
+def _strict_json_loads(payload: str):
+    def _reject_constant(name: str):
+        raise ValueError(f"non-finite JSON token: {name}")
+
+    return json.loads(payload, parse_constant=_reject_constant)
+
+
+def test_legacy_projection_replaces_non_finite_floats_with_null() -> None:
+    projected = wire_codec._legacy_json_project(
+        {
+            "nan": float("nan"),
+            "inf": float("inf"),
+            "neg": float("-inf"),
+            "nested": [float("nan"), {"deep": float("inf")}],
+            "ok": 1.5,
+        }
+    )
+    assert projected["nan"] is None
+    assert projected["inf"] is None
+    assert projected["neg"] is None
+    assert projected["nested"][0] is None
+    assert projected["nested"][1]["deep"] is None
+    assert projected["ok"] == 1.5
+    _strict_json_loads(json.dumps(projected, ensure_ascii=False, allow_nan=False))
+
+
+def test_exact_legacy_scalar_rejects_non_finite_floats() -> None:
+    assert wire_codec._exact_legacy_scalar(float("nan")) is None
+    assert wire_codec._exact_legacy_scalar(float("inf")) is None
+    assert wire_codec._exact_legacy_scalar(float("-inf")) is None
+    assert wire_codec._exact_legacy_scalar(2.5) == 2.5
+
+
+def test_json_object_key_size_rejects_non_finite_float_keys() -> None:
+    assert wire_codec._json_object_key_size(float("nan")) is None
+    assert wire_codec._json_object_key_size(float("inf")) is None
+    assert wire_codec._json_object_key_size(2.5) is not None

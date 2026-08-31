@@ -45,7 +45,9 @@ def _serialize_wire_payload(wire: dict[str, Any]) -> tuple[str, int]:
     serialized = ""
     encoded = b""
     try:
-        serialized = json.dumps(wire, ensure_ascii=False)
+        # allow_nan=False: a NaN/Infinity anywhere in the payload must become
+        # this content-free typed failure, never an unparseable frame.
+        serialized = json.dumps(wire, ensure_ascii=False, allow_nan=False)
         encoded = serialized.encode("utf-8")
     except Exception:
         failed = True

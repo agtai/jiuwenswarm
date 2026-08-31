@@ -413,3 +413,22 @@ def test_agent_ws_server_has_no_direct_websocket_send_calls():
     ]
 
     assert direct_sends == []
+
+
+@pytest.mark.asyncio
+async def test_send_wire_payload_refuses_non_finite_floats(monkeypatch):
+    """NaN/Infinity anywhere in the payload must never produce a frame."""
+    monkeypatch.setattr(ws_send, "AGENT_WS_SEND_BUDGET_BYTES", 1024)
+    ws = FakeWebSocket()
+    for poison in (float("nan"), float("inf"), float("-inf")):
+        wire = {"request_id": "r1", "body": {"metric": poison}}
+        with pytest.raises(ValueError):
+            await ws_send.send_wire_payload(ws, wire)
+    nested = {"request_id": "r1", "body": {"rows": [{"v": [1.0, float("nan")]}]}}
+    with pytest.raises(ValueError):
+        await ws_send.send_wire_payload(ws, nested)
+    assert ws.sent == []
+
+    healthy = {"request_id": "r1", "body": {"metric": 1.5}}
+    assert await ws_send.send_wire_payload(ws, healthy) is True
+    assert json.loads(ws.sent[0]) == healthy
