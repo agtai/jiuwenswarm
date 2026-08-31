@@ -227,6 +227,14 @@ class _DelegateResult:
     event_ids: tuple[str, str]
 
 
+@dataclass(slots=True)
+class _ProviderResponseRequest:
+    turn_id: str
+    runtime_ref: ResponseRef | None
+    payload: dict[str, object]
+    sent: asyncio.Future[str] | None = field(default=None, repr=False)
+
+
 _EVENT_KEYS = {
     "error": frozenset({"type", "event_id", "error"}),
     "conversation.item.truncated": frozenset(
@@ -608,6 +616,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._state = NativeProviderState.NEW
         self._input_audio_lock = asyncio.Lock()
         self._delegate_result_lock = asyncio.Lock()
+        self._response_request_lock = asyncio.Lock()
         self._cancel_lock = asyncio.Lock()
         self._primary_error_reason: str | None = None
         self._pending_events: deque[NativeEngineEvent] = deque()
@@ -629,13 +638,13 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._input_start_ms: int | None = None
         self._input_end_ms: int | None = None
         self._current_turn_id: str | None = None
-        self._pending_direct_response_turn_id: str | None = None
         self._direct_response_requested_turn_ids: set[str] = set()
+        self._response_request_queue: deque[_ProviderResponseRequest] = deque()
+        self._inflight_response_request: _ProviderResponseRequest | None = None
         self._responses: dict[str, _ProviderResponse] = {}
         self._current_response_id: str | None = None
         self._delegates: dict[str, _DelegateWait] = {}
         self._delegate_results: dict[str, _DelegateResult] = {}
-        self._pending_delegate_response: tuple[str, ResponseRef] | None = None
         self._cancelled: dict[
             str, tuple[NativePresentationCursor, tuple[str, str]]
         ] = {}
@@ -703,7 +712,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             data = _closed_event(provider_event)
             results = self._map_event(provider_event, data)
             self._processed_event_ids.add(provider_event.event_id)
-            await self._request_pending_direct_response()
+            await self._request_pending_provider_response()
             if not results:
                 return NativeEngineEvent()
             if len(results) > self._event_queue_capacity:
@@ -724,28 +733,36 @@ class OpenAIRealtimeNativeInteractionEngine:
             self._mark_failed(exc.reason)
             raise exc from None
 
-    async def _request_pending_direct_response(self) -> None:
-        turn_id = self._pending_direct_response_turn_id
-        if turn_id is None:
-            return
-        current = self._current_response()
-        if current is not None and not current.done:
-            return
-        if turn_id in self._direct_response_requested_turn_ids:
-            raise OpenAIRealtimeNativeInteractionError(
-                "NATIVE_DIRECT_RESPONSE_REQUEST_CONFLICT",
-                "one Native turn permits only one direct response request",
-            )
+    async def _request_pending_provider_response(self) -> None:
+        async with self._response_request_lock:
+            if self._inflight_response_request is not None:
+                return
+            current = self._current_response()
+            if current is not None and not current.done:
+                return
+            if not self._response_request_queue:
+                return
+            request = self._response_request_queue.popleft()
+            self._inflight_response_request = request
         try:
-            await self._session.send_event("response.create", {})
+            event_id = await self._session.send_event(
+                "response.create", request.payload
+            )
         except (KeyboardInterrupt, SystemExit, GeneratorExit):
+            if self._inflight_response_request is request:
+                self._inflight_response_request = None
             self._state = NativeProviderState.FAILED
             raise
         except OpenAIRealtimeSessionError as exc:
+            if self._inflight_response_request is request:
+                self._inflight_response_request = None
+            if request.sent is not None and not request.sent.done():
+                request.sent.set_exception(exc)
+                return
             self._mark_failed(exc.reason)
             raise OpenAIRealtimeNativeInteractionError(exc.reason, str(exc)) from None
-        self._direct_response_requested_turn_ids.add(turn_id)
-        self._pending_direct_response_turn_id = None
+        if request.sent is not None and not request.sent.done():
+            request.sent.set_result(event_id)
         self._state = NativeProviderState.RESPONSE_PENDING
 
     async def admit_response(
@@ -829,12 +846,17 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_DELEGATE_RESPONSE_NOT_NEW",
                 "delegate result requires a newer Runtime response generation",
             )
-        if self._pending_delegate_response is not None:
+        if any(
+            request.runtime_ref is not None for request in self._response_request_queue
+        ) or (
+            self._inflight_response_request is not None
+            and self._inflight_response_request.runtime_ref is not None
+        ):
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_DELEGATE_RESPONSE_CONFLICT",
                 "only one pre-admitted delegate response may be pending",
             )
-        pending_delegate_response = (wait.proposal.turn_id, ref)
+        response_request: _ProviderResponseRequest | None = None
         try:
             output_event_id = await self._session.send_event(
                 "conversation.item.create",
@@ -846,10 +868,11 @@ class OpenAIRealtimeNativeInteractionEngine:
                     }
                 },
             )
-            self._pending_delegate_response = pending_delegate_response
-            response_event_id = await self._session.send_event(
-                "response.create",
-                {
+            response_sent = asyncio.get_running_loop().create_future()
+            response_request = _ProviderResponseRequest(
+                turn_id=wait.proposal.turn_id,
+                runtime_ref=ref,
+                payload={
                     "response": {
                         "instructions": _DELEGATE_SUCCESSOR_INSTRUCTIONS,
                         # Realtime counts generated audio in this shared budget.
@@ -860,15 +883,34 @@ class OpenAIRealtimeNativeInteractionEngine:
                         "tool_choice": "none",
                     }
                 },
+                sent=response_sent,
             )
+            self._response_request_queue.append(response_request)
+            await self._request_pending_provider_response()
+            response_event_id = await response_sent
+        except asyncio.CancelledError:
+            if response_request is not None:
+                try:
+                    self._response_request_queue.remove(response_request)
+                except ValueError:
+                    if self._inflight_response_request is response_request:
+                        self._inflight_response_request = None
+                        self._mark_failed("NATIVE_DELEGATE_RESPONSE_CANCELLED")
+            raise
         except (KeyboardInterrupt, SystemExit, GeneratorExit):
-            if self._pending_delegate_response == pending_delegate_response:
-                self._pending_delegate_response = None
+            if response_request is not None:
+                try:
+                    self._response_request_queue.remove(response_request)
+                except ValueError:
+                    pass
             self._state = NativeProviderState.FAILED
             raise
         except OpenAIRealtimeSessionError as exc:
-            if self._pending_delegate_response == pending_delegate_response:
-                self._pending_delegate_response = None
+            if response_request is not None:
+                try:
+                    self._response_request_queue.remove(response_request)
+                except ValueError:
+                    pass
             self._mark_failed(exc.reason)
             raise OpenAIRealtimeNativeInteractionError(exc.reason, str(exc)) from None
         event_ids = (output_event_id, response_event_id)
@@ -1214,7 +1256,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_INPUT_COMMIT_BEFORE_STOP",
                 "input commit requires one stopped speech interval",
             )
-        if self._pending_direct_response_turn_id is not None:
+        if any(request.runtime_ref is None for request in self._response_request_queue):
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_DIRECT_RESPONSE_PENDING",
                 "only one committed direct turn may await Provider response creation",
@@ -1252,7 +1294,19 @@ class OpenAIRealtimeNativeInteractionEngine:
             (("turn_id", turn_id), ("provider_item_id", item_id)),
         )
         self._current_turn_id = turn_id
-        self._pending_direct_response_turn_id = turn_id
+        if turn_id in self._direct_response_requested_turn_ids:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_DIRECT_RESPONSE_REQUEST_CONFLICT",
+                "one Native turn permits only one direct response request",
+            )
+        self._direct_response_requested_turn_ids.add(turn_id)
+        self._response_request_queue.append(
+            _ProviderResponseRequest(
+                turn_id=turn_id,
+                runtime_ref=None,
+                payload={},
+            )
+        )
         self._input_item_id = None
         self._input_start_ms = None
         self._input_end_ms = None
@@ -1280,37 +1334,48 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_PROVIDER_RESPONSE_CONFLICT",
                 "Provider response id cannot be reused",
             )
+        request = self._inflight_response_request
+        if request is None:
+            prior_current_turn_response = any(
+                response.turn_id == self._current_turn_id
+                for response in self._responses.values()
+            )
+            reason = (
+                "NATIVE_DIRECT_RESPONSE_ALREADY_CREATED"
+                if prior_current_turn_response
+                else "NATIVE_DIRECT_RESPONSE_NOT_REQUESTED"
+            )
+            raise OpenAIRealtimeNativeInteractionError(
+                reason,
+                "Provider direct response requires one exact Native request",
+            )
+        response_turn_id = request.turn_id
         prior_turn_response = any(
-            response.turn_id == self._current_turn_id
+            response.turn_id == response_turn_id
             for response in self._responses.values()
         )
-        pending_delegate = self._pending_delegate_response
-        if prior_turn_response and (
-            pending_delegate is None
-            or pending_delegate[0] != self._current_turn_id
-        ):
+        if prior_turn_response and request.runtime_ref is None:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_DIRECT_RESPONSE_ALREADY_CREATED",
                 "one Native turn permits only one direct Provider response",
             )
-        if not prior_turn_response and pending_delegate is not None:
+        if not prior_turn_response and request.runtime_ref is not None:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_DELEGATE_RESPONSE_TURN_MISMATCH",
                 "delegate successor must bind the exact source Native turn",
             )
         response = _ProviderResponse(
             provider_response_id=provider_id,
-            turn_id=self._current_turn_id,
+            turn_id=response_turn_id,
+            runtime_ref=request.runtime_ref,
         )
-        if pending_delegate is not None:
-            response.runtime_ref = pending_delegate[1]
-            self._pending_delegate_response = None
+        self._inflight_response_request = None
         self._responses[provider_id] = response
         self._current_response_id = provider_id
         self._state = NativeProviderState.RESPONSE_PENDING
         payload = [
             ("provider_response_id", provider_id),
-            ("turn_id", self._current_turn_id),
+            ("turn_id", response_turn_id),
         ]
         if response.runtime_ref is not None:
             payload.extend(
@@ -1369,10 +1434,9 @@ class OpenAIRealtimeNativeInteractionEngine:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_PROVIDER_AUDIO_ITEMS_FULL",
                 "Provider response exceeds the bounded audio item count",
-        )
+            )
         if any(
-            item.provider_item_id == item_id
-            for item in response.audio_items.values()
+            item.provider_item_id == item_id for item in response.audio_items.values()
         ):
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_PROVIDER_ITEM_MISMATCH",
@@ -1762,7 +1826,10 @@ class OpenAIRealtimeNativeInteractionEngine:
             response.done = True
             self._state = (
                 NativeProviderState.TURN_COMMITTED
-                if self._pending_direct_response_turn_id is not None
+                if any(
+                    request.runtime_ref is None
+                    for request in self._response_request_queue
+                )
                 else NativeProviderState.READY
             )
             return []
@@ -1808,8 +1875,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         ]
         transcript = (
             " ".join(
-                (item.transcript or "").replace("\n", " ")
-                for item in transcript_items
+                (item.transcript or "").replace("\n", " ") for item in transcript_items
             )
             if transcript_items
             else None

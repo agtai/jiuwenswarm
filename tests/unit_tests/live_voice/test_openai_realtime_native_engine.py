@@ -424,8 +424,7 @@ async def test_native_session_direct_audio_does_not_require_transcript_or_bridge
     assert (
         "You MUST call jiuwen_delegate for every request to create, start, modify, "
         "adjust, cancel, check the status of, or inspect the result of background "
-        "work"
-        in socket.sent[0]["session"]["instructions"]
+        "work" in socket.sent[0]["session"]["instructions"]
     )
     assert (
         "Follow-ups referring to earlier delegated work, its changes, status, or "
@@ -500,9 +499,7 @@ async def test_one_response_preserves_two_ordered_audio_items() -> None:
             pcm16=b"\x02\x00" * 480,
             output_index=1,
         ),
-        output_audio_done(
-            "event-9", "provider-response-1", "assistant-item-1"
-        ),
+        output_audio_done("event-9", "provider-response-1", "assistant-item-1"),
         output_transcript_done(
             "event-10", "provider-response-1", "assistant-item-1", "第一段。"
         ),
@@ -561,12 +558,8 @@ async def test_two_item_response_cancels_exact_presented_item_cursor() -> None:
         speech_stopped("event-4", "user-item-1", 20),
         input_committed("event-5", "user-item-1"),
         response_created("event-6", "provider-response-1"),
-        output_audio_delta(
-            "event-7", "provider-response-1", "assistant-item-1", 0
-        ),
-        output_audio_done(
-            "event-8", "provider-response-1", "assistant-item-1"
-        ),
+        output_audio_delta("event-7", "provider-response-1", "assistant-item-1", 0),
+        output_audio_done("event-8", "provider-response-1", "assistant-item-1"),
         output_audio_delta(
             "event-9",
             "provider-response-1",
@@ -611,9 +604,7 @@ async def test_changed_same_index_audio_item_has_zero_new_audio_effect() -> None
         speech_stopped("event-4", "user-item-1", 20),
         input_committed("event-5", "user-item-1"),
         response_created("event-6", "provider-response-1"),
-        output_audio_delta(
-            "event-7", "provider-response-1", "assistant-item-1", 0
-        ),
+        output_audio_delta("event-7", "provider-response-1", "assistant-item-1", 0),
         invalid_event,
     )
     await engine.start()
@@ -662,9 +653,7 @@ async def test_interleaved_partial_audio_items_never_mix_buffers() -> None:
             2,
             pcm16=b"\x03\x00" * 240,
         ),
-        output_audio_done(
-            "event-10", "provider-response-1", "assistant-item-1"
-        ),
+        output_audio_done("event-10", "provider-response-1", "assistant-item-1"),
         output_audio_done(
             "event-11",
             "provider-response-1",
@@ -1001,6 +990,48 @@ async def test_two_turns_reuse_one_session_and_contiguous_audio_input() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rapid_semantic_vad_commits_serialize_direct_response_creation() -> None:
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        speech_started("event-6", "user-item-2", 20),
+        speech_stopped("event-7", "user-item-2", 40),
+        input_committed("event-8", "user-item-2"),
+        response_created("event-9", "provider-response-1"),
+        response_done("event-10", "provider-response-1"),
+        response_created("event-11", "provider-response-2"),
+        response_done("event-12", "provider-response-2"),
+    )
+    await engine.start()
+    try:
+        _, _, first_commit = await accept_basic_turn(engine)
+        assert first_commit.turn_commit is not None
+        assert first_commit.turn_commit.turn_id == "native-turn-00000001"
+        assert [event["type"] for event in socket.sent].count("response.create") == 1
+
+        _, _, second_commit = await accept_basic_turn(engine)
+        assert second_commit.turn_commit is not None
+        assert second_commit.turn_commit.turn_id == "native-turn-00000002"
+        assert [event["type"] for event in socket.sent].count("response.create") == 1
+
+        first_speak = await engine.next_event()
+        assert first_speak.action is not None
+        assert action_payload(first_speak)["turn_id"] == "native-turn-00000001"
+        await engine.admit_response("provider-response-1", response_ref(1))
+        assert (await engine.next_event()).provider_done is not None
+        assert [event["type"] for event in socket.sent].count("response.create") == 2
+
+        second_speak = await engine.next_event()
+        assert second_speak.action is not None
+        assert action_payload(second_speak)["turn_id"] == "native-turn-00000002"
+        await engine.admit_response("provider-response-2", response_ref(2))
+        assert (await engine.next_event()).provider_done is not None
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_unsolicited_second_direct_response_in_one_turn_has_zero_new_effect() -> (
     None
 ):
@@ -1121,7 +1152,9 @@ async def test_blank_interrupted_transcript_is_absent_and_does_not_close_engine(
 
 
 @pytest.mark.asyncio
-async def test_complete_transcript_canonicalizes_provider_line_breaks_for_audit() -> None:
+async def test_complete_transcript_canonicalizes_provider_line_breaks_for_audit() -> (
+    None
+):
     engine, _, _ = active_engine(
         speech_started("event-3", "user-item-1", 0),
         speech_stopped("event-4", "user-item-1", 20),
@@ -1508,12 +1541,14 @@ async def test_concurrent_exact_delegate_result_sends_one_provider_pair() -> Non
         input_committed("event-5", "user-item-1"),
         response_created("event-6", "provider-response-1"),
         function_done("event-7", "provider-response-1"),
+        response_done("event-8", "provider-response-1"),
     )
     await engine.start()
     await accept_basic_turn(engine)
     await engine.next_event()
     await engine.admit_response("provider-response-1", response_ref(1))
     await engine.next_event()
+    assert (await engine.next_event()).provider_done is not None
     before = len(socket.sent)
     ref = response_ref(2)
 
@@ -1545,6 +1580,161 @@ async def test_concurrent_exact_delegate_result_sends_one_provider_pair() -> Non
 
 
 @pytest.mark.asyncio
+async def test_direct_request_precedes_late_delegate_successor_without_overlap() -> (
+    None
+):
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        function_done("event-7", "provider-response-1"),
+        response_done("event-8", "provider-response-1"),
+        speech_started("event-9", "user-item-2", 20),
+        speech_stopped("event-10", "user-item-2", 40),
+        input_committed("event-11", "user-item-2"),
+        response_created("event-12", "provider-response-2"),
+        response_done("event-13", "provider-response-2"),
+        response_created("event-14", "provider-response-3"),
+    )
+    await engine.start()
+    try:
+        await accept_basic_turn(engine)
+        await engine.next_event()
+        await engine.admit_response("provider-response-1", response_ref(1))
+        assert (await engine.next_event()).delegate is not None
+        assert (await engine.next_event()).provider_done is not None
+
+        await accept_basic_turn(engine)
+        assert [event["type"] for event in socket.sent].count("response.create") == 2
+        delegate_ref = response_ref(3)
+        delegate_task = asyncio.create_task(
+            engine.send_delegate_result("call-1", delegate_ref, "canonical result")
+        )
+        await asyncio.sleep(0)
+
+        assert [event["type"] for event in socket.sent].count(
+            "conversation.item.create"
+        ) == 1
+        assert [event["type"] for event in socket.sent].count("response.create") == 2
+        assert delegate_task.done() is False
+
+        direct_speak = await engine.next_event()
+        assert direct_speak.action is not None
+        assert action_payload(direct_speak)["turn_id"] == "native-turn-00000002"
+        await engine.admit_response("provider-response-2", response_ref(2))
+        assert (await engine.next_event()).provider_done is not None
+        await delegate_task
+        assert [event["type"] for event in socket.sent].count("response.create") == 3
+
+        delegate_speak = await engine.next_event()
+        assert delegate_speak.action is not None
+        assert action_payload(delegate_speak) == {
+            "provider_response_id": "provider-response-3",
+            "turn_id": "native-turn-00000001",
+            "runtime_response_id": delegate_ref.response_id,
+            "response_generation": "3",
+        }
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_delegate_successor_precedes_later_direct_request_without_overlap() -> (
+    None
+):
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        function_done("event-7", "provider-response-1"),
+        response_done("event-8", "provider-response-1"),
+        speech_started("event-9", "user-item-2", 20),
+        speech_stopped("event-10", "user-item-2", 40),
+        input_committed("event-11", "user-item-2"),
+        response_created("event-12", "provider-response-2"),
+        response_done("event-13", "provider-response-2"),
+        response_created("event-14", "provider-response-3"),
+    )
+    await engine.start()
+    try:
+        await accept_basic_turn(engine)
+        await engine.next_event()
+        await engine.admit_response("provider-response-1", response_ref(1))
+        assert (await engine.next_event()).delegate is not None
+        assert (await engine.next_event()).provider_done is not None
+
+        delegate_ref = response_ref(2)
+        await engine.send_delegate_result("call-1", delegate_ref, "canonical result")
+        assert [event["type"] for event in socket.sent].count("response.create") == 2
+
+        await accept_basic_turn(engine)
+        assert [event["type"] for event in socket.sent].count("response.create") == 2
+
+        delegate_speak = await engine.next_event()
+        assert delegate_speak.action is not None
+        assert action_payload(delegate_speak)["turn_id"] == "native-turn-00000001"
+        assert action_payload(delegate_speak)["runtime_response_id"] == (
+            delegate_ref.response_id
+        )
+        assert (await engine.next_event()).provider_done is not None
+        assert [event["type"] for event in socket.sent].count("response.create") == 3
+
+        direct_speak = await engine.next_event()
+        assert direct_speak.action is not None
+        assert action_payload(direct_speak)["turn_id"] == "native-turn-00000002"
+        await engine.admit_response("provider-response-3", response_ref(3))
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_queued_delegate_never_sends_late_response_create() -> None:
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        function_done("event-7", "provider-response-1"),
+        response_done("event-8", "provider-response-1"),
+        speech_started("event-9", "user-item-2", 20),
+        speech_stopped("event-10", "user-item-2", 40),
+        input_committed("event-11", "user-item-2"),
+        response_created("event-12", "provider-response-2"),
+        response_done("event-13", "provider-response-2"),
+    )
+    await engine.start()
+    try:
+        await accept_basic_turn(engine)
+        await engine.next_event()
+        await engine.admit_response("provider-response-1", response_ref(1))
+        assert (await engine.next_event()).delegate is not None
+        assert (await engine.next_event()).provider_done is not None
+        await accept_basic_turn(engine)
+
+        delegate_task = asyncio.create_task(
+            engine.send_delegate_result("call-1", response_ref(3), "canonical result")
+        )
+        await asyncio.sleep(0)
+        assert delegate_task.done() is False
+        delegate_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await delegate_task
+
+        direct_speak = await engine.next_event()
+        assert direct_speak.action is not None
+        assert action_payload(direct_speak)["turn_id"] == "native-turn-00000002"
+        await engine.admit_response("provider-response-2", response_ref(2))
+        assert (await engine.next_event()).provider_done is not None
+        assert [event["type"] for event in socket.sent].count("response.create") == 2
+        assert not engine._response_request_queue
+        assert engine._inflight_response_request is None
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_delegate_response_create_send_failure_fails_closed() -> None:
     engine, socket, _ = active_engine(
         speech_started("event-3", "user-item-1", 0),
@@ -1552,12 +1742,14 @@ async def test_delegate_response_create_send_failure_fails_closed() -> None:
         input_committed("event-5", "user-item-1"),
         response_created("event-6", "provider-response-1"),
         function_done("event-7", "provider-response-1"),
+        response_done("event-8", "provider-response-1"),
     )
     await engine.start()
     await accept_basic_turn(engine)
     await engine.next_event()
     await engine.admit_response("provider-response-1", response_ref(1))
     await engine.next_event()
+    assert (await engine.next_event()).provider_done is not None
     before = len(socket.sent)
     socket.fail_send_at = socket.send_calls + 2
 
@@ -1572,7 +1764,8 @@ async def test_delegate_response_create_send_failure_fails_closed() -> None:
     assert snapshot.state is NativeProviderState.FAILED
     assert snapshot.primary_error_reason == "REALTIME_TRANSPORT_SEND_FAILED"
     assert engine._delegate_results == {}
-    assert engine._pending_delegate_response is None
+    assert not engine._response_request_queue
+    assert engine._inflight_response_request is None
     await engine.close()
 
 
@@ -1584,12 +1777,14 @@ async def test_delegate_successor_binds_if_created_before_send_returns() -> None
         input_committed("event-5", "user-item-1"),
         response_created("event-6", "provider-response-1"),
         function_done("event-7", "provider-response-1"),
+        response_done("event-8", "provider-response-1"),
     )
     await engine.start()
     await accept_basic_turn(engine)
     await engine.next_event()
     await engine.admit_response("provider-response-1", response_ref(1))
     await engine.next_event()
+    assert (await engine.next_event()).provider_done is not None
     result_ref = response_ref(2)
     socket.block_send_at = socket.send_calls + 2
 
@@ -1597,7 +1792,7 @@ async def test_delegate_successor_binds_if_created_before_send_returns() -> None
         engine.send_delegate_result("call-1", result_ref, "canonical result")
     )
     await asyncio.wait_for(socket.send_entered.wait(), timeout=1.0)
-    socket.push(response_created("event-8", "provider-response-2"))
+    socket.push(response_created("event-9", "provider-response-2"))
     try:
         follow_up = await asyncio.wait_for(engine.next_event(), timeout=1.0)
     finally:
@@ -1611,7 +1806,8 @@ async def test_delegate_successor_binds_if_created_before_send_returns() -> None
         "runtime_response_id": result_ref.response_id,
         "response_generation": "2",
     }
-    assert engine._pending_delegate_response is None
+    assert not engine._response_request_queue
+    assert engine._inflight_response_request is None
     await engine.close()
 
 
@@ -1868,7 +2064,9 @@ async def test_cancelled_response_discards_late_provider_authority_events(
 
 
 @pytest.mark.asyncio
-async def test_cursorless_engine_fence_discards_late_output_without_provider_send() -> None:
+async def test_cursorless_engine_fence_discards_late_output_without_provider_send() -> (
+    None
+):
     engine, socket, _ = active_engine(
         speech_started("event-3", "user-item-1", 0),
         speech_stopped("event-4", "user-item-1", 20),
