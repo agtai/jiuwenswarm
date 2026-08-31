@@ -2234,6 +2234,117 @@ async def test_barge_after_provider_done_sends_truncate_without_stale_cancel() -
 
 
 @pytest.mark.asyncio
+async def test_speech_start_proposes_stop_while_provider_done_audio_is_playing() -> (
+    None
+):
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x00\x00" * 480,
+        ),
+        response_done("event-8", "provider-response-1"),
+        speech_started("event-9", "user-item-2", 40),
+    )
+    await engine.start()
+    try:
+        await accept_basic_turn(engine)
+        await engine.next_event()
+        ref = response_ref(1)
+        await engine.admit_response("provider-response-1", ref)
+        assert (await engine.next_event()).audio is not None
+        assert (await engine.next_event()).provider_done is not None
+
+        stop = await engine.next_event()
+        assert stop.action is not None and stop.action.operation == "STOP"
+        assert action_payload(stop) == {
+            "provider_response_id": "provider-response-1",
+            "runtime_response_id": ref.response_id,
+            "response_generation": "1",
+        }
+        listen = await engine.next_event()
+        assert listen.action is not None and listen.action.operation == "LISTEN"
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_presented_provider_done_audio_starts_next_turn_without_stop() -> None:
+    engine, _, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x00\x00" * 480,
+        ),
+        response_done("event-8", "provider-response-1"),
+        speech_started("event-9", "user-item-2", 40),
+    )
+    await engine.start()
+    try:
+        await accept_basic_turn(engine)
+        await engine.next_event()
+        ref = response_ref(1)
+        await engine.admit_response("provider-response-1", ref)
+        assert (await engine.next_event()).audio is not None
+        assert (await engine.next_event()).provider_done is not None
+
+        assert await engine.acknowledge_presentation(ref) is True
+        assert await engine.acknowledge_presentation(ref) is False
+        listen = await engine.next_event()
+
+        assert listen.action is not None and listen.action.operation == "LISTEN"
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_premature_presentation_ack_has_zero_engine_or_provider_effect() -> None:
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        output_audio_delta(
+            "event-7",
+            "provider-response-1",
+            "assistant-item-1",
+            0,
+            pcm16=b"\x00\x00" * 480,
+        ),
+    )
+    await engine.start()
+    try:
+        await accept_basic_turn(engine)
+        await engine.next_event()
+        ref = response_ref(1)
+        await engine.admit_response("provider-response-1", ref)
+        assert (await engine.next_event()).audio is not None
+        before = engine.snapshot()
+        sent = tuple(socket.sent)
+
+        with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+            await engine.acknowledge_presentation(ref)
+
+        assert raised.value.reason == "NATIVE_PRESENTATION_ACK_INVALID"
+        assert engine.snapshot() == before
+        assert tuple(socket.sent) == sent
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_concurrent_exact_cancel_sends_one_provider_pair() -> None:
     engine, socket, _ = active_engine(
         speech_started("event-3", "user-item-1", 0),

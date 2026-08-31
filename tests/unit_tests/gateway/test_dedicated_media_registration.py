@@ -323,6 +323,8 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
         self.input_transcript_items: set[str] = set()
         self.input_transcript_following_assistant: list[dict[str, object]] = []
         self.presentation_history: dict[str, object] | None = None
+        self.presentation_ack_error: Exception | None = None
+        self.presentation_ack_result: dict[str, object] | None = None
 
     async def propose(
         self,
@@ -471,6 +473,10 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
         if ack is not None:
             assert cursor is None and fence_response is None and action_id is None
             self.playback_actions.append(("presentation", ack))
+            if self.presentation_ack_error is not None:
+                raise self.presentation_ack_error
+            if self.presentation_ack_result is not None:
+                return dict(self.presentation_ack_result)
             result: dict[str, object] = {
                 "kind": "presentation_ack",
                 "status": "observed",
@@ -669,6 +675,7 @@ class _FakeNativeEngine:
         self.response_admitted = asyncio.Event()
         self.admissions: list[tuple[str, ResponseRef]] = []
         self.playback_actions: list[tuple[str, object]] = []
+        self.presentation_acknowledgements: list[ResponseRef] = []
         self.delegate_results: list[tuple[str, ResponseRef, str]] = []
         self.delegate_result_sent = asyncio.Event()
 
@@ -705,6 +712,10 @@ class _FakeNativeEngine:
 
     async def fence_response(self, response: ResponseRef) -> bool:
         self.playback_actions.append(("provider_fence", response))
+        return True
+
+    async def acknowledge_presentation(self, response: ResponseRef) -> bool:
+        self.presentation_acknowledgements.append(response)
         return True
 
     async def send_delegate_result(
@@ -2689,6 +2700,7 @@ async def test_native_completed_downlink_reuses_existing_playout_receipt_ack() -
     assert presentation[1].ref == response
     assert presentation[1].unit_id == params["unit_id"]
     assert presentation[1].contiguous_cursor == 0
+    assert engine.presentation_acknowledgements == [response]
     assert downlink.record_id not in registry._records
     assert uplink.synthesis_content_sha256 == {}
     assert uplink.playout_receipts == {}
@@ -2713,6 +2725,7 @@ async def test_native_completed_downlink_reuses_existing_playout_receipt_ack() -
         connection_id="connection-1",
     )
     assert [kind for kind, _value in client.playback_actions].count("presentation") == 1
+    assert engine.presentation_acknowledgements == [response]
     changed_params = dict(params)
     changed_params["playout_peak_depth"] = 2
     with pytest.raises(MediaTransportViolation) as changed_replay:
@@ -2730,6 +2743,64 @@ async def test_native_completed_downlink_reuses_existing_playout_receipt_ack() -
     assert uplink.playout_receipts == {}
     assert uplink.playout_receipt_content_sha256 == {}
     assert uplink.downlink_results == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_mode", "reason_id"),
+    [
+        ("exception", "MEDIA_NATIVE_PRESENTATION_ACK_REJECTED"),
+        ("malformed", "MEDIA_NATIVE_PRESENTATION_ACK_INVALID"),
+    ],
+)
+async def test_native_runtime_rejected_presentation_has_zero_engine_effect(
+    failure_mode: str,
+    reason_id: str,
+) -> None:
+    activation_handle = _native_activation()
+    client = _FakeNativeRuntimeClient(activation_handle)
+    engine = _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine,
+    )
+    activated = _activate(
+        registry,
+        params=_params(sample_rate_hz=24_000),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    assert uplink is not None
+    await registry.begin_native_interaction(uplink)
+    registry.accept_native_frame(
+        uplink,
+        MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.0,) * 480),
+    )
+    if failure_mode == "exception":
+        client.presentation_ack_error = RuntimeError("runtime presentation rejected")
+    else:
+        client.presentation_ack_result = {
+            "kind": "presentation_ack",
+            "status": "observed",
+        }
+
+    with pytest.raises(MediaTransportViolation) as rejected:
+        await _present_native_test_audio_unit(
+            registry,
+            client,
+            engine,
+            uplink,
+            activated,
+            sequence=0,
+        )
+
+    assert rejected.value.reason_id == reason_id
+    assert [kind for kind, _value in client.playback_actions] == ["presentation"]
+    assert engine.presentation_acknowledgements == []
+    assert len(registry._records) == 2
+    await registry.close_native_interaction(uplink)
 
 
 @pytest.mark.asyncio

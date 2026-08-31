@@ -1245,6 +1245,7 @@ class DedicatedMediaProductRegistry:
                     "offer_audio",
                     "next_event",
                     "admit_response",
+                    "acknowledge_presentation",
                     "cancel_response",
                     "fence_response",
                     "send_delegate_result",
@@ -5756,6 +5757,22 @@ class DedicatedMediaProductRegistry:
                         "presented_at": presented_at,
                     },
                 }
+            try:
+                presentation_retired = await session.engine.acknowledge_presentation(
+                    response
+                )
+            except (KeyboardInterrupt, SystemExit, GeneratorExit):
+                raise
+            except Exception as error:
+                raise MediaTransportViolation(
+                    "MEDIA_NATIVE_PRESENTATION_ACK_REJECTED",
+                    "Native Engine rejected the exact browser presentation ACK",
+                ) from error
+            if type(presentation_retired) is not bool:
+                raise MediaTransportViolation(
+                    "MEDIA_NATIVE_PRESENTATION_ACK_INVALID",
+                    "Native Engine presentation acknowledgement is not exact",
+                )
             with self._lock:
                 if (
                     self._native_sessions.get(session_key) is not session

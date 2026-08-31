@@ -203,6 +203,8 @@ class _ProviderResponse:
     next_audio_sequence: int = 0
     done: bool = False
     cancelled: bool = False
+    presentable: bool = False
+    presentation_acknowledged: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1028,6 +1030,29 @@ class OpenAIRealtimeNativeInteractionEngine:
             self._state = NativeProviderState.LISTENING
             return True
 
+    async def acknowledge_presentation(self, ref: ResponseRef) -> bool:
+        """Retire one exact completed response after authoritative audio playout."""
+
+        self._require_operational()
+        parsed = _response_ref(ref, self._binding)
+        response = self._find_response(parsed)
+        if (
+            not response.done
+            or response.cancelled
+            or not response.presentable
+            or not any(
+                item.received_samples > 0 for item in response.audio_items.values()
+            )
+        ):
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_PRESENTATION_ACK_INVALID",
+                "presentation acknowledgement requires completed presentable audio",
+            )
+        if response.presentation_acknowledged:
+            return False
+        response.presentation_acknowledged = True
+        return True
+
     def _discard_response_output(
         self, response: _ProviderResponse, ref: ResponseRef
     ) -> None:
@@ -1184,8 +1209,18 @@ class OpenAIRealtimeNativeInteractionEngine:
         if (
             current is not None
             and current.runtime_ref is not None
-            and not current.done
             and not current.cancelled
+            and not current.presentation_acknowledged
+            and (
+                not current.done
+                or (
+                    current.presentable
+                    and any(
+                        item.received_samples > 0
+                        for item in current.audio_items.values()
+                    )
+                )
+            )
         ):
             operations.append(
                 (
@@ -2118,6 +2153,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "Provider completion exceeds the bounded Native event queue",
             )
         response.done = True
+        response.presentable = status == "completed"
         transcript_items = [
             item
             for _, item in sorted(response.audio_items.items())
