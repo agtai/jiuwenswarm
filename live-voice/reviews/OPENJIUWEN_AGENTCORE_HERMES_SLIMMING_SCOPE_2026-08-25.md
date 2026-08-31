@@ -34,7 +34,8 @@ numbers.
 
 ## 2. AgentCore classification
 
-Every relevant LiveVoice capability receives exactly one current disposition:
+For the AgentCore-specific decision, every relevant LiveVoice capability first
+receives exactly one of the following ownership answers:
 
 - **Direct reuse:** AgentCore already exposes a suitable public contract and
   LiveVoice needs no competing authority or durable state.
@@ -48,6 +49,14 @@ Every relevant LiveVoice capability receives exactly one current disposition:
 - **LiveVoice-owned:** the responsibility is genuinely voice-product-specific
   and remains in LiveVoice, subject to consolidation or refactoring analysis.
 
+The later eight-code atomic register generalizes `DIRECT_REUSE` and
+`ADAPT_REUSE` across both allowed providers: an installed AgentCore public
+boundary **or** an existing JiuwenSwarm shared host. Each atomic row must name
+which provider remains authoritative. Therefore a `DIRECT_REUSE` row for
+`WebChannel`, `AgentManager` or Session History does not claim that host belongs
+to AgentCore; it proves LiveVoice must call the existing JiuwenSwarm owner
+instead of rebuilding it.
+
 The classification must state the public contract, authority owner, required
 Adapter responsibility, unsupported gaps, dependencies and evidence. A
 successful prototype is evidence for a decision, not proof that the prototype
@@ -55,8 +64,13 @@ itself should be integrated.
 
 ## 3. Hermes comparison
 
-Hermes Voice is an architecture reference, not a target implementation or a
-feature-parity requirement. The comparison is used to explain LiveVoice:
+The primary architecture reference is the independent community integration
+`bielcarpi/hermes-live-voice@3dd8af386b845a1486b05b088bbc2b5a642a5b28`.
+Official `NousResearch/hermes-agent@fc9cbc872d8050c22f1192b16bc5ff4aed471e10`
+is a secondary reference for Agent/Session and official Voice seams only; the
+two repositories and their LOC must not be combined. Hermes Voice is not a
+target implementation or a feature-parity requirement. The comparison is used
+to explain LiveVoice:
 
 - what each module owns and why that responsibility exists;
 - which dependency or product invariant makes it necessary;
@@ -112,10 +126,10 @@ decision is detailed in the
 
 | Commit | Candidate boundary | Final preparation decision |
 |---|---|---|
-| `9c820fe1` | OpenJiuwen Task facade | rewrite as a thin scope/mapping boundary over the exact PR 09 lifecycle-bound reader/command/cursor/checkpoint grants; retain tests as oracles |
+| `9c820fe1` | OpenJiuwen Task facade | rewrite as a thin scope/mapping boundary over the future **reimplemented, re-reviewed and accepted** PR 09 lifecycle-bound reader/command/cursor/checkpoint grants; never adapt against the historical rejected facade; retain tests as oracles |
 | `1a84b541` | asynchronous product query owner | retain only the optional async seam design; rewrite the adapter without mirror authority/models |
-| `0228b738` | D1 checkpoint Adapter | rewrite as codec/payload-policy mapping into the executor/runtime/phase-bound PR 09 checkpoint capability over PR 06 safe preauthorization; retain durability oracles |
-| `b0575038` | project/file effect Adapter | discard implementation; first extract a public product `ProjectEffectPort`, then register only a token-free Adapter with the trusted-host PR 10 coordinator; no raw continuation/evidence writer |
+| `0228b738` | D1 checkpoint Adapter | rewrite as codec/payload-policy mapping into the future reimplemented, re-reviewed and accepted PR 09 checkpoint capability over accepted PR 06 safe preauthorization; never adapt against the historical facade; retain durability oracles |
+| `b0575038` | project/file effect Adapter | discard implementation; first extract a public product `ProjectEffectPort`, then register only a token-free Adapter with the future reimplemented, re-reviewed and accepted trusted-host PR 10 coordinator; never adapt against the historical coordinator; no raw continuation/evidence writer |
 | `561e5e5f` | presentation cursor Adapter | retain product receipt proof and optional async seam design; rewrite cursor mapping against final public types |
 
 Together these commits add roughly ten thousand lines including tests and

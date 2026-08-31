@@ -4,6 +4,18 @@ Status: local evidence map and proposed OJ-G1-MAP classification. It is the
 authoritative factual inventory for this review, not an accepted architecture
 decision, installed dependency claim, or product-readiness claim.
 
+2026-08-31 zero-baseline correction: the installed dependency remains
+`openjiuwen 0.1.16@94e10cb6102c36fe78a64547957c0def97299273`. It directly
+provides Agent, Tool, Runner, DeepAgent/Harness, Checkpointer and Session VCS,
+but no acceptable public least-privilege Task command/result/execution/event/
+effect/cursor authority. `TeamAgent.task_manager`, `TeamTaskManager` and
+`TaskDao` are reachable internal/raw surfaces and are not a safe direct-reuse
+facade. SCOPE/A1/A2 and ADD-01..05 are local candidates only. Historical PR09
+and PR10 facade implementations have unresolved Critical/Important review
+findings and must be reimplemented; they are not submission-ready public APIs.
+See the
+[zero-baseline audit](OPENJIUWEN_LIVEVOICE_ZERO_BASE_MODULE_AUDIT_2026-08-31.md).
+
 The later accepted
 [AgentCore reuse and Hermes comparison scope](OPENJIUWEN_AGENTCORE_HERMES_SLIMMING_SCOPE_2026-08-25.md)
 governs how this inventory is used. In particular, migration, composition,
@@ -41,7 +53,9 @@ applies these classifications to the five isolated downstream commits and the
 ignored EVT-02 archive. It selects thin future seams and test oracles, not the
 current prototype implementations.
 
-Current resolutions that affect this map are:
+Historical target-design resolutions that affect this map are listed below.
+They remain desired capability constraints, not accepted current APIs; PR09/
+PR10 must be rebuilt and re-reviewed against them:
 
 | Earlier question | Current local candidate decision |
 |---|---|
@@ -53,12 +67,15 @@ Current resolutions that affect this map are:
 | Terminal/result vocabulary | `ExecutionOutcome`, immutable `TaskResultRef`, command decisions and token-fenced settlement are local `ADD-01` candidates. |
 | Dispatch boundary | `TaskDispatchRecord` plus claim/receipt/release/recovery is the local `ADD-02` candidate beside Task events and Scheduler. |
 | Cancellation ordering | A1 monotonic runtime cancellation is composed with A2 quiesce-before-durable-settlement helpers; a reset-before-cancel product path is not accepted. |
-| `EXE-05` | No new AgentCore launch-lease PR. Existing public Agent/Runner invocation is reused through a thin authenticated Jiuwen project binding adapter. |
+| `EXE-05` | No new AgentCore launch-lease PR. Existing public Agent/Tool/Runner/DeepAgent/Harness invocation is reused through a thin authenticated Jiuwen project binding adapter. The dominant foreground Jiuwen path uses `create_deep_agent` with `attach_output`/`send_input`; reuse is not Runner-only. |
 | Physical migration | Still deliberately unresolved and unauthorized while the LiveVoice feature branch is moving. |
 
 All SCOPE/A1/A2/ADD-01..05/facade implementations remain local PR candidates,
 not installed AgentCore capability claims. None of their roughly 32K lines is a
-wholesale LiveVoice feature-branch deliverable.
+wholesale LiveVoice feature-branch deliverable. `AgentBridgePort` itself is
+currently instantiated only by `fake_verticals.py`; the real formal production
+bridge consumes committed Harness handles, so retiring that fixture/dead seam is
+not the main Agent integration migration.
 
 ## 1. Finding and scope
 
@@ -361,9 +378,9 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Authority/data owned | Product binding decides which verified project Agent may run; OpenJiuwen Runner owns the actual invocation; current adapters also duplicate attempt state. |
 | Product coupling | Project/model/session validation and JiuwenSwarm Agent-manager lifecycle are product semantics. |
 | Existing AgentCore evidence | Base `create_deep_agent`, Runner/Team Runner, NativeHarness and AsyncTool perform real Agent/Tool execution. A2 provides the execution token but explicitly lacks real-caller wiring. |
-| Composition attempted | A2 token -> JiuwenSwarm binding -> base Runner/Agent/Tool is sufficient; moving project identity policy into AgentCore would broaden its authority incorrectly. |
+| Composition attempted | A2 token -> JiuwenSwarm binding -> existing Agent/Tool/Runner/DeepAgent/Harness seam is sufficient; moving project identity policy into AgentCore would broaden its authority incorrectly. |
 | Classification | `ADAPTER_DOWNSTREAM` |
-| Target owner/API | A2 execution token passed to base Runner/AsyncTool launch seam; Runner reports facts back to `TeamTaskManager` settlement API. |
+| Target owner/API | A2 execution token passed to the existing Jiuwen Agent/Harness or Runner/AsyncTool launch seam as appropriate; observations are reported back to the future accepted Task settlement API. |
 | JiuwenSwarm Adapter | Input: scoped execution token plus verified principal/project/model/session. Output: Runner stream observations and bounded result; no Task/Attempt ownership. |
 | Test oracle | Real-Agent formal executor integration, wrong profile/version zero-launch, project-binding mismatch, and wrong scope zero Tool/file effect. |
 | Dependencies | `SCOPE-01`, `EXEC-OWN-01`, `ASYNC-01`. |
@@ -768,12 +785,12 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Current responsibility | Runs a synchronous handler in a local thread pool and returns Agent events. |
 | Authority/data owned | Ephemeral worker/future state only. |
 | Product coupling | Request/event values reflect the old LiveVoice bridge. |
-| Existing AgentCore evidence | Base Runner/Team Runner and AsyncTool already provide Agent/Tool invocation and asynchronous lifecycle. |
-| Composition attempted | Base Runner + adapter event projection subsumes the thread-pool wrapper; retaining it adds no authority or safety. |
-| Classification | `DIRECT_AGENTCORE — BASE_EXISTING` |
-| Target owner/API | OpenJiuwen Runner/Team Runner invocation API; A1 AsyncTool only when background Tool execution is required. |
+| Existing AgentCore evidence | Base Agent/Tool/Runner/DeepAgent/Harness already provide invocation. Current source instantiates this port only from `fake_verticals.py`; the real formal path uses committed Harness handles. |
+| Composition attempted | Existing formal Harness path plus event projection subsumes the fixture thread-pool wrapper; retaining/promoting it adds no authority or safety. |
+| Classification | `CONSOLIDATE_RETIRE` for the legacy port; its underlying invocation responsibility is `DIRECT_REUSE` through the existing Agent/Tool/Runner/DeepAgent/Harness seam |
+| Target owner/API | Existing Jiuwen AgentManager/DeepAgent/Harness invocation API; A1 AsyncTool only when background Tool execution is required. |
 | JiuwenSwarm Adapter | Pure request/event conversion, if any old caller remains. |
-| Test oracle | Port unique submit/close/error tests to the actual Runner adapter; prove no late event after close/cancel. |
+| Test oracle | Port unique submit/close/error tests to the actual formal Harness adapter; prove no late event after close/cancel. |
 | Dependencies | Base Runner; `ASYNC-01` for background work. |
 | Retirement Gate | No production caller imports `AgentBridgePort` and actual Runner integration covers its outcomes. |
 | Confidence/open issue | High. |
@@ -786,16 +803,16 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | LiveVoice file | `jiuwenswarm/server/live_voice/agent_bridge_runtime.py`; `jiuwenswarm/server/live_voice/jiuwenswarm_agent_adapter.py` |
 | LiveVoice symbol | `AgentBridgeDispatchReservation`; `AgentRoundRequest.source_provenance/fingerprint`; `AgentRoundAdapter.stream`; `AgentBridgeRuntime.submit/reserve_dispatch/begin_dispatch_commit/commit_dispatch/abort_dispatch/rollback_undelivered_dispatch/_dispatch_loop/_run_request`; `JiuWenSwarmAgentAdapter.stream/_validate_request` |
 | Current responsibility | Reserves one committed round, binds source provenance, invokes the real JiuwenSwarm/OpenJiuwen Agent stream, and prevents undelivered/duplicate dispatch. |
-| Authority/data owned | Conversation-round admission and provenance; actual execution is in OpenJiuwen Runner. |
+| Authority/data owned | Conversation-round admission and provenance; actual execution is in the existing Jiuwen/OpenJiuwen Agent/Harness path. |
 | Product coupling | Turn commit, round ID, response generation and delivery rollback belong to Conversation Runtime; Agent stream invocation is generic. |
-| Existing AgentCore evidence | Base Runner/Agent stream supplies invocation; base lacks LiveVoice TurnCommit/ResponseRef. A1/A2 concern background Task execution, not foreground conversation round authority. |
-| Composition attempted | Conversation reservation -> thin Agent adapter -> base Runner is already the correct composition; replacing round authority with TaskDao would conflate conversation and Task. |
+| Existing AgentCore evidence | Base Agent/Runner/DeepAgent/Harness stream supplies invocation; Jiuwen's dominant interactive path uses `create_deep_agent` plus `attach_output`/`send_input`. Base lacks LiveVoice TurnCommit/ResponseRef. A1/A2 concern background Task execution, not foreground conversation round authority. |
+| Composition attempted | Conversation reservation -> thin Jiuwen formal Harness adapter -> existing Agent invocation is already the correct composition; replacing round authority with TaskDao would conflate conversation and Task. |
 | Classification | `ADAPTER_DOWNSTREAM` |
-| Target owner/API | Base Runner/Agent stream is the invocation owner; JiuwenSwarm Conversation Runtime remains admission/provenance owner. |
+| Target owner/API | Existing Agent/DeepAgent/Harness stream is the invocation owner; JiuwenSwarm Conversation Runtime remains admission/provenance owner. |
 | JiuwenSwarm Adapter | Input: committed `AgentRoundRequest`. Output: validated Agent events/work progress bound to the same round. It holds no AgentCore Task state. |
 | Test oracle | Existing bridge reserve/commit/abort/rollback/close/provenance/late-event tests and real JiuwenSwarm adapter stream tests. |
 | Dependencies | None for foreground rounds; background task handoff uses `EXE-05`. |
-| Retirement Gate | The adapter calls one OpenJiuwen Runner seam and no duplicate generic worker registry remains. Conversation reservation is not retired. |
+| Retirement Gate | The adapter calls one existing Agent/Harness seam and no duplicate generic worker registry remains. Conversation reservation is not retired. |
 | Confidence/open issue | High. |
 
 #### BRIDGE-03 — response completion, delivery and round progress
@@ -828,14 +845,14 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 | Current responsibility | Freezes the conversation context/provenance passed to the Agent, commits one formal round and adapts Agent chunks back to the response. |
 | Authority/data owned | Conversation context, interaction/round/response relation and stream delivery; not background Task execution truth. |
 | Product coupling | LiveVoice interaction, context selection, response and generation are Conversation Runtime semantics. |
-| Existing AgentCore evidence | Base Agent/Runner accepts execution input and streams results; no AgentCore component should own the product conversation snapshot. |
-| Composition attempted | Formal carrier -> Agent facade -> base Runner is sufficient. Replacing the carrier with TeamTask would conflate foreground Agent rounds and background Tasks. |
+| Existing AgentCore evidence | Existing Agent/Runner/DeepAgent/Harness accepts execution input and streams results; the dominant Jiuwen interactive path uses committed Harness handles. No AgentCore component should own the product conversation snapshot. |
+| Composition attempted | Formal carrier -> existing Jiuwen Agent/Harness facade is sufficient. Replacing the carrier with TeamTask would conflate foreground Agent rounds and background Tasks. |
 | Classification | `ADAPTER_DOWNSTREAM` |
-| Target owner/API | Base Agent/Runner execution request/stream; JiuwenSwarm retains the formal context carrier and response binding. |
-| JiuwenSwarm Adapter | Converts `FormalAgentExecution` to the AgentCore Runner request and validates returned chunks against the same interaction/round. |
+| Target owner/API | Existing Agent/DeepAgent/Harness execution request/stream, with Runner where compatible; JiuwenSwarm retains the formal context carrier and response binding. |
+| JiuwenSwarm Adapter | Converts `FormalAgentExecution` to the selected public Agent/DeepAgent/Harness invocation request or committed handle, using Runner only where compatible, and validates returned chunks against the same interaction/round. |
 | Test oracle | Existing round harness/context/generation/stream/final/cancel tests and real-provider formal carrier integration. |
 | Dependencies | `BRIDGE-02`, `BRIDGE-03`. |
-| Retirement Gate | Runner handoff is direct through one adapter and no duplicate generic Agent execution state is persisted. |
+| Retirement Gate | One selected public Agent/DeepAgent/Harness or compatible Runner invocation seam is used through one adapter, with no duplicate generic Agent execution state. |
 | Confidence/open issue | High. |
 
 #### COMP-01 — P3 Task composition and Store authority
@@ -1046,9 +1063,11 @@ no same-task dual write and passing positive plus fail-closed/zero-effect tests.
 
 | Substatus | LiveVoice responsibility to retire or redirect | Exact AgentCore target |
 |---|---|---|
-| `BASE_EXISTING` | legacy `AgentBridgePort` and generic Agent/Tool invocation | Agent/Team Runner, `create_deep_agent`, NativeHarness; Workflow/Agent storage remains only a checkpoint foundation |
+| `BASE_EXISTING` | generic Agent/Tool invocation underneath the formal bridge; the legacy `AgentBridgePort` itself is retirement-bound | Agent/Team Runner, `create_deep_agent`, NativeHarness; Workflow/Agent storage remains only a checkpoint foundation |
 
-Only the base Runner/Agent invocation contract is direct reuse today. The local
+The installed Agent/Tool/Runner/DeepAgent/Harness invocation contracts are
+direct reuse today; Checkpointer and Session VCS are reusable foundations but
+do not replace Task authority. The local
 Scope/A1/A2/ADD/facade implementations are classified separately as AgentCore
 PR candidates below; none is an installed capability claim.
 

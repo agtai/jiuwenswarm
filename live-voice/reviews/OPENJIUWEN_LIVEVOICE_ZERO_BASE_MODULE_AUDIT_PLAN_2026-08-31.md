@@ -125,6 +125,8 @@ OpenJiuwen AgentCore, and pinned Hermes Live Voice source.
 
 - Modify:
   `live-voice/reviews/OPENJIUWEN_LIVEVOICE_SYMBOL_MIGRATION_MAP_2026-08-24.md`
+- Create:
+  `live-voice/reviews/OPENJIUWEN_LIVEVOICE_ATOMIC_DISPOSITION_2026-08-31.md`
 - Modify the two Task 2 review documents
 - Read only: current JiuwenSwarm outside LiveVoice, installed AgentCore, local
   Scope/A1/A2 candidates, later AgentCore PR candidates and conformance tests
@@ -155,6 +157,8 @@ OpenJiuwen AgentCore, and pinned Hermes Live Voice source.
 
 - Modify:
   `live-voice/reviews/OPENJIUWEN_LIVEVOICE_SLIMMING_FINAL_REVIEW_2026-08-25.md`
+- Consume:
+  `live-voice/reviews/OPENJIUWEN_LIVEVOICE_ATOMIC_DISPOSITION_2026-08-31.md`
 - Modify all review documents named by Tasks 1–4 only where factual
   reconciliation requires it
 

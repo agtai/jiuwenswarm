@@ -1,31 +1,50 @@
 # OpenJiuwen LiveVoice slimming preparation convergence review — 2026-08-25
 
-Status: the line-number-independent inventory, ownership classification,
-Hermes explanation and prototype adjudication are complete for the observed
-LiveVoice product baseline. The AgentCore PR **design and replay packets** are
-complete, but the complete PR source/test/docs packages are not: PR 01–03 have
-local technical candidates and PR 04–10 have preflight only. This document is
-a preparation decision index, not migration, deletion, product-readiness or PR
-submission approval. `STATUS.md` remains the authority for mutable project
-state.
+Status (corrected 2026-08-31): this is a preparation decision index. The earlier
+Hermes explanation and the claim that every old disposition was converged are
+superseded by the
+[zero-baseline audit](OPENJIUWEN_LIVEVOICE_ZERO_BASE_MODULE_AUDIT_2026-08-31.md).
+The current exclusive decisions are recorded in the
+[228-row atomic responsibility manifest](OPENJIUWEN_LIVEVOICE_ATOMIC_DISPOSITION_2026-08-31.md);
+the older path register remains supporting source/caller/Hermes evidence rather
+than an alternative disposition authority.
+The AgentCore PR **design and replay packets** exist, but complete accepted PR
+source/test/docs packages do not: PR 01–03 have local technical candidates,
+PR 04–10 have preflight only, and historical PR09/PR10 facade implementations
+must be reimplemented. This document grants no migration, deletion,
+product-readiness or PR submission approval. `STATUS.md` remains the authority
+for mutable project state.
 
 Risk: Tier 0 documentation under root `TESTING.md`. Every later code boundary
 retains its independently assigned risk and evidence requirements.
 
-Current-baseline reconciliation (2026-08-31): the product branch advanced from
-the original review baseline to
-`c019da1873762f496454ebec203dba4ba08d880b`. Three existing production modules
-and their tests changed, without changing the 152-path manifest or the
-AgentCore/Hermes classifications. Their stronger Task-notification synthesis
-transfer and bounded presentation fallback are reflected in the
+Current-baseline reconciliation (2026-08-31): the frozen product commit is
+`59998e2c5724257bd410885b35e59e1b37027030`. The 152-path manifest still has
+zero missing/duplicate/extra rows, but multiple Hermes and AgentCore
+classifications required correction. Current dedicated production is 128 paths
+and 159,210 physical LOC; 24 shared hosts add 4,054 attributable LiveVoice
+symbol/segment lines and exclude 53,534 host-remainder lines, giving a current
+attributable production footprint of 163,264 LOC. The `7bf704d7..39f4efa3`
+delta changes four existing Channel paths and their tests for successor-capture
+ACK/first-frame diagnostics; `39f4efa3..5b4d3e69` changes only
+`live-voice/STATUS.md`; `5b4d3e69..59998e2c` changes one already inventoried
+composition-registry path by net -1 physical LOC plus tests/status/plan. No
+committed delta adds a production path, stable symbol or disposition class. The
+corrected architecture is reflected in the
 [Chinese module architecture view](OPENJIUWEN_LIVEVOICE_HERMES_MODULE_ARCHITECTURE_ZH_2026-08-31.md).
+Atomic validation covers all 152 paths with 228 unique responsibility keys,
+48 multi-responsibility paths, one canonical code per key, zero invalid stable
+symbols and zero source-line locators. Independent mixed-boundary review is
+`Critical 0 / Important 0 / Minor 10`; the ten remaining findings are disclosed
+same-owner internal split debts, not completed refactors or LOC-removal credit.
 
 ## 1. Converged answer
 
 The slimming target is not “merge the preparation branch” and is not “make
 LiveVoice look like Hermes.” The selected result is:
 
-1. call the existing public AgentCore Runner/Agent boundary directly where it
+1. call the existing public AgentCore Agent/Tool/Runner/DeepAgent/Harness
+   boundary directly where it
    already owns the generic operation;
 2. keep only thin JiuwenSwarm/LiveVoice translation and policy Adapters where
    AgentCore owns, or will own, the generic truth;
@@ -53,12 +72,14 @@ and the
 
 ### 2.1 Direct reuse available now
 
-The only current direct AgentCore reuse selected by this review is the public
-Agent/Runner invocation boundary: `Runner.run_agent`,
-`Runner.run_agent_streaming` and compatible public Agent construction. This
-replaces the generic invocation role of `BRIDGE-01` and is the target under
-`EXE-05`; JiuwenSwarm still authenticates the product scope, chooses the
-project/session/model Agent and translates committed context and observations.
+The current direct AgentCore reuse is the public Agent/Tool/Runner/DeepAgent/
+Harness invocation boundary: `Runner.run_agent[_streaming]`, public Agent/Tool
+contracts, `create_deep_agent`, and DeepAgent interaction methods. The dominant
+Jiuwen foreground path uses `attach_output`/`send_input`, so the target is not
+Runner-only. `AgentBridgePort` itself is instantiated only by
+`fake_verticals.py`; the real formal bridge consumes committed Harness handles.
+JiuwenSwarm still authenticates the product scope, chooses the project/session/
+model Agent and translates committed context and observations.
 
 No local Scope, execution, Task, event, cursor, checkpoint, effect or bound
 facade candidate is reported as direct reuse. Those contracts are not present
@@ -73,7 +94,7 @@ LiveVoice authorities:
 |---|---|---|
 | `EXE-02`, `SCOPE-01` mapping | scoped execution admission and TeamTask authority | translate verified principal/project/session and product configuration into an immutable scope/profile; no Task settlement |
 | `EXE-04`, `TASK-03` | command replay, terminal outcome and immutable result | extract product chat/patch artifacts and adjustment policy; no result ledger |
-| `EXE-05`, `BRIDGE-02`, `BRIDGE-04` | existing Runner plus accepted runtime/execution fencing | choose the Jiuwen Agent, freeze committed product context and translate stream observations; no second launch lifecycle |
+| `EXE-05`, `BRIDGE-02`, `BRIDGE-04` | existing Agent/Tool/Runner/DeepAgent/Harness plus future accepted execution fencing | choose the Jiuwen Agent, freeze committed product context and translate stream observations; no second launch lifecycle |
 | `TASK-05` | PR 06 checkpoint publication exposed through PR 09 | checkpoint codec, compatibility, retention and payload Port; no raw locator, finalizer or resume authority |
 | `EVT-02`, `EVT-04` | canonical event reader/head | cancellation-aware transport polling and a pure event-to-product progress projection; no event sequence or durable subscription owner |
 | `EVT-06` | PR 08 cursor exposed through PR 09 | verify authentic DOM adoption or voice playout, then issue exactly one generic cursor CAS; no second cursor |
@@ -93,7 +114,7 @@ AgentCore changes, not one LiveVoice PR:
 |---:|---|---|
 | 01 | mandatory TeamTask scope (`SCOPE-01`) | local technical replay; real issue metadata and reviewable history package pending |
 | 02 | monotonic AsyncTool cancellation (`A1`) | isolated local technical candidate; issue metadata/package pending |
-| 03 | durable execution ownership (`A2`) | technical-ready on the recorded evidence; issue metadata and three-commit package pending |
+| 03 | durable execution ownership (`A2`) | Tier-3 technical-ready on its recorded evidence (`573` affected tests, `130` race repeats, `C0/I0`); the worktree remains dirty/uncommitted and the issue metadata/package are not submission-ready |
 | 04 | command replay and immutable result (`ADD-01`) | preflight complete; formal replay waits for the packaged PR 03 base |
 | 05 | canonical Task events and transactional dispatch (`ADD-02`) | preflight complete; formal replay waits for accepted PR 04 semantics |
 | 06 | execution-checkpoint publication (`ADD-05`) | preflight complete with `4 Critical / 2 Important` historical findings; topology/dependency freeze and accepted prerequisites required |
@@ -135,15 +156,17 @@ authority, AgentCore relation, Hermes relation, size driver and proposed
 disposition by module path, public symbol, contract and capability ID—never by
 source line number.
 
-Hermes is useful because it exposes recognizable responsibility clusters:
-audio/platform edge, speech-provider boundaries, generation/playout,
-interruption, echo protection and Agent/session connection. It does not define
-Jiuwen product ownership and is not a deletion oracle. LiveVoice is larger for
-two different reasons:
+The pinned comparison is the separate
+`bielcarpi/hermes-live-voice@3dd8af386b845a1486b05b088bbc2b5a642a5b28`,
+not a 16-file selection from official Hermes Agent. It exposes Browser SDK/audio,
+Web demo, Dashboard relay, inbound HTTP/WebSocket, `LiveGatewaySession`,
+Provider adapters, `TaskSupervisor`, Task Store, Hermes Runs adapter and
+terminal. It does not define Jiuwen product ownership and is not a deletion
+oracle. LiveVoice is larger for two different reasons:
 
-- **justified complexity:** Browser/Gateway/AgentServer trust boundaries,
-  committed-input authority, durable Task/execution/event/effect/cursor truth,
-  fail-closed recovery, authentic presentation ACK, privacy and default-off
+- **justified complexity:** Jiuwen multi-Channel/host trust boundaries,
+  committed-input/product authority, richer scope/execution/effect semantics,
+  project/worktree policy, authentic presentation ACK, privacy and default-off
   deployment controls; and
 - **convergence opportunities:** historical Web/AutoHarness carriers, v1/v2 or
   Python/TypeScript contract repetition, large shared-host integration
@@ -215,7 +238,7 @@ is selected by this review.
 
 ## 6. Closure evidence and remaining boundary
 
-The final documentation checks confirmed:
+The original final documentation checks confirmed on their historical baseline:
 
 - the product branch remained clean at observed HEAD `acd873d0`, equal to its
   upstream, so the reviewed source baseline had not advanced;
@@ -226,18 +249,18 @@ The final documentation checks confirmed:
 - all 564 local Markdown targets under `live-voice` resolved;
 - `git diff --check` passed;
 - `git ls-files -- docs/zh/live-voice/**` returned zero tracked duplicates; and
-- an independent cross-document review found no remaining architecture or
-  classification blocker after the stale ordering/status/exclusion findings
-  were corrected.
+- an independent cross-document review found no blocker under the then-current
+  methodology. The zero-baseline re-audit later found that methodology and the
+  Hermes source baseline were insufficient; its results supersede that closure.
 
 No runtime test is required for this final Tier 0 document because it selects
 no production code. Existing technical test counts remain attached to their
 exact candidate sources in the PR review and packet index; they do not transfer
 submission readiness to another base.
 
-After this convergence review, the only unfinished work inside the accepted
-preparation scope is the actual AgentCore PR packaging: obtain a real issue
-reference, package/reword and independently review PR 01–03, then replay and
-verify PR 04–10 on accepted dependency tips and prepare per-PR title/body,
-evidence, risk and exclusions. The later LiveVoice Adapter implementations and
-all migration/cutover work remain intentionally outside this preparation task.
+After the zero-baseline correction, unfinished preparation work includes
+replaying/accepting PR dependencies, reimplementing PR09/10 public grants,
+preparing per-PR source/test/docs packages, and later designing thin Channel,
+Agent and Task facades against the then-current product source. LiveVoice
+Adapter implementation and all migration/cutover work remain intentionally
+outside this preparation task.

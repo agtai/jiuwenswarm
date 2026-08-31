@@ -1,4 +1,28 @@
-# OpenJiuwen 复用与 Hermes Voice 镜像审计
+# OpenJiuwen 复用与 Hermes Voice 镜像审计（冻结历史证据）
+
+> **2026-08-31 whole-document supersession:** 除用于复盘的冻结源码观察外，本文
+> 所有 AgentCore 复用、PR 拓扑、LOC、目标模块图和迁移建议均已被
+> [零基线审计](OPENJIUWEN_LIVEVOICE_ZERO_BASE_MODULE_AUDIT_2026-08-31.md)、
+> [当前 symbol 映射](OPENJIUWEN_LIVEVOICE_SYMBOL_MIGRATION_MAP_2026-08-24.md)和
+> [收敛审查](OPENJIUWEN_LIVEVOICE_SLIMMING_FINAL_REVIEW_2026-08-25.md)取代，
+> **不得用于实现或迁移决策**。本文提到的 raw `TaskDao`/`TeamTaskManager`
+> “直接复用”结论已经撤回：它们只是内部 owner 证据，不是 LiveVoice 可调用的
+> 最小权限公共 facade。旧六组 change-series 拆法已经撤回，当前准备拓扑是十个
+> 依赖有序候选，其中 PR09/PR10 历史实现必须重做、重审并接受后才可使用。
+>
+> 本文的 123 路径/154,059 LOC、23K–31K 估算和源码行号 locator 只属于
+> `2026-08-23@c31e85ad` 的历史复现证据；它们不是当前基线、稳定定位方式或删除
+> 额度。当前可归因生产 footprint 是 163,264 LOC，稳定记录使用路径 + public
+> symbol/责任，不用源码行号。第 13 节图中的 facade、ExecutionRecord、outbox、
+> EffectJournal、cursor 均是未安装、未组合的历史 target hypothesis，不是当前
+> 架构。
+>
+> 本文 Hermes 段审计的是另一个 secondary source：official
+> `NousResearch/hermes-agent@fc9cbc87` 的 Voice seams；主要对标已固定为
+> `bielcarpi/hermes-live-voice@3dd8af386b845a1486b05b088bbc2b5a642a5b28`。
+> 后者真实包含 browser SDK、Dashboard relay、inbound adapters、
+> `LiveGatewaySession`、`TaskSupervisor`、store 和 Hermes Runs adapter，不能从
+> 本文旧 16-file mirror 推导“无 browser/channel 或 durable Task”。
 
 > 日期：2026-08-23
 >
@@ -68,7 +92,7 @@ OpenJiuwen 现有模块当成已经通过完整 P3 合同。候选首先是“�
 Live Voice 的 fetch 只更新了远端跟踪 ref 并执行允许的 fast-forward；本轮
 没有 fetch/rebase/merge OpenJiuwen 或 Hermes，也没有 push。
 
-## 4. LOC 口径与当前基线
+## 4. 历史 LOC 口径与冻结基线（已由零基线审计取代）
 
 本节使用 **Git 跟踪文件的物理行数**，包含空行和注释。这样可由
 `git ls-files` + `Get-Content` 重算，但不能等同于可删除 SLOC、复杂度或
@@ -289,7 +313,7 @@ Adapter 或 Live Voice 产品 projection，不包含 AgentCore 已有源码：
 3K–6K 得到第 12 节 23K–31K planning-hypothesis range。区间端点不能与 retained/临时列的
 另一端机械相加；最终以实际 symbol attribution 和迁移 diff 为准。
 
-## 9. AgentCore PR 候选
+## 9. 历史六组 AgentCore PR 假设（已撤回；不得实施）
 
 这些是六组 Tier-3 候选 change series；每组还要在实现 packet 中继续拆成表中
 可独立 review 的 PR，不能把跨 owner 工作包装成一个“小 PR”。它们扩展现有
@@ -321,7 +345,7 @@ Tool 副作用；**JS-2 sequence carriage**
 reconnect/dedup。DOM adoption、browser playout receipt、语音确认和
 spoken-progress policy 不进入这些 shared PR。
 
-## 10. Hermes Voice 参考矩阵
+## 10. Official Hermes Agent 16-file Voice seam 参考矩阵（非主对标）
 
 Hermes 只提供架构镜像；下表不授予代码复用或 Live Voice 合同替代信用。
 
@@ -396,21 +420,21 @@ apps/desktop/src/app/chat/composer/hooks/use-voice-conversation-rearm.test.tsx
 重算使用 `[IO.File]::ReadAllLines((Resolve-Path -LiteralPath $file)).Length`，
 明确计入空行；不是可能漏空行的 `Measure-Object -Line` 口径。
 
-Hermes 镜像暴露的 Live Voice 架构债务是：
+official Hermes Agent 16-file 镜像暴露的 Live Voice 架构债务是：
 
 1. P1/P2/P3 composition 分散在 13.7K Python registry 与 7.0K React panel，
    应按 Audio Edge、Provider Registry、Sentence Chunker、Streaming Consumer、
    Runtime policy、platform receipt 拆责；
 2. 当前 Live Voice 缺少一个明确命名、Provider-neutral、覆盖中文/Markdown
    的 sentence chunker owner；
-3. generation-time barge-in 仍是当前 STATUS 的真实缺口，不能用 Hermes 的
+3. generation-time barge-in 仍是当前 STATUS 的真实缺口，不能用 official Hermes Agent 的
    process-global interrupt 代替；
 4. Provider/device matrix 应增加 real Provider、首音前/后 failure、阻塞调用
    cancel、热插拔、Bluetooth/采样率漂移、噪声/远场/double-talk；
 5. 所有借鉴都必须落到 Live Voice 的 session/interaction/turn/response/
    generation/capture/playout identity、ACK 和零副作用合同。
 
-Hermes 聚焦测试按其根 `AGENTS.md` 的 runner 尝试，但 checkout 没有可用
+official Hermes Agent 16-file 镜像的聚焦测试按其根 `AGENTS.md` 的 runner 尝试，但 checkout 没有可用
 `.venv`/`venv`，Desktop 也没有 `node_modules/.bin/vitest.cmd`。本轮没有为
 外部镜像安装依赖，因此没有 Hermes 运行通过数；源码/测试清单仍是只读
 证据，不能算动态 conformance PASS。
@@ -550,7 +574,7 @@ JiuwenSwarm 223 项共享批次从仓库根使用默认 repository addopts/cover
 Hermes checkout 没有可用 Python venv 或 Desktop `node_modules`，本轮未安装
 外部依赖、未运行 Hermes tests；其矩阵只有源码/测试清单证据。
 
-## 12. 去重 LOC 估算
+## 12. 历史去重 LOC 估算（非当前目标或删除额度）
 
 以下是迁移规划区间，不是当前可删除清单。估算只在 4.2 节五个互斥池内
 分配，避免同一 `TaskStore` 或 god-file 被多个 outcome 重复计算。
@@ -576,7 +600,7 @@ B/compose 在 Facade/Gate 前都给 **0** 删除信用；C/change series 只有�
 G0–G4 后才可取得经实际 diff 校准的信用；E/product 始终留在 Live Voice。
 两个 god-file 的 20,735 行只披露风险，不进入 headline。
 
-## 13. 最终模块图与迁移 Gate
+## 13. 历史 target hypothesis 与迁移 Gate（未安装、未组合）
 
 ```mermaid
 flowchart TD
