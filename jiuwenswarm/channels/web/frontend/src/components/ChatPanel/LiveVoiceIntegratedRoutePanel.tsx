@@ -1662,6 +1662,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     capture_settlement_requested: boolean;
   }> | null>(null);
   const terminalNotificationCheckRequiredRef = useRef(false);
+  const taskAudioRepollBeforeCaptureTaskIdRef = useRef<string | null>(null);
   terminalNotificationCheckRequiredRef.current = productP2TaskNotificationCheckRequired({
     deferred_presentation: deferredTaskPresentationRef.current !== null,
     task_id: createdProgressTaskId,
@@ -1736,6 +1737,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const bargeInSequenceRef = useRef(0);
   const p3MutationSequenceRef = useRef(0);
   const updateTerminalAnnouncementState = (state: TerminalAnnouncementState, taskId?: string | null) => {
+    if (state !== 'fetching') taskAudioRepollBeforeCaptureTaskIdRef.current = null;
     terminalAnnouncementStateRef.current = state;
     if (taskId !== undefined) terminalAnnouncementTaskIdRef.current = taskId;
     setTerminalAnnouncementState(state);
@@ -2084,6 +2086,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         // for a terminal event, notification completion belongs exclusively to
         // the subsequently rendered and ACKed TEXT fallback.
         const repollBeforeCapture = Boolean(retained.notification_repoll_before_capture);
+        taskAudioRepollBeforeCaptureTaskIdRef.current = repollBeforeCapture ? taskNotification.task_id : null;
         terminalAnnouncementSpeechOwnerRef.current = null;
         updateTerminalAnnouncementState(
           repollBeforeCapture ? 'fetching' : 'idle',
@@ -2361,6 +2364,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           const repollBeforeCapture = Boolean(
             retained.notification_repoll_before_capture && taskNotification !== null && !taskNotification.terminal,
           );
+          taskAudioRepollBeforeCaptureTaskIdRef.current = repollBeforeCapture ? taskNotification?.task_id ?? null : null;
           if (taskNotification !== null) {
             retainBoundedPresentedProductResponse(presentedProductResponsesRef.current, retained.input.response_id);
             if (taskNotification.terminal) {
@@ -2418,6 +2422,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               const repollBeforeCapture = Boolean(
                 retained.notification_repoll_before_capture && taskNotification !== null && !taskNotification.terminal,
               );
+              taskAudioRepollBeforeCaptureTaskIdRef.current = repollBeforeCapture ? taskNotification?.task_id ?? null : null;
               if (taskNotification !== null) {
                 // Playout already completed before this ACK.  Remember that
                 // exact current-Task announcement locally so a server replay
@@ -4492,6 +4497,27 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             voiceLoopGenerationRef.current !== notificationAdmission.voice_loop_generation ||
             voiceLoopP2RefreshAfterGenerationRef.current !== null
           ) {
+            return;
+          }
+          const currentP1StatusAfterNotification = p1VoiceOwnerRef.current?.status().status ?? p1VoiceStatus;
+          if (
+            disposition.kind === 'continue' &&
+            terminalAnnouncementStateRef.current === 'fetching' &&
+            terminalAnnouncementTaskIdRef.current !== null &&
+            taskAudioRepollBeforeCaptureTaskIdRef.current === terminalAnnouncementTaskIdRef.current &&
+            terminalNotificationCheckRequiredRef.current &&
+            pendingForegroundPresentationRef.current === null &&
+            ['idle', 'recognized'].includes(currentP1StatusAfterNotification)
+          ) {
+            taskAudioRepollBeforeCaptureTaskIdRef.current = null;
+            // A nonterminal Task AUDIO ACK deliberately drains one immediate
+            // follow-up before listening resumes.  A keepalive/progress-only
+            // result ends that serial drain; leaving the state as `fetching`
+            // would make this loop poll forever and strand P1 at `recognized`.
+            // The outstanding voice Task still authorizes notification.next
+            // while the fresh capture runs, so terminal delivery remains live.
+            updateTerminalAnnouncementState('idle', null);
+            scheduleProductVoiceLoopCapture();
             return;
           }
           // A presentation owns the P2 lane until its TEXT ACK settles.  Do

@@ -3605,7 +3605,7 @@ test('mounted Task AUDIO failure retry clears its transient recovery error after
   }
 });
 
-test('mounted non-stale Task AUDIO ACK waits for successful P1 playout and never reports failure', async () => {
+test('mounted nonterminal Task AUDIO ACK drains one follow-up then resumes listening', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-task-audio-normal-session';
   const controlRef = { current: null };
@@ -3785,7 +3785,7 @@ test('mounted non-stale Task AUDIO ACK waits for successful P1 playout and never
           },
           agent_event: {
             event_type: 'chat.final',
-            text: 'The current background task is complete.',
+            text: 'Background task update: running.',
             source_provenance: 'server.task_notification',
           },
           presentation_unit: {
@@ -3801,6 +3801,23 @@ test('mounted non-stale Task AUDIO ACK waits for successful P1 playout and never
         'normal Task AUDIO did not reach the formal batch TTS owner',
       );
       await waitForMounted(() => browser.counts.sourceStarts === 1, 'normal Task AUDIO did not start browser playout');
+      publishNotification({
+        ok: true,
+        result: {
+          status: 'notification',
+          ...binding,
+          kind: 'work.progress',
+          response: null,
+          agent_event: null,
+          source_event: null,
+          progress_event: {
+            event_type: 'task.running',
+            payload: { state: 'running' },
+          },
+          presentation_unit: null,
+          error_reason: null,
+        },
+      });
     });
 
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
@@ -3830,6 +3847,8 @@ test('mounted non-stale Task AUDIO ACK waits for successful P1 playout and never
       await browser.emitFirstFrame(0);
       await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'normal Task AUDIO successor capture did not become ready');
     });
+    assert.equal(states.at(-1)?.terminal_announcement_state, 'idle');
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 0);
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();
