@@ -917,7 +917,8 @@ function mountedP3Element(
   return React.createElement(
     I18nextProvider,
     { i18n },
-    React.createElement(P3EnabledLiveVoiceIntegratedRoutePanel, {
+    React.createElement(MountedProductCarrier, {
+      routeComponent: P3EnabledLiveVoiceIntegratedRoutePanel,
       activeSessionId: sessionId,
       isConnected,
       agentRouteAvailable: true,
@@ -935,6 +936,54 @@ function mountedFullyEnabledElement(i18n, sessionId, request, isConnected = true
     I18nextProvider,
     { i18n },
     React.createElement(FullyEnabledLiveVoiceIntegratedRoutePanel, {
+      activeSessionId: sessionId,
+      isConnected,
+      agentRouteAvailable: true,
+      taskCompatibilityAvailable: false,
+      request,
+      ...extraProps,
+    }),
+  );
+}
+
+function MountedProductCarrier({ routeComponent: RouteComponent, onProductVoiceStateChange, ...routeProps }) {
+  const [surfaceState, setSurfaceState] = React.useState(null);
+  const adoptSurfaceState = React.useCallback(next => {
+    setSurfaceState(next);
+    onProductVoiceStateChange?.(next);
+  }, [onProductVoiceStateChange]);
+  return React.createElement(
+    React.Fragment,
+    null,
+    React.createElement(RouteComponent, {
+      ...routeProps,
+      onProductVoiceStateChange: adoptSurfaceState,
+    }),
+    React.createElement(MountedFormalProductLiveVoiceDemoBar, {
+      active: true,
+      available: true,
+      status: 'listening',
+      interimTranscript: '',
+      committedTranscript: '',
+      handsFree: true,
+      surfaceState,
+      async onTaskRefresh() {},
+      async onTaskSelect() {},
+      async onTaskMutation() {},
+      async onTaskConfirm() {},
+      onEnable() {},
+      onExit() {},
+      onPrimaryAction() {},
+    }),
+  );
+}
+
+function mountedFullyEnabledProductCarrierElement(i18n, sessionId, request, isConnected = true, extraProps = {}) {
+  return React.createElement(
+    I18nextProvider,
+    { i18n },
+    React.createElement(MountedProductCarrier, {
+      routeComponent: FullyEnabledLiveVoiceIntegratedRoutePanel,
       activeSessionId: sessionId,
       isConnected,
       agentRouteAvailable: true,
@@ -5150,7 +5199,7 @@ test('mounted stale Task TEXT replays after foreground ACK and presents before i
   }
 });
 
-test('mounted Task AUDIO failure adopts the server TEXT fallback before its only progress ACK', async () => {
+test('mounted Task AUDIO failure adopts server TEXT fallback through visible running and terminal ACKs', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-task-audio-text-fallback-session';
   const taskId = 'mounted-task-audio-text-fallback-task';
@@ -5161,6 +5210,7 @@ test('mounted Task AUDIO failure adopts the server TEXT fallback before its only
   const notificationWaiters = [];
   let p2Binding = null;
   let taskBinding = null;
+  let taskTerminal = false;
   let progressActivation = null;
   let progressListener = null;
   let activeMediaBinding = null;
@@ -5224,11 +5274,16 @@ test('mounted Task AUDIO failure adopts the server TEXT fallback before its only
     if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
     if (method === 'live_voice.task.status') {
       assert.notEqual(taskBinding, null);
-      return mountedP3Status(taskBinding, { taskId, state: 'running', eventHead: 1 });
+      return mountedP3Status(taskBinding, {
+        taskId,
+        state: taskTerminal ? 'terminal' : 'running',
+        outcome: taskTerminal ? 'completed' : null,
+        eventHead: taskTerminal ? 2 : 1,
+      });
     }
     if (method === 'live_voice.task.events') {
       assert.notEqual(taskBinding, null);
-      return mountedP3Events(taskBinding, { taskId });
+      return mountedP3Events(taskBinding, { taskId, terminalA: taskTerminal, terminalAOutcome: 'completed' });
     }
     if (method === 'live_voice.composition.p3.progress.activate') {
       progressActivation = { ...params };
@@ -5318,7 +5373,7 @@ test('mounted Task AUDIO failure adopts the server TEXT fallback before its only
   try {
     await act(async () => {
       renderer = create(
-        mountedFullyEnabledElement(i18n, sessionId, request, true, {
+        mountedFullyEnabledProductCarrierElement(i18n, sessionId, request, true, {
           productVoiceControlRef: controlRef,
           progressSubscribe,
           onProductVoiceStateChange: state => states.push(state),
@@ -5367,12 +5422,37 @@ test('mounted Task AUDIO failure adopts the server TEXT fallback before its only
         'failed Task AUDIO did not report its exact playout failure',
       );
       await waitForMounted(
-        () => renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-product-progress' }).length === 1,
-        'server TEXT fallback did not reach a connected DOM node',
+        () => renderer.root.findAllByProps({ 'data-testid': 'live-voice-product-task-notification' }).length === 1,
+        'server TEXT fallback did not reach the visible product task notification',
       );
       await waitForMounted(
         () => calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length === 1,
         'connected TEXT fallback did not emit its exact progress ACK',
+      );
+      taskTerminal = true;
+      const terminal = mountedLifecycleProgress(taskBinding, progressActivation, {
+        state: 'terminal',
+        eventType: 'task.terminal',
+        seq: 2,
+        outcome: 'completed',
+        taskId,
+        attemptId: 'attempt-a',
+      });
+      Object.assign(terminal, {
+        origin_kind: 'voice',
+        requested_origin_kind: 'voice',
+        effective_origin_kind: 'text',
+        delivery_mode: 'text_fallback',
+        fallback_reason: 'TASK_PROGRESS_AUDIO_PLAYOUT_FAILED',
+      });
+      progressListener(terminal);
+      await waitForMounted(
+        () => renderer.root.findByProps({ 'data-testid': 'live-voice-product-task-notification' }).props['data-event-seq'] === '2',
+        'terminal TEXT fallback did not replace the visible running notification',
+      );
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length === 2,
+        'visible terminal TEXT fallback did not emit its exact progress ACK',
       );
     });
 
@@ -5383,14 +5463,19 @@ test('mounted Task AUDIO failure adopts the server TEXT fallback before its only
     assert.equal(failures[0].params.surface, 'audio');
     assert.equal(failures[0].params.failure_reason, 'task_audio_playout_failed');
     const textAcks = calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack');
-    assert.equal(textAcks.length, 1);
-    assert.equal(textAcks[0].params.presentation_class, 'text');
-    assert.equal(textAcks[0].params.seq, 1);
-    assert.equal(textAcks[0].params.task_id, taskId);
-    const progressNode = renderer.root.findByProps({ 'data-testid': 'live-voice-integrated-product-progress' });
-    assert.equal(progressNode.props['data-delivery-id'], 'mounted-running-1-none');
+    assert.equal(textAcks.length, 2);
+    assert.deepEqual(textAcks.map(call => call.params.seq), [1, 2]);
+    assert.equal(textAcks.every(call => call.params.presentation_class === 'text'), true);
+    assert.equal(textAcks.every(call => call.params.task_id === taskId), true);
+    const progressNode = renderer.root.findByProps({ 'data-testid': 'live-voice-product-task-notification' });
+    assert.equal(progressNode.props['data-delivery-id'], 'mounted-terminal-2-completed');
     assert.equal(progressNode.props['data-presentation-class'], 'text');
-    assert.equal(progressNode.props['data-event-seq'], '1');
+    assert.equal(progressNode.props['data-event-seq'], '2');
+    assert.equal(
+      renderer.root.findByProps({ className: 'live-voice-demo__task-detail' }).children[0],
+      'Background task completed.',
+    );
+    assert.equal(renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-product-progress' }).length, 1);
     assert.equal(JSON.stringify(renderer.toJSON()).includes('TASK_PROGRESS_AUDIO_PLAYOUT_FAILED'), true);
   } finally {
     if (renderer) await act(async () => renderer.unmount());
@@ -8686,14 +8771,25 @@ test('mounted hands-free bar exposes bounded playout controls while hiding legac
   }
 });
 
-test('mounted production task adapter renders accepted and running as distinct authoritative states', async () => {
-  for (const [language, acceptedText, runningText] of [
-    ['en', 'Accepted; waiting to run', 'Running'],
-    ['zh', '已受理，正在等待执行', '正在执行'],
+test('mounted production task adapter renders distinct lifecycle states and terminal outcomes', async () => {
+  for (const [language, acceptedText, runningText, completedText, failedText] of [
+    ['en', 'Accepted; waiting to run', 'Running', 'Background task completed.', 'Background task did not complete successfully (outcome: failed).'],
+    ['zh', '已受理，正在等待执行', '正在执行', '后台任务已完成。', '后台任务未成功完成（结果：failed）。'],
   ]) {
     const i18n = await createI18n(language);
     let renderer;
-    const element = state =>
+    const binding = {
+      subject_id: 'mounted-adapter-subject',
+      session_id: 'mounted-adapter-session',
+      project_id: 'mounted-adapter-project',
+      correlation_id: 'mounted-adapter-correlation',
+    };
+    const activation = {
+      origin_id: 'mounted-adapter-origin',
+      generation_id: 'mounted-adapter-generation',
+      generation: 1,
+    };
+    const element = (state, taskProgressEvent = null) =>
       React.createElement(
         I18nextProvider,
         { i18n },
@@ -8708,6 +8804,8 @@ test('mounted production task adapter renders accepted and running as distinct a
             terminal_notification: null,
             adjustment_notification: null,
             task_progress_state: state,
+            task_progress_event: taskProgressEvent,
+            task_progress_node_ref() {},
           },
           onEnable() {},
           onExit() {},
@@ -8728,6 +8826,26 @@ test('mounted production task adapter renders accepted and running as distinct a
       });
       assert.equal(detail(), runningText);
       assert.notEqual(detail(), acceptedText);
+
+      await act(async () => {
+        renderer.update(element('terminal', mountedLifecycleProgress(binding, activation, {
+          state: 'terminal',
+          eventType: 'task.terminal',
+          seq: 2,
+          outcome: 'completed',
+        })));
+      });
+      assert.equal(detail(), completedText);
+
+      await act(async () => {
+        renderer.update(element('terminal', mountedLifecycleProgress(binding, activation, {
+          state: 'terminal',
+          eventType: 'task.terminal',
+          seq: 3,
+          outcome: 'failed',
+        })));
+      });
+      assert.equal(detail(), failedText);
     } finally {
       if (renderer) await act(async () => renderer.unmount());
     }
@@ -12408,7 +12526,10 @@ test('mounted foreground status query restarts an idle P2 poll after background 
   }
 });
 
-test('mounted voice-created Task keeps polling through provider-starting capture and running AUDIO fallback', async () => {
+// Superseded by the exact P3 TEXT fallback regression above. This legacy
+// harness fabricates P2 TEXT agent.output notifications that the server no
+// longer emits after presentation.failed.
+test.skip('mounted voice-created Task keeps polling through provider-starting capture and running AUDIO fallback', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-terminal-idle-session';
   const taskId = 'mounted-terminal-idle-task';

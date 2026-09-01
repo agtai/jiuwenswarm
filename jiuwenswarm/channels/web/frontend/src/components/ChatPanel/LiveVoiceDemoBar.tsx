@@ -7,6 +7,10 @@ import type {
   FormalP3TaskMutationInput,
   FormalP3TaskOperation,
 } from '../../features/live-voice/formal/formalP3TaskExperience';
+import {
+  productTextProgressPresentationBinding,
+  type ProductTextProgressEvent,
+} from '../../features/live-voice/formal/productTextProgress';
 import { productTaskProgressTranslationKey } from './productTaskProgressPresentation';
 import './LiveVoiceDemoBar.css';
 
@@ -49,6 +53,10 @@ export interface LiveVoiceDemoBarProps {
   /** Always-visible warning shown before any task command can dispatch. */
   taskSafetyDisclosure?: string;
   taskActivity?: LiveVoiceTaskActivity | null;
+  taskProgressPresentation?: Readonly<{
+    event: Readonly<ProductTextProgressEvent>;
+    nodeRef: (node: HTMLDivElement | null) => void;
+  }> | null;
   statusLabel?: string;
   primaryActionLabel?: string;
   primaryActionDisabled?: boolean;
@@ -69,6 +77,8 @@ export type FormalProductTaskPresentationState = Readonly<{
   terminal_notification: string | null;
   adjustment_notification: string | null;
   task_progress_state: string | null;
+  task_progress_event: Readonly<ProductTextProgressEvent> | null;
+  task_progress_node_ref: (node: HTMLDivElement | null) => void;
   task_unread_delivery: Readonly<{
     task_id: string;
     attempt_id: string;
@@ -271,11 +281,46 @@ function PrimaryActionIcon({ status }: { status: LiveVoiceVisualState }) {
   return <Mic size={17} strokeWidth={2} />;
 }
 
-function TaskActivityPanel({ taskSafetyDisclosure, taskActivity }: { taskSafetyDisclosure?: string; taskActivity: LiveVoiceTaskActivity | null }) {
+function TaskActivityPanel({
+  taskSafetyDisclosure,
+  taskActivity,
+  taskProgressPresentation,
+}: {
+  taskSafetyDisclosure?: string;
+  taskActivity: LiveVoiceTaskActivity | null;
+  taskProgressPresentation?: LiveVoiceDemoBarProps['taskProgressPresentation'];
+}) {
   const { t } = useTranslation();
   if (!taskSafetyDisclosure && !taskActivity) return null;
+  const progress = taskProgressPresentation?.event ?? null;
   return (
-    <div className="live-voice-demo__task" data-level={taskActivity?.level ?? 'warning'} role={taskActivity?.level === 'error' ? 'alert' : 'status'}>
+    <div
+      ref={taskProgressPresentation?.nodeRef}
+      className="live-voice-demo__task"
+      data-level={taskActivity?.level ?? 'warning'}
+      role={taskActivity?.level === 'error' ? 'alert' : 'status'}
+      aria-live={taskActivity?.level === 'error' ? 'assertive' : 'polite'}
+      aria-atomic="true"
+      data-testid={progress ? 'live-voice-product-task-notification' : undefined}
+      data-delivery-id={progress?.delivery_id}
+      data-presentation-binding={progress?.consumption_mode === 'presentation' ? productTextProgressPresentationBinding(progress) : undefined}
+      data-session-id={progress?.session_id}
+      data-subject-id={progress?.source_event.scope.subject_id}
+      data-project-id={progress?.project_id}
+      data-task-id={progress?.task_id}
+      data-attempt-id={progress?.attempt_id}
+      data-event-id={progress?.source_event.event_id}
+      data-event-seq={progress ? String(progress.source_event.seq) : undefined}
+      data-generation-id={progress?.generation_id}
+      data-generation={progress ? String(progress.generation) : undefined}
+      data-presentation-class={progress?.presentation_class ?? undefined}
+      data-response-interaction-id={progress?.response_ref?.interaction_id}
+      data-response-id={progress?.response_ref?.response_id}
+      data-response-generation={progress?.response_ref ? String(progress.response_ref.response_generation) : undefined}
+      data-unit-id={progress?.unit_id ?? undefined}
+      data-expected-event-head={progress?.expected_event_head == null ? undefined : String(progress.expected_event_head)}
+      data-result-source-event-id={progress?.consumption_mode === 'presentation' ? progress.result_source_event_id ?? '' : undefined}
+    >
       {taskSafetyDisclosure && (
         <span className="live-voice-demo__task-safety" role="note">
           <strong>{t('liveVoice.task.safetyTitle')}</strong>
@@ -462,6 +507,7 @@ export function LiveVoiceDemoBar({
   routeLabel,
   taskSafetyDisclosure,
   taskActivity = null,
+  taskProgressPresentation = null,
   statusLabel: statusLabelOverride,
   primaryActionLabel: primaryActionLabelOverride,
   primaryActionDisabled = false,
@@ -500,7 +546,13 @@ export function LiveVoiceDemoBar({
             </button>
           </span>
         </div>
-        {taskActivity && <TaskActivityPanel taskSafetyDisclosure={taskSafetyDisclosure} taskActivity={taskActivity} />}
+        {taskActivity && (
+          <TaskActivityPanel
+            taskSafetyDisclosure={taskSafetyDisclosure}
+            taskActivity={taskActivity}
+            taskProgressPresentation={taskProgressPresentation}
+          />
+        )}
         {!available && (
           <span id={unavailableHintId} className="live-voice-demo__sr-only">
             {resolvedUnavailableMessage}
@@ -573,7 +625,11 @@ export function LiveVoiceDemoBar({
           </div>
         )}
 
-        <TaskActivityPanel taskSafetyDisclosure={taskSafetyDisclosure} taskActivity={taskActivity} />
+        <TaskActivityPanel
+          taskSafetyDisclosure={taskSafetyDisclosure}
+          taskActivity={taskActivity}
+          taskProgressPresentation={taskProgressPresentation}
+        />
 
         <div className="live-voice-demo__actions">
           {!handsFree && (
@@ -636,22 +692,39 @@ export function LiveVoiceDemoBar({
 export function FormalProductLiveVoiceDemoBar({ surfaceState, onTaskRefresh, onTaskSelect, onTaskMutation, onTaskConfirm, ...props }: FormalProductLiveVoiceDemoBarProps) {
   const { t } = useTranslation();
   const taskExperience = surfaceState?.task_experience ?? null;
-  const taskDetail =
-    surfaceState?.terminal_notification ??
-    surfaceState?.adjustment_notification ??
-    (surfaceState?.task_progress_state
+  const progressEvent = surfaceState?.task_progress_event ?? null;
+  const progressOutcome = progressEvent && typeof progressEvent.source_event.payload.outcome === 'string'
+    ? progressEvent.source_event.payload.outcome
+    : null;
+  const progressDetail = progressEvent?.state === 'terminal'
+    ? progressOutcome === 'completed'
+      ? t('liveVoice.formal.taskTerminalCompleted')
+      : progressOutcome === 'cancelled'
+        ? t('liveVoice.formal.taskTerminalCancelled')
+        : t('liveVoice.formal.taskTerminalFailed', { outcome: progressOutcome ?? 'unknown' })
+    : surfaceState?.task_progress_state
       ? t(productTaskProgressTranslationKey(surfaceState.task_progress_state), { state: surfaceState.task_progress_state })
-      : null);
+      : null;
+  const taskDetail = progressEvent?.state === 'terminal'
+    ? progressDetail
+    : surfaceState?.terminal_notification ??
+      surfaceState?.adjustment_notification ??
+      progressDetail;
   const taskActivity: LiveVoiceDemoBarProps['taskActivity'] = taskDetail
     ? {
-        level: props.status === 'error' ? 'error' : 'info',
+        level: progressEvent?.state === 'terminal' && progressOutcome !== 'completed'
+          ? progressOutcome === 'cancelled' ? 'warning' : 'error'
+          : props.status === 'error' ? 'error' : 'info',
         title: t('liveVoice.formal.taskTitle'),
         detail: taskDetail,
       }
     : null;
+  const taskProgressPresentation = progressEvent && surfaceState
+    ? Object.freeze({ event: progressEvent, nodeRef: surfaceState.task_progress_node_ref })
+    : null;
   return (
     <>
-      <LiveVoiceDemoBar {...props} taskActivity={taskActivity} />
+      <LiveVoiceDemoBar {...props} taskActivity={taskActivity} taskProgressPresentation={taskProgressPresentation} />
       {taskExperience !== null && taskExperience.status !== 'disabled' && taskExperience.status !== 'closed' && (
         <FormalP3TaskExperiencePanel
           snapshot={taskExperience}

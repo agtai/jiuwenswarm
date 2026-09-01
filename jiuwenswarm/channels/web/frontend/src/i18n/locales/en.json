@@ -2159,6 +2159,9 @@
       "taskStateAccepted": "Accepted; waiting to run",
       "taskStateRunning": "Running",
       "taskState": "Current state: {{state}}",
+      "taskTerminalCompleted": "Background task completed.",
+      "taskTerminalCancelled": "Background task was cancelled.",
+      "taskTerminalFailed": "Background task did not complete successfully (outcome: {{outcome}}).",
       "status": {
         "idle": "Ready for formal speech",
         "starting": "Starting microphone",

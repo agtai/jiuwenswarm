@@ -2157,6 +2157,9 @@
       "taskStateAccepted": "已受理，正在等待执行",
       "taskStateRunning": "正在执行",
       "taskState": "当前状态：{{state}}",
+      "taskTerminalCompleted": "后台任务已完成。",
+      "taskTerminalCancelled": "后台任务已取消。",
+      "taskTerminalFailed": "后台任务未成功完成（结果：{{outcome}}）。",
       "status": {
         "idle": "正式语音已就绪",
         "starting": "正在启动麦克风",

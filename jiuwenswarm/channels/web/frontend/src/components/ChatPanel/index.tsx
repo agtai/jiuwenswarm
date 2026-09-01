@@ -1282,6 +1282,8 @@ export function ChatPanel({
         previous.task_progress_task_id === next.task_progress_task_id &&
         previous.task_progress_state === next.task_progress_state &&
         previous.task_progress_delivery_mode === next.task_progress_delivery_mode &&
+        previous.task_progress_event === next.task_progress_event &&
+        previous.task_progress_node_ref === next.task_progress_node_ref &&
         previous.task_unread_delivery === next.task_unread_delivery &&
         previous.terminal_announcement_state === next.terminal_announcement_state &&
         previous.recovery_diagnostic === next.recovery_diagnostic &&

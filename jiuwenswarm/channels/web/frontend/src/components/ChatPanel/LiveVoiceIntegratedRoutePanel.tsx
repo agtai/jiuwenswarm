@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Activity, RefreshCw, ShieldAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 export { productTaskProgressTranslationKey } from './productTaskProgressPresentation';
@@ -187,6 +187,8 @@ export type ProductLiveVoiceSurfaceState = Readonly<{
   task_progress_task_id: string | null;
   task_progress_state: string | null;
   task_progress_delivery_mode: ProductTextProgressEvent['delivery_mode'] | null;
+  task_progress_event: Readonly<ProductTextProgressEvent> | null;
+  task_progress_node_ref: (node: HTMLDivElement | null) => void;
   task_unread_delivery: Readonly<{
     task_id: string;
     attempt_id: string;
@@ -1564,6 +1566,31 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const progressAckOwnerRef = useRef<ProductTextProgressAckOwner | null>(null);
   const progressDomAdoptionOwnerRef = useRef<ProductTextProgressDomAdoptionOwner | null>(null);
   const progressDomRef = useRef<HTMLDivElement | null>(null);
+  const adoptVisibleProductTextProgressNode = useMemo(() => {
+    const ownedProgress = progress;
+    let ownedNode: HTMLDivElement | null = null;
+    return (node: HTMLDivElement | null) => {
+      if (node === null) {
+        if (progressDomRef.current === ownedNode) progressDomRef.current = null;
+        ownedNode = null;
+        return;
+      }
+      ownedNode = node;
+      progressDomRef.current = node;
+      const adoptionOwner = progressDomAdoptionOwnerRef.current;
+      if (ownedProgress === null || adoptionOwner === null) return;
+      try {
+        const retained = adoptionOwner.adopt(ownedProgress, node);
+        if (retained === null) return;
+        setProgressAck(retained.status);
+        // The reconciliation coroutine clears its in-flight guard in `finally`.
+        // Continue only after the user-visible product node owns this delivery.
+        globalThis.setTimeout(() => progressDrainRef.current?.(), 0);
+      } catch {
+        setProgressAck('failed');
+      }
+    };
+  }, [progress]);
   const activationOwnerRef = useRef<ProductWebP2ActivationOwner | null>(null);
   const p2ActivationJournalRef = useRef<ProductP2ActivationJournal | null>(null);
   const retiredPresentationAckInFlightRef = useRef(new Set<string>());
@@ -3148,8 +3175,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               setP3MutationStatus(terminalStatus);
               queueTerminalAnnouncement(parsed.task_id);
             }
-            // The layout effect owns the first ACK only after React commits the
-            // exact delivery into the connected DOM.
+            // The visible product task notification owns the first ACK only
+            // after React commits the exact delivery into its connected DOM.
             return;
           } catch (error) {
             if (!isCurrent()) return;
@@ -3241,24 +3268,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (progressDomAdoptionOwnerRef.current === domAdoptionOwner) progressDomAdoptionOwnerRef.current = null;
     };
   }, [props.activeSessionId, props.progressAckCapacity, props.progressSubscribe]);
-
-  useLayoutEffect(() => {
-    if (progress === null) return;
-    const adoptionOwner = progressDomAdoptionOwnerRef.current;
-    const node = progressDomRef.current;
-    if (adoptionOwner === null || node === null) return;
-    try {
-      const retained = adoptionOwner.adopt(progress, node);
-      if (retained === null) return;
-      setProgressAck(retained.status);
-      // The reconciliation coroutine clears its in-flight guard in `finally`.
-      // A task turn therefore starts the next prefix item only after both that
-      // guard and this committed-DOM adoption have settled.
-      globalThis.setTimeout(() => progressDrainRef.current?.(), 0);
-    } catch {
-      setProgressAck('failed');
-    }
-  }, [progress]);
 
   useEffect(() => {
     progressAckOwnerRef.current?.setConnected(props.isConnected);
@@ -6906,6 +6915,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         task_progress_task_id: progress?.task_id ?? null,
         task_progress_state: progress?.state ?? null,
         task_progress_delivery_mode: progress?.delivery_mode ?? null,
+        task_progress_event: progress,
+        task_progress_node_ref: adoptVisibleProductTextProgressNode,
         task_unread_delivery: progress === null ? null : Object.freeze({
           task_id: progress.task_id,
           attempt_id: progress.attempt_id,
@@ -6932,6 +6943,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     productTextStatus,
     productVoiceAvailable,
     productCommandRoute,
+    adoptVisibleProductTextProgressNode,
     progress?.delivery_mode,
     progress?.attempt_id,
     progress?.source_event.event_id,
@@ -7008,7 +7020,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       platform={platform}
       progress={progress}
       progressAck={progressAck}
-      progressDomRef={progressDomRef}
       p2Activation={props.isConnected ? p2Activation : null}
       p3Activation={p3Activation}
       productInput={productInput}
@@ -7207,7 +7218,6 @@ export interface LiveVoiceIntegratedRoutePanelViewProps {
   platform: Readonly<WebPlatformDiagnosticsSnapshot> | null;
   progress?: Readonly<ProductTextProgressEvent> | null;
   progressAck?: 'idle' | 'pending' | 'acknowledged' | 'failed';
-  progressDomRef?: RefObject<HTMLDivElement>;
   p2Activation?: Readonly<ProductWebP2ActivationSnapshot> | null;
   p3Activation?: Readonly<ProductWebP3ProgressSnapshot> | null;
   productInput?: string;
@@ -7270,7 +7280,6 @@ export function LiveVoiceIntegratedRoutePanelView({
   platform,
   progress = null,
   progressAck = 'idle',
-  progressDomRef,
   p2Activation = null,
   p3Activation = null,
   productInput = '',
@@ -7712,7 +7721,6 @@ export function LiveVoiceIntegratedRoutePanelView({
         {progress && (
           <div
             key={progress.delivery_id}
-            ref={progressDomRef}
             className="live-voice-integrated__section"
             aria-label={t('liveVoice.integrated.progress.title')}
             data-testid="live-voice-integrated-product-progress"
