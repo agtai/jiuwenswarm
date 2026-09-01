@@ -962,10 +962,14 @@ export function productP2NotificationRepollDelayMs(
     disposition: ProductP2NotificationDisposition;
     terminal_notification_check_required: boolean;
     foreground_response_waiting: boolean;
+    notification?: Readonly<Record<string, unknown>>;
   }>,
 ): number {
+  const event = input.notification ? recordValue(input.notification.agent_event) : null;
+  const streamObserver = event?.event_type === 'chat.delta' || event?.event_type === 'chat.reasoning';
   if (
     input.disposition.kind !== 'continue' ||
+    streamObserver ||
     !input.terminal_notification_check_required ||
     !input.foreground_response_waiting
   )
@@ -4532,6 +4536,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             disposition,
             terminal_notification_check_required: terminalNotificationCheckRequiredRef.current,
             foreground_response_waiting: pendingForegroundPresentationRef.current !== null,
+            notification: outcome.notification,
           });
           if (repollDelayMs > 0) {
             await new Promise<void>(resolve => globalThis.setTimeout(resolve, repollDelayMs));

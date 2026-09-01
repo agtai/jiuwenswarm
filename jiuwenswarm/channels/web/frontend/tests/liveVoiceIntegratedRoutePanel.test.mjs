@@ -967,6 +967,15 @@ test('terminal notification receive transport remains subscribed while an outsta
   assert.equal(
     productP2NotificationRepollDelayMs({
       disposition: { kind: 'continue' },
+      terminal_notification_check_required: true,
+      foreground_response_waiting: true,
+      notification: { agent_event: { event_type: 'chat.delta' } },
+    }),
+    0,
+  );
+  assert.equal(
+    productP2NotificationRepollDelayMs({
+      disposition: { kind: 'continue' },
       terminal_notification_check_required: false,
       foreground_response_waiting: true,
     }),
