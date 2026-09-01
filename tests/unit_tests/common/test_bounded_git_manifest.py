@@ -375,3 +375,72 @@ def test_same_metadata_path_swap_is_detected_by_file_identity(
 
     with pytest.raises(GitManifestInspectionError, match="changed during inspection"):
         module.capture_bounded_git_manifest(project)
+
+
+# ---------------------------------------------------------------------------
+# F11 验收矩阵(清单层):并发变体逐一收敛——单次未跟踪创建/单次 index 变更
+# 必须被"更晚的稳定快照"完整包含(与静止态捕获逐指纹相等),绝不撕裂。
+# HEAD 移动收敛、持续搅动失败关闭、同元数据换文件三个变体已有既有用例。
+# ---------------------------------------------------------------------------
+
+
+def test_matrix_concurrent_untracked_creation_lands_in_a_later_stable_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jiuwenswarm.common import bounded_git_manifest as module
+
+    project = tmp_path / "project"
+    _project(project)
+
+    original_status = module._status_entries
+    injected = {"done": False}
+
+    def creating_status(root):
+        result = original_status(root)
+        if not injected["done"]:
+            injected["done"] = True
+            (project / "late-untracked.txt").write_text("late\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(module, "_status_entries", creating_status)
+
+    raced = module.capture_bounded_git_manifest(project)
+
+    assert injected["done"] is True
+    monkeypatch.setattr(module, "_status_entries", original_status)
+    steady = module.capture_bounded_git_manifest(project)
+    assert raced.tree_fingerprint() == steady.tree_fingerprint()
+    assert raced.content_fingerprint() == steady.content_fingerprint()
+    assert any(
+        entry.path == "late-untracked.txt" for entry in raced.status_entries
+    )
+
+
+def test_matrix_concurrent_index_mutation_lands_in_a_later_stable_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jiuwenswarm.common import bounded_git_manifest as module
+
+    project = tmp_path / "project"
+    _project(project)
+    (project / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+
+    original_status = module._status_entries
+    injected = {"done": False}
+
+    def staging_status(root):
+        result = original_status(root)
+        if not injected["done"]:
+            injected["done"] = True
+            _git(project, "add", "tracked.txt")
+        return result
+
+    monkeypatch.setattr(module, "_status_entries", staging_status)
+
+    raced = module.capture_bounded_git_manifest(project)
+
+    assert injected["done"] is True
+    monkeypatch.setattr(module, "_status_entries", original_status)
+    steady = module.capture_bounded_git_manifest(project)
+    assert raced.tree_fingerprint() == steady.tree_fingerprint()
+    assert raced.content_fingerprint() == steady.content_fingerprint()

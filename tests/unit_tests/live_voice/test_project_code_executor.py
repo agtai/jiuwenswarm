@@ -5977,3 +5977,65 @@ async def test_same_root_inspection_windows_are_serialized(
     finally:
         gate_a.set()
         await adapter.close()
+
+
+# ---------------------------------------------------------------------------
+# F11 验收矩阵(执行器层):初始化派生变更在快照 B 前落根必须预效应拒绝。
+# 生产契约比审计的"派生工作须 join"更强:初始化窗口内落下的任何根变更
+# (无论是否 join)都在 journal/worker/工作树副作用之前被类型化拒绝,
+# 锁随之释放,干净的下一次 dispatch 正常通过。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_matrix_initializer_mutation_before_after_snapshot_is_refused_pre_effect(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "mutating-init-project"
+    _git_project(project)
+
+    async def mutating_fence() -> None:
+        (project / "derived-straggler.txt").write_text("derived\n", encoding="utf-8")
+
+    binding_a = replace(
+        _direct_binding(project, _DirectProjectExecutor(project)),
+        dispatch_fence=mutating_fence,
+    )
+    binding_b = _direct_binding(project, _DirectProjectExecutor(project))
+    bindings = iter([binding_a, binding_b])
+
+    class _SequencedResolver:
+        async def resolve(self, _spec, *, for_dispatch: bool):
+            assert for_dispatch is True
+            return next(bindings)
+
+    adapter = DirectProjectCodeExecutorAdapter(
+        _SequencedResolver(), tmp_path / "mutating.sqlite3"
+    )
+    item_a = replace(
+        _item(project),
+        outbox_id="outbox-a",
+        task_id="task-a",
+        attempt_id="attempt-a",
+        command_id="command-a",
+    )
+    item_b = replace(
+        _item(project),
+        outbox_id="outbox-b",
+        task_id="task-b",
+        attempt_id="attempt-b",
+        command_id="command-b",
+    )
+    try:
+        with pytest.raises(FormalTaskViolation) as refused:
+            await asyncio.wait_for(adapter.dispatch(item_a), timeout=60)
+        assert "initialization changed the selected project" in str(refused.value)
+        assert await asyncio.to_thread(adapter._journal.get, "attempt-a") is None
+        assert dict(adapter._running) == {}
+        assert dict(adapter._retained_worktree_cleanups) == {}
+
+        (project / "derived-straggler.txt").unlink()
+        await asyncio.wait_for(adapter.dispatch(item_b), timeout=60)
+        assert await asyncio.to_thread(adapter._journal.get, "attempt-b") is not None
+    finally:
+        await adapter.close()
