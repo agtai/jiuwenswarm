@@ -16,6 +16,7 @@ import {
   bindProductVoiceTaskOrigin,
   awaitProductTaskNotificationPlayout,
   bootstrapProductP3TaskInspectionLeaf,
+  capturedTaskNotificationDeadlineAction,
   classifyProductP2Notification,
   createProductP2ActivationOwner,
   extractWebErrorReason,
@@ -41,6 +42,7 @@ import {
   retainBoundedPresentedProductResponse,
   productP2NotificationTransportBlockedByP1,
   terminalAnnouncementArbitrationAction,
+  terminalTextFallbackCompletesVoiceAnnouncement,
   webReconnectDelayMs,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
 
@@ -894,6 +896,40 @@ test('terminal announcement arbitration preserves speech and every foreground P1
   assert.equal(terminalAnnouncementArbitrationAction({ ...input, p1_status: 'closed', voice_active: false }), 'defer');
   assert.equal(terminalAnnouncementArbitrationAction({ ...input, p1_status: 'recognized', page_visible: false }), 'defer');
   assert.equal(terminalAnnouncementArbitrationAction({ ...input, p1_status: 'recognized', connected: false }), 'defer');
+});
+
+test('speech-marked capture gets one bounded settlement before Task AUDIO falls back to text', () => {
+  const input = {
+    capture_settlement_requested: false,
+    p1_status: 'capturing',
+    announcement_state: 'queued',
+    capture_binding_available: true,
+  };
+  assert.equal(capturedTaskNotificationDeadlineAction(input), 'settle_capture');
+  assert.equal(
+    capturedTaskNotificationDeadlineAction({ ...input, capture_settlement_requested: true }),
+    'fallback_text',
+  );
+  assert.equal(capturedTaskNotificationDeadlineAction({ ...input, p1_status: 'recognizing' }), 'fallback_text');
+  assert.equal(capturedTaskNotificationDeadlineAction({ ...input, announcement_state: 'fetching' }), 'fallback_text');
+  assert.equal(capturedTaskNotificationDeadlineAction({ ...input, capture_binding_available: false }), 'fallback_text');
+});
+
+test('only the exact visible terminal TEXT fallback settles a voice announcement', () => {
+  const terminalFallback = {
+    task_id: 'task-a',
+    state: 'terminal',
+    origin_kind: 'voice',
+    requested_origin_kind: 'voice',
+    delivery_mode: 'text_fallback',
+    consumption_mode: 'presentation',
+    presentation_class: 'text',
+  };
+  assert.equal(terminalTextFallbackCompletesVoiceAnnouncement(terminalFallback, 'task-a'), true);
+  assert.equal(terminalTextFallbackCompletesVoiceAnnouncement({ ...terminalFallback, state: 'running' }, 'task-a'), false);
+  assert.equal(terminalTextFallbackCompletesVoiceAnnouncement({ ...terminalFallback, delivery_mode: 'text' }, 'task-a'), false);
+  assert.equal(terminalTextFallbackCompletesVoiceAnnouncement({ ...terminalFallback, presentation_class: null }, 'task-a'), false);
+  assert.equal(terminalTextFallbackCompletesVoiceAnnouncement(terminalFallback, 'task-b'), false);
 });
 
 test('terminal notification receive transport remains subscribed while an outstanding Task starts idle capture', () => {

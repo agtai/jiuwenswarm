@@ -13,6 +13,7 @@ import { act, create as createRenderer } from 'react-test-renderer';
 import {
   LiveVoiceIntegratedRoutePanel,
   progressMatchesOwnedBinding,
+  terminalTextFallbackCompletesVoiceAnnouncement,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
 import { parseProductTextProgressEvent } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productTextProgress.js';
 import {
@@ -5454,6 +5455,18 @@ test('mounted Task AUDIO failure adopts server TEXT fallback through visible run
         () => calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length === 2,
         'visible terminal TEXT fallback did not emit its exact progress ACK',
       );
+      assert.equal(
+        terminalTextFallbackCompletesVoiceAnnouncement(states.at(-1)?.task_progress_event, taskId),
+        true,
+        'mounted terminal fallback no longer matches the exact settlement contract',
+      );
+      await waitForMounted(
+        () => states.at(-1)?.terminal_announcement_state === 'idle',
+        `visible terminal TEXT fallback ACK left the voice announcement unsettled; states=${states
+          .slice(-12)
+          .map(state => `${state.p1_status}/${state.terminal_announcement_state}/${state.task_progress_state}/${state.task_progress_delivery_mode}/${state.task_unread_delivery?.acknowledgement}`)
+          .join(',')}`,
+      );
     });
 
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
@@ -5477,6 +5490,11 @@ test('mounted Task AUDIO failure adopts server TEXT fallback through visible run
     );
     assert.equal(renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-product-progress' }).length, 1);
     assert.equal(JSON.stringify(renderer.toJSON()).includes('TASK_PROGRESS_AUDIO_PLAYOUT_FAILED'), true);
+    assert.equal(
+      states.at(-1)?.terminal_announcement_state,
+      'idle',
+      'terminal fallback settlement must not block the next recognized owner from resuming capture',
+    );
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();

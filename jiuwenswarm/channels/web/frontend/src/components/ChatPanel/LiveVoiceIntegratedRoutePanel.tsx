@@ -919,6 +919,38 @@ export function productP2TaskNotificationRequiresCaptureArbitration(
   return input.terminal_notification_check_required && ['starting', 'capturing'].includes(input.p1_status);
 }
 
+export function capturedTaskNotificationDeadlineAction(
+  input: Readonly<{
+    capture_settlement_requested: boolean;
+    p1_status: ProductP1VoiceStatus | null;
+    announcement_state: TerminalAnnouncementState;
+    capture_binding_available: boolean;
+  }>,
+): 'settle_capture' | 'fallback_text' {
+  return !input.capture_settlement_requested &&
+    input.p1_status === 'capturing' &&
+    input.announcement_state === 'queued' &&
+    input.capture_binding_available
+    ? 'settle_capture'
+    : 'fallback_text';
+}
+
+export function terminalTextFallbackCompletesVoiceAnnouncement(
+  event: Readonly<ProductTextProgressEvent>,
+  currentTaskId: string | null,
+): boolean {
+  return (
+    currentTaskId !== null &&
+    event.task_id === currentTaskId &&
+    event.state === 'terminal' &&
+    event.origin_kind === 'voice' &&
+    event.requested_origin_kind === 'voice' &&
+    event.delivery_mode === 'text_fallback' &&
+    event.consumption_mode === 'presentation' &&
+    event.presentation_class === 'text'
+  );
+}
+
 export function productP2NotificationRepollDelayMs(
   input: Readonly<{
     disposition: ProductP2NotificationDisposition;
@@ -1621,6 +1653,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const capturedTaskNotificationDeadlineRef = useRef<Readonly<{
     timer: ReturnType<typeof globalThis.setTimeout>;
     notification: CapturedProductTaskNotification;
+    capture_settlement_requested: boolean;
   }> | null>(null);
   const terminalNotificationCheckRequiredRef = useRef(false);
   terminalNotificationCheckRequiredRef.current = productP2TaskNotificationCheckRequired({
@@ -2206,7 +2239,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     return true;
   };
 
-  const scheduleCapturedTaskNotificationDeadline = (captured: CapturedProductTaskNotification) => {
+  const scheduleCapturedTaskNotificationDeadline = (
+    captured: CapturedProductTaskNotification,
+    captureSettlementRequested = false,
+  ) => {
     const previous = capturedTaskNotificationDeadlineRef.current;
     if (previous !== null) globalThis.clearTimeout(previous.timer);
     const timeoutMs = props.taskNotificationPlayoutTimeoutMs ?? PRODUCT_TASK_NOTIFICATION_PLAYOUT_TIMEOUT_MS;
@@ -2215,7 +2251,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
     const timer = globalThis.setTimeout(() => {
       const deadline = capturedTaskNotificationDeadlineRef.current;
-      if (deadline?.timer !== timer || !clearCapturedTaskNotification(captured)) return;
+      if (deadline?.timer !== timer || deadline.notification !== captured) return;
       capturedTaskNotificationDeadlineRef.current = null;
       if (
         !mountedRef.current ||
@@ -2223,18 +2259,42 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         captured.owner.snapshot().binding?.session_id !== activeSessionRef.current ||
         createdProgressRouteRef.current?.task_id !== captured.task_id
       ) {
+        clearCapturedTaskNotification(captured);
         return;
       }
+      const deadlineAction = capturedTaskNotificationDeadlineAction({
+        capture_settlement_requested: deadline.capture_settlement_requested,
+        p1_status: p1VoiceOwnerRef.current?.status().status ?? null,
+        announcement_state: terminalAnnouncementStateRef.current,
+        capture_binding_available: p1VoiceCaptureBindingRef.current !== null,
+      });
+      if (deadlineAction === 'settle_capture') {
+        // A speech-marked capture may legitimately own a user utterance when a
+        // Task AUDIO notification arrives.  Settle that utterance through the
+        // existing recognition/submit path once before abandoning audio.  The
+        // retained pop-on-read Task notification stays exact and gets one more
+        // bounded acquisition window; a second expiry still falls back to
+        // visible text rather than blocking forever.
+        scheduleCapturedTaskNotificationDeadline(captured, true);
+        void stopP1VoiceHandlerRef.current().catch(() => undefined);
+        return;
+      }
+      if (!clearCapturedTaskNotification(captured)) return;
       // notification.next is pop-on-read. A Task AUDIO delivery may therefore
       // not remain parked forever behind speech-active capture rotations: once
-      // this bounded acquisition window expires, report the exact AUDIO failure
-      // so the Registry can publish its durable TEXT fallback.
+      // the capture has received one bounded settlement opportunity and the
+      // second acquisition window expires, report the exact AUDIO failure so
+      // the Registry can publish its durable TEXT fallback.
       retainDeferredTaskPresentation(captured.owner, captured.disposition);
       if (!settleDeferredTaskPresentationFailure(captured.owner)) {
         setP2NotificationWakeEpoch(epoch => epoch + 1);
       }
     }, timeoutMs);
-    capturedTaskNotificationDeadlineRef.current = Object.freeze({ timer, notification: captured });
+    capturedTaskNotificationDeadlineRef.current = Object.freeze({
+      timer,
+      notification: captured,
+      capture_settlement_requested: captureSettlementRequested,
+    });
   };
 
   const settleProductPresentationAck = (retained: NonNullable<typeof pendingPresentationAttemptRef.current>): Promise<void> => {
@@ -3173,7 +3233,24 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             const terminalStatus = productP3TerminalStatus(record);
             if (terminalStatus !== null) {
               setP3MutationStatus(terminalStatus);
-              queueTerminalAnnouncement(parsed.task_id);
+              if (
+                terminalTextFallbackCompletesVoiceAnnouncement(
+                  parsed,
+                  createdProgressRouteRef.current?.task_id ?? null,
+                )
+              ) {
+                // Registry has already converted this exact failed AUDIO route
+                // into its durable terminal TEXT presentation. Re-queuing it as
+                // a voice announcement recreates a fence that no AUDIO delivery
+                // can settle and blocks the next healthy P1 capture.
+                terminalNotificationTaskIdRef.current = parsed.task_id;
+                terminalNotificationCheckRequiredRef.current = false;
+                terminalAnnouncementSpeechOwnerRef.current = null;
+                updateTerminalAnnouncementState('idle', null);
+                scheduleProductVoiceLoopCapture();
+              } else {
+                queueTerminalAnnouncement(parsed.task_id);
+              }
             }
             // The visible product task notification owns the first ACK only
             // after React commits the exact delivery into its connected DOM.
