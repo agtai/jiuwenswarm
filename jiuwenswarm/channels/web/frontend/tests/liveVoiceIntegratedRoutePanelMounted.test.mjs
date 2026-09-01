@@ -12813,24 +12813,9 @@ test('mounted voice-created Task keeps polling through provider-starting capture
     });
 
     await act(async () => {
-      await browser.rotateSilentCaptureWindow();
-      await waitForMounted(
-        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 3,
-        `speech-marked idle capture did not rotate; states=${states
-          .slice(-12)
-          .map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}`)
-          .join(',')}`,
-      );
-      await waitForMounted(
-        () => states.at(-1)?.p1_status === 'recognized' && states.at(-1)?.terminal_announcement_state === 'fetching',
-        `terminal wake did not retry after the speech-marked capture rotated; states=${states
-          .slice(-12)
-          .map(state => `${state.p1_status}/${state.terminal_announcement_state}/${state.text_reason ?? 'none'}`)
-          .join(',')}`,
-      );
       await waitForMounted(
         () => notificationWaiters.length > 0,
-        'rotated speech-marked capture did not resume the terminal notification poll',
+        'speech-marked capture did not retain the terminal notification poll',
       );
       publishNotification(
         presentation(p2Binding, 'mounted-terminal-idle-running', 2, 'Background task update: running.', true),
@@ -12839,24 +12824,24 @@ test('mounted voice-created Task keeps polling through provider-starting capture
         () =>
           calls.filter(
             call =>
-              call.method === 'live_voice.speech.synthesize_batch' &&
-              call.params.response.response_id === 'mounted-terminal-idle-running',
+              call.method === 'live_voice.composition.p2.presentation.failed' &&
+              call.params.response_id === 'mounted-terminal-idle-running',
           ).length === 1,
-        `running Task AUDIO did not retry after the speech-marked capture rotated; states=${states
+        `capture-blocked running Task AUDIO did not fail over after its finite acquisition deadline; states=${states
           .slice(-12)
           .map(state => `${state.p1_status}/${state.terminal_announcement_state}/${state.text_reason ?? 'none'}`)
           .join(',')}`,
       );
-      await waitForMounted(() => browser.counts.sourceStarts === 2, 'running Task AUDIO did not start browser playout');
-      await waitForMounted(
-        () =>
-          calls.filter(
-            call =>
-              call.method === 'live_voice.composition.p2.presentation.failed' &&
-              call.params.response_id === 'mounted-terminal-idle-running',
-          ).length === 1,
-        'hung running Task AUDIO did not fail over after its finite playout deadline',
+      assert.equal(
+        calls.filter(
+          call =>
+            call.method === 'live_voice.speech.synthesize_batch' &&
+            call.params.response.response_id === 'mounted-terminal-idle-running',
+        ).length,
+        0,
+        'capture-blocked running Task AUDIO must not start an unauthorized TTS playout',
       );
+      assert.equal(browser.counts.sourceStarts, 1, 'capture-blocked running Task AUDIO unexpectedly reached browser playout');
       await waitForMounted(
         () =>
           calls.filter(

@@ -800,6 +800,7 @@ type DeferredProductTaskPresentation = Readonly<{
 type CapturedProductTaskNotification = Readonly<{
   owner: ProductWebP2ActivationOwner;
   notification: Readonly<Record<string, unknown>>;
+  disposition: Extract<ProductP2NotificationDisposition, { readonly kind: 'presentation' }>;
   admission: ProductP2NotificationAdmission;
   task_id: string;
   response_id: string;
@@ -1590,6 +1591,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const voiceLoopP2RefreshInFlightRef = useRef(false);
   const deferredTaskPresentationRef = useRef<DeferredProductTaskPresentation | null>(null);
   const capturedTaskNotificationRef = useRef<CapturedProductTaskNotification | null>(null);
+  const capturedTaskNotificationDeadlineRef = useRef<Readonly<{
+    timer: ReturnType<typeof globalThis.setTimeout>;
+    notification: CapturedProductTaskNotification;
+  }> | null>(null);
   const terminalNotificationCheckRequiredRef = useRef(false);
   terminalNotificationCheckRequiredRef.current = productP2TaskNotificationCheckRequired({
     deferred_presentation: deferredTaskPresentationRef.current !== null,
@@ -1669,6 +1674,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     if (taskId !== undefined) terminalAnnouncementTaskIdRef.current = taskId;
     setTerminalAnnouncementState(state);
   };
+  const clearCapturedTaskNotification = (expected?: CapturedProductTaskNotification) => {
+    if (expected !== undefined && capturedTaskNotificationRef.current !== expected) return false;
+    const deadline = capturedTaskNotificationDeadlineRef.current;
+    if (deadline !== null && (expected === undefined || deadline.notification === expected)) {
+      globalThis.clearTimeout(deadline.timer);
+      capturedTaskNotificationDeadlineRef.current = null;
+    }
+    capturedTaskNotificationRef.current = null;
+    return true;
+  };
   const queueTerminalAnnouncement = (taskId: string) => {
     const route = createdProgressRouteRef.current;
     if (route?.task_id !== taskId || route.origin?.kind !== 'voice' || terminalNotificationTaskIdRef.current === taskId) {
@@ -1682,7 +1697,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const previousTaskId = createdProgressRouteRef.current?.task_id ?? null;
     const nextTaskId = route?.task_id ?? null;
     if (nextTaskId !== null && nextTaskId !== previousTaskId) {
-      capturedTaskNotificationRef.current = null;
+      clearCapturedTaskNotification();
       terminalNotificationTaskIdRef.current = null;
       updateTerminalAnnouncementState('idle', null);
       terminalAnnouncementSpeechOwnerRef.current = null;
@@ -1816,7 +1831,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       capturedTaskNotificationRef.current?.owner === owner &&
       owner.snapshot().status === 'closed'
     ) {
-      capturedTaskNotificationRef.current = null;
+      clearCapturedTaskNotification(capturedTaskNotificationRef.current);
     }
   };
 
@@ -1844,7 +1859,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       retainedBinding !== null &&
       sameProductP2ActivationBinding(retainedBinding, binding)
     ) {
-      capturedTaskNotificationRef.current = null;
+      clearCapturedTaskNotification(retained);
     }
   };
 
@@ -1999,13 +2014,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         setPendingPresentationAck(null);
         setProductTextReason(null);
         setProductTextStatus(pendingForegroundPresentationRef.current !== null ? 'waiting' : 'acknowledged');
-        if (taskNotification.terminal && taskNotification.task_id) {
-          terminalNotificationTaskIdRef.current = taskNotification.task_id;
-          terminalNotificationCheckRequiredRef.current = false;
-        }
-        const repollBeforeCapture = Boolean(
-          retained.notification_repoll_before_capture && !taskNotification.terminal,
-        );
+        // presentation.failed only proves that AUDIO was not delivered. Even
+        // for a terminal event, notification completion belongs exclusively to
+        // the subsequently rendered and ACKed TEXT fallback.
+        const repollBeforeCapture = Boolean(retained.notification_repoll_before_capture);
         terminalAnnouncementSpeechOwnerRef.current = null;
         updateTerminalAnnouncementState(
           repollBeforeCapture ? 'fetching' : 'idle',
@@ -2165,6 +2177,37 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     updateTerminalAnnouncementState('recovering');
     void settleTaskPresentationFailure(failureAttempt, 'task_audio_playout_failed');
     return true;
+  };
+
+  const scheduleCapturedTaskNotificationDeadline = (captured: CapturedProductTaskNotification) => {
+    const previous = capturedTaskNotificationDeadlineRef.current;
+    if (previous !== null) globalThis.clearTimeout(previous.timer);
+    const timeoutMs = props.taskNotificationPlayoutTimeoutMs ?? PRODUCT_TASK_NOTIFICATION_PLAYOUT_TIMEOUT_MS;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new Error('Task notification capture deadline must be positive');
+    }
+    const timer = globalThis.setTimeout(() => {
+      const deadline = capturedTaskNotificationDeadlineRef.current;
+      if (deadline?.timer !== timer || !clearCapturedTaskNotification(captured)) return;
+      capturedTaskNotificationDeadlineRef.current = null;
+      if (
+        !mountedRef.current ||
+        activationOwnerRef.current !== captured.owner ||
+        captured.owner.snapshot().binding?.session_id !== activeSessionRef.current ||
+        createdProgressRouteRef.current?.task_id !== captured.task_id
+      ) {
+        return;
+      }
+      // notification.next is pop-on-read. A Task AUDIO delivery may therefore
+      // not remain parked forever behind speech-active capture rotations: once
+      // this bounded acquisition window expires, report the exact AUDIO failure
+      // so the Registry can publish its durable TEXT fallback.
+      retainDeferredTaskPresentation(captured.owner, captured.disposition);
+      if (!settleDeferredTaskPresentationFailure(captured.owner)) {
+        setP2NotificationWakeEpoch(epoch => epoch + 1);
+      }
+    }, timeoutMs);
+    capturedTaskNotificationDeadlineRef.current = Object.freeze({ timer, notification: captured });
   };
 
   const settleProductPresentationAck = (retained: NonNullable<typeof pendingPresentationAttemptRef.current>): Promise<void> => {
@@ -2389,7 +2432,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     voiceLoopP2RefreshAfterGenerationRef.current = null;
     voiceLoopP2RefreshInFlightRef.current = false;
     deferredTaskPresentationRef.current = null;
-    capturedTaskNotificationRef.current = null;
+    clearCapturedTaskNotification();
     unifiedInputOwnerRef.current = null;
     submittedVoiceFinalsRef.current.clear();
     pendingUnifiedFinalRef.current = null;
@@ -3318,6 +3361,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     voiceDraftBindingRef.current = null;
     p1VoiceCaptureBindingRef.current = null;
     presentedProductResponsesRef.current.clear();
+    clearCapturedTaskNotification();
     terminalNotificationTaskIdRef.current = null;
     terminalAnnouncementSpeechOwnerRef.current = null;
     updateTerminalAnnouncementState('idle', null);
@@ -3338,6 +3382,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       mountedRef.current = false;
       clearScheduledProductVoiceLoopCapture();
       clearScheduledProductP2Recovery();
+      clearCapturedTaskNotification();
       recognizedSpeechConfirmationRef.current = null;
       editedVoiceDraftConfirmationRef.current = null;
       voiceDraftBindingRef.current = null;
@@ -4158,10 +4203,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             terminalAnnouncementTaskIdRef.current !== capturedTaskNotification.task_id ||
             createdProgressRouteRef.current?.task_id !== capturedTaskNotification.task_id
           ) {
-            capturedTaskNotificationRef.current = null;
+            clearCapturedTaskNotification(capturedTaskNotification);
             return;
           }
-          capturedTaskNotificationRef.current = null;
+          clearCapturedTaskNotification(capturedTaskNotification);
           adoptProductP2Notification(
             owner,
             capturedTaskNotification.notification,
@@ -4271,6 +4316,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           if (
             previewDisposition.kind === 'presentation' &&
             previewDisposition.task_notification &&
+            previewDisposition.ack.surface === 'audio' &&
             productP2TaskNotificationRequiresCaptureArbitration({
               p1_status: notificationP1Status,
               terminal_notification_check_required: terminalNotificationCheckRequiredRef.current,
@@ -4288,14 +4334,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               throw new Error('a captured Task notification is still unresolved');
             }
             if (retained === null) {
-              capturedTaskNotificationRef.current = Object.freeze({
+              const captured = Object.freeze<CapturedProductTaskNotification>({
                 owner,
                 notification: outcome.notification,
+                disposition: previewDisposition,
                 admission: notificationAdmission,
                 task_id: taskRoute.task_id,
                 response_id: previewDisposition.response_id,
                 response_generation: previewDisposition.response.response_generation,
               });
+              capturedTaskNotificationRef.current = captured;
+              scheduleCapturedTaskNotificationDeadline(captured);
             }
             queueTerminalAnnouncement(taskRoute.task_id);
             return;
@@ -6711,7 +6760,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     clearScheduledProductVoiceLoopCapture();
     voiceLoopEnabledRef.current = false;
     voiceLoopGenerationRef.current += 1;
-    capturedTaskNotificationRef.current = null;
+    clearCapturedTaskNotification();
     // Exit is the authoritative local presentation fence. An accepted Agent
     // execution may finish under retained server teardown, but its unpresented
     // response cannot block, text-present, ACK or play in the next loop.
