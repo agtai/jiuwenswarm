@@ -4642,7 +4642,7 @@ test('mounted post-submit Task AUDIO fallback retains the exact foreground P1 pl
   }
 });
 
-test('mounted stale Task TEXT defers to one foreground-ordered ACK without presentation failure or capture wedge', async () => {
+test('mounted stale Task TEXT replays after foreground ACK and presents before its only ACK', async () => {
   const i18n = await createI18n();
   const waitForMounted = (predicate, message) => waitForMountedDefault(predicate, message, 10_000);
   const sessionId = 'mounted-task-text-deferred-session';
@@ -4652,6 +4652,7 @@ test('mounted stale Task TEXT defers to one foreground-ordered ACK without prese
   const projectedMessages = [];
   const queuedNotifications = [];
   const notificationWaiters = [];
+  const notificationResults = new Map();
   const unifiedGate = deferred();
   const eventOrder = [];
   let foregroundAckObserved = false;
@@ -4662,7 +4663,10 @@ test('mounted stale Task TEXT defers to one foreground-ordered ACK without prese
   const activateP2 = createMountedP2ActivationResponder();
   const publishNotification = notification => {
     const waiter = notificationWaiters.shift();
-    if (waiter) waiter(notification);
+    if (waiter) {
+      notificationResults.set(waiter.requestId, notification);
+      waiter.resolve(notification);
+    }
     else queuedNotifications.push(notification);
   };
   const request = async (method, params, options) => {
@@ -4671,10 +4675,18 @@ test('mounted stale Task TEXT defers to one foreground-ordered ACK without prese
       binding = { ...params };
       return activateP2(params);
     }
-    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.close') {
+      notificationWaiters.length = 0;
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
     if (method === 'live_voice.composition.p2.notification.next') {
-      if (queuedNotifications.length > 0) return queuedNotifications.shift();
-      return new Promise(resolve => notificationWaiters.push(resolve));
+      if (notificationResults.has(options.requestId)) return notificationResults.get(options.requestId);
+      if (queuedNotifications.length > 0) {
+        const notification = queuedNotifications.shift();
+        notificationResults.set(options.requestId, notification);
+        return notification;
+      }
+      return new Promise(resolve => notificationWaiters.push({ requestId: options.requestId, resolve }));
     }
     if (method === 'live_voice.composition.p2.presentation.ack') {
       if (params.response_id === 'mounted-task-text-foreground-response') {
@@ -4682,8 +4694,8 @@ test('mounted stale Task TEXT defers to one foreground-ordered ACK without prese
         eventOrder.push('foreground-ack');
       } else {
         assert.equal(params.response_id, 'mounted-task-text-stale-response');
-        assert.equal(foregroundAckObserved, true, 'stale Task TEXT may ACK only after its authoritative foreground ACK');
-        eventOrder.push('deferred-text-ack');
+        assert.equal(foregroundAckObserved, true, 'replayed Task TEXT may ACK only after its authoritative foreground ACK');
+        eventOrder.push('replayed-text-ack');
       }
       return {
         request_id: options.requestId,
@@ -4920,23 +4932,105 @@ test('mounted stale Task TEXT defers to one foreground-ordered ACK without prese
           calls.some(
             call =>
               call.method === 'live_voice.composition.p2.presentation.ack' &&
-              call.params.response_id === 'mounted-task-text-stale-response',
-          ),
-        'foreground settlement did not adopt the retained Task TEXT through its exact ACK authority',
+              call.params.response_id === 'mounted-task-text-foreground-response',
+        ),
+        'foreground settlement did not emit its exact ACK',
       );
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.p2.activate' && call.params.activation_generation > 1),
+        'foreground settlement did not refresh the P2 owner for retained Task TEXT replay',
+      );
+    });
+
+    await act(async () => {
+      await waitForMounted(
+        () =>
+          notificationWaiters.length === 1 &&
+          calls.some(
+            call =>
+              call.method === 'live_voice.composition.p2.notification.next' &&
+              call.params.activation_generation > 1,
+          ),
+        'successor P2 owner did not request retained Task TEXT replay',
+      );
+      publishNotification({
+        ok: true,
+        result: {
+          status: 'notification',
+          ...binding,
+          kind: 'agent.output',
+          response: {
+            interaction_id: binding.interaction_id,
+            response_id: 'mounted-task-text-stale-response',
+            response_generation: 1,
+          },
+          agent_event: {
+            event_type: 'chat.final',
+            text: 'This stale Task TEXT must remain side-effect free until foreground settlement.',
+            source_provenance: 'server.task_notification',
+          },
+          presentation_unit: {
+            surface: 'text',
+            unit_id: 'mounted-task-text-replayed-unit',
+            seq: 0,
+            content_ref: `sha256:${'d'.repeat(64)}`,
+          },
+        },
+      });
+      await waitForMounted(
+        () =>
+          calls.filter(call => call.method === 'live_voice.media.activate').length === 2 &&
+          states.at(-1)?.p1_status === 'starting',
+        'successor Task TEXT did not prepare a fresh media owner',
+      );
+      await browser.emitFirstFrame(0);
+    });
+
+    await act(async () => {
       try {
         await waitForMounted(
-          () => calls.filter(call => call.method === 'live_voice.composition.p2.activate').length === 2,
-          'retained Task TEXT ACK did not release the successor capture activation',
+          () =>
+            calls.some(
+              call =>
+                call.method === 'live_voice.speech.synthesize_batch' &&
+                call.params.response.response_id === 'mounted-task-text-stale-response',
+            ),
+          'successor did not present retained Task TEXT through TTS',
         );
       } catch (error) {
         assert.fail(
           `${error.message}; states=${states
             .slice(-12)
             .map(state => `${state.p1_status}/${state.text_status}/${state.terminal_announcement_state}`)
-            .join(',')}; methods=${calls.map(call => call.method).join(',')}`,
+            .join(',')}; methods=${calls
+            .map(call => `${call.method}:${call.params.response?.response_id ?? call.params.response_id ?? call.params.activation_generation ?? 'none'}`)
+            .join(',')}`,
         );
       }
+      await waitForMounted(() => browser.counts.sourceStarts === 2, 'replayed Task TEXT did not start browser playout');
+    });
+
+    assert.equal(
+      calls.filter(
+        call =>
+          call.method === 'live_voice.composition.p2.presentation.ack' &&
+          call.params.response_id === 'mounted-task-text-stale-response',
+      ).length,
+      0,
+      'replayed Task TEXT must remain unacknowledged until browser playout completes',
+    );
+
+    await act(async () => {
+      browser.endLatestSource();
+      await waitForMounted(
+        () =>
+          calls.some(
+            call =>
+              call.method === 'live_voice.composition.p2.presentation.ack' &&
+              call.params.response_id === 'mounted-task-text-stale-response',
+          ),
+        'replayed Task TEXT successful playout did not emit its exact ACK',
+      );
     });
 
     const acknowledgements = calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack');
@@ -4956,14 +5050,14 @@ test('mounted stale Task TEXT defers to one foreground-ordered ACK without prese
         },
         {
           response_id: 'mounted-task-text-stale-response',
-          response_generation: 2,
+          response_generation: 1,
           surface: 'text',
-          unit_id: 'mounted-task-text-stale-unit',
+          unit_id: 'mounted-task-text-replayed-unit',
         },
       ],
-      'foreground ACK must be the documented authority before exactly one retained Task TEXT ACK',
+      'foreground ACK must precede exactly one replayed and presented Task TEXT ACK',
     );
-    assert.deepEqual(eventOrder, ['foreground-ack', 'deferred-text-ack']);
+    assert.deepEqual(eventOrder, ['foreground-ack', 'replayed-text-ack']);
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 0);
     assert.equal(
       calls.filter(
@@ -4971,13 +5065,13 @@ test('mounted stale Task TEXT defers to one foreground-ordered ACK without prese
           call.method === 'live_voice.speech.synthesize_batch' &&
           call.params.response.response_id === 'mounted-task-text-stale-response',
       ).length,
-      0,
-      'retained Task TEXT must ACK without a duplicate TTS replay',
+      1,
+      'retained Task TEXT must present exactly once after successor replay',
     );
     assert.equal(
-      projectedMessages.some(event => event.message.content.includes('This stale Task TEXT')),
-      false,
-      'retained Task TEXT ACK must not create a duplicate UI/history projection',
+      projectedMessages.filter(event => event.message.content.includes('This stale Task TEXT')).length,
+      1,
+      'retained Task TEXT must project into UI/history exactly once after foreground settlement',
     );
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 1);
     assert.equal(
@@ -4990,7 +5084,7 @@ test('mounted stale Task TEXT defers to one foreground-ordered ACK without prese
       false,
       'stale Task TEXT must not mutate Task, Agent, or Tool authority',
     );
-    assert.equal(calls.filter(call => call.method === 'live_voice.media.playout_receipt').length, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.playout_receipt').length, 2);
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();

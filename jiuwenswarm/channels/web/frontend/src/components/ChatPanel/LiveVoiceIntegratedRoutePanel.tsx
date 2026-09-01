@@ -1831,6 +1831,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     if (predecessorGeneration === null || binding.activation_generation <= predecessorGeneration) return;
     voiceLoopP2RefreshAfterGenerationRef.current = null;
     voiceLoopP2RefreshInFlightRef.current = false;
+    // Clearing the refresh fence only mutates refs. Wake this bounded terminal
+    // handoff so the Registry's successor-bound TEXT is polled immediately.
+    if (['queued', 'fetching'].includes(terminalAnnouncementStateRef.current)) {
+      setP2NotificationWakeEpoch(epoch => epoch + 1);
+    }
     // Predecessor output is fenced at Exit. Successor capture is independent
     // of the shielded teardown of an already accepted Agent turn.
     scheduleProductVoiceLoopCapture();
@@ -2257,34 +2262,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       return settleDeferredTaskPresentationFailure(owner);
     }
     if (retained.disposition.ack.surface !== 'text') return false;
-    const disposition = retained.disposition;
-    let markPlayoutSettled: () => void = () => undefined;
-    const playoutSettlement = new Promise<void>(resolve => {
-      markPlayoutSettled = resolve;
-    });
-    markPlayoutSettled();
-    const acknowledgementAttempt: PendingProductPresentationAttempt = {
-      owner,
-      input: {
-        ...disposition.ack,
-        presented_at: new Date().toISOString(),
-      },
-      response: disposition.response,
-      playoutSettlement,
-      markPlayoutSettled,
-      task_notification: {
-        task_id: createdProgressRouteRef.current?.task_id ?? terminalAnnouncementTaskIdRef.current ?? '',
-        disposition,
-        retry_count: 0,
-        retry_pending: false,
-      },
-      notification_repoll_before_capture: true,
-    };
+    const binding = owner.snapshot().binding;
+    if (binding === null || !voiceLoopEnabledRef.current) return false;
+    // notification.next is pop-on-read, so this TEXT response is older than
+    // the foreground response that just settled. ACKing it here would claim a
+    // presentation that never reached UI, history or TTS. Retire the exact P2
+    // owner instead; the Registry keeps the unacknowledged terminal fact and
+    // rebinds it to the successor response generation for normal presentation.
     deferredTaskPresentationRef.current = null;
-    pendingPresentationAttemptRef.current = acknowledgementAttempt;
-    updateTerminalAnnouncementState('acking');
-    setPendingPresentationAck(disposition.ack);
-    void settleProductPresentationAck(acknowledgementAttempt);
+    voiceLoopP2RefreshAfterGenerationRef.current = Math.max(
+      voiceLoopP2RefreshAfterGenerationRef.current ?? binding.activation_generation,
+      binding.activation_generation,
+    );
+    voiceLoopP2RefreshInFlightRef.current = false;
+    updateTerminalAnnouncementState('queued');
+    requestVoiceLoopP2Refresh();
     return true;
   };
 
@@ -2434,8 +2426,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // immediate failure authority while the foreground is busy: the Registry
       // retains its safe TEXT fallback, and the authoritative foreground ACK
       // releases that one deferred server presentation. A legitimate Task
-      // TEXT remains retained until that same ACK owner can acknowledge it
-      // without UI or TTS effects. In particular, Task fallback must not enter
+      // TEXT remains unacknowledged; foreground settlement retires this P2
+      // owner so the Registry can rebind the terminal fact to a successor for
+      // normal UI, TTS and ACK. In particular, Task fallback must not enter
       // playAgentText and fail the P1 owner leased by the foreground response.
       retainDeferredTaskPresentation(owner, disposition);
       if (disposition.ack.surface === 'audio' && !settleDeferredTaskPresentationFailure(owner)) {
