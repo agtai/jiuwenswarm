@@ -1031,6 +1031,7 @@ export class ProductP1VoiceRouteOwner {
       response: Readonly<AudioResponseRef>;
       unit_id: string;
       text: string;
+      capture_during_playout?: boolean;
     }>
   ): Promise<void> {
     if (this.#speech === null || this.#playout === null || this.#closed || this.#closeRequested) {
@@ -1076,7 +1077,7 @@ export class ProductP1VoiceRouteOwner {
       // nullish coalescing here would turn a valid stream into a zero-frame
       // batch and reject its first media frame as stale.
       const frameCount = result.downlink === null ? chunks.length : result.downlink.frame_count;
-      const captureDuringPlayout = result.downlink !== null;
+      const captureDuringPlayout = result.downlink !== null && input.capture_during_playout !== false;
       if (result.downlink !== null) {
         if (captureDuringPlayout) {
           this.#successorCaptureReadiness = 'pending';
@@ -1201,6 +1202,13 @@ export class ProductP1VoiceRouteOwner {
           this.#requireCurrent(operationGeneration);
           this.#setStatus('capturing', pendingPlayout.degradationReason);
           this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
+        } else if (!captureDuringPlayout) {
+          // Task announcements deliberately pause listening before playback.
+          // Do not create an overlap capture that can hear the announcement
+          // itself and survive as an unarmed successor after the final ACK.
+          // The Integrated route starts one fresh capture after presentation
+          // settlement, using the normal authorized media-start path.
+          this.#setStatus('recognized', null);
         } else {
           this.#setStatus('recognized', captureReadiness?.reason ?? 'AUDIO_CAPTURE_FAILED');
         }

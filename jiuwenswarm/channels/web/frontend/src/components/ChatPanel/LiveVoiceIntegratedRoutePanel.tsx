@@ -2848,6 +2848,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         response: disposition.response,
         unit_id: disposition.unit_id,
         text: disposition.text,
+        // Task announcements are system audio, not foreground Agent answers.
+        // Their existing arbiter pauses capture before playout; starting the
+        // generic overlap capture here would record the announcement itself
+        // and leave the final notification's successor unarmed until the
+        // capture-duration bound. Resume with a fresh capture after ACK.
+        capture_during_playout: !disposition.task_notification,
       });
       void (disposition.task_notification
         ? awaitProductTaskNotificationPlayout(

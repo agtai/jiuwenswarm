@@ -2084,6 +2084,16 @@ test('overlap capture publishes its exact binding before playout EOT can race co
   assert.match(handler, /p1VoiceCaptureBindingRef\.current = binding/);
 });
 
+test('Task AUDIO playout suppresses overlap capture before post-ACK listening resumes', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const start = source.indexOf('const playout = voiceOwner.playAgentText({');
+  const end = source.indexOf('void (disposition.task_notification', start);
+  const handler = source.slice(start, end);
+
+  assert.equal(start >= 0 && end > start, true);
+  assert.match(handler, /capture_during_playout: !disposition\.task_notification/);
+});
+
 test('explicit Live Voice exit fences old playout settlement without blocking its visible-text ACK', async () => {
   const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
   const start = source.indexOf('const foregroundPlayoutLease = ownsForegroundPresentation');

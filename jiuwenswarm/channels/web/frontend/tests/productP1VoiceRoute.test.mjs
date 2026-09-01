@@ -4124,6 +4124,7 @@ async function runConcurrentCaptureJourney(options = {}) {
     response,
     unit_id: 'unit-duplex-1',
     text: options.agentText ?? 'duplex Agent response',
+    ...(options.captureDuringPlayout === false ? { capture_during_playout: false } : {}),
   });
   void playing.catch(() => undefined);
   if (options.sendSecondFrame !== false) {
@@ -4716,6 +4717,41 @@ async function runFirstRecoveredRetry(journey, afterCaptureStarted = async () =>
   await playing;
   return { owner, recognition, statuses };
 }
+
+test('formal P1 Task announcement playout suppresses self-capturing overlap before a fresh resume', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    pauseForNotificationBeforePlayout: true,
+    captureDuringPlayout: false,
+    sendSecondFrame: false,
+  });
+
+  assert.equal(journey.playError, null);
+  assert.equal(journey.notificationPauseOutcome, 'paused');
+  assert.equal(journey.concurrentCaptureStartedCalls, 0);
+  assert.equal(journey.activationCount, 1);
+  assert.deepEqual(journey.owner.status(), { status: 'recognized', reason: null });
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length,
+    1,
+  );
+  const priorWorklet = journey.environment.worklet;
+  const resumed = journey.owner.startCapture({
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+    locale: 'zh-CN',
+  });
+  await sendFirstFrameToNextWorklet(journey.environment, priorWorklet);
+  await resumed;
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length,
+    2,
+  );
+  await journey.owner.close();
+});
 
 test('formal P1 preserves the streaming finalize budget for initial and successor captures', async () => {
   const journey = await runConcurrentCaptureJourney({ streamingRecognition: true });
