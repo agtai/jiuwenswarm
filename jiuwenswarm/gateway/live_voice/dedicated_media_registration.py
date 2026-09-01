@@ -2839,10 +2839,15 @@ class DedicatedMediaProductRegistry:
         assert isinstance(event, Mapping)
         assert isinstance(response, Mapping)
         assert isinstance(unit, Mapping)
+        surface = unit.get("surface")
+        trusted_task_audio = (
+            surface == "audio"
+            and event.get("source_provenance") == "server.task_notification"
+        )
         if (
             result.get("kind") != "agent.output"
             or event.get("event_type") != "chat.final"
-            or unit.get("surface") != "text"
+            or (surface != "text" and not trusted_task_audio)
             or not isinstance(event.get("text"), str)
             or not str(event["text"]).strip()
         ):

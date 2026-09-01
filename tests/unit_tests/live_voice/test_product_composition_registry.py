@@ -4870,6 +4870,7 @@ async def test_current_p2_poll_retries_terminal_progress_after_foreground_recove
         terminal_unit = cast(
             dict[str, object], terminal_notification["presentation_unit"]
         )
+        assert terminal_unit["surface"] == "audio"
         acknowledged = await registry.handle_p2_presentation_ack(
             params=_p2_params(
                 response_id=terminal_response["response_id"],

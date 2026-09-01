@@ -664,6 +664,7 @@ test('bounded P2 notification owner delivers eighteen ordered items through two 
 test('P2 notification replay re-observes an exact retained presentation without advancing the poll cursor', async () => {
   const calls = [];
   const retained = new Map();
+  let mutateReplayContent = false;
   const terminal = notificationItem(1, {
     response: {
       interaction_id: binding.interaction_id,
@@ -677,7 +678,7 @@ test('P2 notification replay re-observes an exact retained presentation without 
       text: '后台任务已完成',
     },
     presentation_unit: {
-      surface: 'text',
+      surface: 'audio',
       unit_id: 'unit-terminal',
       seq: 0,
       source_start_utf8: 0,
@@ -694,7 +695,16 @@ test('P2 notification replay re-observes an exact retained presentation without 
       assert.equal(method, PRODUCT_P2_NOTIFICATION_NEXT_METHOD);
       calls.push({ params: { ...params }, requestId });
       const replay = retained.get(requestId);
-      if (replay !== undefined) return replay;
+      if (replay !== undefined) {
+        if (!mutateReplayContent) return replay;
+        return notificationBatch(
+          replay.result.notifications.map(item =>
+            item.response?.response_id === 'response-terminal'
+              ? { ...item, agent_event: { ...item.agent_event, text: 'changed replay content' } }
+              : item,
+          ),
+        );
+      }
       const value =
         params.notification_sequence === 1
           ? notificationBatch([notificationItem(0), terminal])
@@ -708,16 +718,26 @@ test('P2 notification replay re-observes an exact retained presentation without 
   assert.equal((await owner.nextNotification()).publish_seq, 0);
   assert.equal((await owner.nextNotification()).response.response_id, 'response-terminal');
   assert.equal(calls.length, 1);
+  for (const target of [
+    { interaction_id: binding.interaction_id, response_id: 'response-foreign', response_generation: 12, unit_id: 'unit-terminal' },
+    { interaction_id: binding.interaction_id, response_id: 'response-terminal', response_generation: 13, unit_id: 'unit-terminal' },
+    { interaction_id: binding.interaction_id, response_id: 'response-terminal', response_generation: 12, unit_id: 'unit-foreign' },
+  ]) {
+    await assert.rejects(owner.replayNotificationForMediaAuthorization(target), /target is not retained/);
+  }
+  assert.equal(calls.length, 1);
+
+  mutateReplayContent = true;
   await assert.rejects(
     owner.replayNotificationForMediaAuthorization({
       interaction_id: binding.interaction_id,
-      response_id: 'response-foreign',
+      response_id: 'response-terminal',
       response_generation: 12,
       unit_id: 'unit-terminal',
     }),
-    /target is not retained/,
+    /replay result changed/,
   );
-  assert.equal(calls.length, 1);
+  mutateReplayContent = false;
 
   await owner.replayNotificationForMediaAuthorization({
     interaction_id: binding.interaction_id,
@@ -725,13 +745,61 @@ test('P2 notification replay re-observes an exact retained presentation without 
     response_generation: 12,
     unit_id: 'unit-terminal',
   });
-  assert.equal(calls.length, 2);
-  assert.equal(calls[1].requestId, calls[0].requestId);
-  assert.deepEqual(calls[1].params, calls[0].params);
+  assert.equal(calls.length, 3);
+  assert.equal(calls[2].requestId, calls[0].requestId);
+  assert.deepEqual(calls[2].params, calls[0].params);
 
   assert.equal((await owner.nextNotification()).publish_seq, 2);
-  assert.equal(calls[2].params.notification_sequence, 2);
-  assert.notEqual(calls[2].requestId, calls[0].requestId);
+  assert.equal(calls[3].params.notification_sequence, 2);
+  assert.notEqual(calls[3].requestId, calls[0].requestId);
+  await owner.close();
+});
+
+test('P2 notification replay rejects audio that is not a server Task notification', async () => {
+  let notificationCalls = 0;
+  const untrustedAudio = notificationItem(0, {
+    response: {
+      interaction_id: binding.interaction_id,
+      response_id: 'response-untrusted-audio',
+      response_generation: 13,
+    },
+    agent_event: {
+      ...notificationItem(0).agent_event,
+      event_type: 'chat.final',
+      text: 'ordinary Agent audio must not gain Task replay authority',
+    },
+    presentation_unit: {
+      surface: 'audio',
+      unit_id: 'unit-untrusted-audio',
+      seq: 0,
+      source_start_utf8: 0,
+      source_end_utf8: 58,
+      content_ref: 'sha256:untrusted-fixture',
+    },
+  });
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    notification_batch_size: 16,
+    request: async method => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_CLOSE_METHOD) return response('closed');
+      notificationCalls += 1;
+      return notificationBatch([untrustedAudio]);
+    },
+  });
+  await owner.start(binding);
+  assert.equal((await owner.nextNotification()).response.response_id, 'response-untrusted-audio');
+
+  await assert.rejects(
+    owner.replayNotificationForMediaAuthorization({
+      interaction_id: binding.interaction_id,
+      response_id: 'response-untrusted-audio',
+      response_generation: 13,
+      unit_id: 'unit-untrusted-audio',
+    }),
+    /target is not retained/,
+  );
+  assert.equal(notificationCalls, 1);
   await owner.close();
 });
 

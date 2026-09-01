@@ -1571,7 +1571,12 @@ def _observe_task_notification(
     unit_id: str = "unit-1",
     text: str = "Task progress notification",
     response_generation: int = 0,
+    surface: str = "text",
+    source_provenance: str | None = None,
 ) -> ResponseRef:
+    agent_event = {"event_type": "chat.final", "text": text}
+    if source_provenance is not None:
+        agent_event["source_provenance"] = source_provenance
     registry.observe_agent_response(
         {
             "ok": True,
@@ -1587,8 +1592,8 @@ def _observe_task_notification(
                     "response_id": response_id,
                     "response_generation": response_generation,
                 },
-                "agent_event": {"event_type": "chat.final", "text": text},
-                "presentation_unit": {"surface": "text", "unit_id": unit_id},
+                "agent_event": agent_event,
+                "presentation_unit": {"surface": surface, "unit_id": unit_id},
             },
         },
         routed_session_id="session-1",
@@ -1669,8 +1674,9 @@ def test_task_notification_speech_authority_hands_off_to_rotated_media_owner() -
                 "agent_event": {
                     "event_type": "chat.final",
                     "text": "Task progress notification",
+                    "source_provenance": "server.task_notification",
                 },
-                "presentation_unit": {"surface": "text", "unit_id": "unit-1"},
+                "presentation_unit": {"surface": "audio", "unit_id": "unit-1"},
             },
         },
         routed_session_id="session-1",
@@ -1720,6 +1726,41 @@ def test_task_notification_speech_authority_hands_off_to_rotated_media_owner() -
     )
 
     assert registry.authorize(binding) == binding
+
+
+@pytest.mark.parametrize(
+    "source_provenance", [None, "server.foreground_agent"]
+)
+def test_non_task_audio_notification_never_retains_speech_authority(
+    source_provenance: str | None,
+) -> None:
+    registry = _active_registry()
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    record = registry.consume_ticket(_media_ticket(activation), request_origin=ORIGIN)
+    assert record is not None
+    record.route_completed = True
+
+    response = _observe_task_notification(
+        registry,
+        response_id="response-untrusted-audio",
+        unit_id="unit-untrusted-audio",
+        surface="audio",
+        source_provenance=source_provenance,
+    )
+
+    assert (response, "unit-untrusted-audio") not in record.synthesis_content_sha256
+    authority = registry._product_activations[
+        ("session-1", "connection-1", "interaction-1")
+    ]
+    assert not any(
+        key[0] == response and key[1] == "unit-untrusted-audio"
+        for key in authority.synthesis_content_sha256
+    )
 
 
 @pytest.mark.asyncio
@@ -1871,6 +1912,7 @@ async def test_task_notification_reobservation_authorizes_late_media_owner() -> 
     "failure",
     [
         "no_owner",
+        "wrong_subject",
         "wrong_session",
         "wrong_connection",
         "activation_generation",
@@ -1927,6 +1969,8 @@ async def test_task_notification_speech_authority_failures_never_call_provider(
         assert successor_record is not None
         successor_record.route_completed = True
         subject_id = str(successor["subject_id"])
+    if failure == "wrong_subject":
+        subject_id = "subject-foreign"
     request_response = (
         ResponseRef("interaction-1", "response-stale", 1)
         if failure == "stale_response"

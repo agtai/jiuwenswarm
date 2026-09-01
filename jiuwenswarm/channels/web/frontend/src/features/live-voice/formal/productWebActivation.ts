@@ -1258,7 +1258,7 @@ export class ProductWebP2ActivationOwner {
         response?.interaction_id === target.interaction_id &&
         response.response_id === target.response_id &&
         response.response_generation === target.response_generation &&
-        unit?.surface === 'text' &&
+        (unit?.surface === 'text' || unit?.surface === 'audio') &&
         unit.unit_id === target.unit_id
       );
     };

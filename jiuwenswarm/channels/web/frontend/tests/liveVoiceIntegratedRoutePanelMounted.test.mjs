@@ -3721,6 +3721,11 @@ test('mounted non-stale Task AUDIO ACK waits for successful P1 playout and never
     const playoutReceiptIndex = calls.findIndex(call => call.method === 'live_voice.media.playout_receipt');
     const presentationAckIndex = calls.findIndex(call => call.method === 'live_voice.composition.p2.presentation.ack');
     assert.equal(playoutReceiptIndex >= 0 && playoutReceiptIndex < presentationAckIndex, true);
+    await act(async () => {
+      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'normal Task AUDIO playout did not resume listening');
+      await browser.emitFirstFrame(0);
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'normal Task AUDIO successor capture did not become ready');
+    });
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();
