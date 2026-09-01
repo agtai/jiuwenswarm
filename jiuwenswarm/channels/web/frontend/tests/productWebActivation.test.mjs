@@ -8,6 +8,7 @@ import {
   PRODUCT_P2_PRESENTATION_ACK_METHOD,
   PRODUCT_P2_PRESENTATION_FAILED_METHOD,
   PRODUCT_P2_BARGE_IN_METHOD,
+  PRODUCT_P2_INTERRUPT_GENERATION_METHOD,
   PRODUCT_P2_SUBMIT_METHOD,
   PRODUCT_P3_PROGRESS_ACTIVATE_METHOD,
   PRODUCT_P3_PROGRESS_CLOSE_METHOD,
@@ -460,6 +461,8 @@ test('P2 close synchronously fences an in-flight media authority refresh before 
   await owner.start(binding);
   const refreshing = owner.refreshMediaAuthority();
   const closing = owner.close();
+  assert.equal(typeof owner.retirementStarted, 'function');
+  assert.equal(owner.retirementStarted(), true);
   assert.equal(owner.authorizesMediaStart(binding), false);
   await Promise.resolve();
   assert.deepEqual(
@@ -1826,6 +1829,84 @@ test('barge-in response loss stays pending until the exact input is replayed', a
   assert.equal((await owner.bargeIn(input)).replayed, true);
   assert.equal(owner.hasPendingBargeIn(), false);
   assert.equal(bargeCalls, 2);
+});
+
+test('generation interruption releases a deterministic malformed response instead of replaying it forever', async () => {
+  const interruptCalls = [];
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_INTERRUPT_GENERATION_METHOD) {
+        interruptCalls.push([params, requestId]);
+        return durableResponse(requestId, 'generation_interrupted', {
+          action_id: params.action_id,
+          response_id: params.response_id,
+          response_generation: params.response_generation,
+          fence_status: 'fenced',
+          applied: true,
+          replayed: false,
+          effect_ids: ['effect-response-fence'],
+          // `cancel_scope` is intentionally absent: the response arrived, but
+          // it is a deterministic protocol violation, not transport loss.
+        });
+      }
+      return response('closed');
+    },
+  });
+  const input = {
+    action_id: 'generation-interrupt-malformed',
+    response_id: 'response-malformed',
+    response_generation: 2,
+  };
+  await owner.start(binding);
+
+  await assert.rejects(owner.interruptGeneration(input), /generation interruption response binding/);
+
+  assert.equal(interruptCalls.length, 1);
+  assert.equal(owner.hasPendingGenerationInterrupt(), false);
+});
+
+test('generation interruption retains only ambiguous transport loss for exact replay', async () => {
+  const interruptCalls = [];
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_INTERRUPT_GENERATION_METHOD) {
+        interruptCalls.push([params, requestId]);
+        if (interruptCalls.length === 1) {
+          throw webError('generation interruption response lost', 'REQUEST_TIMEOUT', true);
+        }
+        return durableResponse(requestId, 'generation_interrupted', {
+          action_id: params.action_id,
+          response_id: params.response_id,
+          response_generation: params.response_generation,
+          cancel_scope: 'round.cancel',
+          fence_status: 'fenced',
+          applied: true,
+          replayed: true,
+          effect_ids: ['effect-response-fence'],
+        });
+      }
+      return response('closed');
+    },
+  });
+  const input = {
+    action_id: 'generation-interrupt-response-loss',
+    response_id: 'response-loss',
+    response_generation: 3,
+  };
+  await owner.start(binding);
+
+  await assert.rejects(owner.interruptGeneration(input), /response lost/);
+  assert.equal(owner.hasPendingGenerationInterrupt(), true);
+  assert.equal((await owner.interruptGeneration(input)).replayed, true);
+
+  assert.equal(owner.hasPendingGenerationInterrupt(), false);
+  assert.equal(interruptCalls.length, 2);
+  assert.equal(interruptCalls[0][1], interruptCalls[1][1]);
+  assert.deepEqual(interruptCalls[0][0], interruptCalls[1][0]);
 });
 
 test('stock Web P3 owner binds exact committed voice origin and rejects borrowing', async () => {

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 export { productTaskProgressTranslationKey } from './productTaskProgressPresentation';
 import {
   FEATURE_LIVE_VOICE_INTEGRATED_WEB,
+  FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION,
   FEATURE_LIVE_VOICE_INTEGRATED_P1,
   FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION,
   FEATURE_LIVE_VOICE_TASK_DEMO,
@@ -124,6 +125,24 @@ function sameProductP2ActivationBinding(
     left.activation_id === right.activation_id &&
     left.activation_generation === right.activation_generation
   );
+}
+
+export function normalizeProductP1StatusForP2Retirement(
+  status: ProductP1VoiceStatus,
+  reason: string | null,
+  p2RetirementStarted: boolean,
+): Readonly<{ status: ProductP1VoiceStatus; reason: string | null }> {
+  if (
+    p2RetirementStarted
+    && status === 'failed'
+    && reason === 'STREAMING_SPEECH_ROUTE_ABORTED'
+  ) {
+    return Object.freeze({
+      status: 'cleanup_pending',
+      reason: 'FORMAL_P1_CLEANUP_IN_PROGRESS',
+    });
+  }
+  return Object.freeze({ status, reason });
 }
 
 export interface LiveVoiceIntegratedRoutePanelProps {
@@ -317,6 +336,17 @@ function durablePresentationAckMatches(
     operation.method === PRODUCT_P2_PRESENTATION_ACK_METHOD &&
     sameProductPresentation(operation.params as ProductPresentationAckInput, input) &&
     operation.params.presented_at === input.presented_at
+  );
+}
+
+export const PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER = 'PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER';
+
+/** True when playout stood down for a live speaker rather than failing. */
+function playoutDeferredToSpeaker(value: unknown): boolean {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    (value as { reason?: unknown }).reason === PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER
   );
 }
 
@@ -834,6 +864,12 @@ type PendingProductPresentationAttempt = {
   notification_repoll_before_capture?: boolean;
   failure_reason?: ProductTaskPresentationFailureReason;
   settlement?: Promise<void>;
+  /**
+   * Set when playout yielded to a live speaker. The announcement is retained
+   * exactly as delivered and replayed once that speaker settles; it is not a
+   * playout failure and must not rebuild the P1 route.
+   */
+  deferred_to_speaker?: boolean;
 };
 
 function foregroundPresentationFenceMatchesResponse(
@@ -1473,6 +1509,13 @@ export function retainBoundedPresentedProductResponse(responses: Map<string, tru
   responses.set(responseId, true);
 }
 
+function productResponseGenerationIdentity(response: Readonly<{
+  response_id: string;
+  response_generation: number;
+}>): string {
+  return `${response.response_generation}:${response.response_id}`;
+}
+
 function browserSpeechCompatibilityAvailable(): boolean {
   if (typeof window === 'undefined') return false;
   const browserWindow = window as Window & {
@@ -1736,6 +1779,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   } | null>(null);
   const pendingPresentationAttemptRef = useRef<PendingProductPresentationAttempt | null>(null);
   const retryTerminalAnnouncementHandlerRef = useRef<(retained: NonNullable<typeof pendingPresentationAttemptRef.current>) => void>(() => undefined);
+  const resumeDeferredTaskAnnouncementRef = useRef<(retained: NonNullable<typeof pendingPresentationAttemptRef.current>) => void>(() => undefined);
   const pendingBargeInRef = useRef<{
     owner: ProductWebP2ActivationOwner;
     input: {
@@ -1783,6 +1827,73 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const activationGenerationRef = useRef(0);
   const productTurnSequenceRef = useRef(0);
   const bargeInSequenceRef = useRef(0);
+  // The hands-free listening window that runs while an Agent answer is still
+  // being generated. It is bound to the exact response it may replace, so a
+  // late or reordered capture can never fence a newer answer.
+  const generationCaptureRef = useRef<Readonly<{
+    owner: ProductWebP2ActivationOwner;
+    fence: PendingForegroundPresentationFence;
+    loop_generation: number;
+  }> | null>(null);
+  const pendingGenerationInterruptRef = useRef<Readonly<{
+    owner: ProductWebP2ActivationOwner;
+    input: { action_id: string; response_id: string; response_generation: number };
+  }> | null>(null);
+  /**
+   * Whether this exact activation still owns an interruption that has not
+   * settled. Five rounds of review turned this into the single question every
+   * barrier here has to ask: an unsettled interruption closes its own owner's
+   * capture, listening window, announcement arbitration and turn admission,
+   * while a retired activation's handle must close nothing at all -- matching
+   * on "any pending interruption" once fenced every later Session out of
+   * generation-time listening for the life of the page.
+   */
+  const ownerHasUnsettledGenerationInterrupt = (
+    candidate: ProductWebP2ActivationOwner | null,
+  ): boolean => candidate !== null && pendingGenerationInterruptRef.current?.owner === candidate;
+  /**
+   * Retire the generation-time listening window.
+   *
+   * The window is the one capture allowed to keep the P2 notification poll
+   * alive, and the next answer is refused a window of its own while one is
+   * retained -- so a window left behind does not merely leak, it silently
+   * disables the feature for the rest of the session. Four separate paths must
+   * retire it, each found by a different review round: Session switch, Exit,
+   * browser capture ownership surrender, and the exact response failing. They
+   * all go through here so the complete set stays greppable from one name.
+   *
+   * `matches` narrows the retirement to a window this caller owns; omit it to
+   * retire whatever is there.
+   */
+  const retireGenerationListening = (
+    matches?: (retained: { fence: PendingForegroundPresentationFence }) => boolean,
+  ): boolean => {
+    const retained = generationCaptureRef.current;
+    if (retained === null) return false;
+    if (matches !== undefined && !matches(retained)) return false;
+    generationCaptureRef.current = null;
+    return true;
+  };
+  const generationInterruptSequenceRef = useRef(0);
+  // Responses this route has interrupted. A fenced answer can still be in
+  // flight from the server, so exact response id + generation, not timing, is
+  // what refuses it.
+  const interruptedProductResponsesRef = useRef(new Map<string, true>());
+  const interruptProductGenerationHandlerRef = useRef<() => Promise<void>>(async () => undefined);
+
+  /**
+   * Keep pulling P2 notifications while the generation-time window listens.
+   *
+   * Ordinary capture and waiting for an answer are mutually exclusive, so the
+   * poll normally stands down for any open capture. Generation-time listening
+   * is the one capture that runs *because* an answer is still outstanding: if
+   * the poll stood down for it, that answer could not arrive until the user
+   * stopped speaking, which is the exact latency this feature removes.
+   */
+  const admitsGenerationListeningPoll = (status: ProductP1VoiceStatus): boolean =>
+    FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION &&
+    generationCaptureRef.current !== null &&
+    ['starting', 'capturing'].includes(status);
   const p3MutationSequenceRef = useRef(0);
   const updateTerminalAnnouncementState = (state: TerminalAnnouncementState, taskId?: string | null) => {
     if (state !== 'fetching') taskAudioRepollBeforeCaptureTaskIdRef.current = null;
@@ -2609,6 +2720,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     submittedVoiceFinalsRef.current.clear();
     pendingUnifiedFinalRef.current = null;
     pendingForegroundPresentationRef.current = null;
+    retireGenerationListening();
+    // The interruption handle is deliberately kept here: while its activation
+    // is still open, it is the only way the exact owner that issued the request
+    // can still settle it. Every consumer matches on that owner, so a retired
+    // handle can neither bind a successor nor fence one out of its own work,
+    // and `retireOwnerGenerationInterrupt` drops it once that activation
+    // closes and no replay through it is possible any more.
+    interruptedProductResponsesRef.current.clear();
     p2ActivationJournalRef.current = null;
     if (!FEATURE_LIVE_VOICE_INTEGRATED_WEB || !hasDurableProductVoiceSession(sessionId)) {
       setP2JournalState(null);
@@ -2692,6 +2811,22 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // rotation must not discard it while that owner remains current.
       return disposition;
     }
+    const interruptedResponse =
+      disposition.kind === 'failed'
+        ? disposition.response ?? null
+        : disposition.kind === 'presentation' && !disposition.task_notification
+          ? disposition.response
+          : null;
+    if (
+      interruptedResponse !== null &&
+      interruptedProductResponsesRef.current.has(productResponseGenerationIdentity(interruptedResponse))
+    ) {
+      // The speaker already interrupted this exact answer. Its expected
+      // cancellation terminal and any late output belong to the predecessor,
+      // so neither may fail, render, speak, acknowledge or reach history in
+      // the replacement turn.
+      return disposition;
+    }
     if (disposition.kind === 'failed') {
       const settlesForegroundPresentation = foregroundPresentationFenceMatchesResponse(
         pendingForegroundPresentationRef.current,
@@ -2703,6 +2838,22 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         : false;
       if (settlesForegroundPresentation) {
         pendingForegroundPresentationRef.current = null;
+      }
+      // The generation-time listening window is bound to the exact response
+      // that just failed. There is nothing left to interrupt or replace, so
+      // leaving it behind would refuse the next answer its own window for the
+      // rest of the session and keep a capture that answers to nothing holding
+      // the notification-poll privilege.
+      if (
+        retireGenerationListening(listening =>
+          foregroundPresentationFenceMatchesResponse(
+            listening.fence,
+            presentationBinding,
+            disposition.response ?? null,
+          ),
+        )
+      ) {
+        void settleCaptureBeforePlayout().catch(() => undefined);
       }
       const reason = stableProductTextReason(disposition.reason, 'PRODUCT_AGENT_OUTPUT_FAILED');
       setProductTextReason(reason);
@@ -2923,27 +3074,36 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
     if (voiceOwner !== null && (!disposition.replayed || disposition.task_notification)) {
       if (disposition.task_notification) updateTerminalAnnouncementState('playing');
-      const playout = voiceOwner.playAgentText({
-        response: disposition.response,
-        unit_id: disposition.unit_id,
-        text: disposition.text,
-        // Task announcements are system audio, not foreground Agent answers.
-        // Their existing arbiter pauses capture before playout; starting the
-        // generic overlap capture here would record the announcement itself
-        // and leave the final notification's successor unarmed until the
-        // capture-duration bound. Resume with a fresh capture after ACK.
-        capture_during_playout: !disposition.task_notification,
-      });
-      void (disposition.task_notification
-        ? awaitProductTaskNotificationPlayout(
-            playout,
-            () => {
-              if (!isCurrentPresentationAttempt()) return;
-              void voiceOwner.close().catch(() => undefined);
-            },
-            props.taskNotificationPlayoutTimeoutMs,
-          )
-        : playout)
+      // Clear a silent listening window before playout, and yield entirely to a
+      // speaker who is mid-utterance instead of failing the route on them.
+      void settleCaptureBeforePlayout()
+        .then(readiness => {
+          if (readiness !== 'ready') {
+            throw Object.assign(new Error('playout yielded to an active speaker'), {
+              reason: PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER,
+            });
+          }
+          const playout = voiceOwner.playAgentText({
+            response: disposition.response,
+            unit_id: disposition.unit_id,
+            text: disposition.text,
+            // Task system audio must not start foreground overlap capture and
+            // record its own announcement. Resume fresh listening after ACK.
+            capture_during_playout: !disposition.task_notification,
+          });
+          // The playout deadline starts after capture settlement, never while
+          // a possible user utterance or generation-listening start owns it.
+          return disposition.task_notification
+            ? awaitProductTaskNotificationPlayout(
+                playout,
+                () => {
+                  if (!isCurrentPresentationAttempt()) return;
+                  void voiceOwner.close().catch(() => undefined);
+                },
+                props.taskNotificationPlayoutTimeoutMs,
+              )
+            : playout;
+        })
         .then(() => {
           if (!isCurrentVoicePlayout()) {
             presentationAttempt.markPlayoutSettled();
@@ -2964,6 +3124,24 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           retainAck();
         })
         .catch(error => {
+          if (disposition.task_notification && playoutDeferredToSpeaker(error)) {
+            // Standing down is not a playout failure and must be decided before
+            // anything settles: settling the playout here would let cleanup
+            // acknowledge an announcement that was never spoken. The retained
+            // attempt is the only identity that matters here -- media start
+            // authority is not required to *not* play something.
+            if (pendingPresentationAttemptRef.current !== presentationAttempt) return;
+            // Release the active-response claim: while it stands the route
+            // counts as foreground-busy, and the arbitration that has to replay
+            // this announcement would defer forever.
+            if (activeVoiceResponseRef.current?.response_id === disposition.response_id) {
+              activeVoiceResponseRef.current = null;
+            }
+            presentationAttempt.deferred_to_speaker = true;
+            terminalAnnouncementSpeechOwnerRef.current = voiceOwner;
+            updateTerminalAnnouncementState('queued');
+            return;
+          }
           presentationAttempt.markPlayoutSettled();
           if (disposition.task_notification && disposition.ack.surface === 'audio') {
             if (!isCurrentPresentationAttempt()) return;
@@ -3108,7 +3286,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
     }
     const pendingPresentation = pendingPresentationAttemptRef.current;
-    if (pendingPresentation?.owner === owner) {
+    if (pendingPresentation?.owner === owner && pendingPresentation.deferred_to_speaker === true) {
+      // It stood down for a speaker and was never handed to TTS, so it has no
+      // presentation to acknowledge. Retire it with this activation and let the
+      // server-owned unread/redelivery path own it instead of inventing an ACK.
+      pendingPresentation.markPlayoutSettled();
+      pendingPresentationAttemptRef.current = null;
+      setPendingPresentationAck(null);
+      updateTerminalAnnouncementState('idle');
+    } else if (pendingPresentation?.owner === owner) {
       await pendingPresentation.playoutSettlement;
       // Normal playout settlement and P2 recovery share one exact retained
       // operation. A failed Task AUDIO playout reports failure; it must never
@@ -3141,6 +3327,39 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           pendingBargeInRef.current = null;
         }
       }
+    }
+    const pendingGenerationInterrupt = pendingGenerationInterruptRef.current;
+    if (pendingGenerationInterrupt?.owner === owner) {
+      // Settled through the exact owner that issued it. `is_current` keeps a
+      // retired Session or activation from resurrecting it against a successor.
+      try {
+        await retryRetainedProductOperation({
+          operation: () => owner.interruptGeneration(pendingGenerationInterrupt.input),
+          is_current: isCurrent,
+        });
+        if (pendingGenerationInterruptRef.current === pendingGenerationInterrupt) {
+          pendingGenerationInterruptRef.current = null;
+        }
+      } catch (error) {
+        if (owner.hasPendingGenerationInterrupt()) throw error;
+        if (pendingGenerationInterruptRef.current === pendingGenerationInterrupt) {
+          pendingGenerationInterruptRef.current = null;
+        }
+      }
+    }
+  };
+
+  /**
+   * A closed activation can no longer issue anything: `interruptGeneration`
+   * requires its active binding, so any generation interruption it still holds
+   * is unreachable for replay. Idempotence of a retried interruption is owned
+   * by the server-side `action_id` ledger, not by this handle. Dropping it
+   * with the activation is what keeps a retired one from reporting a pending
+   * interruption that no successor can ever settle.
+   */
+  const retireOwnerGenerationInterrupt = (retiring: ProductWebP2ActivationOwner) => {
+    if (ownerHasUnsettledGenerationInterrupt(retiring)) {
+      pendingGenerationInterruptRef.current = null;
     }
   };
 
@@ -3686,6 +3905,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             if (snapshot.binding && journalReady && sameSession) {
               journal!.markClosed(snapshot.binding);
             }
+            retireOwnerGenerationInterrupt(previous);
           } catch {
             if (!operationsSettled && snapshot.binding && journalReady && sameSession && journal!.snapshot().pending_operation === null) {
               try {
@@ -3746,6 +3966,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             if (snapshot.binding && journalReady && sameSession) {
               journal!.markClosed(snapshot.binding);
             }
+            retireOwnerGenerationInterrupt(previous);
           } catch {
             if (
               journalReady &&
@@ -4235,10 +4456,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         pendingProductTurnRef.current?.owner === closing ||
         pendingPresentationAttemptRef.current?.owner === closing ||
         pendingBargeInRef.current?.owner === closing ||
+        ownerHasUnsettledGenerationInterrupt(closing) ||
         closing.hasPendingSubmission() ||
         closing.hasPendingPresentationAck() ||
         closing.hasPendingPresentationFailure() ||
-        closing.hasPendingBargeIn(),
+        closing.hasPendingBargeIn() ||
+        closing.hasPendingGenerationInterrupt(),
       );
       if (recoveryBarrier) {
         if (activationOwnerRef.current === closing) activationOwnerRef.current = null;
@@ -4257,6 +4480,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         .then(() => {
           retireDeferredTaskPresentationForClosedOwner(closing);
           retireCapturedTaskNotificationForClosedOwner(closing);
+          retireOwnerGenerationInterrupt(closing);
           if (binding && journal) {
             try {
               journal.markClosed(binding);
@@ -4280,8 +4504,19 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       foreground_active: Boolean(
         pendingProductTurnRef.current !== null ||
         pendingUnifiedFinalRef.current !== null ||
-        pendingPresentationAttemptRef.current !== null ||
+        // An announcement that stood down for a speaker is waiting for exactly
+        // this arbitration to replay it, so it must not report itself busy.
+        (pendingPresentationAttemptRef.current !== null &&
+          pendingPresentationAttemptRef.current.deferred_to_speaker !== true) ||
         pendingBargeInRef.current !== null ||
+        // A generation-time listening window, and the interruption it issues,
+        // are foreground work: a Task announcement must not take the
+        // microphone away from a speaker who is replacing an answer.
+        generationCaptureRef.current !== null ||
+        // Matched on the current owner. A handle left behind by an activation
+        // that has already retired belongs to no live foreground, and must not
+        // report a successor busy forever.
+        ownerHasUnsettledGenerationInterrupt(activationOwnerRef.current) ||
         activeVoiceResponseRef.current !== null ||
         productTextStatus === 'waiting' ||
         activationOwnerRef.current?.hasPendingSubmission() ||
@@ -4333,6 +4568,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
     if (action === 'fetch') {
       terminalAnnouncementSpeechOwnerRef.current = null;
+      const deferred = pendingPresentationAttemptRef.current;
+      if (deferred !== null && deferred.deferred_to_speaker === true) {
+        // The speaker settled. Replay the exact announcement already delivered
+        // instead of fetching a new one; nothing was consumed twice and the P1
+        // route the speaker just used stays intact.
+        resumeDeferredTaskAnnouncementRef.current(deferred);
+        return;
+      }
       updateTerminalAnnouncementState('fetching');
     }
   }, [
@@ -4365,10 +4608,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       voiceLoopP2RefreshAfterGenerationRef.current !== null ||
       (!['idle', 'fetching'].includes(terminalAnnouncementState) && !(terminalAnnouncementState === 'queued' && productTextStatus === 'waiting')) ||
       (terminalAnnouncementState === 'fetching' && !voiceLoopEnabledRef.current) ||
-      productP2NotificationTransportBlockedByP1({
+      (productP2NotificationTransportBlockedByP1({
         p1_status: p1VoiceStatus,
         terminal_notification_check_required: terminalNotificationCheckRequiredRef.current,
-      })
+      }) && !admitsGenerationListeningPoll(p1VoiceStatus))
     )
       return;
     const notificationAdmission: ProductP2NotificationAdmission = Object.freeze({
@@ -4379,6 +4622,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const poll = async () => {
       while (!cancelled && activationOwnerRef.current === owner) {
         const capturedTaskNotification = capturedTaskNotificationRef.current;
+        const currentP1Status = p1VoiceOwnerRef.current?.status().status ?? p1VoiceStatus;
         if (
           terminalAnnouncementStateRef.current === 'fetching' &&
           capturedTaskNotification?.owner === owner
@@ -4434,14 +4678,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           );
           return;
         }
-        const currentP1Status = p1VoiceOwnerRef.current?.status().status ?? p1VoiceStatus;
         if (
           readPendingUnifiedFinal() !== null ||
           activeVoiceResponseRef.current !== null ||
-          productP2NotificationTransportBlockedByP1({
+          (productP2NotificationTransportBlockedByP1({
             p1_status: currentP1Status,
             terminal_notification_check_required: terminalNotificationCheckRequiredRef.current,
-          })
+          }) && !admitsGenerationListeningPoll(currentP1Status))
         )
           return;
         try {
@@ -4667,7 +4910,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             !retained.hasPendingSubmission() &&
             !retained.hasPendingPresentationAck() &&
             !retained.hasPendingPresentationFailure() &&
-            !retained.hasPendingBargeIn()
+            !retained.hasPendingBargeIn() &&
+            !retained.hasPendingGenerationInterrupt()
           ) {
             if (activationOwnerRef.current === retained) {
               activationOwnerRef.current = null;
@@ -5027,10 +5271,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         pendingPresentationAck !== null ||
         pendingPresentationAttemptRef.current !== null ||
         pendingBargeInRef.current !== null ||
+        ownerHasUnsettledGenerationInterrupt(owner) ||
         owner.hasPendingSubmission() ||
         owner.hasPendingPresentationAck() ||
         owner.hasPendingPresentationFailure() ||
-        owner.hasPendingBargeIn()
+        owner.hasPendingBargeIn() ||
+        owner.hasPendingGenerationInterrupt()
       ) {
         setProductTextStatus('failed');
         return null;
@@ -5193,6 +5439,35 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     throw new Error('PRODUCT_P3_CREATED_TASK_BOOTSTRAP_FAILED');
   };
 
+  /**
+   * Name the exact answer this committed final replaces, if one is still live.
+   *
+   * Speech-start normally fences that answer first and clears the foreground
+   * fence. This is the atomic fallback for the race where the utterance ends
+   * before that fence settled: the server then supersedes the exact response in
+   * the same admission that accepts the replacement turn.
+   */
+  const supersededGenerationTarget = (
+    binding: Readonly<NonNullable<ProductWebP2ActivationSnapshot['binding']>>,
+  ): Readonly<{ response_id: string; response_generation: number }> | null => {
+    const fence = pendingForegroundPresentationRef.current;
+    if (
+      !FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION ||
+      fence === null ||
+      fence.session_id !== binding.session_id ||
+      fence.correlation_id !== binding.correlation_id ||
+      fence.interaction_id !== binding.interaction_id ||
+      fence.activation_id !== binding.activation_id ||
+      fence.activation_generation !== binding.activation_generation
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      response_id: fence.response_id,
+      response_generation: fence.response_generation,
+    });
+  };
+
   const submitUnifiedRecognizedVoice = (
     recognized: ProductRecognizedVoice,
     binding: Readonly<NonNullable<ProductWebP2ActivationSnapshot['binding']>>,
@@ -5248,8 +5523,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       setProductTextReason(null);
       setProductTextStatus('submitting');
       try {
+        const supersedes = supersededGenerationTarget(binding);
         const submitResult = await retryRetainedProductOperation({
-          operation: () => owner!.submit(binding, input),
+          operation: () => owner!.submit(binding, input, supersedes),
           is_current: () =>
             activationOwnerRef.current?.snapshot().status === 'active' &&
             activeSessionRef.current === binding.session_id,
@@ -5345,6 +5621,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
         setProductTextStatus('waiting');
         setP2NotificationWakeEpoch(epoch => epoch + 1);
+        // Listen while the Agent generates. Nothing in this window can commit
+        // by itself: only a provider speech-start fences this exact answer, and
+        // only the later EOT submits what the user actually said.
+        const generationOwner = activationOwnerRef.current;
+        if (generationOwner !== null) scheduleGenerationTimeCapture(generationOwner, presentationFence);
       } catch (error) {
         if (pendingForegroundPresentationRef.current === presentationFence) {
           pendingForegroundPresentationRef.current = null;
@@ -5386,17 +5667,34 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const binding = currentProductP2Binding();
     const retainedTerminalRecovery =
       terminalAnnouncementStateRef.current === 'recovering' && pendingPresentationAttemptRef.current?.task_notification?.retry_pending === true;
+    // Listening while an Agent answer is still being generated is admitted only
+    // for the exact response that capture was bound to. Every other foreground
+    // fence keeps its original barrier, so an unrelated in-flight turn, ACK or
+    // barge-in still refuses a new capture.
+    const admitsGenerationCapture = () => {
+      const retained = generationCaptureRef.current;
+      const fence = pendingForegroundPresentationRef.current;
+      return (
+        retained !== null &&
+        fence !== null &&
+        retained.fence === fence &&
+        retained.loop_generation === loopGeneration &&
+        retained.owner === activationOwnerRef.current
+      );
+    };
     const hasCaptureAuthorityBarrier = () =>
       pendingProductTurnRef.current !== null ||
       pendingUnifiedFinalRef.current !== null ||
-      pendingForegroundPresentationRef.current !== null ||
+      (pendingForegroundPresentationRef.current !== null && !admitsGenerationCapture()) ||
       deferredTaskPresentationRef.current !== null ||
       (pendingPresentationAttemptRef.current !== null && !retainedTerminalRecovery) ||
       pendingBargeInRef.current !== null ||
       Boolean(activationOwnerRef.current?.hasPendingSubmission()) ||
       Boolean(activationOwnerRef.current?.hasPendingPresentationAck()) ||
       Boolean(activationOwnerRef.current?.hasPendingPresentationFailure()) ||
-      Boolean(activationOwnerRef.current?.hasPendingBargeIn());
+      Boolean(activationOwnerRef.current?.hasPendingBargeIn()) ||
+      ownerHasUnsettledGenerationInterrupt(activationOwnerRef.current) ||
+      Boolean(activationOwnerRef.current?.hasPendingGenerationInterrupt());
     const isCurrentBinding = () => {
       const activation = activationOwnerRef.current?.snapshot();
       const current = activation?.binding;
@@ -5527,18 +5825,29 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           : { capture_stream_factory: l0CaptureStreamFactoryRef.current }),
         on_status: (status, reason) => {
           if (callbackOwner !== null && p1VoiceOwnerRef.current === callbackOwner) {
-            if (status !== 'capturing' && terminalAnnouncementSpeechOwnerRef.current === callbackOwner) {
+            // Revoking an old P2 activation also aborts its streaming Speech
+            // leaf. That terminal is expected once retirement has started; it
+            // remains cleanup truth, not a user-visible route failure. The
+            // same reason on the current activation still fails normally.
+            const normalized = normalizeProductP1StatusForP2Retirement(
+              status,
+              reason,
+              activationOwner.retirementStarted() || activationOwnerRef.current !== activationOwner,
+            );
+            const publishedStatus = normalized.status;
+            const publishedReason = normalized.reason;
+            if (publishedStatus !== 'capturing' && terminalAnnouncementSpeechOwnerRef.current === callbackOwner) {
               terminalAnnouncementSpeechOwnerRef.current = null;
             }
-            if (status === 'recognized' && terminalAnnouncementStateRef.current === 'suspending_capture') {
+            if (publishedStatus === 'recognized' && terminalAnnouncementStateRef.current === 'suspending_capture') {
               p1VoiceCaptureBindingRef.current = null;
               updateTerminalAnnouncementState('fetching');
             }
-            setP1VoiceStatus(status);
-            setP1VoiceReason(reason);
+            setP1VoiceStatus(publishedStatus);
+            setP1VoiceReason(publishedReason);
             const diagnostics = callbackOwner.captureDiagnostics();
             setInterruptionDegradedReason(
-              ['playing', 'recognized'].includes(status)
+              ['playing', 'recognized'].includes(publishedStatus)
               && diagnostics.successor_readiness === 'degraded'
                 ? diagnostics.successor_readiness_reason
                 : null,
@@ -5562,7 +5871,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                   ? activeResponse
                   : null;
               const seam: ProductLiveVoiceRecoveryDiagnostic['seam'] = response === null ? 'activation' : 'tts';
-              if (status === 'cleanup_pending' && reason !== 'FORMAL_P1_CLEANUP_IN_PROGRESS') {
+              if (publishedStatus === 'cleanup_pending' && publishedReason !== 'FORMAL_P1_CLEANUP_IN_PROGRESS') {
                 const retainedDiagnostic = recoveryDiagnosticRef.current;
                 const retainsExactTerminalTruth =
                   retainedDiagnostic?.disposition === 'terminal' &&
@@ -5578,20 +5887,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                   publishProductRecoveryDiagnostic({
                     seam,
                     disposition: 'retrying',
-                    reason: stableProductTextReason(reason, 'FORMAL_P1_CLEANUP_PENDING'),
+                    reason: stableProductTextReason(publishedReason, 'FORMAL_P1_CLEANUP_PENDING'),
                     binding,
                     response,
                   });
                 }
-              } else if (status === 'failed') {
+              } else if (publishedStatus === 'failed') {
                 publishProductRecoveryDiagnostic({
                   seam,
                   disposition: 'terminal',
-                  reason: stableProductTextReason(reason, 'PRODUCT_P1_ROUTE_FAILED'),
+                  reason: stableProductTextReason(publishedReason, 'PRODUCT_P1_ROUTE_FAILED'),
                   binding,
                   response,
                 });
-              } else if (['idle', 'capturing', 'recognized', 'closed'].includes(status)) {
+              } else if (['idle', 'capturing', 'recognized', 'closed'].includes(publishedStatus)) {
                 clearProductRecoveryDiagnostic({ seam: 'activation', binding });
               }
             }
@@ -5644,6 +5953,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             // handler. Playout was stopped by speech-start, not by EOT.
             const binding = currentProductP2Binding();
             if (binding !== null) p1VoiceCaptureBindingRef.current = binding;
+          }
+        },
+        on_generation_speech_start: () => {
+          if (
+            voiceLoopEnabledRef.current &&
+            voiceLoopGenerationRef.current === loopGeneration &&
+            p1VoiceOwnerRef.current === owner
+          ) {
+            // The user started speaking while the Agent was still generating.
+            // Fence that answer now, at the provider speech-start boundary, so
+            // none of it can be produced, spoken, acknowledged or written to
+            // history. The later EOT stays the sole submit boundary.
+            const binding = currentProductP2Binding();
+            if (binding !== null) p1VoiceCaptureBindingRef.current = binding;
+            void interruptProductGenerationHandlerRef.current();
           }
         },
       });
@@ -5774,6 +6098,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           response: terminal.disposition.response,
           unit_id: terminal.disposition.unit_id,
           text: terminal.disposition.text,
+          capture_during_playout: false,
         }),
         () => {
           if (pendingPresentationAttemptRef.current !== retained) return;
@@ -5814,6 +6139,116 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           response: terminal.disposition.response,
         });
         updateTerminalAnnouncementState('recovering');
+      }
+    });
+  };
+
+  /**
+   * Replay an announcement that stood down for a live speaker.
+   *
+   * Unlike the recovery retry, this never closes or rebuilds the P1 route: the
+   * route is healthy and has just finished carrying the utterance that made the
+   * announcement stand down. Nothing was consumed twice -- the exact delivered
+   * announcement is still retained -- so there is no fetch either.
+   */
+  resumeDeferredTaskAnnouncementRef.current = retained => {
+    const terminal = retained.task_notification;
+    if (
+      terminal === null ||
+      retained.deferred_to_speaker !== true ||
+      terminal.retry_pending ||
+      pendingPresentationAttemptRef.current !== retained
+    ) {
+      return;
+    }
+    const activationOwner = retained.owner;
+    if (
+      !mountedRef.current ||
+      !voiceLoopEnabledRef.current ||
+      !isConnectedRef.current ||
+      activationOwnerRef.current !== activationOwner
+    ) {
+      return;
+    }
+    terminal.retry_pending = true;
+    const playoutLoopGeneration = voiceLoopGenerationRef.current;
+    void (async () => {
+      const readiness = await settleCaptureBeforePlayout();
+      if (
+        !mountedRef.current ||
+        !voiceLoopEnabledRef.current ||
+        voiceLoopGenerationRef.current !== playoutLoopGeneration ||
+        activationOwnerRef.current !== activationOwner ||
+        pendingPresentationAttemptRef.current !== retained
+      ) {
+        terminal.retry_pending = false;
+        return;
+      }
+      const voiceOwner = p1VoiceOwnerRef.current;
+      if (readiness !== 'ready' || voiceOwner === null) {
+        // Still speaking. Stay queued without spending the recovery budget.
+        terminal.retry_pending = false;
+        terminalAnnouncementSpeechOwnerRef.current = voiceOwner;
+        updateTerminalAnnouncementState('queued');
+        return;
+      }
+      retained.deferred_to_speaker = false;
+      terminalAnnouncementSpeechOwnerRef.current = null;
+      p1VoiceCaptureBindingRef.current = null;
+      updateTerminalAnnouncementState('playing');
+      activeVoiceResponseRef.current = terminal.disposition.response;
+      await awaitProductTaskNotificationPlayout(
+        voiceOwner.playAgentText({
+          response: terminal.disposition.response,
+          unit_id: terminal.disposition.unit_id,
+          text: terminal.disposition.text,
+          capture_during_playout: false,
+        }),
+        () => {
+          if (pendingPresentationAttemptRef.current !== retained) return;
+          void voiceOwner.close().catch(() => undefined);
+        },
+        props.taskNotificationPlayoutTimeoutMs,
+      );
+      if (activationOwnerRef.current !== activationOwner || pendingPresentationAttemptRef.current !== retained) {
+        terminal.retry_pending = false;
+        return;
+      }
+      if (activeVoiceResponseRef.current?.response_id === terminal.disposition.response_id) {
+        activeVoiceResponseRef.current = null;
+      }
+      clearProductRecoveryDiagnostic({
+        seam: 'tts',
+        binding: activationOwner.snapshot().binding,
+        response: terminal.disposition.response,
+      });
+      terminal.retry_pending = false;
+      retained.markPlayoutSettled();
+      updateTerminalAnnouncementState('acking');
+      setPendingPresentationAck(terminal.disposition.ack);
+      void settleProductPresentationAck(retained);
+    })().catch(error => {
+      terminal.retry_pending = false;
+      retained.deferred_to_speaker = false;
+      if (activeVoiceResponseRef.current?.response_id === terminal.disposition.response_id) {
+        activeVoiceResponseRef.current = null;
+      }
+      if (pendingPresentationAttemptRef.current === retained) {
+        // A resumed AUDIO failure uses the same Registry TEXT fallback as an
+        // initial Task playout failure, not the retired local TTS retry path.
+        const reason = stableProductTextReason(error, 'PRODUCT_TERMINAL_ANNOUNCEMENT_AUDIO_FAILED');
+        setProductTextReason(reason);
+        setProductTextStatus('failed');
+        publishProductRecoveryDiagnostic({
+          seam: 'tts',
+          disposition: 'terminal',
+          reason,
+          binding: activationOwner.snapshot().binding,
+          response: terminal.disposition.response,
+        });
+        updateTerminalAnnouncementState('recovering');
+        retained.markPlayoutSettled();
+        void settleTaskPresentationFailure(retained, 'task_audio_playout_failed');
       }
     });
   };
@@ -5951,6 +6386,177 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
   };
 
+  /**
+   * Fence the answer that is still being generated, at speech-start.
+   *
+   * This issues only the server-side generation interruption, whose exact
+   * cancellation scope is the conversational round. A background Task started
+   * by that round keeps running and keeps reporting through Task notification.
+   */
+  const interruptProductGeneration = async () => {
+    const retained = generationCaptureRef.current;
+    const p2Owner = activationOwnerRef.current;
+    const fence = pendingForegroundPresentationRef.current;
+    if (
+      retained === null ||
+      p2Owner === null ||
+      retained.owner !== p2Owner ||
+      fence === null ||
+      retained.fence !== fence ||
+      retained.loop_generation !== voiceLoopGenerationRef.current ||
+      ownerHasUnsettledGenerationInterrupt(p2Owner)
+    ) {
+      return;
+    }
+    generationInterruptSequenceRef.current += 1;
+    const input = Object.freeze({
+      action_id: `product-generation-interrupt-${generationInterruptSequenceRef.current}`,
+      response_id: fence.response_id,
+      response_generation: fence.response_generation,
+    });
+    const pending = Object.freeze({ owner: p2Owner, input });
+    const loopGeneration = retained.loop_generation;
+    // An interruption can settle long after the route that issued it stopped
+    // owning the foreground: the user can Exit, switch Session or hand the
+    // microphone to another tab while it is still on the wire. Its outcome may
+    // therefore only touch UI state that still belongs to that exact activation,
+    // Session and voice loop; a successor must never inherit it.
+    const ownsInterruptionOutcome = () =>
+      mountedRef.current &&
+      activationOwnerRef.current === p2Owner &&
+      activeSessionRef.current === fence.session_id &&
+      voiceLoopEnabledRef.current &&
+      voiceLoopGenerationRef.current === loopGeneration;
+    pendingGenerationInterruptRef.current = pending;
+    // Optimistic: recorded before the request leaves so an answer that crosses
+    // it on the wire is refused by identity. It is only a guess that the server
+    // will fence anything, and it is withdrawn below whenever the server says
+    // it did not -- an answer the server left intact is a legitimate answer.
+    const interruptedResponseIdentity = productResponseGenerationIdentity(input);
+    retainBoundedPresentedProductResponse(interruptedProductResponsesRef.current, interruptedResponseIdentity);
+    const withdrawOptimisticRefusal = () => {
+      interruptedProductResponsesRef.current.delete(interruptedResponseIdentity);
+    };
+    try {
+      const outcome = await p2Owner.interruptGeneration(input);
+      if (recordValue(outcome)?.fence_status !== 'fenced') {
+        // ALREADY_SETTLED: the target finished or was replaced on its own, so
+        // nothing was fenced and nothing was cancelled. Its presentation is
+        // still valid, so withdraw the optimistic refusal and leave the
+        // foreground exactly as it was -- that answer is still coming and the
+        // route must stay able to receive, speak and acknowledge it.
+        withdrawOptimisticRefusal();
+        return;
+      }
+      // The fenced answer can no longer render, speak, be acknowledged or be
+      // written to history, so it stops owning the foreground. The utterance
+      // still being captured becomes an ordinary next turn at EOT.
+      if (pendingForegroundPresentationRef.current === fence) {
+        pendingForegroundPresentationRef.current = null;
+      }
+      if (generationCaptureRef.current === retained) generationCaptureRef.current = null;
+      if (ownsInterruptionOutcome()) {
+        // The fenced answer is gone and the replacement utterance is still
+        // being captured, so the route is waiting for input again, not for a
+        // response that can no longer arrive.
+        setProductOutput(null);
+        setProductTextStatus('idle');
+        setProductTextReason(null);
+      }
+    } catch (error) {
+      if (isDefinitiveProductOperationError(error)) {
+        // The server definitively refused, so it fenced nothing: the answer is
+        // still live and must not be silently dropped by our optimistic guess.
+        withdrawOptimisticRefusal();
+      }
+      if (ownsInterruptionOutcome()) {
+        setProductTextReason(stableProductTextReason(error, 'PRODUCT_GENERATION_INTERRUPT_RECOVERY_REQUIRED'));
+        setProductTextStatus('failed');
+      }
+    } finally {
+      // A retriable transport failure leaves the request unresolved inside the
+      // owner. Clearing the ref here would strand it: only this ref lets
+      // settleRetainedP2Operations replay it through the exact owner that
+      // issued it, and cleanup refuses to retire an owner that still has one.
+      if (
+        pendingGenerationInterruptRef.current === pending &&
+        !p2Owner.hasPendingGenerationInterrupt()
+      ) {
+        pendingGenerationInterruptRef.current = null;
+      }
+    }
+  };
+  interruptProductGenerationHandlerRef.current = interruptProductGeneration;
+
+  /** Open the listening window that runs while the Agent is still generating. */
+  const scheduleGenerationTimeCapture = (
+    owner: ProductWebP2ActivationOwner,
+    fence: PendingForegroundPresentationFence,
+  ) => {
+    if (
+      !FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION ||
+      !FEATURE_LIVE_VOICE_INTEGRATED_P1 ||
+      !voiceLoopEnabledRef.current ||
+      generationCaptureRef.current !== null ||
+      pendingForegroundPresentationRef.current !== fence ||
+      activationOwnerRef.current !== owner ||
+      pendingPresentationAttemptRef.current !== null ||
+      pendingBargeInRef.current !== null ||
+      // Only this owner's own unsettled interruption closes its listening
+      // window. A retired activation's handle cannot reach this foreground,
+      // so letting it match here would block every successor Session forever.
+      ownerHasUnsettledGenerationInterrupt(owner) ||
+      terminalAnnouncementStateRef.current !== 'idle'
+    ) {
+      return;
+    }
+    const retained = Object.freeze({
+      owner,
+      fence,
+      loop_generation: voiceLoopGenerationRef.current,
+    });
+    generationCaptureRef.current = retained;
+    void startP1VoiceHandlerRef.current().catch(() => {
+      if (generationCaptureRef.current === retained) generationCaptureRef.current = null;
+    });
+  };
+
+  /**
+   * Decide whether an answer may be spoken right now, and clear the way if so.
+   *
+   * A silent generation-time listening window is released, because nobody is
+   * speaking into it. A capture that already observed provider speech-start is
+   * never discarded: it owns a real utterance. In that case the answer is not
+   * handed to P1 at all -- asking P1 to play over a live capture fails the whole
+   * route and would throw away the words the user is in the middle of saying.
+   * The caller treats `speaker_active` as an ordinary unplayed presentation, so
+   * Task notifications keep their existing retained-recovery path.
+   */
+  const settleCaptureBeforePlayout = async (): Promise<'ready' | 'speaker_active'> => {
+    const retained = generationCaptureRef.current;
+    if (retained !== null) {
+      // An answer can arrive while that window is still being opened. Join the
+      // exact start first, otherwise a half-started capture would stay open.
+      const startInFlight = pendingP1VoiceStartRef.current?.promise;
+      if (startInFlight !== undefined) await startInFlight.catch(() => undefined);
+      if (generationCaptureRef.current === retained) generationCaptureRef.current = null;
+    }
+    const owner = p1VoiceOwnerRef.current;
+    if (owner === null) return 'ready';
+    if (owner.status().status !== 'capturing') {
+      return ['starting', 'recognizing'].includes(owner.status().status) ? 'speaker_active' : 'ready';
+    }
+    if (owner.captureDiagnostics().provider_speech_start_observed) return 'speaker_active';
+    try {
+      await owner.abandonCapture('formal_generation_listening_released');
+    } catch {
+      // The owner publishes a content-free reason and retains cleanup.
+    }
+    if (owner.status().status === 'capturing') return 'speaker_active';
+    if (p1VoiceCaptureBindingRef.current !== null) p1VoiceCaptureBindingRef.current = null;
+    return 'ready';
+  };
+
   const commitRecognizedVoiceTaskOrigin = async (): Promise<ProductVoiceTaskOrigin | null> => {
     const owner = activationOwnerRef.current;
     const recognized = recognizedVoiceRef.current;
@@ -5966,10 +6572,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       activationBinding === null ||
       pendingProductTurnRef.current !== null ||
       pendingBargeInRef.current !== null ||
+      ownerHasUnsettledGenerationInterrupt(owner) ||
       owner.hasPendingSubmission() ||
       owner.hasPendingPresentationAck() ||
       owner.hasPendingPresentationFailure() ||
-      owner.hasPendingBargeIn()
+      owner.hasPendingBargeIn() ||
+      owner.hasPendingGenerationInterrupt()
     )
       return null;
     productTurnSequenceRef.current += 1;
@@ -6839,10 +7447,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     unifiedInputOwnerRef.current?.hasPending() ||
     pendingPresentationAttemptRef.current ||
     pendingBargeInRef.current ||
+    ownerHasUnsettledGenerationInterrupt(activationOwnerRef.current) ||
     activationOwnerRef.current?.hasPendingSubmission() ||
     activationOwnerRef.current?.hasPendingPresentationAck() ||
     activationOwnerRef.current?.hasPendingPresentationFailure() ||
-    activationOwnerRef.current?.hasPendingBargeIn(),
+    activationOwnerRef.current?.hasPendingBargeIn() ||
+    activationOwnerRef.current?.hasPendingGenerationInterrupt(),
   );
   const productOperationRetained = Boolean(recognizedSpeechConfirmation || editedVoiceDraftConfirmation || productTextTransportRetained);
   const productVoiceAvailable = FEATURE_LIVE_VOICE_INTEGRATED_P1 && props.isConnected && p2Activation.status === 'active';
@@ -6853,10 +7463,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingProductTurnRef.current ||
       pendingPresentationAttemptRef.current ||
       pendingBargeInRef.current ||
+      ownerHasUnsettledGenerationInterrupt(owner) ||
       owner?.hasPendingSubmission() ||
       owner?.hasPendingPresentationAck() ||
       owner?.hasPendingPresentationFailure() ||
-      owner?.hasPendingBargeIn()
+      owner?.hasPendingBargeIn() ||
+      owner?.hasPendingGenerationInterrupt()
     )
       return;
     updateRecognizedSpeechConfirmation(null);
@@ -6873,10 +7485,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingProductTurnRef.current ||
       pendingPresentationAttemptRef.current ||
       pendingBargeInRef.current ||
+      ownerHasUnsettledGenerationInterrupt(owner) ||
       owner?.hasPendingSubmission() ||
       owner?.hasPendingPresentationAck() ||
       owner?.hasPendingPresentationFailure() ||
       owner?.hasPendingBargeIn() ||
+      owner?.hasPendingGenerationInterrupt() ||
       taskIntentSnapshot.retained_transport
     )
       return;
@@ -7022,6 +7636,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     // execution may finish under retained server teardown, but its unpresented
     // response cannot block, text-present, ACK or play in the next loop.
     pendingForegroundPresentationRef.current = null;
+    // The listening window belongs to the response Exit just fenced. Leaving it
+    // behind is not merely untidy: the next loop refuses to open a new window
+    // while one is retained, so generation-time interruption would be silently
+    // dead for the rest of the session.
+    retireGenerationListening();
     setProductOutput(null);
     setProductTextReason(null);
     setProductTextStatus('idle');
@@ -7078,6 +7697,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (p1VoiceCaptureBindingRef.current?.session_id === sessionId) {
         p1VoiceCaptureBindingRef.current = null;
       }
+      // Browser capture ownership just moved away. The generation-time
+      // listening window belonged to the capture that was surrendered, and it
+      // is the one thing that lets the notification poll run during a capture;
+      // leaving it behind would grant that privilege to whatever starts next.
+      retireGenerationListening(listening => listening.fence.session_id === sessionId);
     }
   };
 

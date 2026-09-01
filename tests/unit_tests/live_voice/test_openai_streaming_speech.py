@@ -250,8 +250,10 @@ class CapturingLogHandler(logging.Handler):
     def __init__(self) -> None:
         super().__init__()
         self.messages: list[str] = []
+        self.records: list[logging.LogRecord] = []
 
     def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
         self.messages.append(record.getMessage())
 
 
@@ -2549,6 +2551,40 @@ async def test_slow_transport_close_finishes_and_releases_its_cleanup_slot(
     assert settled.clean is True
     owner.require_session_capacity(active_sessions=0)
     assert (await owner.close()).clean is True
+
+
+@pytest.mark.asyncio
+async def test_retained_transport_cleanup_timeout_is_deferred_not_an_error() -> None:
+    owner = _TransportCleanupOwner()
+    release = asyncio.Event()
+    logs = CapturingLogHandler()
+
+    async def slow_cleanup() -> None:
+        await release.wait()
+
+    _LOGGER.addHandler(logs)
+    try:
+        assert (
+            await owner.attempt(
+                kind="socket",
+                resource=object(),
+                cleanup=slow_cleanup,
+            )
+            is False
+        )
+
+        assert any(
+            record.levelno == logging.INFO
+            and "live_voice_speech_transport_cleanup_deferred" in record.message
+            and "kind=socket" in record.message
+            and "reason=timeout" in record.message
+            for record in logs.records
+        )
+        assert not any(record.levelno >= logging.ERROR for record in logs.records)
+    finally:
+        _LOGGER.removeHandler(logs)
+        release.set()
+        assert (await owner.close()).clean is True
 
 
 @pytest.mark.asyncio

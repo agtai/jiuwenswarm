@@ -5,6 +5,7 @@ export const PRODUCT_P2_NOTIFICATION_NEXT_METHOD = 'live_voice.composition.p2.no
 export const PRODUCT_P2_PRESENTATION_ACK_METHOD = 'live_voice.composition.p2.presentation.ack' as const;
 export const PRODUCT_P2_PRESENTATION_FAILED_METHOD = 'live_voice.composition.p2.presentation.failed' as const;
 export const PRODUCT_P2_BARGE_IN_METHOD = 'live_voice.composition.p2.barge_in' as const;
+export const PRODUCT_P2_INTERRUPT_GENERATION_METHOD = 'live_voice.composition.p2.interrupt_generation' as const;
 export const PRODUCT_P3_CONFIRMATION_ISSUE_METHOD = 'live_voice.composition.p3.confirmation.issue' as const;
 export const PRODUCT_P3_MUTATE_METHOD = 'live_voice.composition.p3.mutate' as const;
 export const PRODUCT_P3_TASK_LIST_METHOD = 'live_voice.task.list' as const;
@@ -111,7 +112,11 @@ function allocateProductRequestId(prefix: string): string {
 
 export type ProductWebRequest = (method: string, params: Record<string, unknown>, request_id?: string) => Promise<unknown>;
 
-export type ProductP2DurableOperationMethod = typeof PRODUCT_P2_SUBMIT_METHOD | typeof PRODUCT_P2_PRESENTATION_ACK_METHOD | typeof PRODUCT_P2_BARGE_IN_METHOD;
+export type ProductP2DurableOperationMethod =
+  | typeof PRODUCT_P2_SUBMIT_METHOD
+  | typeof PRODUCT_P2_PRESENTATION_ACK_METHOD
+  | typeof PRODUCT_P2_BARGE_IN_METHOD
+  | typeof PRODUCT_P2_INTERRUPT_GENERATION_METHOD;
 
 export type ProductP2DurableOperation = Readonly<{
   method: ProductP2DurableOperationMethod;
@@ -162,6 +167,11 @@ function durableOperationParamKeys(method: ProductP2DurableOperationMethod, para
   if (method === PRODUCT_P2_PRESENTATION_ACK_METHOD) {
     return [...binding, 'response_id', 'response_generation', 'surface', 'unit_id', 'contiguous_cursor', 'presented_at'];
   }
+  // A generation interruption carries no cancellation-scope key at all, so a
+  // persisted operation can never be replayed as a wider cancellation.
+  if (method === PRODUCT_P2_INTERRUPT_GENERATION_METHOD) {
+    return [...binding, 'action_id', 'response_id', 'response_generation'];
+  }
   return [...binding, 'action_id', 'response_id', 'response_generation', 'cancel_response'];
 }
 
@@ -180,7 +190,8 @@ export function validateProductP2DurableOperation(value: unknown, expectedBindin
   if (
     operation.method !== PRODUCT_P2_SUBMIT_METHOD &&
     operation.method !== PRODUCT_P2_PRESENTATION_ACK_METHOD &&
-    operation.method !== PRODUCT_P2_BARGE_IN_METHOD
+    operation.method !== PRODUCT_P2_BARGE_IN_METHOD &&
+    operation.method !== PRODUCT_P2_INTERRUPT_GENERATION_METHOD
   ) {
     throw new Error('durable product operation method is invalid');
   }
@@ -221,6 +232,10 @@ export function validateProductP2DurableOperation(value: unknown, expectedBindin
     exactDurableText(params.unit_id, 'unit_id');
     exactDurableGeneration(params.contiguous_cursor, 'contiguous_cursor', true);
     exactDurableText(params.presented_at, 'presented_at');
+  } else if (method === PRODUCT_P2_INTERRUPT_GENERATION_METHOD) {
+    exactDurableText(params.action_id, 'action_id');
+    exactDurableText(params.response_id, 'response_id');
+    exactDurableGeneration(params.response_generation, 'response_generation', true);
   } else {
     exactDurableText(params.action_id, 'action_id');
     exactDurableText(params.response_id, 'response_id');
@@ -429,7 +444,8 @@ function requireP2BoundOperationResult(
     | 'notification'
     | 'presentation_acknowledged'
     | 'presentation_failed_fallback_text'
-    | 'barge_in_applied',
+    | 'barge_in_applied'
+    | 'generation_interrupted',
   binding: Readonly<ProductWebP2ActivationBinding>,
 ): JsonObject {
   const payload = objectValue(value);
@@ -624,6 +640,25 @@ function requireDurableP2OperationResult(operation: Readonly<ProductP2DurableOpe
       throw new Error('product P2 presentation ACK result binding is invalid');
     }
     return result;
+  }
+  if (operation.method === PRODUCT_P2_INTERRUPT_GENERATION_METHOD) {
+    const interrupted = requireP2BoundOperationResult(payload, 'generation_interrupted', binding);
+    if (
+      interrupted.action_id !== params.action_id ||
+      interrupted.response_id !== params.response_id ||
+      interrupted.response_generation !== params.response_generation ||
+      // The server owns this fact and the browser refuses anything wider than
+      // a round cancellation, so a widened scope fails closed here as well.
+      interrupted.cancel_scope !== 'round.cancel' ||
+      (interrupted.fence_status !== 'fenced' && interrupted.fence_status !== 'already_settled') ||
+      typeof interrupted.applied !== 'boolean' ||
+      typeof interrupted.replayed !== 'boolean' ||
+      !Array.isArray(interrupted.effect_ids) ||
+      interrupted.effect_ids.some(item => typeof item !== 'string' || !item)
+    ) {
+      throw new Error('generation interruption response binding is invalid');
+    }
+    return interrupted;
   }
   const result = requireP2BoundOperationResult(payload, 'barge_in_applied', binding);
   if (
@@ -894,10 +929,12 @@ export class ProductWebP2ActivationOwner {
   private readonly presentationAcks = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
   private readonly presentationFailures = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
   private readonly bargeIns = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
+  private readonly generationInterrupts = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
   private readonly submissionReplayFence = new ProductReplayFence();
   private readonly presentationAckReplayFence = new ProductReplayFence();
   private readonly presentationFailureReplayFence = new ProductReplayFence();
   private readonly bargeInReplayFence = new ProductReplayFence();
+  private readonly generationInterruptReplayFence = new ProductReplayFence();
   private notificationRequestId: string | null = null;
   private notificationPromise: Promise<JsonObject> | null = null;
   private notificationSequence = 0;
@@ -933,6 +970,10 @@ export class ProductWebP2ActivationOwner {
 
   snapshot(): ProductWebP2ActivationSnapshot {
     return Object.freeze({ status: this.status, binding: this.binding, reason: this.reason });
+  }
+
+  retirementStarted(): boolean {
+    return this.closing;
   }
 
   needsCleanup(): boolean {
@@ -1092,6 +1133,10 @@ export class ProductWebP2ActivationOwner {
 
   hasPendingBargeIn(): boolean {
     return [...this.bargeIns.values()].some(entry => entry.result === undefined);
+  }
+
+  hasPendingGenerationInterrupt(): boolean {
+    return [...this.generationInterrupts.values()].some(entry => entry.result === undefined);
   }
 
   async submitText(input: {
@@ -1316,6 +1361,82 @@ export class ProductWebP2ActivationOwner {
         if (isDefinitiveProductOperationError(error)) {
           this.durableOperationJournal?.settleOperation(operation);
           this.bargeIns.delete(fingerprint);
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (entry.promise === promise) entry.promise = undefined;
+      });
+    entry.promise = promise;
+    return promise;
+  }
+
+  /**
+   * Fence one exact unfinished response so newer committed speech can own it.
+   *
+   * There is deliberately no cancellation-scope argument: the server always
+   * limits itself to the conversational round, so a spoken interruption can
+   * never grow into a background Task cancellation from the browser side.
+   */
+  async interruptGeneration(input: { action_id: string; response_id: string; response_generation: number }): Promise<JsonObject> {
+    const binding = this.requireActiveBinding();
+    if (!Number.isSafeInteger(input.response_generation) || input.response_generation < 0) {
+      return Promise.reject(new Error('generation interruption binding is invalid'));
+    }
+    const params = {
+      ...binding,
+      action_id: requiredText(input.action_id, 'action_id'),
+      response_id: requiredText(input.response_id, 'response_id'),
+      response_generation: input.response_generation,
+    };
+    const fingerprint = JSON.stringify(params);
+    let retained = this.generationInterrupts.get(fingerprint);
+    if (retained?.result) return Promise.resolve(retained.result);
+    if (retained?.promise) return retained.promise;
+    if (!retained) {
+      if (this.generationInterruptReplayFence.has(fingerprint)) {
+        return Promise.reject(new Error('completed generation interruption replay has expired'));
+      }
+      if (
+        this.generationInterrupts.size >= PRODUCT_OPERATION_CAPACITY &&
+        !evictCompletedProductOperation(this.generationInterrupts, this.generationInterruptReplayFence)
+      ) {
+        return Promise.reject(new Error('bounded generation interruption ledger is full'));
+      }
+      retained = { requestId: allocateProductRequestId('live-voice-p2-generation-interrupt') };
+      this.generationInterrupts.set(fingerprint, retained);
+    }
+    const entry = retained;
+    // The exact request/response shape is still validated here, but this
+    // operation deliberately stays out of the single-slot durable journal.
+    // Barge-in must be recoverable because it settles output the user already
+    // saw or heard; a generation interruption happens before any output exists,
+    // and reserving the slot would collide with the presentation ACK of the
+    // very answer it is fencing. Replay safety comes from the server-side
+    // action_id ledger instead.
+    const operation = freezeDurableOperation(PRODUCT_P2_INTERRUPT_GENERATION_METHOD, entry.requestId, params);
+    let promise: Promise<JsonObject>;
+    promise = this.request(PRODUCT_P2_INTERRUPT_GENERATION_METHOD, params, entry.requestId)
+      .then(value => {
+        let result: JsonObject;
+        try {
+          result = requireDurableP2OperationResult(operation, value);
+        } catch (error) {
+          // A response was received, so a binding/schema failure is
+          // deterministic rather than ambiguous transport loss. Retaining it
+          // would make every recovery poll replay the same invalid response
+          // forever. Release only this exact entry and fail closed instead.
+          if (this.generationInterrupts.get(fingerprint) === entry) {
+            this.generationInterrupts.delete(fingerprint);
+          }
+          throw error;
+        }
+        entry.result = result;
+        return result;
+      })
+      .catch(error => {
+        if (isDefinitiveProductOperationError(error)) {
+          this.generationInterrupts.delete(fingerprint);
         }
         throw error;
       })

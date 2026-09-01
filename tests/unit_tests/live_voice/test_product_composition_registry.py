@@ -94,7 +94,6 @@ from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCor
 from jiuwenswarm.server.live_voice.p2_response_generation_store import (
     SqliteP2ResponseGenerationOwner,
 )
-from jiuwenswarm.server.live_voice.product_p2_interaction_adapter import P2LeaseState
 from jiuwenswarm.server.live_voice.p3_confirmation import (
     BoundedP3ConfirmationOwner,
     P3ConfirmationBinding,
@@ -127,6 +126,10 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     _ProgressDelivery,
     _VoiceTaskOrigin,
     create_product_composition_registry_from_environment,
+)
+from jiuwenswarm.server.live_voice.product_p2_interaction_adapter import (
+    P2LeaseCloseStatus,
+    P2LeaseState,
 )
 from jiuwenswarm.server.live_voice import product_composition_registry
 from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
@@ -13231,6 +13234,109 @@ async def test_p2_ack_and_next_submit_linearize_one_complete_context_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_p2_close_waits_for_an_ack_admitted_before_close(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-activate-ack-close-race",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    history = _HistoryWriter()
+    route.activation_lease._runtime._history_writer = history
+    submitted = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-ack-close-race",
+            turn_id="turn-ack-close-race",
+            response_id="response-ack-close-race",
+            committed_at=NOW,
+            text="the admitted acknowledgement must win",
+        ),
+        request_id="request-ack-close-race-submit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+
+    presentation = None
+    response = None
+    for sequence in range(1, 5):
+        polled = await asyncio.wait_for(
+            registry.handle_p2_notification_next(
+                params=_p2_params(notification_sequence=sequence),
+                request_id=f"request-ack-close-race-notification-{sequence}",
+                session_id="session-product",
+            ),
+            timeout=1,
+        )
+        assert polled.ok is True
+        notification = cast(dict[str, object], polled.payload["result"])
+        if isinstance(notification["presentation_unit"], dict):
+            presentation = cast(
+                dict[str, object], notification["presentation_unit"]
+            )
+            response = cast(dict[str, object], notification["response"])
+            break
+    assert presentation is not None
+    assert response is not None
+
+    await route.activation_lease._operation_lock.acquire()
+    ack_request_id = "request-ack-close-race-ack"
+    ack_task = asyncio.create_task(
+        registry.handle_p2_presentation_ack(
+            params=_p2_params(
+                response_id=response["response_id"],
+                response_generation=response["response_generation"],
+                surface=presentation["surface"],
+                unit_id=presentation["unit_id"],
+                contiguous_cursor=presentation["seq"],
+                presented_at=NOW,
+            ),
+            request_id=ack_request_id,
+            session_id="session-product",
+        )
+    )
+    for _ in range(200):
+        if ack_request_id in registry._p2_ack_operations:
+            break
+        await asyncio.sleep(0.005)
+    ack_was_admitted = ack_request_id in registry._p2_ack_operations
+    if not ack_was_admitted:
+        route.activation_lease._operation_lock.release()
+        unexpected = await ack_task
+        raise AssertionError(f"ACK was not admitted: {unexpected.payload!r}")
+
+    close_task = asyncio.create_task(
+        route.activation_lease.close(route.binding, timeout_seconds=1)
+    )
+    for _ in range(20):
+        if route.activation_lease.snapshot().state is P2LeaseState.CLOSING:
+            break
+        await asyncio.sleep(0)
+    close_state = route.activation_lease.snapshot().state
+    route.activation_lease._operation_lock.release()
+    assert close_state is P2LeaseState.CLOSING
+
+    acknowledged, lease_closed = await asyncio.gather(ack_task, close_task)
+    assert acknowledged.ok is True
+    assert cast(dict, acknowledged.payload["result"])["accepted"] is True
+    assert lease_closed.status is P2LeaseCloseStatus.CLOSED
+    closed = await registry.handle_p2_close(
+        params=_p2_params(),
+        request_id="request-ack-close-race-close",
+        session_id="session-product",
+    )
+    assert closed.ok is True
+    assert len(history.assistants) == 1
+    assert registry._p2_routes == {}
+    await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_p2_close_fences_a_concurrent_next_submit_before_agent_effect(
     tmp_path: Path,
 ) -> None:
@@ -14598,6 +14704,106 @@ async def test_product_p2_terminal_barge_after_text_ack_is_playback_only(
     assert terminal.state is ResponseState.TERMINAL
     assert terminal.cancel_state is CancelState.NONE
 
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_product_p2_generation_interrupt_reaches_the_runtime_round(
+    tmp_path: Path,
+) -> None:
+    """Drive the production Registry -> P2 lease -> Agent Runtime wiring.
+
+    The focused suites exercise the Runtime directly, so a broken or missing
+    lease/registry hop would not fail them. This case owns that seam: it
+    asserts the effects and the round cancellation the real handler must have
+    produced.
+    """
+
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    blocking = _BlockingFacade()
+    manager.agent = blocking
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-generation-interrupt",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    submitted = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-generation-interrupt",
+            turn_id="turn-generation-interrupt",
+            response_id="response-generation-interrupt",
+            committed_at=NOW,
+            text="keep generating while the user speaks",
+            dispatch_target="agent",
+        ),
+        request_id="request-submit-generation-interrupt",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+    await asyncio.wait_for(blocking.started.wait(), timeout=1)
+
+    params = _p2_params(
+        action_id="generation-interrupt-action-1",
+        response_id="response-generation-interrupt",
+        response_generation=0,
+    )
+    interrupted = await registry.handle_p2_interrupt_generation(
+        params=params,
+        request_id="request-generation-interrupt-1",
+        session_id="session-product",
+    )
+    replayed = await registry.handle_p2_interrupt_generation(
+        params=params,
+        request_id="request-generation-interrupt-1",
+        session_id="session-product",
+    )
+    conflict = await registry.handle_p2_interrupt_generation(
+        params={**params, "action_id": "generation-interrupt-action-2"},
+        request_id="request-generation-interrupt-1",
+        session_id="session-product",
+    )
+
+    # A client-supplied cancellation scope is refused outright, not ignored.
+    scoped = await registry.handle_p2_interrupt_generation(
+        params={**params, "cancel_scope": "task.cancel"},
+        request_id="request-generation-interrupt-scoped",
+        session_id="session-product",
+    )
+    assert scoped.ok is False
+    assert cast(dict, scoped.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )
+
+    assert interrupted.ok is True
+    result = cast(dict, interrupted.payload["result"])
+    assert result["status"] == "generation_interrupted"
+    assert result["fence_status"] == "fenced"
+    assert result["applied"] is True
+    assert result["cancel_scope"] == "round.cancel"
+    assert result["round_cancel_accepted"] is True
+    assert result["response_id"] == "response-generation-interrupt"
+    assert "cancel_response" not in result
+    assert replayed.payload == interrupted.payload
+    assert conflict.ok is False
+    assert cast(dict, conflict.payload["error"])["reason"] == (
+        "PRODUCT_REQUEST_ID_CONFLICT"
+    )
+
+    # The Runtime really applied the fence and cancelled exactly the round.
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    runtime = route.activation_lease._runtime
+    runtime_effects = [
+        record.effect.effect_type for record in runtime._cr.snapshot().effects
+    ]
+    assert runtime_effects.count("playback.stop") == 1
+    assert runtime_effects.count("response.cancel") == 1
+    assert not {"round.cancel", "task.cancel"} & set(runtime_effects)
+    assert runtime.snapshot().harness.cancel_effects == 1
+
+    blocking.release.set()
     await registry.close_active_routes()
 
 

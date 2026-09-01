@@ -165,8 +165,29 @@
   reproduced defect. The older successor-capture/playout-receipt decoupling
   seams now also pass bounded independent Tier-3 review. Preserve the integrated
   bounded P2 notification pull and legacy single-pull compatibility.
-  Generation-time interruption and physical fixed-corpus/generalization remain
-  separate follow-up work and are not P3-9 blockers or claims. The L0 packet is
+  Generation-time interruption is being integrated behind its default-off flag.
+  Its source-line history below does not replace the current terminal-notification
+  repair or grant physical acceptance to this integration. On the original
+  `hx/0823_generation_interruption` line, its
+  final fix-only Tier-3 source review is **PASS — C0/I0/M0** on `6559c38e`, and
+  its user-approved minimum interrupt-and-replace physical journey is **PASS**
+  on `2c04da22` under [D-106](decisions/DECISIONS.md). The interruption-ledger
+  bound is repaired on
+  `30300f32`; `35537a9a` introduced the exact predecessor/successor boundary and
+  `4c1c7d68` closes its five targeted authority/replay/cleanup findings. Its
+  follow-up accepted four and returned `C0/I1/M0` on delayed Exit fencing and
+  duplicate cancel; `dab64023` makes Exit synchronously own one cancel, both
+  frame releases and both media revocations before browser cleanup can suspend.
+  The next follow-up returned `C0/I1/M0` on a pending B activation re-adding
+  already closed A; `6559c38e` transfers A only while the owner still holds its
+  exact binding. Its final bounded follow-up found no actionable defect and
+  closed the source review Gate. `e8f55ded` and `2c04da22` then close the two
+  acceptance-period UI/dispatch defects; the final log has one interrupt RPC,
+  one prompt round cancel and no retry loop or user-visible product error. This
+  closes the core feature packet, but grants no idle-window, background-Task
+  concurrency, fixed-corpus latency, echo/double-talk, rollout or
+  product-readiness credit.
+  The L0 packet is
   closed under D-097's bounded warm steady-state scope: the 8/8
   ordinary-Chrome journey, authoritative terminal-response barge rerun and
   first-audio/barge warm `20/20 + 20/20` aggregate are recorded. Do not treat
@@ -187,6 +208,30 @@
   feature-complete boundary below passes. At that future boundary, re-read the
   configured remotes and live ref before any integration; this document assumes
   no current remote name or divergence count.
+
+### Generation-interruption scoped closure (2026-08-25)
+
+- **Disposition:** the source Gate is **PASS — C0/I0/M0** on `6559c38e`; the
+  user-approved minimum interrupt-and-replace physical journey is **PASS** on
+  deployed source `2c04da22`. D-106 (source-line D-100) closes this feature packet while ordinary
+  production remains flag-off.
+- **Accepted observation:** while the first prompt was still generating, the
+  user spoke “算了，换个问题，天空是什么颜色？”. The replacement text and audible
+  answer both completed. The final log shows one normalized interrupt request,
+  one same-ID `e2a.complete`, the exact old round cancelled in about 0.15 seconds,
+  no recovery replay and no user-visible product error. A later old-owner close
+  logged one expected `STREAMING_SPEECH_ROUTE_ABORTED`, which `e8f55ded`
+  normalized to cleanup state.
+- **Final repairs and automation:** `e8f55ded` normalizes only a retiring owner's
+  expected streaming abort; `2c04da22` restores the missing top-level product
+  dispatch and releases only deterministic malformed-response retention. Formal
+  Integrated Web is `499/499`, the affected AgentServer/Registry/Gateway set is
+  `66/66`, and `build:live-voice`, `git diff --check` plus the controlled real
+  Speech/security deployment probe pass.
+- **Explicit non-credit:** the original handoff's idle-window and background-Task
+  concurrency scenarios were not rerun. No fixed-corpus timing, echo/double-talk,
+  broader device/network, rollout/A/B, default-on, P3-9, controlled-product or
+  Production claim follows.
 
 ## Completion boundaries
 
@@ -255,7 +300,7 @@ risks, dependencies, acceptance and integration order.
 | Speech Recognition | **PARTIAL.** Real microphone finals now sustain repeated automatic turns on `e1df8b452`. Ordinary and barge-in capture both retain the 1.2-second server-VAD silence contract; one EOT-to-submit interval was 0.669 seconds | Fixed-corpus ordinary/barge-in p50/p95 and pause/truncation evidence before VAD tuning; exact provider speech-start attribution, robust fallback/cancel, Provider-neutral configuration and broader device/network validation | Audio I/O, media route and benchmark owner; no claim that recognition finalization is barge-in-specific |
 | Speech Synthesis | **PARTIAL.** Streaming/Batch TTS, browser playout, response ownership and ACK paths exist; repeated short/long TTS was physically audible on `e1df8b452` without the repaired ACK/receipt failures | Provider-neutral configuration, measured first-audio/underrun/pronunciation targets and complete stale/cancel recovery | Conversation Runtime ownership and Audio I/O stop confirmation; scoped physical PASS does not close feature-complete targets |
 | Realtime Media | **PARTIAL.** Dedicated transport, capture rotation, media registration and presentation ACK sustain the accepted physical loop. The bounded P2 notification pull removes the diagnosed one-notification-per-RPC tail from production Web: Web requests `16`, the server accepts explicit `2..16`, and omitted input remains legacy single-pull compatibility | Backpressure/load targets; drop/reorder/corruption/reconnect matrix; stable diagnostics across repeated recovery; fixed-corpus p50/p95 proof | Audio I/O plus Conversation Runtime; [D-094](decisions/DECISIONS.md) and cumulative real network/device verification |
-| Conversation Runtime | **PARTIAL.** Committed-input fencing, generation ownership, ACK/history projection, Exit fencing, exact foreground Stop, automatic continuation and playout-time barge-in passed the scoped physical journeys. Bounded final notification delivery is default-on. Formal Live Voice intentionally disables interactive Agent tools; ordinary clarification is spoken as a normal response and answered in the next committed turn | **Hands-free speech during Agent generation cannot currently interrupt or replace that response and remains explicit follow-up work**; fixed-corpus/generalization and cross-load arbitration | Media, Interaction Intelligence, Agent Bridge and presentation regressions; structured `ask_user` interrupt/resume is optional compatibility work only if later scope requires exact suspended-workflow continuation |
+| Conversation Runtime | **PARTIAL overall; generation-time interruption source Gate and scoped physical core journey PASS behind a default-off flag.** Committed-input fencing, generation ownership, ACK/history projection, Exit fencing, exact foreground Stop, automatic continuation and playout-time barge-in passed the scoped physical journeys. Bounded final notification delivery is default-on. Hands-free speech during Agent generation can stop or replace one exact round: the fence closes both presentation surfaces and refuses every later token, final, TTS enqueue, presentation ACK and assistant-history projection of that response, and the only cancellation it can issue is `round.cancel` against the exact conversational round. The interruption replay ledger owns pending and settled identities in one atomic 256-entry bound (`30300f32`); `35537a9a`, `4c1c7d68`, `dab64023` and `6559c38e` close the cross-capture authority/replay/Exit chain, whose final review passes `C0/I0/M0`. The final accepted `2c04da22` route returns one exact interrupt receipt without entering DeepAgent, and the real interrupt-and-replace journey completes replacement text and audio. A terminal Task announcement that lands while that speaker is mid-utterance still stands down and is replayed once they finish. Formal Live Voice intentionally disables interactive Agent tools; ordinary clarification is spoken as a normal response and answered in the next committed turn | Fixed-corpus generation-window timing, echo/double-talk, broader device/network, rollout/A/B/rollback and cross-load evidence; the original idle-window and Task-concurrency physical scenarios retain no new credit | Media, Interaction Intelligence, Agent Bridge and presentation regressions; [D-106](decisions/DECISIONS.md) and the [generation-interruption evidence](evidence/GENERATION_TIME_INTERRUPTION_20260823.md); structured `ask_user` interrupt/resume is optional compatibility work only if later scope requires exact suspended-workflow continuation |
 | Interaction Intelligence | **PARTIAL.** VAD/EOT and bounded dialogue/background routing exist for the controlled journey | General natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization; Native model-level duplex remains optional | Streaming Speech plus Runtime; measured golden corpus |
 | Agent Bridge and dialogue truth | **PARTIAL.** Real Agent dialogue/tools and bounded response/progress integration exist | Non-blocking progress provenance, strict Task-truth isolation, bounded result-context reservation and unconstrained reread prevention | Runtime, Task/Event truth and affected text-path regressions |
 | Task Control Core and Store | **PARTIAL overall; scheduled P3 code boundary and bounded P3-9 candidate journey closed.** Schema v6 retains canonical multi-Task authority, closed command/disposition/update/successor semantics, durable D0-D2 checkpoint/effect/recovery truth, Task-wide retained replay and class-isolated presentation ACK. Production multi-Task queries/mutations use authenticated reread and exact Task/Attempt/head CAS; D-093 fixes absent primitives as stable zero-effect unsupported | Feature-complete work still requires the declared full Task operations/generalization boundary without adding a second authority | Executor capability/admission/durability facts, Voice–Task Bridge, restart/concurrency matrix, [P3-9 human acceptance](evidence/P3_9_CUMULATIVE_PRODUCT_ACCEPTANCE_20260902.md) and [final review](reviews/P3_9_FINAL_INDEPENDENT_TIER3_REVIEW_2026-09-02.md) |
@@ -311,6 +356,29 @@ it cannot upgrade the failed candidate or invalidate the historical
 exact-source Alpha result.
 
 ## Current execution packet
+
+### W3 generation interruption and Native adaptation integration
+
+- **Scope/risk:** user-authorized, ordered transplant of `c400188d` and
+  `4b247ddb` onto W3 source `fec2bbe2`; Tier-3 integration seams across
+  P1 capture, P2 presentation, Gateway response replay and authenticated P3.
+  Imported modules keep their own exact-source reviews; this composition has
+  no inherited independent-review or human acceptance credit.
+- **Intended behaviour/owners:** preserve existing queued Task controls,
+  terminal recognition/media-start recovery, visible TEXT fallback and completed
+  unary exact-ID replay while adding the two commits' generation interruption
+  and explicitly opt-in Native engine. Own only necessary source/test conflict
+  resolution and documentation reconciliation; keep both branches' regression
+  oracles and exact response/owner/Session/generation fences.
+- **Exclusions:** no new protocol, policy, model upgrade, default-on switch,
+  credential/configuration change, deployment, remote update or new physical
+  acceptance claim. Cascade remains the default; interruption remains flag-off.
+- **Closure:** in progress. Recompile and run affected frontend, interruption,
+  Native, Gateway/P3 and notification regressions, production build, static and
+  scoped complete-diff review. Preserve and disclose baseline-only failures.
+  Current W3 D-098/D-099/D-100 remain Task-control decisions; source-line
+  generation decisions map to D-104/D-105/D-106, leaving Native D-101/D-102/D-103
+  distinct. Historical evidence is interpreted through that mapping.
 
 ### Reopened terminal Task notification presentation repair
 

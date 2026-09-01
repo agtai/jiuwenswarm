@@ -8,6 +8,8 @@ import React from 'react';
 import { I18nextProvider } from 'react-i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
 
+import * as integratedPanelModule from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
+
 import {
   LiveVoiceIntegratedRoutePanelView,
   PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS,
@@ -49,6 +51,32 @@ import {
   terminalTextFallbackMessage,
   webReconnectDelayMs,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
+
+test('P2 retirement hides only its expected streaming-route abort from recovery UI', () => {
+  const normalize = integratedPanelModule.normalizeProductP1StatusForP2Retirement;
+  assert.equal(typeof normalize, 'function');
+  assert.deepEqual(
+    normalize('failed', 'STREAMING_SPEECH_ROUTE_ABORTED', true),
+    {
+      status: 'cleanup_pending',
+      reason: 'FORMAL_P1_CLEANUP_IN_PROGRESS',
+    },
+  );
+  assert.deepEqual(
+    normalize('failed', 'STREAMING_SPEECH_ROUTE_ABORTED', false),
+    {
+      status: 'failed',
+      reason: 'STREAMING_SPEECH_ROUTE_ABORTED',
+    },
+  );
+  assert.deepEqual(
+    normalize('failed', 'MEDIA_TRANSPORT_CLOSED', true),
+    {
+      status: 'failed',
+      reason: 'MEDIA_TRANSPORT_CLOSED',
+    },
+  );
+});
 
 test('Panel P2 owner factory defaults production to sixteen and injects one for A/B baseline', async () => {
   const binding = {
@@ -2098,7 +2126,10 @@ test('fresh task.create rebinds the panel progress owner to its exact task', asy
 test('product barge-in stops local playout before any response cancel request', async () => {
   const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
   const start = source.indexOf('const stopProductVoicePlayout = async () =>');
-  const end = source.indexOf('const commitRecognizedVoiceTaskOrigin', start);
+  // Generation interruption is intentionally declared between barge-in and
+  // committed-origin handling. Keep this structural oracle scoped to the
+  // barge-in handler rather than treating the adjacent feature as its body.
+  const end = source.indexOf('const interruptProductGeneration = async () =>', start);
   const handler = source.slice(start, end);
   const stopIndex = handler.indexOf('p1Owner.stopAgentPlayout(response)');
   const rejectIndex = handler.indexOf('if (!locallyStopped) return;');
@@ -2130,11 +2161,17 @@ test('overlap capture publishes its exact binding before playout EOT can race co
 test('Task AUDIO playout suppresses overlap capture before post-ACK listening resumes', async () => {
   const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
   const start = source.indexOf('const playout = voiceOwner.playAgentText({');
-  const end = source.indexOf('void (disposition.task_notification', start);
+  const end = source.indexOf('awaitProductTaskNotificationPlayout(', start);
   const handler = source.slice(start, end);
 
   assert.equal(start >= 0 && end > start, true);
   assert.match(handler, /capture_during_playout: !disposition\.task_notification/);
+  const resumeStart = source.indexOf('resumeDeferredTaskAnnouncementRef.current = retained =>');
+  const resumeEnd = source.indexOf('const stopProductVoiceCaptureOwned', resumeStart);
+  const resume = source.slice(resumeStart, resumeEnd);
+  assert.match(resume, /capture_during_playout: false/);
+  assert.match(resume, /awaitProductTaskNotificationPlayout/);
+  assert.match(resume, /settleTaskPresentationFailure\(retained, 'task_audio_playout_failed'\)/);
 });
 
 test('explicit Live Voice exit fences old playout settlement without blocking its visible-text ACK', async () => {

@@ -238,6 +238,9 @@ class ReqMethod(Enum):
     LIVE_VOICE_COMPOSITION_P2_BARGE_IN = (
         "live_voice.composition.p2.barge_in"
     )
+    LIVE_VOICE_COMPOSITION_P2_INTERRUPT_GENERATION = (
+        "live_voice.composition.p2.interrupt_generation"
+    )
     LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE = (
         "live_voice.composition.p3.confirmation.issue"
     )

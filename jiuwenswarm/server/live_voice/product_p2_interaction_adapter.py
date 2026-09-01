@@ -39,6 +39,7 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
 from .agent_conversation_runtime import (
     AgentConversationHandle,
     AgentConversationNotification,
+    AgentGenerationInterruption,
     AgentConversationShutdownResult,
     AgentConversationShutdownStatus,
     AuthoritativePresentationHandle,
@@ -556,6 +557,10 @@ class P2ActivationLease:
         self._operation_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._close_coordinator: asyncio.Task[P2LeaseCloseResult] | None = None
+        self._presentation_ack_reservation_sequence = 0
+        self._presentation_ack_reservations: dict[int, PresentationAck] = {}
+        self._presentation_ack_reservations_settled = asyncio.Event()
+        self._presentation_ack_reservations_settled.set()
         attach_consumer = getattr(runtime, "attach_notification_consumer", None)
         self._notification_lease = (
             attach_consumer(
@@ -617,12 +622,27 @@ class P2ActivationLease:
         before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None = None,
         after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
         allow_tools: bool = True,
+        supersedes: ResponseRef | None = None,
     ) -> AgentConversationHandle:
-        """Forward one exact committed turn through the retained runtime owner."""
+        """Forward one exact committed turn through the retained runtime owner.
+
+        ``supersedes`` carries the exact response this committed speech
+        replaces.  It must belong to the activated interaction, so one browser
+        activation can never fence another interaction response.
+        """
 
         async with self._operation_lock:
             with self._state_lock:
                 self._require_open_exact_binding(binding)
+            if (
+                supersedes is not None
+                and supersedes.interaction_id != binding.interaction_id
+            ):
+                raise _violation(
+                    "SUPERSEDED_RESPONSE_BINDING_MISMATCH",
+                    "a replacement turn must supersede its own activated interaction",
+                    ErrorCode.PERMISSION_DENIED,
+                )
             submit = getattr(self._runtime, "submit_committed_turn", None)
             if not callable(submit):
                 raise _violation(
@@ -640,6 +660,7 @@ class P2ActivationLease:
                 before_dispatch=before_dispatch,
                 after_dispatch=after_dispatch,
                 allow_tools=allow_tools,
+                supersedes=supersedes,
             )
             if not isinstance(outcome, AgentConversationHandle):
                 raise _violation(
@@ -1012,12 +1033,23 @@ class P2ActivationLease:
         self,
         binding: P2InteractionBinding,
         ack: PresentationAck,
+        *,
+        reservation_id: int | None = None,
     ) -> PresentationAckResult:
         """Forward an exact presentation ACK to the retained history owner."""
 
         async with self._operation_lock:
             with self._state_lock:
-                self._require_open_exact_binding(binding)
+                if reservation_id is None:
+                    self._require_open_exact_binding(binding)
+                else:
+                    self._require_exact_binding(binding)
+                    if self._presentation_ack_reservations.get(reservation_id) != ack:
+                        raise _violation(
+                            "PRESENTATION_ACK_RESERVATION_MISMATCH",
+                            "presentation ACK changed after admission",
+                            ErrorCode.PERMISSION_DENIED,
+                        )
             acknowledge = getattr(self._runtime, "acknowledge_presentation", None)
             if not callable(acknowledge):
                 raise _violation(
@@ -1033,6 +1065,47 @@ class P2ActivationLease:
                     ErrorCode.UNAVAILABLE,
                 )
             return outcome
+
+    def reserve_presentation_ack(
+        self,
+        binding: P2InteractionBinding,
+        ack: PresentationAck,
+    ) -> int:
+        """Linearize one exact ACK before a later close can own the lease."""
+
+        if not isinstance(ack, PresentationAck):
+            raise _violation(
+                "INVALID_PRESENTATION_ACK",
+                "presentation ACK must be canonical",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        with self._state_lock:
+            self._require_open_exact_binding(binding)
+            self._presentation_ack_reservation_sequence += 1
+            reservation_id = self._presentation_ack_reservation_sequence
+            self._presentation_ack_reservations[reservation_id] = ack
+            self._presentation_ack_reservations_settled.clear()
+            return reservation_id
+
+    def release_presentation_ack(
+        self,
+        binding: P2InteractionBinding,
+        ack: PresentationAck,
+        reservation_id: int,
+    ) -> None:
+        """Release the exact ACK admission after every owned effect settles."""
+
+        with self._state_lock:
+            self._require_exact_binding(binding)
+            if self._presentation_ack_reservations.get(reservation_id) != ack:
+                raise _violation(
+                    "PRESENTATION_ACK_RESERVATION_MISMATCH",
+                    "presentation ACK reservation is not active",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            self._presentation_ack_reservations.pop(reservation_id)
+            if not self._presentation_ack_reservations:
+                self._presentation_ack_reservations_settled.set()
 
     async def barge_in(
         self,
@@ -1069,6 +1142,45 @@ class P2ActivationLease:
                 raise _violation(
                     "PRODUCT_BARGE_IN_UNAVAILABLE",
                     "retained runtime returned no canonical barge-in result",
+                    ErrorCode.UNAVAILABLE,
+                )
+            return outcome
+
+    async def interrupt_generation(
+        self,
+        binding: P2InteractionBinding,
+        *,
+        action_id: str,
+        response: ResponseRef,
+    ) -> AgentGenerationInterruption:
+        """Fence one unfinished response owned by this exact activation.
+
+        This never widens beyond ``round.cancel``: the lease exposes no
+        cancellation scope at all, so a caller cannot ask it to reach a
+        background Task.
+        """
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            if response.interaction_id != binding.interaction_id:
+                raise _violation(
+                    "GENERATION_INTERRUPT_BINDING_MISMATCH",
+                    "generation interruption must target the exact activated interaction",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            interrupt = getattr(self._runtime, "interrupt_generation", None)
+            if not callable(interrupt):
+                raise _violation(
+                    "PRODUCT_GENERATION_INTERRUPT_UNAVAILABLE",
+                    "retained runtime has no generation interruption owner",
+                    ErrorCode.UNAVAILABLE,
+                )
+            outcome = await interrupt(action_id=action_id, ref=response)
+            if not isinstance(outcome, AgentGenerationInterruption):
+                raise _violation(
+                    "PRODUCT_GENERATION_INTERRUPT_UNAVAILABLE",
+                    "retained runtime returned no canonical interruption result",
                     ErrorCode.UNAVAILABLE,
                 )
             return outcome
@@ -1139,6 +1251,7 @@ class P2ActivationLease:
 
     async def _run_close(self) -> P2LeaseCloseResult:
         try:
+            await self._presentation_ack_reservations_settled.wait()
             async with self._operation_lock:
                 if (
                     self._notification_lease is not None

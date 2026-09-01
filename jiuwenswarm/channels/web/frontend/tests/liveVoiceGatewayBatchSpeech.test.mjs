@@ -30,12 +30,22 @@ function ids() {
   return () => `generated-${++value}`;
 }
 
-function frame(generation = 1, seq = 0, value = 0.25, captureId = 'capture-1') {
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolveValue, rejectValue) => {
+    resolve = resolveValue;
+    reject = rejectValue;
+  });
+  return { promise, resolve, reject };
+}
+
+function frame(generation = 1, seq = 0, value = 0.25, captureId = 'capture-1', trackId = 'track-1') {
   return {
     capture: {
       capture_id: captureId,
       capture_generation: generation,
-      track_id: 'track-1',
+      track_id: trackId,
     },
     seq,
     sample_cursor: seq * 320,
@@ -201,6 +211,72 @@ test('AIO-B final frames reach formal SR-B with provenance but never commit a tu
   assert.equal(result.commits_turn, false);
   assert.equal(result.provider.implementation_class, 'formal');
   assert.equal(calls.length, 1);
+});
+
+test('cross-capture final keeps predecessor provenance and one ordered Batch request', async () => {
+  const calls = [];
+  const transport = {
+    async request(method, params) {
+      calls.push({ method, params });
+      assert.equal(method, SPEECH_RECOGNIZE_BATCH_METHOD);
+      assert.deepEqual(params.predecessor.capture, {
+        capture_id: 'capture-prefix',
+        capture_generation: 1,
+        track_id: 'track-prefix',
+        final: true,
+      });
+      assert.equal(params.predecessor.subject_id, 'subject-prefix');
+      const prefix = Buffer.from(params.predecessor.audio.data_base64, 'base64');
+      const tail = Buffer.from(params.audio.data_base64, 'base64');
+      assert.equal(new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength).getInt16(44, true) < 0, true);
+      assert.equal(new DataView(tail.buffer, tail.byteOffset, tail.byteLength).getInt16(44, true) > 0, true);
+      return recognitionEnvelope(params);
+    },
+  };
+  const client = new GatewayBatchSpeechClient({ enabled: true, transport, scope, createId: ids() });
+
+  const result = await client.recognizeFinal({
+    frames: [frame(2, 0, 0.5, 'capture-tail', 'track-tail')],
+    predecessor: {
+      subjectId: 'subject-prefix',
+      frames: [frame(1, 0, -0.5, 'capture-prefix', 'track-prefix')],
+    },
+    locale: 'en-US',
+    correlationId: 'correlation-1',
+  });
+
+  assert.equal(result.final_text, 'formal text');
+  assert.equal(result.capture.capture_id, 'capture-tail');
+  assert.equal(calls.length, 1);
+});
+
+test('cross-capture final rejects equal predecessor and successor generations locally', async () => {
+  let transportCalls = 0;
+  const client = new GatewayBatchSpeechClient({
+    enabled: true,
+    scope,
+    createId: ids(),
+    transport: {
+      async request() {
+        transportCalls += 1;
+        throw new Error('equal generations must fail before transport');
+      },
+    },
+  });
+
+  await assert.rejects(
+    client.recognizeFinal({
+      frames: [frame(1, 0, 0.5, 'capture-tail', 'track-tail')],
+      predecessor: {
+        subjectId: 'subject-prefix',
+        frames: [frame(1, 0, -0.5, 'capture-prefix', 'track-prefix')],
+      },
+      locale: 'en-US',
+      correlationId: 'correlation-1',
+    }),
+    error => error.reason === 'CAPTURE_CONTINUATION_IDENTITY_CONFLICT',
+  );
+  assert.equal(transportCalls, 0);
 });
 
 test('real backend streaming fallback fixture crosses into the frontend contract', async () => {
@@ -758,6 +834,47 @@ test('transport timeout requests scoped cancellation and applies no recognition 
   assert.ok(cancel);
   assert.equal(cancel.params.scope.subject_id, 'alice');
   assert.equal(cancel.params.target_operation_id, calls[0].params.operation_id);
+});
+
+test('an explicit recognition fence owns the only cancel when the held request later aborts', async () => {
+  const heldRecognition = deferred();
+  const calls = [];
+  const transport = {
+    request(method, params) {
+      calls.push({ method, params });
+      if (method === SPEECH_CANCEL_METHOD) return Promise.resolve({ ok: true });
+      assert.equal(method, SPEECH_RECOGNIZE_BATCH_METHOD);
+      return heldRecognition.promise;
+    },
+  };
+  const client = new GatewayBatchSpeechClient({ enabled: true, transport, scope, createId: ids() });
+  const recognition = client.recognizeFinal({
+    frames: [frame(2, 0, 0.5, 'capture-tail', 'track-tail')],
+    predecessor: {
+      subjectId: 'subject-prefix',
+      frames: [frame(1, 0, -0.5, 'capture-prefix', 'track-prefix')],
+    },
+    locale: 'en-US',
+    correlationId: 'correlation-1',
+  });
+  const rejected = assert.rejects(
+    recognition,
+    error => error?.code === 'REQUEST_ABORTED',
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  const batch = calls.find(call => call.method === SPEECH_RECOGNIZE_BATCH_METHOD);
+  assert.ok(batch);
+
+  await client.fenceRecognition('capture-tail');
+  heldRecognition.reject(Object.assign(new Error('request aborted after explicit fence'), {
+    code: 'REQUEST_ABORTED',
+  }));
+  await rejected;
+  await new Promise(resolve => setImmediate(resolve));
+
+  const cancels = calls.filter(call => call.method === SPEECH_CANCEL_METHOD);
+  assert.equal(cancels.length, 1);
+  assert.equal(cancels[0].params.target_operation_id, batch.params.operation_id);
 });
 
 test('mismatched Provider rate and malformed capture fail closed before AIO application', async () => {

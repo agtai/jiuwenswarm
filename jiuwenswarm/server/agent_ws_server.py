@@ -2056,6 +2056,7 @@ class AgentWebSocketServer:
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_FAILED,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P2_INTERRUPT_GENERATION,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT_STATUS,
@@ -9240,6 +9241,12 @@ class AgentWebSocketServer:
                 )
             elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN:
                 result = await registry.handle_p2_barge_in(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_INTERRUPT_GENERATION:
+                result = await registry.handle_p2_interrupt_generation(
                     params=params,
                     request_id=request.request_id,
                     session_id=request.session_id,

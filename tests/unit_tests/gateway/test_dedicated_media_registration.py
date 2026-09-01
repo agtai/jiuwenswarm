@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import replace
 import base64
-import hashlib
 import io
 import json
 import logging
@@ -19,6 +19,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     ResponseRef,
     ScopeRef,
+    canonical_json_bytes,
 )
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAck,
@@ -58,6 +59,7 @@ from jiuwenswarm.server.live_voice.batch_speech import (
     RECOGNIZE_OPERATION,
     SYNTHESIZE_OPERATION,
     SpeechAuthorizationBinding,
+    SpeechRecognitionSegmentBinding,
     SpeechRpcContext,
 )
 from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
@@ -1491,6 +1493,359 @@ def test_completed_route_authorizes_only_exact_independent_capture_and_no_disk(
     assert registry.authorize(exact) == exact
     forged = replace(exact, content_sha256="0" * 64)
     assert registry.authorize(forged) is None
+
+
+def _continued_recognition_authority() -> tuple[
+    DedicatedMediaProductRegistry,
+    SpeechAuthorizationBinding,
+    object,
+    object,
+]:
+    now = 1.0
+    registry = DedicatedMediaProductRegistry(enabled=True, monotonic=lambda: now)
+    registry.set_provider_available(True)
+    predecessor_activation = _activate(
+        registry,
+        params=_params(
+            capture_id="capture-predecessor",
+            capture_generation=1,
+            track_id="track-predecessor",
+        ),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    predecessor = registry.consume_ticket(
+        _media_ticket(predecessor_activation), request_origin=ORIGIN
+    )
+    assert predecessor is not None
+    registry.accept_frame(
+        predecessor,
+        MediaAudioFrame(seq=0, sample_cursor=0, samples=(-0.25,) * 320),
+    )
+    registry.complete_route(
+        predecessor,
+        SimpleNamespace(
+            activated=True,
+            accepted_frames=1,
+            reason_id=MediaDetachReason.RECOGNITION_CONTINUATION,
+        ),  # type: ignore[arg-type]
+    )
+    now = 2.0
+    current_activation = _activate(
+        registry,
+        params=_params(
+            capture_id="capture-current",
+            capture_generation=2,
+            track_id="track-current",
+            recognition_predecessor_subject_id=str(
+                predecessor_activation["subject_id"]
+            ),
+        ),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    current = registry.consume_ticket(
+        _media_ticket(current_activation), request_origin=ORIGIN
+    )
+    assert current is not None
+    registry.accept_frame(
+        current,
+        MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.25,) * 320),
+    )
+    registry.complete_route(
+        current,
+        SimpleNamespace(activated=True, accepted_frames=1),  # type: ignore[arg-type]
+    )
+    segments = (
+        SpeechRecognitionSegmentBinding(
+            subject_id=str(predecessor_activation["subject_id"]),
+            capture_id="capture-predecessor",
+            capture_generation=1,
+            track_id="track-predecessor",
+            content_sha256=str(predecessor.recognition_content_sha256),
+        ),
+        SpeechRecognitionSegmentBinding(
+            subject_id=str(current_activation["subject_id"]),
+            capture_id="capture-current",
+            capture_generation=2,
+            track_id="track-current",
+            content_sha256=str(current.recognition_content_sha256),
+        ),
+    )
+
+    def combined_digest(
+        candidates: tuple[SpeechRecognitionSegmentBinding, ...],
+    ) -> str:
+        return hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "segments": [
+                        {
+                            "subject_id": segment.subject_id,
+                            "capture_id": segment.capture_id,
+                            "capture_generation": segment.capture_generation,
+                            "track_id": segment.track_id,
+                            "content_sha256": segment.content_sha256,
+                        }
+                        for segment in candidates
+                    ]
+                }
+            )
+        ).hexdigest()
+
+    scope = ScopeRef(
+        segments[-1].subject_id, None, "session-1", Assurance.AUTHENTICATED
+    )
+    binding = SpeechAuthorizationBinding(
+        subject_id=segments[-1].subject_id,
+        scope=scope,
+        operation=RECOGNIZE_OPERATION,
+        operation_id="recognize-continuation",
+        correlation_id="correlation-1",
+        capture_id=segments[-1].capture_id,
+        capture_generation=segments[-1].capture_generation,
+        track_id=segments[-1].track_id,
+        response=None,
+        unit_id=None,
+        content_sha256=combined_digest(segments),
+        recognition_segments=segments,
+    )
+    return registry, binding, predecessor, current
+
+
+def _continued_binding_with_segments(
+    binding: SpeechAuthorizationBinding,
+    segments: tuple[SpeechRecognitionSegmentBinding, ...],
+) -> SpeechAuthorizationBinding:
+    digest = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "segments": [
+                    {
+                        "subject_id": segment.subject_id,
+                        "capture_id": segment.capture_id,
+                        "capture_generation": segment.capture_generation,
+                        "track_id": segment.track_id,
+                        "content_sha256": segment.content_sha256,
+                    }
+                    for segment in segments
+                ]
+            }
+        )
+    ).hexdigest()
+    return replace(binding, recognition_segments=segments, content_sha256=digest)
+
+
+def _single_recognition_binding(
+    binding: SpeechAuthorizationBinding,
+    segment: SpeechRecognitionSegmentBinding,
+) -> SpeechAuthorizationBinding:
+    return replace(
+        binding,
+        subject_id=segment.subject_id,
+        scope=replace(binding.scope, subject_id=segment.subject_id),
+        capture_id=segment.capture_id,
+        capture_generation=segment.capture_generation,
+        track_id=segment.track_id,
+        content_sha256=segment.content_sha256,
+        recognition_segments=(),
+    )
+
+
+def test_continued_recognition_requires_exact_ordered_media_authorities() -> None:
+    registry, exact, predecessor, current = _continued_recognition_authority()
+
+    assert registry.authorize(exact) == exact
+    assert (
+        registry.authorize(
+            _single_recognition_binding(exact, exact.recognition_segments[0])
+        )
+        is None
+    )
+    assert (
+        registry.authorize(
+            _single_recognition_binding(exact, exact.recognition_segments[1])
+        )
+        is None
+    )
+    before = (len(registry._records), len(registry._subjects))
+
+    reversed_segments = tuple(reversed(exact.recognition_segments))
+    assert (
+        registry.authorize(_continued_binding_with_segments(exact, reversed_segments))
+        is None
+    )
+    forged_track = (
+        replace(exact.recognition_segments[0], track_id="track-forged"),
+        exact.recognition_segments[1],
+    )
+    assert (
+        registry.authorize(_continued_binding_with_segments(exact, forged_track))
+        is None
+    )
+    forged_audio = (
+        replace(exact.recognition_segments[0], content_sha256="0" * 64),
+        exact.recognition_segments[1],
+    )
+    assert (
+        registry.authorize(_continued_binding_with_segments(exact, forged_audio))
+        is None
+    )
+    predecessor.binding = replace(
+        predecessor.binding, connection_id="connection-foreign"
+    )
+    assert registry.authorize(exact) is None
+    assert (len(registry._records), len(registry._subjects)) == before
+    assert predecessor.recognition_content_sha256 is not None
+    assert current.recognition_content_sha256 is not None
+
+
+def test_continued_predecessor_can_activate_only_one_successor() -> None:
+    registry, exact, predecessor, current = _continued_recognition_authority()
+    before = (len(registry._records), len(registry._subjects))
+    params = _params(
+        capture_id="capture-second-successor",
+        capture_generation=3,
+        track_id="track-second-successor",
+        recognition_predecessor_subject_id=predecessor.subject_id,
+    )
+
+    with pytest.raises(
+        MediaTransportViolation, match="exact completed predecessor"
+    ):
+        _activate(
+            registry,
+            params=params,
+            request_origin=ORIGIN,
+            connection_id="connection-1",
+        )
+
+    assert (len(registry._records), len(registry._subjects)) == before
+    assert current.subject_id == exact.subject_id
+
+
+def test_continued_activation_rejects_equal_capture_generation() -> None:
+    registry = _active_registry()
+    predecessor_activation = _activate(
+        registry,
+        params=_params(
+            capture_id="capture-predecessor",
+            capture_generation=1,
+            track_id="track-predecessor",
+        ),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    predecessor = registry.consume_ticket(
+        _media_ticket(predecessor_activation), request_origin=ORIGIN
+    )
+    assert predecessor is not None
+    registry.accept_frame(
+        predecessor,
+        MediaAudioFrame(seq=0, sample_cursor=0, samples=(-0.25,) * 320),
+    )
+    registry.complete_route(
+        predecessor,
+        SimpleNamespace(
+            activated=True,
+            accepted_frames=1,
+            reason_id=MediaDetachReason.RECOGNITION_CONTINUATION,
+        ),  # type: ignore[arg-type]
+    )
+    successor_params = _params(
+        capture_id="capture-current",
+        capture_generation=1,
+        track_id="track-current",
+        recognition_predecessor_subject_id=predecessor.subject_id,
+    )
+    _trust_product_activation(
+        registry,
+        successor_params,
+        connection_id="connection-1",
+    )
+
+    with pytest.raises(
+        MediaTransportViolation, match="exact completed predecessor"
+    ):
+        registry.activate(
+            params=successor_params,
+            request_origin=ORIGIN,
+            connection_id="connection-1",
+        )
+
+    assert len(registry._records) == 1
+
+
+def test_continued_recognition_cannot_import_a_cross_session_predecessor() -> None:
+    registry, exact, predecessor, current = _continued_recognition_authority()
+    predecessor.binding = replace(predecessor.binding, session_id="session-foreign")
+    registry._subjects.pop(("session-1", predecessor.subject_id))
+    registry._subjects[("session-foreign", predecessor.subject_id)] = (
+        predecessor.record_id
+    )
+
+    assert registry.authorize(exact) is None
+    assert predecessor.recognition_content_sha256 is not None
+    assert current.recognition_content_sha256 is not None
+
+
+def test_continued_activation_requires_a_completed_exact_predecessor() -> None:
+    registry = _active_registry()
+    params = _params(
+        capture_id="capture-current",
+        capture_generation=2,
+        track_id="track-current",
+        recognition_predecessor_subject_id="media-subject-absent",
+    )
+    _trust_product_activation(
+        registry,
+        params,
+        connection_id="connection-1",
+    )
+
+    with pytest.raises(
+        MediaTransportViolation, match="exact completed predecessor"
+    ):
+        registry.activate(
+            params=params,
+            request_origin=ORIGIN,
+            connection_id="connection-1",
+        )
+
+    assert registry._records == {}
+    assert registry._subjects == {}
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "interaction",
+        "activation_id",
+        "activation_generation",
+        "predecessor_flag",
+        "successor_marker",
+    ],
+)
+def test_continued_recognition_rejects_cross_authority_predecessor(
+    boundary: str,
+) -> None:
+    registry, exact, predecessor, current = _continued_recognition_authority()
+    if boundary == "interaction":
+        predecessor.binding = replace(
+            predecessor.binding, interaction_id="interaction-foreign"
+        )
+    elif boundary == "activation_id":
+        predecessor.product_activation_id = "activation-foreign"
+    elif boundary == "activation_generation":
+        predecessor.product_activation_generation += 1
+    elif boundary == "predecessor_flag":
+        predecessor.recognition_continuation_predecessor = False
+    else:
+        current.recognition_predecessor_subject_id = None
+
+    assert registry.authorize(exact) is None
+    assert predecessor.recognition_content_sha256 is not None
+    assert current.recognition_content_sha256 is not None
 
 
 def test_agent_notification_authorizes_only_exact_agent_text_render_plan() -> None:
