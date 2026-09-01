@@ -95,6 +95,10 @@ def build_permission_rail(
     )
     from openjiuwen.harness.security.models import PermissionConfirmResponse
 
+    from jiuwenswarm.agents.harness.common.rails.permissions.scope_permissions import (
+        narrow_permission_config,
+        scope_refuses,
+    )
     from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
         SKILLS_REBUILD_SILENT,
         TOOL_PERMISSION_CHANNEL_ID,
@@ -342,6 +346,43 @@ def build_permission_rail(
             ):
                 return ("approve",)
 
+            # scopes (docs/local/scopes-design.md §11 step 3). Third of the five
+            # branches, and the position is part of the design rather than an
+            # implementation detail. Why it answers only ``deny`` is in
+            # ``scope_refuses``; this is why it sits here.
+            #
+            # It is *above* everything that follows because a scope can only
+            # tighten (D4): a deny placed under a branch that approves would be
+            # a restriction the config expresses and the code does not honour,
+            # and the two branches below both approve. Putting it here can
+            # therefore never widen any of them -- it can only refuse something
+            # one of them would have allowed.
+            #
+            # It is above the ``perm_ctx is None`` return for a harder reason.
+            # ``setup_permission_context`` builds a PermissionContext only for
+            # the digital-avatar scene or when memory is off, so perm_ctx is
+            # None for an ordinary Slack turn: a scopes branch below that line
+            # would never run for the conversations scopes exist to govern. It
+            # reads the two ContextVars the request handler always sets instead.
+            #
+            # It is *below* the two branches above it because neither is a
+            # decision this can outrank. The silent skills.rebuild session has
+            # no UI to render an approval in at all, and ask_user is bypassed
+            # here because the permission rail otherwise swallows its answer and
+            # re-pops the card forever (issue #1976) -- a scope denying ask_user
+            # would reopen that, so ask_user is out of scopes' reach and this is
+            # where that is decided.
+            if scope_refuses(inp.normalized_tool_name):
+                logger.info(
+                    "[InterruptHelpers] scopes deny tool=%s",
+                    inp.normalized_tool_name,
+                )
+                return (
+                    "reject",
+                    "[PERMISSION_DENIED] 该工具在当前会话被 scopes 规则禁用"
+                    " (scopes: deny)",
+                )
+
             if perm_ctx is None:
                 return None
 
@@ -389,7 +430,14 @@ def build_permission_rail(
                     "file_guard": {"enabled": False},
                 }
             cfg = get_config()
-            return cfg.get("permissions") if isinstance(cfg, dict) else {}
+            permissions = cfg.get("permissions") if isinstance(cfg, dict) else {}
+            # Where a scopes ``permissions`` section is applied. It is not a
+            # plain fold through agent-core's narrow_permissions: that is
+            # monotone over the ``tools`` field alone, and the sections the
+            # engine reads ahead of it have to be edited to match. What has to
+            # be edited, and the one case that can only be reported, are in
+            # common/scopes/permissions.py.
+            return narrow_permission_config(permissions)
 
         host = ToolPermissionHost(
             get_permissions_snapshot=_get_permissions_snapshot,

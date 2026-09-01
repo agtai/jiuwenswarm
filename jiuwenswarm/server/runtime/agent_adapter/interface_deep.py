@@ -249,6 +249,7 @@ from jiuwenswarm.common.kv_cache_affinity_config import (
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
     TOOL_PERMISSION_CHANNEL_ID,
+    TOOL_PERMISSION_CHAT_ID,
 )
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
@@ -11944,6 +11945,14 @@ class JiuWenSwarmDeepAdapter:
         )
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+        # Bound beside the channel and reset beside it. The request is where the
+        # conversation id is; nothing downstream of here carries it, which is
+        # why a ContextVar is what the tool call reads it from. See that
+        # ContextVar's own comment for why the scopes permissions section wants
+        # the pair.
+        token_chat = TOOL_PERMISSION_CHAT_ID.set(
+            (getattr(request, "chat_id", "") or "").strip()
+        )
         token_perm = setup_permission_context(request)
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(
@@ -12169,6 +12178,7 @@ class JiuWenSwarmDeepAdapter:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+            TOOL_PERMISSION_CHAT_ID.reset(token_chat)
             cleanup_permission_context(token_perm)
             self._reset_runtime_cron_context(cron_context_tokens)
             self._unmark_session_active(session_id)
@@ -12328,6 +12338,9 @@ class JiuWenSwarmDeepAdapter:
             # the long-lived team stream task keeps the values this request set
             # even after the resets below run at request end.
             token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+            token_chat = TOOL_PERMISSION_CHAT_ID.set(
+                (getattr(request, "chat_id", "") or "").strip()
+            )
             token_perm = setup_permission_context(request)
             resolved_language = self._resolve_runtime_language()
             resolved_channel = str(cid or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
@@ -12364,6 +12377,7 @@ class JiuWenSwarmDeepAdapter:
                 reset_current_multimodal_image_files(image_files_token)
                 reset_team_heartbeat_service(token_heartbeat_service)
                 TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+                TOOL_PERMISSION_CHAT_ID.reset(token_chat)
                 cleanup_permission_context(token_perm)
             return
 
@@ -12634,6 +12648,14 @@ class JiuWenSwarmDeepAdapter:
         )
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+        # Bound beside the channel and reset beside it. The request is where the
+        # conversation id is; nothing downstream of here carries it, which is
+        # why a ContextVar is what the tool call reads it from. See that
+        # ContextVar's own comment for why the scopes permissions section wants
+        # the pair.
+        token_chat = TOOL_PERMISSION_CHAT_ID.set(
+            (getattr(request, "chat_id", "") or "").strip()
+        )
         token_perm = setup_permission_context(request)
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
@@ -13392,6 +13414,7 @@ class JiuWenSwarmDeepAdapter:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+            TOOL_PERMISSION_CHAT_ID.reset(token_chat)
             cleanup_permission_context(token_perm)
             if not stream_consumer_cancelled:
                 self._reset_runtime_cron_context(cron_context_tokens)
