@@ -2755,7 +2755,7 @@ class AgentServerProductCompositionRegistry:
                 return
             progress.orphaned_terminal = None
 
-    def _current_task_presentation_route(
+    def _exact_voice_task_presentation_route(
         self,
         binding: TaskProgressOriginBinding,
     ) -> _P2Route | None:
@@ -2774,6 +2774,15 @@ class AgentServerProductCompositionRegistry:
                 and exact.activation_lease.snapshot().state is P2LeaseState.OPEN
             ):
                 return exact
+        return None
+
+    def _current_task_presentation_route(
+        self,
+        binding: TaskProgressOriginBinding,
+    ) -> _P2Route | None:
+        exact = self._exact_voice_task_presentation_route(binding)
+        if exact is not None:
+            return exact
         candidates = tuple(
             retained
             for (session_id, _interaction_id), retained in self._p2_routes.items()
@@ -2895,15 +2904,24 @@ class AgentServerProductCompositionRegistry:
                     pass
                 retained = self._progress_routes.get(key)
         target = self._progress_targets.get(key)
-        exact_p2 = self._current_task_presentation_route(binding)
+        exact_voice_owner = self._exact_voice_task_presentation_route(binding)
+        presentation_route = self._current_task_presentation_route(binding)
         if (
             retained is None
             or target is None
-            or exact_p2 is None
             or target.requested_origin_kind is not TaskProgressOriginKind.VOICE
             or target.correlation_id != binding.correlation_id
             or target.generation != binding.generation
         ):
+            raise RuntimeError("deferred voice progress route is no longer current")
+        terminal = self._terminal_text_event(intent)
+        if terminal is not None and exact_voice_owner is None:
+            # The Task terminal outlives the P2 activation that created it.
+            # A successor activation cannot drain the old ordered voice route,
+            # so move the immutable terminal fact to the P2 ACK replay ledger.
+            await self._retain_terminal_after_voice_owner_loss(terminal)
+            return
+        if presentation_route is None:
             raise RuntimeError("deferred voice progress route is no longer current")
         self._defer_progress_presentation(
             retained,
@@ -3498,6 +3516,31 @@ class AgentServerProductCompositionRegistry:
             )
             return
 
+    async def _retain_terminal_after_voice_owner_loss(
+        self,
+        event: TaskProgressTextEvent,
+    ) -> None:
+        if self._remember_terminal_notification(event):
+            # A current notification.next may already be waiting. Publishing
+            # wakes that receive owner; the ledger retains the fact until ACK.
+            await self._deliver_terminal_notification(event, retained=None)
+            return
+        binding = event.origin
+        progress = self._progress_routes.get(
+            (
+                binding.session_id,
+                binding.task_id,
+                binding.origin_id,
+                binding.generation_id,
+            )
+        )
+        if progress is None or progress.binding != binding:
+            raise RuntimeError("terminal notification retry owner is unavailable")
+        prior = progress.orphaned_terminal
+        if prior is not None and prior.task_event.event_id != event.task_event.event_id:
+            raise RuntimeError("terminal notification retry owner is occupied")
+        progress.orphaned_terminal = event
+
     async def _emit_voice_progress(
         self, intent: TaskProgressNotificationIntent
     ) -> None:
@@ -3763,32 +3806,7 @@ class AgentServerProductCompositionRegistry:
             # has gone, the old ordered progress stream cannot legally bind a
             # successor generation.  Retain the fact in the existing P2 ACK
             # replay ledger instead of stranding it behind the old stream.
-            if self._remember_terminal_notification(fallback_event):
-                # A current P2 notification.next may already be blocked inside
-                # the Runtime when this terminal fact arrives.  Publishing the
-                # retained presentation here wakes that exact receive owner;
-                # the ledger still keeps the fact until its normal P2 ACK.
-                await self._deliver_terminal_notification(
-                    fallback_event,
-                    retained=None,
-                )
-                return
-            progress_key = (
-                binding.session_id,
-                binding.task_id,
-                binding.origin_id,
-                binding.generation_id,
-            )
-            progress = self._progress_routes.get(progress_key)
-            if progress is None or progress.binding != binding:
-                raise RuntimeError("terminal notification retry owner is unavailable")
-            prior = progress.orphaned_terminal
-            if (
-                prior is not None
-                and prior.task_event.event_id != fallback_event.task_event.event_id
-            ):
-                raise RuntimeError("terminal notification retry owner is occupied")
-            progress.orphaned_terminal = fallback_event
+            await self._retain_terminal_after_voice_owner_loss(fallback_event)
             return
         logger.info(
             "[LiveVoiceProduct] Task progress origin fell back to text",

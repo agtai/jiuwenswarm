@@ -5397,6 +5397,7 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
         "before_owner_close_capacity_retry",
         "during_owner_close",
         "after_owner_close",
+        "after_owner_close_deferred",
         "after_owner_close_capacity_replay",
         "after_owner_close_capacity_progress_close_retry",
         "after_owner_close_capacity_disconnect_retry",
@@ -5659,6 +5660,9 @@ async def test_terminal_after_voice_playout_failure_replays_on_successor_p2(
 
     if terminal_timing == "after_owner_close":
         terminal_event = await complete_and_emit_terminal()
+    elif terminal_timing == "after_owner_close_deferred":
+        terminal_event, terminal_intent = complete_terminal_intent()
+        await registry._defer_voice_progress(terminal_intent)
     elif terminal_timing.startswith("after_owner_close_capacity"):
         terminal_event, terminal_intent = complete_terminal_intent()
         fallback = TaskProgressTextEvent(
