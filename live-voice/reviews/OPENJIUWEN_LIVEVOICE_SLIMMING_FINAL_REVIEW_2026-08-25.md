@@ -72,7 +72,9 @@ the
 [152-path module disposition](OPENJIUWEN_LIVEVOICE_MODULE_DISPOSITION_AND_HERMES_COMPARISON_2026-08-25.md),
 the
 [prototype adjudication](OPENJIUWEN_LIVEVOICE_PROTOTYPE_ADJUDICATION_2026-08-25.md)
-and, only for dated candidate evidence, the
+and the current
+[AgentCore foundation zero-baseline audit](OPENJIUWEN_AGENTCORE_FOUNDATION_ZERO_BASE_AUDIT_2026-09-01.md);
+only for dated candidate evidence, read the
 [AgentCore PR preparation review](OPENJIUWEN_AGENTCORE_PR_PREPARATION_REVIEW_2026-08-25.md).
 
 ## 2. AgentCore outcome by capability
@@ -90,7 +92,9 @@ model Agent and translates committed context and observations.
 
 No local Scope, execution, Task, event, cursor, checkpoint, effect or bound
 facade candidate is reported as direct reuse. Those contracts are not present
-in the locked/base dependency and require the AgentCore candidates below.
+in the locked/base dependency. D-097 records them as F1–F6 foundation gaps;
+future work must first revalidate the then-installed public API and is not bound
+to any historical candidate topology.
 
 ### 2.2 Thin downstream Adapters after the owning API exists
 
@@ -102,11 +106,11 @@ LiveVoice authorities:
 | `EXE-02`, `SCOPE-01` mapping | scoped execution admission and TeamTask authority | translate verified principal/project/session and product configuration into an immutable scope/profile; no Task settlement |
 | `EXE-04`, `TASK-03` | command replay, terminal outcome and immutable result | extract product chat/patch artifacts and adjustment policy; no result ledger |
 | `EXE-05`, `BRIDGE-02`, `BRIDGE-04` | existing Agent/Tool/Runner/DeepAgent/Harness plus future accepted execution fencing | choose the Jiuwen Agent, freeze committed product context and translate stream observations; no second launch lifecycle |
-| `TASK-05` | PR 06 checkpoint publication exposed through PR 09 | checkpoint codec, compatibility, retention and payload Port; no raw locator, finalizer or resume authority |
-| `EVT-02`, `EVT-04` | canonical event reader/head | cancellation-aware transport polling and a pure event-to-product progress projection; no event sequence or durable subscription owner |
-| `EVT-06` | PR 08 cursor exposed through PR 09 | verify authentic DOM adoption or voice playout, then issue exactly one generic cursor CAS; no second cursor |
-| `D2-02`, `D2-03` | PR 07 effect journal exposed through PR 10 | public product `ProjectEffectPort`, provider credentials/request body, project/file probe and compensation policy; no token or evidence writer |
-| `COMP-01`, `WEB-01` | bound Task/effect authorities | authentication, product envelope mapping and discardable browser projection; no canonical Task/Event/Result cache |
+| `TASK-05` | accepted/installed F5 checkpoint-publication seam | checkpoint payload codec, compatibility, retention and payload Port; no raw locator, finalizer or resume authority |
+| `EVT-02`, `EVT-04` | accepted/installed F2 canonical event reader/head | cancellation-aware transport polling and a pure event-to-product progress projection; no event sequence or durable subscription owner |
+| `EVT-06` | accepted/installed F3 cursor seam | verify authentic DOM adoption or voice playout, then issue exactly one generic cursor CAS; no second cursor |
+| `D2-02`, `D2-03` | accepted/installed F6 effect-journal seam | public product `ProjectEffectPort`, provider credentials/request body, project/file probe and compensation policy; no token or evidence writer |
+| `COMP-01`, `WEB-01` | accepted/installed narrow F1–F6 authorities | authentication, product envelope mapping and discardable browser projection; no canonical Task/Event/Result cache |
 
 These are future boundary shapes, not selected implementations. The moving
 feature branch must revalidate each seam against the accepted AgentCore public
@@ -114,10 +118,14 @@ contract before code is written or ported.
 
 ### 2.3 AgentCore downshift requirements and historical candidate evidence
 
-The 13 `AGENTCORE_PR` atomic responsibilities are the authoritative downstream
-requirement set. The historical work grouped related gaps into ten possible
-AgentCore changes; this table preserves feasibility and defect evidence, not
-unfinished work required to close this branch:
+The 13 `AGENTCORE_PR` atomic responsibilities are stable locators, not 13
+implementation units. D-097 and the
+[AgentCore foundation zero-baseline audit](OPENJIUWEN_AGENTCORE_FOUNDATION_ZERO_BASE_AUDIT_2026-09-01.md)
+supersede the former implementation-granularity inference: the locators collapse
+into four transaction families and six minimal public seams, and the historical
+15,128 production-line delta is explicitly not a requirement or target. The
+historical work grouped related gaps into ten possible changes; this table
+preserves feasibility and defect evidence only:
 
 | Historical group | Capability | Preserved evidence state |
 |---:|---|---|

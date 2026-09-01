@@ -52,7 +52,7 @@ These are responsibility counts, not files or LOC.
 4. `l0Measurement.ts` now has separate production-emitter `SPLIT_REQUIRED` and batch-only-control `CONSOLIDATE_RETIRE` responsibilities.
 5. `product_p2_readiness.py`, `realtime_media.py`, `sli_window_contract.py` and `telemetry_privacy_contract.py` have no production composition/import caller and are `CONSOLIDATE_RETIRE` after oracle/type-port gates.
 6. `critical_token_safety.py` is Jiuwen L3 critical-command clarification/authorization policy and is `JIUWENSWARM_HOST_KEEP`.
-7. `durability_checkpoint.py` contains only current Jiuwen D1 value/codec mappings and both atoms are `ADAPT_REUSE`; the future `ExecutionCheckpointRef` remains an AgentCore PR contract gap, not a current implementation atom. `durability_readers.py` is split into generic prefix-invariant `AGENTCORE_PR` evidence and a Jiuwen row-decoder `ADAPT_REUSE` mapping. `durability_identity.py` is also a Jiuwen vocabulary mapping and is `ADAPT_REUSE`.
+7. `durability_checkpoint.py` contains only current Jiuwen D1 value/codec mappings and both atoms are `ADAPT_REUSE`; the future `ExecutionCheckpointRef` remains an AgentCore foundation-contract gap, not a current implementation atom. `durability_readers.py` is split into generic prefix-invariant `AGENTCORE_PR` evidence and a Jiuwen row-decoder `ADAPT_REUSE` mapping. `durability_identity.py` is also a Jiuwen vocabulary mapping and is `ADAPT_REUSE`.
 8. In `agent_bridge.py`, the legacy `AgentBridgePort`/request/handler fixture seam is `CONSOLIDATE_RETIRE`, while the live `AgentEvent` projection value used by production runtimes is a separate `LIVEVOICE_CORE_KEEP` atom. Installed Agent/DeepAgent/Harness invocation reuse is represented by the runtime/facade responsibilities.
 9. Browser speech recognition/synthesis, `integratedP1Route`, formal Task-result/contract copies, runtime replicas and scripted/offline validation remain retirement responsibilities because caller liveness, not an abstract future role, controls this manifest.
 10. Pinned Hermes M1-M12 relations use the corrected browser/channel and durable-Task evidence; no row uses the disproven 'no browser/channel' or 'no durable Task' premise.
@@ -61,6 +61,33 @@ These are responsibility counts, not files or LOC.
 13. `product_p2_interaction_adapter.py` is Jiuwen authority-first activation/lease/cleanup policy, not `ADAPT_REUSE`; Agent and Task providers remain separate injected dependencies.
 14. Task UI, Task progress, presentation consumption, production intent, P3 text and formal Task schema concentrations no longer hide product/Channel ownership inside a single reuse or PR code: distinct symbols are split where possible and indivisible class concentrations are `SPLIT_REQUIRED`.
 15. The installed DeepAgent/Harness provider is distinguished from its Jiuwen `interface_deep.py` consumer, and future-only Task/durability adapters never call a local candidate an installed primitive.
+
+## AgentCore foundation interpretation correction (D-097)
+
+The 13 rows carrying the historical stable code `AGENTCORE_PR` are **locators of
+generic ownership gaps**, not 13 AgentCore implementation units and not a source
+migration allowlist. In the current authority chain the code is read as
+`AGENTCORE_FOUNDATION_ADD`; the stable token is retained only to avoid rewriting
+the 228-row identity and dated evidence.
+
+The authoritative implementation decomposition is the
+[AgentCore foundation zero-baseline audit](OPENJIUWEN_AGENTCORE_FOUNDATION_ZERO_BASE_AUDIT_2026-09-01.md):
+four transaction families and six minimal public seams. In particular:
+
+- AR-089/AR-139 mix generic records with Voice/Host schema and must split;
+- AR-189 is a mixed Project/Git execution journal and cannot move as a class;
+- AR-190 moves only generic worker ownership, not checkout-safety policy;
+- AR-204–AR-209 are entrypoints into one current Store, not permission to copy
+  six method groups into a second Store;
+- AR-207 splits generic sequence cursor from DOM/audio/presentation truth;
+- AR-127/AR-130/AR-132/AR-205 share one durability transaction/codec/reducer;
+  their listed symbols are neither the complete capability nor a file boundary.
+
+The historical 15,128-line AgentCore production delta and the 31,325 physical
+LOC (including blanks/comments, matching the repository-wide footprint method)
+of the eight Jiuwen containers are both explicitly rejected as target size
+or migration unit. Stable-symbol rows below remain authoritative for finding the
+current seams; D-097 is authoritative for what may be added, adapted or kept.
 
 ## Exact 152-path coverage index
 
@@ -458,7 +485,7 @@ This tracked register retains the current caller evidence, provider/target statu
 
 This manifest decides current atomic ownership/disposition only. It does not
 authorize migration, physical deletion, exact future module shape or LOC.
-`AGENTCORE_PR` is a stable code for a future AgentCore downshift requirement;
-it does not require this preparation branch to implement, replay, package or
-submit a PR, and replacement remains conditional on an accepted and installed
-public capability. `CONSOLIDATE_RETIRE` remains conditional on its row gate.
+`AGENTCORE_PR` is a stable legacy code for a future AgentCore foundation gap;
+under D-097 it does not define an implementation unit, and replacement remains
+conditional on an accepted and installed public capability.
+`CONSOLIDATE_RETIRE` remains conditional on its row gate.

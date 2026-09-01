@@ -5,7 +5,7 @@
 提交信用。只有当 `STATUS.md` 记录 feature-complete 边界在一个 exact clean source
 上通过并显式激活瘦身包时，未来执行者才使用本文件启动增量重基线。
 
-本准备分支不实现、replay、包装或提交 AgentCore PR。历史候选和 preflight 只保留
+本准备分支不实现 AgentCore 基础能力。历史候选和 preflight 只保留
 为缺口、风险和测试 oracle 证据。实际 LiveVoice 与 AgentCore 代码调整必须在冻结
 后的产品源码和届时的 AgentCore 权威源码上分别建立新的实施分支/worktree。
 
@@ -46,6 +46,7 @@ Tier 0。
 |---|---|---|
 | LiveVoice 产品审计基线 | `hx/0812_live_voice_w3@59998e2c5724257bd410885b35e59e1b37027030` | 128 个专属生产路径 159,210 physical LOC，加 24 个共享宿主中可归因的 4,054 symbol/segment LOC，共 163,264；共享宿主其余 53,534 行排除 |
 | 原子归属基线 | `codex/livevoice-agentcore-hermes-prep@cfb7f030d0e7ceb08d1a15c94c0ba631334e8bf3` | 152/152 路径、228 项责任、48 个多责任路径；13 项 `AGENTCORE_PR` 只表示未来下沉要求 |
+| AgentCore 零基线 | [D-097 审计](OPENJIUWEN_AGENTCORE_FOUNDATION_ZERO_BASE_AUDIT_2026-09-01.md) | 13 个 locator 收敛为四个事务能力族/六个最小 public seam；历史 15,128 行不是预算或迁移单元 |
 | Hermes Live Voice | `bielcarpi/hermes-live-voice@3dd8af386b845a1486b05b088bbc2b5a642a5b28` | 62 个 shipped 文件 25,254 physical LOC；去除插件内完全重复 Browser SDK/worklet 后为 22,530 |
 
 `physical LOC` 包含空行和注释，只用于复现 footprint，不代表复杂度、质量或可删除
@@ -178,7 +179,7 @@ symbol、当前 caller/owner、复用/适配/下沉/保留/退休处置、replac
 |---:|---|---|---|
 | S0 | 冻结、原子 delta 与 canonical schema | 冻结 source、changed-responsibility delta、单一 schema/method catalog 计划 | feature-complete PASS；差异和跨语言 contract 可复现 |
 | S1 | 现有公共能力直接复用 | Agent/Tool/Runner/DeepAgent/Harness 及 Jiuwen shared host 改为直接调用；删除竞争 facade/fixture lane | installed public API 和真实 caller 证明；正负 Agent/Tool 场景通过 |
-| S2 | AgentCore 缺口与薄 consumer Adapter | 对仍为 absent 的通用责任建立独立 AgentCore 实施包；只在能力 accepted/installed 后组合薄 Task/Event/Cursor Adapter | 不复用历史候选源码；generic non-Voice tests、public API、版本锁定和独立 review 通过 |
+| S2 | AgentCore 缺口与薄 consumer Adapter | 按 D-097 的 F1–F6 对仍 absent 的 invariant 逐项扩展现有 owner；只在能力 accepted/installed 后组合薄 Task/Event/Cursor Adapter | 每项证明最近 public owner、唯一 transaction/reducer 和真实 adopter；不 wholesale 复用历史候选源码；generic non-Voice tests、public API、版本锁定和独立 review 通过 |
 | S3 | Task/Store/Event/Result single-writer cutover | 新 owner 先通过共同 oracle，再 quiesced cutover；旧 Store/outbox/result 停止分配 | migration/importer、old-version read、race/restart/corruption、canary/rollback 和零副作用通过 |
 | S4 | Checkpoint/effect 与 Project Executor 拆分 | 通用 publication/journal/reconcile 下沉；Jiuwen 留 project/worktree/Git/Tool/probe/cleanup | AgentCore replacement installed；D1/D2 truth、ambiguous effect、crash window 和 compensation 通过 |
 | S5 | LiveVoice Core 与 Channel 收敛 | 合并 Speech/Media/Conversation/Progress/Presentation 重复 owner，拆十项 same-owner 结构债务 | 行为保持、Provider fallback、barge-in、ACK、reconnect 和完整音频链回归通过 |
@@ -186,8 +187,11 @@ symbol、当前 caller/owner、复用/适配/下沉/保留/退休处置、replac
 | S7 | Legacy 与 production-test 退休 | legacy allocation 为零；oracle 迁 test/validation/support；删除无 caller/重复 schema | replacement、caller scan、feature-on/off、rollback 和测试发现率 Gate 通过 |
 | S8 | 累积 canary、验收与计量 | 全产品 Journey、独立跨模块 review、最终 L1–L5 与多仓口径报告 | 所有前置包关闭；exact clean source 上自动化、集成、人测和回滚演练通过 |
 
-S2 若需要 AgentCore 代码，AgentCore owner 在届时源码上另建实施分支；本准备分支的
-十个历史 packet 只能提供风险/oracle 线索，不能作为 cherry-pick 或完成信用。
+S2 若需要 AgentCore 代码，必须先按
+[D-097 零基线审计](OPENJIUWEN_AGENTCORE_FOUNDATION_ZERO_BASE_AUDIT_2026-09-01.md)
+重新验证 F1–F6。13 个 locator、按既有 physical-LOC 口径计算的 31,325 行 Jiuwen
+混合容器和历史 15,128 行 AgentCore 增量都不是实施预算；十个历史 packet 只能提供
+风险/oracle 线索，不能作为复用或完成信用。
 
 ## 9. 任一迁移或删除的最低 Gate
 

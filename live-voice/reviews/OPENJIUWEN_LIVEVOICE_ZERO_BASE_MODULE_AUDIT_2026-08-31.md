@@ -1,7 +1,7 @@
 # OpenJiuwen LiveVoice 零基线模块审计 — 2026-08-31
 
 > 状态（D-096，2026-09-01）：准备分支上的源码事实与冻结后激活 handoff 已完成；
-> 不执行迁移、不改产品代码、不激活 composition、不实现或包装 AgentCore PR、
+> 不执行迁移、不改产品代码、不激活 composition、不实现 AgentCore 基础能力、
 > 不更新远端。
 
 ## 1. 结论先行
@@ -39,6 +39,12 @@
 - 只把确属通用缺口的合同记录为未来 AgentCore 下沉要求；
 - 保留 channel-neutral 的语音语义、Web 媒体叶子和 Jiuwen 产品策略；
 - Gate 后退休 legacy、测试替身和重复 authority。
+
+AgentCore 侧的最小 owner、13 个 locator 的真实拆分以及历史 15,128 行候选为何
+不能整体采用，见后续
+[AgentCore 基础能力零基线审计](OPENJIUWEN_AGENTCORE_FOUNDATION_ZERO_BASE_AUDIT_2026-09-01.md)。
+该审计将本文件的“未来下沉要求”进一步收敛为四个事务能力族、六个最小 public
+seam；它不改变本文 152 路径/228 责任的 LiveVoice 代码事实。
 
 ## 2. 基线与证据强度
 
@@ -350,13 +356,13 @@ cancel channel。区别主要是 owner 位置和 failure model，不是“有/�
 | 零基线生产/支持 LOC、五层责任与八条当前流程 | 本轮审计已形成；原子归属独立复核为 `Critical 0 / Important 0 / Minor 10` | 不等于运行时迁移、内部重构或产品验收；10 项同 owner 结构债务仍未实现 |
 | Hermes 模块逐项比较 | pinned snapshot 审查已关闭，独立复核为 `Critical 0 / Important 0 / Minor 0` | 不把 Hermes 当目标架构或源码复用来源 |
 | AgentCore/JiuwenSwarm 复用、适配、下沉候选 | installed/local-candidate/absent 已分开；设计与 replay 证据已准备 | 不表示候选 API 已安装、已 composition 或已被 AgentCore 接受 |
-| AgentCore 下沉 handoff | **完成**：13 个 `AGENTCORE_PR` 原子责任、公共缺口、依赖、历史缺陷/oracle 和未来 Gate 已记录 | 本分支不要求 PR 实现、replay、issue metadata、包装或提交；历史 packet 只作可选证据 |
-| LiveVoice 迁移、single-writer cutover、canary、旧实现退休 | **未开始**，按用户范围刻意排除 | 没有迁移产品代码、删除 Store/schema、运行 canary 或提交远端 PR |
+| AgentCore 下沉 handoff | **完成**：13 个 locator 已由 D-097 收敛为四个事务能力族/六个最小 public seam；直接复用、适配、基础新增、Jiuwen 保留、历史 15,128 行拒绝项和未来 Gate 已记录 | 本分支不实现基础能力或迁移；历史 packet 只作可选缺陷/oracle 证据 |
+| LiveVoice 迁移、single-writer cutover、canary、旧实现退休 | **未开始**，按用户范围刻意排除 | 没有迁移产品代码、删除 Store/schema、运行 canary 或更新远端 |
 
 ### 8.2 已披露但不阻断归属决策的 10 项结构债务
 
 这些项的 canonical owner 已经明确，所以不再阻断“直接复用 / 适配复用 /
-AgentCore PR / 保留 / 退休”的准备结论；但它们仍是实际的收敛工作，不能说成
+AgentCore 基础新增 / 保留 / 退休”的准备结论；但它们仍是实际的收敛工作，不能说成
 已经重构，也不能预先计入删除 LOC：
 
 1. `batch_speech.py` 的 Provider contract、环境选择和 service orchestration；

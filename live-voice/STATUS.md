@@ -165,7 +165,7 @@ credit and does not repair defects.
 The historical [OpenJiuwen reuse and Hermes Voice mirror audit](reviews/OPENJIUWEN_REUSE_AND_HERMES_VOICE_MIRROR_AUDIT_2026-08-23.md)
 finds reusable AgentCore/JiuwenSwarm foundations but no complete direct
 replacement for the frozen P3 outcome contracts. It proposes bounded generic
-AgentCore PRs plus a thin JiuwenSwarm Facade; current Live Voice authority stays
+AgentCore foundation additions plus a thin JiuwenSwarm Facade; current Live Voice authority stays
 canonical and no deletion is credited until the new composition passes isolated
 L2/L3/L4, a quiesced single-writer migration and post-cutover canary Gate.
 Hermes remains an architecture-only reference with no copied code or dependency.
@@ -306,7 +306,7 @@ AsyncTool identity. The five static checkpoint mismatch cases now pass through
 a real thin pre-dispatch Adapter, and every xfail accepts only business
 `AssertionError` failures. Restart reconcile and atomic-admission red cases are
 gap characterizations that must be reconnected to the selected public seams in
-the production PR; they are not advertised as automatic future XPASS oracles.
+the production foundation implementation; they are not advertised as automatic future XPASS oracles.
 
 The evidence narrows rather than rejects composition: static admission and the
 tested cooperative relation/race path stay thin, while the remaining boundary
@@ -314,11 +314,11 @@ requires a scoped durable ExecutionRecord or equivalent canonical backend,
 AsyncTool cancellation/terminal fences, atomic per-task Scheduler admission and
 restart orphan reconcile. That is a new shared protocol/backend crossing
 multiple production owners, so production code stops here until a separate
-minimum AgentCore PR packet re-scopes it. Exact evidence, commands, ownership
+minimum AgentCore foundation packet re-scopes it. Exact evidence, commands, ownership
 and exclusions are in the [OJ-G1-A packet](reviews/OPENJIUWEN_G1_A_EXECUTION_OWNERSHIP_CONFORMANCE_PACKET_2026-08-23.md).
 
 The accepted [AgentCore reuse and Hermes comparison scope](reviews/OPENJIUWEN_AGENTCORE_HERMES_SLIMMING_SCOPE_2026-08-25.md)
-and D-096 close the isolated slimming preparation branch as a future handoff:
+and D-096/D-097 close the isolated slimming preparation branch as a future handoff:
 direct reuse, thin Adapter, AgentCore downshift requirements and LiveVoice/
 JiuwenSwarm module dispositions are recorded without requiring PR replay or
 packaging. The accompanying
@@ -328,7 +328,12 @@ The [slimming convergence review](reviews/OPENJIUWEN_LIVEVOICE_SLIMMING_FINAL_RE
 and [activation handoff](reviews/OPENJIUWEN_LIVEVOICE_HERMES_ALIGNED_SLIMMING_BUDGET_2026-08-31.md)
 close the 152-path/228-responsibility module/Hermes analysis, future LiveVoice
 allowlist/exclusions, delta-rebaseline procedure and dependency-ordered package
-families. Historical AgentCore candidates/packets remain optional evidence,
+families. The subsequent
+[AgentCore foundation zero-baseline audit](reviews/OPENJIUWEN_AGENTCORE_FOUNDATION_ZERO_BASE_AUDIT_2026-09-01.md)
+proves that the 13 generic locators collapse into four transaction families and
+six minimal public seams. It records current direct/Adapter reuse, the exact
+foundation gaps and Jiuwen exclusions, and rejects the historical 15,128-line
+candidate delta as a requirement or target. Historical AgentCore candidates/packets remain optional evidence,
 not unfinished current work. No preparation implementation, migration or
 deletion receives product credit.
 
@@ -861,11 +866,14 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
 ## Tracked cleanup and review work
 
 - **Post-freeze LiveVoice/AgentCore slimming handoff — COMPLETE AS
-  PREPARATION (2026-09-01):** D-096 closes the isolated preparation branch with
+  PREPARATION (2026-09-01):** D-096/D-097 close the isolated preparation branch with
   the 152-path/228-responsibility inventory, Hermes explanation, direct/Adapter/
   downshift/keep/retire dispositions, ten disclosed same-owner split debts,
-  planning envelope, delta-rebaseline procedure, dependency-ordered future
-  packages and deletion Gates. It deliberately does not prepare AgentCore PRs
+  AgentCore zero-baseline decomposition, planning envelope, delta-rebaseline
+  procedure, dependency-ordered future packages and deletion Gates. The 13
+  AgentCore locators are four transaction families/six minimal public seams;
+  neither the current mixed Jiuwen containers nor the historical 15,128-line
+  AgentCore delta is a migration unit or implementation budget. It deliberately does not implement AgentCore foundation code
   or grant implementation, migration, canary, deletion or product credit.
   Activation waits for feature-complete PASS on an exact clean source, then
   uses a new execution branch and an affected-responsibility delta rather than
