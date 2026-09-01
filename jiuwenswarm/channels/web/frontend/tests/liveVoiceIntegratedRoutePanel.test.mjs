@@ -11,8 +11,10 @@ import {
   LiveVoiceIntegratedRoutePanelView,
   PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS,
   PRODUCT_P2_NOTIFICATION_PENDING_BACKOFF_MS,
+  PRODUCT_TASK_NOTIFICATION_PLAYOUT_TIMEOUT_MS,
   PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY,
   bindProductVoiceTaskOrigin,
+  awaitProductTaskNotificationPlayout,
   bootstrapProductP3TaskInspectionLeaf,
   classifyProductP2Notification,
   createProductP2ActivationOwner,
@@ -1019,6 +1021,32 @@ test('nonterminal Task ACK keeps notification polling authorized after its route
     }),
     true,
   );
+});
+
+test('Task notification playout has a finite deadline and fences the hung audio owner', async () => {
+  let timedOut = 0;
+  await assert.rejects(
+    awaitProductTaskNotificationPlayout(
+      new Promise(() => {}),
+      () => {
+        timedOut += 1;
+      },
+      10,
+    ),
+    error => error?.reason === 'PRODUCT_TASK_NOTIFICATION_PLAYOUT_TIMEOUT',
+  );
+  assert.equal(timedOut, 1);
+  assert.equal(PRODUCT_TASK_NOTIFICATION_PLAYOUT_TIMEOUT_MS, 15_000);
+
+  let successfulTimeout = 0;
+  await awaitProductTaskNotificationPlayout(
+    Promise.resolve(),
+    () => {
+      successfulTimeout += 1;
+    },
+    10,
+  );
+  assert.equal(successfulTimeout, 0);
 });
 
 test('Web response error extraction preserves nested product reason', () => {

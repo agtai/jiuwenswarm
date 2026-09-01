@@ -12424,7 +12424,6 @@ test('mounted voice-created Task keeps polling through provider-starting capture
   let p2Binding = null;
   let activeMediaBinding = null;
   let keepaliveAfterTaskStart = false;
-  let terminalSynthesisFailuresRemaining = 1;
   let recognitionCalls = 0;
   let renderer;
   const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
@@ -12453,7 +12452,14 @@ test('mounted voice-created Task keeps polling through provider-starting capture
     if (waiter) waiter.resolve(notification);
     else queuedNotifications.push(notification);
   };
-  const presentation = (binding, responseId, responseGeneration, text, taskNotification = false) => ({
+  const presentation = (
+    binding,
+    responseId,
+    responseGeneration,
+    text,
+    taskNotification = false,
+    surface = taskNotification ? 'audio' : 'text',
+  ) => ({
     ok: true,
     result: {
       status: 'notification',
@@ -12470,7 +12476,7 @@ test('mounted voice-created Task keeps polling through provider-starting capture
         ...(taskNotification ? { source_provenance: 'server.task_notification' } : {}),
       },
       presentation_unit: {
-        surface: taskNotification ? 'audio' : 'text',
+        surface,
         unit_id: `${responseId}-unit`,
         seq: 0,
         content_ref: `sha256:${String(responseGeneration).padStart(64, '0')}`,
@@ -12527,6 +12533,30 @@ test('mounted voice-created Task keeps polling through provider-starting capture
       };
     }
     if (method === 'live_voice.composition.p2.presentation.failed') {
+      if (p2Binding !== null && params.response_id === 'mounted-terminal-idle-running') {
+        publishNotification(
+          presentation(
+            p2Binding,
+            'mounted-terminal-idle-running-text',
+            20,
+            'Background task update: running.',
+            true,
+            'text',
+          ),
+        );
+      }
+      if (p2Binding !== null && params.response_id === 'mounted-terminal-idle-complete') {
+        publishNotification(
+          presentation(
+            p2Binding,
+            'mounted-terminal-idle-complete-text',
+            30,
+            '后台任务已完成，结果已经准备好。',
+            true,
+            'text',
+          ),
+        );
+      }
       return {
         ok: true,
         result: {
@@ -12668,12 +12698,6 @@ test('mounted voice-created Task keeps polling through provider-starting capture
       };
     }
     if (method === 'live_voice.speech.synthesize_batch') {
-      if (params.response.response_id === 'mounted-terminal-idle-complete' && terminalSynthesisFailuresRemaining > 0) {
-        terminalSynthesisFailuresRemaining -= 1;
-        throw Object.assign(new Error('mounted first terminal synthesis owner is unavailable'), {
-          reason: 'SPEECH_PROVIDER_UNAVAILABLE',
-        });
-      }
       return {
         contract_version: 'live-voice.contract.v2',
         request_id: params.request_id,
@@ -12710,6 +12734,7 @@ test('mounted voice-created Task keeps polling through provider-starting capture
         mountedFullyEnabledElement(i18n, sessionId, request, true, {
           productVoiceControlRef: controlRef,
           progressSubscribe,
+          taskNotificationPlayoutTimeoutMs: 25,
           onProductVoiceStateChange: state => states.push(state),
         }),
       );
@@ -12823,19 +12848,37 @@ test('mounted voice-created Task keeps polling through provider-starting capture
           .join(',')}`,
       );
       await waitForMounted(() => browser.counts.sourceStarts === 2, 'running Task AUDIO did not start browser playout');
-      browser.endLatestSource();
+      await waitForMounted(
+        () =>
+          calls.filter(
+            call =>
+              call.method === 'live_voice.composition.p2.presentation.failed' &&
+              call.params.response_id === 'mounted-terminal-idle-running',
+          ).length === 1,
+        'hung running Task AUDIO did not fail over after its finite playout deadline',
+      );
       await waitForMounted(
         () =>
           calls.filter(
             call =>
               call.method === 'live_voice.composition.p2.presentation.ack' &&
-              call.params.response_id === 'mounted-terminal-idle-running',
+              call.params.response_id === 'mounted-terminal-idle-running-text' &&
+              call.params.surface === 'text',
           ).length === 1,
-        'running Task AUDIO did not emit its exact ACK after capture rotation',
+        'visible running Task TEXT fallback did not emit its exact ACK',
+      );
+      assert.equal(
+        calls.filter(
+          call =>
+            call.method === 'live_voice.speech.synthesize_batch' &&
+            call.params.response.response_id === 'mounted-terminal-idle-running-text',
+        ).length,
+        0,
+        'visible running Task TEXT fallback must not depend on another TTS owner',
       );
       await waitForMounted(
-        () => states.at(-1)?.p1_status === 'recognized' && states.at(-1)?.terminal_announcement_state === 'fetching',
-        'running Task AUDIO did not retain the terminal follow-up before listening',
+        () => states.at(-1)?.terminal_announcement_state === 'fetching',
+        'running Task fallback did not retain the terminal follow-up subscription',
       );
       await waitForMounted(
         () => notificationWaiters.length > 0,
@@ -12846,13 +12889,7 @@ test('mounted voice-created Task keeps polling through provider-starting capture
     await act(async () => {
       publishNotification(presentation(p2Binding, 'mounted-terminal-idle-complete', 3, '后台任务已完成，结果已经准备好。', true));
       await waitForMounted(
-        () =>
-          calls.filter(call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === 'mounted-terminal-idle-complete')
-            .length === 1,
-        'terminal notification did not reach its first P1 owner',
-      );
-      await waitForMounted(
-        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length === 1,
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length === 2,
         `terminal notification did not report its failed AUDIO playout; states=${states
           .slice(-10)
           .map(state => `${state.p1_status}/${state.terminal_announcement_state}/${state.text_reason ?? 'none'}`)
@@ -12865,14 +12902,24 @@ test('mounted voice-created Task keeps polling through provider-starting capture
         'failed first terminal playout must not ACK',
       );
       await waitForMounted(
-        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 4,
-        `accepted TEXT fallback did not resume one bounded capture owner; states=${states
-          .slice(-16)
-          .map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}/${state.text_status}/${state.terminal_announcement_state}`)
-          .join(',')}; methods=${calls.slice(-24).map(call => call.method).join(',')}`,
+        () =>
+          calls.filter(
+            call =>
+              call.method === 'live_voice.composition.p2.presentation.ack' &&
+              call.params.response_id === 'mounted-terminal-idle-complete-text' &&
+              call.params.surface === 'text',
+          ).length === 1,
+        'successful terminal Task TEXT fallback did not emit its exact ACK',
       );
-      await browser.emitFirstFrame(0);
-      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'TEXT fallback successor did not resume listening');
+      assert.equal(
+        calls.filter(
+          call =>
+            call.method === 'live_voice.speech.synthesize_batch' &&
+            call.params.response.response_id === 'mounted-terminal-idle-complete-text',
+        ).length,
+        0,
+        'visible terminal Task TEXT fallback must not depend on another TTS owner',
+      );
     });
 
     const presentationFailures = calls.filter(
@@ -12916,13 +12963,20 @@ test('mounted voice-created Task keeps polling through provider-starting capture
     assert.equal(
       calls.filter(call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === 'mounted-terminal-idle-complete')
         .length,
-      1,
-      'failed Task AUDIO must not be replayed locally',
+      0,
+      'deferred terminal Task AUDIO must fall back without an unauthorized local replay',
     );
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 2);
     assert.equal(calls.filter(call => call.method === 'live_voice.speech.recognize_batch').length, 1);
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 1);
-    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 4);
+    assert.equal(
+      calls.filter(
+        call =>
+          call.method === 'live_voice.composition.p2.presentation.ack' &&
+          call.params.response_id === 'mounted-terminal-idle-complete-text',
+      ).length,
+      1,
+    );
     assert.equal(
       calls.some(call => call.method.includes('task.cancel') || call.method.includes('task.mutate') || call.method === 'live_voice.composition.p3.mutate'),
       false,

@@ -136,6 +136,7 @@ export interface LiveVoiceIntegratedRoutePanelProps {
   progressSubscribe?: (listener: (payload: unknown) => void) => () => void;
   progressAckCapacity?: number;
   p3RetryInspectionWait?: (delayMs: number, signal: AbortSignal) => Promise<void>;
+  taskNotificationPlayoutTimeoutMs?: number;
   productVoiceControlRef?: { current: ProductLiveVoiceSurfaceControl | null };
   onProductVoiceStateChange?: (state: Readonly<ProductLiveVoiceSurfaceState>) => void;
   onProductVoiceMessage?: (event: Readonly<ProductLiveVoiceMessageEvent>) => void;
@@ -233,6 +234,36 @@ const PRODUCT_P3_PROGRESS_RECONCILIATION_RETRY_MS = 250;
 const PRODUCT_P3_PROGRESS_RECONCILIATION_MAX_ATTEMPTS = 4;
 const PRODUCT_P3_PROGRESS_ACK_RETENTION_FAILED = 'PRODUCT_P3_PROGRESS_ACK_RETENTION_FAILED';
 export const PRODUCT_P2_NOTIFICATION_PENDING_BACKOFF_MS = 500;
+export const PRODUCT_TASK_NOTIFICATION_PLAYOUT_TIMEOUT_MS = 15_000;
+
+export async function awaitProductTaskNotificationPlayout(
+  operation: Promise<void>,
+  onTimeout: () => void,
+  timeoutMs = PRODUCT_TASK_NOTIFICATION_PLAYOUT_TIMEOUT_MS,
+): Promise<void> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error('Task notification playout timeout must be positive');
+  }
+  let timeout: ReturnType<typeof globalThis.setTimeout> | null = null;
+  const deadline = new Promise<void>((_resolve, reject) => {
+    timeout = globalThis.setTimeout(() => {
+      try {
+        onTimeout();
+      } finally {
+        reject(
+          Object.assign(new Error('Task notification playout did not settle'), {
+            reason: 'PRODUCT_TASK_NOTIFICATION_PLAYOUT_TIMEOUT',
+          }),
+        );
+      }
+    }, timeoutMs);
+  });
+  try {
+    await Promise.race([operation, deadline]);
+  } finally {
+    if (timeout !== null) globalThis.clearTimeout(timeout);
+  }
+}
 
 function defaultP3RetryInspectionWait(delayMs: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.reject(new Error('P3 retry inspection was cancelled'));
@@ -2637,6 +2668,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       setPendingPresentationAck(disposition.ack);
       void settleProductPresentationAck(presentationAttempt);
     };
+    if (disposition.task_notification && disposition.ack.surface === 'text') {
+      // The Task fallback is already rendered in the transcript. It must not
+      // depend on acquiring another audio owner, otherwise one failed running
+      // announcement can still block every later terminal notification.
+      if (activeVoiceResponseRef.current?.response_id === disposition.response_id) {
+        activeVoiceResponseRef.current = null;
+      }
+      retainAck();
+      return disposition;
+    }
     const voiceOwner = foregroundPlayoutLease !== null
       ? foregroundPlayoutLease.playout_owner
       : p1VoiceOwnerRef.current;
@@ -2667,12 +2708,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
     if (voiceOwner !== null && (!disposition.replayed || disposition.task_notification)) {
       if (disposition.task_notification) updateTerminalAnnouncementState('playing');
-      void voiceOwner
-        .playAgentText({
-          response: disposition.response,
-          unit_id: disposition.unit_id,
-          text: disposition.text,
-        })
+      const playout = voiceOwner.playAgentText({
+        response: disposition.response,
+        unit_id: disposition.unit_id,
+        text: disposition.text,
+      });
+      void (disposition.task_notification
+        ? awaitProductTaskNotificationPlayout(
+            playout,
+            () => {
+              if (!isCurrentPresentationAttempt()) return;
+              void voiceOwner.close().catch(() => undefined);
+            },
+            props.taskNotificationPlayoutTimeoutMs,
+          )
+        : playout)
         .then(() => {
           if (!isCurrentVoicePlayout()) {
             presentationAttempt.markPlayoutSettled();
@@ -5413,11 +5463,18 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         ...terminal.disposition.response,
         unit_id: terminal.disposition.unit_id,
       });
-      await retryOwner.playAgentText({
-        response: terminal.disposition.response,
-        unit_id: terminal.disposition.unit_id,
-        text: terminal.disposition.text,
-      });
+      await awaitProductTaskNotificationPlayout(
+        retryOwner.playAgentText({
+          response: terminal.disposition.response,
+          unit_id: terminal.disposition.unit_id,
+          text: terminal.disposition.text,
+        }),
+        () => {
+          if (pendingPresentationAttemptRef.current !== retained) return;
+          void retryOwner.close().catch(() => undefined);
+        },
+        props.taskNotificationPlayoutTimeoutMs,
+      );
       if (activationOwnerRef.current !== activationOwner || pendingPresentationAttemptRef.current !== retained) {
         return;
       }
