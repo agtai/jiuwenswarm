@@ -177,3 +177,27 @@ The record must list tested source, automated/review commands, human
 observations, unresolved gaps and every accepted deviation. A pass remains
 bounded to this contract; it does not trigger `develop` integration or claim
 feature-complete, productized or RC/Production readiness.
+
+## 10. Current bounded result — 2026-09-02
+
+**PASS — CONTROLLED PRODUCT-READINESS CANDIDATE** on exact product source
+`83fde562284e96df12f2e2546797c4703a75132b`.
+
+The ordinary-Chrome 8+2 microphone/Agent/Task/TTS journey passed on that clean
+source, and a separate Session completed the final Tier-3 changed-boundary
+review with `Critical 0 / Important 0` and `Assessment: Ready`. The review made
+no source change, so the source-, route- and environment-bound human evidence
+remains applicable. See the sanitized
+[human evidence](../evidence/P3_9_CUMULATIVE_PRODUCT_ACCEPTANCE_20260902.md) and
+[final review](../reviews/P3_9_FINAL_INDEPENDENT_TIER3_REVIEW_2026-09-02.md).
+
+Accepted deviations remain explicit: the broad frontend diagnostic is
+`493 passed / 5 failed / 1 skipped`, with the five mounted timing failures
+outside the P3-9 repair overlay and a representative failure reproduced on the
+comparison source. The final review therefore ran the focused changed-boundary
+candidate rather than relabelling or rerunning the broad diagnostic as a pass.
+
+This result grants only the controlled-candidate boundary. It does not trigger
+`develop` integration and does not claim feature completeness, productization,
+fixed-corpus latency/generalization, production authentication or tenancy,
+public deployment, SLOs, RC or Production readiness.
