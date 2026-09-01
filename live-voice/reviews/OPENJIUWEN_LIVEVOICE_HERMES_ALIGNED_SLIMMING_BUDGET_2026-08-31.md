@@ -46,7 +46,7 @@ Tier 0。
 |---|---|---|
 | LiveVoice 产品审计基线 | `hx/0812_live_voice_w3@59998e2c5724257bd410885b35e59e1b37027030` | 128 个专属生产路径 159,210 physical LOC，加 24 个共享宿主中可归因的 4,054 symbol/segment LOC，共 163,264；共享宿主其余 53,534 行排除 |
 | 原子归属基线 | `codex/livevoice-agentcore-hermes-prep@cfb7f030d0e7ceb08d1a15c94c0ba631334e8bf3` | 152/152 路径、228 项责任、48 个多责任路径；13 项 `AGENTCORE_PR` 只表示未来下沉要求 |
-| AgentCore 零基线 | [D-097 审计](OPENJIUWEN_AGENTCORE_FOUNDATION_ZERO_BASE_AUDIT_2026-09-01.md) | 13 个 locator 收敛为四个事务能力族/六个最小 public seam；历史 15,128 行不是预算或迁移单元 |
+| AgentCore 零基线 | [D-097 审计](OPENJIUWEN_AGENTCORE_FOUNDATION_ZERO_BASE_AUDIT_2026-09-01.md) | 13 个 locator 收敛为四个事务能力族/六个最小 public seam；历史 15,128 行不是预算，当前范围 production 规划中心约 5,300、区间约 3,600–8,100 |
 | Hermes Live Voice | `bielcarpi/hermes-live-voice@3dd8af386b845a1486b05b088bbc2b5a642a5b28` | 62 个 shipped 文件 25,254 physical LOC；去除插件内完全重复 Browser SDK/worklet 后为 22,530 |
 
 `physical LOC` 包含空行和注释，只用于复现 footprint，不代表复杂度、质量或可删除
@@ -192,6 +192,13 @@ S2 若需要 AgentCore 代码，必须先按
 重新验证 F1–F6。13 个 locator、按既有 physical-LOC 口径计算的 31,325 行 Jiuwen
 混合容器和历史 15,128 行 AgentCore 增量都不是实施预算；十个历史 packet 只能提供
 风险/oracle 线索，不能作为复用或完成信用。
+
+当前范围的 AgentCore production planning envelope 是 **约 3,600–8,100 LOC，中心约
+5,300**：约 1,490 行薄适配/扩展和 3,810 行真正 foundation-add。该值不含测试、
+文档、迁移工具和 Jiuwen 产品 Adapter，也不含尚未接受的多数据库、强 tamper-evidence
+或长期公共兼容扩张；它是成本归因和偏差解释线，不是行数完成 Gate，也不豁免
+AgentCore 已有 backend/public-compatibility 接受政策。额外平台成本应单列，不能回记
+为 LiveVoice 必需下沉。
 
 ## 9. 任一迁移或删除的最低 Gate
 

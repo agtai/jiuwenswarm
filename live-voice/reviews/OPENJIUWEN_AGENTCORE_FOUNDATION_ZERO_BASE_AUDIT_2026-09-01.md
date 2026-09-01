@@ -345,6 +345,66 @@ DOM/audio/history 仍留在 Jiuwen 两侧，因此 `_run_attempt`、`SqliteTaskS
 
 因此未来应先定合同、owner 和 threat model，再计量实现；禁止先拿“15K”当预算去填。
 
+### 7.4 当前范围的近似瘦身行数
+
+用户要求的是可用于规划的大概数，因此本文在“不伪装成精确最小值”的前提下给出
+production-only envelope。三种独立估算法得到：
+
+| 估算法 | 低 | 中心 | 高 | 主要假设 |
+|---|---:|---:|---:|---|
+| 按文件结构去重 | 3,200 | 4,500 | 6,200 | 一个 reducer/transaction owner，强删除 facade/无 adopter surface |
+| 按 F1–F6 invariant bottom-up | 约 3,600 | **约 5,300** | 约 8,100 | 当前 LiveVoice 所需 crash/concurrency/corruption fail-closed；保留最小 public seam |
+| 平台保守审查 | 7,300 | 9,400 | 12,200 | 额外承担多数据库、强 tamper evidence、长期兼容和更宽外部 adopter |
+
+本任务选择 **约 5,300 行作为规划中心，约 3,600–8,100 行作为当前范围区间**。
+原因是本准备任务只能为当前 LiveVoice 已证明的 generic invariant 负责，不能把尚未
+接受的多数据库、恶意数据库防篡改或更宽平台兼容承诺继续记在“LiveVoice 下沉”名下。
+若 AgentCore owner 后续接受这些平台扩张，应另行解释超出约 8,100 的责任和成本。
+
+这是**成本归因边界，不是 AgentCore 接受豁免**。若 AgentCore 已有政策要求
+SQLite/PostgreSQL/MySQL 支持、既有 public compatibility 或其他平台 Gate，最终实现
+仍必须满足；超出当前区间的增量单列为平台 owner 成本，不回记为 LiveVoice 必需下沉，
+也不能用 8.1K 上限拒绝正式接受条件。这里的 `corruption fail-closed` 包含 malformed/
+missing/inconsistent row、digest mismatch、sequence gap 和 impossible transition 拒绝；
+排除的是恶意 DB writer 能重算普通 digest 时的 tamper-proof/Byzantine evidence。
+最小 public seam 的版本责任已包含，排除的是 speculative adopter、legacy alias 和
+未接受的长期兼容层。
+
+#### 15,128 行三类要求加一类拒绝项的中央账（内部估算对账值）
+
+| 处理方式 | 历史候选规划归因 | 瘦身后 | 减少 | 解释 |
+|---|---:|---:|---:|---|
+| 已有 AgentCore primitive 直接承担 | 2,135 | **0** | 2,135 | Task/Team lifecycle、Scheduler delivery、payload store、session/runtime 等已有 owner；不再写候选副本 |
+| 在现有 primitive 上薄适配/扩展 | 3,805 | **1,490** | 2,315 | 在 TaskDao/DbSessions、AsyncToolRuntime、Scheduler、Checkpointer、Session binding 上补窄 Port/CAS/wiring |
+| 真正缺失的 foundation invariant | 6,520 | **3,810** | 2,710 | F1–F6 中现有 public API 没有的 durable truth；重写为一个 owner，不复用旧层级 |
+| 重复/过度设计/无 adopter/重排 | 2,668 | **0** | 2,668 | Manager 纯转发、DAO/Authority 双 reducer/verifier、重复 codec/digest、预造 export/coordinator、47 行 diff 重排 |
+| **合计** | **15,128** | **5,300** | **9,828（65.0%）** | production code；不含测试、文档、迁移工具和 Jiuwen 产品 Adapter |
+
+除历史 Git 增量 15,128 外，本表其余数值都是按 symbol/function responsibility
+分配的规划估算，不是逐行量测或可挑选代码清单；约 3.6–8.1K 包络承接其误差。
+
+“可去掉”不能全部叫直接复用：其中约 2,135 行确实被现有 AgentCore owner 直接替代；
+另约 2,668 行本来就不应存在，应拒绝/退休。适配复用使约 3,805 行压到 1,490，
+真正的新基础能力则使历史约 6,520 行压到 3,810。
+
+#### 六个最小 seam 的近似 production LOC
+
+| Seam | 历史来源 | 低 | 中心 | 高 | 中心中的 Adapter / foundation-add |
+|---|---:|---:|---:|---:|---:|
+| F1 Scoped Task/Attempt/Command/Result | 2,958 | 620 | **930** | 1,560 | 430 / 500 |
+| F2 Transactional Event/Outbox | 2,202 | 620 | **900** | 1,300 | 180 / 720 |
+| F3 Consumer Cursor | 1,822 | 200 | **340** | 600 | 50 / 290 |
+| F4 Execution Ownership/Cancel/Settlement | 2,276 | 820 | **1,140** | 1,616 | 320 / 820 |
+| F5 Checkpoint Publication | 999 | 240 | **370** | 550 | 140 / 230 |
+| F6 External-effect Journal | 4,824 | 1,100 | **1,620** | 2,500 | 370 / 1,250 |
+| diff 重排 | 47 | 0 | **0** | 0 | 0 / 0 |
+| **合计** | **15,128** | **3,600** | **5,300** | **8,126** | **1,490 / 3,810** |
+
+这张表是 capability planning allocation，不是未来按旧行号挑代码。实施时若某 seam
+超过高值，必须说明新增 threat model、backend 或 public adopter；若低于低值并不失败，
+但必须证明没有删除 scope、CAS、lease、monotonic terminal、transactional outbox、
+checkpoint binding 或 external-effect unknown-outcome fence。
+
 ## 8. Jiuwen/LiveVoice 当前物理代码不能怎样计算
 
 13 个原子项位于 8 个物理容器；按本仓库既有口径（包含空行和注释）在
@@ -414,5 +474,7 @@ LiveVoice 会让每个产品重复实现。
 但历史 15K 实现本身没有获得采用结论。当前证据反而要求它大幅收敛：复用现有
 TaskDao/Manager、Scheduler、AsyncToolRuntime、Checkpointer/Journal primitive，删除
 重复 facade/reducer/verifier，关闭 raw bypass，只留下一个 transaction owner 和六个
-窄 public seam。未来实现多少行，必须由这些合同和 threat model决定，不能倒过来由
-历史代码量决定。
+窄 public seam。当前范围的大概数是 **15,128 → 约 5,300 production LOC**，合理区间
+约 **3,600–8,100**：约 2.1K 被现有能力直接替代，约 3.8K 适配型候选压到 1.5K，
+约 6.5K 真缺口重写为 3.8K，另约 2.7K 重复/预造代码归零。这个数量必须由合同和
+threat model 校验，不能倒过来用 LOC 删除安全语义。

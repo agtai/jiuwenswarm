@@ -333,7 +333,11 @@ families. The subsequent
 proves that the 13 generic locators collapse into four transaction families and
 six minimal public seams. It records current direct/Adapter reuse, the exact
 foundation gaps and Jiuwen exclusions, and rejects the historical 15,128-line
-candidate delta as a requirement or target. Historical AgentCore candidates/packets remain optional evidence,
+candidate delta as a requirement or target. Its current-scope production
+planning envelope is approximately 3,600–8,100 LOC with a 5,300 center: approximately 1,490
+thin adaptation/extension and 3,810 genuine foundation-add LOC, excluding tests,
+documentation, migration tools, Jiuwen product Adapters and unaccepted platform
+expansion. Historical AgentCore candidates/packets remain optional evidence,
 not unfinished current work. No preparation implementation, migration or
 deletion receives product credit.
 
