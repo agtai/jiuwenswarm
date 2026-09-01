@@ -48,6 +48,7 @@ import {
 import {
   PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
   PRODUCT_P1_CAPTURE_MAX_DURATION_MS,
+  PRODUCT_P1_EMPTY_TRANSCRIPT_REASON,
   ProductP1VoiceRouteOwner,
   type ProductP1VoiceStatus,
 } from '../../features/live-voice/formal/productP1VoiceRoute';
@@ -4515,16 +4516,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         if (snapshot.status === 'ready') {
           taskExperienceValidatedSessionRef.current = sessionId;
           taskExperienceRevalidationPendingSessionRef.current = null;
-        }
-        if (selected === undefined && createdProgressRouteRef.current !== null) {
-          adoptCreatedProgressRoute(null);
-        }
-        if (selected !== undefined && createdProgressRouteRef.current?.task_id !== selected.task_id) {
-          adoptCreatedProgressRoute(Object.freeze({
-            task_id: selected.task_id,
-            correlation_id: selected.correlation_id,
-            origin: null,
-          }));
+          if (selected === undefined && createdProgressRouteRef.current !== null) {
+            adoptCreatedProgressRoute(null);
+          }
+          if (selected !== undefined && createdProgressRouteRef.current?.task_id !== selected.task_id) {
+            adoptCreatedProgressRoute(Object.freeze({
+              task_id: selected.task_id,
+              correlation_id: selected.correlation_id,
+              origin: null,
+            }));
+          }
         }
       },
     });
@@ -5408,6 +5409,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
     } catch {
       // The owner publishes a content-free reason and retains cleanup.
+      const status = owner.status();
+      if (
+        isCurrentBinding() &&
+        status.status === 'idle' &&
+        status.reason === PRODUCT_P1_EMPTY_TRANSCRIPT_REASON
+      ) {
+        p1VoiceCaptureBindingRef.current = null;
+        scheduleProductVoiceLoopCapture();
+      }
     }
   };
 

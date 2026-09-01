@@ -12147,6 +12147,11 @@ test('mounted foreground status query restarts an idle P2 poll after background 
         () => progressActivation?.task_id === taskId && typeof progressListener === 'function',
         'voice-created task did not retain its exact progress wakeup before intervening dialogue',
       );
+      await assert.rejects(
+        controlRef.current.refreshTasks(),
+        /FORMAL_P3_REQUEST_REJECTED|formal P3 response result is invalid/i,
+        'a failed Task collection refresh must remain a fail-closed UI read',
+      );
       assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 1);
       assert.equal(calls.filter(call => call.method === 'live_voice.task.status').length, 3);
       await browser.emitSpeechEndOfTurn();
@@ -12344,7 +12349,7 @@ test('mounted foreground status query restarts an idle P2 poll after background 
   }
 });
 
-test('mounted voice-created Task AUDIO failure falls back without local replay or presentation ACK', async () => {
+test('mounted voice-created Task survives an empty listening turn before AUDIO fallback settlement', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-terminal-idle-session';
   const taskId = 'mounted-terminal-idle-task';
@@ -12361,6 +12366,7 @@ test('mounted voice-created Task AUDIO failure falls back without local replay o
   let activeMediaBinding = null;
   let keepaliveAfterTaskStart = false;
   let terminalSynthesisFailuresRemaining = 1;
+  let recognitionCalls = 0;
   let renderer;
   const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
   const activateP2 = createMountedP2ActivationResponder();
@@ -12537,7 +12543,13 @@ test('mounted voice-created Task AUDIO failure falls back without local replay o
       };
     }
     if (method === 'live_voice.speech.recognize_batch') {
-      return mountedRecognition(params, '帮我在后台制定一份三天杭州行程。', 1);
+      recognitionCalls += 1;
+      if (recognitionCalls === 1) {
+        return mountedRecognition(params, '帮我在后台制定一份三天杭州行程。', 1);
+      }
+      throw Object.assign(new Error('mounted idle capture contained no committed speech'), {
+        reason: 'SPEECH_PROVIDER_EMPTY_TRANSCRIPT',
+      });
     }
     if (method === 'live_voice.composition.unified.submit') {
       p2Binding = {
@@ -12680,6 +12692,21 @@ test('mounted voice-created Task AUDIO failure falls back without local replay o
       });
     }
 
+    await act(async () => {
+      const activationsBeforeEmptyTurn = calls.filter(call => call.method === 'live_voice.media.activate').length;
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.media.activate').length === activationsBeforeEmptyTurn + 1,
+        `empty listening turn did not resume capture; states=${states
+          .slice(-12)
+          .map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}`)
+          .join(',')}`,
+      );
+      await browser.emitFirstFrame(0);
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'empty listening turn successor did not become ready');
+      assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 1);
+    });
+
     const taskBinding = {
       subject_id: 'mounted-terminal-idle-subject',
       session_id: sessionId,
@@ -12729,7 +12756,7 @@ test('mounted voice-created Task AUDIO failure falls back without local replay o
         'failed first terminal playout must not ACK',
       );
       await waitForMounted(
-        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 5,
+        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 6,
         `accepted TEXT fallback did not resume one bounded capture owner; states=${states
           .slice(-16)
           .map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}/${state.text_status}/${state.terminal_announcement_state}`)
@@ -12784,9 +12811,9 @@ test('mounted voice-created Task AUDIO failure falls back without local replay o
       'failed Task AUDIO must not be replayed locally',
     );
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 1);
-    assert.equal(calls.filter(call => call.method === 'live_voice.speech.recognize_batch').length, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.speech.recognize_batch').length, 2);
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 1);
-    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 5);
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 6);
     assert.equal(
       calls.some(call => call.method.includes('task.cancel') || call.method.includes('task.mutate') || call.method === 'live_voice.composition.p3.mutate'),
       false,
