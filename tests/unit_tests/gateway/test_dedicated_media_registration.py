@@ -3904,3 +3904,125 @@ def test_same_session_reactivation_shares_the_lease() -> None:
     )
     assert replay["status"] == "active"
     assert registry._voice_session_lease.generation == generation
+
+
+# ---------------------------------------------------------------------------
+# F06+F16 验收矩阵(注册表层):撤销后帧拒绝与 stop_all_leaves 全量效果。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_matrix_post_revoke_frames_are_rejected_on_both_ingestion_paths() -> (
+    None
+):
+    """撤销后:批量路径给类型化拒绝;流式路径在 Provider begin 停车的武装态下
+    静默丢弃,预开缓冲不再增长。"""
+    provider = _DelayedPreopenStreamingProvider()
+    owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
+        )
+    )
+    registry = _active_registry()
+    registry.configure_streaming_recognition(
+        owner,
+        receipt_issuer=lambda **_binding: asyncio.sleep(0, result="unused"),
+    )
+    await registry.prepare_streaming_provider()
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-owner",
+    )
+    ticket = _media_ticket(activation)
+    record = registry.consume_ticket(ticket, request_origin=ORIGIN)
+    assert record is not None
+    frame = MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.25,) * 320)
+    registry.accept_frame(record, frame)
+    assert record.accepted_frames == 1
+    registry.start_streaming_recognition(record)
+    await asyncio.wait_for(provider.open_started.wait(), timeout=1)
+    begin_task = record.streaming_recognition_begin_task
+    assert begin_task is not None and not begin_task.done()
+    registry.accept_streaming_frame(record, frame)
+    assert len(record.streaming_preopen_frames) == 1
+
+    try:
+        registry.revoke(
+            params={
+                "session_id": "session-1",
+                "subject_id": activation["subject_id"],
+                "correlation_id": "correlation-1",
+                "interaction_id": "interaction-1",
+                "activation_id": "activation-1",
+                "activation_generation": 1,
+            },
+            routed_session_id="session-1",
+            connection_id="connection-owner",
+            user_id="user-1",
+        )
+
+        assert record.stop.is_set() is True
+        with pytest.raises(MediaTransportViolation) as rejected:
+            registry.accept_frame(record, MediaAudioFrame(1, 320, (0.25,) * 320))
+        assert rejected.value.reason_id == "MEDIA_LEASE_CLOSED"
+        assert record.accepted_frames == 1
+
+        # 撤销即清零预开缓冲;此后流式路径必须静默丢弃,不得再增长。
+        assert len(record.streaming_preopen_frames) == 0
+        registry.accept_streaming_frame(
+            record, MediaAudioFrame(1, 320, (0.25,) * 320)
+        )
+        assert len(record.streaming_preopen_frames) == 0
+        assert record.streaming_preopen_f32_bytes == 0
+    finally:
+        pending_begin = record.streaming_recognition_begin_task
+        if pending_begin is not None and not pending_begin.done():
+            pending_begin.cancel()
+            try:
+                await pending_begin
+            except BaseException:
+                pass
+
+
+def test_matrix_stop_all_leaves_wakes_every_record_and_clears_the_lease() -> None:
+    """F16 相位一全量:每片在册叶子被唤醒(含未消费票据的),会话租约清空,
+    准入关闭;重复调用幂等为零。"""
+    registry = _active_registry()
+    first_activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-owner",
+    )
+    first_record = registry.consume_ticket(
+        _media_ticket(first_activation), request_origin=ORIGIN
+    )
+    assert first_record is not None
+    second_activation = _activate(
+        registry,
+        params=_params(
+            activation_id="activation-2",
+            activation_generation=2,
+            correlation_id="correlation-2",
+            interaction_id="interaction-2",
+            capture_id="capture-2",
+            track_id="track-2",
+        ),
+        request_origin=ORIGIN,
+        connection_id="connection-owner",
+    )
+    second_ticket = _media_ticket(second_activation)
+    second_record = _pending_record(registry, second_ticket)
+    assert registry._voice_session_lease is not None
+
+    woken = registry.stop_all_leaves()
+
+    assert woken == 2
+    assert first_record.stop.is_set() is True
+    assert second_record.stop.is_set() is True
+    assert registry._voice_session_lease is None
+    assert registry.consume_ticket(second_ticket, request_origin=ORIGIN) is None
+    assert registry.stop_all_leaves() == 0

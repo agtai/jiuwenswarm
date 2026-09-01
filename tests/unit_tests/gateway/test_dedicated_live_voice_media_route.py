@@ -2596,3 +2596,233 @@ async def test_socket_leaf_cleanup_is_bounded_when_physical_close_never_confirms
 
     assert result.reason_id is MediaDetachReason.MALFORMED_FRAME
     assert len(socket.close_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# F06+F16 验收矩阵(路由层):停车栅栏对每个等待类的作用。
+# 合作传输(close 唤醒停车的 recv/send)下,叶子必须走自身结算路径干净收尾
+# (cleanup_complete=True,不得误报失败);source 停车无法被关 socket 唤醒,
+# 必须经 cancel 升级在预算内返回诚实的 cleanup_complete=False。
+# ---------------------------------------------------------------------------
+
+
+class _FenceCooperativeSocket(_FakeDedicatedSocket):
+    """close 会唤醒停车中的 recv/send 并让其抛错——正常合作的传输。"""
+
+    def __init__(
+        self, incoming: list[object] | None = None, *, park_send_at: int | None = None
+    ) -> None:
+        super().__init__(list(incoming or []))
+        self.park_send_at = park_send_at
+        self.closed_event = asyncio.Event()
+        self.recv_parked = asyncio.Event()
+        self.send_parked = asyncio.Event()
+
+    async def recv(self) -> str | bytes:
+        if self.incoming:
+            return await super().recv()
+        self.recv_parked.set()
+        await self.closed_event.wait()
+        raise ConnectionError("transport closed by stop fence")
+
+    async def send(self, message: str | bytes) -> None:
+        if self.park_send_at is not None and len(self.sent) == self.park_send_at:
+            self.send_parked.set()
+            await self.closed_event.wait()
+            raise ConnectionError("transport closed by stop fence")
+        await super().send(message)
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        await super().close(code, reason)
+        self.closed_event.set()
+
+
+class _ParkedForeverSource:
+    """__anext__ 永远停车、无 aclose——关 socket 唤不醒的下行来源。"""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+
+    def __aiter__(self) -> "_ParkedForeverSource":
+        return self
+
+    async def __anext__(self) -> MediaAudioFrame:
+        self.entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+def _assert_settled_cleanly(result: object) -> None:
+    assert result.activated is True
+    assert result.cleanup_complete is True
+    assert result.cleanup_pending_tasks == 0
+
+
+@pytest.mark.asyncio
+async def test_matrix_fence_wakes_uplink_recv_wait_without_false_failure() -> None:
+    binding = _binding()
+    socket = _FenceCooperativeSocket()
+    stop = asyncio.Event()
+    leaf = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            stop_event=stop,
+        )
+    )
+    await asyncio.wait_for(socket.recv_parked.wait(), timeout=5)
+
+    stop.set()
+    result = await asyncio.wait_for(leaf, timeout=20)
+
+    _assert_settled_cleanly(result)
+    assert result.attach_sent is True
+    assert (1001, "media authority stopped") in socket.close_calls
+
+
+@pytest.mark.asyncio
+async def test_matrix_fence_wakes_uplink_end_of_turn_wait_without_false_failure() -> None:
+    binding = _binding()
+    socket = _FenceCooperativeSocket()
+    stop = asyncio.Event()
+    eot_wait_entered = asyncio.Event()
+
+    async def next_speech_start() -> MediaSpeechStart:
+        return MediaSpeechStart(
+            lease_id=binding.lease_id,
+            generation=binding.generation.value,
+            provider_start_ms=0,
+        )
+
+    async def next_end_of_turn() -> MediaEndOfTurn:
+        eot_wait_entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    leaf = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_speech_start=next_speech_start,
+            next_end_of_turn=next_end_of_turn,
+            cleanup_owner=DedicatedMediaLeafCleanupOwner(),
+            stop_event=stop,
+        )
+    )
+    await asyncio.wait_for(eot_wait_entered.wait(), timeout=5)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    speech_controls = [
+        deserialize_media_control(item)
+        for item in socket.sent
+        if isinstance(item, str)
+    ]
+    assert any(isinstance(item, MediaSpeechStart) for item in speech_controls)
+
+    stop.set()
+    result = await asyncio.wait_for(leaf, timeout=20)
+
+    _assert_settled_cleanly(result)
+    assert result.attach_sent is True
+
+
+@pytest.mark.asyncio
+async def test_matrix_fence_wakes_uplink_send_wait_without_false_failure() -> None:
+    binding = _binding()
+    socket = _FenceCooperativeSocket(park_send_at=0)
+    stop = asyncio.Event()
+    leaf = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            stop_event=stop,
+        )
+    )
+    await asyncio.wait_for(socket.send_parked.wait(), timeout=5)
+
+    stop.set()
+    result = await asyncio.wait_for(leaf, timeout=20)
+
+    assert result.activated is True
+    assert result.cleanup_complete is True
+    assert result.reason_id is MediaDetachReason.TRANSPORT_SEND_FAILED
+
+
+@pytest.mark.asyncio
+async def test_matrix_fence_escalates_parked_downlink_source_to_honest_incomplete() -> (
+    None
+):
+    binding = _downlink_binding()
+    socket = _FenceCooperativeSocket()
+    source = _ParkedForeverSource()
+    stop = asyncio.Event()
+    leaf = asyncio.create_task(
+        run_dedicated_media_downlink_socket_leaf(
+            _request(binding),
+            socket=socket,
+            frames=source,
+            on_playback_stop=lambda _receipt: None,
+            stop_event=stop,
+        )
+    )
+    await asyncio.wait_for(source.entered.wait(), timeout=5)
+
+    stop.set()
+    result = await asyncio.wait_for(leaf, timeout=20)
+
+    assert result.cleanup_complete is False
+    assert result.cleanup_pending_tasks == 1
+    assert result.reason_id is MediaDetachReason.TRANSPORT_CLOSED
+    assert (1001, "media authority stopped") in socket.close_calls
+
+
+@pytest.mark.asyncio
+async def test_matrix_fence_wakes_downlink_ack_wait_without_false_failure() -> None:
+    binding = _downlink_binding()
+    socket = _FenceCooperativeSocket()
+    stop = asyncio.Event()
+    leaf = asyncio.create_task(
+        run_dedicated_media_downlink_socket_leaf(
+            _request(binding),
+            socket=socket,
+            frames=[_frame()],
+            on_playback_stop=lambda _receipt: None,
+            stop_event=stop,
+        )
+    )
+    await asyncio.wait_for(socket.recv_parked.wait(), timeout=5)
+    assert sum(1 for item in socket.sent if isinstance(item, bytes)) == 1
+
+    stop.set()
+    result = await asyncio.wait_for(leaf, timeout=20)
+
+    assert result.cleanup_complete is True
+    assert result.attach_sent is True
+    assert result.sent_frames == 1
+    assert (1001, "media authority stopped") in socket.close_calls
+
+
+@pytest.mark.asyncio
+async def test_matrix_fence_wakes_downlink_send_wait_without_false_failure() -> None:
+    binding = _downlink_binding()
+    socket = _FenceCooperativeSocket(park_send_at=1)
+    stop = asyncio.Event()
+    leaf = asyncio.create_task(
+        run_dedicated_media_downlink_socket_leaf(
+            _request(binding),
+            socket=socket,
+            frames=[_frame()],
+            on_playback_stop=lambda _receipt: None,
+            stop_event=stop,
+        )
+    )
+    await asyncio.wait_for(socket.send_parked.wait(), timeout=5)
+
+    stop.set()
+    result = await asyncio.wait_for(leaf, timeout=20)
+
+    assert result.cleanup_complete is True
+    assert result.reason_id is MediaDetachReason.TRANSPORT_SEND_FAILED
