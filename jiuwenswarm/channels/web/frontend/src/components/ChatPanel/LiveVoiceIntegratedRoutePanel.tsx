@@ -740,6 +740,7 @@ export type ProductP2NotificationDisposition =
       readonly ack: ProductPresentationAckInput;
       readonly replayed: boolean;
       readonly task_notification: boolean;
+      readonly task_notification_terminal: boolean;
       readonly adjustment_notification: boolean;
     };
 
@@ -787,6 +788,7 @@ type PendingProductPresentationAttempt = {
   task_notification: {
     task_id: string;
     disposition: Extract<ProductP2NotificationDisposition, { readonly kind: 'presentation' }>;
+    terminal: boolean;
     retry_count: number;
     retry_pending: boolean;
   } | null;
@@ -1273,6 +1275,7 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
           : `live-voice:${response.interaction_id}:${response.response_id}:${response.response_generation}:${presentationSurface}:${unit.seq}:${unit.seq}:${contentDigest}`,
       replayed: hasPresentedOutput,
       task_notification: taskNotification,
+      task_notification_terminal: taskNotification && !event.text.startsWith('Background task update: '),
       adjustment_notification: event.source_provenance === 'server.background.adjustment',
       ack: {
         response_id: response.response_id,
@@ -1924,12 +1927,18 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
         pendingPresentationAttemptRef.current = null;
         setPendingPresentationAck(null);
-        if (taskNotification.task_id) {
+        if (taskNotification.terminal && taskNotification.task_id) {
           terminalNotificationTaskIdRef.current = taskNotification.task_id;
           terminalNotificationCheckRequiredRef.current = false;
         }
+        const repollBeforeCapture = Boolean(
+          retained.notification_repoll_before_capture && !taskNotification.terminal,
+        );
         terminalAnnouncementSpeechOwnerRef.current = null;
-        updateTerminalAnnouncementState('idle', null);
+        updateTerminalAnnouncementState(
+          repollBeforeCapture ? 'fetching' : 'idle',
+          repollBeforeCapture ? taskNotification.task_id : null,
+        );
         clearProductRecoveryDiagnostic({
           seam: 'tts',
           binding: owner.snapshot().binding,
@@ -2073,6 +2082,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       task_notification: {
         task_id: createdProgressRouteRef.current?.task_id ?? terminalAnnouncementTaskIdRef.current ?? '',
         disposition,
+        terminal: disposition.task_notification_terminal,
         retry_count: 0,
         retry_pending: false,
       },
@@ -2139,13 +2149,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           pendingPresentationAttemptRef.current = null;
           setPendingPresentationAck(null);
           if (!mayMutateUi) return;
-          const terminal = retained.task_notification;
-          if (terminal !== null) {
+          const taskNotification = retained.task_notification;
+          const repollBeforeCapture = Boolean(
+            retained.notification_repoll_before_capture && taskNotification !== null && !taskNotification.terminal,
+          );
+          if (taskNotification !== null) {
             retainBoundedPresentedProductResponse(presentedProductResponsesRef.current, retained.input.response_id);
-            terminalNotificationTaskIdRef.current = terminal.task_id;
-            terminalNotificationCheckRequiredRef.current = false;
+            if (taskNotification.terminal) {
+              terminalNotificationTaskIdRef.current = taskNotification.task_id;
+              terminalNotificationCheckRequiredRef.current = false;
+            }
             terminalAnnouncementSpeechOwnerRef.current = null;
-            updateTerminalAnnouncementState('idle', null);
+            updateTerminalAnnouncementState(
+              repollBeforeCapture ? 'fetching' : 'idle',
+              repollBeforeCapture ? taskNotification.task_id : null,
+            );
           }
           if (
             foregroundPresentationFenceMatchesResponse(
@@ -2171,7 +2189,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             !settleDeferredTaskPresentation(owner) &&
             !continuePendingVoiceLoopP2Refresh()
           ) {
-            scheduleProductVoiceLoopCapture();
+            if (repollBeforeCapture) setP2NotificationWakeEpoch(epoch => epoch + 1);
+            else scheduleProductVoiceLoopCapture();
           }
         }
       })
@@ -2187,17 +2206,25 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               // A newer committed utterance already owns the response lane.
               // The predecessor ACK is definitively obsolete, not a voice
               // recovery failure; keep polling for the newer presentation.
-              const terminal = retained.task_notification;
-              if (terminal !== null) {
+              const taskNotification = retained.task_notification;
+              const repollBeforeCapture = Boolean(
+                retained.notification_repoll_before_capture && taskNotification !== null && !taskNotification.terminal,
+              );
+              if (taskNotification !== null) {
                 // Playout already completed before this ACK.  Remember that
                 // exact current-Task announcement locally so a server replay
                 // cannot speak or ACK it twice, then release the foreground
                 // response lane from the predecessor's `acking` state.
                 retainBoundedPresentedProductResponse(presentedProductResponsesRef.current, retained.input.response_id);
-                terminalNotificationTaskIdRef.current = terminal.task_id;
-                terminalNotificationCheckRequiredRef.current = false;
+                if (taskNotification.terminal) {
+                  terminalNotificationTaskIdRef.current = taskNotification.task_id;
+                  terminalNotificationCheckRequiredRef.current = false;
+                }
                 terminalAnnouncementSpeechOwnerRef.current = null;
-                updateTerminalAnnouncementState('idle', null);
+                updateTerminalAnnouncementState(
+                  repollBeforeCapture ? 'fetching' : 'idle',
+                  repollBeforeCapture ? taskNotification.task_id : null,
+                );
               }
               if (
                 foregroundPresentationFenceMatchesResponse(
@@ -2216,7 +2243,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                 response: retained.input,
               });
               if (!continuePendingVoiceLoopP2Refresh() && pendingForegroundPresentationRef.current === null) {
-                scheduleProductVoiceLoopCapture();
+                if (repollBeforeCapture) setP2NotificationWakeEpoch(epoch => epoch + 1);
+                else scheduleProductVoiceLoopCapture();
               }
             } else {
               setProductTextReason(reason);
@@ -2362,14 +2390,19 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const responseId = typeof response?.response_id === 'string' ? response.response_id : null;
     const disposition = classifyProductP2Notification(notification, responseId !== null && presentedProductResponsesRef.current.has(responseId));
     const presentationBinding = owner.snapshot().binding;
+    const isTaskNotification = disposition.kind === 'presentation' && disposition.task_notification;
     if (
       admission !== null &&
-      (voiceLoopGenerationRef.current !== admission.voice_loop_generation ||
-        voiceLoopP2RefreshAfterGenerationRef.current !== null)
+      (voiceLoopP2RefreshAfterGenerationRef.current !== null ||
+        (voiceLoopGenerationRef.current !== admission.voice_loop_generation &&
+          (!isTaskNotification || !voiceLoopEnabledRef.current)))
     ) {
       // Exit and P2 refresh retire the entire poll admission before any UI,
       // history, TTS or ACK effect. The durable route may replay the
       // notification to the exact successor owner after cleanup completes.
+      // A trusted Task notification belongs to the current P2/task authority,
+      // not to one microphone capture generation, so a normal idle-capture
+      // rotation must not discard it while that owner remains current.
       return disposition;
     }
     if (disposition.kind === 'failed') {
@@ -2517,10 +2550,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           ? {
               task_id: createdProgressRouteRef.current?.task_id ?? terminalAnnouncementTaskIdRef.current ?? '',
               disposition,
+              terminal: disposition.task_notification_terminal,
               retry_count: 0,
               retry_pending: false,
             }
           : null,
+        notification_repoll_before_capture:
+          disposition.task_notification &&
+          !disposition.task_notification_terminal &&
+          terminalAnnouncementStateRef.current === 'fetching',
       };
     }
     const presentationAttempt = pendingPresentationAttemptRef.current;

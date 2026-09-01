@@ -778,6 +778,7 @@ test('P2 notification classification surfaces failures and treats transport keep
   });
   assert.equal(terminalPresentation.kind, 'presentation');
   assert.equal(terminalPresentation.task_notification, true);
+  assert.equal(terminalPresentation.task_notification_terminal, true);
   assert.equal(terminalPresentation.adjustment_notification, false);
   const audioTaskPresentation = classifyProductP2Notification({
     kind: 'agent.output',
@@ -788,7 +789,7 @@ test('P2 notification classification surfaces failures and treats transport keep
     },
     agent_event: {
       event_type: 'chat.final',
-      text: 'The background task is running.',
+      text: 'Background task update: running.',
       source_provenance: 'server.task_notification',
     },
     presentation_unit: {
@@ -800,6 +801,7 @@ test('P2 notification classification surfaces failures and treats transport keep
   });
   assert.equal(audioTaskPresentation.kind, 'presentation');
   assert.equal(audioTaskPresentation.task_notification, true);
+  assert.equal(audioTaskPresentation.task_notification_terminal, false);
   assert.equal(audioTaskPresentation.ack.surface, 'audio');
   assert.equal(
     audioTaskPresentation.history_message_id,

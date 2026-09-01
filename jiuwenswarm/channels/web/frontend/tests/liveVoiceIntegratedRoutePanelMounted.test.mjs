@@ -12354,7 +12354,7 @@ test('mounted foreground status query restarts an idle P2 poll after background 
   }
 });
 
-test('mounted voice-created Task survives an empty listening turn before AUDIO fallback settlement', async () => {
+test('mounted voice-created Task keeps polling after running AUDIO before empty listening and terminal fallback', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-terminal-idle-session';
   const taskId = 'mounted-terminal-idle-task';
@@ -12382,8 +12382,21 @@ test('mounted voice-created Task survives an empty listening turn before AUDIO f
     };
   };
   const publishNotification = notification => {
-    const waiter = notificationWaiters.shift();
-    if (waiter) waiter(notification);
+    const result = notification?.result;
+    let matchingIndex = -1;
+    for (let index = notificationWaiters.length - 1; index >= 0; index -= 1) {
+      const waiter = notificationWaiters[index];
+      if (
+        result &&
+        waiter.binding.activation_id === result.activation_id &&
+        waiter.binding.activation_generation === result.activation_generation
+      ) {
+        matchingIndex = index;
+        break;
+      }
+    }
+    const waiter = matchingIndex >= 0 ? notificationWaiters.splice(matchingIndex, 1)[0] : undefined;
+    if (waiter) waiter.resolve(notification);
     else queuedNotifications.push(notification);
   };
   const presentation = (binding, responseId, responseGeneration, text, taskNotification = false) => ({
@@ -12413,7 +12426,10 @@ test('mounted voice-created Task survives an empty listening turn before AUDIO f
 
   const request = async (method, params, options) => {
     calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
-    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.activate') {
+      p2Binding = { ...params };
+      return activateP2(params);
+    }
     if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
     if (method === 'live_voice.composition.p2.notification.next') {
       if (queuedNotifications.length > 0) return queuedNotifications.shift();
@@ -12432,7 +12448,7 @@ test('mounted voice-created Task survives an empty listening turn before AUDIO f
           },
         };
       }
-      return new Promise(resolve => notificationWaiters.push(resolve));
+      return new Promise(resolve => notificationWaiters.push({ resolve, binding: { ...params } }));
     }
     if (method === 'live_voice.composition.p2.presentation.ack') {
       if (params.response_id === 'mounted-terminal-idle-complete') {
@@ -12740,7 +12756,38 @@ test('mounted voice-created Task survives an empty listening turn before AUDIO f
         () => calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length === 3,
         'completed progress was not ACKed exactly once after authoritative reconciliation',
       );
-      publishNotification(presentation(p2Binding, 'mounted-terminal-idle-complete', 2, '后台任务已完成，结果已经准备好。', true));
+      publishNotification(
+        presentation(p2Binding, 'mounted-terminal-idle-running', 2, 'Background task update: running.', true),
+      );
+      await waitForMounted(
+        () =>
+          calls.filter(
+            call =>
+              call.method === 'live_voice.speech.synthesize_batch' &&
+              call.params.response.response_id === 'mounted-terminal-idle-running',
+          ).length === 1,
+        'running Task AUDIO did not reach its P1 playout owner after the terminal wake',
+      );
+      await waitForMounted(() => browser.counts.sourceStarts === 2, 'running Task AUDIO did not start browser playout');
+      browser.endLatestSource();
+      await waitForMounted(
+        () =>
+          calls.filter(
+            call =>
+              call.method === 'live_voice.composition.p2.presentation.ack' &&
+              call.params.response_id === 'mounted-terminal-idle-running',
+          ).length === 1,
+        'running Task AUDIO did not emit its exact ACK',
+      );
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'recognized' && states.at(-1)?.terminal_announcement_state === 'fetching',
+        'running Task AUDIO did not retain the already-terminal follow-up before listening',
+      );
+      await waitForMounted(
+        () => notificationWaiters.length > 0,
+        'running Task AUDIO ACK incorrectly stopped the terminal notification poll',
+      );
+      publishNotification(presentation(p2Binding, 'mounted-terminal-idle-complete', 3, '后台任务已完成，结果已经准备好。', true));
       await waitForMounted(
         () =>
           calls.filter(call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === 'mounted-terminal-idle-complete')
@@ -12775,7 +12822,7 @@ test('mounted voice-created Task survives an empty listening turn before AUDIO f
       call => call.method === 'live_voice.composition.p2.presentation.failed' && call.params.response_id === 'mounted-terminal-idle-complete',
     );
     assert.equal(presentationFailures.length, 1);
-    assert.equal(presentationFailures[0].params.response_generation, 2);
+    assert.equal(presentationFailures[0].params.response_generation, 3);
     assert.equal(presentationFailures[0].params.surface, 'audio');
     assert.equal(presentationFailures[0].params.unit_id, 'mounted-terminal-idle-complete-unit');
     assert.equal(presentationFailures[0].params.failure_reason, 'task_audio_playout_failed');
