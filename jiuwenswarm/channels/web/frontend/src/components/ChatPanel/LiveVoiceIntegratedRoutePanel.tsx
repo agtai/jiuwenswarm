@@ -935,6 +935,12 @@ export function capturedTaskNotificationDeadlineAction(
     : 'fallback_text';
 }
 
+export function capturedTaskNotificationRequiresAnnouncementRequeue(
+  announcementState: TerminalAnnouncementState,
+): boolean {
+  return announcementState === 'fetching';
+}
+
 export function terminalTextFallbackCompletesVoiceAnnouncement(
   event: Readonly<ProductTextProgressEvent>,
   currentTaskId: string | null,
@@ -4432,7 +4438,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               capturedTaskNotificationRef.current = captured;
               scheduleCapturedTaskNotificationDeadline(captured);
             }
-            queueTerminalAnnouncement(taskRoute.task_id);
+            if (
+              capturedTaskNotificationRequiresAnnouncementRequeue(
+                terminalAnnouncementStateRef.current,
+              )
+            ) {
+              // A prior Task AUDIO presentation can leave its concurrent
+              // successor capture active while the terminal poll is already
+              // `fetching`. Capturing the next exact AUDIO delivery must
+              // re-enter queued arbitration so that capture is paused and this
+              // pop-on-read notification is adopted, rather than timing out.
+              updateTerminalAnnouncementState('queued', taskRoute.task_id);
+            } else {
+              queueTerminalAnnouncement(taskRoute.task_id);
+            }
             return;
           }
           if (previewDisposition.kind === 'presentation' && previewDisposition.task_notification) {

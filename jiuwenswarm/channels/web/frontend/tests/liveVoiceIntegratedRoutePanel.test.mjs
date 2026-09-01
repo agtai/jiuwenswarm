@@ -17,6 +17,7 @@ import {
   awaitProductTaskNotificationPlayout,
   bootstrapProductP3TaskInspectionLeaf,
   capturedTaskNotificationDeadlineAction,
+  capturedTaskNotificationRequiresAnnouncementRequeue,
   classifyProductP2Notification,
   createProductP2ActivationOwner,
   extractWebErrorReason,
@@ -913,6 +914,13 @@ test('speech-marked capture gets one bounded settlement before Task AUDIO falls 
   assert.equal(capturedTaskNotificationDeadlineAction({ ...input, p1_status: 'recognizing' }), 'fallback_text');
   assert.equal(capturedTaskNotificationDeadlineAction({ ...input, announcement_state: 'fetching' }), 'fallback_text');
   assert.equal(capturedTaskNotificationDeadlineAction({ ...input, capture_binding_available: false }), 'fallback_text');
+});
+
+test('captured Task AUDIO re-enters arbitration from an in-flight terminal fetch', () => {
+  assert.equal(capturedTaskNotificationRequiresAnnouncementRequeue('fetching'), true);
+  for (const state of ['idle', 'queued', 'suspending_capture', 'playing', 'acking', 'recovering']) {
+    assert.equal(capturedTaskNotificationRequiresAnnouncementRequeue(state), false, state);
+  }
 });
 
 test('only the exact visible terminal TEXT fallback settles a voice announcement', () => {
