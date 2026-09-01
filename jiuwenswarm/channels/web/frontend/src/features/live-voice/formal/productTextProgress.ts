@@ -1,3 +1,5 @@
+import { parseEventEnvelope } from './liveVoiceContractV2.js';
+
 export const PRODUCT_TEXT_PROGRESS_EVENT = 'live_voice.task.progress' as const;
 export const PRODUCT_PROGRESS_ACK_METHOD = 'live_voice.composition.p3.progress.ack' as const;
 
@@ -136,33 +138,69 @@ function parseEnvelope(value: unknown): ProductTextProgressEnvelope | null {
   const raw = objectValue(value);
   if (!raw) return null;
   const envelopeKeys = Object.keys(raw).sort();
-  if (
-    ![
-      [
-        'causation_id',
-        'correlation_id',
-        'event_id',
-        'event_type',
-        'payload',
-        'scope',
-        'seq',
-        'stream_ref',
-      ],
-      [
-        'causation_id',
-        'correlation_id',
-        'event_id',
-        'event_type',
-        'extensions',
-        'payload',
-        'scope',
-        'seq',
-        'stream_ref',
-      ],
-    ].some(expected => expected.length === envelopeKeys.length && expected.every((key, index) => key === envelopeKeys[index]))
-  ) {
-    return null;
+  const canonicalKeys = [
+    'causation_id',
+    'contract_version',
+    'correlation_id',
+    'event_id',
+    'event_type',
+    'extensions',
+    'occurred_at',
+    'payload',
+    'producer',
+    'required_capabilities',
+    'scope',
+    'seq',
+    'stream_ref',
+  ];
+  if (canonicalKeys.length === envelopeKeys.length && canonicalKeys.every((key, index) => key === envelopeKeys[index])) {
+    try {
+      const parsed = parseEventEnvelope(raw);
+      if (parsed.scope.assurance !== 'authenticated' || parsed.scope.project_id === null || parsed.scope.session_id === null) return null;
+      return Object.freeze({
+        event_id: parsed.event_id,
+        event_type: parsed.event_type,
+        seq: parsed.seq,
+        correlation_id: parsed.correlation_id,
+        causation_id: parsed.causation_id,
+        stream_ref: Object.freeze({ ...parsed.stream_ref }),
+        scope: Object.freeze({
+          subject_id: parsed.scope.subject_id,
+          project_id: parsed.scope.project_id,
+          session_id: parsed.scope.session_id,
+          assurance: 'authenticated',
+        }),
+        payload: Object.freeze({ ...parsed.payload }),
+        raw: Object.freeze({ ...raw }),
+      });
+    } catch {
+      return null;
+    }
   }
+  const legacyEnvelope = [
+    [
+      'causation_id',
+      'correlation_id',
+      'event_id',
+      'event_type',
+      'payload',
+      'scope',
+      'seq',
+      'stream_ref',
+    ],
+    [
+      'causation_id',
+      'correlation_id',
+      'event_id',
+      'event_type',
+      'extensions',
+      'payload',
+      'scope',
+      'seq',
+      'stream_ref',
+    ],
+  ].some(expected => expected.length === envelopeKeys.length && expected.every((key, index) => key === envelopeKeys[index]));
+  if (!legacyEnvelope) return null;
   const eventId = textValue(raw.event_id);
   const eventType = textValue(raw.event_type);
   const seq = uintValue(raw.seq);

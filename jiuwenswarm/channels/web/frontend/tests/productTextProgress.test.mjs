@@ -110,6 +110,60 @@ function legacyProgressEvent(overrides = {}) {
   return event;
 }
 
+function canonicalProgressEvent(overrides = {}) {
+  const event = progressEvent(overrides);
+  const source = event.source_event;
+  const progress = event.progress_event;
+  source.contract_version = 'live-voice.contract.v2';
+  source.producer = {
+    component: 'task_core',
+    instance_id: 'agent_server.p3_core',
+    authority: 'task_core',
+  };
+  source.occurred_at = '2030-01-01T00:00:00Z';
+  source.required_capabilities = [];
+  Object.assign(source.extensions['jiuwenswarm.task_progress_return'], {
+    consumer_scope_rebound: true,
+    persistent_correlation_id: event.correlation_id,
+    persistent_scope: { ...source.scope },
+  });
+
+  progress.contract_version = 'live-voice.contract.v2';
+  progress.producer = {
+    component: 'product_p3_voice',
+    instance_id: `${event.session_id}:${event.origin_id}:${event.generation}`,
+    authority: 'adapter',
+  };
+  progress.occurred_at = '2030-01-01T00:00:00Z';
+  progress.required_capabilities = [];
+  progress.extensions = {
+    'jiuwenswarm.task_progress_return': {
+      consumer_scope_rebound: true,
+      persistent_correlation_id: event.correlation_id,
+      persistent_event_seq: source.seq,
+      persistent_scope: { ...source.scope },
+    },
+  };
+  progress.payload = {
+    work_ref: { kind: 'task', id: event.task_id },
+    source: {
+      authority: 'task_core',
+      event_id: source.event_id,
+      source_work_ref: { kind: 'task', id: event.task_id },
+      adapter: 'agent_server.product_p3_voice.v1',
+    },
+    seq: source.seq,
+    state: event.state,
+    outcome: overrides.outcome ?? null,
+    summary: { knowledge: 'unknown' },
+    blocking_question: { knowledge: 'unknown' },
+    artifact_refs: { knowledge: 'unknown' },
+    urgency: 'unknown',
+    speakability: 'not_speakable',
+  };
+  return event;
+}
+
 test('accepts the exact production presentation state binding', () => {
   const parsed = parseProductTextProgressEvent(progressEvent({ state: 'running' }));
   assert.notEqual(parsed, null);
@@ -118,6 +172,30 @@ test('accepts the exact production presentation state binding', () => {
   const mismatched = progressEvent({ state: 'running' });
   mismatched.state = 'waiting';
   assert.equal(parseProductTextProgressEvent(mismatched), null);
+});
+
+test('accepts the complete canonical v2 envelopes emitted through the Gateway', () => {
+  const canonical = canonicalProgressEvent();
+  const parsed = parseProductTextProgressEvent(canonical);
+  assert.notEqual(parsed, null);
+  assert.equal(parsed.source_event.raw.contract_version, 'live-voice.contract.v2');
+  assert.equal(parsed.progress_event.raw.producer.authority, 'adapter');
+
+  for (const mutate of [
+    event => {
+      delete event.source_event.occurred_at;
+    },
+    event => {
+      event.progress_event.producer.authority = 'task_core';
+    },
+    event => {
+      event.progress_event.unknown = true;
+    },
+  ]) {
+    const invalid = canonicalProgressEvent();
+    mutate(invalid);
+    assert.equal(parseProductTextProgressEvent(invalid), null);
+  }
 });
 
 test('DOM adoption owner ACKs only an exact connected rendered delivery', () => {
