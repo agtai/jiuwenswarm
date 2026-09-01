@@ -23,6 +23,7 @@ import {
   reconcileProductP3ProgressEvent,
   productP2WebRequestOptions,
   productP2NotificationRepollDelayMs,
+  productP2TaskNotificationRequiresCaptureArbitration,
   productP3RetryInspectionFailureReason,
   productP3ProgressReconciliationRetryDelayMs,
   productP3ProgressFailureIsQuarantinable,
@@ -892,13 +893,18 @@ test('terminal announcement arbitration preserves speech and every foreground P1
   assert.equal(terminalAnnouncementArbitrationAction({ ...input, p1_status: 'recognized', connected: false }), 'defer');
 });
 
-test('terminal notification receive transport remains subscribed during idle capture', () => {
+test('terminal notification receive transport remains subscribed while an outstanding Task starts idle capture', () => {
   const input = {
     p1_status: 'capturing',
     terminal_notification_check_required: true,
   };
   assert.equal(productP2NotificationTransportBlockedByP1(input), false);
+  assert.equal(productP2NotificationTransportBlockedByP1({ ...input, p1_status: 'starting' }), false);
   assert.equal(productP2NotificationTransportBlockedByP1({ ...input, terminal_notification_check_required: false }), true);
+  assert.equal(
+    productP2NotificationTransportBlockedByP1({ ...input, p1_status: 'starting', terminal_notification_check_required: false }),
+    true,
+  );
   assert.equal(productP2NotificationTransportBlockedByP1({ ...input, p1_status: 'recognizing' }), true);
   assert.equal(productP2NotificationTransportBlockedByP1({ ...input, p1_status: 'playing' }), true);
   assert.equal(productP2NotificationTransportBlockedByP1({ ...input, p1_status: 'recognized' }), false);
@@ -926,6 +932,40 @@ test('terminal notification receive transport remains subscribed during idle cap
       foreground_response_waiting: false,
     }),
     0,
+  );
+});
+
+test('trusted Task notification waits behind provider-starting capture without widening ordinary P1 arbitration', () => {
+  assert.equal(
+    productP2TaskNotificationRequiresCaptureArbitration({
+      p1_status: 'starting',
+      terminal_notification_check_required: true,
+    }),
+    true,
+  );
+  assert.equal(
+    productP2TaskNotificationRequiresCaptureArbitration({
+      p1_status: 'capturing',
+      terminal_notification_check_required: true,
+    }),
+    true,
+  );
+  for (const p1_status of ['recognized', 'failed', 'closed']) {
+    assert.equal(
+      productP2TaskNotificationRequiresCaptureArbitration({
+        p1_status,
+        terminal_notification_check_required: true,
+      }),
+      false,
+      p1_status,
+    );
+  }
+  assert.equal(
+    productP2TaskNotificationRequiresCaptureArbitration({
+      p1_status: 'starting',
+      terminal_notification_check_required: false,
+    }),
+    false,
   );
 });
 

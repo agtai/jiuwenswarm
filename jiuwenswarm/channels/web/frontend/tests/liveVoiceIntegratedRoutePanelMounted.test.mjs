@@ -12354,7 +12354,7 @@ test('mounted foreground status query restarts an idle P2 poll after background 
   }
 });
 
-test('mounted voice-created Task retries a terminal wake after a speech-marked capture rotates and keeps polling through running AUDIO fallback', async () => {
+test('mounted voice-created Task keeps polling through provider-starting capture and running AUDIO fallback', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-terminal-idle-session';
   const taskId = 'mounted-terminal-idle-task';
@@ -12423,6 +12423,18 @@ test('mounted voice-created Task retries a terminal wake after a speech-marked c
       },
     },
   });
+  const keepalive = binding => ({
+    ok: true,
+    result: {
+      status: 'notification',
+      ...binding,
+      kind: 'transport.keepalive',
+      response: null,
+      agent_event: null,
+      progress_event: null,
+      presentation_unit: null,
+    },
+  });
 
   const request = async (method, params, options) => {
     calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
@@ -12435,18 +12447,7 @@ test('mounted voice-created Task retries a terminal wake after a speech-marked c
       if (queuedNotifications.length > 0) return queuedNotifications.shift();
       if (keepaliveAfterTaskStart && p2Binding !== null) {
         keepaliveAfterTaskStart = false;
-        return {
-          ok: true,
-          result: {
-            status: 'notification',
-            ...p2Binding,
-            kind: 'transport.keepalive',
-            response: null,
-            agent_event: null,
-            progress_event: null,
-            presentation_unit: null,
-          },
-        };
+        return keepalive(p2Binding);
       }
       return new Promise(resolve => notificationWaiters.push({ resolve, binding: { ...params } }));
     }
@@ -12671,6 +12672,20 @@ test('mounted voice-created Task retries a terminal wake after a speech-marked c
         'task-start response was not ACKed',
       );
       await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'idle listening did not restart after task-start');
+      await waitForMounted(
+        () => notificationWaiters.length > 0,
+        'provider-starting capture did not retain one outstanding Task notification subscription',
+      );
+      const notificationCallsBeforeStartingKeepalive = calls.filter(
+        call => call.method === 'live_voice.composition.p2.notification.next',
+      ).length;
+      publishNotification(keepalive(p2Binding));
+      await waitForMounted(
+        () =>
+          calls.filter(call => call.method === 'live_voice.composition.p2.notification.next').length >
+          notificationCallsBeforeStartingKeepalive,
+        'provider-starting capture did not replace the Task subscription consumed by a keepalive',
+      );
       await browser.emitFirstFrame(0.25);
       await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'speech-marked idle listening did not become ready');
       await waitForMounted(

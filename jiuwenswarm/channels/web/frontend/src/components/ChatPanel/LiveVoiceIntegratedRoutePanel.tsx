@@ -850,8 +850,17 @@ export function productP2NotificationTransportBlockedByP1(
     terminal_notification_check_required: boolean;
   }>,
 ): boolean {
-  if (input.p1_status === 'capturing') return !input.terminal_notification_check_required;
-  return ['starting', 'recognizing', 'playing', 'cleanup_pending'].includes(input.p1_status);
+  if (productP2TaskNotificationRequiresCaptureArbitration(input)) return false;
+  return ['starting', 'capturing', 'recognizing', 'playing', 'cleanup_pending'].includes(input.p1_status);
+}
+
+export function productP2TaskNotificationRequiresCaptureArbitration(
+  input: Readonly<{
+    p1_status: ProductP1VoiceStatus;
+    terminal_notification_check_required: boolean;
+  }>,
+): boolean {
+  return input.terminal_notification_check_required && ['starting', 'capturing'].includes(input.p1_status);
 }
 
 export function productP2NotificationRepollDelayMs(
@@ -4181,8 +4190,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           if (
             previewDisposition.kind === 'presentation' &&
             previewDisposition.task_notification &&
-            notificationP1Status === 'capturing' &&
-            terminalNotificationCheckRequiredRef.current &&
+            productP2TaskNotificationRequiresCaptureArbitration({
+              p1_status: notificationP1Status,
+              terminal_notification_check_required: terminalNotificationCheckRequiredRef.current,
+            }) &&
             taskRoute?.origin?.kind === 'voice' &&
             terminalNotificationTaskIdRef.current !== taskRoute.task_id
           ) {
