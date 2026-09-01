@@ -375,6 +375,36 @@ test('sender and receiver are injected seams and never open sockets themselves',
   assert.equal('socket' in receiver, false);
 });
 
+test('receiver retains only a bounded product reason when its audio consumer fails', () => {
+  const exactBinding = binding({ direction: 'downlink' });
+  const receiver = new StrictMediaReceiver(exactBinding, () => {
+    throw Object.assign(new Error('private browser device detail'), {
+      reason: 'PLAYOUT_SAMPLE_RATE_MISMATCH',
+      private_device_id: 'speaker-secret',
+    });
+  });
+  receiver.attach({ type: 'media.attach', binding: exactBinding });
+
+  const result = receiver.acceptBinary(encodeAudioFrame(exactBinding, frame()));
+
+  assert.equal(result.reason_id, 'MEDIA_CONSUMER_FAILED');
+  assert.equal(receiver.consumer_failure_reason_id, 'PLAYOUT_SAMPLE_RATE_MISMATCH');
+  assert.equal(JSON.stringify(receiver).includes('speaker-secret'), false);
+  assert.equal(JSON.stringify(receiver).includes('private browser device detail'), false);
+});
+
+test('receiver replaces an unrecognised consumer failure with its bounded callback stage', () => {
+  const exactBinding = binding({ direction: 'downlink' });
+  const receiver = new StrictMediaReceiver(exactBinding, () => {
+    throw Object.assign(new Error('private consumer detail'), { reason: 'PRIVATE_SECRET' });
+  });
+  receiver.attach({ type: 'media.attach', binding: exactBinding });
+
+  receiver.acceptBinary(encodeAudioFrame(exactBinding, frame()));
+
+  assert.equal(receiver.consumer_failure_reason_id, 'ADAPTER_AUDIO_FRAME_CALLBACK_FAILED');
+});
+
 for (const scenario of [
   { enabled: false, exactBinding: binding(), provider: true, transport: true, reason: 'MEDIA_FEATURE_DISABLED' },
   { enabled: true, exactBinding: null, provider: true, transport: true, reason: 'MEDIA_AUTHORITY_UNAVAILABLE' },

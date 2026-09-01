@@ -65,6 +65,7 @@ from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AgentManagerProjectBindingResolver,
     AuthenticatedPrincipal,
+    NativeP3ActivationAuthority,
     P3AuthenticatedComposition,
     PreparedProductionIntentAuthority,
     P3_MUTATIONS,
@@ -791,6 +792,303 @@ def _production_registry_text_params(
     if continuation_id is not None:
         params["continuation_id"] = continuation_id
     return params
+
+
+@pytest.mark.asyncio
+async def test_native_activation_authority_reuses_principal_without_bearer(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(
+        tmp_path,
+        allowed_operations=P3_OPERATIONS | frozenset({"agent.chat"}),
+    )
+    await harness.composition.start()
+    authority = harness.composition.prepare_native_activation_authority(
+        bearer_token=TOKEN,
+        session_id="session-1",
+        correlation_id="correlation-native",
+    )
+
+    assert isinstance(authority, NativeP3ActivationAuthority)
+    assert TOKEN not in repr(authority)
+    try:
+        assert (
+            await harness.composition.read_current_background_task_native(
+                authority,
+                session_id="session-1",
+            )
+            is None
+        )
+        listed = await harness.composition.handle_native(
+            authority,
+            operation="task.list",
+            params={"session_id": "session-1"},
+            request_id="request-native-task-list",
+            session_id="session-1",
+        )
+        assert listed.ok is True
+        assert listed.payload["result"]["tasks"] == []
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_activation_authority_never_elevates_agent_chat_scope(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(
+        tmp_path,
+        allowed_operations=frozenset({"agent.chat"}),
+    )
+    await harness.composition.start()
+    authority = harness.composition.prepare_native_activation_authority(
+        bearer_token=TOKEN,
+        session_id="session-1",
+        correlation_id="correlation-native-denied",
+    )
+    before = _store_counts(harness.database)
+    try:
+        with pytest.raises(FormalTaskViolation) as rejected:
+            await harness.composition.read_current_background_task_native(
+                authority,
+                session_id="session-1",
+            )
+        assert rejected.value.reason == "FORMAL_TASK_AUTHORIZATION_DENIED"
+        assert _store_counts(harness.database) == before
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_activation_authority_runs_real_task_journey_without_bearer(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(
+        tmp_path,
+        allowed_operations=P3_OPERATIONS | frozenset({"agent.chat"}),
+    )
+    await harness.composition.start()
+    authority = harness.composition.prepare_native_activation_authority(
+        bearer_token=TOKEN,
+        session_id="session-1",
+        correlation_id="correlation-native-journey",
+    )
+    try:
+        before = _store_counts(harness.database)
+        created = await harness.composition.handle_native(
+            authority,
+            operation="task.create",
+            params=_issued_create_params(harness, "command-native-create"),
+            request_id="request-native-create",
+            session_id="session-1",
+        )
+        assert created.ok is True, created.payload
+        task_id = str(created.payload["result"]["task_id"])
+        await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        after_create = _store_counts(harness.database)
+        assert after_create > before
+
+        status = await harness.composition.handle_native(
+            authority,
+            operation="task.status",
+            params={"session_id": "session-1", "task_id": task_id},
+            request_id="request-native-status",
+            session_id="session-1",
+        )
+        result = await harness.composition.handle_native(
+            authority,
+            operation="task.result",
+            params={"session_id": "session-1", "task_id": task_id},
+            request_id="request-native-result",
+            session_id="session-1",
+        )
+        assert status.ok is result.ok is True
+        assert status.payload["result"]["task"]["task_id"] == task_id
+        assert result.payload["result"] == {
+            "task_id": task_id,
+            "availability": "not_ready",
+            "reason": "TASK_RESULT_NOT_READY",
+            "task_result": None,
+        }
+        assert _store_counts(harness.database) == after_create
+
+        adjusted = await harness.composition.handle_native(
+            authority,
+            operation="task.adjust",
+            params=_issue_confirmation(
+                harness,
+                _adjust_params(task_id, "command-native-adjust"),
+                operation="task.adjust",
+            ),
+            request_id="request-native-adjust",
+            session_id="session-1",
+        )
+        assert adjusted.ok is True, adjusted.payload
+        await _wait_until(
+            lambda: harness.executor.adjustments == ["command-native-adjust"]
+        )
+        after_adjust = _store_counts(harness.database)
+        assert after_adjust[2] > after_create[2]
+
+        cancelled = await harness.composition.handle_native(
+            authority,
+            operation="task.cancel",
+            params=_issued_cancel_params(harness, task_id),
+            request_id="request-native-cancel",
+            session_id="session-1",
+        )
+        assert cancelled.ok is True, cancelled.payload
+        await _wait_until(lambda: len(harness.executor.cancels) == 1)
+        after_cancel = _store_counts(harness.database)
+        assert after_cancel[2] > after_adjust[2]
+        assert TOKEN not in repr(authority)
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_activation_expiry_rejects_mutation_with_zero_effects(
+    tmp_path: Path,
+) -> None:
+    observed_at = [NOW]
+    harness = _harness(
+        tmp_path,
+        clock=lambda: observed_at[0],
+        allowed_operations=P3_OPERATIONS | frozenset({"agent.chat"}),
+    )
+    await harness.composition.start()
+    authority = harness.composition.prepare_native_activation_authority(
+        bearer_token=TOKEN,
+        session_id="session-1",
+        correlation_id="correlation-native-expiry",
+    )
+    params = _issued_create_params(harness, "command-native-expired")
+    before = _store_counts(harness.database)
+    observed_at[0] = EXPIRY
+    try:
+        rejected = await harness.composition.handle_native(
+            authority,
+            operation="task.create",
+            params=params,
+            request_id="request-native-expired",
+            session_id="session-1",
+        )
+        assert rejected.ok is False
+        assert rejected.payload["error"]["reason"] == (
+            "FORMAL_TASK_AUTHORIZATION_EXPIRED"
+        )
+        assert _store_counts(harness.database) == before
+        assert harness.executor.dispatches == []
+        assert harness.executor.cancels == []
+        assert harness.executor.adjustments == []
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ["session", "project", "context"])
+async def test_native_activation_context_drift_rejects_with_zero_effects(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    harness = _harness(
+        tmp_path,
+        allowed_operations=P3_OPERATIONS | frozenset({"agent.chat"}),
+    )
+    await harness.composition.start()
+    authority = harness.composition.prepare_native_activation_authority(
+        bearer_token=TOKEN,
+        session_id="session-1",
+        correlation_id=f"correlation-native-drift-{drift}",
+    )
+    params = _issued_create_params(harness, f"command-native-drift-{drift}")
+    routed_session = "session-1"
+    if drift == "session":
+        routed_session = "session-2"
+        params["session_id"] = "session-2"
+    elif drift == "project":
+        harness.authority.contexts["session-1"] = _context(
+            tmp_path,
+            project_id="project-2",
+            session_id="session-1",
+        )
+    else:
+        rotated = tmp_path / "rotated-context"
+        rotated.mkdir()
+        harness.authority.contexts["session-1"] = _context(rotated)
+    before = _store_counts(harness.database)
+    try:
+        rejected = await harness.composition.handle_native(
+            authority,
+            operation="task.create",
+            params=params,
+            request_id=f"request-native-drift-{drift}",
+            session_id=routed_session,
+        )
+        assert rejected.ok is False
+        assert rejected.payload["error"]["reason"] == (
+            "NATIVE_P3_ACTIVATION_AUTHORITY_MISMATCH"
+            if drift == "session"
+            else "EXECUTION_CONTEXT_SCOPE_MISMATCH"
+        )
+        assert _store_counts(harness.database) == before
+        assert harness.executor.dispatches == []
+        assert harness.executor.cancels == []
+        assert harness.executor.adjustments == []
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_activation_wrong_exact_task_has_zero_durable_effects(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(
+        tmp_path,
+        allowed_operations=P3_OPERATIONS | frozenset({"agent.chat"}),
+    )
+    await harness.composition.start()
+    authority = harness.composition.prepare_native_activation_authority(
+        bearer_token=TOKEN,
+        session_id="session-1",
+        correlation_id="correlation-native-wrong-task",
+    )
+    foreign_params = _create_params("command-native-foreign-task")
+    foreign_params["session_id"] = "session-2"
+    foreign_params["correlation_id"] = "correlation-native-foreign-task"
+    foreign_params = _issue_confirmation(
+        harness,
+        foreign_params,
+        operation="task.create",
+        scope=_scope(project_id="project-2", session_id="session-2"),
+    )
+    try:
+        foreign = await harness.composition.handle(
+            operation="task.create",
+            params=foreign_params,
+            request_id="request-native-foreign-task",
+            session_id="session-2",
+        )
+        assert foreign.ok is True, foreign.payload
+        foreign_task_id = str(foreign.payload["result"]["task_id"])
+        await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        before = _store_counts(harness.database)
+
+        rejected = await harness.composition.handle_native(
+            authority,
+            operation="task.status",
+            params={"session_id": "session-1", "task_id": foreign_task_id},
+            request_id="request-native-wrong-task",
+            session_id="session-1",
+        )
+        assert rejected.ok is False
+        assert rejected.payload["error"]["code"] == "NOT_FOUND"
+        assert foreign_task_id not in str(rejected.payload["error"])
+        assert _store_counts(harness.database) == before
+        assert harness.executor.cancels == []
+        assert harness.executor.adjustments == []
+    finally:
+        await harness.composition.stop()
 
 
 @pytest.mark.asyncio

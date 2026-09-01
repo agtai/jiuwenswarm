@@ -21,7 +21,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -451,6 +451,44 @@ class ResolvedAuthority:
     principal: AuthenticatedPrincipal
     scope: ScopeRef
     context: ResolvedTaskContext
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class NativeP3ActivationAuthority:
+    """Non-secret activation projection of the existing authenticated principal."""
+
+    principal: AuthenticatedPrincipal = field(repr=False)
+    session_id: str
+    correlation_id: str
+    scope: ScopeRef
+    context: ResolvedTaskContext = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.principal, AuthenticatedPrincipal)
+            or type(self.session_id) is not str
+            or not self.session_id
+            or type(self.correlation_id) is not str
+            or not self.correlation_id
+            or not isinstance(self.scope, ScopeRef)
+            or not isinstance(self.context, ResolvedTaskContext)
+            or self.scope != self.context.scope
+            or self.scope.subject_id != self.principal.principal_id
+            or self.scope.session_id != self.session_id
+        ):
+            raise FormalTaskViolation(
+                "INVALID_NATIVE_P3_ACTIVATION_AUTHORITY",
+                "Native P3 activation authority is incomplete",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+
+    def __repr__(self) -> str:
+        return (
+            "NativeP3ActivationAuthority("
+            f"session_id={self.session_id!r}, "
+            f"correlation_id={self.correlation_id!r}, "
+            f"expires_at={self.principal.expires_at!r})"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1584,6 +1622,86 @@ class P3AuthenticatedComposition:
                 self._p2_response_generation_owner = owner
             return owner.next_generation(session_id, interaction_id, local_prior)
 
+    def prepare_native_activation_authority(
+        self,
+        *,
+        bearer_token: object,
+        session_id: str,
+        correlation_id: str,
+    ) -> NativeP3ActivationAuthority:
+        """Authenticate once without retaining the Native activation's bearer."""
+
+        if not self._accepting:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_ROUTE_DISABLED",
+                "formal task route is unavailable",
+                ErrorCode.UNAVAILABLE,
+            )
+        now = self._clock()
+        principal = self._authenticator.authenticate(
+            bearer_token,
+            operation=_PRODUCT_P2_OPERATION,
+            now=now,
+        )
+        resolved = self._authority_resolver.resolve(
+            principal,
+            session_id=session_id,
+            now=now,
+            require_clean=False,
+        )
+        resolved.context.require_usable(
+            scope=resolved.scope,
+            required_permissions=frozenset({"task.execute", "project.write"}),
+            destructive=False,
+            now=now,
+        )
+        return NativeP3ActivationAuthority(
+            principal=principal,
+            session_id=session_id,
+            correlation_id=correlation_id,
+            scope=resolved.scope,
+            context=resolved.context,
+        )
+
+    def _resolve_native_activation_authority(
+        self,
+        authority: NativeP3ActivationAuthority,
+        *,
+        operation: str,
+        session_id: str,
+        now: str,
+        require_clean: bool,
+    ) -> ResolvedAuthority:
+        if (
+            not isinstance(authority, NativeP3ActivationAuthority)
+            or authority.session_id != session_id
+        ):
+            raise FormalTaskViolation(
+                "NATIVE_P3_ACTIVATION_AUTHORITY_MISMATCH",
+                "Native Task operation does not match its activation authority",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        authority.principal.require_usable(operation=operation, now=now)
+        current = self._authority_resolver.resolve(
+            authority.principal,
+            session_id=session_id,
+            now=now,
+            require_clean=require_clean,
+        )
+        if (
+            current.scope != authority.scope
+            or current.context.scope != authority.context.scope
+            or current.context.source != authority.context.source
+            or current.context.stable_id != authority.context.stable_id
+            or current.context.uri != authority.context.uri
+        ):
+            raise FormalTaskViolation(
+                "EXECUTION_CONTEXT_SCOPE_MISMATCH",
+                "Native Task authority no longer matches the activated project",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        return current
+
     def resolve_product_authority_candidate(
         self,
         *,
@@ -2586,6 +2704,45 @@ class P3AuthenticatedComposition:
                 await self._run_blocking(
                     self._require_exact_task_context,
                     authority=authority,
+                    operation="task.status",
+                    task_id=current.task_id,
+                    now=now,
+                )
+            return current
+        finally:
+            if entered:
+                await self._leave_operation()
+
+    async def read_current_background_task_native(
+        self,
+        authority: NativeP3ActivationAuthority,
+        *,
+        session_id: str,
+    ) -> PersistentTaskRecord | None:
+        """Read current Task through the retained principal, never a bearer."""
+
+        entered = False
+        try:
+            await self._enter_operation()
+            entered = True
+            now = self._clock()
+            resolved = await self._run_blocking(
+                self._resolve_native_activation_authority,
+                authority,
+                operation="task.status",
+                session_id=session_id,
+                now=now,
+                require_clean=False,
+            )
+            current = await self._run_blocking(
+                self._core.store.get_current_background_task,
+                resolved.scope,
+                session_id=session_id,
+            )
+            if current is not None:
+                await self._run_blocking(
+                    self._require_exact_task_context,
+                    authority=resolved,
                     operation="task.status",
                     task_id=current.task_id,
                     now=now,
@@ -4092,6 +4249,33 @@ class P3AuthenticatedComposition:
             except Exception:  # noqa: BLE001 -- telemetry cannot change authority
                 logger.exception("[LiveVoiceP3] telemetry sink failed")
 
+    async def handle_native(
+        self,
+        authority: NativeP3ActivationAuthority,
+        *,
+        operation: str,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+        trusted_demo_policy_bypass: bool = False,
+        current_background_session_id: str | None = None,
+        trusted_current_task_id: str | None = None,
+    ) -> P3RouteResult:
+        """Invoke the existing P3 owner with a server-retained principal."""
+
+        internal_params = dict(params)
+        internal_params["auth_token"] = None
+        return await self.handle(
+            operation=operation,
+            params=internal_params,
+            request_id=request_id,
+            session_id=session_id,
+            trusted_demo_policy_bypass=trusted_demo_policy_bypass,
+            current_background_session_id=current_background_session_id,
+            trusted_current_task_id=trusted_current_task_id,
+            _native_authority=authority,
+        )
+
     async def handle(
         self,
         *,
@@ -4102,6 +4286,7 @@ class P3AuthenticatedComposition:
         trusted_demo_policy_bypass: bool = False,
         current_background_session_id: str | None = None,
         trusted_current_task_id: str | None = None,
+        _native_authority: NativeP3ActivationAuthority | None = None,
     ) -> P3RouteResult:
         started = time.monotonic()
         outcome = "rejected"
@@ -4117,9 +4302,21 @@ class P3AuthenticatedComposition:
                     ErrorCode.UNSUPPORTED,
                 )
             now = self._clock()
-            principal = self._authenticator.authenticate(
-                params.get("auth_token"), operation=operation, now=now
-            )
+            native_resolved: ResolvedAuthority | None = None
+            if _native_authority is None:
+                principal = self._authenticator.authenticate(
+                    params.get("auth_token"), operation=operation, now=now
+                )
+            else:
+                native_resolved = await self._run_blocking(
+                    self._resolve_native_activation_authority,
+                    _native_authority,
+                    operation=operation,
+                    session_id=str(session_id or "").strip(),
+                    now=now,
+                    require_clean=operation in {"task.create", "task.retry"},
+                )
+                principal = _native_authority.principal
             clean = self._validate_params(
                 operation,
                 params,
@@ -4153,7 +4350,7 @@ class P3AuthenticatedComposition:
                     "voice current-task adjustment requires its exact background Session",
                     ErrorCode.PERMISSION_DENIED,
                 )
-            authority = await self._run_blocking(
+            authority = native_resolved or await self._run_blocking(
                 self._authority_resolver.resolve,
                 principal,
                 session_id=clean["session_id"],
@@ -4952,6 +5149,7 @@ __all__ = [
     "AgentManagerProjectBindingResolver",
     "AuthenticatedPrincipal",
     "LoggingP3TelemetrySink",
+    "NativeP3ActivationAuthority",
     "P3AuthenticatedComposition",
     "PreparedProductionIntentAuthority",
     "PreparedP3MutationConfirmation",

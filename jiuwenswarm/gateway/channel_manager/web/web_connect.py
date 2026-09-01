@@ -206,6 +206,8 @@ class WebChannel(BaseWsChannel):
         self.live_voice_owned_speech_service: Any = None
         self.live_voice_streaming_speech_owner: Any = None
         self.live_voice_streaming_synthesis_owner: Any = None
+        self.live_voice_interaction_engine: str = "cascade"
+        self.live_voice_native_runtime_client: Any = None
 
     @staticmethod
     def _coalescible_stream_frame(
@@ -299,6 +301,41 @@ class WebChannel(BaseWsChannel):
         for ws_list in self._clients_by_key.values():
             result.update(ws_list)
         return result
+
+    async def _compensate_native_activation(
+        self,
+        payload: dict[str, object],
+        *,
+        msg: Message,
+        connection_id: str,
+    ) -> None:
+        native_client = self.live_voice_native_runtime_client
+        abort = getattr(native_client, "abort_activation_response", None)
+        if not callable(abort) or not connection_id:
+            logger.error(
+                "Live Voice Native activation compensation has no exact owner"
+            )
+            return
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        request_id = (
+            "native-activation-aborted:"
+            + uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"{msg.id}\0{msg.session_id}\0{connection_id}",
+            ).hex
+        )
+        try:
+            await abort(
+                payload,
+                routed_session_id=msg.session_id,
+                connection_id=connection_id,
+                request_method=str(metadata.get("method") or ""),
+                request_id=request_id,
+            )
+        except Exception:
+            logger.exception(
+                "Live Voice Native activation compensation remains pending"
+            )
 
     # ── 扩展注册 API ──────────────────────────────────────
 
@@ -1063,7 +1100,18 @@ class WebChannel(BaseWsChannel):
                             if not getattr(w, "closed", False):
                                 ws_set.add(w)
 
+            media_registry = self.live_voice_media_registry
+            private_native_descriptor = (
+                isinstance(res_payload.get("result"), dict)
+                and "_native_gateway" in res_payload["result"]
+            )
             if not ws_set:
+                if private_native_descriptor:
+                    await self._compensate_native_activation(
+                        res_payload,
+                        msg=msg,
+                        connection_id=request_ws_id,
+                    )
                 logger.debug(
                     "[WebChannel] response route miss: ws_id=%s session_id=%s id=%s",
                     request_ws_id,
@@ -1075,26 +1123,115 @@ class WebChannel(BaseWsChannel):
             # Media/Speech authority is minted only from the exact response
             # returned to the still-live physical request socket.  Session or
             # routing-key fallbacks are delivery conveniences, never authority.
-            media_registry = self.live_voice_media_registry
-            if (
-                media_registry is not None
-                and exact_request_ws is not None
-                and ws_set == {exact_request_ws}
+            if private_native_descriptor and (
+                exact_request_ws is None or ws_set != {exact_request_ws}
             ):
+                await self._compensate_native_activation(
+                    res_payload,
+                    msg=msg,
+                    connection_id=request_ws_id,
+                )
+                logger.error(
+                    "Live Voice Native activation response lacked exact socket authority"
+                )
+                return
+            if exact_request_ws is not None and ws_set == {exact_request_ws}:
+                native_client = self.live_voice_native_runtime_client
+                private_activation_payload = res_payload
                 try:
-                    media_registry.observe_agent_response(
-                        res_payload,
-                        routed_session_id=msg.session_id,
-                        user_id=msg.user_id,
-                        connection_id=request_ws_id,
-                        request_method=str(metadata.get("method") or ""),
-                    )
+                    if native_client is not None:
+                        res_payload = native_client.observe_activation_response(
+                            res_payload,
+                            routed_session_id=msg.session_id,
+                            connection_id=request_ws_id,
+                            request_method=str(metadata.get("method") or ""),
+                        )
+                    elif private_native_descriptor:
+                        raise RuntimeError(
+                            "Native activation has no Gateway capability owner"
+                        )
                 except Exception:
-                    # An evidence observer can only narrow Speech authority; it
-                    # must never interrupt delivery of the Agent response.
-                    logger.exception(
-                        "Live Voice media authority observer failed closed"
+                    await self._compensate_native_activation(
+                        private_activation_payload,
+                        msg=msg,
+                        connection_id=request_ws_id,
                     )
+                    res_payload = {
+                        "request_id": res_payload.get("request_id", msg.id),
+                        "ok": False,
+                        "result": None,
+                        "error": {
+                            "code": "UNAVAILABLE",
+                            "reason": "NATIVE_GATEWAY_ACTIVATION_INVALID",
+                            "message": "Native activation is unavailable",
+                        },
+                    }
+                    logger.exception(
+                        "Live Voice Native capability observer failed closed"
+                    )
+                frame["payload"] = res_payload
+                if res_payload.get("ok") is False:
+                    frame["ok"] = False
+                    native_error = res_payload.get("error")
+                    if isinstance(native_error, dict):
+                        if isinstance(native_error.get("message"), str):
+                            frame["error"] = native_error["message"]
+                        if isinstance(native_error.get("code"), str):
+                            frame["code"] = native_error["code"]
+                if media_registry is not None and frame["ok"] is True:
+                    try:
+                        media_registry.observe_agent_response(
+                            res_payload,
+                            routed_session_id=msg.session_id,
+                            user_id=msg.user_id,
+                            connection_id=request_ws_id,
+                            request_method=str(metadata.get("method") or ""),
+                        )
+                    except Exception:
+                        activation_for = getattr(native_client, "activation_for", None)
+                        abort_media = getattr(
+                            media_registry,
+                            "abort_native_activation",
+                            None,
+                        )
+                        if callable(activation_for) and callable(abort_media):
+                            retained_activation = activation_for(
+                                session_id=msg.session_id,
+                                interaction_id=(
+                                    private_activation_payload.get("result", {}).get(
+                                        "interaction_id"
+                                    )
+                                    if isinstance(
+                                        private_activation_payload.get("result"), dict
+                                    )
+                                    else ""
+                                ),
+                                connection_id=request_ws_id,
+                            )
+                            if retained_activation is not None:
+                                abort_media(retained_activation)
+                        await self._compensate_native_activation(
+                            private_activation_payload,
+                            msg=msg,
+                            connection_id=request_ws_id,
+                        )
+                        res_payload = {
+                            "request_id": res_payload.get("request_id", msg.id),
+                            "ok": False,
+                            "result": None,
+                            "error": {
+                                "code": "UNAVAILABLE",
+                                "reason": "NATIVE_GATEWAY_ACTIVATION_INVALID",
+                                "message": "Native activation is unavailable",
+                            },
+                        }
+                        frame["payload"] = res_payload
+                        frame["ok"] = False
+                        frame["error"] = "Native activation is unavailable"
+                        frame["code"] = "UNAVAILABLE"
+                        logger.exception(
+                            "Live Voice media authority observer failed closed"
+                        )
             await self._broadcast_to(frame, ws_set)
             return
 

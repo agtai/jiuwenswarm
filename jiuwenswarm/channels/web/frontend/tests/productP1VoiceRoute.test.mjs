@@ -10,7 +10,9 @@ import {
   PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
   PRODUCT_P1_MEDIA_CLOSE_METHOD,
   PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD,
+  parseProductP1NativeChatProjection,
   ProductP1VoiceRouteOwner,
+  parseProductP1NativeInteractionActivation,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productP1VoiceRoute.js';
 import {
   decodeAudioFrame,
@@ -29,6 +31,110 @@ const MANUAL_EOT_FALLBACK = Object.freeze({
   reason_id: 'MEDIA_END_OF_TURN_FEATURE_OFF',
   fallback: 'manual',
   visible: true,
+});
+
+test('formal P1 Native chat projection is exact and response-bound', () => {
+  const response = Object.freeze({
+    interaction_id: 'interaction-native-1',
+    response_id: 'response-native-1',
+    response_generation: 1,
+  });
+  const projection = {
+    message: {
+      id: 'live-voice:interaction-native-1:response-native-1:1:native-audio:digest',
+      role: 'assistant',
+      content: '你好，我是 JiuwenSwarm。',
+      timestamp: 1_788_134_401.5,
+    },
+    binding: {
+      response,
+      surface: 'native_audio',
+      presented_at: '2026-08-31T00:00:01.500Z',
+    },
+  };
+
+  assert.deepEqual(parseProductP1NativeChatProjection(projection, response), {
+    id: projection.message.id,
+    role: 'assistant',
+    content: projection.message.content,
+    timestamp: '2026-08-31T00:00:01.500Z',
+  });
+  assert.throws(
+    () => parseProductP1NativeChatProjection({ ...projection, forged: true }, response),
+    /fields are not closed/,
+  );
+  assert.throws(
+    () => parseProductP1NativeChatProjection({
+      ...projection,
+      binding: {
+        ...projection.binding,
+        response: { ...response, response_generation: 2 },
+      },
+    }, response),
+    /response binding mismatch/,
+  );
+});
+
+test('formal P1 buffers the bounded downlink handshake window before playout ownership is installed', () => {
+  assert.match(
+    productP1VoiceRouteSource,
+    /const earlyDownlinkFrames: Readonly<MediaAudioFrame>\[\] = \[\]/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /reason: 'PLAYOUT_OWNERSHIP_BUFFER_OVERFLOW'/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /for \(const frame of earlyDownlinkFrames\) this\.#acceptDownlinkFrame\(pendingPlayout, frame, result\.provider\)/,
+  );
+});
+
+test('formal P1 gives every synchronous Native downlink consumer rejection a bounded reason', () => {
+  assert.doesNotMatch(
+    productP1VoiceRouteSource,
+    /reason: 'PLAYOUT_OWNERSHIP_NOT_READY'/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /dedicated media downlink frame is stale or non-contiguous'[\s\S]{0,160}reason: 'PLAYOUT_DOWNLINK_FRAME_STALE'/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /browser playout rejected a formal chunk'[\s\S]{0,160}reason: 'PLAYOUT_CHUNK_REJECTED'/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /classifySynchronousPlayoutFailure\(error, 'PLAYOUT_FRAME_ACCEPT_FAILED'\)/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /this\.#nativePlayoutFailureReason \?\?= stableFailureReason\(failure\)/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /void this\.#fail\(failure\)/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /reason: 'PLAYOUT_DOWNLINK_ACK_FAILED'/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /const failureReason = this\.#nativePlayoutFailureReason \?\? stableFailureReason\(error\)/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /this\.#nativePlayoutFailureReason \?\?= stableFailureReason\(error\)[\s\S]{0,240}const failureReason = this\.#nativePlayoutFailureReason/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /event\.direction === 'downlink'[\s\S]{0,360}this\.#nativePlayoutFailureReason \?\?= mediaTerminalFailureReason\(event\)/,
+  );
+  assert.match(
+    productP1VoiceRouteSource,
+    /ADAPTER_\$\{direction\}_\$\{source\}_MEDIA_CONSUMER_FAILED/,
+  );
 });
 
 function attachRealCaptureProcessor(worklet, sampleRate = 48_000) {
@@ -546,6 +652,26 @@ function streamingMediaActivation(binding, degradation = null, endOfTurn = MANUA
     streaming_recognition: degradation === null,
     streaming_degradation: degradation,
     end_of_turn: endOfTurn,
+    binding,
+    privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+  };
+}
+
+function nativeMediaActivation(binding) {
+  return {
+    status: 'active',
+    reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+    subject_id: 'media-subject-native-1',
+    endpoint_path: '/ws/live-voice/media',
+    media_ticket: 'N'.repeat(43),
+    subprotocol: 'live-voice.media.v1',
+    ticket_ttl_ms: 30_000,
+    end_of_turn: MANUAL_EOT_FALLBACK,
+    native_interaction: {
+      contract_version: 'live-voice.native-interaction.v1',
+      engine: 'openai-realtime-native',
+      model: 'gpt-realtime',
+    },
     binding,
     privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
   };
@@ -4827,7 +4953,7 @@ test('formal P1 initial and successor Speech adapters forward the exact request 
 test('formal P1 L0 success waits for the authoritative playout receipt and retains render time', () => {
   assert.match(
     productP1VoiceRouteSource,
-    /await this\.#acknowledgePlayout\(pendingPlayout\);[\s\S]*?this\.#l0Record\([\s\S]*?'playout_completed'[\s\S]*?'success'[\s\S]*?completed/s,
+    /await this\.#acknowledgePlayout\(pendingPlayout, (?:true|false)\);[\s\S]*?this\.#l0Record\([\s\S]*?'playout_completed'[\s\S]*?'success'[\s\S]*?completed/s,
   );
   assert.doesNotMatch(
     productP1VoiceRouteSource,
@@ -6294,6 +6420,462 @@ test('formal P1 duration expiry releases local capture before an exact authority
   const retriedCloses = calls.filter(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2');
   assert.equal(retriedCloses.length, 2);
   assert.deepEqual(retriedCloses[1][1], retriedCloses[0][1]);
+});
+
+test('formal P1 Native activation plays Provider audio while preserving the continuous uplink', async () => {
+  const calls = [];
+  const sockets = [];
+  const environment = audioEnvironment();
+  const uplinkBinding = serverBinding();
+  const response = Object.freeze({
+    interaction_id: 'interaction-1',
+    response_id: 'native-response-1',
+    response_generation: 1,
+  });
+  const unitId = 'native-audio-unit-0';
+  const nativeFrameCount = 150;
+  const downlinkBinding = {
+    ...serverBinding(),
+    lease_id: 'native-downlink-lease-1',
+    authority_evidence_id: 'native-downlink-authority-1',
+    media_session_id: 'native-downlink-session-1',
+    track_id: 'native-playout-track-1',
+    direction: 'downlink',
+    generation: { kind: 'response', id: response.response_id, value: response.response_generation },
+    playout: {
+      response_id: response.response_id,
+      response_generation: response.response_generation,
+      unit_id: unitId,
+    },
+  };
+
+  class NativeSocket extends FakeSocket {
+    serverBinding = null;
+    nextDownlinkSequence = 0;
+    pendingUplinkAckThrough = null;
+    uplinkAckScheduled = false;
+
+    queueDownlinkFrame(sequence) {
+      queueMicrotask(() => this.onmessage?.({
+        data: encodeAudioFrame(this.serverBinding, {
+          seq: sequence,
+          sample_cursor: sequence * 960,
+          samples: new Float32Array(960).fill(sequence / nativeFrameCount),
+        }),
+      }));
+    }
+
+    send(value) {
+      this.sent.push(value);
+      if (typeof value === 'string') {
+        const control = JSON.parse(value);
+        if (control.type === 'media.auth') {
+          this.serverBinding = control.binding;
+        } else if (
+          this.serverBinding?.direction === 'downlink' &&
+          this.serverBinding.generation.value === 1 &&
+          control.type === 'media.ack'
+        ) {
+          if (this.nextDownlinkSequence < nativeFrameCount) {
+            this.queueDownlinkFrame(this.nextDownlinkSequence);
+            this.nextDownlinkSequence += 1;
+          } else if (control.through_seq === nativeFrameCount - 1) {
+            queueMicrotask(() => this.onmessage?.({
+              data: serializeMediaControl({
+                type: 'media.detach',
+                lease_id: this.serverBinding.lease_id,
+                generation: this.serverBinding.generation.value,
+                reason_id: 'MEDIA_LOCAL_CLOSE',
+                through_seq: control.through_seq,
+                business_cancel_count_delta: 0,
+              }),
+            }));
+          }
+        }
+        return;
+      }
+      if (this.serverBinding?.direction === 'uplink') {
+        const frame = decodeAudioFrame(this.serverBinding, value);
+        this.pendingUplinkAckThrough = frame.seq;
+        if (!this.uplinkAckScheduled) {
+          this.uplinkAckScheduled = true;
+          setImmediate(() => {
+            this.uplinkAckScheduled = false;
+            const throughSeq = this.pendingUplinkAckThrough;
+            this.pendingUplinkAckThrough = null;
+            this.onmessage?.({
+              data: serializeMediaControl({
+                type: 'media.ack',
+                lease_id: this.serverBinding.lease_id,
+                generation: this.serverBinding.generation.value,
+                through_seq: throughSeq,
+              }),
+            });
+          });
+        }
+      }
+    }
+  }
+
+  let activeBargeResponse = null;
+  let bargeStopped = null;
+  let unexpectedBargeStarts = 0;
+  let owner;
+  owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    on_barge_in_speech_start: () => {
+      if (activeBargeResponse === null) {
+        unexpectedBargeStarts += 1;
+        return;
+      }
+      bargeStopped = owner.stopAgentPlayout(activeBargeResponse);
+    },
+    socket_factory: () => {
+      const socket = new NativeSocket();
+      sockets.push(socket);
+      queueMicrotask(() => {
+        socket.protocol = 'live-voice.media.v1';
+        socket.readyState = 1;
+        socket.onopen?.({});
+        const binding = socket.serverBinding;
+        assert.notEqual(binding, null);
+        socket.onmessage?.({ data: serializeMediaControl({ type: 'media.attach', binding }) });
+        if (binding.direction === 'downlink') {
+          const initialBurst = 8;
+          while (socket.nextDownlinkSequence < initialBurst) {
+            socket.queueDownlinkFrame(socket.nextDownlinkSequence);
+            socket.nextDownlinkSequence += 1;
+          }
+        }
+      });
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) return nativeMediaActivation(uplinkBinding);
+      if (method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD) {
+        return {
+          status: 'media_playout_acknowledged',
+          reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
+          receipt_id: 'native-playout-receipt-1',
+          duplex_media_observed: true,
+          ...params,
+          chat_projection: {
+            message: {
+              id: 'live-voice:interaction-1:native-response-1:1:native-audio:digest',
+              role: 'assistant',
+              content: '我是 JiuwenSwarm。',
+              timestamp: 1_788_170_401,
+            },
+            binding: {
+              response: {
+                interaction_id: params.interaction_id,
+                response_id: params.response_id,
+                response_generation: params.response_generation,
+              },
+              surface: 'native_audio',
+              presented_at: '2026-08-31T10:00:01.000Z',
+            },
+          },
+        };
+      }
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      throw new Error(`Native route unexpectedly called ${method}`);
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+    locale: 'zh-CN',
+  });
+  assert.equal(owner.interactionEngine(), 'openai-realtime-native');
+  const uplink = sockets.find(socket => socket.serverBinding?.direction === 'uplink');
+  assert.ok(uplink);
+  const uplinkFramesBeforePlayout = uplink.sent.filter(value => typeof value !== 'string').length;
+  let forbiddenCascadeStopCalls = 0;
+  assert.equal(
+    owner.armEndOfTurn(() => {
+      forbiddenCascadeStopCalls += 1;
+    }),
+    false,
+  );
+  uplink.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: uplink.serverBinding.lease_id,
+      generation: uplink.serverBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 100,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  const nativeAudioInput = {
+    response,
+    presentation_unit: {
+      response,
+      surface: 'audio',
+      unit_id: unitId,
+      seq: 0,
+      source_start_utf8: 0,
+      source_end_utf8: 480,
+      content_ref: `sha256:${'0'.repeat(64)}`,
+    },
+    audio: {
+      format: 'pcm_f32_mono_20ms',
+      sample_rate_hz: 48_000,
+      channel_count: 1,
+      frame_count: null,
+      delivery: 'dedicated_media_downlink',
+      endpoint_path: '/ws/live-voice/media',
+      media_ticket: 'D'.repeat(43),
+      subprotocol: 'live-voice.media.v1',
+      ticket_ttl_ms: 30_000,
+      binding: downlinkBinding,
+      max_pending_frames: 8,
+      max_pending_bytes: 131_072,
+      streaming: true,
+      degradation_reason: null,
+    },
+  };
+  await assert.rejects(
+    owner.playNativeAudio({
+      ...nativeAudioInput,
+      audio: { ...nativeAudioInput.audio, sample_rate_hz: 24_000 },
+    }),
+    error => error?.reason === 'PRODUCT_NATIVE_AUDIO_SAMPLE_RATE_MISMATCH',
+  );
+  await assert.rejects(
+    owner.playNativeAudio({
+      ...nativeAudioInput,
+      audio: { ...nativeAudioInput.audio, delivery: 'inline' },
+    }),
+    error => error?.reason === 'PRODUCT_NATIVE_AUDIO_DELIVERY_INVALID',
+  );
+  await assert.rejects(
+    owner.playNativeAudio({
+      ...nativeAudioInput,
+      audio: { ...nativeAudioInput.audio, unexpected: true },
+    }),
+    error => error?.reason === 'PRODUCT_NATIVE_AUDIO_FIELDS_INVALID',
+  );
+  environment.contexts[0].deferSourceEnds = true;
+  const normalPlayout = owner.playNativeAudio(nativeAudioInput);
+  for (let turn = 0; turn < 100 && owner.status().status !== 'playing'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(owner.status().status, 'playing');
+  uplink.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.end_of_turn',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: uplink.serverBinding.lease_id,
+      generation: uplink.serverBinding.generation.value,
+      detector: 'server_vad',
+      speech_started_observed: true,
+      provider_start_ms: 100,
+      provider_end_ms: 700,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  // Native owns one continuous Provider session. Crossing the Cascade
+  // capture lease boundary while its response is still rendering must only
+  // compact already-ACKed browser PCM; it must never rotate the uplink and
+  // create a second Native activation.
+  await sendCaptureToDurationBoundary(environment, new Float32Array(960), {
+    exceed: true,
+    extraFrames: 1,
+  });
+  for (let turn = 0; turn < 20; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(sockets.filter(socket => socket.serverBinding?.direction === 'uplink').length, 1);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length, 1);
+  assert.equal(owner.captureDiagnostics().rotation_in_flight, false);
+  assert.equal(owner.captureDiagnostics().last_rotation, null);
+  assert.equal(uplink.readyState, 1);
+  assert.ok(uplink.sent.filter(value => typeof value !== 'string').length > uplinkFramesBeforePlayout);
+  environment.contexts[0].deferSourceEnds = false;
+  environment.contexts[0].releaseSourceEnds();
+  assert.deepEqual(await normalPlayout, {
+    id: 'live-voice:interaction-1:native-response-1:1:native-audio:digest',
+    role: 'assistant',
+    content: '我是 JiuwenSwarm。',
+    timestamp: '2026-08-31T10:00:01.000Z',
+  });
+
+  assert.equal(unexpectedBargeStarts, 0);
+  assert.equal(forbiddenCascadeStopCalls, 0);
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(owner.captureDiagnostics().provider_speech_start_observed, false);
+  assert.equal(owner.captureDiagnostics().utterance_start_frame_index, null);
+  assert.equal(environment.contexts[0].sourceStartCount, nativeFrameCount);
+  assert.equal(environment.contexts[0].sourceEndCount, nativeFrameCount);
+  assert.equal(uplink.readyState, 1);
+  assert.equal(uplink.sent.filter(value => typeof value !== 'string').length, 1_502);
+  assert.equal(calls.filter(([method]) => method.includes('speech.recognize')).length, 0);
+  assert.equal(calls.filter(([method]) => method.includes('speech.synthesize')).length, 0);
+  const receiptCalls = calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD);
+  assert.equal(receiptCalls.length, 1);
+  assert.equal(receiptCalls[0][1].capture_frames_acked, 1_502);
+  assert.equal(receiptCalls[0][1].rendered_chunks, nativeFrameCount);
+  assert.equal(receiptCalls[0][1].rendered_through_seq, nativeFrameCount - 1);
+  const firstDownlink = sockets.find(
+    socket => socket.serverBinding?.generation?.id === response.response_id,
+  );
+  const firstDownlinkAcks = firstDownlink.sent
+    .filter(value => typeof value === 'string')
+    .map(JSON.parse)
+    .filter(control => control.type === 'media.ack');
+  assert.deepEqual(
+    firstDownlinkAcks.map(control => control.through_seq),
+    Array.from({ length: nativeFrameCount }, (_value, sequence) => sequence),
+  );
+
+  const secondResponse = Object.freeze({
+    interaction_id: 'interaction-1',
+    response_id: 'native-response-2',
+    response_generation: 2,
+  });
+  const secondUnitId = 'native-audio-unit-1';
+  const secondDownlinkBinding = {
+    ...downlinkBinding,
+    lease_id: 'native-downlink-lease-2',
+    authority_evidence_id: 'native-downlink-authority-2',
+    media_session_id: 'native-downlink-session-2',
+    generation: { kind: 'response', id: secondResponse.response_id, value: secondResponse.response_generation },
+    playout: {
+      response_id: secondResponse.response_id,
+      response_generation: secondResponse.response_generation,
+      unit_id: secondUnitId,
+    },
+  };
+  activeBargeResponse = secondResponse;
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  environment.contexts[0].deferSourceEnds = true;
+  const bargedPlayout = owner.playNativeAudio({
+    response: secondResponse,
+    presentation_unit: {
+      response: secondResponse,
+      surface: 'audio',
+      unit_id: secondUnitId,
+      seq: 1,
+      source_start_utf8: 480,
+      source_end_utf8: 960,
+      content_ref: `sha256:${'1'.repeat(64)}`,
+    },
+    audio: {
+      format: 'pcm_f32_mono_20ms',
+      sample_rate_hz: 48_000,
+      channel_count: 1,
+      frame_count: null,
+      delivery: 'dedicated_media_downlink',
+      endpoint_path: '/ws/live-voice/media',
+      media_ticket: 'E'.repeat(43),
+      subprotocol: 'live-voice.media.v1',
+      ticket_ttl_ms: 30_000,
+      binding: secondDownlinkBinding,
+      max_pending_frames: 8,
+      max_pending_bytes: 131_072,
+      streaming: true,
+      degradation_reason: null,
+    },
+  });
+  for (let turn = 0; turn < 100 && owner.status().status !== 'playing'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(owner.status().status, 'playing');
+  uplink.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: uplink.serverBinding.lease_id,
+      generation: uplink.serverBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 900,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  uplink.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.end_of_turn',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: uplink.serverBinding.lease_id,
+      generation: uplink.serverBinding.generation.value,
+      detector: 'server_vad',
+      speech_started_observed: true,
+      provider_start_ms: 900,
+      provider_end_ms: 1_300,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  environment.contexts[0].deferSourceEnds = false;
+  environment.contexts[0].releaseSourceEnds();
+  await bargedPlayout;
+  assert.equal(bargeStopped, true);
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(owner.captureDiagnostics().provider_speech_start_observed, false);
+  assert.equal(owner.captureDiagnostics().utterance_start_frame_index, null);
+  const secondDownlink = sockets.find(
+    socket => socket.serverBinding?.generation?.id === secondResponse.response_id,
+  );
+  assert.ok(secondDownlink);
+  const playbackStops = secondDownlink.sent
+    .filter(value => typeof value === 'string')
+    .map(JSON.parse)
+    .filter(control => control.type === 'media.playback_stop_receipt');
+  assert.equal(playbackStops.length, 1);
+  assert.equal(playbackStops[0].business_cancel_count_delta, 0);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+  await owner.close();
+});
+
+test('formal P1 Native activation descriptor is exact and fail-closed', () => {
+  assert.deepEqual(
+    parseProductP1NativeInteractionActivation({
+      contract_version: 'live-voice.native-interaction.v1',
+      engine: 'openai-realtime-native',
+      model: 'gpt-realtime',
+    }),
+    {
+      contract_version: 'live-voice.native-interaction.v1',
+      engine: 'openai-realtime-native',
+      model: 'gpt-realtime',
+    },
+  );
+  assert.throws(
+    () => parseProductP1NativeInteractionActivation({
+      contract_version: 'live-voice.native-interaction.v1',
+      engine: 'openai-realtime-native',
+      model: 'gpt-realtime',
+      fallback: 'cascade',
+    }),
+    /fields are not closed/,
+  );
 });
 
 test('formal P1 accepts Stop and recognize at the exact 30-second capture boundary', async () => {

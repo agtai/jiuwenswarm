@@ -2,7 +2,11 @@
 param(
     [ValidateSet('hands-free-demo', 'formal-web-validation')]
     [string]$RuntimeProfile = 'hands-free-demo',
-    [ValidateSet('hx/0812_live_voice_w3', 'hx/0823_generation_interruption')]
+    [ValidateSet(
+        'codex/live-voice-generation-interruption-realtime-adaptation',
+        'hx/0812_live_voice_w3',
+        'hx/0823_generation_interruption'
+    )]
     [string]$ExpectedSourceBranch = 'hx/0812_live_voice_w3',
     [switch]$GenerationInterruption,
     [string]$ProjectPath,
@@ -13,6 +17,19 @@ param(
     [switch]$RestartExisting,
     [switch]$AllowDirtyProject,
     [switch]$NoBrowser,
+    [ValidateRange(1024, 65535)]
+    [int]$AgentServerPort = 18092,
+    [ValidateRange(1024, 65535)]
+    [int]$WebPort = 19000,
+    [ValidateRange(1024, 65535)]
+    [int]$GatewayPort = 19001,
+    [ValidateRange(0, 65535)]
+    [int]$FrontendPort = 0,
+    [ValidateSet('cascade', 'openai-realtime-native')]
+    [string]$InteractionEngine = 'cascade',
+    [ValidateLength(1, 256)]
+    [ValidatePattern('^[^\r\n]+$')]
+    [string]$NativeRealtimeModel = 'gpt-realtime-2.1-mini',
     [switch]$L0Measurement,
     [switch]$L0OrdinaryChromeBatch,
     [switch]$L0ResumeBatch,
@@ -47,7 +64,9 @@ $LiveVoiceFrontendEnv = Join-Path $FrontendRoot '.env.live-voice'
 $FormalWebRuntimeProbe = Join-Path $PSScriptRoot 'formal_web_runtime_probe.py'
 $L0OrdinaryChromeCoordinator = Join-Path $PSScriptRoot 'l0_ordinary_chrome_batch.py'
 $L0Enabled = $L0Measurement -or $L0OrdinaryChromeBatch
-$FrontendPort = if ($RuntimeProfile -eq 'formal-web-validation') { 5173 } else { 6173 }
+if ($FrontendPort -eq 0) {
+    $FrontendPort = if ($RuntimeProfile -eq 'formal-web-validation') { 5173 } else { 6173 }
+}
 $RuntimeProfileLabel = if ($RuntimeProfile -eq 'formal-web-validation') {
     'Formal Web validation'
 } else {
@@ -56,9 +75,12 @@ $RuntimeProfileLabel = if ($RuntimeProfile -eq 'formal-web-validation') {
 $ExecutorProfile = 'live-voice.direct-project-code.d2.v1'
 $ExpectedPorts = [ordered]@{
     FRONTEND_PORT     = $FrontendPort
-    AGENT_SERVER_PORT = 18092
-    WEB_PORT          = 19000
-    GATEWAY_PORT      = 19001
+    AGENT_SERVER_PORT = $AgentServerPort
+    WEB_PORT          = $WebPort
+    GATEWAY_PORT      = $GatewayPort
+}
+if (@($ExpectedPorts.Values | Select-Object -Unique).Count -ne $ExpectedPorts.Count) {
+    throw 'Frontend、AgentServer、WebChannel 与 Gateway 必须使用四个不同端口。'
 }
 $ExpectedOrderInputs = @(
     '01-去程航班.md',
@@ -858,6 +880,8 @@ try {
         LIVE_VOICE_SPEECH_PROVIDER                               = 'openai'
         LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED                    = '1'
         LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED                = '1'
+        LIVE_VOICE_INTERACTION_ENGINE                              = $InteractionEngine
+        LIVE_VOICE_NATIVE_REALTIME_MODEL                           = $NativeRealtimeModel
         PYTHONUTF8                                                = '1'
         PYTHONIOENCODING                                          = 'utf-8'
     }
@@ -884,9 +908,9 @@ try {
     # Set both layers so the launcher cannot silently fall back to a different
     # frontend port than the selected controlled profile.
     [Environment]::SetEnvironmentVariable('JIUWENSWARM_FRONTEND_PORT', [string]$FrontendPort, 'Process')
-    [Environment]::SetEnvironmentVariable('JIUWENSWARM_AGENT_SERVER_PORT', '18092', 'Process')
-    [Environment]::SetEnvironmentVariable('JIUWENSWARM_WEB_PORT', '19000', 'Process')
-    [Environment]::SetEnvironmentVariable('JIUWENSWARM_GATEWAY_PORT', '19001', 'Process')
+    [Environment]::SetEnvironmentVariable('JIUWENSWARM_AGENT_SERVER_PORT', [string]$AgentServerPort, 'Process')
+    [Environment]::SetEnvironmentVariable('JIUWENSWARM_WEB_PORT', [string]$WebPort, 'Process')
+    [Environment]::SetEnvironmentVariable('JIUWENSWARM_GATEWAY_PORT', [string]$GatewayPort, 'Process')
     foreach ($frontendOverride in @(
         'VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB',
         'VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1',
@@ -1122,6 +1146,8 @@ try {
         project_binding_validated = $true
         project_remote_count      = $remotes.Count
         ports                     = $ExpectedPorts
+        interaction_engine        = $InteractionEngine
+        native_realtime_model     = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeRealtimeModel } else { $null }
         required_flags            = $validatedFlags
         frontend_flags            = [ordered]@{
             VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION = $generationInterruptionEnabled

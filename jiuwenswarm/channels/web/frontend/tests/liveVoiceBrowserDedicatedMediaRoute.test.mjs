@@ -170,8 +170,10 @@ function active({
   maxDrainStallRetries,
   drainScheduler,
   endOfTurnCapability,
+  continuousEndOfTurn,
   onSpeechStart,
   onEndOfTurn,
+  onAudioFrame,
 } = {}) {
   const counters = effects ?? { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 };
   const factoryCalls = [];
@@ -187,9 +189,9 @@ function active({
       factoryCalls.push({ url, protocols });
       return socket;
     },
-    on_audio_frame: () => {
+    on_audio_frame: onAudioFrame ?? (() => {
       counters.audio += 1;
-    },
+    }),
     max_pending_frames: maxPendingFrames,
     max_pending_bytes: maxPendingBytes,
     socket_high_water_bytes: highWater,
@@ -203,6 +205,7 @@ function active({
     schedule_drain_retry: drainScheduler?.schedule,
     cancel_drain_retry: drainScheduler?.cancel,
     end_of_turn_capability: endOfTurnCapability,
+    continuous_end_of_turn: continuousEndOfTurn,
     on_speech_start: onSpeechStart,
     on_end_of_turn: onEndOfTurn,
   });
@@ -607,6 +610,41 @@ test('downlink accepts exact binary sequence, invokes audio once, and returns ty
   assert.deepEqual(effects, { audio: 1, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
 });
 
+test('downlink reports a bounded browser consumer reason without changing the wire detach', () => {
+  const terminal = [];
+  const route = active({
+    exactBinding: binding({ direction: 'downlink' }),
+    onAudioFrame: () => {
+      throw Object.assign(new Error('private browser output detail'), {
+        reason: 'PLAYOUT_SAMPLE_RATE_MISMATCH',
+        output_device_id: 'speaker-secret',
+      });
+    },
+    onTerminal: event => terminal.push(event),
+  });
+  attach(route);
+
+  route.socket.message(encodeAudioFrame(route.activation.binding, mediaFrame()));
+
+  assert.deepEqual(deserializeMediaControl(route.socket.sent[0]), {
+    type: 'media.detach',
+    lease_id: route.activation.binding.lease_id,
+    generation: route.activation.binding.generation.value,
+    reason_id: 'MEDIA_CONSUMER_FAILED',
+    through_seq: null,
+    business_cancel_count_delta: 0,
+  });
+  assert.deepEqual(terminal, [{
+    reason_id: 'MEDIA_CONSUMER_FAILED',
+    consumer_reason_id: 'PLAYOUT_SAMPLE_RATE_MISMATCH',
+    source: 'internal_failure',
+    direction: 'downlink',
+    attached_before_close: true,
+  }]);
+  assert.equal(JSON.stringify(terminal).includes('speaker-secret'), false);
+  assert.equal(JSON.stringify(terminal).includes('private browser output detail'), false);
+});
+
 test('downlink can defer its bounded ACK until browser rendering confirms the frame', () => {
   const effects = { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 };
   const route = active({
@@ -1006,6 +1044,140 @@ test('negotiated EOT is content-free, one-shot, and preserves pending uplink com
   });
   route.socket.message(serializeMediaControl(detach));
   assert.equal((await completion).reason_id, 'MEDIA_LOCAL_CLOSE');
+});
+
+test('speech boundary consumer failures retain a bounded internal stage and keep the wire detach generic', () => {
+  const controlFor = (route, type) => ({
+    type,
+    capability_version: 'media.end_of_turn.v1',
+    lease_id: route.activation.binding.lease_id,
+    generation: route.activation.binding.generation.value,
+    detector: 'server_vad',
+    ...(type === 'media.speech_start'
+      ? { provider_start_ms: 320 }
+      : {
+          speech_started_observed: true,
+          provider_start_ms: 320,
+          provider_end_ms: 1840,
+        }),
+    timing_basis: 'provider_time',
+    timing_provenance: 'adapter_derived',
+    create_response: false,
+    interrupt_response: false,
+    business_cancel_count_delta: 0,
+  });
+  const scenarios = [
+    {
+      expected: 'ADAPTER_SPEECH_START_CALLBACK_FAILED',
+      configure: terminal => active({
+        endOfTurnCapability: 'media.end_of_turn.v1',
+        onSpeechStart: () => {
+          throw new Error('private speech-start callback detail');
+        },
+        onEndOfTurn: () => undefined,
+        onTerminal: event => terminal.push(event),
+      }),
+      deliver: route => route.socket.message(serializeMediaControl(controlFor(route, 'media.speech_start'))),
+    },
+    {
+      expected: 'ADAPTER_END_OF_TURN_CALLBACK_FAILED',
+      configure: terminal => active({
+        endOfTurnCapability: 'media.end_of_turn.v1',
+        onSpeechStart: () => undefined,
+        onEndOfTurn: () => {
+          throw Object.assign(new Error('private end-of-turn callback detail'), { device_id: 'microphone-secret' });
+        },
+        onTerminal: event => terminal.push(event),
+      }),
+      deliver: route => {
+        route.socket.message(serializeMediaControl(controlFor(route, 'media.speech_start')));
+        route.socket.message(serializeMediaControl(controlFor(route, 'media.end_of_turn')));
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const terminal = [];
+    const route = scenario.configure(terminal);
+    attach(route);
+    scenario.deliver(route);
+
+    assert.equal(route.activation.leaf.closed, true);
+    assert.equal(deserializeMediaControl(route.socket.sent.at(-1)).reason_id, 'MEDIA_CONSUMER_FAILED');
+    assert.deepEqual(terminal, [{
+      reason_id: 'MEDIA_CONSUMER_FAILED',
+      consumer_reason_id: scenario.expected,
+      source: 'internal_failure',
+      direction: 'uplink',
+      attached_before_close: true,
+    }]);
+    assert.equal(JSON.stringify(terminal).includes('private'), false);
+    assert.equal(JSON.stringify(terminal).includes('microphone-secret'), false);
+    assert.deepEqual(route.effects, {
+      audio: 0,
+      agent: 0,
+      tool: 0,
+      task: 0,
+      history: 0,
+      persistence: 0,
+    });
+  }
+});
+
+test('Native continuous EOT admits prefix-overlapped Provider speech cycles and rejects a stale replay', () => {
+  const observedStarts = [];
+  const observedEnds = [];
+  const route = active({
+    endOfTurnCapability: 'media.end_of_turn.v1',
+    continuousEndOfTurn: true,
+    onSpeechStart: event => observedStarts.push(event.provider_start_ms),
+    onEndOfTurn: event => observedEnds.push(event.provider_end_ms),
+  });
+  attach(route);
+  const boundary = (type, start, end = null) => ({
+    type,
+    capability_version: 'media.end_of_turn.v1',
+    lease_id: route.activation.binding.lease_id,
+    generation: route.activation.binding.generation.value,
+    detector: 'server_vad',
+    ...(type === 'media.speech_start'
+      ? {
+          provider_start_ms: start,
+        }
+      : {
+          speech_started_observed: true,
+          provider_start_ms: start,
+          provider_end_ms: end,
+        }),
+    timing_basis: 'provider_time',
+    timing_provenance: 'adapter_derived',
+    create_response: false,
+    interrupt_response: false,
+    business_cancel_count_delta: 0,
+  });
+
+  route.socket.message(serializeMediaControl(boundary('media.speech_start', 100)));
+  route.socket.message(serializeMediaControl(boundary('media.end_of_turn', 100, 700)));
+  // Realtime VAD includes leading audio in speech_start and trailing audio in
+  // speech_stopped, so consecutive provider intervals may legitimately
+  // overlap. This reproduces the observed 512 ms semantic-VAD overlap.
+  route.socket.message(serializeMediaControl(boundary('media.speech_start', 188)));
+  route.socket.message(serializeMediaControl(boundary('media.end_of_turn', 188, 1400)));
+
+  assert.deepEqual(observedStarts, [100, 188]);
+  assert.deepEqual(observedEnds, [700, 1400]);
+  assert.equal(route.activation.leaf.closed, false);
+
+  route.socket.message(serializeMediaControl(boundary('media.speech_start', 100)));
+  assert.equal(route.activation.leaf.closed, true);
+  assert.deepEqual(route.effects, {
+    audio: 0,
+    agent: 0,
+    tool: 0,
+    task: 0,
+    history: 0,
+    persistence: 0,
+  });
 });
 
 test('unnegotiated, duplicate, stale, or out-of-order speech boundaries fail closed with zero business effects', () => {

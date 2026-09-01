@@ -241,6 +241,182 @@ async def _inject_live_voice_gateway_voice_claim(
     msg.params = params
 
 
+def _inject_live_voice_interaction_engine(
+    msg: Message, selected_engine: str | None
+) -> None:
+    """Replace any Browser Engine claim with the Gateway-owned selection."""
+
+    method = getattr(getattr(msg, "req_method", None), "value", "")
+    if (
+        msg.channel_id != "web"
+        or method != ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value
+    ):
+        return
+    params = dict(msg.params or {})
+    params.pop("interaction_engine", None)
+    selected = str(selected_engine or "").strip()
+    params["interaction_engine"] = selected or "unavailable"
+    msg.params = params
+
+
+async def _serve_live_voice_native_notification(
+    msg: Message, web_channel: Any
+) -> bool:
+    """Serve one Gateway-owned Native audio projection before AgentServer poll."""
+
+    method = getattr(getattr(msg, "req_method", None), "value", "")
+    if (
+        msg.channel_id != "web"
+        or method != ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT.value
+        or not isinstance(msg.params, dict)
+        or not isinstance(msg.metadata, dict)
+    ):
+        return False
+    ws_id = msg.metadata.get("ws_id")
+    parameter_session_id = msg.params.get("session_id")
+    correlation_id = msg.params.get("correlation_id")
+    interaction_id = msg.params.get("interaction_id")
+    activation_id = msg.params.get("activation_id")
+    activation_generation = msg.params.get("activation_generation")
+    notification_sequence = msg.params.get("notification_sequence")
+    if (
+        not isinstance(ws_id, str)
+        or not ws_id
+        or not isinstance(msg.session_id, str)
+        or parameter_session_id != msg.session_id
+        or not isinstance(correlation_id, str)
+        or not isinstance(interaction_id, str)
+        or not isinstance(activation_id, str)
+        or type(activation_generation) is not int
+        or type(notification_sequence) is not int
+    ):
+        return False
+    sockets = getattr(web_channel, "_ws_by_id", None)
+    ws = sockets.get(ws_id) if isinstance(sockets, dict) else None
+    registry = getattr(web_channel, "live_voice_media_registry", None)
+    take = getattr(registry, "take_native_notification_response", None)
+    send_response = getattr(web_channel, "send_response", None)
+    if ws is None or not callable(take) or not callable(send_response):
+        return False
+    try:
+        payload = take(
+            request_id=msg.id,
+            session_id=msg.session_id,
+            correlation_id=correlation_id,
+            interaction_id=interaction_id,
+            activation_id=activation_id,
+            activation_generation=activation_generation,
+            connection_id=ws_id,
+            notification_sequence=notification_sequence,
+        )
+    except ValueError:
+        return False
+    if payload is None:
+        return False
+    logger.info("live_voice_native_audio_notification_served")
+    await send_response(ws, msg.id, ok=True, payload=payload)
+    return True
+
+
+def _mark_live_voice_native_notification_forwarded(
+    msg: Message, web_channel: Any
+) -> bool:
+    """Fence an exact notification poll before it can reach AgentServer."""
+
+    method = getattr(getattr(msg, "req_method", None), "value", "")
+    if (
+        msg.channel_id != "web"
+        or method != ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT.value
+        or not isinstance(msg.params, dict)
+        or not isinstance(msg.metadata, dict)
+    ):
+        return False
+    ws_id = msg.metadata.get("ws_id")
+    parameter_session_id = msg.params.get("session_id")
+    correlation_id = msg.params.get("correlation_id")
+    interaction_id = msg.params.get("interaction_id")
+    activation_id = msg.params.get("activation_id")
+    activation_generation = msg.params.get("activation_generation")
+    notification_sequence = msg.params.get("notification_sequence")
+    if (
+        not isinstance(ws_id, str)
+        or not ws_id
+        or not isinstance(msg.session_id, str)
+        or parameter_session_id != msg.session_id
+        or not isinstance(correlation_id, str)
+        or not isinstance(interaction_id, str)
+        or not isinstance(activation_id, str)
+        or type(activation_generation) is not int
+        or type(notification_sequence) is not int
+    ):
+        return False
+    sockets = getattr(web_channel, "_ws_by_id", None)
+    if not isinstance(sockets, dict) or sockets.get(ws_id) is None:
+        return False
+    registry = getattr(web_channel, "live_voice_media_registry", None)
+    mark = getattr(registry, "mark_native_notification_forwarded", None)
+    if not callable(mark):
+        return False
+    try:
+        return bool(
+            mark(
+                request_id=msg.id,
+                session_id=msg.session_id,
+                correlation_id=correlation_id,
+                interaction_id=interaction_id,
+                activation_id=activation_id,
+                activation_generation=activation_generation,
+                connection_id=ws_id,
+                notification_sequence=notification_sequence,
+            )
+        )
+    except ValueError:
+        return False
+
+
+async def _normalize_and_forward_gateway_message(
+    msg: Message,
+    *,
+    forward_methods: set[str] | frozenset[str],
+    no_local_methods: set[str] | frozenset[str],
+    source_label: str,
+    source_channel: Any,
+    channel_manager: Any,
+) -> bool:
+    """Apply source-owned projection state before forwarding one request."""
+
+    method_val = getattr(getattr(msg, "req_method", None), "value", None) or ""
+    if method_val not in forward_methods:
+        return False
+    if source_label == "Web" and await _serve_live_voice_native_notification(
+        msg, source_channel
+    ):
+        return True
+    if source_label == "Web":
+        _mark_live_voice_native_notification_forwarded(msg, source_channel)
+    normalized = _normalize_gateway_message(msg)
+    _inject_live_voice_web_alpha_credential(normalized)
+    if source_label == "Web":
+        _inject_live_voice_interaction_engine(
+            normalized,
+            getattr(source_channel, "live_voice_interaction_engine", None),
+        )
+        await _inject_live_voice_gateway_voice_claim(
+            normalized,
+            getattr(source_channel, "live_voice_speech_service", None),
+        )
+    if method_val == "session.create":
+        _inject_session_work_mode(normalized)
+    await channel_manager.deliver_to_message_handler(normalized)
+    logger.info(
+        "[App] %s 入站 -> MessageHandler: id=%s channel_id=%s",
+        source_label,
+        msg.id,
+        msg.channel_id,
+    )
+    return method_val in no_local_methods
+
+
 async def _normalize_and_forward_message(msg, channel_manager) -> bool:
     normalized = _normalize_gateway_message(msg)
     # ACP/直连转发路径(session.create 等)也需注入 work_mode 归一化,
@@ -2001,29 +2177,14 @@ async def _run(
             source_label: str,
     ):
         async def _norm_and_forward(msg: Message) -> bool:
-            method_val = getattr(getattr(msg, "req_method", None), "value", None) or ""
-            if method_val not in forward_methods:
-                return False
-            normalized = _normalize_gateway_message(msg)
-            _inject_live_voice_web_alpha_credential(normalized)
-            if source_label == "Web":
-                await _inject_live_voice_gateway_voice_claim(
-                    normalized,
-                    getattr(web_channel, "live_voice_speech_service", None),
-                )
-            # session.create 主路径注入 work_mode 归一化(与 fallback _session_create
-            # 共用同一 helper resolve_session_work_mode_params,保持主路径/fallback 一致):
-            # 成功时写回归一化后的 project_id/project_dir/work_mode 到 params,
-            # 转发到 AgentServer 后由其 session.create 处理逻辑使用;
-            # 失败时(非法 work_mode)不写回,保留原始 params 由 AgentServer 或
-            # fallback _session_create 返回 BAD_REQUEST。
-            if method_val == "session.create":
-                _inject_session_work_mode(normalized)
-            await channel_manager.deliver_to_message_handler(normalized)
-            logger.info("[App] %s 入站 -> MessageHandler: id=%s channel_id=%s", source_label, msg.id, msg.channel_id)
-            if method_val in no_local_methods:
-                return True
-            return False
+            return await _normalize_and_forward_gateway_message(
+                msg,
+                forward_methods=forward_methods,
+                no_local_methods=no_local_methods,
+                source_label=source_label,
+                source_channel=web_channel if source_label == "Web" else tui_channel,
+                channel_manager=channel_manager,
+            )
 
         return _norm_and_forward
 

@@ -1,9 +1,10 @@
 import asyncio
+import copy
 import json
 
 import pytest
 
-from jiuwenswarm.common.schema.message import EventType, Message
+from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
 from jiuwenswarm.gateway.channel_manager.web.web_connect import (
     WebChannel,
@@ -21,6 +22,50 @@ class _FakeClient:
 
     async def send(self, data):
         self.frames.append(json.loads(data))
+
+
+def _private_native_activation_payload() -> dict[str, object]:
+    return {
+        "request_id": "request-native-activation",
+        "ok": True,
+        "result": {
+            "status": "active",
+            "session_id": "session-native",
+            "correlation_id": "correlation-native",
+            "interaction_id": "interaction-native",
+            "activation_id": "activation-native",
+            "activation_generation": 1,
+            "_native_gateway": {
+                "contract_version": "live-voice.native-interaction.v1",
+                "binding": {},
+                "capability": "a" * 64,
+            },
+        },
+        "error": None,
+        "product_composition": {"enabled": True},
+    }
+
+
+class _NativeActivationCompensator:
+    def __init__(self) -> None:
+        self.aborted = asyncio.Event()
+        self.abort_calls: list[dict[str, object]] = []
+
+    def observe_activation_response(self, payload, **_kwargs):
+        sanitized = copy.deepcopy(payload)
+        descriptor = sanitized["result"].pop("_native_gateway")
+        assert descriptor
+        sanitized["result"]["native_interaction"] = {
+            "contract_version": "live-voice.native-interaction.v1",
+            "engine": "openai-realtime-native",
+            "model": "gpt-realtime-2.1-mini",
+        }
+        return sanitized
+
+    async def abort_activation_response(self, payload, **kwargs):
+        self.abort_calls.append({"payload": payload, **kwargs})
+        self.aborted.set()
+        return {"kind": "close", "status": "closed", "accepted": True}
 
 
 def test_web_channel_preserves_goal_structured_payloads():
@@ -510,6 +555,137 @@ async def test_web_channel_routes_rpc_response_by_request_ws_id():
     finally:
         await channel.unregister_ws(client)
         await channel.unregister_ws(other_client)
+
+
+@pytest.mark.asyncio
+async def test_native_activation_without_exact_socket_is_compensated() -> None:
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    native = _NativeActivationCompensator()
+    channel.live_voice_native_runtime_client = native
+    msg = Message(
+        id="request-native-activation",
+        type="res",
+        channel_id="web",
+        session_id="session-native",
+        params={},
+        timestamp=0.0,
+        ok=True,
+        payload=_private_native_activation_payload(),
+        metadata={
+            "ws_id": "missing-web-connection",
+            "method": ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value,
+        },
+    )
+
+    await channel.send(msg)
+    await asyncio.wait_for(native.aborted.wait(), timeout=1.0)
+
+    assert len(native.abort_calls) == 1
+    assert native.abort_calls[0]["connection_id"] == "missing-web-connection"
+    assert native.abort_calls[0]["routed_session_id"] == "session-native"
+
+
+@pytest.mark.asyncio
+async def test_native_observer_failure_compensates_and_returns_error() -> None:
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    client = _FakeClient()
+    routing_key = RoutingKey(
+        channel_id="web",
+        app_id="default",
+        user_id="native-user",
+        session_id="session-native",
+        agent_ref=None,
+    )
+    await channel.register_ws(client, routing_key)
+
+    class _FailingNativeObserver(_NativeActivationCompensator):
+        def observe_activation_response(self, *_args, **_kwargs):
+            raise RuntimeError("native observer failed")
+
+    native = _FailingNativeObserver()
+    channel.live_voice_native_runtime_client = native
+    msg = Message(
+        id="request-native-observer",
+        type="res",
+        channel_id="web",
+        session_id="session-native",
+        params={},
+        timestamp=0.0,
+        ok=True,
+        payload=_private_native_activation_payload(),
+        metadata={
+            "ws_id": getattr(client, "_jiuwen_ws_id", ""),
+            "method": ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value,
+        },
+    )
+    try:
+        await channel.send(msg)
+        await asyncio.wait_for(native.aborted.wait(), timeout=1.0)
+        for _ in range(20):
+            if client.frames:
+                break
+            await asyncio.sleep(0)
+
+        assert len(native.abort_calls) == 1
+        assert len(client.frames) == 1
+        assert client.frames[0]["ok"] is False
+        assert client.frames[0]["payload"]["error"]["reason"] == (
+            "NATIVE_GATEWAY_ACTIVATION_INVALID"
+        )
+    finally:
+        await channel.unregister_ws(client)
+
+
+@pytest.mark.asyncio
+async def test_native_media_observer_failure_compensates_and_returns_error() -> None:
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    client = _FakeClient()
+    routing_key = RoutingKey(
+        channel_id="web",
+        app_id="default",
+        user_id="native-user",
+        session_id="session-native",
+        agent_ref=None,
+    )
+    await channel.register_ws(client, routing_key)
+    native = _NativeActivationCompensator()
+    channel.live_voice_native_runtime_client = native
+
+    class _FailingMediaObserver:
+        def observe_agent_response(self, *_args, **_kwargs):
+            raise RuntimeError("media observer failed")
+
+    channel.live_voice_media_registry = _FailingMediaObserver()
+    msg = Message(
+        id="request-native-media-observer",
+        type="res",
+        channel_id="web",
+        session_id="session-native",
+        params={},
+        timestamp=0.0,
+        ok=True,
+        payload=_private_native_activation_payload(),
+        metadata={
+            "ws_id": getattr(client, "_jiuwen_ws_id", ""),
+            "method": ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value,
+        },
+    )
+    try:
+        await channel.send(msg)
+        await asyncio.wait_for(native.aborted.wait(), timeout=1.0)
+        for _ in range(20):
+            if client.frames:
+                break
+            await asyncio.sleep(0)
+
+        assert len(native.abort_calls) == 1
+        assert len(client.frames) == 1
+        assert client.frames[0]["ok"] is False
+        assert client.frames[0]["payload"]["error"]["reason"] == (
+            "NATIVE_GATEWAY_ACTIVATION_INVALID"
+        )
+    finally:
+        await channel.unregister_ws(client)
 
 
 @pytest.mark.asyncio

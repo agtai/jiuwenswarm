@@ -15,13 +15,18 @@ from jiuwenswarm.server.live_voice.interaction_engine import (
     InteractionAction,
     InteractionEnginePort,
     InteractionEngineViolation,
+    INTERACTION_ACTION_OPERATIONS,
     ScriptedCascadeInteractionEngine,
 )
 
 
-_CASCADE_SCOPE = ScopeRef(
-    "subject", "project", "session", Assurance.AUTHENTICATED
-)
+def test_native_and_cascade_share_one_closed_action_vocabulary() -> None:
+    assert INTERACTION_ACTION_OPERATIONS == frozenset(
+        {"LISTEN", "SILENCE", "TURN_COMMIT", "SPEAK", "STOP", "REVISE", "DELEGATE"}
+    )
+
+
+_CASCADE_SCOPE = ScopeRef("subject", "project", "session", Assurance.AUTHENTICATED)
 _CASCADE_GOLDEN_ORACLE = (
     ("speech.started", "LISTEN"),
     ("speech.partial", "LISTEN"),
@@ -290,10 +295,13 @@ def test_scripted_cascade_golden_conformance_freezes_every_intention() -> None:
             "DELEGATE",
         }
     )
-    assert tuple(
-        (observation.value, action.value)
-        for observation, action in CASCADE_GOLDEN_SCRIPT
-    ) == _CASCADE_GOLDEN_ORACLE
+    assert (
+        tuple(
+            (observation.value, action.value)
+            for observation, action in CASCADE_GOLDEN_SCRIPT
+        )
+        == _CASCADE_GOLDEN_ORACLE
+    )
     engine = ScriptedCascadeInteractionEngine(
         scope=_CASCADE_SCOPE,
         interaction_id="interaction-1",
@@ -382,9 +390,7 @@ def test_exact_duplicate_replays_but_sequence_gap_fails_closed() -> None:
     ("scope", "interaction_id", "generation", "sequence"),
     [
         (
-            ScopeRef(
-                "subject", "other-project", "session", Assurance.AUTHENTICATED
-            ),
+            ScopeRef("subject", "other-project", "session", Assurance.AUTHENTICATED),
             "interaction-1",
             7,
             1,
@@ -499,15 +505,11 @@ def test_same_binding_and_sequence_cannot_rebind_identity_or_kind(
             "OBSERVATION_INTERACTION_MISMATCH",
         ),
         (
-            _observation(
-                1, CascadeObservationKind.SPEECH_STARTED, generation=6
-            ),
+            _observation(1, CascadeObservationKind.SPEECH_STARTED, generation=6),
             "STALE_RESPONSE_GENERATION",
         ),
         (
-            _observation(
-                1, CascadeObservationKind.SPEECH_STARTED, generation=8
-            ),
+            _observation(1, CascadeObservationKind.SPEECH_STARTED, generation=8),
             "RESPONSE_GENERATION_MISMATCH",
         ),
     ],
@@ -601,9 +603,7 @@ def test_released_identity_tombstones_are_bounded_and_fail_closed() -> None:
     )
 
     for sequence in range(1, 4):
-        engine.observe(
-            _observation(sequence, CascadeObservationKind.SPEECH_STARTED)
-        )
+        engine.observe(_observation(sequence, CascadeObservationKind.SPEECH_STARTED))
         assert engine.release_through(sequence) == 1
 
     snapshot = engine.snapshot()
@@ -644,7 +644,9 @@ def test_release_cursor_zero_is_a_no_op_at_every_engine_state() -> None:
     assert engine.snapshot().retained_observations == 1
 
 
-def test_unsupported_cascade_capability_is_fail_closed_and_consumes_no_sequence() -> None:
+def test_unsupported_cascade_capability_is_fail_closed_and_consumes_no_sequence() -> (
+    None
+):
     engine = ScriptedCascadeInteractionEngine(
         scope=_CASCADE_SCOPE,
         interaction_id="interaction-1",

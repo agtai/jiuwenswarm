@@ -301,7 +301,7 @@ risks, dependencies, acceptance and integration order.
 | Speech Synthesis | **PARTIAL.** Streaming/Batch TTS, browser playout, response ownership and ACK paths exist; repeated short/long TTS was physically audible on `e1df8b452` without the repaired ACK/receipt failures | Provider-neutral configuration, measured first-audio/underrun/pronunciation targets and complete stale/cancel recovery | Conversation Runtime ownership and Audio I/O stop confirmation; scoped physical PASS does not close feature-complete targets |
 | Realtime Media | **PARTIAL.** Dedicated transport, capture rotation, media registration and presentation ACK sustain the accepted physical loop. The bounded P2 notification pull removes the diagnosed one-notification-per-RPC tail from production Web: Web requests `16`, the server accepts explicit `2..16`, and omitted input remains legacy single-pull compatibility | Backpressure/load targets; drop/reorder/corruption/reconnect matrix; stable diagnostics across repeated recovery; fixed-corpus p50/p95 proof | Audio I/O plus Conversation Runtime; [D-094](decisions/DECISIONS.md) and cumulative real network/device verification |
 | Conversation Runtime | **PARTIAL overall; generation-time interruption source Gate and scoped physical core journey PASS behind a default-off flag.** Committed-input fencing, generation ownership, ACK/history projection, Exit fencing, exact foreground Stop, automatic continuation and playout-time barge-in passed the scoped physical journeys. Bounded final notification delivery is default-on. Hands-free speech during Agent generation can stop or replace one exact round: the fence closes both presentation surfaces and refuses every later token, final, TTS enqueue, presentation ACK and assistant-history projection of that response, and the only cancellation it can issue is `round.cancel` against the exact conversational round. The interruption replay ledger owns pending and settled identities in one atomic 256-entry bound (`30300f32`); `35537a9a`, `4c1c7d68`, `dab64023` and `6559c38e` close the cross-capture authority/replay/Exit chain, whose final review passes `C0/I0/M0`. The final accepted `2c04da22` route returns one exact interrupt receipt without entering DeepAgent, and the real interrupt-and-replace journey completes replacement text and audio. A terminal Task announcement that lands while that speaker is mid-utterance still stands down and is replayed once they finish. Formal Live Voice intentionally disables interactive Agent tools; ordinary clarification is spoken as a normal response and answered in the next committed turn | Fixed-corpus generation-window timing, echo/double-talk, broader device/network, rollout/A/B/rollback and cross-load evidence; the original idle-window and Task-concurrency physical scenarios retain no new credit | Media, Interaction Intelligence, Agent Bridge and presentation regressions; [D-106](decisions/DECISIONS.md) and the [generation-interruption evidence](evidence/GENERATION_TIME_INTERRUPTION_20260823.md); structured `ask_user` interrupt/resume is optional compatibility work only if later scope requires exact suspended-workflow continuation |
-| Interaction Intelligence | **PARTIAL.** VAD/EOT and bounded dialogue/background routing exist for the controlled journey | General natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization; Native model-level duplex remains optional | Streaming Speech plus Runtime; measured golden corpus |
+| Interaction Intelligence | **PARTIAL overall; imported exact-source history only, not acceptance of this W3 composition.** Explicit opt-in Native source/automation, ordinary-Chrome prerecorded digital and bounded physical-device/human foreground boundaries passed. VAD/EOT and bounded dialogue/background routing exist for the controlled journey. D-101/D-103's Native model-level duplex path is frozen at `944a1e72`; the item-local cursor repair is exact source `268c8063` and independently reviewed `C0/I0/M0`. The later ordinary-Chrome real-microphone run on `b54730170b` passed first audio, continuous turns, playback-time voice interruption without repeated input, a safe read-only Agent delegate and Exit/re-entry. Cascade remains default | General natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization, broader device/network evidence and strict physical-acoustic/latency measurement | [Native human evidence](evidence/OPENAI_REALTIME_NATIVE_PHYSICAL_HUMAN_FOREGROUND_ACCEPTANCE_20260901.md), [Native design](architecture/OPENAI_REALTIME_NATIVE_INTERACTION_ENGINE_2026-08-25.md), [Tier-3 review](reviews/OPENAI_REALTIME_NATIVE_REAL_BROWSER_TIER3_REVIEW_20260829.md), Streaming Speech plus Runtime and measured golden corpus |
 | Agent Bridge and dialogue truth | **PARTIAL.** Real Agent dialogue/tools and bounded response/progress integration exist | Non-blocking progress provenance, strict Task-truth isolation, bounded result-context reservation and unconstrained reread prevention | Runtime, Task/Event truth and affected text-path regressions |
 | Task Control Core and Store | **PARTIAL overall; scheduled P3 code boundary and bounded P3-9 candidate journey closed.** Schema v6 retains canonical multi-Task authority, closed command/disposition/update/successor semantics, durable D0-D2 checkpoint/effect/recovery truth, Task-wide retained replay and class-isolated presentation ACK. Production multi-Task queries/mutations use authenticated reread and exact Task/Attempt/head CAS; D-093 fixes absent primitives as stable zero-effect unsupported | Feature-complete work still requires the declared full Task operations/generalization boundary without adding a second authority | Executor capability/admission/durability facts, Voice–Task Bridge, restart/concurrency matrix, [P3-9 human acceptance](evidence/P3_9_CUMULATIVE_PRODUCT_ACCEPTANCE_20260902.md) and [final review](reviews/P3_9_FINAL_INDEPENDENT_TIER3_REVIEW_2026-09-02.md) |
 | Executor & Durability | **PARTIAL overall; scheduled Direct capability/configuration code boundary and bounded P3-9 D2 journey closed.** The production factory consumes exactly one validated Direct D0 or D2 profile; missing, D1 and unknown profiles fail before Store construction. D0 and D2 declarations match their real candidate operations; no D1 candidate or D1 product claim exists. Admission, checkpoint resume, effect reconciliation, linked recovery and ambiguous-effect settlement remain integrated | Any future additional Executor or D1 candidate requires its own exact capability/profile packet | D-093 Tier-3 review, exact Wave-2/Wave-3 Direct/Store/Core evidence and bounded P3-9 D2 journey; no generic Executor or host-crash claim |
@@ -373,9 +373,14 @@ exact-source Alpha result.
 - **Exclusions:** no new protocol, policy, model upgrade, default-on switch,
   credential/configuration change, deployment, remote update or new physical
   acceptance claim. Cascade remains the default; interruption remains flag-off.
-- **Closure:** in progress. Recompile and run affected frontend, interruption,
-  Native, Gateway/P3 and notification regressions, production build, static and
-  scoped complete-diff review. Preserve and disclose baseline-only failures.
+- **Closure:** local source integration and scoped regressions completed;
+  **PARTIAL — independent integration review and fresh human acceptance not
+  granted.** All 30 affected Python test files pass `1568/1568`; Native and
+  media/L0/build-profile frontend suites pass. Integrated Web reports
+  `547 passed / 5 pre-existing failed / 1 skipped`, and the production build
+  passes. Three existing Gateway Ruff findings remain unchanged. Cold scoped
+  self-review is a disclosed substitute, not independent Tier-3 PASS. See the
+  [integration evidence](evidence/W3_GENERATION_NATIVE_ADAPTATION_INTEGRATION_20260902.md).
   Current W3 D-098/D-099/D-100 remain Task-control decisions; source-line
   generation decisions map to D-104/D-105/D-106, leaving Native D-101/D-102/D-103
   distinct. Historical evidence is interpreted through that mapping.
@@ -636,6 +641,103 @@ exact-source Alpha result.
   PASS is claimed. Changed-file Ruff, compileall, diff checks and the Live Voice
   frontend build pass. A clean controlled redeployment and human journey remain
   required.
+
+### OpenAI Realtime Native Interaction Engine — imported source history
+
+This packet and its acceptance apply to the source hashes below, not the current
+W3 composition. Current integration closure is the packet above.
+
+- **Status/source:** **SOURCE/AUTOMATION + ORDINARY INSTALLED-CHROME
+  PRERECORDED DIGITAL GATE PASS; INDEPENDENT REVIEW `C0/I0/M0` PASS;
+  BOUNDED PHYSICAL DEVICE/HUMAN FOREGROUND GATE PASS** on isolated branch
+  `codex/openai-realtime-native-interaction-engine`, based on clean integration
+  source `1742c1b4e5fa5e7a25a7b41dad9c8eef8453e3cc`. The post-review exact
+  implementation candidate is
+  `268c806340f8a64418fdf2ab8946d7f73a681014`: fixed-corpus foreground
+  first-audio is `20/20`, barge-in is `20/20`, Browser drops are zero, and the
+  same-metric first-audio p50/p95 is `2468.167/3057.833 ms` versus the accepted
+  Cascade warm baseline `4834.362/5603.215 ms` (reductions `48.95%/45.43%`).
+  One uncredited overlong successor response reached the intentional bounded
+  Runtime audio ledger, failed closed and recovered through activation
+  generation 3 before the final 40 eligible scenarios completed. D-103
+  solution A is frozen at exact source candidate
+  `944a1e72addeca67dbb53ec06d7801d5ddf2d232`; the complete affected backend,
+  frontend and build automation have passed, and independent Tier-3 cold review is
+  `C0/I0/M0 — PASS`. The earlier exact candidate
+  `0a1a5d36e851998e5fe384c48302f7b446f52d12` remains an immutable
+  `C2/I5/M0 — FAIL` result and receives no retroactive credit. The old
+  `codex/openai-realtime-native-voice@42f448aff7f8af9b0759c59a841f6a57a5792449`
+  remains an untouched Speech Adapter reference and has no Native Engine
+  completion authority. The later bounded ordinary-Chrome human run used exact
+  clean runtime source `b54730170bc560933c6b345fb984b843295282de` and a real
+  microphone/audible playout. It passed Native first audio, continuous turns,
+  playback-time voice interruption whose new utterance was answered without
+  repetition, a real read-only Jiuwen Agent delegate, and Exit/re-entry. That
+  result is scoped in the
+  [physical human evidence](evidence/OPENAI_REALTIME_NATIVE_PHYSICAL_HUMAN_FOREGROUND_ACCEPTANCE_20260901.md).
+- **Capability/risk/dependencies:** Interaction Intelligence combined with
+  Realtime Media, Conversation Runtime, Agent Bridge and Voice–Task Bridge;
+  Tier 3. It depends on the existing dedicated media path, Runtime
+  response/generation/presentation fences, unified committed-input resolver,
+  Agent/Task bridges and OpenAI Realtime GA contract. Cascade remains the
+  default path.
+- **Intended behaviour:** an explicit `openai-realtime-native` activation owns
+  one continuous server-side Realtime session, projects the closed
+  `LISTEN/SILENCE/TURN_COMMIT/SPEAK/STOP/REVISE/DELEGATE` action set, admits
+  direct native audio only through Runtime fences, truncates interrupted
+  Provider output at the Audio I/O played cursor and delegates Jiuwen work only
+  through the existing Bridge authorities. Under D-103, one Provider response
+  owns one bounded streaming source/ticket/socket while each 20 ms frame remains
+  individually Runtime-admitted; no-cursor interruption fences locally and
+  discards late output without inventing Provider truncate truth.
+- **Owned product/test surfaces:** new closed
+  `live-voice.native-interaction.v1` internal contract, shared Realtime session
+  kernel extraction, independent Native Engine and Runtime adapter, thin
+  Gateway/Product activation/media composition, D-102's three-method internal
+  authority carrier and single existing-P2 `native.audio` notification variant;
+  D-103 additionally owns its response-scoped async source, closed fence-only
+  ACK and activation-aborted close variants, AgentServer history reconciliation
+  task, method-specific delegate deadline and retained Provider close owner,
+  plus focused contract, Provider-fake, Runtime, Bridge and cumulative Cascade
+  regression tests.
+- **Exclusions:** no existing TurnCommit or SQLite migration, second
+  classifier/Runtime/history/Task authority, Provider-direct Jiuwen Tool/MCP,
+  silent cross-Engine fallback, Production/public deployment, remote update or
+  background/W3 change. The passing ordinary-Chrome gate uses prerecorded
+  Browser-stream injection and makes no physical microphone, headset, AEC,
+  room, human-audibility, Production or deployment claim. The separate
+  2026-09-01 human Gate adds only the observed local Chrome foreground
+  microphone/audibility/semantic journey; it adds no AEC, double-talk,
+  room/device generalization, fixed-corpus latency, background Task, Production
+  or deployment credit.
+- **Acceptance and re-scope:** red-green-refactor plus deterministic
+  event/barrier/manual-clock races now proves 3 s/150-frame sustained audio,
+  before-first/between-frame/duplicate speech-start, cursor/no-cursor fencing,
+  both history settlement orders and autonomous writer retry, long delegate,
+  incomplete Runtime/Provider close ownership, atomic revoke capacity,
+  close-retry quiescing, single direct response and transactional activation
+  compensation. Mutation-capable negative paths assert zero forbidden effects,
+  and the frozen D-103 candidate passed independent fix-only Tier-3 review at
+  `C0/I0`. The item-local cursor repair delta passed complete-diff cold
+  self-review and one independent fix-only re-review at `C0/I0/M0`. The
+  bounded physical audio-device/human foreground journey now also passes on
+  `b54730170b`; broader acoustic, routing, device/network and latency evidence
+  remains outside this packet. The real Provider prerecorded digital Gate is
+  passed and grants no physical, product-readiness, Production or deployment
+  credit. Any
+  need to change shared wire/schema,
+  authority ownership, Provider function exposure, played-cursor truth or
+  fallback policy triggers re-scope before code expansion. See the
+  [accepted design](architecture/OPENAI_REALTIME_NATIVE_INTERACTION_ENGINE_2026-08-25.md)
+  and [D-101/D-102/D-103](decisions/DECISIONS.md); the executable correction
+  boundary is in the
+  [D-103 plan](../docs/superpowers/plans/2026-08-25-openai-realtime-native-response-stream-correction.md),
+  with exact verification and review recorded in the
+  [D-103 source-candidate evidence](evidence/OPENAI_REALTIME_NATIVE_D100_SOURCE_CANDIDATE_EVIDENCE_20260825.md)
+  and the
+  [original ordinary-Chrome Realtime evidence](evidence/OPENAI_REALTIME_NATIVE_ORDINARY_CHROME_EVIDENCE_20260829.md),
+  [post-review Chrome evidence](evidence/OPENAI_REALTIME_NATIVE_POST_REVIEW_ORDINARY_CHROME_EVIDENCE_20260829.md)
+  and [Tier-3 review](reviews/OPENAI_REALTIME_NATIVE_REAL_BROWSER_TIER3_REVIEW_20260829.md).
 
 ### P3-9 cumulative one-product acceptance
 
@@ -1508,6 +1610,49 @@ facts and remaining gaps. They are not child packages in the active P3 batch.
   Important 0`, `Ready`; see the
   [human acceptance evidence](evidence/P3_9_CUMULATIVE_PRODUCT_ACCEPTANCE_20260902.md)
   and [final review](reviews/P3_9_FINAL_INDEPENDENT_TIER3_REVIEW_2026-09-02.md).
+
+- On 2026-09-01, exact clean runtime source `b54730170b` passed the bounded
+  physical-device/human foreground Gate through ordinary installed Chrome,
+  `openai-realtime-native` and `gpt-realtime-2.1-mini`. The operator accepted
+  real-microphone first audio, continuous two-turn dialogue, playback-time
+  voice interruption whose new utterance was answered without repetition, a
+  real read-only Jiuwen Agent/file delegate, and Exit followed by immediate
+  re-entry and another audible answer. Native audio presentation ACKs completed
+  with zero Native error codes and zero delegate timeout; the concurrent P3-9
+  listeners remained unchanged. This adds no background Task, P3-9, strict
+  acoustic/latency, device generalization, product-readiness or Production
+  credit. See the
+  [physical human evidence](evidence/OPENAI_REALTIME_NATIVE_PHYSICAL_HUMAN_FOREGROUND_ACCEPTANCE_20260901.md).
+
+- On 2026-08-29, post-review source
+  `268c806340f8a64418fdf2ab8946d7f73a681014` ran
+  `gpt-realtime-2.1-mini` through ordinary installed Chrome with fixed
+  prerecorded capture: warm-up completed, foreground first-audio passed
+  `20/20`, barge-in passed `20/20`, and all 40 eligible attempts were
+  Browser-complete with zero drops. One additional zero-record attempt failed
+  closed when an overlong successor response reached the bounded 4,096-record
+  Native audio ledger; activation generation 3 recovered and completed the
+  remaining scenarios. Browser EOT-to-WebAudio-start p50/p95 is
+  `2468.167/3057.833 ms`, reductions of `48.95%/45.43%` from the accepted
+  Cascade warm baseline. W3 listeners remained unchanged and formal Task,
+  background, unified-input and foreground-effect tables remained empty.
+  Independent repair review is `C0/I0/M0`; physical microphone/headset/human
+  acceptance was not run in that prerecorded packet and is now separately
+  covered by the 2026-09-01 bounded human Gate above. See the
+  [post-review evidence](evidence/OPENAI_REALTIME_NATIVE_POST_REVIEW_ORDINARY_CHROME_EVIDENCE_20260829.md)
+  and [review](reviews/OPENAI_REALTIME_NATIVE_REAL_BROWSER_TIER3_REVIEW_20260829.md).
+
+- On 2026-08-29, exact implementation candidate `2026e02fbfcc03164e51d953731f04c0eac41938`
+  ran `gpt-realtime-2.1-mini` through ordinary installed Chrome with a fixed
+  prerecorded capture corpus: warm-up completed, foreground first-audio passed
+  `20/20`, barge-in passed `20/20`, and all 40 attempts had zero Browser drops
+  or failures. Same-metric Browser EOT-to-WebAudio-start latency is p50/p95
+  `2320.633/2902.033 ms`, reductions of `52.00%/48.21%` from the accepted
+  Cascade warm baseline. W3 listeners remained on their original processes and
+  no background Task was invoked. Physical microphone/headset/human acceptance
+  was not run in that prerecorded packet and is now separately covered by the
+  2026-09-01 bounded human Gate above; see the
+  [ordinary-Chrome Realtime evidence](evidence/OPENAI_REALTIME_NATIVE_ORDINARY_CHROME_EVIDENCE_20260829.md).
 
 - On 2026-08-25, behaviour source `ba06d9825c` passed the formal launcher
   probes and ordinary installed-Chrome warm sequence: one non-counted warm-up,

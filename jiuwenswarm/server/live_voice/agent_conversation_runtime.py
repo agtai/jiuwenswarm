@@ -8,10 +8,10 @@ import asyncio
 import hashlib
 import math
 import threading
-from collections import deque
-from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable, Mapping
+from collections import deque
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timezone
 from enum import StrEnum
 from typing import Protocol
 
@@ -32,6 +32,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.server.live_voice.agent_bridge import AgentEvent
 from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
+    AgentBridgeCompletionStatus,
     AgentBridgeCompletionHandle,
     AgentBridgeDispatchReservation,
     AgentBridgeRuntime,
@@ -72,6 +73,14 @@ from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
     JiuWenSwarmRoundHarness,
     RoundCancelResult,
 )
+from jiuwenswarm.server.live_voice.native_interaction_contract import (
+    NativeInteractionBinding,
+)
+from jiuwenswarm.server.live_voice.native_interaction_runtime import (
+    NativeHistoryAdmission,
+    NativeInteractionRuntimeOwner,
+    NativeUserHistoryAdmission,
+)
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     HistorySurfacePolicy,
     PresentationAck,
@@ -98,6 +107,9 @@ _MAX_EFFECT_ID_UTF8_BYTES = 512
 _MAX_EFFECTS_PER_REQUEST = 3
 _MAX_FORMAL_CONTEXT_ENTRIES = 8
 _MAX_FORMAL_CONTEXT_UTF8_BYTES = 32 * 1024
+_DEFAULT_NATIVE_DELEGATE_TIMEOUT_SECONDS = 25.0
+_MAX_NATIVE_DELEGATE_TIMEOUT_SECONDS = 28.0
+_NATIVE_DELEGATE_CANCEL_SETTLEMENT_SECONDS = 1.0
 
 
 class AgentConversationRuntimeViolation(ValueError):
@@ -498,6 +510,22 @@ class FormalHistoryWriter(Protocol):
         channel_id: str,
     ) -> tuple[bool, ...]: ...
 
+    async def persist_native_assistant(
+        self,
+        admission: NativeHistoryAdmission,
+        *,
+        session_id: str,
+        channel_id: str,
+    ) -> bool: ...
+
+    async def persist_native_user(
+        self,
+        admission: NativeUserHistoryAdmission,
+        *,
+        session_id: str,
+        channel_id: str,
+    ) -> bool: ...
+
 
 @dataclass(slots=True)
 class _AdmissionOutcome:
@@ -609,6 +637,9 @@ class AgentConversationRuntime:
         harness: JiuWenSwarmRoundHarness | None = None,
         bridge: AgentBridgeRuntime | None = None,
         response_generation_owner: Callable[[str, int], int] | None = None,
+        native_delegate_timeout_seconds: float = (
+            _DEFAULT_NATIVE_DELEGATE_TIMEOUT_SECONDS
+        ),
     ) -> None:
         if not isinstance(scope, ScopeRef):
             raise AgentConversationRuntimeViolation(
@@ -638,6 +669,19 @@ class AgentConversationRuntime:
                     f"{name} must be a positive integer",
                     ErrorCode.INVALID_ARGUMENT,
                 )
+        if (
+            isinstance(native_delegate_timeout_seconds, bool)
+            or not isinstance(native_delegate_timeout_seconds, (int, float))
+            or not math.isfinite(native_delegate_timeout_seconds)
+            or native_delegate_timeout_seconds <= 0
+            or native_delegate_timeout_seconds > _MAX_NATIVE_DELEGATE_TIMEOUT_SECONDS
+        ):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_NATIVE_DELEGATE_TIMEOUT",
+                "Native delegate timeout must be finite, positive, and below "
+                "the 30 second carrier deadline",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         self._scope = scope
         self._instance_id = instance_id
         self._facade = facade
@@ -664,6 +708,7 @@ class AgentConversationRuntime:
             reservation_ttl_seconds=reservation_ttl_seconds,
         )
         self._history_writer = history_writer or SessionFormalHistoryWriter()
+        self._native_delegate_timeout_seconds = float(native_delegate_timeout_seconds)
         self._max_requests = max_requests
         self._notifications = _BoundedNotificationBuffer(
             observer_capacity=notification_capacity,
@@ -673,6 +718,10 @@ class AgentConversationRuntime:
         self._turn_identity_claims: dict[str, _TurnIdentityClaim] = {}
         self._commit_identity_claims: dict[str, _TurnIdentityClaim] = {}
         self._committed_turn_submissions: dict[str, _CommittedTurnSubmissionEntry] = {}
+        self._native_delegate_executions: dict[
+            str, tuple[bytes, asyncio.Task[str]]
+        ] = {}
+        self._native_delegate_turns: dict[tuple[str, str], str] = {}
         self._submitted_turn_bindings: dict[tuple[str, str], str] = {}
         self._admissions: dict[str, _AdmissionEntry] = {}
         self._handles: dict[str, AgentConversationHandle] = {}
@@ -689,6 +738,21 @@ class AgentConversationRuntime:
         self._pending_history: dict[
             tuple[ResponseRef, PresentationSurface, int],
             tuple[PresentationHistoryIntent, str, str],
+        ] = {}
+        self._native_history_results: dict[
+            ResponseRef, tuple[NativeHistoryAdmission, str, bool]
+        ] = {}
+        self._pending_native_history: dict[
+            ResponseRef, tuple[NativeHistoryAdmission, str, str]
+        ] = {}
+        self._native_user_history_results: dict[
+            str, tuple[NativeUserHistoryAdmission, str, bool]
+        ] = {}
+        self._pending_native_user_history: dict[
+            str, tuple[NativeUserHistoryAdmission, str, str]
+        ] = {}
+        self._native_history_write_tasks: dict[
+            ResponseRef, tuple[NativeHistoryAdmission, str, asyncio.Task[None]]
         ] = {}
         self._pending_user_history: dict[str, tuple[TurnCommit, str]] = {}
         self._task_presentation_reservations: dict[
@@ -728,6 +792,306 @@ class AgentConversationRuntime:
         self._closed = not enabled
         if self._closed:
             self._notifications.close()
+
+    def create_native_interaction_runtime_owner(
+        self, binding: NativeInteractionBinding
+    ) -> NativeInteractionRuntimeOwner:
+        """Create the Native adapter only over this facade's retained CR owner."""
+
+        if not isinstance(binding, NativeInteractionBinding):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_RUNTIME_BINDING_INVALID",
+                "Native Runtime requires a canonical activation binding",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if binding.scope != self._scope:
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_RUNTIME_BINDING_MISMATCH",
+                "Native Runtime must match the exact facade scope",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        return NativeInteractionRuntimeOwner(
+            binding,
+            runtime=self._cr,
+            owns_runtime=False,
+        )
+
+    async def execute_native_delegate(
+        self,
+        *,
+        request_id: str,
+        source_response: ResponseRef,
+        correlation_id: str,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        channel_id: str = "web",
+        allow_tools: bool = True,
+        answer_from_selected_task_result: bool = False,
+    ) -> str:
+        """Run one Native delegate through the retained Harness/Agent Bridge.
+
+        The source Native response supplies only the Bridge correlation fence.
+        This path deliberately creates no second CR turn/response, TEXT
+        presentation, notification, or history write.
+        """
+
+        self._require_admission()
+        if not isinstance(commit, TurnCommit) or commit.scope != self._scope:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_NATIVE_DELEGATE_COMMIT",
+                "Native delegate must use a standard commit in the exact scope",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if (
+            not isinstance(source_response, ResponseRef)
+            or source_response.interaction_id != commit.interaction_id
+        ):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_NATIVE_DELEGATE_RESPONSE",
+                "Native delegate must bind the exact source response",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if self._facade is None:
+            raise AgentConversationRuntimeViolation(
+                "FORMAL_AGENT_FACADE_UNAVAILABLE",
+                "formal Agent facade is not configured",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        context.validate_for(commit)
+        self._validate_dispatch_channel(channel_id)
+        if type(allow_tools) is not bool:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_AGENT_TOOL_POLICY",
+                "formal Agent tool policy must be a boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(answer_from_selected_task_result) is not bool:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_AGENT_RESULT_ANSWER_POLICY",
+                "formal Agent result-answer policy must be a boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        source_record = next(
+            (
+                item
+                for item in self._cr.snapshot().conversation.responses
+                if item.ref == source_response
+            ),
+            None,
+        )
+        if source_record is None or source_record.state is ResponseState.TERMINAL:
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_DELEGATE_RESPONSE_STALE",
+                "Native Agent execution requires the live source response",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        fingerprint = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "request_id": request_id,
+                    "source_response": {
+                        "interaction_id": source_response.interaction_id,
+                        "response_id": source_response.response_id,
+                        "response_generation": source_response.response_generation,
+                    },
+                    "correlation_id": correlation_id,
+                    "commit": commit.to_dict(),
+                    "context": {
+                        "scope": context.scope.to_dict(),
+                        "entries": [
+                            {
+                                "ref": entry.ref.to_dict(),
+                                "content_sha256": hashlib.sha256(
+                                    entry.content.encode("utf-8")
+                                ).hexdigest(),
+                            }
+                            for entry in context.entries
+                        ],
+                    },
+                    "channel_id": channel_id,
+                    "allow_tools": allow_tools,
+                    "answer_from_selected_task_result": (
+                        answer_from_selected_task_result
+                    ),
+                }
+            )
+        ).digest()
+        async with self._identity_claim_lock:
+            prior = self._native_delegate_executions.get(request_id)
+            if prior is not None:
+                if prior[0] != fingerprint:
+                    raise AgentConversationRuntimeViolation(
+                        "NATIVE_DELEGATE_REQUEST_CONFLICT",
+                        "Native delegate request cannot change its binding",
+                        ErrorCode.CONFLICT,
+                    )
+                operation = prior[1]
+            else:
+                turn_key = (commit.interaction_id, commit.turn_id)
+                prior_request = self._native_delegate_turns.get(turn_key)
+                if prior_request is not None and prior_request != request_id:
+                    raise AgentConversationRuntimeViolation(
+                        "NATIVE_DELEGATE_COMMIT_CONFLICT",
+                        "Native delegate commit cannot execute under another request",
+                        ErrorCode.CONFLICT,
+                    )
+                if len(self._native_delegate_executions) >= self._max_requests:
+                    raise AgentConversationRuntimeViolation(
+                        "NATIVE_DELEGATE_LEDGER_FULL",
+                        "bounded Native Agent delegate ledger is full",
+                        ErrorCode.UNAVAILABLE,
+                    )
+                operation = asyncio.create_task(
+                    self._run_native_delegate(
+                        request_id=request_id,
+                        source_response=source_response,
+                        correlation_id=correlation_id,
+                        commit=commit,
+                        context=context,
+                        channel_id=channel_id,
+                        allow_tools=allow_tools,
+                        answer_from_selected_task_result=(
+                            answer_from_selected_task_result
+                        ),
+                    ),
+                    name=f"live-voice-native-delegate:{request_id}",
+                )
+                self._native_delegate_executions[request_id] = (
+                    fingerprint,
+                    operation,
+                )
+                self._native_delegate_turns[turn_key] = request_id
+        return await asyncio.shield(operation)
+
+    async def _run_native_delegate(
+        self,
+        *,
+        request_id: str,
+        source_response: ResponseRef,
+        correlation_id: str,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        channel_id: str,
+        allow_tools: bool,
+        answer_from_selected_task_result: bool,
+    ) -> str:
+        harness_reservation: HarnessRoundReservation | None = None
+        bridge_reservation: AgentBridgeDispatchReservation | None = None
+        round_handle: HarnessRoundHandle | None = None
+        try:
+            assert self._facade is not None
+            harness_reservation = self._harness.reserve_round(
+                HarnessRoundBinding(
+                    request_id=request_id,
+                    response_id=source_response.response_id,
+                    correlation_id=correlation_id,
+                    commit=commit,
+                ),
+                facade=self._facade,
+            )
+            bridge_reservation = self._bridge.reserve_dispatch(
+                request_id=request_id,
+                round_id=harness_reservation.round_id,
+                response_id=source_response.response_id,
+                correlation_id=correlation_id,
+                commit=commit,
+                adapter_id=JiuWenSwarmAgentAdapter.adapter_id,
+            )
+            self._harness.begin_round_commit(harness_reservation)
+            self._bridge.begin_dispatch_commit(bridge_reservation)
+            round_handle = self._harness.commit_round(
+                harness_reservation,
+                response_ref=source_response,
+                context=context,
+                facade=self._facade,
+                channel_id=channel_id,
+                allow_tools=allow_tools,
+                answer_from_selected_task_result=(answer_from_selected_task_result),
+            )
+            submission = self._bridge.commit_dispatch(
+                bridge_reservation,
+                response_ref=source_response,
+                adapter=JiuWenSwarmAgentAdapter(round_handle),
+            )
+            try:
+                completion = await asyncio.wait_for(
+                    submission.completion,
+                    timeout=self._native_delegate_timeout_seconds,
+                )
+            except TimeoutError as timeout_error:
+                cancel = CommandEnvelope.from_dict(
+                    {
+                        "contract_version": "live-voice.contract.v2",
+                        "request_id": request_id,
+                        "command_id": (
+                            "native-delegate-timeout-"
+                            + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+                        ),
+                        "command_type": "round.cancel",
+                        "issued_at": datetime.now(UTC)
+                        .isoformat(timespec="microseconds")
+                        .replace("+00:00", "Z"),
+                        "scope": commit.scope.to_dict(),
+                        "correlation_id": correlation_id,
+                        "causation_id": None,
+                        "origin": {
+                            "kind": "committed_turn",
+                            "turn_id": commit.turn_id,
+                            "commit_id": commit.commit_id,
+                        },
+                        "target_ref": {
+                            "kind": "round",
+                            "id": round_handle.round_id,
+                        },
+                        "context_refs": [],
+                        "required_capabilities": ["round.cancel"],
+                        "payload": {},
+                        "extensions": {},
+                    }
+                )
+                round_handle.cancel(cancel)
+                try:
+                    await asyncio.wait_for(
+                        submission.completion,
+                        timeout=_NATIVE_DELEGATE_CANCEL_SETTLEMENT_SECONDS,
+                    )
+                except TimeoutError:
+                    pass
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_DELEGATE_AGENT_TIMEOUT",
+                    "Native Agent delegate exceeded its server-owned deadline",
+                    ErrorCode.TIMEOUT,
+                ) from timeout_error
+            if (
+                completion.status is not AgentBridgeCompletionStatus.TERMINAL_OBSERVED
+                or completion.terminal_outcome is not TerminalOutcome.COMPLETED
+                or completion.canonical_final_count != 1
+                or completion.canonical_text is None
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_DELEGATE_AGENT_RESULT_INVALID",
+                    "Agent Bridge did not return one completed canonical final",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+            return completion.canonical_text
+        except BaseException:
+            if bridge_reservation is not None:
+                try:
+                    self._bridge.rollback_undelivered_dispatch(
+                        bridge_reservation,
+                        reason="native_delegate_failed",
+                    )
+                except (AgentBridgeRuntimeViolation, RuntimeError):
+                    pass
+            if harness_reservation is not None:
+                try:
+                    self._harness.rollback_unstarted_round(
+                        harness_reservation,
+                        reason="native_delegate_failed",
+                    )
+                except (HarnessRoundViolation, RuntimeError):
+                    pass
+            raise
 
     async def start(self) -> bool:
         async with self._start_lock:
@@ -2845,6 +3209,287 @@ class AgentConversationRuntime:
         self._pending_user_history.pop(commit_id, None)
         return written
 
+    async def persist_native_assistant_history(
+        self,
+        admission: NativeHistoryAdmission,
+        *,
+        channel_id: str,
+    ) -> bool:
+        """Consume one Native eligibility fact through the canonical writer."""
+
+        self._require_started()
+        if not isinstance(admission, NativeHistoryAdmission):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_HISTORY_ADMISSION_INVALID",
+                "Native history requires one Runtime-issued admission",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            not isinstance(channel_id, str)
+            or not channel_id
+            or channel_id != channel_id.strip()
+        ):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_HISTORY_CHANNEL_INVALID",
+                "Native history requires one exact channel identity",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        interaction = next(
+            (
+                item
+                for item in self._cr.snapshot().conversation.interactions
+                if item.interaction_id == admission.response.interaction_id
+            ),
+            None,
+        )
+        if interaction is None:
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_HISTORY_RESPONSE_STALE",
+                "Native history response is not owned by this Runtime",
+                ErrorCode.STALE,
+            )
+        session_id = self._scope.session_id
+        assert isinstance(session_id, str)
+        key = admission.response
+        async with self._ack_lock:
+            completed = self._native_history_results.get(key)
+            if completed is not None:
+                if completed[0] != admission or completed[1] != channel_id:
+                    raise AgentConversationRuntimeViolation(
+                        "NATIVE_HISTORY_REPLAY_CONFLICT",
+                        "Native history replay cannot change its admission",
+                        ErrorCode.CONFLICT,
+                    )
+                return completed[2]
+            pending = self._pending_native_history.get(key)
+            if pending is not None and pending != (admission, session_id, channel_id):
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_HISTORY_REPLAY_CONFLICT",
+                    "Native history retry cannot change its admission",
+                    ErrorCode.CONFLICT,
+                )
+            if (
+                pending is None
+                and len(self._native_history_results)
+                + len(self._pending_native_history)
+                >= self._max_requests
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_HISTORY_LEDGER_FULL",
+                    "bounded Native history ledger is full",
+                    ErrorCode.UNAVAILABLE,
+                )
+            try:
+                written = await self._history_writer.persist_native_assistant(
+                    admission,
+                    session_id=session_id,
+                    channel_id=channel_id,
+                )
+            except BaseException as error:  # noqa: BLE001
+                self._pending_native_history[key] = (
+                    admission,
+                    session_id,
+                    channel_id,
+                )
+                if isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                    raise
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_HISTORY_WRITE_FAILED",
+                    "canonical Native assistant history remains pending",
+                    ErrorCode.UNAVAILABLE,
+                ) from error
+            if type(written) is not bool:
+                self._pending_native_history[key] = (
+                    admission,
+                    session_id,
+                    channel_id,
+                )
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_HISTORY_WRITE_FAILED",
+                    "canonical Native assistant history returned no exact outcome",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+            self._pending_native_history.pop(key, None)
+            self._native_history_results[key] = (admission, channel_id, written)
+            return written
+
+    async def persist_native_user_history(
+        self,
+        admission: NativeUserHistoryAdmission,
+        *,
+        channel_id: str,
+    ) -> bool:
+        """Persist one Runtime-admitted Native user final exactly once."""
+
+        self._require_started()
+        if not isinstance(admission, NativeUserHistoryAdmission):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_USER_HISTORY_ADMISSION_INVALID",
+                "Native user history requires one Runtime-issued admission",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            not isinstance(channel_id, str)
+            or not channel_id
+            or channel_id != channel_id.strip()
+        ):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_USER_HISTORY_CHANNEL_INVALID",
+                "Native user history requires one exact channel identity",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if admission.binding.scope != self._scope or not any(
+            item.interaction_id == admission.binding.interaction_id
+            for item in self._cr.snapshot().conversation.interactions
+        ):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_USER_HISTORY_TURN_STALE",
+                "Native user history is not owned by this Runtime",
+                ErrorCode.STALE,
+            )
+        session_id = self._scope.session_id
+        assert isinstance(session_id, str)
+        key = admission.commit_id
+        async with self._ack_lock:
+            completed = self._native_user_history_results.get(key)
+            if completed is not None:
+                if completed[0] != admission or completed[1] != channel_id:
+                    raise AgentConversationRuntimeViolation(
+                        "NATIVE_USER_HISTORY_REPLAY_CONFLICT",
+                        "Native user history replay cannot change its admission",
+                        ErrorCode.CONFLICT,
+                    )
+                return completed[2]
+            pending = self._pending_native_user_history.get(key)
+            if pending is not None and pending != (admission, session_id, channel_id):
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_USER_HISTORY_REPLAY_CONFLICT",
+                    "Native user history retry cannot change its admission",
+                    ErrorCode.CONFLICT,
+                )
+            if (
+                pending is None
+                and len(self._native_user_history_results)
+                + len(self._pending_native_user_history)
+                >= self._max_requests
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_USER_HISTORY_LEDGER_FULL",
+                    "bounded Native user history ledger is full",
+                    ErrorCode.UNAVAILABLE,
+                )
+            try:
+                written = await self._history_writer.persist_native_user(
+                    admission,
+                    session_id=session_id,
+                    channel_id=channel_id,
+                )
+            except BaseException as error:  # noqa: BLE001
+                self._pending_native_user_history[key] = (
+                    admission,
+                    session_id,
+                    channel_id,
+                )
+                if isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                    raise
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_USER_HISTORY_WRITE_FAILED",
+                    "canonical Native user history remains pending",
+                    ErrorCode.UNAVAILABLE,
+                ) from error
+            if type(written) is not bool:
+                self._pending_native_user_history[key] = (
+                    admission,
+                    session_id,
+                    channel_id,
+                )
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_USER_HISTORY_WRITE_FAILED",
+                    "canonical Native user history returned no exact outcome",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+            self._pending_native_user_history.pop(key, None)
+            self._native_user_history_results[key] = (
+                admission,
+                channel_id,
+                written,
+            )
+            return written
+
+    async def schedule_native_assistant_history(
+        self,
+        admission: NativeHistoryAdmission,
+        *,
+        channel_id: str,
+    ) -> bool:
+        """Own one bounded automatic Native history write on AgentServer."""
+
+        self._require_started()
+        if not isinstance(admission, NativeHistoryAdmission):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_HISTORY_ADMISSION_INVALID",
+                "Native history requires one Runtime-issued admission",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            not isinstance(channel_id, str)
+            or not channel_id
+            or channel_id != channel_id.strip()
+        ):
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_HISTORY_CHANNEL_INVALID",
+                "Native history requires one exact channel identity",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        async with self._ack_lock:
+            prior = self._native_history_write_tasks.get(admission.response)
+            if prior is not None:
+                if prior[0] != admission or prior[1] != channel_id:
+                    raise AgentConversationRuntimeViolation(
+                        "NATIVE_HISTORY_REPLAY_CONFLICT",
+                        "Native history writer replay cannot change its admission",
+                        ErrorCode.CONFLICT,
+                    )
+                return True
+            if len(self._native_history_write_tasks) >= self._max_requests:
+                raise AgentConversationRuntimeViolation(
+                    "NATIVE_HISTORY_LEDGER_FULL",
+                    "bounded Native history writer ledger is full",
+                    ErrorCode.UNAVAILABLE,
+                )
+            task = asyncio.create_task(
+                self._run_native_history_writer(admission, channel_id=channel_id),
+                name=(
+                    "live-voice-native-history:"
+                    f"{admission.response.response_generation}"
+                ),
+            )
+            self._native_history_write_tasks[admission.response] = (
+                admission,
+                channel_id,
+                task,
+            )
+            self._history_tasks.add(task)
+            task.add_done_callback(self._history_tasks.discard)
+            return True
+
+    async def _run_native_history_writer(
+        self,
+        admission: NativeHistoryAdmission,
+        *,
+        channel_id: str,
+    ) -> None:
+        for _attempt in range(3):
+            try:
+                await self.persist_native_assistant_history(
+                    admission,
+                    channel_id=channel_id,
+                )
+                return
+            except AgentConversationRuntimeViolation as error:
+                if error.reason != "NATIVE_HISTORY_WRITE_FAILED":
+                    return
+
     async def request_response_cancel(
         self, command_id: str, ref: ResponseRef
     ) -> ResponseCancelResult:
@@ -3213,7 +3858,10 @@ class AgentConversationRuntime:
                 for entry in self._effect_claims.values()
             ),
             pending_history_intents=(
-                len(self._pending_history) + len(self._pending_user_history)
+                len(self._pending_history)
+                + len(self._pending_native_history)
+                + len(self._pending_native_user_history)
+                + len(self._pending_user_history)
             ),
             conversation=self._cr.snapshot(),
             bridge=self._bridge.snapshot(),
@@ -3591,6 +4239,15 @@ class AgentConversationRuntime:
                 await asyncio.shield(
                     asyncio.gather(*admission_tasks, return_exceptions=True)
                 )
+            native_delegate_tasks = tuple(
+                operation
+                for _fingerprint, operation in self._native_delegate_executions.values()
+                if not operation.done()
+            )
+            if native_delegate_tasks:
+                await asyncio.shield(
+                    asyncio.gather(*native_delegate_tasks, return_exceptions=True)
+                )
             await self._bridge.close()
             if self._consumer is not None:
                 await asyncio.shield(self._consumer)
@@ -3604,10 +4261,10 @@ class AgentConversationRuntime:
                 await asyncio.shield(asyncio.gather(*ack_tasks, return_exceptions=True))
             async with self._ack_lock:
                 history_tasks = tuple(self._history_tasks)
-                if history_tasks:
-                    await asyncio.shield(
-                        asyncio.gather(*history_tasks, return_exceptions=True)
-                    )
+            if history_tasks:
+                await asyncio.shield(
+                    asyncio.gather(*history_tasks, return_exceptions=True)
+                )
             shutdown_effects = await self._cr.close()
             async with self._effect_lock:
                 self._retain_effects(shutdown_effects)
@@ -3622,7 +4279,12 @@ class AgentConversationRuntime:
             final_drain_capability = (
                 None if final_drain_lease is None else final_drain_lease.lease
             )
-            if self._pending_history or self._pending_user_history:
+            if (
+                self._pending_history
+                or self._pending_native_history
+                or self._pending_native_user_history
+                or self._pending_user_history
+            ):
                 return AgentConversationShutdownResult(
                     AgentConversationShutdownStatus.FAILED,
                     "history_write_intents_pending",

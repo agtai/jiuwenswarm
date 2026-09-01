@@ -2069,6 +2069,13 @@ class AgentWebSocketServer:
                     ws, request, send_lock
                 )
                 return
+            if request.req_method in {
+                ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE,
+                ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PRESENTATION_ACK,
+                ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_CLOSE,
+            }:
+                await self._handle_live_voice_native_request(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.ISSUE_WATCH_ONCE:
                 await self._handle_schedule_request(ws, request, send_lock, "issue_watch_once")
                 return
@@ -9304,6 +9311,86 @@ class AgentWebSocketServer:
                 result_ok=result_ok,
                 duration_ms=max(0.0, (time.monotonic() - operation_started) * 1000.0),
             )
+        response = AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=result_ok,
+            payload=payload,
+            agent_ref=request.agent_ref,
+        )
+        wire = encode_agent_response_for_wire(
+            response,
+            response_id=request.request_id,
+        )
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_live_voice_native_request(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Dispatch the closed Gateway-only Native Runtime carrier."""
+
+        registry = getattr(self, "_live_voice_product_composition", None)
+        if request.channel_id != "live_voice_native_gateway":
+            result_ok = False
+            payload: dict[str, object] = {
+                "request_id": request.request_id,
+                "ok": False,
+                "result": None,
+                "error": {
+                    "code": "PERMISSION_DENIED",
+                    "reason": "NATIVE_INTERNAL_CHANNEL_REQUIRED",
+                    "message": "Native Runtime requests require the private Gateway channel",
+                },
+            }
+        elif registry is None:
+            result_ok = False
+            payload = {
+                "request_id": request.request_id,
+                "ok": False,
+                "result": None,
+                "error": {
+                    "code": "UNAVAILABLE",
+                    "reason": "PRODUCT_COMPOSITION_DISABLED",
+                    "message": "Live Voice product composition is unavailable",
+                },
+            }
+        else:
+            params = {
+                key: value
+                for key, value in (request.params or {}).items()
+                if key not in {"mode", "agent_type", "agent_ref"}
+            }
+            if request.req_method is ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE:
+                result = await registry.handle_native_propose(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
+            elif (
+                request.req_method
+                is ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PRESENTATION_ACK
+            ):
+                result = await registry.handle_native_presentation_ack(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
+            else:
+                result = await registry.handle_native_close(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
+            result_ok = result.ok
+            payload = dict(result.payload)
+            # Product-composition metadata belongs to the browser-facing
+            # lifecycle carrier.  The Gateway-only Native Runtime protocol is
+            # intentionally closed to request_id/ok/result/error.
+            payload.pop("product_composition", None)
         response = AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,

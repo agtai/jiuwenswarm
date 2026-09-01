@@ -47,6 +47,12 @@ from .agent_conversation_runtime import (
 )
 from .conversation_runtime_loop import BargeInResult
 from .interaction_engine import InteractionAction, InteractionEnginePort
+from .native_interaction_contract import NativeInteractionBinding
+from .native_interaction_runtime import NativeInteractionRuntimeOwner
+from .native_interaction_runtime import (
+    NativeHistoryAdmission,
+    NativeUserHistoryAdmission,
+)
 from .presentation_ledger import (
     PresentationAck,
     PresentationSurface,
@@ -561,6 +567,7 @@ class P2ActivationLease:
         self._presentation_ack_reservations: dict[int, PresentationAck] = {}
         self._presentation_ack_reservations_settled = asyncio.Event()
         self._presentation_ack_reservations_settled.set()
+        self._native_runtime_owner: NativeInteractionRuntimeOwner | None = None
         attach_consumer = getattr(runtime, "attach_notification_consumer", None)
         self._notification_lease = (
             attach_consumer(
@@ -608,6 +615,48 @@ class P2ActivationLease:
                 accepted=accepted,
                 cancellation_scope=_CANCELLATION_SCOPES.get(retained.operation),
             )
+
+    async def activate_native_interaction_runtime(
+        self,
+    ) -> NativeInteractionRuntimeOwner:
+        """Attach one Native owner to the lease's already-open Runtime."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(self._binding)
+            if self._native_runtime_owner is not None:
+                return self._native_runtime_owner
+            create = getattr(
+                self._runtime, "create_native_interaction_runtime_owner", None
+            )
+            if not callable(create):
+                raise _violation(
+                    "NATIVE_RUNTIME_FACTORY_UNAVAILABLE",
+                    "retained runtime has no Native owner factory",
+                    ErrorCode.UNAVAILABLE,
+                )
+            binding = NativeInteractionBinding(
+                scope=self._binding.scope,
+                interaction_id=self._binding.interaction_id,
+                activation_id=self._binding.activation_id,
+                activation_generation=self._binding.activation_generation,
+                correlation_id=self._binding.correlation_id,
+            )
+            owner = create(binding)
+            if not isinstance(owner, NativeInteractionRuntimeOwner):
+                raise _violation(
+                    "NATIVE_RUNTIME_FACTORY_UNAVAILABLE",
+                    "retained runtime returned no canonical Native owner",
+                    ErrorCode.UNAVAILABLE,
+                )
+            if await owner.start() is not True:
+                raise _violation(
+                    "NATIVE_RUNTIME_START_FAILED",
+                    "Native owner did not attach to the retained Runtime",
+                    ErrorCode.UNAVAILABLE,
+                )
+            self._native_runtime_owner = owner
+            return owner
 
     async def submit_committed_turn(
         self,
@@ -696,6 +745,115 @@ class P2ActivationLease:
                     ErrorCode.UNAVAILABLE,
                 )
             return outcome
+
+    async def execute_native_delegate(
+        self,
+        binding: P2InteractionBinding,
+        *,
+        request_id: str,
+        source_response: ResponseRef,
+        correlation_id: str,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        channel_id: str = "web",
+        allow_tools: bool = True,
+        answer_from_selected_task_result: bool = False,
+    ) -> str:
+        """Execute one Native delegate without a second presentation path."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            execute = getattr(self._runtime, "execute_native_delegate", None)
+            if not callable(execute):
+                raise _violation(
+                    "NATIVE_DELEGATE_RUNTIME_UNAVAILABLE",
+                    "retained runtime has no Native Agent delegate owner",
+                    ErrorCode.UNAVAILABLE,
+                )
+            if type(answer_from_selected_task_result) is not bool:
+                raise _violation(
+                    "INVALID_NATIVE_DELEGATE_RESULT_ANSWER_POLICY",
+                    "Native delegate result-answer policy must be a boolean",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            outcome = await execute(
+                request_id=request_id,
+                source_response=source_response,
+                correlation_id=correlation_id,
+                commit=commit,
+                context=context,
+                channel_id=channel_id,
+                allow_tools=allow_tools,
+                answer_from_selected_task_result=(answer_from_selected_task_result),
+            )
+            if type(outcome) is not str or not outcome.strip():
+                raise _violation(
+                    "NATIVE_DELEGATE_RUNTIME_UNAVAILABLE",
+                    "retained runtime returned no canonical Agent final",
+                    ErrorCode.UNAVAILABLE,
+                )
+            return outcome
+
+    async def persist_native_assistant_history(
+        self,
+        binding: P2InteractionBinding,
+        admission: NativeHistoryAdmission,
+        *,
+        channel_id: str = "web",
+    ) -> bool:
+        """Consume one Native history admission through the retained Runtime."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            persist = getattr(
+                self._runtime,
+                "schedule_native_assistant_history",
+                None,
+            )
+            if not callable(persist):
+                raise _violation(
+                    "NATIVE_HISTORY_RUNTIME_UNAVAILABLE",
+                    "retained Runtime has no canonical Native history writer",
+                    ErrorCode.UNAVAILABLE,
+                )
+            written = await persist(admission, channel_id=channel_id)
+            if type(written) is not bool:
+                raise _violation(
+                    "NATIVE_HISTORY_RUNTIME_UNAVAILABLE",
+                    "retained Runtime returned no exact Native history outcome",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+            return written
+
+    async def persist_native_user_history(
+        self,
+        binding: P2InteractionBinding,
+        admission: NativeUserHistoryAdmission,
+        *,
+        channel_id: str = "web",
+    ) -> bool:
+        """Consume one Native user-history admission through the retained Runtime."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            persist = getattr(self._runtime, "persist_native_user_history", None)
+            if not callable(persist):
+                raise _violation(
+                    "NATIVE_USER_HISTORY_RUNTIME_UNAVAILABLE",
+                    "retained Runtime has no canonical Native user history writer",
+                    ErrorCode.UNAVAILABLE,
+                )
+            written = await persist(admission, channel_id=channel_id)
+            if type(written) is not bool:
+                raise _violation(
+                    "NATIVE_USER_HISTORY_RUNTIME_UNAVAILABLE",
+                    "retained Runtime returned no exact Native user history outcome",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+            return written
 
     async def accept_task_origin(
         self,
@@ -1253,6 +1411,8 @@ class P2ActivationLease:
         try:
             await self._presentation_ack_reservations_settled.wait()
             async with self._operation_lock:
+                if self._native_runtime_owner is not None:
+                    await self._native_runtime_owner.close()
                 if (
                     self._notification_lease is not None
                     and not self._notification_detached

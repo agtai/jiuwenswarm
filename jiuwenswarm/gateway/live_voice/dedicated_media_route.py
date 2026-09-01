@@ -16,6 +16,7 @@ actual route-to-disk regression proves zero raw-audio persistence.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import ipaddress
 import math
 import re
@@ -701,7 +702,9 @@ async def run_dedicated_media_socket_leaf(
     on_uplink_frame_accepted: Callable[[MediaAck, float], None] | None = None,
     on_uplink_ack_sent: Callable[[MediaAck], None] | None = None,
     next_speech_start: Callable[[], Awaitable[MediaSpeechStart]] | None = None,
+    repeat_speech_start: bool = False,
     next_end_of_turn: Callable[[], Awaitable[MediaEndOfTurn]] | None = None,
+    repeat_speech_boundaries: bool = False,
     cleanup_owner: DedicatedMediaLeafCleanupOwner | None = None,
 ) -> DedicatedMediaSocketLeafResult:
     """Run one injected uplink WebSocket after the central handshake.
@@ -747,6 +750,28 @@ async def run_dedicated_media_socket_leaf(
     if next_speech_start is not None and not callable(next_speech_start):
         raise MediaTransportViolation(
             "MEDIA_INVALID_CONSUMER", "speech-start source must be callable"
+        )
+    if (
+        type(repeat_speech_start) is not bool
+        or repeat_speech_start
+        and (next_speech_start is None or next_end_of_turn is not None)
+    ):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER",
+            "repeated speech-start requires one source and no end-of-turn source",
+        )
+    if (
+        type(repeat_speech_boundaries) is not bool
+        or repeat_speech_boundaries
+        and (
+            next_speech_start is None
+            or next_end_of_turn is None
+            or repeat_speech_start
+        )
+    ):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER",
+            "repeated speech-boundary pairs require exact start and end sources",
         )
     if (
         next_speech_start is not None or next_end_of_turn is not None
@@ -1091,6 +1116,13 @@ async def run_dedicated_media_socket_leaf(
                                     return await terminate(closed)
                                 speech_start_sent = True
                                 speech_start_ms = speech_start.provider_start_ms
+                                if repeat_speech_start:
+                                    speech_start_sent = False
+                                    speech_start_ms = None
+                                    speech_start_task = asyncio.create_task(
+                                        _await_owned_call(next_speech_start),
+                                        name="live-voice-media-speech-start",
+                                    )
                         if (
                             not speech_boundaries_disabled
                             and (speech_start_sent or speech_start_task is None)
@@ -1125,7 +1157,20 @@ async def run_dedicated_media_socket_leaf(
                                         MediaDetachReason.TRANSPORT_SEND_FAILED
                                     )
                                     return await terminate(closed)
-                                end_of_turn_sent = True
+                                if repeat_speech_boundaries:
+                                    speech_start_sent = False
+                                    speech_start_ms = None
+                                    end_of_turn_sent = False
+                                    speech_start_task = asyncio.create_task(
+                                        _await_owned_call(next_speech_start),
+                                        name="live-voice-media-speech-start",
+                                    )
+                                    end_of_turn_task = asyncio.create_task(
+                                        _await_owned_call(next_end_of_turn),
+                                        name="live-voice-media-end-of-turn",
+                                    )
+                                else:
+                                    end_of_turn_sent = True
                         message = await asyncio.shield(receive_task)
                 receive_task = None
         except asyncio.CancelledError:
@@ -1213,7 +1258,7 @@ async def run_dedicated_media_downlink_socket_leaf(
     *,
     socket: DedicatedMediaSocket,
     frames: Iterable[MediaAudioFrame] | AsyncIterable[MediaAudioFrame],
-    on_playback_stop: Callable[[MediaPlaybackStopReceipt], None],
+    on_playback_stop: Callable[[MediaPlaybackStopReceipt], None | Awaitable[None]],
     on_complete: Callable[[DedicatedMediaSocketLeafResult], None] | None = None,
     max_pending_frames: int = 8,
     max_pending_bytes: int = 131_072,
@@ -1508,7 +1553,9 @@ async def run_dedicated_media_downlink_socket_leaf(
                         and exact_stop.confirmed_through_seq >= sent_frames
                     ):
                         return await terminate(MediaDetachReason.ACK_UNSENT)
-                    on_playback_stop(exact_stop)
+                    retained = on_playback_stop(exact_stop)
+                    if inspect.isawaitable(retained):
+                        await retained
                 except MediaTransportViolation as error:
                     return await terminate(coerce_reason(error.reason_id))
                 except Exception:

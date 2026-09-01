@@ -1611,6 +1611,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     )
     from jiuwenswarm.server.live_voice.batch_speech import (
         FormalBatchSpeechService,
+        SPEECH_API_BASE_ENV,
+        SPEECH_API_KEY_ENV,
         create_environment_batch_speech_provider,
     )
     from jiuwenswarm.server.live_voice.openai_streaming_speech import (
@@ -1620,7 +1622,75 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     from jiuwenswarm.server.live_voice.observability import (
         LiveVoiceObservabilityCollector,
     )
-    media_registry = DedicatedMediaProductRegistry.from_environment()
+    from jiuwenswarm.server.live_voice.native_interaction_config import (
+        InteractionEngineKind,
+        NativeInteractionConfigurationError,
+        select_interaction_engine_environment,
+    )
+    from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
+        GatewayNativeInteractionRuntimeClient,
+    )
+    from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
+        OpenAIRealtimeNativeInteractionEngine,
+    )
+    from jiuwenswarm.server.live_voice.openai_realtime_session import (
+        OpenAIRealtimeSessionConfig,
+    )
+
+    native_runtime_client = None
+    native_engine_factory = None
+    selected_native_model = None
+    try:
+        interaction_selection = select_interaction_engine_environment(os.environ)
+        selected_interaction_engine = interaction_selection.kind.value
+        selected_native_model = interaction_selection.native_model
+    except NativeInteractionConfigurationError as exc:
+        selected_interaction_engine = "unavailable"
+        logger.error(
+            "Live Voice interaction Engine selection unavailable: reason=%s",
+            exc.reason,
+        )
+    if (
+        selected_interaction_engine
+        == InteractionEngineKind.OPENAI_REALTIME_NATIVE.value
+    ):
+        resolved_native_agent_client = (
+            agent_client.get("value")
+            if isinstance(agent_client, dict)
+            else agent_client
+        )
+        try:
+            api_key = str(os.getenv(SPEECH_API_KEY_ENV) or "").strip()
+            api_base = str(os.getenv(SPEECH_API_BASE_ENV) or "").strip()
+            if not api_key or not isinstance(selected_native_model, str):
+                raise ValueError("Native Realtime Provider configuration unavailable")
+            native_session_config = OpenAIRealtimeSessionConfig(
+                api_key=api_key,
+                model=selected_native_model,
+                api_base=api_base or "https://api.openai.com/v1",
+            )
+            native_runtime_client = GatewayNativeInteractionRuntimeClient(
+                resolved_native_agent_client,
+                native_model=selected_native_model,
+            )
+
+            def native_engine_factory(binding):
+                return OpenAIRealtimeNativeInteractionEngine(
+                    native_session_config,
+                    binding=binding,
+                )
+
+        except Exception:
+            selected_interaction_engine = "unavailable"
+            native_runtime_client = None
+            native_engine_factory = None
+            logger.error("Live Voice Native Runtime client is unavailable")
+    channel.live_voice_interaction_engine = selected_interaction_engine
+    channel.live_voice_native_runtime_client = native_runtime_client
+    media_registry = DedicatedMediaProductRegistry.from_environment(
+        native_runtime_client=native_runtime_client,
+        native_engine_factory=native_engine_factory,
+    )
     speech_service = bind.speech_service
     media_registry_owns_speech_authority = speech_service is None
     if speech_service is None:
@@ -1821,6 +1891,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         ws_id = str(getattr(ws, "_jiuwen_ws_id", "") or "").strip()
         if callable(cleanup) and ws_id:
             await cleanup(channel.channel_id, ws_id)
+        native_client = getattr(channel, "live_voice_native_runtime_client", None)
+        forget_connection = getattr(native_client, "forget_connection", None)
+        if callable(forget_connection) and ws_id:
+            forget_connection(ws_id)
 
     register_disconnect = getattr(channel, "on_disconnect", None)
     if callable(register_disconnect):

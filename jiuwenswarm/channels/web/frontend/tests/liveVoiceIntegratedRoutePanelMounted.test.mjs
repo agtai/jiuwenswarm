@@ -7145,6 +7145,103 @@ test('mounted explicit P1 Start fails before media when exact P2 authority refre
   }
 });
 
+test('mounted one Start recovers a closed Native predecessor and captures on one successor', async () => {
+  const i18n = await createI18n();
+  let activeMediaBinding = null;
+  let mediaGeneration = 0;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const calls = [];
+  const p2Activations = [];
+  let renderer;
+  const request = async (method, params) => {
+    calls.push({ method, params: { ...params } });
+    if (method === 'live_voice.composition.p2.activate') {
+      const replayed = p2Activations.some(
+        binding =>
+          binding.activation_id === params.activation_id &&
+          binding.activation_generation === params.activation_generation,
+      );
+      p2Activations.push({ ...params });
+      if (p2Activations.length === 2) {
+        throw Object.assign(new Error('the exact Native runtime is already closed'), {
+          code: 'CONFLICT',
+          reason: 'NATIVE_RUNTIME_CLOSED',
+        });
+      }
+      return { ok: true, result: { status: 'active', ...params, replayed } };
+    }
+    if (method === 'live_voice.composition.p2.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.media.activate') {
+      mediaGeneration += 1;
+      activeMediaBinding = mountedMediaBinding(params, mediaGeneration);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: `mounted-native-recovery-media-${mediaGeneration}`,
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'N'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'fallback',
+          requested_capability: 'media.end_of_turn.v1',
+          reason_id: 'MEDIA_END_OF_TURN_FEATURE_OFF',
+          fallback: 'manual',
+          visible: true,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') {
+      activeMediaBinding = null;
+      return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    }
+    throw new Error(`unexpected closed-Native recovery request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP1Element(i18n, 'mounted-native-one-click-recovery', request));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await waitForMounted(() => formalVoiceStartButton(renderer).props.disabled === false, 'P2 did not expose formal P1');
+    });
+    await act(async () => {
+      formalVoiceStartButton(renderer).props.onClick();
+      await waitForMounted(
+        () => browser.counts.getUserMedia === 1,
+        `one Start did not activate the successor capture; calls=${JSON.stringify(calls)}`,
+      );
+    });
+
+    assert.deepEqual(
+      p2Activations.slice(0, 3).map(binding => binding.activation_generation),
+      [1, 1, 2],
+    );
+    assert.equal(
+      calls.filter(call => call.method === 'live_voice.composition.p2.close' && call.params.activation_generation === 1).length,
+      1,
+    );
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 1);
+    assert.equal(browser.counts.getUserMedia, 1);
+    assert.equal(calls.some(call => call.method.includes('submit') || call.method.includes('presentation.ack')), false);
+  } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await new Promise(resolve => setTimeout(resolve, 20));
+      });
+    }
+    browser.restore();
+  }
+});
+
 for (const refreshFailure of ['new-route', 'ambiguous-transport']) {
   test(`mounted ${refreshFailure} authority refresh closes exact P2 before route recovery and opens no media`, async () => {
     const i18n = await createI18n();

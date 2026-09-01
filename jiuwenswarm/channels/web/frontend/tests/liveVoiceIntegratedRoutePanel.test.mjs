@@ -907,6 +907,80 @@ test('P2 notification classification surfaces failures and treats transport keep
   );
 });
 
+test('P2 notification classification isolates exact Native audio from text presentation authority', () => {
+  const response = {
+    interaction_id: 'interaction-1',
+    response_id: 'native-response-1',
+    response_generation: 1,
+  };
+  const presentationUnit = {
+    response,
+    surface: 'audio',
+    unit_id: 'native-audio-unit-0',
+    seq: 0,
+    source_start_utf8: 0,
+    source_end_utf8: 480,
+    content_ref: `sha256:${'c'.repeat(64)}`,
+  };
+  const audio = {
+    delivery: 'dedicated_media_downlink',
+    media_ticket: 'N'.repeat(43),
+  };
+  const notification = {
+    status: 'notification',
+    kind: 'native.audio',
+    sequence_effect: 'neutral',
+    request_id: 'native-notification-1',
+    round_id: null,
+    response,
+    agent_event: null,
+    source_event: null,
+    progress_event: null,
+    presentation_unit: presentationUnit,
+    audio,
+    error_reason: null,
+    publish_seq: null,
+    session_id: 'session-1',
+    correlation_id: 'correlation-1',
+    interaction_id: 'interaction-1',
+    activation_id: 'activation-1',
+    activation_generation: 1,
+  };
+
+  const nativeDisposition = classifyProductP2Notification(notification);
+  assert.deepEqual(nativeDisposition, {
+    kind: 'native_audio',
+    response_id: 'native-response-1',
+    response,
+    unit_id: 'native-audio-unit-0',
+    presentation_unit: presentationUnit,
+    audio,
+  });
+  assert.notEqual(nativeDisposition.audio, audio);
+  assert.equal(Object.isFrozen(nativeDisposition.audio), false);
+  assert.equal(Reflect.deleteProperty(nativeDisposition.audio, 'media_ticket'), true);
+  assert.equal(Object.hasOwn(nativeDisposition.audio, 'media_ticket'), false);
+  assert.deepEqual(
+    classifyProductP2Notification({ ...notification, forged_text: 'must not be accepted' }),
+    {
+      kind: 'failed',
+      reason: 'PRODUCT_NATIVE_AUDIO_NOTIFICATION_INVALID',
+      response,
+    },
+  );
+  assert.deepEqual(
+    classifyProductP2Notification({
+      ...notification,
+      presentation_unit: { ...presentationUnit, response: { ...response, response_generation: 2 } },
+    }),
+    {
+      kind: 'failed',
+      reason: 'PRODUCT_NATIVE_AUDIO_NOTIFICATION_INVALID',
+      response,
+    },
+  );
+});
+
 test('terminal announcement arbitration preserves speech and every foreground P1 phase ahead of idle notification work', () => {
   const input = {
     queued: true,

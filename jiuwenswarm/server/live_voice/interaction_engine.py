@@ -66,6 +66,9 @@ class CascadeActionOperation(StrEnum):
 CASCADE_ACTION_OPERATIONS = frozenset(
     operation.value for operation in CascadeActionOperation
 )
+# Native and Cascade engines intentionally share one closed proposal vocabulary.
+# Runtime remains the authority that admits or rejects every proposed operation.
+INTERACTION_ACTION_OPERATIONS = CASCADE_ACTION_OPERATIONS
 
 
 class CascadeObservationKind(StrEnum):
@@ -400,13 +403,8 @@ class ScriptedCascadeInteractionEngine:
                 "INVALID_OBSERVATION_CAPACITY",
                 "max_observations exceeds the bounded positive range",
             )
-        if (
-            type(max_observation_identities) is not int
-            or not (
-                max_observations
-                <= max_observation_identities
-                <= _MAX_OBSERVATIONS
-            )
+        if type(max_observation_identities) is not int or not (
+            max_observations <= max_observation_identities <= _MAX_OBSERVATIONS
         ):
             raise InteractionEngineViolation(
                 "INVALID_OBSERVATION_IDENTITY_CAPACITY",
@@ -562,9 +560,7 @@ class ScriptedCascadeInteractionEngine:
             return True, action
 
     def release_through(self, observation_sequence: int) -> int:
-        cursor = _require_safe_integer(
-            observation_sequence, "observation_sequence"
-        )
+        cursor = _require_safe_integer(observation_sequence, "observation_sequence")
         with self._lock:
             # An already-released cursor is a no-op at every state, including a
             # fresh engine where cursor 0 would otherwise read as "ahead".

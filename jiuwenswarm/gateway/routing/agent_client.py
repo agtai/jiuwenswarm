@@ -546,9 +546,10 @@ class WebSocketAgentServerClient(AgentServerClient):
             raise RuntimeError("AgentServer WebSocket connection closed") from exc
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
-        connection_ws, connection_generation = (
-            await self._ensure_connected_for_request()
-        )
+        (
+            connection_ws,
+            connection_generation,
+        ) = await self._ensure_connected_for_request()
         # 非流式 API 必须与 AgentServer 的 unary 路径一致；忽略信封上误带的 is_stream=True。
         envelope.is_stream = False
         rid = _wire_request_id_key(envelope.request_id)
@@ -560,10 +561,6 @@ class WebSocketAgentServerClient(AgentServerClient):
             envelope.channel,
             envelope.method,
             envelope.is_stream,
-        )
-        logger.debug(
-            "[WebSocketAgentServerClient] 发送请求(非流式) E2A: %s",
-            _to_json(payload),
         )
 
         async with self._queue_lock:
@@ -669,10 +666,6 @@ class WebSocketAgentServerClient(AgentServerClient):
         try:
             # 发送请求
             async with self._lock:
-                logger.info(
-                    "[WebSocketAgentServerClient] 发送请求(非流式) payload: %s",
-                    _to_json(payload),
-                )
                 await self._send_wire_payload(
                     payload,
                     expected_ws=connection_ws,
@@ -710,9 +703,10 @@ class WebSocketAgentServerClient(AgentServerClient):
     async def send_request_stream(
         self, envelope: E2AEnvelope
     ) -> AsyncIterator[AgentResponseChunk]:
-        connection_ws, connection_generation = (
-            await self._ensure_connected_for_request()
-        )
+        (
+            connection_ws,
+            connection_generation,
+        ) = await self._ensure_connected_for_request()
         envelope.is_stream = True
         rid = _wire_request_id_key(envelope.request_id)
         logger.info(

@@ -40,11 +40,25 @@ from jiuwenswarm.server.live_voice.conversation_runtime import (
     ConversationRuntimeViolation,
     ResponseState,
 )
+from jiuwenswarm.server.live_voice import formal_history_writer as history_writer_module
+from jiuwenswarm.server.live_voice.formal_history_writer import (
+    SessionFormalHistoryWriter,
+)
 from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
     HarnessReservationState,
     HarnessRoundBinding,
     HarnessRoundViolation,
     JiuWenSwarmRoundHarness,
+)
+from jiuwenswarm.server.live_voice.native_interaction_contract import (
+    NATIVE_INTERACTION_CONTRACT_VERSION,
+    NativeInteractionBinding,
+    NativeTurnCommit,
+)
+from jiuwenswarm.server.live_voice.native_interaction_runtime import (
+    NativeHistoryAdmission,
+    NativeInteractionRuntimeOwner,
+    NativeUserHistoryAdmission,
 )
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationAck,
@@ -177,10 +191,18 @@ class ScriptedFormalAdapter(LowerFormalAdapter):
 
 
 class RecordingHistoryWriter:
-    def __init__(self, *, fail_assistant_once: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_assistant_once: bool = False,
+        fail_native_assistant_once: bool = False,
+    ) -> None:
         self.users = []
         self.assistant_intents = []
+        self.native_assistant_intents = []
+        self.native_user_intents = []
         self.fail_assistant_once = fail_assistant_once
+        self.fail_native_assistant_once = fail_native_assistant_once
 
     async def persist_user(self, current_commit, *, channel_id: str) -> bool:
         self.users.append((current_commit, channel_id))
@@ -194,6 +216,21 @@ class RecordingHistoryWriter:
             self.fail_assistant_once = False
             raise OSError("history unavailable")
         return tuple(True for _ in intent.contents)
+
+    async def persist_native_assistant(
+        self, admission, *, session_id: str, channel_id: str
+    ) -> bool:
+        if self.fail_native_assistant_once:
+            self.fail_native_assistant_once = False
+            raise OSError("native history unavailable")
+        self.native_assistant_intents.append((admission, session_id, channel_id))
+        return True
+
+    async def persist_native_user(
+        self, admission, *, session_id: str, channel_id: str
+    ) -> bool:
+        self.native_user_intents.append((admission, session_id, channel_id))
+        return True
 
 
 class BlockingHistoryWriter(RecordingHistoryWriter):
@@ -209,6 +246,24 @@ class BlockingHistoryWriter(RecordingHistoryWriter):
         await self.assistant_release.wait()
         return await super().persist_assistant(
             intent, session_id=session_id, channel_id=channel_id
+        )
+
+
+class BlockingNativeHistoryWriter(RecordingHistoryWriter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.native_started = asyncio.Event()
+        self.native_release = asyncio.Event()
+
+    async def persist_native_assistant(
+        self, admission, *, session_id: str, channel_id: str
+    ) -> bool:
+        self.native_started.set()
+        await self.native_release.wait()
+        return await super().persist_native_assistant(
+            admission,
+            session_id=session_id,
+            channel_id=channel_id,
         )
 
 
@@ -298,6 +353,7 @@ def runtime(
     max_requests: int = 256,
     notification_capacity: int = 64,
     bridge: AgentBridgeRuntime | None = None,
+    native_delegate_timeout_seconds: float = 25.0,
 ) -> AgentConversationRuntime:
     harness = JiuWenSwarmRoundHarness(
         instance_id="real-harness-1",
@@ -315,7 +371,583 @@ def runtime(
         history_writer=history,
         harness=harness,
         bridge=bridge,
+        native_delegate_timeout_seconds=native_delegate_timeout_seconds,
     )
+
+
+@pytest.mark.asyncio
+async def test_runtime_creates_native_owner_only_for_its_existing_cr_binding() -> None:
+    current = runtime(LowerFormalAdapter(), RecordingHistoryWriter())
+    assert await current.start() is True
+    await current.open_interaction("interaction-native")
+    native_binding = NativeInteractionBinding(
+        scope=scope(),
+        interaction_id="interaction-native",
+        activation_id="activation-native",
+        activation_generation=1,
+        correlation_id="correlation-native",
+    )
+
+    owner = current.create_native_interaction_runtime_owner(native_binding)
+    assert await owner.start() is True
+    await owner.close()
+
+    assert current.snapshot().closed is False
+    await current.close(timeout_seconds=0.2)
+
+
+@pytest.mark.asyncio
+async def test_native_history_admission_uses_canonical_writer_once() -> None:
+    history = RecordingHistoryWriter()
+    current = runtime(LowerFormalAdapter(), history)
+    assert await current.start() is True
+    await current.open_interaction("interaction-native-history")
+    admission = NativeHistoryAdmission(
+        response=ResponseRef(
+            "interaction-native-history",
+            "response-native-history",
+            1,
+        ),
+        turn_id="native-turn-history",
+        transcript="Canonical native answer.",
+        presented_at="2026-08-25T10:00:01Z",
+    )
+
+    assert (
+        await current.persist_native_assistant_history(
+            admission,
+            channel_id="web",
+        )
+        is True
+    )
+    assert (
+        await current.persist_native_assistant_history(
+            admission,
+            channel_id="web",
+        )
+        is True
+    )
+    assert history.native_assistant_intents == [(admission, scope().session_id, "web")]
+    assert current.snapshot().pending_history_intents == 0
+    assert (await current.close(timeout_seconds=0.2)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_history_writer_projects_native_admission_without_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records: list[tuple[str, dict[str, object]]] = []
+
+    def append(*, session_id: str, record: dict[str, object]) -> bool:
+        records.append((session_id, record))
+        return True
+
+    monkeypatch.setattr(
+        history_writer_module,
+        "append_formal_history_record_idempotent",
+        append,
+    )
+    admission = NativeHistoryAdmission(
+        response=ResponseRef("interaction-native", "response-native", 2),
+        turn_id="native-turn-history",
+        transcript="Canonical native transcript.",
+        presented_at="2026-08-25T10:00:01Z",
+    )
+
+    assert (
+        await SessionFormalHistoryWriter().persist_native_assistant(
+            admission,
+            session_id="session-formal",
+            channel_id="web",
+        )
+        is True
+    )
+    assert len(records) == 1
+    session_id, record = records[0]
+    assert session_id == "session-formal"
+    assert record["role"] == "assistant"
+    assert record["content"] == admission.transcript
+    assert record["event_type"] == "chat.final"
+    assert record["formal_binding"] == {
+        "interaction_id": admission.response.interaction_id,
+        "turn_id": admission.turn_id,
+        "response_id": admission.response.response_id,
+        "response_generation": admission.response.response_generation,
+        "surface": "native_audio",
+        "transcript_sha256": hashlib.sha256(
+            admission.transcript.encode("utf-8")
+        ).hexdigest(),
+    }
+    assert "audio" not in record
+
+
+@pytest.mark.asyncio
+async def test_session_history_writer_projects_native_user_admission_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records: list[tuple[str, dict[str, object]]] = []
+
+    def append(*, session_id: str, record: dict[str, object]) -> bool:
+        records.append((session_id, record))
+        return True
+
+    monkeypatch.setattr(
+        history_writer_module,
+        "append_formal_history_record_idempotent",
+        append,
+    )
+    admission = NativeUserHistoryAdmission(
+        binding=NativeInteractionBinding(
+            scope=scope(),
+            interaction_id="interaction-native-user",
+            activation_id="activation-native-user",
+            activation_generation=1,
+            correlation_id="correlation-native-user",
+        ),
+        turn_id="native-turn-user-1",
+        commit_id="native-commit-user-1",
+        provider_session_id="provider-session-1",
+        provider_item_id="provider-user-item-1",
+        provider_event_id="provider-user-transcript-1",
+        transcript="介绍你自己。",
+        observed_at="2026-08-31T10:00:01.000Z",
+    )
+
+    assert await SessionFormalHistoryWriter().persist_native_user(
+        admission,
+        session_id="session-formal",
+        channel_id="web",
+    )
+
+    assert len(records) == 1
+    session_id, record = records[0]
+    assert session_id == "session-formal"
+    assert record == {
+        "id": "live-voice:native-commit-user-1:native-user",
+        "role": "user",
+        "request_id": "native-commit-user-1",
+        "channel_id": "web",
+        "timestamp": 1788170401.0,
+        "content": "介绍你自己。",
+        "event_type": "chat.final",
+        "formal_binding": {
+            "interaction_id": "interaction-native-user",
+            "turn_id": "native-turn-user-1",
+            "commit_id": "native-commit-user-1",
+            "provider_session_id": "provider-session-1",
+            "provider_item_id": "provider-user-item-1",
+            "provider_event_id": "provider-user-transcript-1",
+            "source": "openai_realtime_input_audio_transcription",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_user_history_runtime_persists_exact_admission_once() -> None:
+    history = RecordingHistoryWriter()
+    current = runtime(LowerFormalAdapter(), history)
+    assert await current.start() is True
+    await current.open_interaction("interaction-native-user-history")
+    admission = NativeUserHistoryAdmission(
+        binding=NativeInteractionBinding(
+            scope=scope(),
+            interaction_id="interaction-native-user-history",
+            activation_id="activation-native-user-history",
+            activation_generation=1,
+            correlation_id="correlation-native-user-history",
+        ),
+        turn_id="native-turn-user-history-1",
+        commit_id="native-commit-user-history-1",
+        provider_session_id="provider-session-1",
+        provider_item_id="provider-user-item-1",
+        provider_event_id="provider-user-transcript-1",
+        transcript="介绍你自己。",
+        observed_at="2026-08-31T10:00:01.000Z",
+    )
+
+    assert await current.persist_native_user_history(admission, channel_id="web")
+    assert await current.persist_native_user_history(admission, channel_id="web")
+    assert history.native_user_intents == [(admission, scope().session_id, "web")]
+
+    with pytest.raises(AgentConversationRuntimeViolation) as changed:
+        await current.persist_native_user_history(
+            replace(admission, transcript="Changed transcript."), channel_id="web"
+        )
+    assert changed.value.reason == "NATIVE_USER_HISTORY_REPLAY_CONFLICT"
+    assert history.native_user_intents == [(admission, scope().session_id, "web")]
+
+
+@pytest.mark.asyncio
+async def test_native_history_writer_failure_is_retained_and_exact_retry_recovers() -> (
+    None
+):
+    history = RecordingHistoryWriter(fail_native_assistant_once=True)
+    current = runtime(LowerFormalAdapter(), history)
+    assert await current.start() is True
+    await current.open_interaction("interaction-native-history-retry")
+    admission = NativeHistoryAdmission(
+        response=ResponseRef(
+            "interaction-native-history-retry",
+            "response-native-history-retry",
+            1,
+        ),
+        turn_id="native-turn-history-retry",
+        transcript="Canonical retry answer.",
+        presented_at="2026-08-25T10:00:02Z",
+    )
+
+    with pytest.raises(AgentConversationRuntimeViolation) as raised:
+        await current.persist_native_assistant_history(admission, channel_id="web")
+    assert raised.value.reason == "NATIVE_HISTORY_WRITE_FAILED"
+    assert current.snapshot().pending_history_intents == 1
+    assert history.native_assistant_intents == []
+
+    assert (
+        await current.persist_native_assistant_history(
+            admission,
+            channel_id="web",
+        )
+        is True
+    )
+    assert history.native_assistant_intents == [(admission, scope().session_id, "web")]
+    assert current.snapshot().pending_history_intents == 0
+    assert (await current.close(timeout_seconds=0.2)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_scheduled_native_history_is_bounded_and_drained_during_close() -> None:
+    history = BlockingNativeHistoryWriter()
+    current = runtime(LowerFormalAdapter(), history, max_requests=1)
+    assert await current.start() is True
+    await current.open_interaction("interaction-native-history-drain")
+    admission = NativeHistoryAdmission(
+        response=ResponseRef(
+            "interaction-native-history-drain",
+            "response-native-history-drain",
+            1,
+        ),
+        turn_id="native-turn-history-drain",
+        transcript="Canonical drain answer.",
+        presented_at="2026-08-25T10:00:03Z",
+    )
+
+    assert await current.schedule_native_assistant_history(
+        admission,
+        channel_id="web",
+    )
+    assert await current.schedule_native_assistant_history(
+        admission,
+        channel_id="web",
+    )
+    await asyncio.wait_for(history.native_started.wait(), timeout=1.0)
+
+    pending = await current.close(timeout_seconds=0.01)
+    assert pending.status is AgentConversationShutdownStatus.PENDING
+    assert history.native_assistant_intents == []
+
+    history.native_release.set()
+    closed = await current.close(timeout_seconds=0.2)
+    assert closed.status is AgentConversationShutdownStatus.CLOSED
+    assert history.native_assistant_intents == [(admission, scope().session_id, "web")]
+
+
+async def _prepare_native_delegate_execution(
+    lower: LowerFormalAdapter,
+    *,
+    suffix: str,
+    native_delegate_timeout_seconds: float = 25.0,
+) -> tuple[
+    AgentConversationRuntime,
+    NativeInteractionRuntimeOwner,
+    NativeInteractionBinding,
+    ResponseRef,
+    TurnCommit,
+    FormalContextSnapshot,
+]:
+    current = runtime(
+        lower,
+        RecordingHistoryWriter(),
+        native_delegate_timeout_seconds=native_delegate_timeout_seconds,
+    )
+    assert await current.start() is True
+    interaction_id = f"interaction-native-{suffix}"
+    await current.open_interaction(interaction_id)
+    binding = NativeInteractionBinding(
+        scope=scope(),
+        interaction_id=interaction_id,
+        activation_id=f"activation-native-{suffix}",
+        activation_generation=1,
+        correlation_id=f"correlation-native-{suffix}",
+    )
+    owner = current.create_native_interaction_runtime_owner(binding)
+    assert await owner.start() is True
+    assert (
+        await owner.accept_turn(
+            NativeTurnCommit(
+                contract_version=NATIVE_INTERACTION_CONTRACT_VERSION,
+                commit_id=f"native-source-commit-{suffix}",
+                binding=binding,
+                turn_id=f"native-source-turn-{suffix}",
+                provider_session_id=f"provider-session-{suffix}",
+                provider_item_id=f"provider-user-item-{suffix}",
+                provider_event_id=f"provider-commit-event-{suffix}",
+                causation_id=f"provider-speech-event-{suffix}",
+                input_audio_start_ms=0,
+                input_audio_end_ms=20,
+                committed_audio_ms=20,
+            )
+        )
+        is True
+    )
+    source = await owner.accept_provider_response(
+        f"provider-response-{suffix}", f"response-native-source-{suffix}"
+    )
+    delegated = commit(
+        turn_id=f"native-delegate-turn-{suffix}",
+        commit_id=f"native-delegate-commit-{suffix}",
+        interaction_id=binding.interaction_id,
+        text="Use Jiuwen once",
+    )
+    context = FormalContextSnapshot(delegated.scope)
+    return current, owner, binding, source.response, delegated, context
+
+
+@pytest.mark.asyncio
+async def test_native_delegate_uses_existing_bridge_without_text_presentation() -> None:
+    lower = LowerFormalAdapter(final="Canonical Jiuwen result.")
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    assert await current.start() is True
+    await current.open_interaction("interaction-native-delegate")
+    native_binding = NativeInteractionBinding(
+        scope=scope(),
+        interaction_id="interaction-native-delegate",
+        activation_id="activation-native-delegate",
+        activation_generation=1,
+        correlation_id="correlation-native-delegate",
+    )
+    owner = current.create_native_interaction_runtime_owner(native_binding)
+    assert await owner.start() is True
+    native_commit = NativeTurnCommit(
+        contract_version=NATIVE_INTERACTION_CONTRACT_VERSION,
+        commit_id="native-source-commit",
+        binding=native_binding,
+        turn_id="native-source-turn",
+        provider_session_id="provider-session-native",
+        provider_item_id="provider-user-item-native",
+        provider_event_id="provider-commit-event-native",
+        causation_id="provider-speech-event-native",
+        input_audio_start_ms=0,
+        input_audio_end_ms=20,
+        committed_audio_ms=20,
+    )
+    assert await owner.accept_turn(native_commit) is True
+    source = await owner.accept_provider_response(
+        "provider-response-native", "response-native-source"
+    )
+    delegated = commit(
+        turn_id="native-delegate-turn",
+        commit_id="native-delegate-commit",
+        interaction_id=native_binding.interaction_id,
+        text="Use a Jiuwen tool",
+    )
+
+    result = await current.execute_native_delegate(
+        request_id="native-delegate-request",
+        source_response=source.response,
+        correlation_id=native_binding.correlation_id,
+        commit=delegated,
+        context=FormalContextSnapshot(delegated.scope),
+        channel_id="web",
+        allow_tools=True,
+    )
+
+    assert result == "Canonical Jiuwen result."
+    assert lower.calls == 1
+    assert history.users == []
+    assert history.assistant_intents == []
+    snapshot = current.snapshot()
+    assert snapshot.queued_notifications == 0
+    assert snapshot.conversation.presentation.records == ()
+    assert all(
+        record.ref != source.response or record.state is not ResponseState.TERMINAL
+        for record in snapshot.conversation.conversation.responses
+    )
+    await owner.close()
+    await current.close(timeout_seconds=0.2)
+
+
+@pytest.mark.asyncio
+async def test_native_delegate_caller_cancel_replays_one_retained_agent_execution() -> (
+    None
+):
+    release = asyncio.Event()
+    lower = LowerFormalAdapter(final="Canonical retained result.", release=release)
+    current = runtime(lower, RecordingHistoryWriter())
+    assert await current.start() is True
+    await current.open_interaction("interaction-native-delegate-cancel")
+    native_binding = NativeInteractionBinding(
+        scope=scope(),
+        interaction_id="interaction-native-delegate-cancel",
+        activation_id="activation-native-delegate-cancel",
+        activation_generation=1,
+        correlation_id="correlation-native-delegate-cancel",
+    )
+    owner = current.create_native_interaction_runtime_owner(native_binding)
+    assert await owner.start() is True
+    assert (
+        await owner.accept_turn(
+            NativeTurnCommit(
+                contract_version=NATIVE_INTERACTION_CONTRACT_VERSION,
+                commit_id="native-source-commit-cancel",
+                binding=native_binding,
+                turn_id="native-source-turn-cancel",
+                provider_session_id="provider-session-native-cancel",
+                provider_item_id="provider-user-item-native-cancel",
+                provider_event_id="provider-commit-event-native-cancel",
+                causation_id="provider-speech-event-native-cancel",
+                input_audio_start_ms=0,
+                input_audio_end_ms=20,
+                committed_audio_ms=20,
+            )
+        )
+        is True
+    )
+    source = await owner.accept_provider_response(
+        "provider-response-native-cancel", "response-native-source-cancel"
+    )
+    delegated = commit(
+        turn_id="native-delegate-turn-cancel",
+        commit_id="native-delegate-commit-cancel",
+        interaction_id=native_binding.interaction_id,
+        text="Use Jiuwen once",
+    )
+    invocation = {
+        "request_id": "native-delegate-request-cancel",
+        "source_response": source.response,
+        "correlation_id": native_binding.correlation_id,
+        "commit": delegated,
+        "context": FormalContextSnapshot(delegated.scope),
+        "channel_id": "web",
+        "allow_tools": True,
+    }
+    caller = asyncio.create_task(current.execute_native_delegate(**invocation))
+    await lower.started.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    replay = asyncio.create_task(current.execute_native_delegate(**invocation))
+    release.set()
+    assert await replay == "Canonical retained result."
+    assert lower.calls == 1
+    await owner.close()
+    closed = await current.close(timeout_seconds=0.2)
+    assert closed.status is AgentConversationShutdownStatus.CLOSED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "lower",
+    [
+        LowerFormalAdapter(final=None),
+        LowerFormalAdapter(error=OSError("injected Agent failure")),
+    ],
+    ids=["confirmation-or-final-pending", "agent-failed"],
+)
+async def test_native_delegate_requires_one_successful_canonical_agent_final(
+    lower: LowerFormalAdapter,
+) -> None:
+    (
+        current,
+        owner,
+        binding,
+        source,
+        delegated,
+        context,
+    ) = await _prepare_native_delegate_execution(lower, suffix=str(id(lower)))
+    invocation = {
+        "request_id": f"native-delegate-invalid-{id(lower)}",
+        "source_response": source,
+        "correlation_id": binding.correlation_id,
+        "commit": delegated,
+        "context": context,
+        "channel_id": "web",
+        "allow_tools": True,
+    }
+
+    with pytest.raises(AgentConversationRuntimeViolation) as raised:
+        await current.execute_native_delegate(**invocation)
+    assert raised.value.reason == "NATIVE_DELEGATE_AGENT_RESULT_INVALID"
+    with pytest.raises(AgentConversationRuntimeViolation) as replayed:
+        await current.execute_native_delegate(**invocation)
+    assert replayed.value.reason == raised.value.reason
+    assert lower.calls == 1
+    snapshot = current.snapshot()
+    assert snapshot.queued_notifications == 0
+    assert snapshot.conversation.presentation.records == ()
+    await owner.close()
+    closed = await current.close(timeout_seconds=0.2)
+    assert closed.status is AgentConversationShutdownStatus.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_native_delegate_server_deadline_cancels_once_and_closes_bounded() -> (
+    None
+):
+    never_release = asyncio.Event()
+    lower = LowerFormalAdapter(
+        final="forbidden late result",
+        release=never_release,
+    )
+    (
+        current,
+        owner,
+        binding,
+        source,
+        delegated,
+        context,
+    ) = await _prepare_native_delegate_execution(
+        lower,
+        suffix="deadline",
+        native_delegate_timeout_seconds=0.01,
+    )
+    invocation = {
+        "request_id": "native-delegate-deadline",
+        "source_response": source,
+        "correlation_id": binding.correlation_id,
+        "commit": delegated,
+        "context": context,
+        "channel_id": "web",
+        "allow_tools": True,
+    }
+
+    with pytest.raises(AgentConversationRuntimeViolation) as raised:
+        await asyncio.wait_for(
+            current.execute_native_delegate(**invocation), timeout=0.5
+        )
+    assert raised.value.reason == "NATIVE_DELEGATE_AGENT_TIMEOUT"
+    with pytest.raises(AgentConversationRuntimeViolation) as replayed:
+        await asyncio.wait_for(
+            current.execute_native_delegate(**invocation), timeout=0.1
+        )
+    assert replayed.value.reason == raised.value.reason
+    assert lower.calls == 1
+    assert current._harness.snapshot().cancel_effects == 1
+    before = current.snapshot()
+    await asyncio.sleep(0.02)
+    after = current.snapshot()
+    assert after.queued_notifications == before.queued_notifications == 0
+    assert after.conversation.presentation.records == ()
+    assert lower.calls == 1
+
+    await owner.close()
+    closed = await asyncio.wait_for(current.close(timeout_seconds=0.2), timeout=0.5)
+    assert closed.status is AgentConversationShutdownStatus.CLOSED
 
 
 async def prepare(

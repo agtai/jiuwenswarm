@@ -184,6 +184,8 @@ class AgentBridgeCompletion:
     source_event_count: int
     progress_event_count: int
     terminal_outcome: TerminalOutcome | None
+    canonical_text: str | None
+    canonical_final_count: int
 
 
 class AgentBridgeCompletionHandle:
@@ -654,9 +656,7 @@ class AgentBridgeRuntime:
     ) -> bool:
         running = asyncio.get_running_loop()
         self._require_owner_loop(running)
-        _validate_runtime_text(
-            reason, "reason", reason="INVALID_DISPATCH_ABORT_REASON"
-        )
+        _validate_runtime_text(reason, "reason", reason="INVALID_DISPATCH_ABORT_REASON")
         retained = self._reservations.get(reservation.request_id)
         if retained != reservation:
             raise AgentBridgeRuntimeViolation(
@@ -690,9 +690,7 @@ class AgentBridgeRuntime:
         """
 
         self._require_admission()
-        _validate_runtime_text(
-            reason, "reason", reason="INVALID_DISPATCH_ABORT_REASON"
-        )
+        _validate_runtime_text(reason, "reason", reason="INVALID_DISPATCH_ABORT_REASON")
         retained = self._reservations.get(reservation.request_id)
         if retained != reservation:
             raise AgentBridgeRuntimeViolation(
@@ -856,6 +854,8 @@ class AgentBridgeRuntime:
         agent_event_count = 0
         source_event_count = 0
         progress_event_count = 0
+        canonical_text: str | None = None
+        canonical_final_count = 0
         expected_agent_seq = 0
         envelope_seq = 0
         projection_seq = 0
@@ -904,6 +904,14 @@ class AgentBridgeRuntime:
                     )
                     expected_agent_seq += 1
                     agent_event_count += 1
+                    if item.event_type == "chat.final":
+                        canonical_final_count += 1
+                        if (
+                            canonical_final_count == 1
+                            and isinstance(item.text, str)
+                            and bool(item.text.strip())
+                        ):
+                            canonical_text = item.text
                     if (
                         measurement_binding is not None
                         and not first_delta_observed
@@ -954,9 +962,7 @@ class AgentBridgeRuntime:
                         elapsed_ms = (time.monotonic() - request_started) * 1_000.0
                         emit_runtime_l0_milestone(
                             component="agent",
-                            milestone=(
-                                L0Milestone.FIRST_STABLE_SPEAKABLE_SENTENCE
-                            ),
+                            milestone=(L0Milestone.FIRST_STABLE_SPEAKABLE_SENTENCE),
                             binding=measurement_binding,
                             duration_ms=elapsed_ms,
                             event_nonce=f"{request.request_id}:{item.seq}:stable",
@@ -1063,6 +1069,8 @@ class AgentBridgeRuntime:
                                     source_event_count=source_event_count,
                                     progress_event_count=progress_event_count,
                                     terminal_outcome=terminal_outcome,
+                                    canonical_text=canonical_text,
+                                    canonical_final_count=canonical_final_count,
                                 )
                             )
                         closing_stream = stream
@@ -1085,6 +1093,8 @@ class AgentBridgeRuntime:
                         source_event_count=source_event_count,
                         progress_event_count=progress_event_count,
                         terminal_outcome=terminal_outcome,
+                        canonical_text=canonical_text,
+                        canonical_final_count=canonical_final_count,
                     )
                 )
             closing_stream = stream

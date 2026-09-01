@@ -194,6 +194,73 @@ def test_agent_client_log_json_redacts_auth_token_without_mutating_payload():
 
 
 @pytest.mark.asyncio
+async def test_send_request_logs_bounded_metadata_without_rendering_audio_payload(
+    caplog,
+    monkeypatch,
+):
+    target_logger = logging.getLogger(agent_client.__name__)
+    previous_level = target_logger.level
+    previous_propagate = target_logger.propagate
+    target_logger.addHandler(caplog.handler)
+    target_logger.setLevel(logging.DEBUG)
+    target_logger.propagate = False
+    client = AgentClientHarness()
+    ws = FakeWebSocket()
+    client.set_ws_for_test(ws)
+    audio_sentinel = "AUDIO_BASE64_SENTINEL_" + ("A" * 20_000)
+    env = e2a_from_agent_fields(
+        request_id="rid-native-audio-log",
+        channel_id="web",
+        session_id="sess-native-audio-log",
+        params={
+            "content": audio_sentinel,
+            "frame_count": 16,
+            "auth_token": "formal-route-secret",
+        },
+        is_stream=False,
+    )
+    expected_wire_payload = env.to_dict()
+
+    def reject_hot_path_log_serialization(_payload):
+        raise AssertionError("unary send hot path must not render the E2A payload")
+
+    monkeypatch.setattr(agent_client, "_to_json", reject_hot_path_log_serialization)
+
+    try:
+        request = asyncio.create_task(client.send_request(env))
+        for _ in range(100):
+            if ws.sent_payloads:
+                break
+            await asyncio.sleep(0.001)
+        assert ws.sent_payloads
+
+        queue = client.get_message_queue_for_test("rid-native-audio-log")
+        await queue.put(
+            encode_agent_response_for_wire(
+                AgentResponse(
+                    request_id="rid-native-audio-log",
+                    channel_id="web",
+                    ok=True,
+                    payload={"status": "accepted"},
+                ),
+                response_id="rid-native-audio-log",
+            )
+        )
+        response = await asyncio.wait_for(request, timeout=0.5)
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.setLevel(previous_level)
+        target_logger.propagate = previous_propagate
+
+    assert response.payload == {"status": "accepted"}
+    assert json.loads(ws.sent_payloads[0]) == expected_wire_payload
+    assert "rid-native-audio-log" in caplog.text
+    assert audio_sentinel not in caplog.text
+    assert "formal-route-secret" not in caplog.text
+    assert max(len(record.getMessage()) for record in caplog.records) < 512
+
+
+@pytest.mark.asyncio
 async def test_send_request_stream_keeps_tail_window_for_processing_status(monkeypatch):
     client = AgentClientHarness()
     client.set_ws_for_test(FakeWebSocket())
@@ -830,10 +897,7 @@ async def test_old_stream_cleanup_cannot_remove_same_id_queue_after_reconnect():
     assert new_queue is not old_queue
 
     await old_stream.aclose()
-    assert (
-        client.get_message_queue_for_test("rid-stream-generation-reuse")
-        is new_queue
-    )
+    assert client.get_message_queue_for_test("rid-stream-generation-reuse") is new_queue
 
     await new_queue.put(
         encode_agent_chunk_for_wire(
@@ -867,10 +931,7 @@ async def test_old_delayed_marker_cleanup_cannot_clear_replacement_owner(monkeyp
         "rid-marker-reuse",
         old_token,
     )
-    assert (
-        client.get_cancelled_marker_for_test("rid-marker-reuse")
-        is replacement_token
-    )
+    assert client.get_cancelled_marker_for_test("rid-marker-reuse") is replacement_token
 
     await client._delayed_cleanup_cancelled_request_id(
         "rid-marker-reuse",

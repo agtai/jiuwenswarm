@@ -245,6 +245,47 @@ export interface MediaActivationRequest {
   readonly lifecycle_fact_capacity?: number;
 }
 
+const CONSUMER_FAILURE_REASON_PREFIXES = Object.freeze([
+  'ADAPTER_',
+  'AUDIO_',
+  'CAPTURE_',
+  'DOCUMENT_',
+  'FEATURE_',
+  'INSECURE_',
+  'INVALID_AUDIO_',
+  'INVALID_PLAYOUT_',
+  'PAGE_',
+  'PLAYOUT_',
+] as const);
+
+export type MediaConsumerFailureFallback =
+  | 'MEDIA_CONSUMER_FAILED'
+  | 'ADAPTER_AUDIO_FRAME_CALLBACK_FAILED'
+  | 'ADAPTER_SPEECH_START_CALLBACK_FAILED'
+  | 'ADAPTER_END_OF_TURN_CALLBACK_FAILED';
+
+export function boundedMediaConsumerFailureReason(
+  error: unknown,
+  fallback: MediaConsumerFailureFallback = 'MEDIA_CONSUMER_FAILED'
+): string {
+  let reason: unknown;
+  try {
+    reason = typeof error === 'object' && error !== null && 'reason' in error
+      ? (error as { readonly reason?: unknown }).reason
+      : null;
+  } catch {
+    return fallback;
+  }
+  if (
+    typeof reason !== 'string'
+    || reason.length === 0
+    || reason.length > 96
+    || !/^[A-Z][A-Z0-9_]*$/.test(reason)
+    || !CONSUMER_FAILURE_REASON_PREFIXES.some(prefix => reason.startsWith(prefix))
+  ) return fallback;
+  return reason;
+}
+
 export interface InactiveMediaActivation {
   readonly active: false;
   readonly reason_id:
@@ -1174,6 +1215,7 @@ export class StrictMediaReceiver {
   private nextCursor = 0;
   private lastAck = -1;
   private detachState: MediaDetach | null = null;
+  private consumerFailureReasonId: string | null = null;
 
   constructor(binding: MediaAuthorityBinding, onAudioFrame: (frame: MediaAudioFrame) => void) {
     if (typeof onAudioFrame !== 'function') {
@@ -1188,6 +1230,7 @@ export class StrictMediaReceiver {
   get next_seq(): number { return this.nextSeq; }
   get next_cursor(): number { return this.nextCursor; }
   get last_ack(): number | null { return this.lastAck < 0 ? null : this.lastAck; }
+  get consumer_failure_reason_id(): string | null { return this.consumerFailureReasonId; }
 
   private terminal(reasonId: unknown): MediaDetach {
     this.detachState ??= detachFor(
@@ -1223,7 +1266,11 @@ export class StrictMediaReceiver {
     if (frame.sample_cursor !== this.nextCursor) return this.terminal('MEDIA_CURSOR_MISMATCH');
     try {
       this.onAudioFrame(frame);
-    } catch {
+    } catch (error: unknown) {
+      this.consumerFailureReasonId = boundedMediaConsumerFailureReason(
+        error,
+        'ADAPTER_AUDIO_FRAME_CALLBACK_FAILED'
+      );
       return this.terminal('MEDIA_CONSUMER_FAILED');
     }
     if (this.closedState) return this.detachState ?? this.terminal('MEDIA_LEASE_CLOSED');
@@ -1339,6 +1386,7 @@ export class BrowserGatewayMediaRegistrationOwner {
   get audit_delivery_failures(): number { return this.#auditFailureCount; }
   get pending_lifecycle_facts(): number { return this.#lifecycleFacts.length; }
   get dropped_lifecycle_facts(): number { return this.#droppedLifecycleFactCount; }
+  get consumer_failure_reason_id(): string | null { return this.#receiver.consumer_failure_reason_id; }
 
   enqueue(frame: MediaAudioFrame): MediaEnqueueResult {
     if (this.#closedState) {

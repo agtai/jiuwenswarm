@@ -465,6 +465,8 @@ function requireP2BoundOperationResult(
 }
 
 const PRODUCT_P2_NOTIFICATION_BATCH_MAX = 16;
+const PRODUCT_P2_NOTIFICATION_SEQUENCE_MISMATCH = 'PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH';
+const PRODUCT_P2_NOTIFICATION_RESYNC_MAX_ATTEMPTS = 1;
 const PRODUCT_P2_NOTIFICATION_BATCH_KEYS = Object.freeze([
   'status',
   'notifications',
@@ -506,6 +508,39 @@ function isP2BatchObserver(notification: Readonly<Record<string, unknown>>): boo
   );
 }
 
+type ProductP2NotificationSequenceEffect = 'consumed' | 'neutral';
+
+function requireP2NotificationSequenceEffect(
+  notification: Readonly<Record<string, unknown>>,
+): ProductP2NotificationSequenceEffect {
+  const effect = notification.sequence_effect;
+  if (effect === undefined || effect === 'consumed') return 'consumed';
+  if (effect === 'neutral' && notification.publish_seq === null) return 'neutral';
+  throw new Error('product P2 notification sequence effect is invalid');
+}
+
+export function isProductNotificationSequenceMismatch(error: unknown): boolean {
+  const candidate = objectValue(error);
+  const payload = objectValue(candidate?.payload);
+  const detail = objectValue(payload?.error);
+  return (
+    candidate?.reason === PRODUCT_P2_NOTIFICATION_SEQUENCE_MISMATCH ||
+    detail?.reason === PRODUCT_P2_NOTIFICATION_SEQUENCE_MISMATCH
+  );
+}
+
+function productNotificationExpectedSequence(error: unknown): number | null {
+  if (!isProductNotificationSequenceMismatch(error)) return null;
+  const candidate = objectValue(error);
+  const payload = objectValue(candidate?.payload);
+  const detail = objectValue(payload?.error);
+  const details = objectValue(detail?.details);
+  const expectedSequence = details?.expected_sequence;
+  return Number.isSafeInteger(expectedSequence) && (expectedSequence as number) > 0
+    ? (expectedSequence as number)
+    : null;
+}
+
 function requireP2NotificationResult(
   value: unknown,
   binding: Readonly<ProductWebP2ActivationBinding>,
@@ -518,7 +553,9 @@ function requireP2NotificationResult(
     throw new Error('product P2 notification response is unavailable');
   }
   if (looseResult.status === 'notification') {
-    return Object.freeze([requireP2BoundOperationResult(value, 'notification', binding)]);
+    const notification = requireP2BoundOperationResult(value, 'notification', binding);
+    requireP2NotificationSequenceEffect(notification);
+    return Object.freeze([notification]);
   }
   let result: Record<string, unknown>;
   try {
@@ -937,7 +974,7 @@ export class ProductWebP2ActivationOwner {
   private readonly generationInterruptReplayFence = new ProductReplayFence();
   private notificationRequestId: string | null = null;
   private notificationPromise: Promise<JsonObject> | null = null;
-  private notificationSequence = 0;
+  private committedNotificationSequence = 0;
   private notificationQueue: JsonObject[] = [];
   private lastNotificationPublishSeq: number | null = null;
   private replayableNotificationBatch: Readonly<{
@@ -1222,50 +1259,66 @@ export class ProductWebP2ActivationOwner {
     const queued = this.notificationQueue.shift();
     if (queued !== undefined) return queued;
     if (this.notificationPromise) return this.notificationPromise;
-    if (this.notificationRequestId === null) {
-      this.notificationRequestId = allocateProductRequestId('live-voice-p2-notification');
-      this.notificationSequence += 1;
-    }
-    const requestId = this.notificationRequestId;
-    const params = {
-      ...binding,
-      notification_sequence: this.notificationSequence,
-      ...(this.notificationBatchSize > 1 ? { max_notifications: this.notificationBatchSize } : {}),
-    };
-    const priorPublishSeq = this.lastNotificationPublishSeq;
-    let promise: Promise<JsonObject>;
-    promise = this.request(PRODUCT_P2_NOTIFICATION_NEXT_METHOD, params, requestId)
-      .then(value => {
-        if (this.closing || this.binding === null || !sameBinding(this.binding, binding)) {
-          throw new Error('product P2 notification owner is no longer current');
+    const poll = async (): Promise<JsonObject> => {
+      for (let resyncAttempts = 0; ; ) {
+        if (this.notificationRequestId === null) {
+          this.notificationRequestId = allocateProductRequestId('live-voice-p2-notification');
         }
-        const notifications = requireP2NotificationResult(value, binding, this.notificationBatchSize, priorPublishSeq);
-        const [result, ...tail] = notifications;
-        if (result === undefined) throw new Error('product P2 notification batch is empty');
-        for (let index = notifications.length - 1; index >= 0; index -= 1) {
-          const publishSeq = notifications[index].publish_seq;
-          if (typeof publishSeq === 'number') {
-            this.lastNotificationPublishSeq = publishSeq;
-            break;
+        const requestId = this.notificationRequestId;
+        const candidateSequence = this.committedNotificationSequence + 1;
+        const params = {
+          ...binding,
+          notification_sequence: candidateSequence,
+          ...(this.notificationBatchSize > 1 ? { max_notifications: this.notificationBatchSize } : {}),
+        };
+        const priorPublishSeq = this.lastNotificationPublishSeq;
+        try {
+          const value = await this.request(PRODUCT_P2_NOTIFICATION_NEXT_METHOD, params, requestId);
+          if (this.closing || this.binding === null || !sameBinding(this.binding, binding)) {
+            throw new Error('product P2 notification owner is no longer current');
           }
+          const notifications = requireP2NotificationResult(value, binding, this.notificationBatchSize, priorPublishSeq);
+          const [result, ...tail] = notifications;
+          if (result === undefined) throw new Error('product P2 notification batch is empty');
+          for (let index = notifications.length - 1; index >= 0; index -= 1) {
+            const publishSeq = notifications[index].publish_seq;
+            if (typeof publishSeq === 'number') {
+              this.lastNotificationPublishSeq = publishSeq;
+              break;
+            }
+          }
+          this.notificationQueue.push(...tail);
+          if (requireP2NotificationSequenceEffect(result) === 'consumed') {
+            this.committedNotificationSequence = candidateSequence;
+            this.replayableNotificationBatch = Object.freeze({
+              requestId,
+              params: Object.freeze({ ...params }),
+              priorPublishSeq,
+              notifications,
+            });
+          }
+          this.notificationRequestId = null;
+          return result;
+        } catch (error) {
+          if (isProductNotificationSequenceMismatch(error)) {
+            const expectedSequence = productNotificationExpectedSequence(error);
+            this.notificationRequestId = null;
+            if (expectedSequence !== null && resyncAttempts < PRODUCT_P2_NOTIFICATION_RESYNC_MAX_ATTEMPTS) {
+              this.committedNotificationSequence = expectedSequence - 1;
+              resyncAttempts += 1;
+              continue;
+            }
+          } else if (isDefinitiveProductOperationError(error)) {
+            this.notificationRequestId = null;
+          }
+          throw error;
         }
-        this.notificationQueue.push(...tail);
-        this.replayableNotificationBatch = Object.freeze({
-          requestId,
-          params: Object.freeze({ ...params }),
-          priorPublishSeq,
-          notifications,
-        });
-        this.notificationRequestId = null;
-        return result;
-      })
-      .catch(error => {
-        if (isDefinitiveProductOperationError(error)) this.notificationRequestId = null;
-        throw error;
-      })
-      .finally(() => {
-        if (this.notificationPromise === promise) this.notificationPromise = null;
-      });
+      }
+    };
+    let promise: Promise<JsonObject>;
+    promise = poll().finally(() => {
+      if (this.notificationPromise === promise) this.notificationPromise = null;
+    });
     this.notificationPromise = promise;
     return promise;
   }
@@ -1725,7 +1778,8 @@ export async function pollProductP2RouteWithRecovery<TSuccessor>(input: {
       is_current: input.is_current,
     });
     return { kind: 'notification', notification };
-  } catch {
+  } catch (error) {
+    if (isProductNotificationSequenceMismatch(error)) throw error;
     await input.settle_retained_operations();
     await input.owner.closeWithRetry();
     if (!input.can_activate_successor()) {

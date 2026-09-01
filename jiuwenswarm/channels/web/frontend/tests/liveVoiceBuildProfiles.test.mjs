@@ -90,6 +90,44 @@ test("the controlled launcher builds the explicit profile and owns Demo-only run
     formalWebLauncher,
     /-RuntimeProfile formal-web-validation -RestartExisting/u,
   );
+  for (const portParameter of [
+    "AgentServerPort",
+    "WebPort",
+    "GatewayPort",
+    "FrontendPort",
+  ]) {
+    assert.match(
+      launcher,
+      new RegExp(`\\[int\\]\\$${portParameter}\\b`, "u"),
+      `${portParameter} must be an explicit controlled-launcher parameter`,
+    );
+  }
+  assert.match(
+    launcher,
+    /AGENT_SERVER_PORT\s*=\s*\$AgentServerPort/u,
+  );
+  assert.match(launcher, /WEB_PORT\s*=\s*\$WebPort/u);
+  assert.match(launcher, /GATEWAY_PORT\s*=\s*\$GatewayPort/u);
+  assert.match(
+    launcher,
+    /ExpectedPorts\.Values \| Select-Object -Unique/u,
+  );
+  assert.match(
+    launcher,
+    /ValidateSet\('cascade', 'openai-realtime-native'\)/u,
+  );
+  assert.match(
+    launcher,
+    /LIVE_VOICE_INTERACTION_ENGINE\s+=\s+\$InteractionEngine/u,
+  );
+  assert.match(
+    launcher,
+    /LIVE_VOICE_NATIVE_REALTIME_MODEL\s+=\s+\$NativeRealtimeModel/u,
+  );
+  assert.match(
+    launcher,
+    /interaction_engine\s+=\s+\$InteractionEngine/u,
+  );
   assert.match(
     launcher,
     /JIUWENSWARM_LIVE_VOICE_RUNTIME_PROFILE\s*=\s*\$RuntimeProfile/u,

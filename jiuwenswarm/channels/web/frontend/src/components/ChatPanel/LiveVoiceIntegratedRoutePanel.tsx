@@ -32,6 +32,7 @@ import {
   PRODUCT_P3_TASK_EVENTS_METHOD,
   PRODUCT_P3_TASK_STATUS_METHOD,
   ProductWebP2ActivationOwner,
+  isProductNotificationSequenceMismatch,
   ProductWebP3MutationOwner,
   ProductWebP3ProgressOwner,
   isDefinitiveProductOperationError,
@@ -51,6 +52,7 @@ import {
   PRODUCT_P1_CAPTURE_MAX_DURATION_MS,
   PRODUCT_P1_EMPTY_TRANSCRIPT_REASON,
   ProductP1VoiceRouteOwner,
+  type ProductP1InteractionEngine,
   type ProductP1VoiceStatus,
 } from '../../features/live-voice/formal/productP1VoiceRoute';
 import {
@@ -258,7 +260,7 @@ export const PRODUCT_P2_NOTIFICATION_PENDING_BACKOFF_MS = 500;
 export const PRODUCT_TASK_NOTIFICATION_PLAYOUT_TIMEOUT_MS = 15_000;
 
 export async function awaitProductTaskNotificationPlayout(
-  operation: Promise<void>,
+  operation: Promise<unknown>,
   onTimeout: () => void,
   timeoutMs = PRODUCT_TASK_NOTIFICATION_PLAYOUT_TIMEOUT_MS,
 ): Promise<void> {
@@ -699,6 +701,16 @@ export function productTextBlockedByP1Status(status: ProductP1VoiceStatus): bool
   return ['starting', 'capturing', 'recognizing', 'playing', 'cleanup_pending'].includes(status);
 }
 
+export function shouldBlockProductP2NotificationPoll(
+  status: ProductP1VoiceStatus,
+  interactionEngine: ProductP1InteractionEngine,
+): boolean {
+  return (
+    ['starting', 'recognizing', 'playing', 'cleanup_pending'].includes(status) ||
+    (status === 'capturing' && interactionEngine !== 'openai-realtime-native')
+  );
+}
+
 export function recognizedSpeechConfirmationMatches(
   pending: RecognizedSpeechConfirmation | null,
   recognized: ProductRecognizedVoice | null,
@@ -805,6 +817,38 @@ export type ProductP2NotificationDisposition =
       readonly task_notification: boolean;
       readonly task_notification_terminal: boolean;
       readonly adjustment_notification: boolean;
+    }
+  | {
+      readonly kind: 'native_audio';
+      readonly response_id: string;
+      readonly response: Readonly<{
+        interaction_id: string;
+        response_id: string;
+        response_generation: number;
+      }>;
+      readonly unit_id: string;
+      readonly presentation_unit: Readonly<Record<string, unknown>>;
+      readonly audio: Readonly<Record<string, unknown>>;
+    }
+  | {
+      readonly kind: 'native_user_transcript';
+      readonly session_id: string;
+      readonly correlation_id: string;
+      readonly interaction_id: string;
+      readonly activation_id: string;
+      readonly activation_generation: number;
+      readonly message: Readonly<{
+        id: string;
+        role: 'user';
+        content: string;
+        timestamp: string;
+      }>;
+      readonly following_assistant: readonly Readonly<{
+        id: string;
+        role: 'assistant';
+        content: string;
+        timestamp: string;
+      }>[];
     };
 
 type PendingForegroundPresentationFence = Readonly<{
@@ -1074,6 +1118,12 @@ export function rememberProductP3ProgressExhaustion(exhausted: Map<string, true>
 
 function recordValue(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function hasExactFields(value: Readonly<Record<string, unknown>>, fields: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...fields].sort();
+  return actual.length === expected.length && actual.every((field, index) => field === expected[index]);
 }
 
 export function formalTaskIntentResultSummary(receipt: FormalTaskIntentReceipt | null | undefined): string | null {
@@ -1425,6 +1475,207 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
           response_generation: response.response_generation as number,
         })
       : null;
+  if (notification.kind === 'native.user_transcript') {
+    const message = recordValue(event?.message);
+    const binding = recordValue(event?.binding);
+    const scope = recordValue(binding?.scope);
+    const timestamp = message?.timestamp;
+    const followingAssistant = event?.following_assistant;
+    const timestampDate =
+      typeof timestamp === 'number' && Number.isFinite(timestamp) && timestamp >= 0
+        ? new Date(timestamp * 1_000)
+        : null;
+    const valid =
+      hasExactFields(notification, [
+        'status', 'kind', 'request_id', 'round_id', 'response', 'agent_event',
+        'source_event', 'progress_event', 'presentation_unit', 'audio',
+        'error_reason', 'publish_seq', 'session_id', 'correlation_id',
+        'interaction_id', 'activation_id', 'activation_generation', 'sequence_effect',
+      ]) &&
+      notification.status === 'notification' &&
+      notification.sequence_effect === 'neutral' &&
+      typeof notification.request_id === 'string' && notification.request_id.trim().length > 0 &&
+      notification.round_id === null &&
+      notification.response === null &&
+      notification.source_event === null &&
+      notification.progress_event === null &&
+      notification.presentation_unit === null &&
+      notification.audio === null &&
+      notification.error_reason === null &&
+      notification.publish_seq === null &&
+      typeof notification.session_id === 'string' && notification.session_id.trim().length > 0 &&
+      typeof notification.correlation_id === 'string' && notification.correlation_id.trim().length > 0 &&
+      typeof notification.interaction_id === 'string' && notification.interaction_id.trim().length > 0 &&
+      typeof notification.activation_id === 'string' && notification.activation_id.trim().length > 0 &&
+      Number.isSafeInteger(notification.activation_generation) &&
+      (notification.activation_generation as number) > 0 &&
+      event !== null &&
+      (hasExactFields(event, ['event_type', 'message', 'binding']) ||
+        hasExactFields(event, ['event_type', 'message', 'binding', 'following_assistant'])) &&
+      event.event_type === 'chat.final' &&
+      message !== null &&
+      hasExactFields(message, ['id', 'role', 'content', 'timestamp']) &&
+      typeof message.id === 'string' && message.id.trim().length > 0 &&
+      message.role === 'user' &&
+      typeof message.content === 'string' &&
+      message.content.trim().length > 0 &&
+      message.content === message.content.trim() &&
+      timestampDate !== null &&
+      Number.isFinite(timestampDate.getTime()) &&
+      binding !== null &&
+      hasExactFields(binding, [
+        'scope', 'interaction_id', 'activation_id', 'activation_generation',
+        'correlation_id', 'turn_id', 'commit_id', 'provider_session_id',
+        'provider_item_id', 'provider_event_id',
+      ]) &&
+      scope !== null &&
+      hasExactFields(scope, ['subject_id', 'project_id', 'session_id', 'assurance']) &&
+      typeof scope.subject_id === 'string' && scope.subject_id.trim().length > 0 &&
+      (scope.project_id === null || (typeof scope.project_id === 'string' && scope.project_id.trim().length > 0)) &&
+      scope.session_id === notification.session_id &&
+      (scope.assurance === 'request_asserted' || scope.assurance === 'authenticated') &&
+      binding.interaction_id === notification.interaction_id &&
+      binding.activation_id === notification.activation_id &&
+      binding.activation_generation === notification.activation_generation &&
+      binding.correlation_id === notification.correlation_id &&
+      typeof binding.turn_id === 'string' && binding.turn_id.trim().length > 0 &&
+      typeof binding.commit_id === 'string' && binding.commit_id.trim().length > 0 &&
+      typeof binding.provider_session_id === 'string' && binding.provider_session_id.trim().length > 0 &&
+      typeof binding.provider_item_id === 'string' && binding.provider_item_id.trim().length > 0 &&
+      typeof binding.provider_event_id === 'string' && binding.provider_event_id.trim().length > 0 &&
+      message.id === `live-voice:${binding.commit_id}:native-user` &&
+      (followingAssistant === undefined || (Array.isArray(followingAssistant) && followingAssistant.length > 0));
+    if (!valid) {
+      return { kind: 'failed', reason: 'PRODUCT_NATIVE_USER_TRANSCRIPT_NOTIFICATION_INVALID' };
+    }
+    const parsedFollowing: Array<Readonly<{
+      id: string;
+      role: 'assistant';
+      content: string;
+      timestamp: string;
+    }>> = [];
+    for (const candidate of (followingAssistant ?? []) as unknown[]) {
+      const projection = recordValue(candidate);
+      const assistantMessage = recordValue(projection?.message);
+      const assistantBinding = recordValue(projection?.binding);
+      const assistantResponse = recordValue(assistantBinding?.response);
+      const assistantTimestamp = assistantMessage?.timestamp;
+      const assistantTimestampDate =
+        typeof assistantTimestamp === 'number' && Number.isFinite(assistantTimestamp) && assistantTimestamp >= 0
+          ? new Date(assistantTimestamp * 1_000)
+          : null;
+      if (
+        projection === null ||
+        !hasExactFields(projection, ['message', 'binding']) ||
+        assistantMessage === null ||
+        !hasExactFields(assistantMessage, ['id', 'role', 'content', 'timestamp']) ||
+        typeof assistantMessage.id !== 'string' || !assistantMessage.id.trim() ||
+        assistantMessage.role !== 'assistant' ||
+        typeof assistantMessage.content !== 'string' || !assistantMessage.content.trim() ||
+        assistantMessage.content !== assistantMessage.content.trim() ||
+        assistantTimestampDate === null || !Number.isFinite(assistantTimestampDate.getTime()) ||
+        assistantBinding === null ||
+        !hasExactFields(assistantBinding, ['turn_id', 'response', 'surface', 'presented_at']) ||
+        assistantBinding.turn_id !== binding.turn_id ||
+        assistantBinding.surface !== 'native_audio' ||
+        typeof assistantBinding.presented_at !== 'string' ||
+        !assistantBinding.presented_at.trim() ||
+        !Number.isFinite(Date.parse(assistantBinding.presented_at)) ||
+        assistantResponse === null ||
+        !hasExactFields(assistantResponse, ['interaction_id', 'response_id', 'response_generation']) ||
+        assistantResponse.interaction_id !== notification.interaction_id ||
+        typeof assistantResponse.response_id !== 'string' || !assistantResponse.response_id.trim() ||
+        !Number.isSafeInteger(assistantResponse.response_generation) ||
+        (assistantResponse.response_generation as number) <= 0
+      ) {
+        return { kind: 'failed', reason: 'PRODUCT_NATIVE_USER_TRANSCRIPT_NOTIFICATION_INVALID' };
+      }
+      parsedFollowing.push(Object.freeze({
+        id: assistantMessage.id,
+        role: 'assistant',
+        content: assistantMessage.content,
+        timestamp: assistantTimestampDate.toISOString(),
+      }));
+    }
+    return {
+      kind: 'native_user_transcript',
+      session_id: notification.session_id as string,
+      correlation_id: notification.correlation_id as string,
+      interaction_id: notification.interaction_id as string,
+      activation_id: notification.activation_id as string,
+      activation_generation: notification.activation_generation as number,
+      message: Object.freeze({
+        id: message.id as string,
+        role: 'user',
+        content: message.content as string,
+        timestamp: timestampDate!.toISOString(),
+      }),
+      following_assistant: Object.freeze(parsedFollowing),
+    };
+  }
+  if (notification.kind === 'native.audio') {
+    const unitResponse = recordValue(unit?.response);
+    const audio = recordValue(notification.audio);
+    const valid =
+      hasExactFields(notification, [
+        'status', 'kind', 'request_id', 'round_id', 'response', 'agent_event',
+        'source_event', 'progress_event', 'presentation_unit', 'audio',
+        'error_reason', 'publish_seq', 'session_id', 'correlation_id',
+        'interaction_id', 'activation_id', 'activation_generation', 'sequence_effect',
+      ]) &&
+      notification.status === 'notification' &&
+      notification.sequence_effect === 'neutral' &&
+      typeof notification.request_id === 'string' && notification.request_id.trim().length > 0 &&
+      notification.round_id === null &&
+      notification.agent_event === null &&
+      notification.source_event === null &&
+      notification.progress_event === null &&
+      notification.error_reason === null &&
+      notification.publish_seq === null &&
+      typeof notification.session_id === 'string' && notification.session_id.trim().length > 0 &&
+      typeof notification.correlation_id === 'string' && notification.correlation_id.trim().length > 0 &&
+      typeof notification.interaction_id === 'string' &&
+      typeof notification.activation_id === 'string' && notification.activation_id.trim().length > 0 &&
+      Number.isSafeInteger(notification.activation_generation) &&
+      (notification.activation_generation as number) > 0 &&
+      responseBinding !== null &&
+      responseBinding.interaction_id === notification.interaction_id &&
+      responseBinding.response_generation > 0 &&
+      unit !== null &&
+      hasExactFields(unit, [
+        'response', 'surface', 'unit_id', 'seq', 'source_start_utf8',
+        'source_end_utf8', 'content_ref',
+      ]) &&
+      unitResponse !== null &&
+      hasExactFields(unitResponse, ['interaction_id', 'response_id', 'response_generation']) &&
+      unitResponse.interaction_id === responseBinding.interaction_id &&
+      unitResponse.response_id === responseBinding.response_id &&
+      unitResponse.response_generation === responseBinding.response_generation &&
+      unit.surface === 'audio' &&
+      typeof unit.unit_id === 'string' && unit.unit_id.trim().length > 0 &&
+      Number.isSafeInteger(unit.seq) && (unit.seq as number) >= 0 &&
+      Number.isSafeInteger(unit.source_start_utf8) && (unit.source_start_utf8 as number) >= 0 &&
+      Number.isSafeInteger(unit.source_end_utf8) &&
+      (unit.source_end_utf8 as number) >= (unit.source_start_utf8 as number) &&
+      typeof unit.content_ref === 'string' && /^sha256:[0-9a-f]{64}$/.test(unit.content_ref) &&
+      audio !== null;
+    if (!valid) {
+      return responseBinding === null
+        ? { kind: 'failed', reason: 'PRODUCT_NATIVE_AUDIO_NOTIFICATION_INVALID' }
+        : { kind: 'failed', reason: 'PRODUCT_NATIVE_AUDIO_NOTIFICATION_INVALID', response: responseBinding };
+    }
+    return {
+      kind: 'native_audio',
+      response_id: responseBinding.response_id,
+      response: responseBinding,
+      unit_id: unit.unit_id as string,
+      presentation_unit: Object.freeze({ ...unit, response: Object.freeze({ ...unitResponse }) }),
+      // This object is the one-use handoff into P1. P1 must remove the private
+      // media ticket immediately after creating its ticket consumer, so freezing
+      // the handoff here makes an otherwise valid Gateway descriptor unusable.
+      audio: { ...audio },
+    };
+  }
   if (
     notification.kind === 'agent.error' ||
     errorReason !== null ||
@@ -1796,6 +2047,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   }> | null>(null);
   const recoveryDiagnosticRef = useRef<ProductLiveVoiceRecoveryDiagnostic | null>(null);
   const presentedProductResponsesRef = useRef(new Map<string, true>());
+  const presentedNativeChatMessagesRef = useRef(new Map<string, true>());
   const progressActivationOwnerRef = useRef<ProductWebP3ProgressOwner | null>(null);
   const p3MutationOwnerRef = useRef<ProductWebP3MutationOwner | null>(null);
   const taskIntentOwnerRef = useRef<ProductFormalTaskIntentOwner | null>(null);
@@ -2827,6 +3079,45 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // the replacement turn.
       return disposition;
     }
+    if (disposition.kind === 'native_user_transcript') {
+      if (
+        presentationBinding === null ||
+        presentationBinding.session_id !== disposition.session_id ||
+        presentationBinding.correlation_id !== disposition.correlation_id ||
+        presentationBinding.interaction_id !== disposition.interaction_id ||
+        presentationBinding.activation_id !== disposition.activation_id ||
+        presentationBinding.activation_generation !== disposition.activation_generation
+      ) {
+        return disposition;
+      }
+      if (!presentedNativeChatMessagesRef.current.has(disposition.message.id)) {
+        retainBoundedPresentedProductResponse(
+          presentedNativeChatMessagesRef.current,
+          disposition.message.id,
+        );
+        props.onProductVoiceMessage?.(
+          Object.freeze({
+            session_id: disposition.session_id,
+            message: disposition.message,
+          }),
+        );
+      }
+      for (const assistant of disposition.following_assistant) {
+        if (presentedNativeChatMessagesRef.current.has(assistant.id)) continue;
+        retainBoundedPresentedProductResponse(
+          presentedNativeChatMessagesRef.current,
+          assistant.id,
+        );
+        props.onProductVoiceMessage?.(
+          Object.freeze({
+            session_id: disposition.session_id,
+            message: assistant,
+          }),
+        );
+      }
+      setP2NotificationWakeEpoch(epoch => epoch + 1);
+      return disposition;
+    }
     if (disposition.kind === 'failed') {
       const settlesForegroundPresentation = foregroundPresentationFenceMatchesResponse(
         pendingForegroundPresentationRef.current,
@@ -2868,6 +3159,101 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (!deferredTaskSettlementStarted && !continuePendingVoiceLoopP2Refresh()) {
         scheduleProductVoiceLoopCapture();
       }
+      return disposition;
+    }
+    if (disposition.kind === 'native_audio') {
+      const foregroundFence = pendingForegroundPresentationRef.current;
+      const ownsForegroundResponse = foregroundPresentationFenceMatchesResponse(
+        foregroundFence,
+        presentationBinding,
+        disposition.response,
+      );
+      const expectedForegroundResponse = admission?.foreground_presentation ?? null;
+      if (
+        (expectedForegroundResponse !== null || foregroundFence !== null) &&
+        (foregroundFence !== expectedForegroundResponse || !ownsForegroundResponse)
+      ) {
+        return disposition;
+      }
+      if (ownsForegroundResponse) pendingForegroundPresentationRef.current = null;
+      const voiceOwner = p1VoiceOwnerRef.current;
+      if (
+        voiceOwner === null ||
+        voiceOwner.interactionEngine() !== 'openai-realtime-native' ||
+        voiceOwner.status().status !== 'capturing'
+      ) {
+        const reason = 'PRODUCT_NATIVE_AUDIO_OWNER_UNAVAILABLE';
+        setProductTextReason(reason);
+        setProductTextStatus('failed');
+        publishProductRecoveryDiagnostic({
+          seam: 'response_generation',
+          disposition: 'terminal',
+          reason,
+          binding: presentationBinding,
+          response: disposition.response,
+        });
+        setP2NotificationWakeEpoch(epoch => epoch + 1);
+        return disposition;
+      }
+      const playoutLoopGeneration = voiceLoopGenerationRef.current;
+      const isCurrentNativePlayout = () =>
+        mountedRef.current &&
+        activationOwnerRef.current === owner &&
+        presentationBinding !== null &&
+        activeSessionRef.current === presentationBinding.session_id &&
+        voiceLoopGenerationRef.current === playoutLoopGeneration &&
+        p1VoiceOwnerRef.current === voiceOwner;
+      activeVoiceResponseRef.current = disposition.response;
+      setProductTextReason(null);
+      setProductTextStatus('waiting');
+      void voiceOwner.playNativeAudio({
+        response: disposition.response,
+        presentation_unit: disposition.presentation_unit,
+        audio: disposition.audio,
+      }).then(chatProjection => {
+        if (activeVoiceResponseRef.current?.response_id === disposition.response_id) {
+          activeVoiceResponseRef.current = null;
+        }
+        if (presentationBinding === null || !isCurrentNativePlayout()) return;
+        if (
+          chatProjection !== null &&
+          !presentedNativeChatMessagesRef.current.has(chatProjection.id)
+        ) {
+          retainBoundedPresentedProductResponse(
+            presentedNativeChatMessagesRef.current,
+            chatProjection.id,
+          );
+          props.onProductVoiceMessage?.(
+            Object.freeze({
+              session_id: presentationBinding.session_id,
+              message: chatProjection,
+            }),
+          );
+        }
+        setProductTextStatus('acknowledged');
+        clearProductRecoveryDiagnostic({
+          seam: 'response_generation',
+          binding: presentationBinding,
+          response: disposition.response,
+        });
+        setP2NotificationWakeEpoch(epoch => epoch + 1);
+      }).catch(error => {
+        if (activeVoiceResponseRef.current?.response_id === disposition.response_id) {
+          activeVoiceResponseRef.current = null;
+        }
+        if (!isCurrentNativePlayout()) return;
+        const reason = stableProductTextReason(error, 'PRODUCT_NATIVE_AUDIO_PLAYOUT_FAILED');
+        setProductTextReason(reason);
+        setProductTextStatus('failed');
+        publishProductRecoveryDiagnostic({
+          seam: 'response_generation',
+          disposition: 'terminal',
+          reason,
+          binding: presentationBinding,
+          response: disposition.response,
+        });
+        setP2NotificationWakeEpoch(epoch => epoch + 1);
+      });
       return disposition;
     }
     if (disposition.kind !== 'presentation') {
@@ -3077,7 +3463,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // Clear a silent listening window before playout, and yield entirely to a
       // speaker who is mid-utterance instead of failing the route on them.
       void settleCaptureBeforePlayout()
-        .then(readiness => {
+        .then(async readiness => {
           if (readiness !== 'ready') {
             throw Object.assign(new Error('playout yielded to an active speaker'), {
               reason: PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER,
@@ -3093,7 +3479,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           });
           // The playout deadline starts after capture settlement, never while
           // a possible user utterance or generation-listening start owns it.
-          return disposition.task_notification
+          await (disposition.task_notification
             ? awaitProductTaskNotificationPlayout(
                 playout,
                 () => {
@@ -3102,7 +3488,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                 },
                 props.taskNotificationPlayoutTimeoutMs,
               )
-            : playout;
+            : playout);
         })
         .then(() => {
           if (!isCurrentVoicePlayout()) {
@@ -3765,6 +4151,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     p1VoiceCaptureBindingRef.current = null;
     presentedProductResponsesRef.current.clear();
     clearCapturedTaskNotification();
+    presentedNativeChatMessagesRef.current.clear();
     terminalNotificationTaskIdRef.current = null;
     terminalAnnouncementSpeechOwnerRef.current = null;
     updateTerminalAnnouncementState('idle', null);
@@ -4611,7 +4998,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       (productP2NotificationTransportBlockedByP1({
         p1_status: p1VoiceStatus,
         terminal_notification_check_required: terminalNotificationCheckRequiredRef.current,
-      }) && !admitsGenerationListeningPoll(p1VoiceStatus))
+      }) &&
+        !admitsGenerationListeningPoll(p1VoiceStatus) &&
+        shouldBlockProductP2NotificationPoll(
+          p1VoiceStatus,
+          p1VoiceOwnerRef.current?.interactionEngine() ?? 'cascade',
+        ))
     )
       return;
     const notificationAdmission: ProductP2NotificationAdmission = Object.freeze({
@@ -4684,7 +5076,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           (productP2NotificationTransportBlockedByP1({
             p1_status: currentP1Status,
             terminal_notification_check_required: terminalNotificationCheckRequiredRef.current,
-          }) && !admitsGenerationListeningPoll(currentP1Status))
+          }) &&
+            !admitsGenerationListeningPoll(currentP1Status) &&
+            shouldBlockProductP2NotificationPoll(
+              currentP1Status,
+              p1VoiceOwnerRef.current?.interactionEngine() ?? 'cascade',
+            ))
         )
           return;
         try {
@@ -4844,13 +5241,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             }
           }
           const exactForegroundDelivery =
-            previewDisposition.kind === 'presentation' &&
-            !previewDisposition.task_notification &&
-            foregroundPresentationFenceMatchesResponse(
-              pendingForegroundPresentationRef.current,
-              owner.snapshot().binding,
-              previewDisposition.response,
-            );
+            (
+              previewDisposition.kind === 'presentation' &&
+              !previewDisposition.task_notification
+            ) || previewDisposition.kind === 'native_audio'
+              ? foregroundPresentationFenceMatchesResponse(
+                  pendingForegroundPresentationRef.current,
+                  owner.snapshot().binding,
+                  previewDisposition.response,
+                )
+              : false;
           if (pendingUnified !== null && !exactForegroundDelivery) return;
           if (cancelled && !exactForegroundDelivery) return;
           const disposition = adoptProductP2Notification(owner, outcome.notification, notificationAdmission);
@@ -4885,7 +5285,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           // A presentation owns the P2 lane until its TEXT ACK settles.  Do
           // not let an immediately rejected TTS attempt race a successor
           // notification long-poll and strand that ACK behind it.
-          if (disposition.kind === 'presentation' || pendingPresentationAttemptRef.current?.owner === owner) return;
+          if (
+            disposition.kind === 'presentation' ||
+            disposition.kind === 'native_audio' ||
+            pendingPresentationAttemptRef.current?.owner === owner
+          ) return;
           // A hands-free capture is admitted only after this exact poll has
           // settled. A committed foreground response keeps the P2 lane until
           // its presentation arrives; the queued Task terminal check cannot
@@ -4901,6 +5305,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             if (cancelled || activationOwnerRef.current !== owner) return;
           }
         } catch (error) {
+          if (!cancelled && isProductNotificationSequenceMismatch(error)) {
+            const reason = stableProductTextReason(error, 'PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH');
+            setProductTextReason(reason);
+            setProductTextStatus('failed');
+            return;
+          }
           const retained = activationOwnerRef.current;
           if (
             !cancelled &&
@@ -5746,12 +6156,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       await activationOwner.refreshMediaAuthority();
     } catch (error) {
       const reason = extractWebErrorReason(error) ?? 'MEDIA_PRODUCT_ACTIVATION_UNTRUSTED';
+      const predecessorIsClosedNativeRuntime = reason === 'NATIVE_RUNTIME_CLOSED';
       console.warn(`live_voice_media_authority_refresh_failure reason=${reason} fallback=text visible=true`);
       if (activationOwnerRef.current === activationOwner && mountedRef.current && activeSessionRef.current === binding.session_id) {
         // Persist the state-loss barrier before cleanup so a reload cannot
         // reinterpret a later stale/closed tombstone as permission to prepare
         // a successor after the stable response-generation owner was lost.
         let barrierPersisted = false;
+        let closedNativeRuntimeCheckpointed = false;
         const journal = p2ActivationJournalRef.current;
         if (journal !== null) {
           try {
@@ -5768,8 +6180,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               barrierPersisted = true;
             }
             if (journalSnapshot.phase === 'active' && journalSnapshot.pending_operation === null && journalSnapshot.recovery_token === null && bindingMatches) {
-              journal.markResultUnknown(binding);
-              barrierPersisted = true;
+              if (predecessorIsClosedNativeRuntime) {
+                // The Provider has authoritatively declared this exact Native
+                // predecessor closed.  Preserve the exact binding while local
+                // teardown runs, then one Start may allocate its successor.
+                journal.markClosing(binding);
+                closedNativeRuntimeCheckpointed = true;
+                voiceLoopP2RefreshAfterGenerationRef.current = Math.max(
+                  voiceLoopP2RefreshAfterGenerationRef.current ?? binding.activation_generation,
+                  binding.activation_generation,
+                );
+                voiceLoopP2RefreshInFlightRef.current = false;
+              } else {
+                journal.markResultUnknown(binding);
+                barrierPersisted = true;
+              }
             }
           } catch {
             // Journal ownership/storage failure remains a local hard barrier;
@@ -5782,6 +6207,104 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           await activationOwner.closeWithRetry();
           retireDeferredTaskPresentationForClosedOwner(activationOwner);
           retireCapturedTaskNotificationForClosedOwner(activationOwner);
+          if (closedNativeRuntimeCheckpointed && journal !== null && mountedRef.current && activeSessionRef.current === binding.session_id) {
+            let exactCloseCheckpointed = false;
+            try {
+              const latest = journal.refresh();
+              const latestBinding = latest.binding;
+              const exactBinding =
+                latestBinding !== null &&
+                latestBinding.session_id === binding.session_id &&
+                latestBinding.correlation_id === binding.correlation_id &&
+                latestBinding.interaction_id === binding.interaction_id &&
+                latestBinding.activation_id === binding.activation_id &&
+                latestBinding.activation_generation === binding.activation_generation;
+              if (latest.phase === 'closed' && exactBinding) {
+                exactCloseCheckpointed = true;
+              } else if (latest.recovery_token === null && exactBinding) {
+                journal.markClosed(binding);
+                exactCloseCheckpointed = true;
+              }
+            } catch {
+              // A concurrent recovery owner remains the only authority that
+              // may close this checkpoint and allocate its successor.
+            }
+            if (exactCloseCheckpointed) {
+              if (activationOwnerRef.current === activationOwner) activationOwnerRef.current = null;
+              let successorBinding: ProductWebP2ActivationBinding;
+              try {
+                successorBinding = journal.prepareSuccessor(pageInstanceIdRef.current!);
+              } catch {
+                setP2Activation({
+                  status: 'unavailable',
+                  binding: null,
+                  reason: PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED,
+                });
+                return;
+              }
+              activationGenerationRef.current = successorBinding.activation_generation;
+              let successorOwner: ProductWebP2ActivationOwner | null = null;
+              successorOwner = createProductP2ActivationOwner({
+                enabled: true,
+                request: (method, params, requestId) =>
+                  productRequest(method, params, productP2WebRequestOptions(method, requestId)),
+                durable_operation_journal: journal,
+                on_snapshot: snapshot => {
+                  if (
+                    mountedRef.current &&
+                    activeSessionRef.current === binding.session_id &&
+                    activationOwnerRef.current === successorOwner &&
+                    snapshot.status !== 'active'
+                  ) {
+                    setP2Activation(snapshot);
+                  }
+                },
+              });
+              activationOwnerRef.current = successorOwner;
+              try {
+                const activated = await successorOwner.start(successorBinding);
+                if (
+                  !mountedRef.current ||
+                  activeSessionRef.current !== binding.session_id ||
+                  activationOwnerRef.current !== successorOwner
+                ) {
+                  return;
+                }
+                journal.markActive(successorBinding);
+                setP2Activation(activated);
+                setProductTextReason(null);
+                clearProductRecoveryDiagnostic({
+                  seam: 'activation',
+                  binding: activated.binding,
+                });
+                if (activated.binding !== null) resumeVoiceLoopAfterP2Successor(activated.binding);
+              } catch (successorError) {
+                if (
+                  mountedRef.current &&
+                  activeSessionRef.current === binding.session_id &&
+                  activationOwnerRef.current === successorOwner
+                ) {
+                  const successorReason = stableProductTextReason(
+                    successorError,
+                    PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED,
+                  );
+                  publishProductRecoveryDiagnostic({
+                    seam: 'activation',
+                    disposition: 'retrying',
+                    reason: successorReason,
+                    binding: successorBinding,
+                  });
+                  setP2Activation({
+                    status: 'unavailable',
+                    binding: null,
+                    reason: successorReason,
+                  });
+                  setP2RecoveryEpoch(epoch => epoch + 1);
+                }
+              }
+              return;
+            }
+          }
           if (activationOwnerRef.current === activationOwner && mountedRef.current && activeSessionRef.current === binding.session_id) {
             if (barrierPersisted) activationOwnerRef.current = null;
             setP2Activation({
@@ -6338,6 +6861,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const locallyStopped = p1Owner.stopAgentPlayout(response);
     if (!locallyStopped) return;
     activeVoiceResponseRef.current = null;
+    if (p1Owner.interactionEngine() === 'openai-realtime-native') return;
     let retained = pendingBargeInRef.current;
     if (retained !== null && retained.owner !== p2Owner) {
       setProductTextStatus('failed');

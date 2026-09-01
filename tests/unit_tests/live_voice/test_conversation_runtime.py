@@ -139,6 +139,70 @@ def test_external_response_generation_owner_continues_stable_high_water() -> Non
     assert second.response_generation == 8
 
 
+def test_response_generation_floor_is_opt_in_and_fails_closed() -> None:
+    default_runtime = prepared()
+    default_ref, _ = default_runtime.accept_response("turn-1", "response-default")
+    assert default_ref.response_generation == 0
+
+    native_runtime = prepared()
+    native_ref, _ = native_runtime.accept_response(
+        "turn-1", "response-native", minimum_generation=1
+    )
+    assert native_ref.response_generation == 1
+
+    invalid_runtime = ConversationRuntime(
+        scope(), response_generation_owner=lambda _interaction_id, _prior: 0
+    )
+    invalid_runtime.open_interaction("interaction-1")
+    invalid_runtime.start_turn("interaction-1", "turn-1")
+    accepted, _ = invalid_runtime.commit_turn(commit())
+    assert accepted is True
+    before = invalid_runtime.snapshot()
+
+    with pytest.raises(ConversationRuntimeViolation) as raised:
+        invalid_runtime.accept_response(
+            "turn-1", "response-invalid", minimum_generation=1
+        )
+
+    assert raised.value.reason == "INVALID_RESPONSE_GENERATION"
+    assert invalid_runtime.snapshot() == before
+
+
+def test_native_turn_commit_transitions_without_forging_text_turn_commit() -> None:
+    runtime = ConversationRuntime(scope())
+    runtime.open_interaction("interaction-1")
+    runtime.start_turn("interaction-1", "native-turn-1")
+
+    accepted, event = runtime.commit_native_turn(
+        turn_id="native-turn-1",
+        interaction_id="interaction-1",
+        scope=scope(),
+        commit_id="native-commit-1",
+    )
+
+    assert accepted is True
+    assert event is not None and event.event_type == "turn.committed"
+    assert runtime.commit_native_turn(
+        turn_id="native-turn-1",
+        interaction_id="interaction-1",
+        scope=scope(),
+        commit_id="native-commit-1",
+    ) == (False, None)
+    ref, _ = runtime.accept_response("native-turn-1", "native-response-1")
+    assert ref.interaction_id == "interaction-1"
+
+    before = runtime.snapshot()
+    with pytest.raises(ConversationRuntimeViolation) as changed:
+        runtime.commit_native_turn(
+            turn_id="native-turn-1",
+            interaction_id="interaction-1",
+            scope=scope(),
+            commit_id="changed-native-commit",
+        )
+    assert changed.value.reason == "NATIVE_TURN_COMMIT_CONFLICT"
+    assert runtime.snapshot() == before
+
+
 @pytest.mark.parametrize("owned_generation", [True, -1, 0.0])
 def test_external_response_generation_owner_fails_closed_on_invalid_value(
     owned_generation: object,
