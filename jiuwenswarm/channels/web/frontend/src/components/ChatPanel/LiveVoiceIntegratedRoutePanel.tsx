@@ -826,6 +826,28 @@ function foregroundPresentationFenceMatchesResponse(
 
 export type TerminalAnnouncementState = 'idle' | 'queued' | 'suspending_capture' | 'fetching' | 'playing' | 'acking' | 'recovering';
 
+export function productP2TaskNotificationCheckRequired(
+  input: Readonly<{
+    deferred_presentation: boolean;
+    task_id: string | null;
+    origin_kind: 'text' | 'voice' | null;
+    terminal_task_id: string | null;
+    announcement_task_id: string | null;
+    announcement_state: TerminalAnnouncementState;
+  }>,
+): boolean {
+  // A Task query refresh may temporarily withdraw the created route while the
+  // pop-on-read P2 owner still owes running/terminal notifications.  The
+  // retained announcement owner remains the receive authority until it settles.
+  return Boolean(
+    input.deferred_presentation ||
+      (input.task_id !== null &&
+        input.origin_kind === 'voice' &&
+        input.terminal_task_id !== input.task_id) ||
+      (input.announcement_task_id !== null && input.announcement_state !== 'idle'),
+  );
+}
+
 export function terminalAnnouncementArbitrationAction(
   input: Readonly<{
     queued: boolean;
@@ -1538,12 +1560,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const deferredTaskPresentationRef = useRef<DeferredProductTaskPresentation | null>(null);
   const capturedTaskNotificationRef = useRef<CapturedProductTaskNotification | null>(null);
   const terminalNotificationCheckRequiredRef = useRef(false);
-  terminalNotificationCheckRequiredRef.current = Boolean(
-    deferredTaskPresentationRef.current !== null ||
-      (createdProgressTaskId !== null &&
-        createdProgressOrigin?.kind === 'voice' &&
-        terminalNotificationTaskIdRef.current !== createdProgressTaskId),
-  );
+  terminalNotificationCheckRequiredRef.current = productP2TaskNotificationCheckRequired({
+    deferred_presentation: deferredTaskPresentationRef.current !== null,
+    task_id: createdProgressTaskId,
+    origin_kind: createdProgressOrigin?.kind ?? null,
+    terminal_task_id: terminalNotificationTaskIdRef.current,
+    announcement_task_id: terminalAnnouncementTaskIdRef.current,
+    announcement_state: terminalAnnouncementStateRef.current,
+  });
   const submittedVoiceFinalsRef = useRef(
     new Map<string, Readonly<{ fingerprint: string; operation: Promise<void> }>>(),
   );
@@ -1635,9 +1659,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       setAdjustmentNotification(null);
     }
     createdProgressRouteRef.current = route;
-    terminalNotificationCheckRequiredRef.current = Boolean(
-      nextTaskId !== null && route?.origin?.kind === 'voice' && terminalNotificationTaskIdRef.current !== nextTaskId,
-    );
+    terminalNotificationCheckRequiredRef.current = productP2TaskNotificationCheckRequired({
+      deferred_presentation: deferredTaskPresentationRef.current !== null,
+      task_id: nextTaskId,
+      origin_kind: route?.origin?.kind ?? null,
+      terminal_task_id: terminalNotificationTaskIdRef.current,
+      announcement_task_id: terminalAnnouncementTaskIdRef.current,
+      announcement_state: terminalAnnouncementStateRef.current,
+    });
     setCreatedProgressRoute(route);
   };
   const cancelP3RetryInspection = () => {

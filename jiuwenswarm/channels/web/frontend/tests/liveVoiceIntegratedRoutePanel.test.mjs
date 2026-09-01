@@ -23,6 +23,7 @@ import {
   reconcileProductP3ProgressEvent,
   productP2WebRequestOptions,
   productP2NotificationRepollDelayMs,
+  productP2TaskNotificationCheckRequired,
   productP2TaskNotificationRequiresCaptureArbitration,
   productP3RetryInspectionFailureReason,
   productP3ProgressReconciliationRetryDelayMs,
@@ -966,6 +967,57 @@ test('trusted Task notification waits behind provider-starting capture without w
       terminal_notification_check_required: false,
     }),
     false,
+  );
+});
+
+test('nonterminal Task ACK keeps notification polling authorized after its route refresh disappears', () => {
+  const current = {
+    deferred_presentation: false,
+    task_id: null,
+    origin_kind: null,
+    terminal_task_id: null,
+    announcement_task_id: 'task-running-follow-up',
+    announcement_state: 'fetching',
+  };
+  assert.equal(productP2TaskNotificationCheckRequired(current), true);
+  assert.equal(
+    productP2NotificationTransportBlockedByP1({
+      p1_status: 'capturing',
+      terminal_notification_check_required: productP2TaskNotificationCheckRequired(current),
+    }),
+    false,
+  );
+  assert.equal(
+    productP2TaskNotificationCheckRequired({
+      ...current,
+      task_id: 'task-running-follow-up',
+      origin_kind: 'voice',
+      terminal_task_id: 'task-running-follow-up',
+      announcement_state: 'idle',
+    }),
+    false,
+    'only the settled terminal announcement may end same-Task polling',
+  );
+  assert.equal(
+    productP2TaskNotificationCheckRequired({
+      ...current,
+      task_id: 'task-text',
+      origin_kind: 'text',
+      announcement_task_id: null,
+      announcement_state: 'idle',
+    }),
+    false,
+  );
+  assert.equal(
+    productP2TaskNotificationCheckRequired({
+      ...current,
+      task_id: 'task-text',
+      origin_kind: 'text',
+      announcement_task_id: null,
+      announcement_state: 'idle',
+      deferred_presentation: true,
+    }),
+    true,
   );
 });
 

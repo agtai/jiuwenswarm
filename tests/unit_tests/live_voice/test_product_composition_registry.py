@@ -961,8 +961,13 @@ class _ItineraryBindingResolver:
 
 
 class _UnifiedP3Composition(_P3Composition):
-    def __init__(self, project_dir: Path) -> None:
-        super().__init__(project_dir)
+    def __init__(
+        self,
+        project_dir: Path,
+        *,
+        presentation_store: SqliteTaskStore | None = None,
+    ) -> None:
+        super().__init__(project_dir, presentation_store=presentation_store)
         self.current: PersistentTaskRecord | None = None
         self.handle_calls: list[tuple[str, dict[str, object], dict[str, object]]] = []
         self.read_current_calls = 0
@@ -3737,6 +3742,160 @@ async def test_unified_voice_create_returns_task_id_and_retains_live_voice_origi
     assert registered[0].response_id == origin.response_ref.response_id
     await _ack_unified_presentation(registry, sequence=0, stem="unified-origin-create")
     await _close_unified_route(registry, stem="unified-origin-create")
+
+
+@pytest.mark.asyncio
+async def test_unified_create_ack_releases_accepted_then_running_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The create receipt must not strand a later deferred running event."""
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        lambda: ACK_NOW,
+    )
+    project, store, task_id, source_events = _running_presentation_store(tmp_path)
+    composition = _UnifiedP3Composition(project, presentation_store=store)
+    composition.create_state = FormalTaskState.ACCEPTED
+    registry, _composition, manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+        composition=composition,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-progress-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+    created = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="unified-progress-create",
+            text="帮我根据这些要求制定三天的行程。",
+        ),
+        request_id="request-unified-progress-create",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert created.ok
+    assert manager.agent.calls == 0
+
+    origin = registry._voice_task_origins.pop("task-current-1")
+    registry._voice_task_origins[task_id] = origin
+    activated = await registry.handle_p3_progress_activate(
+        params=_progress_params(
+            task_id=task_id,
+            correlation_id=origin.correlation_id,
+            origin_id=origin.interaction_id,
+            origin_kind="voice",
+            generation_id="unified-progress-generation",
+        ),
+        request_id="request-unified-progress-subscribe",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert activated.ok
+    retained_progress = next(iter(registry._progress_routes.values()))
+    for _ in range(200):
+        snapshot = retained_progress.progress_lease.snapshot()
+        if snapshot.last_task_event_seq == source_events[-1].seq:
+            break
+        await asyncio.sleep(0.01)
+    assert retained_progress.progress_lease.snapshot().last_task_event_seq == 3
+
+    sequence = await _ack_unified_presentation(
+        registry,
+        sequence=0,
+        stem="unified-progress-create",
+    )
+    accepted_presentation: TaskPresentationDelivery | None = None
+    for _ in range(200):
+        with registry._task_presentation_state_lock:
+            mapped = tuple(registry._task_presentation_deliveries.values())
+        if len(mapped) == 1 and mapped[0][1].event_seq == 0:
+            accepted_presentation = mapped[0][1]
+            break
+        await asyncio.sleep(0.01)
+    assert accepted_presentation is not None
+    accepted_notification: Mapping[str, object] | None = None
+    for _ in range(10):
+        sequence += 1
+        polled = await registry.handle_p2_notification_next(
+            params=_p2_params(notification_sequence=sequence),
+            request_id=f"request-unified-progress-accepted-{sequence}",
+            session_id=SCOPE.session_id,
+        )
+        assert polled.ok
+        candidate = cast(Mapping[str, object], polled.payload["result"])
+        response = candidate.get("response")
+        if (
+            isinstance(response, Mapping)
+            and response.get("response_id")
+            == accepted_presentation.response_ref.response_id
+        ):
+            accepted_notification = candidate
+            break
+    assert accepted_notification is not None
+    accepted_response = cast(Mapping[str, object], accepted_notification["response"])
+    accepted_unit = cast(
+        Mapping[str, object], accepted_notification["presentation_unit"]
+    )
+    accepted = await registry.handle_p2_presentation_ack(
+        params=_p2_params(
+            response_id=accepted_response["response_id"],
+            response_generation=accepted_response["response_generation"],
+            surface=accepted_unit["surface"],
+            unit_id=accepted_unit["unit_id"],
+            contiguous_cursor=accepted_unit["seq"],
+            presented_at=ACK_NOW,
+        ),
+        request_id="request-unified-progress-accepted-ack",
+        session_id=SCOPE.session_id,
+    )
+    assert accepted.ok
+
+    running_presentation: TaskPresentationDelivery | None = None
+    for _ in range(200):
+        with registry._task_presentation_state_lock:
+            mapped = tuple(registry._task_presentation_deliveries.values())
+        if len(mapped) == 1 and mapped[0][1].event_seq == 3:
+            running_presentation = mapped[0][1]
+            break
+        await asyncio.sleep(0.01)
+    assert running_presentation is not None, (
+        retained_progress.progress_lease.snapshot(),
+        tuple(retained_progress.pending_presentations),
+    )
+    running_notification: Mapping[str, object] | None = None
+    for _ in range(10):
+        sequence += 1
+        polled = await registry.handle_p2_notification_next(
+            params=_p2_params(notification_sequence=sequence),
+            request_id=f"request-unified-progress-running-{sequence}",
+            session_id=SCOPE.session_id,
+        )
+        assert polled.ok
+        candidate = cast(Mapping[str, object], polled.payload["result"])
+        response = candidate.get("response")
+        if (
+            isinstance(response, Mapping)
+            and response.get("response_id")
+            == running_presentation.response_ref.response_id
+        ):
+            running_notification = candidate
+            break
+    assert running_notification is not None
+    assert (
+        store.unread_events_page(
+            task_id, SCOPE, presentation_class="voice", limit=500
+        ).watermark
+        == 0
+    )
+    await registry.stop()
 
 
 @pytest.mark.asyncio
