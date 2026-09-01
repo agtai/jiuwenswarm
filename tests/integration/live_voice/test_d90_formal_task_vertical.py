@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import subprocess
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -1091,16 +1092,37 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
         current_payload = cast(dict[str, Any], next_progress())
         source_event = cast(dict[str, object], current_payload["source_event"])
         progress_event = cast(dict[str, object], current_payload["progress_event"])
-        delivery_key = (
-            "session-1",
-            task_id,
-            "interaction-joint",
-            "joint-task-progress-generation",
+        presentation_binding = json.dumps(
+            {
+                "consumption_mode": "presentation",
+                "correlation_id": current_payload["correlation_id"],
+                "delivery_id": current_payload["delivery_id"],
+                "delivery_mode": current_payload["delivery_mode"],
+                "effective_origin_kind": current_payload["effective_origin_kind"],
+                "evidence_id": current_payload["evidence_id"],
+                "expected_event_head": current_payload["expected_event_head"],
+                "fallback_reason": current_payload["fallback_reason"],
+                "generation": current_payload["generation"],
+                "generation_id": current_payload["generation_id"],
+                "generation_kind": current_payload["generation_kind"],
+                "origin_id": current_payload["origin_id"],
+                "origin_kind": current_payload["origin_kind"],
+                "presentation_class": current_payload["presentation_class"],
+                "progress_event": current_payload["progress_event"],
+                "project_id": current_payload["project_id"],
+                "requested_origin_kind": current_payload["requested_origin_kind"],
+                "response_ref": current_payload["response_ref"],
+                "result_source_event_id": current_payload["result_source_event_id"],
+                "session_id": current_payload["session_id"],
+                "source_event": current_payload["source_event"],
+                "state": current_payload["state"],
+                "task_id": current_payload["task_id"],
+                "unit_id": current_payload["unit_id"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
         )
-        delivery = registry._progress_deliveries[delivery_key][
-            cast(str, current_payload["delivery_id"])
-        ]
-        assert delivery.presentation_binding is not None
         acknowledged = await registry.handle_p3_progress_ack(
             params={
                 "auth_token": PRODUCT_TOKEN,
@@ -1122,7 +1144,7 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
                 "result_source_event_id": current_payload[
                     "result_source_event_id"
                 ],
-                "presentation_binding": delivery.presentation_binding,
+                "presentation_binding": presentation_binding,
             },
             request_id=f"request-joint-task-progress-ack-{ack_index}",
             session_id="session-1",

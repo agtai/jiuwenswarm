@@ -1930,19 +1930,44 @@ def _progress_ack_params(
     return params
 
 
+def _web_presentation_binding(event: Mapping[str, object]) -> str:
+    return json.dumps(
+        {
+            "consumption_mode": "presentation",
+            "correlation_id": event["correlation_id"],
+            "delivery_id": event["delivery_id"],
+            "delivery_mode": event["delivery_mode"],
+            "effective_origin_kind": event["effective_origin_kind"],
+            "evidence_id": event["evidence_id"],
+            "expected_event_head": event["expected_event_head"],
+            "fallback_reason": event["fallback_reason"],
+            "generation": event["generation"],
+            "generation_id": event["generation_id"],
+            "generation_kind": event["generation_kind"],
+            "origin_id": event["origin_id"],
+            "origin_kind": event["origin_kind"],
+            "presentation_class": event["presentation_class"],
+            "progress_event": event["progress_event"],
+            "project_id": event["project_id"],
+            "requested_origin_kind": event["requested_origin_kind"],
+            "response_ref": event["response_ref"],
+            "result_source_event_id": event["result_source_event_id"],
+            "session_id": event["session_id"],
+            "source_event": event["source_event"],
+            "state": event["state"],
+            "task_id": event["task_id"],
+            "unit_id": event["unit_id"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
 def _presentation_progress_ack_params(
-    registry: AgentServerProductCompositionRegistry,
     event: Mapping[str, object],
 ) -> dict[str, object]:
     params = _progress_ack_params(event)
-    key = (
-        str(event["session_id"]),
-        str(event["task_id"]),
-        str(event["origin_id"]),
-        str(event["generation_id"]),
-    )
-    delivery = registry._progress_deliveries[key][str(event["delivery_id"])]
-    assert delivery.presentation_binding is not None
     params.update(
         {
             "presentation_class": event["presentation_class"],
@@ -1950,7 +1975,7 @@ def _presentation_progress_ack_params(
             "unit_id": event["unit_id"],
             "expected_event_head": event["expected_event_head"],
             "result_source_event_id": event["result_source_event_id"],
-            "presentation_binding": delivery.presentation_binding,
+            "presentation_binding": _web_presentation_binding(event),
         }
     )
     return params
@@ -8563,7 +8588,7 @@ async def test_real_store_failed_journey_links_mutation_executor_generation_and_
         "outcome": "failed",
     }
     acknowledged = await registry.handle_p3_progress_ack(
-        params=_presentation_progress_ack_params(registry, terminal_payload),
+        params=_presentation_progress_ack_params(terminal_payload),
         request_id="request-actual-chain-terminal-ack",
         session_id=SCOPE.session_id,
         channel_id="web",
@@ -8950,7 +8975,7 @@ async def test_real_store_progress_replays_unread_predecessor_before_retry_attem
             expected_seq
         )
         acknowledged = await registry.handle_p3_progress_ack(
-            params=_presentation_progress_ack_params(registry, payload),
+            params=_presentation_progress_ack_params(payload),
             request_id=f"request-retry-reconnect-ack-{ordinal}",
             session_id=session_b,
             channel_id="web",
@@ -9229,7 +9254,7 @@ async def test_real_store_text_projects_recovery_attempt_boundary(
         if expected_seq == expected_sequences[-1]:
             assert source["event_type"] == "task.recovery_accepted"
         acknowledged = await registry.handle_p3_progress_ack(
-            params=_presentation_progress_ack_params(registry, payload),
+            params=_presentation_progress_ack_params(payload),
             request_id=f"request-recovery-text-ack-{ordinal}",
             session_id=session_id,
             channel_id="web",
@@ -9738,7 +9763,7 @@ async def test_real_store_progress_drains_gap_and_recycles_one_slot_capacity(
     )
 
     first_ack = await registry.handle_p3_progress_ack(
-        params=_presentation_progress_ack_params(registry, first),
+        params=_presentation_progress_ack_params(first),
         request_id="request-prefix-first-ack",
         session_id=SCOPE.session_id,
         channel_id="web",
@@ -9759,7 +9784,7 @@ async def test_real_store_progress_drains_gap_and_recycles_one_slot_capacity(
     )
 
     second_ack = await registry.handle_p3_progress_ack(
-        params=_presentation_progress_ack_params(registry, second),
+        params=_presentation_progress_ack_params(second),
         request_id="request-prefix-second-ack",
         session_id=SCOPE.session_id,
         channel_id="web",
@@ -9843,7 +9868,7 @@ async def test_real_store_progress_reconnects_in_fresh_session_and_fences_late_a
     event_a = cast(Mapping[str, object], pushed[0]["payload"])
     assert event_a["session_id"] == SCOPE.session_id
     assert cast(Mapping[str, object], event_a["source_event"])["seq"] == 0
-    late_ack_a = _presentation_progress_ack_params(registry, event_a)
+    late_ack_a = _presentation_progress_ack_params(event_a)
     assert (
         store.unread_events_page(
             task_id, SCOPE, presentation_class="text", limit=500
@@ -9926,7 +9951,7 @@ async def test_real_store_progress_reconnects_in_fresh_session_and_fences_late_a
         Assurance.AUTHENTICATED,
     )
     acknowledged_b = await registry.handle_p3_progress_ack(
-        params=_presentation_progress_ack_params(registry, event_b),
+        params=_presentation_progress_ack_params(event_b),
         request_id="request-reconnect-progress-b-ack",
         session_id=session_b,
         channel_id="web",
@@ -10041,7 +10066,7 @@ async def test_real_store_progress_reconnect_skips_durably_consumed_prefix(
     assert len(pushed) == 1
     event_a = cast(Mapping[str, object], pushed[0]["payload"])
     assert cast(Mapping[str, object], event_a["source_event"])["seq"] == 0
-    late_ack_a = _presentation_progress_ack_params(registry, event_a)
+    late_ack_a = _presentation_progress_ack_params(event_a)
     acknowledged_a = await registry.handle_p3_progress_ack(
         params=late_ack_a,
         request_id="request-consumed-reconnect-progress-a-ack",
@@ -10134,7 +10159,7 @@ async def test_real_store_progress_reconnect_skips_durably_consumed_prefix(
         == 0
     )
     acknowledged_b = await registry.handle_p3_progress_ack(
-        params=_presentation_progress_ack_params(registry, event_b),
+        params=_presentation_progress_ack_params(event_b),
         request_id="request-consumed-reconnect-progress-b-ack",
         session_id=session_b,
         channel_id="web",
@@ -10218,7 +10243,7 @@ async def test_text_runtime_ack_then_core_before_commit_failure_retries_exactly_
         await asyncio.sleep(0.01)
     assert len(pushed) == 1
     event = cast(Mapping[str, object], pushed[0]["payload"])
-    ack_params = _presentation_progress_ack_params(registry, event)
+    ack_params = _presentation_progress_ack_params(event)
 
     first = await registry.handle_p3_progress_ack(
         params=ack_params,
@@ -11312,7 +11337,7 @@ async def test_audio_playout_failure_falls_back_to_text_without_voice_consumptio
         "TASK_PROGRESS_PRESENTATION_CLOSED"
     )
     text_ack = await registry.handle_p3_progress_ack(
-        params=_presentation_progress_ack_params(registry, fallback_payload),
+        params=_presentation_progress_ack_params(fallback_payload),
         request_id="request-audio-fallback-text-ack",
         session_id=SCOPE.session_id,
         channel_id="web",
@@ -11553,8 +11578,36 @@ async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
         == -1
     )
 
+    incomplete_prefix_ack = _presentation_progress_ack_params(replayed_prefix)
+    incomplete_binding = json.loads(
+        cast(str, incomplete_prefix_ack["presentation_binding"])
+    )
+    del incomplete_binding["consumption_mode"]
+    incomplete_prefix_ack["presentation_binding"] = json.dumps(
+        incomplete_binding,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    rejected_prefix = await registry.handle_p3_progress_ack(
+        params=incomplete_prefix_ack,
+        request_id="request-later-audio-fallback-incomplete-prefix-ack",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert not rejected_prefix.ok
+    assert cast(dict[str, object], rejected_prefix.payload["error"])["reason"] == (
+        "TASK_PROGRESS_PRESENTATION_MISMATCH"
+    )
+    assert (
+        store.unread_events_page(
+            task_id, SCOPE, presentation_class="text", limit=500
+        ).watermark
+        == -1
+    )
+
     prefix_ack = await registry.handle_p3_progress_ack(
-        params=_presentation_progress_ack_params(registry, replayed_prefix),
+        params=_presentation_progress_ack_params(replayed_prefix),
         request_id="request-later-audio-fallback-prefix-ack",
         session_id=SCOPE.session_id,
         channel_id="web",
@@ -11569,7 +11622,7 @@ async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
     running_source = cast(Mapping[str, object], running_fallback["source_event"])
     assert running_source["seq"] == 3
     running_ack = await registry.handle_p3_progress_ack(
-        params=_presentation_progress_ack_params(registry, running_fallback),
+        params=_presentation_progress_ack_params(running_fallback),
         request_id="request-later-audio-fallback-running-ack",
         session_id=SCOPE.session_id,
         channel_id="web",
@@ -11598,7 +11651,7 @@ async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
     assert terminal_source["seq"] == 5
     assert terminal_fallback["state"] == "terminal"
     terminal_ack = await registry.handle_p3_progress_ack(
-        params=_presentation_progress_ack_params(registry, terminal_fallback),
+        params=_presentation_progress_ack_params(terminal_fallback),
         request_id="request-later-audio-fallback-terminal-ack",
         session_id=SCOPE.session_id,
         channel_id="web",

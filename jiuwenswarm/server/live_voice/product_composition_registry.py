@@ -2336,6 +2336,7 @@ class AgentServerProductCompositionRegistry:
             }
             delivery.presentation_binding = json.dumps(
                 {
+                    "consumption_mode": "presentation",
                     "correlation_id": binding.correlation_id,
                     "delivery_id": delivery_id,
                     "delivery_mode": delivery_mode,

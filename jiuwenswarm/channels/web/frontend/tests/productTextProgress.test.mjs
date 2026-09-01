@@ -279,7 +279,8 @@ test('creates an exact credential-free Web UI delivery acknowledgement', () => {
   const parsed = parseProductTextProgressEvent(progressEvent());
   assert.notEqual(parsed, null);
 
-  assert.deepEqual(createProductTextProgressDeliveryAck(parsed), {
+  const ack = createProductTextProgressDeliveryAck(parsed);
+  assert.deepEqual(ack, {
     session_id: 'session-1',
     task_id: 'task-1',
     correlation_id: 'correlation-1',
@@ -300,9 +301,10 @@ test('creates an exact credential-free Web UI delivery acknowledgement', () => {
     unit_id: 'unit-progress-7',
     expected_event_head: 7,
     result_source_event_id: null,
-    presentation_binding: createProductTextProgressDeliveryAck(parsed).presentation_binding,
+    presentation_binding: ack.presentation_binding,
   });
-  assert.equal('auth_token' in createProductTextProgressDeliveryAck(parsed), false);
+  assert.equal('auth_token' in ack, false);
+  assert.equal(JSON.parse(ack.presentation_binding).consumption_mode, 'presentation');
 });
 
 test('feature-off legacy progress keeps exact DOM adoption and never acquires presentation authority', async () => {
