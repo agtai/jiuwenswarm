@@ -133,6 +133,7 @@ from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationSurface,
     PresentationUnit,
+    TaskPresentationDelivery,
 )
 from jiuwenswarm.server.live_voice.product_p3_text_adapter import (
     ProductP3AuthorizedQuery,
@@ -11333,6 +11334,288 @@ async def test_audio_playout_failure_falls_back_to_text_without_voice_consumptio
         == -1
     )
     assert manager.agent.calls == 0
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed later AUDIO event must not strand TEXT behind its own cursor."""
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
+        lambda: ACK_NOW,
+    )
+    project, store, task_id, source_events = _running_presentation_store(tmp_path)
+    task = store.get_task(task_id, SCOPE)
+    attempt = store.get_attempt(task.attempt_id)
+    assert attempt.executor_ref is not None
+    artifact = TaskResultArtifact(
+        relative_path="itinerary.md",
+        sha256=hashlib.sha256(b"completed itinerary").hexdigest(),
+    )
+    store.apply_observations(
+        (
+            ExecutorObservation(
+                resolution=ExecutorResolution.KNOWN,
+                executor_id=attempt.executor_id,
+                executor_ref=attempt.executor_ref,
+                task_id=task_id,
+                attempt_id=attempt.attempt_id,
+                source_event_id=f"{attempt.executor_ref}:2",
+                source_seq=2,
+                attempt_state=FormalAttemptState.TERMINAL,
+                attempt_outcome=TerminalOutcome.COMPLETED,
+                occurred_at=NOW,
+                raw_status="completed",
+                result_text="completed itinerary",
+                result_artifacts=(artifact,),
+            ),
+        )
+    )
+    source_events = store.events(task_id, SCOPE)
+    assert [event.seq for event in source_events] == [0, 1, 2, 3, 4, 5]
+    composition = _P3Composition(project, presentation_store=store)
+    composition.subscription_events = source_events
+    pushed: list[dict[str, object]] = []
+
+    async def push(message: dict[str, object]) -> bool:
+        pushed.append(message)
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-later-audio-fallback-p2",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    registry._voice_task_origins[task_id] = _VoiceTaskOrigin(
+        session_id=SCOPE.session_id or "",
+        interaction_id="interaction-1",
+        activation_id="activation-1",
+        activation_generation=1,
+        correlation_id="correlation-p2",
+        response_ref=ResponseRef("interaction-1", "response-origin", 0),
+    )
+    assert (
+        await registry.handle_p3_progress_activate(
+            params=_progress_params(
+                task_id=task_id,
+                correlation_id="correlation-p2",
+                origin_id="interaction-1",
+                origin_kind="voice",
+                generation_id="voice-progress-later-audio-fallback",
+            ),
+            request_id="request-later-audio-fallback-progress",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+
+    retained_progress = next(iter(registry._progress_routes.values()))
+    delivered = False
+    for _ in range(200):
+        with registry._task_presentation_state_lock:
+            delivered = bool(registry._task_presentation_deliveries)
+        if (
+            delivered
+            or retained_progress.progress_lease.snapshot().pending_voice_intents
+        ):
+            break
+        await asyncio.sleep(0.01)
+    if not delivered:
+        assert await retained_progress.progress_lease.drain_voice() == 1
+    for _ in range(200):
+        with registry._task_presentation_state_lock:
+            if registry._task_presentation_deliveries:
+                break
+        await asyncio.sleep(0.01)
+
+    sequence = 0
+    accepted_notification: Mapping[str, object] | None = None
+    for _ in range(10):
+        sequence += 1
+        polled = await registry.handle_p2_notification_next(
+            params=_p2_params(notification_sequence=sequence),
+            request_id=f"request-later-audio-fallback-accepted-{sequence}",
+            session_id=SCOPE.session_id,
+        )
+        assert polled.ok
+        candidate = cast(Mapping[str, object], polled.payload["result"])
+        if isinstance(candidate.get("presentation_unit"), Mapping):
+            accepted_notification = candidate
+            break
+    assert accepted_notification is not None
+    accepted_response = cast(Mapping[str, object], accepted_notification["response"])
+    accepted_unit = cast(
+        Mapping[str, object], accepted_notification["presentation_unit"]
+    )
+    accepted = await registry.handle_p2_presentation_ack(
+        params=_p2_params(
+            response_id=accepted_response["response_id"],
+            response_generation=accepted_response["response_generation"],
+            surface=accepted_unit["surface"],
+            unit_id=accepted_unit["unit_id"],
+            contiguous_cursor=accepted_unit["seq"],
+            presented_at=ACK_NOW,
+        ),
+        request_id="request-later-audio-fallback-accepted-ack",
+        session_id=SCOPE.session_id,
+    )
+    assert accepted.ok
+    assert (
+        store.unread_events_page(
+            task_id, SCOPE, presentation_class="voice", limit=500
+        ).watermark
+        == 0
+    )
+    assert (
+        store.unread_events_page(
+            task_id, SCOPE, presentation_class="text", limit=500
+        ).watermark
+        == -1
+    )
+
+    running_presentation: TaskPresentationDelivery | None = None
+    for _ in range(200):
+        with registry._task_presentation_state_lock:
+            mapped = tuple(registry._task_presentation_deliveries.values())
+        if len(mapped) == 1 and mapped[0][1].event_seq == 3:
+            running_presentation = mapped[0][1]
+            break
+        await asyncio.sleep(0.01)
+    assert running_presentation is not None
+
+    running_notification: Mapping[str, object] | None = None
+    for _ in range(10):
+        sequence += 1
+        polled = await registry.handle_p2_notification_next(
+            params=_p2_params(notification_sequence=sequence),
+            request_id=f"request-later-audio-fallback-running-{sequence}",
+            session_id=SCOPE.session_id,
+        )
+        assert polled.ok
+        candidate = cast(Mapping[str, object], polled.payload["result"])
+        response = candidate.get("response")
+        if (
+            isinstance(candidate.get("presentation_unit"), Mapping)
+            and isinstance(response, Mapping)
+            and response.get("response_id")
+            == running_presentation.response_ref.response_id
+        ):
+            running_notification = candidate
+            break
+    assert running_notification is not None
+    running_response = cast(Mapping[str, object], running_notification["response"])
+    running_unit = cast(Mapping[str, object], running_notification["presentation_unit"])
+    failed = await registry.handle_p2_presentation_failed(
+        params=_p2_params(
+            response_id=running_response["response_id"],
+            response_generation=running_response["response_generation"],
+            surface=running_unit["surface"],
+            unit_id=running_unit["unit_id"],
+            failure_reason="task_audio_playout_failed",
+        ),
+        request_id="request-later-audio-fallback-failed",
+        session_id=SCOPE.session_id,
+    )
+
+    assert failed.ok
+    assert len(pushed) == 1
+    replayed_prefix = cast(Mapping[str, object], pushed[0]["payload"])
+    replayed_source = cast(Mapping[str, object], replayed_prefix["source_event"])
+    assert replayed_prefix["presentation_class"] == "text"
+    assert replayed_prefix["fallback_reason"] == (
+        "TASK_PROGRESS_AUDIO_PLAYOUT_FAILED"
+    )
+    assert replayed_source["seq"] == 0
+    assert replayed_source["event_id"] == source_events[0].event_id
+    assert (
+        store.unread_events_page(
+            task_id, SCOPE, presentation_class="voice", limit=500
+        ).watermark
+        == 0
+    )
+    assert (
+        store.unread_events_page(
+            task_id, SCOPE, presentation_class="text", limit=500
+        ).watermark
+        == -1
+    )
+
+    prefix_ack = await registry.handle_p3_progress_ack(
+        params=_presentation_progress_ack_params(registry, replayed_prefix),
+        request_id="request-later-audio-fallback-prefix-ack",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert prefix_ack.ok
+    for _ in range(200):
+        if len(pushed) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    assert len(pushed) == 2
+    running_fallback = cast(Mapping[str, object], pushed[1]["payload"])
+    running_source = cast(Mapping[str, object], running_fallback["source_event"])
+    assert running_source["seq"] == 3
+    running_ack = await registry.handle_p3_progress_ack(
+        params=_presentation_progress_ack_params(registry, running_fallback),
+        request_id="request-later-audio-fallback-running-ack",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert running_ack.ok
+    assert (
+        store.unread_events_page(
+            task_id, SCOPE, presentation_class="text", limit=500
+        ).watermark
+        == 3
+    )
+
+    for _ in range(10):
+        sequence += 1
+        polled = await registry.handle_p2_notification_next(
+            params=_p2_params(notification_sequence=sequence),
+            request_id=f"request-later-audio-fallback-terminal-{sequence}",
+            session_id=SCOPE.session_id,
+        )
+        assert polled.ok
+        if len(pushed) >= 3:
+            break
+    assert len(pushed) == 3
+    terminal_fallback = cast(Mapping[str, object], pushed[2]["payload"])
+    terminal_source = cast(Mapping[str, object], terminal_fallback["source_event"])
+    assert terminal_source["seq"] == 5
+    assert terminal_fallback["state"] == "terminal"
+    terminal_ack = await registry.handle_p3_progress_ack(
+        params=_presentation_progress_ack_params(registry, terminal_fallback),
+        request_id="request-later-audio-fallback-terminal-ack",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert terminal_ack.ok
+    assert (
+        store.unread_events_page(
+            task_id, SCOPE, presentation_class="text", limit=500
+        ).watermark
+        == 5
+    )
+    assert (
+        store.unread_events_page(
+            task_id, SCOPE, presentation_class="voice", limit=500
+        ).watermark
+        == 0
+    )
     await registry.stop()
 
 

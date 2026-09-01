@@ -3406,13 +3406,14 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
   }
 });
 
-test('mounted Task AUDIO without a P1 owner reports one exact failure and never sends a presentation ACK', async () => {
+test('mounted Task AUDIO failure retry clears its transient recovery error after exact TEXT fallback acceptance', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-task-audio-owner-unavailable-session';
   const calls = [];
   const states = [];
   let binding = null;
   let delivered = false;
+  let presentationFailureAttempts = 0;
   let renderer;
   const browser = installP1BrowserEnvironment();
   const request = async (method, params, options) => {
@@ -3458,6 +3459,14 @@ test('mounted Task AUDIO without a P1 owner reports one exact failure and never 
       };
     }
     if (method === 'live_voice.composition.p2.presentation.failed') {
+      presentationFailureAttempts += 1;
+      if (presentationFailureAttempts === 1) {
+        throw Object.assign(new Error('transient mounted Task fallback transport failure'), {
+          code: 'UNAVAILABLE',
+          reason: 'PRODUCT_TASK_AUDIO_FALLBACK_RECOVERY_REQUIRED',
+          retriable: true,
+        });
+      }
       return {
         ok: true,
         result: {
@@ -3480,21 +3489,28 @@ test('mounted Task AUDIO without a P1 owner reports one exact failure and never 
         }),
       );
       await waitForMounted(
-        () => calls.some(call => call.method === 'live_voice.composition.p2.presentation.failed'),
-        'Task AUDIO without P1 did not report its exact failure',
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length === 2,
+        'Task AUDIO without P1 did not retry its exact failure',
+      );
+      await waitForMounted(
+        () => states.at(-1)?.terminal_announcement_state === 'idle',
+        'accepted Task TEXT fallback did not settle the terminal announcement owner',
       );
     });
 
     const failures = calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed');
-    assert.equal(failures.length, 1);
+    assert.equal(failures.length, 2);
     assert.equal(failures[0].params.response_id, 'mounted-task-audio-owner-unavailable-response');
     assert.equal(failures[0].params.response_generation, 3);
     assert.equal(failures[0].params.surface, 'audio');
     assert.equal(failures[0].params.unit_id, 'mounted-task-audio-owner-unavailable-unit');
     assert.equal(failures[0].params.failure_reason, 'task_audio_owner_unavailable');
     assert.match(failures[0].requestId, /^live-voice-p2-presentation-failed-/);
+    assert.equal(failures[1].requestId, failures[0].requestId, 'retry must retain the exact request identity');
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
     assert.equal(states.at(-1)?.terminal_announcement_state, 'idle');
+    assert.notEqual(states.at(-1)?.text_status, 'failed');
+    assert.equal(states.at(-1)?.text_reason, null);
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();

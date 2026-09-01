@@ -1937,6 +1937,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
         pendingPresentationAttemptRef.current = null;
         setPendingPresentationAck(null);
+        setProductTextReason(null);
+        setProductTextStatus(pendingForegroundPresentationRef.current !== null ? 'waiting' : 'acknowledged');
         if (taskNotification.terminal && taskNotification.task_id) {
           terminalNotificationTaskIdRef.current = taskNotification.task_id;
           terminalNotificationCheckRequiredRef.current = false;

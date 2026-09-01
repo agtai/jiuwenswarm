@@ -480,6 +480,7 @@ class _ProgressRoute:
         field(default_factory=dict)
     )
     orphaned_terminal: TaskProgressTextEvent | None = None
+    text_fallback_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2421,6 +2422,37 @@ class AgentServerProductCompositionRegistry:
         ):
             self._remember_terminal_notification(event)
 
+    async def _start_text_progress_fallback(
+        self,
+        failed_delivery: _ProgressDelivery,
+        failed_event: TaskProgressTextEvent,
+        *,
+        fallback_reason: str,
+    ) -> None:
+        """Degrade one voice route and replay its exact class-isolated prefix."""
+
+        key = self._progress_key_for_delivery(failed_delivery)
+        retained = None if key is None else self._progress_routes.get(key)
+        if retained is None or retained.binding != failed_event.origin:
+            raise RuntimeError("Task progress fallback route is unavailable")
+        prior_reason = retained.text_fallback_reason
+        if prior_reason is not None and prior_reason != fallback_reason:
+            raise RuntimeError("Task progress fallback reason was rewritten")
+        retained.text_fallback_reason = fallback_reason
+        deliveries = self._progress_deliveries.get(key, {})
+        ordered: dict[str, TaskProgressTextEvent] = {}
+        for delivery in sorted(deliveries.values(), key=lambda item: item.seq):
+            event = delivery.fallback_event
+            if event is None or event.task_event.seq > failed_event.task_event.seq:
+                continue
+            ordered.setdefault(event.task_event.event_id, event)
+        ordered.setdefault(failed_event.task_event.event_id, failed_event)
+        for event in ordered.values():
+            await self._emit_text_progress(
+                event,
+                fallback_reason=fallback_reason,
+            )
+
     async def _prepare_progress_presentation(
         self,
         event: TaskProgressTextEvent,
@@ -3492,6 +3524,29 @@ class AgentServerProductCompositionRegistry:
         if exact_live_origin:
             assert retained is not None
             assert origin is not None
+            retained_progress = self._progress_routes.get(
+                (
+                    binding.session_id,
+                    binding.task_id,
+                    binding.origin_id,
+                    binding.generation_id,
+                )
+            )
+            if (
+                retained_progress is not None
+                and retained_progress.text_fallback_reason is not None
+            ):
+                await self._emit_text_progress(
+                    TaskProgressTextEvent(
+                        origin=binding,
+                        task_event=intent.task_event,
+                        source_event=intent.source_event,
+                        progress_event=intent.progress_event,
+                        evidence_id=intent.evidence_id,
+                    ),
+                    fallback_reason=retained_progress.text_fallback_reason,
+                )
+                return
             try:
                 if not self._p3_presentation_consumption_available:
                     await retained.activation_lease.deliver_task_progress(
@@ -8792,7 +8847,8 @@ class AgentServerProductCompositionRegistry:
                                     fallback.audio_closed = True
                             replayed = fallback.text_emitted
                             if not fallback.text_emitted:
-                                await self._emit_text_progress(
+                                await self._start_text_progress_fallback(
+                                    fallback.progress_delivery,
                                     fallback.event,
                                     fallback_reason=fallback_delivery_reason,
                                 )
