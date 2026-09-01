@@ -31,6 +31,7 @@ from jiuwenswarm.server.runtime.a2ui.validator import (
     validate_a2ui_messages,
     validate_a2ui_response,
 )
+from jiuwenswarm.server.runtime.agent_adapter.user_turn import envelope_clock_fields
 
 
 A2UI_ACTIVE_PROTOCOL_VERSION = VERSION_0_8
@@ -410,8 +411,13 @@ def _build_a2ui_event_payload(
     channel: str,
     language: str,
 ) -> dict[str, Any]:
+    # ``UserTurn.render`` hands an A2UI client event straight to this builder and
+    # never reaches its own envelope, so the clock has to be stated here or the
+    # turn arrives with no date at any position. Same fields, same source, so a
+    # client event and an ordinary message are read against one clock.
     return {
         "source": channel,
+        **envelope_clock_fields(),
         "preferred_response_language": language,
         "type": A2UI_CLIENT_EVENT_TYPE,
         "protocolVersion": event.get("protocolVersion", VERSION_0_8),
