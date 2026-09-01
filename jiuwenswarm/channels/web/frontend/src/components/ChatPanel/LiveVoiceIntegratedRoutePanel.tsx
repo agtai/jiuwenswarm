@@ -1418,6 +1418,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [productOutput, setProductOutput] = useState<string | null>(null);
   const [terminalNotification, setTerminalNotification] = useState<string | null>(null);
   const [terminalAnnouncementState, setTerminalAnnouncementState] = useState<TerminalAnnouncementState>('idle');
+  const [terminalAnnouncementArbitrationEpoch, setTerminalAnnouncementArbitrationEpoch] = useState(0);
   const [adjustmentNotification, setAdjustmentNotification] = useState<string | null>(null);
   const [productTextStatus, setProductTextStatus] = useState<
     'idle' | 'submitting' | 'waiting' | 'presented' | 'acknowledged' | 'failed'
@@ -4015,7 +4016,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       terminalAnnouncementSpeechOwnerRef.current = null;
       updateTerminalAnnouncementState('fetching');
     }
-  }, [p1VoiceStatus, p2Activation.status, productTextStatus, props.isConnected, terminalAnnouncementState]);
+  }, [
+    p1VoiceStatus,
+    p2Activation.status,
+    productTextStatus,
+    props.isConnected,
+    terminalAnnouncementArbitrationEpoch,
+    terminalAnnouncementState,
+  ]);
 
   useEffect(() => {
     const owner = activationOwnerRef.current;
@@ -5192,11 +5200,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           }
         },
         on_concurrent_capture_started: () => {
-          if (
+          const ownsCurrentCapture =
+            callbackOwner !== null &&
+            mountedRef.current &&
             voiceLoopEnabledRef.current &&
             voiceLoopGenerationRef.current === loopGeneration &&
-            p1VoiceOwnerRef.current === owner
-          ) {
+            p1VoiceOwnerRef.current === callbackOwner;
+          if (ownsCurrentCapture && terminalAnnouncementSpeechOwnerRef.current === callbackOwner) {
+            // `speech_active` protects only the capture generation that
+            // observed it. Idle/overlap rotation reuses the same P1 owner, so
+            // owner identity alone would permanently defer a queued Task
+            // announcement after the new capture becomes authoritative.
+            terminalAnnouncementSpeechOwnerRef.current = null;
+            setTerminalAnnouncementArbitrationEpoch(epoch => epoch + 1);
+          }
+          if (ownsCurrentCapture) {
             // The overlap uplink is already authoritative even while the
             // answer is still playing. Retain its P2 binding now so an EOT
             // racing the final playout frame can still stop, recognize, and

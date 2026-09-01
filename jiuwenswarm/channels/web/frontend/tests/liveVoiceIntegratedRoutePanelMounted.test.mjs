@@ -12354,7 +12354,7 @@ test('mounted foreground status query restarts an idle P2 poll after background 
   }
 });
 
-test('mounted voice-created Task keeps polling after running AUDIO before empty listening and terminal fallback', async () => {
+test('mounted voice-created Task retries a terminal wake after a speech-marked capture rotates and keeps polling through running AUDIO fallback', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-terminal-idle-session';
   const taskId = 'mounted-terminal-idle-task';
@@ -12671,8 +12671,8 @@ test('mounted voice-created Task keeps polling after running AUDIO before empty 
         'task-start response was not ACKed',
       );
       await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'idle listening did not restart after task-start');
-      await browser.emitFirstFrame(0);
-      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'silent idle listening did not become ready');
+      await browser.emitFirstFrame(0.25);
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'speech-marked idle listening did not become ready');
       await waitForMounted(
         () => progressActivation?.task_id === taskId && typeof progressListener === 'function',
         'voice-created task did not activate exact progress wakeup',
@@ -12686,46 +12686,10 @@ test('mounted voice-created Task keeps polling after running AUDIO before empty 
         () => calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length === 2,
         'activation-time accepted/running replay was not ACKed exactly once per delivery',
       );
-    });
-
-    for (let cycle = 0; cycle < 2; cycle += 1) {
-      await act(async () => {
-        try {
-          await browser.rotateSilentCaptureWindow();
-        } catch (error) {
-          assert.fail(
-            `silent idle capture ${cycle + 1} did not rotate: ${error.message}; states=${states
-              .slice(-8)
-              .map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}`)
-              .join(',')}; activations=${calls.filter(call => call.method === 'live_voice.media.activate').length}`,
-          );
-        }
-        await waitForMounted(
-          () => calls.filter(call => call.method === 'live_voice.media.activate').length === cycle + 3,
-          `silent idle capture ${cycle + 1} did not rotate`,
-        );
-        await waitForMounted(
-          () => calls.some(call => call.method === 'live_voice.media.close' && call.params.subject_id === `mounted-terminal-idle-media-${cycle + 2}`),
-          `silent idle capture ${cycle + 1} did not revoke its predecessor authority`,
-        );
-        for (let turn = 0; turn < 5; turn += 1) await new Promise(resolve => setImmediate(resolve));
-        await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', `silent idle capture ${cycle + 1} lost listening`);
-      });
-    }
-
-    await act(async () => {
-      const activationsBeforeEmptyTurn = calls.filter(call => call.method === 'live_voice.media.activate').length;
-      await browser.emitSpeechEndOfTurn();
       await waitForMounted(
-        () => calls.filter(call => call.method === 'live_voice.media.activate').length === activationsBeforeEmptyTurn + 1,
-        `empty listening turn did not resume capture; states=${states
-          .slice(-12)
-          .map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}`)
-          .join(',')}`,
+        () => notificationWaiters.length > 0,
+        'speech-marked capture did not retain one Task notification receive subscription',
       );
-      await browser.emitFirstFrame(0);
-      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'empty listening turn successor did not become ready');
-      assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 1);
     });
 
     const taskBinding = {
@@ -12739,22 +12703,40 @@ test('mounted voice-created Task keeps polling after running AUDIO before empty 
     const progress = mountedTerminalProgress(taskBinding, progressActivation, 'completed', taskId, 'attempt-a', 2);
     assert.notEqual(parseProductTextProgressEvent(progress), null);
     await act(async () => {
-      await waitForMounted(
-        () => notificationWaiters.length > 0,
-        'silent capture did not retain one terminal notification receive subscription',
-      );
       progressListener(progress);
       await waitForMounted(
-        () => states.at(-1)?.p1_status === 'recognized',
-        `terminal wakeup did not suspend silent capture; states=${states
-          .slice(-10)
-          .map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}`)
+        () => states.at(-1)?.terminal_announcement_state === 'queued',
+        `terminal wake did not defer behind the speech-marked capture; states=${states
+          .slice(-12)
+          .map(state => `${state.p1_status}/${state.terminal_announcement_state}/${state.text_status}/${state.text_reason ?? 'none'}`)
           .join(',')}`,
       );
       await waitForMounted(() => states.at(-1)?.task_progress_state === 'terminal', 'completed progress was not visible');
       await waitForMounted(
         () => calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length === 3,
         'completed progress was not ACKed exactly once after authoritative reconciliation',
+      );
+    });
+
+    await act(async () => {
+      await browser.rotateSilentCaptureWindow();
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 3,
+        `speech-marked idle capture did not rotate; states=${states
+          .slice(-12)
+          .map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}`)
+          .join(',')}`,
+      );
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'recognized' && states.at(-1)?.terminal_announcement_state === 'fetching',
+        `terminal wake did not retry after the speech-marked capture rotated; states=${states
+          .slice(-12)
+          .map(state => `${state.p1_status}/${state.terminal_announcement_state}/${state.text_reason ?? 'none'}`)
+          .join(',')}`,
+      );
+      await waitForMounted(
+        () => notificationWaiters.length > 0,
+        'rotated speech-marked capture did not resume the terminal notification poll',
       );
       publishNotification(
         presentation(p2Binding, 'mounted-terminal-idle-running', 2, 'Background task update: running.', true),
@@ -12766,7 +12748,10 @@ test('mounted voice-created Task keeps polling after running AUDIO before empty 
               call.method === 'live_voice.speech.synthesize_batch' &&
               call.params.response.response_id === 'mounted-terminal-idle-running',
           ).length === 1,
-        'running Task AUDIO did not reach its P1 playout owner after the terminal wake',
+        `running Task AUDIO did not retry after the speech-marked capture rotated; states=${states
+          .slice(-12)
+          .map(state => `${state.p1_status}/${state.terminal_announcement_state}/${state.text_reason ?? 'none'}`)
+          .join(',')}`,
       );
       await waitForMounted(() => browser.counts.sourceStarts === 2, 'running Task AUDIO did not start browser playout');
       browser.endLatestSource();
@@ -12777,16 +12762,19 @@ test('mounted voice-created Task keeps polling after running AUDIO before empty 
               call.method === 'live_voice.composition.p2.presentation.ack' &&
               call.params.response_id === 'mounted-terminal-idle-running',
           ).length === 1,
-        'running Task AUDIO did not emit its exact ACK',
+        'running Task AUDIO did not emit its exact ACK after capture rotation',
       );
       await waitForMounted(
         () => states.at(-1)?.p1_status === 'recognized' && states.at(-1)?.terminal_announcement_state === 'fetching',
-        'running Task AUDIO did not retain the already-terminal follow-up before listening',
+        'running Task AUDIO did not retain the terminal follow-up before listening',
       );
       await waitForMounted(
         () => notificationWaiters.length > 0,
         'running Task AUDIO ACK incorrectly stopped the terminal notification poll',
       );
+    });
+
+    await act(async () => {
       publishNotification(presentation(p2Binding, 'mounted-terminal-idle-complete', 3, '后台任务已完成，结果已经准备好。', true));
       await waitForMounted(
         () =>
@@ -12808,7 +12796,7 @@ test('mounted voice-created Task keeps polling after running AUDIO before empty 
         'failed first terminal playout must not ACK',
       );
       await waitForMounted(
-        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 6,
+        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 4,
         `accepted TEXT fallback did not resume one bounded capture owner; states=${states
           .slice(-16)
           .map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}/${state.text_status}/${state.terminal_announcement_state}`)
@@ -12863,9 +12851,9 @@ test('mounted voice-created Task keeps polling after running AUDIO before empty 
       'failed Task AUDIO must not be replayed locally',
     );
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 1);
-    assert.equal(calls.filter(call => call.method === 'live_voice.speech.recognize_batch').length, 2);
+    assert.equal(calls.filter(call => call.method === 'live_voice.speech.recognize_batch').length, 1);
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 1);
-    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 6);
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 4);
     assert.equal(
       calls.some(call => call.method.includes('task.cancel') || call.method.includes('task.mutate') || call.method === 'live_voice.composition.p3.mutate'),
       false,
