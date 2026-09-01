@@ -4701,6 +4701,216 @@ async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_repla
 
 
 @pytest.mark.asyncio
+async def test_current_p2_poll_retries_terminal_progress_after_foreground_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry._P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS",
+        0.01,
+    )
+    project, store, task_id, _source_events = _running_presentation_store(tmp_path)
+    task = store.get_task(task_id, SCOPE)
+    attempt = store.get_attempt(task.attempt_id)
+    assert attempt.executor_ref is not None
+    artifact = TaskResultArtifact(
+        relative_path="itinerary.md",
+        sha256=hashlib.sha256(b"completed itinerary").hexdigest(),
+    )
+    store.apply_observations(
+        (
+            ExecutorObservation(
+                resolution=ExecutorResolution.KNOWN,
+                executor_id=attempt.executor_id,
+                executor_ref=attempt.executor_ref,
+                task_id=task_id,
+                attempt_id=attempt.attempt_id,
+                source_event_id=f"{attempt.executor_ref}:2",
+                source_seq=2,
+                attempt_state=FormalAttemptState.TERMINAL,
+                attempt_outcome=TerminalOutcome.COMPLETED,
+                occurred_at=NOW,
+                raw_status="completed",
+                result_text="杭州一日行程已完成。",
+                result_artifacts=(artifact,),
+            ),
+        )
+    )
+    events = store.events(task_id, SCOPE)
+    terminal_event = events[-1]
+    prefix_event = events[-2]
+    assert terminal_event.event_type == "task.terminal"
+    preconsumed = store.ack_events(
+        CommandEnvelope.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "request_id": "request-current-p2-terminal-prefix",
+                "command_id": "command-current-p2-terminal-prefix",
+                "command_type": "task.ack_events",
+                "issued_at": ACK_NOW,
+                "scope": SCOPE.to_dict(),
+                "correlation_id": "correlation-p2",
+                "causation_id": prefix_event.event_id,
+                "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+                "target_ref": {"kind": "task", "id": task_id},
+                "context_refs": [],
+                "required_capabilities": ["task.ack_events"],
+                "payload": {
+                    "presentation_class": "voice",
+                    "acked_through_seq": prefix_event.seq,
+                    "acked_event_id": prefix_event.event_id,
+                    "expected_event_head": terminal_event.seq,
+                },
+                "extensions": {},
+            }
+        ),
+        observed_at=ACK_NOW,
+    )
+    assert preconsumed.ok
+
+    composition = _P3Composition(project, presentation_store=store)
+    composition.subscription_events = (terminal_event,)
+    manager = _AgentManager()
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=True),
+        p3_composition=composition,
+        agent_manager=manager,
+        push_text_event=lambda _message: asyncio.sleep(0, result=True),
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-current-p2-terminal-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    registry._voice_task_origins[task_id] = _VoiceTaskOrigin(
+        session_id=SCOPE.session_id or "",
+        interaction_id="interaction-1",
+        activation_id="activation-1",
+        activation_generation=1,
+        correlation_id="correlation-p2",
+        response_ref=ResponseRef("interaction-1", "response-task-origin", 0),
+    )
+    progress_params = _progress_params(
+        task_id=task_id,
+        correlation_id="correlation-p2",
+        origin_id="interaction-1",
+        origin_kind="voice",
+        generation_id="current-p2-terminal-retry",
+    )
+    retained_p2 = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+    retained_runtime = retained_p2.activation_lease._runtime
+    runtime_type = type(retained_runtime)
+    original_foreground_safe = runtime_type.task_notification_foreground_safe
+    foreground_safe = False
+
+    def controlled_foreground_safe(runtime: object) -> bool:
+        if runtime is retained_runtime:
+            return foreground_safe
+        return original_foreground_safe(runtime)
+
+    monkeypatch.setattr(
+        runtime_type,
+        "task_notification_foreground_safe",
+        controlled_foreground_safe,
+    )
+    try:
+        assert (
+            await registry.handle_p3_progress_activate(
+                params=progress_params,
+                request_id="request-current-p2-terminal-progress",
+                session_id=SCOPE.session_id,
+                channel_id="web",
+            )
+        ).ok
+        retained_progress = next(iter(registry._progress_routes.values()))
+        for _ in range(200):
+            if any(
+                pending.event.task_event.event_id == terminal_event.event_id
+                for pending in retained_progress.pending_presentations.values()
+            ):
+                break
+            await asyncio.sleep(0.01)
+        assert any(
+            pending.event.task_event.event_id == terminal_event.event_id
+            for pending in retained_progress.pending_presentations.values()
+        )
+
+        foreground_safe = True
+        assert retained_p2.activation_lease.task_notification_foreground_safe(
+            retained_p2.binding
+        )
+
+        terminal_notification: dict[str, object] | None = None
+        for sequence in range(1, 5):
+            polled = await registry.handle_p2_notification_next(
+                params=_p2_params(notification_sequence=sequence),
+                request_id=f"request-current-p2-terminal-next-{sequence}",
+                session_id=SCOPE.session_id,
+            )
+            assert polled.ok
+            candidate = cast(dict[str, object], polled.payload["result"])
+            agent_event = candidate.get("agent_event")
+            response = candidate.get("response")
+            if (
+                isinstance(agent_event, Mapping)
+                and agent_event.get("source_provenance") == "server.task_notification"
+                and isinstance(response, Mapping)
+                and str(response.get("response_id", "")).startswith(
+                    "response-task-progress-"
+                )
+            ):
+                terminal_notification = candidate
+                break
+        assert terminal_notification is not None
+        assert terminal_notification["activation_generation"] == 1
+        terminal_response = cast(dict[str, object], terminal_notification["response"])
+        terminal_unit = cast(
+            dict[str, object], terminal_notification["presentation_unit"]
+        )
+        acknowledged = await registry.handle_p2_presentation_ack(
+            params=_p2_params(
+                response_id=terminal_response["response_id"],
+                response_generation=terminal_response["response_generation"],
+                surface=terminal_unit["surface"],
+                unit_id=terminal_unit["unit_id"],
+                contiguous_cursor=terminal_unit["seq"],
+                presented_at=ACK_NOW,
+            ),
+            request_id="request-current-p2-terminal-ack",
+            session_id=SCOPE.session_id,
+        )
+        assert acknowledged.ok
+        assert (
+            store.unread_events_page(
+                task_id,
+                SCOPE,
+                presentation_class="voice",
+                limit=500,
+            ).watermark
+            == terminal_event.seq
+        )
+        assert not any(
+            pending.event.task_event.event_id == terminal_event.event_id
+            for pending in retained_progress.pending_presentations.values()
+        )
+        after_ack = await registry.handle_p2_notification_next(
+            params=_p2_params(notification_sequence=sequence + 1),
+            request_id="request-current-p2-terminal-after-ack",
+            session_id=SCOPE.session_id,
+        )
+        assert after_ack.ok
+        assert cast(dict[str, object], after_ack.payload["result"])["kind"] == (
+            "transport.keepalive"
+        )
+        assert manager.agent.calls == 0
+    finally:
+        await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_unified_query_reads_authoritative_result_before_agent_and_never_cancels(
     tmp_path: Path,
 ) -> None:

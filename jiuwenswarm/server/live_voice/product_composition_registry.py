@@ -2796,9 +2796,17 @@ class AgentServerProductCompositionRegistry:
         return read
 
     async def _drain_voice_progress_for_p2_binding(
-        self, binding: P2InteractionBinding
+        self,
+        binding: P2InteractionBinding,
+        *,
+        drain_return_lease: bool = True,
     ) -> None:
-        """Wake deferred Task presentations owned by the acknowledged P2 route."""
+        """Retry deferred Task presentation owned by one exact current P2 route.
+
+        Presentation ACK also releases the Progress Return lease.  A receive
+        poll only retries Registry-owned presentation because the lease may
+        still retain the same immutable intent.
+        """
 
         async with self._lock:
             routes = tuple(
@@ -2827,7 +2835,8 @@ class AgentServerProductCompositionRegistry:
             # permanently pending and blocks browser capture recovery.
             await self._drain_progress_presentation(key, "text")
             await self._drain_progress_presentation(key, "voice")
-            await retained.progress_lease.drain_voice()
+            if drain_return_lease:
+                await retained.progress_lease.drain_voice()
 
     async def _defer_voice_progress(
         self, intent: TaskProgressNotificationIntent
@@ -8058,6 +8067,14 @@ class AgentServerProductCompositionRegistry:
         max_notifications: int,
     ) -> P3RouteResult:
         try:
+            # A recognition/fallback turn can release the Runtime foreground
+            # without producing a presentation ACK.  Retry only progress owned
+            # by this exact current P2 binding before entering the receive wait,
+            # so an immutable terminal event is not stranded until route close.
+            await self._drain_voice_progress_for_p2_binding(
+                retained.binding,
+                drain_return_lease=False,
+            )
             self._promote_orphaned_terminal_notifications(retained)
             pending_terminal = next(
                 (

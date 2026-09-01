@@ -368,11 +368,27 @@ exact-source Alpha result.
   repairs the reproduced automation boundary but grants no human, physical or
   final-review credit; the interrupted P3-9 acceptance must run again on the
   committed repair source.
+- **2026-09-01 current-P2 terminal retry repair:** the next assisted acceptance
+  proved a narrower follow-on boundary: the Task terminal/result was durable
+  and the current P2 generation kept polling, but a noise-triggered recognition
+  timeout released the Runtime foreground without producing a presentation ACK.
+  The exact P3 presentation therefore remained deferred until closing Live
+  Voice promoted it to a successor generation. The scoped repair makes one
+  current P2 receive poll retry only deferred progress owned by that exact
+  scope/session/correlation/interaction/activation generation before it waits.
+  It does not re-drain the Progress Return lease, so the same immutable intent
+  is not rewritten or duplicated; the existing exact presentation ACK remains
+  the only durable consumption authority. The reproduced same-generation
+  terminal path, ACK/no-duplicate checks and the affected terminal, successor,
+  audio-fallback, batching and identity matrix pass focused automation. This is
+  source-level automated repair only: it was not redeployed in this step and
+  earns no human or final-review credit.
 - **Remaining Gate:** implementation and automated task work are complete. Run
   the required human acceptance on the exact committed source containing the
-  successor-replay and P2 terminal-notification liveness repairs, including the
-  visible formal P3 panel and the separate user-confirmed real voice journey,
-  then obtain final independent Tier-3 review over the integrated candidate.
+  successor-replay, P2 terminal-notification liveness and current-P2 terminal
+  retry repairs, including the visible formal P3 panel and the separate
+  user-confirmed real voice journey, then obtain final independent Tier-3
+  review over the integrated candidate.
   Record one sanitized cumulative evidence result and synchronize STATUS only
   after those Gates actually run. Any unexplained failure or flake keeps the
   packet PARTIAL/FAIL.
