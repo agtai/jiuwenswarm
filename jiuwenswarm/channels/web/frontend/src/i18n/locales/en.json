@@ -2210,6 +2210,7 @@
         "priority": "Admission priority",
         "issue": "Issue control",
         "confirm": "Confirm exact control",
+        "confirmationPending": "Confirmation pending: the current form has not been applied. Select “Confirm exact control” and rely on Applied plus the authoritative Task state above.",
         "command": "Command",
         "request": "Request",
         "accepted": "Accepted",

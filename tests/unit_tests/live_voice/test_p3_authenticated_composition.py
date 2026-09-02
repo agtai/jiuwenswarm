@@ -1567,9 +1567,7 @@ async def test_product_status_projects_only_exact_existing_authority_operations(
         assert isinstance(stale_admission["admission"], dict)
         stale_admission["admission"]["attempt_count"] += 1
         stale_admission["admission"]["reason"] = "EXECUTOR_PROJECT_BUSY"
-        stale_admission["task"]["admission"] = dict(
-            stale_admission["admission"]
-        )
+        stale_admission["task"]["admission"] = dict(stale_admission["admission"])
         with pytest.raises(FormalTaskViolation) as changed_generation:
             _project_production_status_authority(
                 stale_admission,
@@ -1578,9 +1576,7 @@ async def test_product_status_projects_only_exact_existing_authority_operations(
                 retry_admission=retry_admission,
                 authorized_operations=frozenset(expected_operations),
             )
-        assert changed_generation.value.reason == (
-            "PRODUCTION_TASK_AUTHORITY_CHANGED"
-        )
+        assert changed_generation.value.reason == ("PRODUCTION_TASK_AUTHORITY_CHANGED")
         assert changed_generation.value.code is ErrorCode.STALE
         assert harness.composition._core.store.counts() == before_counts
         assert (
@@ -5615,12 +5611,11 @@ def test_product_factory_selects_exact_same_store_backed_d2_candidate(
     assert type(store) is SqliteTaskStore
     assert type(direct) is DirectProjectCodeExecutorAdapter
     assert direct._durability_store is store
-    assert type(
-        composition._authority_resolver._managed_worktree_reader
-    ) is DirectProjectManagedBaselineReader
     assert (
-        composition._authority_resolver._managed_worktree_reader._store is store
+        type(composition._authority_resolver._managed_worktree_reader)
+        is DirectProjectManagedBaselineReader
     )
+    assert composition._authority_resolver._managed_worktree_reader._store is store
     candidates = direct.capability_profiles()
     assert tuple(profile.durability_level for profile in candidates) == ("D0", "D2")
     assert composition._executor_profiles == (candidates[-1],)
@@ -5643,9 +5638,7 @@ def test_enabled_factory_fails_closed_without_one_available_exact_profile(
 ) -> None:
     _configure_enabled_factory(monkeypatch, 3600)
     if configured_profile is None:
-        monkeypatch.delenv(
-            "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE", raising=False
-        )
+        monkeypatch.delenv("JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE", raising=False)
     else:
         monkeypatch.setenv(
             "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE", configured_profile
@@ -8960,3 +8953,88 @@ async def test_dispatch_builds_the_agent_handle_instead_of_reading_the_accessor(
     assert binding.execution_agent is built
     assert agent.ensure_calls == 1
     assert binding.project_executor is agent
+
+
+@pytest.mark.asyncio
+async def test_attempt_scoped_dispatch_does_not_build_root_agent_on_target(
+    tmp_path: Path,
+) -> None:
+    """Direct D2 must initialize only the Agent in its isolated checkout."""
+
+    class Authority:
+        def revalidate(self, _context, **_kwargs):
+            return SimpleNamespace(
+                project_dir=str(tmp_path),
+                project_id="project-1",
+                session_id="session-1",
+                revision="a77516a0",
+            )
+
+    class Agent:
+        def __init__(self) -> None:
+            self.ensure_calls = 0
+
+        def get_instance(self):
+            return None
+
+        async def ensure_instance(self):
+            self.ensure_calls += 1
+            (tmp_path / "root-agent-side-effect.txt").write_text(
+                "forbidden",
+                encoding="utf-8",
+            )
+            return object()
+
+        def get_project_execution_root(self) -> str:
+            return str(tmp_path)
+
+        async def process_background_code_task_stream(self):
+            return None
+
+    agent = Agent()
+
+    class Manager:
+        async def get_live_voice_formal_task_agent(self, _project_dir: str):
+            return agent
+
+        def pin_agent(self, _agent) -> None:
+            return None
+
+        def unpin_agent(self, _agent) -> None:
+            return None
+
+        async def acquire_live_voice_formal_task_attempt_agent(self, _project_dir: str):
+            raise AssertionError("resolve must not acquire the attempt Agent")
+
+        async def release_live_voice_formal_task_attempt_agent(
+            self,
+            _project_dir: str,
+            *,
+            expected_agent,
+        ) -> bool:
+            raise AssertionError(expected_agent)
+
+    resolver = AgentManagerProjectBindingResolver(
+        authority_resolver=Authority(),
+        agent_manager=Manager(),
+        service=None,
+        model_resolver=_ModelResolver(),
+        principal=_principal(),
+        clock=lambda: NOW,
+    )
+
+    binding = await resolver.resolve(
+        SimpleNamespace(
+            context=object(),
+            attributes=(
+                ("model_identity", "default#0"),
+                ("model_config_version", "catalog-v1"),
+            ),
+        ),
+        for_dispatch=True,
+    )
+
+    assert binding.execution_agent is None
+    assert binding.attempt_executor_factory is not None
+    assert agent.ensure_calls == 0
+    assert not (tmp_path / "root-agent-side-effect.txt").exists()

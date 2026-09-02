@@ -941,6 +941,19 @@ class AgentManagerProjectBindingResolver:
                     "formal task model is unavailable",
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                 )
+            acquire_attempt = getattr(
+                self._agent_manager,
+                "acquire_live_voice_formal_task_attempt_agent",
+                None,
+            )
+            release_attempt = getattr(
+                self._agent_manager,
+                "release_live_voice_formal_task_attempt_agent",
+                None,
+            )
+            has_attempt_executor_factory = callable(acquire_attempt) and callable(
+                release_attempt
+            )
             agent = await self._agent_manager.get_live_voice_formal_task_agent(
                 snapshot.project_dir
             )
@@ -966,13 +979,19 @@ class AgentManagerProjectBindingResolver:
                 effective_root = (
                     get_root() if callable(get_root) else snapshot.project_dir
                 )
-                # ``get_instance`` is a plain accessor and returns None until
-                # the root DeepAgent has been built by the chat path.  A formal
-                # task dispatches outside that path on a freshly created
-                # project Agent, so it must build the handle it needs; using
-                # the accessor left ``execution_agent`` None and failed every
-                # real attempt with EXECUTOR_CAPABILITY_UNAVAILABLE.
-                execution_agent = await agent.ensure_instance()
+                if has_attempt_executor_factory:
+                    # Direct D2 executes only through the attempt-scoped Agent
+                    # created after its isolated checkout has been seeded.  The
+                    # root adapter remains a cheap project binding/fence owner;
+                    # eagerly building its DeepAgent here can create transient
+                    # project support files before isolation and must not be an
+                    # execution prerequisite for this path.
+                    get_instance = getattr(agent, "get_instance", None)
+                    execution_agent = get_instance() if callable(get_instance) else None
+                else:
+                    # Legacy project execution still passes the root DeepAgent
+                    # directly to the carrier and therefore must build it.
+                    execution_agent = await agent.ensure_instance()
                 project_executor = agent
             except BaseException:  # noqa: BLE001 -- no acquired pin may be lost
                 release()
@@ -1008,23 +1027,13 @@ class AgentManagerProjectBindingResolver:
             async def acquire_attempt_executor(
                 attempt_root: str,
             ) -> AttemptProjectExecutorLease:
-                acquire = getattr(
-                    self._agent_manager,
-                    "acquire_live_voice_formal_task_attempt_agent",
-                    None,
-                )
-                release_attempt = getattr(
-                    self._agent_manager,
-                    "release_live_voice_formal_task_attempt_agent",
-                    None,
-                )
-                if not callable(acquire) or not callable(release_attempt):
+                if not has_attempt_executor_factory:
                     raise FormalTaskViolation(
                         "EXECUTOR_CAPABILITY_UNAVAILABLE",
                         "formal attempt Agent leasing is unavailable",
                         ErrorCode.CAPABILITY_UNAVAILABLE,
                     )
-                acquisition = await acquire(attempt_root)
+                acquisition = await acquire_attempt(attempt_root)
                 if acquisition is None:
                     raise FormalTaskViolation(
                         "EXECUTOR_CAPABILITY_UNAVAILABLE",
@@ -1060,7 +1069,8 @@ class AgentManagerProjectBindingResolver:
                     initialization_error=initialization_error,
                 )
 
-            attempt_executor_factory = acquire_attempt_executor
+            if has_attempt_executor_factory:
+                attempt_executor_factory = acquire_attempt_executor
         try:
             binding = ProjectExecutionBinding(
                 service=self._service,
@@ -1232,7 +1242,10 @@ class P3AuthenticatedComposition:
         if execution_durability_level not in {"D0", "D1", "D2"}:
             raise ValueError("execution_durability_level must be D0, D1, or D2")
         if validated_executor_configuration is not None:
-            if type(validated_executor_configuration) is not ValidatedExecutorConfiguration:
+            if (
+                type(validated_executor_configuration)
+                is not ValidatedExecutorConfiguration
+            ):
                 raise TypeError(
                     "validated_executor_configuration must use the exact contract"
                 )

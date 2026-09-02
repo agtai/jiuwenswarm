@@ -2629,6 +2629,7 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
             self._project_dir = ""
             self.sessions: set[str] = set()
             self.sub_mode: str | None = "unset"
+            self.ensure_calls = 0
             created_adapters.append(self)
 
         async def create_instance(
@@ -2643,9 +2644,11 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
             self._project_dir = str(Path(config["project_dir"]).resolve())
 
         async def ensure_instance(self):
-            # Mirrors the real adapter: return the DeepAgent, building it on
-            # first use. A formal dispatch runs outside the chat path and must
-            # await this instead of reading the bare ``get_instance`` accessor.
+            self.ensure_calls += 1
+            (Path(self._project_dir) / "root-agent-side-effect.txt").write_text(
+                "forbidden",
+                encoding="utf-8",
+            )
             return self._instance
 
         async def prepare_background_project_session(self, session_id: str) -> None:
@@ -2730,6 +2733,9 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
     assert Path(isolated._project_dir).resolve() != project.resolve()  # type: ignore[attr-defined]
     assert canonical.sub_mode is None  # type: ignore[attr-defined]
     assert isolated.sub_mode is None  # type: ignore[attr-defined]
+    assert canonical.ensure_calls == 0  # type: ignore[attr-defined]
+    assert isolated.ensure_calls == 0  # type: ignore[attr-defined]
+    assert not (project / "root-agent-side-effect.txt").exists()
     assert manager._agent_pins == {}
     assert adapter.retained_cleanup_attempt_ids() == ()
 

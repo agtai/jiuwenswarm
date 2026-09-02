@@ -2208,6 +2208,7 @@
         "priority": "准入优先级",
         "issue": "签发控制",
         "confirm": "确认精确控制",
+        "confirmationPending": "待确认：当前表单内容尚未应用。请点击“确认精确控制”，并以命令的“已应用”和上方权威 Task 状态为准。",
         "command": "命令",
         "request": "请求",
         "accepted": "已接受",

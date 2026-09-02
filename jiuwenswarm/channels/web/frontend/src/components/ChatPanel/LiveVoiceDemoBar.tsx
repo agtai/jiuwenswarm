@@ -150,7 +150,9 @@ function FormalP3TaskExperiencePanel({
     (operation !== 'task.create' && operation !== 'task.create_successor' || Boolean(name.trim() && instruction.trim()))
     && (operation !== 'task.update' || Boolean(instruction.trim()))
     && (operation !== 'task.adjust' || Boolean(adjustment.trim()));
-  const controlsDisabled = snapshot.status !== 'ready' || ['issuing', 'confirmation_required', 'unknown'].includes(snapshot.command?.phase ?? 'idle');
+  const confirmationPending = snapshot.command?.phase === 'confirmation_required';
+  const controlsDisabled = snapshot.status !== 'ready' || ['issuing', 'unknown'].includes(snapshot.command?.phase ?? 'idle');
+  const formControlsDisabled = controlsDisabled || confirmationPending;
   const submit = () => onMutation({
     operation,
     ...(targetRequired && selected !== null ? { task_id: selected.task_id } : {}),
@@ -214,7 +216,7 @@ function FormalP3TaskExperiencePanel({
           <div className="live-voice-demo__p3-control">
                 <label>
                   <span>{t('liveVoice.formal.p3.operation')}</span>
-                  <select value={operation} disabled={controlsDisabled} onChange={event => setOperation(event.target.value as FormalP3TaskOperation)}>
+                  <select value={operation} disabled={formControlsDisabled} onChange={event => setOperation(event.target.value as FormalP3TaskOperation)}>
                     {FORMAL_P3_VISIBLE_OPERATIONS.map(candidate => {
                       const candidateUnsupported = ['task.provide_input', 'task.pause', 'task.resume'].includes(candidate);
                       const available = candidate === 'task.create'
@@ -225,20 +227,25 @@ function FormalP3TaskExperiencePanel({
                   </select>
                 </label>
                 {(operation === 'task.create' || operation === 'task.create_successor') && (
-                  <label><span>{t('liveVoice.formal.p3.name')}</span><input value={name} maxLength={256} onChange={event => setName(event.target.value)} /></label>
+                  <label><span>{t('liveVoice.formal.p3.name')}</span><input value={name} disabled={formControlsDisabled} maxLength={256} onChange={event => setName(event.target.value)} /></label>
                 )}
                 {(operation === 'task.create' || operation === 'task.create_successor' || operation === 'task.update') && (
-                  <label className="is-wide"><span>{t('liveVoice.formal.p3.instruction')}</span><textarea value={instruction} maxLength={4096} onChange={event => setInstruction(event.target.value)} /></label>
+                  <label className="is-wide"><span>{t('liveVoice.formal.p3.instruction')}</span><textarea value={instruction} disabled={formControlsDisabled} maxLength={4096} onChange={event => setInstruction(event.target.value)} /></label>
                 )}
                 {operation === 'task.adjust' && (
-                  <label className="is-wide"><span>{t('liveVoice.formal.p3.adjustment')}</span><textarea value={adjustment} maxLength={4096} onChange={event => setAdjustment(event.target.value)} /></label>
+                  <label className="is-wide"><span>{t('liveVoice.formal.p3.adjustment')}</span><textarea value={adjustment} disabled={formControlsDisabled} maxLength={4096} onChange={event => setAdjustment(event.target.value)} /></label>
                 )}
                 {operation === 'task.reprioritize' && (
-                  <label><span>{t('liveVoice.formal.p3.priority')}</span><select value={priority} onChange={event => setPriority(event.target.value as typeof priority)}><option value="low">low</option><option value="normal">normal</option><option value="high">high</option><option value="urgent">urgent</option></select></label>
+                  <label><span>{t('liveVoice.formal.p3.priority')}</span><select value={priority} disabled={formControlsDisabled} onChange={event => setPriority(event.target.value as typeof priority)}><option value="low">low</option><option value="normal">normal</option><option value="high">high</option><option value="urgent">urgent</option></select></label>
                 )}
-                <button type="button" disabled={controlsDisabled || unsupported || !operationAvailable || !contentReady} onClick={() => runFormalP3Action(submit)}>
-                  {t('liveVoice.formal.p3.issue')}
+                <button
+                  type="button"
+                  disabled={controlsDisabled || (!confirmationPending && (unsupported || !operationAvailable || !contentReady))}
+                  onClick={() => runFormalP3Action(confirmationPending ? onConfirm : submit)}
+                >
+                  {t(confirmationPending ? 'liveVoice.formal.p3.confirm' : 'liveVoice.formal.p3.issue')}
                 </button>
+                {confirmationPending && <span className="live-voice-demo__p3-notice" role="note">{t('liveVoice.formal.p3.confirmationPending')}</span>}
           </div>
           {snapshot.command !== null && (
             <div className="live-voice-demo__p3-command" role="status">
@@ -249,9 +256,6 @@ function FormalP3TaskExperiencePanel({
               <span>{t('liveVoice.formal.p3.applied')}: <code>{String(snapshot.command.applied)}</code></span>
               <span>{t('liveVoice.formal.p3.terminal')}: <code>{snapshot.command.terminal_outcome ?? '—'}</code></span>
               {snapshot.command.reason !== null && <span>{snapshot.command.reason}</span>}
-              {snapshot.command.phase === 'confirmation_required' && (
-                <button type="button" onClick={() => runFormalP3Action(onConfirm)}>{t('liveVoice.formal.p3.confirm')}</button>
-              )}
             </div>
           )}
         </div>

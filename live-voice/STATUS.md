@@ -294,12 +294,13 @@ exact-source Alpha result.
 
 ### Formal multi-Task coherent status and managed-baseline repair
 
-- **Status/source:** **DEPLOYED VALIDATION-READY / HUMAN REACCEPTANCE
-  PENDING**. The original implementation is commit `7f8673e1`, and
+- **Status/source:** **IMPLEMENTED / CLEAN REDEPLOYMENT PENDING / HUMAN
+  REACCEPTANCE BLOCKED**. The
+  original implementation is commit `7f8673e1`, and
   queued-reconciliation/order repair is commit `a179d02a`. The final running
-  source must be the clean documentation-only descendant containing this
-  record. The earlier documentation-only descendant `f02e3974` failed the
-  retained real product attempt and is not validation-ready.
+  source must be a clean descendant containing this record and the repair below.
+  The earlier documentation-only descendants, including the retained deployment
+  at `a735c0a0`, are not validation-ready.
   The retained isolated run showed Task A as `accepted/queued` with
   `EXECUTOR_PROJECT_BUSY` while the formal Panel omitted
   `task.reprioritize`. Canonical inspection proved that the background
@@ -311,6 +312,21 @@ exact-source Alpha result.
   D2 effect sequence/checkpoint and current tree now prove the exact completed
   managed baseline. The failed data root, target project and log are retained
   outside Git as diagnostic evidence.
+  A subsequent human attempt on `a735c0a0` exposed two further failures in the
+  same journey. The first targeted reprioritize request issued an exact pending
+  confirmation, but the primary control stayed above a separate confirmation
+  action and the confirmation was never consumed; the draft `urgent` value was
+  therefore visually confusable with an applied priority even though canonical
+  admission remained `normal`. After the predecessor completed, the queued
+  attempt then failed `EXECUTOR_INITIALIZATION_MUTATED_TARGET`: the Direct
+  binding eagerly built a root project Agent before creating the isolated
+  attempt checkout, despite the actual execution already owning an
+  attempt-scoped Agent factory. The retained target returned to the exact
+  pre-initialization fingerprint, so the guard was truthful but the root build
+  was both unnecessary and transiently target-mutating. The same interval also
+  contained a roughly twenty-second streaming Speech timeout/fallback; this is
+  retained as an adjacent responsiveness observation, not attributed to Task
+  mutation authority without a separate reproduced causal oracle.
 - **Capability/risk/dependencies:** Task Control/Store status authority plus
   Direct D2 Executor project-effect admission; Tier 3 under root `TESTING.md`.
   This repair depends on D-087/D-088 queued update/reprioritize rules, D-089
@@ -336,13 +352,23 @@ exact-source Alpha result.
   that the two proofs cannot be observed in the reverse order. The next
   attempt is still isolated, seeded from that exact tree and applied by
   optimistic fingerprint comparison.
+  The formal Panel's primary action must visibly transition from issue to exact
+  confirmation in place, keep the draft disabled while confirmation is pending,
+  and never display a draft priority as authoritative admission; the canonical
+  Task detail and command `accepted/applied` fields remain the only success
+  truth. Direct dispatch must not initialize or execute any Agent against the
+  selected target when an attempt-scoped factory is available: it validates the
+  exact root/model/context first, creates and seeds the isolated checkout, then
+  initializes only the attempt-owned Agent there. Legacy bindings without an
+  attempt factory retain their existing root-Agent requirement.
 - **Owner files/tests:** production authority reader/status composition in
   `p3_production_intent_composition.py` and
   `product_composition_registry.py`; authenticated project resolution and
   Direct managed-baseline verification in `p3_authenticated_composition.py`
-  and `project_code_executor.py`; canonical queued reconciliation in
+  and `project_code_executor.py`; formal Panel confirmation presentation in
+  `LiveVoiceDemoBar.tsx`; canonical queued reconciliation in
   `persistent_task_core.py` and `task_store.py`; focused
-  Store/Registry/Executor/formal Web tests plus affected
+  Store/Registry/Executor/formal Web and Panel tests plus affected
   regressions/build/static checks.
 - **Explicit exclusions:** never accept an arbitrary manual tracked/untracked
   change, changed HEAD, unsafe link, foreign scope/project, nonterminal,
@@ -351,6 +377,9 @@ exact-source Alpha result.
   or running reprioritize available, change UI authority ownership, add D1,
   add a new control primitive, alter notification/audio semantics, update a
   remote ref or claim feature-complete/product/Production acceptance.
+  This repair does not shorten Provider timeouts, change P2 notification
+  delivery/ACK semantics or claim that the adjacent Speech fallback has been
+  removed.
 - **Acceptance:** deterministic race coverage rejects a mixed status generation
   with zero mutation and a stable refresh converges; fresh busy admission
   exposes reprioritize only while unclaimed, preserves Task/Attempt identity
@@ -385,6 +414,9 @@ exact-source Alpha result.
   current execution environment, and the real JiuwenSwarm Agent/file-Tool seam
   remains the human journey; this packet cannot close before the fresh
   deployment and that journey.
+  Those results predate the newly reproduced root-initialization and Panel
+  confirmation failures. The current repair adds the missing affected-boundary
+  evidence below; no earlier deployment gains acceptance credit from it.
 - **Post-reopen repair evidence:** focused RED-to-green reconciliation and
   status tests pass `5/5`; admission plus real reconciliation-worker/D2 serial
   execution passes `120/120`; the two complete affected Core/composition
@@ -396,6 +428,26 @@ exact-source Alpha result.
   Core order test proves Task B settles canonically before Task A consumes the
   managed baseline and both distinct files survive serial completion. The
   human JiuwenSwarm Agent/file-Tool journey remains required.
+- **Current initialization/confirmation repair evidence:** the resolver unit
+  oracle proves an attempt-factory Direct binding leaves the root Agent
+  uninitialized and creates no target file, while the production-manager real
+  facade integration proves the attempt-scoped Agent still completes from its
+  isolated checkout. The mounted formal Panel oracle proves there is exactly
+  one confirmation action in the primary control position, all draft fields
+  are locked while it is pending, the unapplied notice is visible and the
+  exact callback is consumed. The three focused Python cases pass `3/3`; the
+  two complete affected Python modules report `268 passed, 2 skipped, 2
+  failed`, with both failures being noncooperative cleanup/deadline timing cases
+  that pass together on immediate isolated rerun `2/2`. The changed mounted
+  Panel case passes both alone and in the complete affected Web diagnostic.
+  That Web diagnostic reports `73 passed, 1 skipped, 5 failed`; all five are
+  the already recorded P2 terminal-notification/ACK timing failures in unchanged
+  and explicitly excluded notification/audio sources, so no cumulative Web
+  PASS is claimed. The Live Voice frontend build, Ruff check/format check,
+  compileall and diff checks pass. A cold complete-diff self-review found no
+  repair-scope issue; an independent reviewer is unavailable in the current
+  execution environment. A fresh real deployment and the human journey remain
+  required.
 - **Failed line-ending deployment retained:** validation label `1bc2535d` uses project
   `proj_f857a412` at
   `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-project-1bc2535d4c7b4d06960a83f1dbb80fe1`
@@ -427,9 +479,23 @@ exact-source Alpha result.
   and real Speech TTS→STT. The critical receipt passed, identity mismatch
   and forged claim were rejected with zero business side effect, and HTTP
   returned 200. The first launch log is
-  `logs/swarm-20260902-133154.log`. A final restart must bind the
-  documentation-only descendant containing this record before handoff; the
-  remaining acceptance is the user's real multi-Task journey.
+  `logs/swarm-20260902-133154.log`. The subsequent human journey is retained in
+  `logs/swarm-20260902-133406.log`: Task B completed, the attempted Task A
+  priority remained canonically `normal` because its pending confirmation was
+  never consumed, and Task A later failed
+  `EXECUTOR_INITIALIZATION_MUTATED_TARGET`. This deployment is therefore
+  failed evidence and must not be reused.
+- **Reserved fresh repair deployment:** validation label `c99a45f0` reserves
+  project `proj_c99a45f0` at
+  `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-project-c99a45f0309a4867bcb37aa235204928`
+  and data root
+  `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-data-c99a45f0309a4867bcb37aa235204928`.
+  It must be created as a fresh, clean, zero-remote Git fixture with
+  repository-local `core.autocrlf=false`, a fresh Store and no retained Task,
+  Attempt, event, result, outbox or Direct rows. Only a successful controlled
+  preflight, Live Voice build, launch, real Speech/receipt probe and HTTP check
+  from the clean commit containing this record make its URL eligible for human
+  reacceptance.
 - **Failed isolated deployment retained:** validation label `aeeb4a70` uses project
   `proj_9a8b984a` at
   `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-project-aeeb4a708abd4161ab31a7791e4aae8e`
