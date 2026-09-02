@@ -331,6 +331,85 @@ def test_confirmation_is_consumed_by_port_once_and_proposal_has_no_fact() -> Non
     _assert_no_effects(second, authority)
 
 
+@pytest.mark.parametrize(
+    "changed_field",
+    [
+        "context_sha256",
+        "semantic_config_sha256",
+        "model_identity",
+        "model_config_version",
+    ],
+)
+def test_model_context_provenance_is_immutable_and_binds_formal_confirmation(
+    changed_field,
+):
+    authority = RecordingAuthority(_fact())
+    origin = RecordingOriginAuthority()
+    confirmation = RecordingConfirmationConsumer()
+    clarifications = RecordingClarificationOwner(boot_id="semantic-binding", capacity=8)
+    text = "Cancel the referenced work."
+    source = {
+        "context_sha256": "a" * 64,
+        "semantic_config_sha256": "b" * 64,
+        "model_identity": "configured-model",
+        "model_config_version": "configuration-1",
+    }
+    request = replace(
+        _request(_proposal("task.cancel", "task-a", {}, text), origin, text=text),
+        semantic_context_binding=source,
+    )
+    original = _resolve(request, authority, origin, confirmation, clarifications)
+    assert original.outcome is ProductionTaskPolicyOutcome.PROPOSED
+    assert original.confirmation == "required"
+    assert original.origin_binding.semantic_context_binding == source
+    changed = dict(source)
+    changed[changed_field] = "c" * 64 if changed_field.endswith("sha256") else "another"
+    source[changed_field] = changed[changed_field]
+    unchanged = _resolve(request, authority, origin, confirmation, clarifications)
+    assert unchanged.origin_binding_fingerprint == original.origin_binding_fingerprint
+    assert (
+        unchanged.confirmation_binding.fingerprint
+        == original.confirmation_binding.fingerprint
+    )
+    newer = _resolve(
+        replace(request, semantic_context_binding=changed),
+        authority,
+        origin,
+        confirmation,
+        clarifications,
+    )
+    assert newer.origin_binding_fingerprint != original.origin_binding_fingerprint
+    assert (
+        newer.confirmation_binding.fingerprint
+        != original.confirmation_binding.fingerprint
+    )
+    assert confirmation.calls == []
+    _assert_no_effects(original, authority)
+    _assert_no_effects(newer, authority)
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        {},
+        {"unexpected": "field"},
+        {
+            "context_sha256": "not-sha",
+            "semantic_config_sha256": "b" * 64,
+            "model_identity": "configured",
+            "model_config_version": "v1",
+        },
+    ],
+)
+def test_invalid_semantic_provenance_never_enters_formal_resolver(binding):
+    origin = RecordingOriginAuthority()
+    text = "Cancel the referenced work."
+    request = _request(_proposal("task.cancel", "task-a", {}, text), origin, text=text)
+    with pytest.raises(ValueError):
+        replace(request, semantic_context_binding=binding)
+    assert origin.calls == []
+
+
 def test_bridge_cannot_skip_any_trusted_port() -> None:
     authority = RecordingAuthority(_fact())
     origin = RecordingOriginAuthority()

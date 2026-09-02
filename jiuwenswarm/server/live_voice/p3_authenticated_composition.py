@@ -35,6 +35,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     QueryEnvelope,
     ResultEnvelope,
     ScopeRef,
+    TurnCommit,
     TurnCommitLedger,
     canonical_json_bytes,
 )
@@ -126,6 +127,7 @@ from .task_progress_return import (
     TaskProgressOriginKind,
 )
 from .task_store import SqliteTaskStore, TaskDurabilityDiagnosticSnapshot
+from .task_semantics import TaskSemanticContext, TaskSemanticDecision, TaskSemanticResolver
 from .voice_task_policy import FormalTaskPolicyAdapter, FormalTaskPolicyInput
 
 logger = logging.getLogger(__name__)
@@ -1506,12 +1508,134 @@ class P3AuthenticatedComposition:
             capabilities=capabilities,
         )
 
+    def _resolve_production_input_authority(
+        self,
+        *,
+        bearer_token: object,
+        operation: str,
+        session_id: str,
+        now: str,
+        require_clean: bool,
+        native_authority: NativeP3ActivationAuthority | None = None,
+    ) -> tuple[AuthenticatedPrincipal, ResolvedAuthority]:
+        if native_authority is not None:
+            authority = self._resolve_native_activation_authority(
+                native_authority,
+                operation=operation,
+                session_id=session_id,
+                now=now,
+                require_clean=require_clean,
+            )
+            return native_authority.principal, authority
+        principal = self._authenticator.authenticate(
+            bearer_token, operation=operation, now=now
+        )
+        return principal, self._authority_resolver.resolve(
+            principal,
+            session_id=session_id,
+            now=now,
+            require_clean=require_clean,
+        )
+
+    async def resolve_production_semantics(
+        self,
+        *,
+        commit: TurnCommit,
+        bearer_token: object,
+        session_id: str,
+        history: tuple[Mapping[str, object], ...] = (),
+        pending: tuple[Mapping[str, object], ...] = (),
+        native_authority: NativeP3ActivationAuthority | None = None,
+        analysis: Mapping[str, str] | None = None,
+    ) -> TaskSemanticDecision:
+        """Authenticate read-only model context; ingress retains commit authority.
+
+        This method cannot admit a commit, authorize a mutation or issue a formal
+        origin receipt. The caller must still hold its verified Gateway/Native
+        final and generation fence before dispatching the returned proposal.
+        """
+        authority = await asyncio.to_thread(
+            self.prepare_production_intent_authority,
+            bearer_token=bearer_token,
+            operation="task.list",
+            session_id=session_id,
+            native_authority=native_authority,
+        )
+        if not isinstance(commit, TurnCommit) or commit.scope != authority.scope:
+            raise FormalTaskViolation(
+                "SEMANTIC_COMMIT_SCOPE_MISMATCH",
+                "semantic input has another scope",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if self._model_resolver is None:
+            raise FormalTaskViolation(
+                "P3_MODEL_CATALOG_UNAVAILABLE",
+                "semantic model authority is unavailable",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        facts = await asyncio.to_thread(
+            authority.reader.list_visible_tasks, authority.scope
+        )
+
+        def validate_context() -> None:
+            if not self._accepting:
+                raise FormalTaskViolation(
+                    "FORMAL_TASK_ROUTE_DISABLED",
+                    "semantic route is unavailable",
+                    ErrorCode.UNAVAILABLE,
+                )
+            now = self._clock()
+            _principal, current = self._resolve_production_input_authority(
+                bearer_token=bearer_token,
+                operation="task.list",
+                session_id=session_id,
+                now=now,
+                require_clean=False,
+                native_authority=native_authority,
+            )
+            if current.scope != facts.scope:
+                raise FormalTaskViolation(
+                    "SEMANTIC_COMMIT_SCOPE_MISMATCH",
+                    "semantic context changed scope",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            current.context.require_usable(
+                scope=current.scope,
+                required_permissions=frozenset(),
+                destructive=False,
+                now=now,
+            )
+            # Validate precisely the records that will be disclosed, not a
+            # separately paginated list which could race or omit a later page.
+            # Historical read rules permit a normal revision advance, but not
+            # project URI/identity, redaction, expiry or permission drift.
+            for fact in facts.tasks:
+                self._require_exact_task_context(
+                    authority=current,
+                    operation="task.list",
+                    task_id=fact.task_id,
+                    now=now,
+                )
+
+        async def before_invoke() -> None:
+            await asyncio.to_thread(validate_context)
+
+        await before_invoke()
+        return await TaskSemanticResolver(
+            self._model_resolver, before_invoke=before_invoke
+        ).resolve(
+            commit,
+            TaskSemanticContext(facts, session_id, history, pending),
+            analysis=analysis,
+        )
+
     def prepare_production_intent_authority(
         self,
         *,
         bearer_token: object,
         operation: str,
         session_id: str,
+        native_authority: NativeP3ActivationAuthority | None = None,
     ) -> PreparedProductionIntentAuthority:
         """Authenticate one proposal operation and expose read-only Task facts.
 
@@ -1534,16 +1658,13 @@ class P3AuthenticatedComposition:
                 ErrorCode.UNSUPPORTED,
             )
         now = self._clock()
-        principal = self._authenticator.authenticate(
-            bearer_token,
+        principal, authority = self._resolve_production_input_authority(
+            bearer_token=bearer_token,
             operation=operation,
-            now=now,
-        )
-        authority = self._authority_resolver.resolve(
-            principal,
             session_id=_required_text(session_id, "session_id", maximum=256),
             now=now,
             require_clean=False,
+            native_authority=native_authority,
         )
         authority.context.require_usable(
             scope=authority.scope,
@@ -3560,6 +3681,7 @@ class P3AuthenticatedComposition:
         origin_authority: CallLocalProductionOriginAuthority,
         confirmation_consumer: CallLocalProductionConfirmationConsumer | None = None,
         current_background_session_id: str | None = None,
+        native_authority: NativeP3ActivationAuthority | None = None,
     ) -> P3RouteResult:
         """Freshly authorize and invoke one generalized production resolution.
 
@@ -3597,17 +3719,14 @@ class P3AuthenticatedComposition:
                     ErrorCode.INVALID_ARGUMENT,
                 )
             now = self._clock()
-            principal = self._authenticator.authenticate(
-                bearer_token,
+            principal, authority = await self._run_blocking(
+                self._resolve_production_input_authority,
+                bearer_token=bearer_token,
                 operation=operation,
-                now=now,
-            )
-            authority = await self._run_blocking(
-                self._authority_resolver.resolve,
-                principal,
                 session_id=_required_text(session_id, "session_id", maximum=256),
                 now=now,
                 require_clean=operation in {"task.create", "task.create_successor"},
+                native_authority=native_authority,
             )
             destructive = operation in P3_PRODUCTION_MUTATIONS
             authority.context.require_usable(

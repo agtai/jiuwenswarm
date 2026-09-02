@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-02. This is the only mutable source for current product
+> Updated: 2026-09-03. This is the only mutable source for current product
 > judgement, capability completion, remaining scope, dependency order and the
 > next execution packet. Read live branch/HEAD/upstream state from Git; do not
 > copy transient ahead/behind, dirty-tree or “uncommitted” claims into this file.
@@ -403,6 +403,22 @@ exact-source Alpha result.
   [Core prerequisite evidence](evidence/SEMANTIC_RETIREMENT_CORE_BOUNDARY_20260902.md).
   This does not acknowledge pending work as applied or close semantic/audio Gates.
   Generic running changes remain `task.adjust`, not new running `task.update`.
+- **Semantic foundation, not production cutover:** the configured-model strict
+  parser, exact origin provenance and bounded journal context/frozen replay data
+  are implemented. The combined five-file boundary suite passes 281 tests.
+  Independent review found a project-remap disclosure gap; exact outgoing Task
+  context checks now run before and after model preparation, with both bearer
+  and Native negative/normal-revision tests. Fix-only review passes C0/I0/M0. See the
+  [model/context prerequisite evidence](evidence/SEMANTIC_RETIREMENT_MODEL_BOUNDARY_20260903.md).
+  The Registry still calls old semantic paths; no retirement or audio credit is
+  implied by these helpers.
+- **Decision needed before all-voice cutover:** without Demo bypass, existing
+  Gateway critical-token handling requires explicit UI transcript confirmation.
+  Pure-voice readback confirmation is not currently implemented. A minimal
+  Tier-3 binding of actual readback presentation, original input and a later
+  authenticated speech confirmation was proposed to the user; do not implement
+  a replacement bypass or relabel ordinary speech as explicit text. Other
+  unaffected work may continue while this scope decision is pending.
 - **Persistence/compatibility:** pre-command proposal/continuation records use
   the existing committed-input journal's additive bounded storage, not another
   Task Store. Bind scope, authorized conversation, origin, version, expiry and

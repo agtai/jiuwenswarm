@@ -2,6 +2,7 @@
 
 import hashlib
 import sqlite3
+import time
 
 import pytest
 
@@ -17,6 +18,100 @@ def digest(value: str) -> str:
 
 def fingerprint(value: str) -> bytes:
     return hashlib.sha256(value.encode("utf-8")).digest()
+
+
+def test_semantic_freeze_is_after_admission_and_exact_immutable_replay(tmp_path):
+    journal = SqliteUnifiedCommittedInputJournal(tmp_path / "freeze.sqlite3")
+    voice, binding = digest("voice"), fingerprint("input")
+    data = {
+        "decision": {"operation": "task.create", "instruction": "read actual inputs"}
+    }
+    args = dict(voice_identity_sha256=voice, fingerprint=binding)
+    with pytest.raises(FormalTaskViolation):
+        journal.bind_semantic(**args, semantic_binding=data)
+    assert journal.admit(
+        request_id="original", created_at="2030-01-01T00:00:00Z", **args
+    ).execute
+    assert journal.bind_semantic(**args, semantic_binding=data) == data
+    assert journal.bind_semantic(**args, semantic_binding=data) == data
+    with pytest.raises(FormalTaskViolation) as conflict:
+        journal.bind_semantic(**args, semantic_binding={"decision": "changed"})
+    assert conflict.value.reason == "UNIFIED_INPUT_SEMANTIC_BINDING_CONFLICT"
+    reopened = SqliteUnifiedCommittedInputJournal(journal.database_path)
+    replay = reopened.admit(
+        request_id="retry", created_at="2030-01-01T00:00:01Z", **args
+    )
+    assert replay.in_progress and not replay.execute and replay.semantic_binding == data
+    with journal._connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM unified_foreground_effects"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+@pytest.mark.parametrize(
+    "failure", ["different_owner", "expired", "wrong_fingerprint", "completed"]
+)
+def test_semantic_freeze_cannot_write_without_live_exact_lease(tmp_path, failure):
+    database = tmp_path / "freeze.sqlite3"
+    journal = SqliteUnifiedCommittedInputJournal(database)
+    voice, binding = digest("voice"), fingerprint("input")
+    args = dict(voice_identity_sha256=voice, fingerprint=binding)
+    journal.admit(request_id="original", created_at="2030-01-01T00:00:00Z", **args)
+    if failure == "different_owner":
+        journal = SqliteUnifiedCommittedInputJournal(database)
+    elif failure == "expired":
+        with journal._connect() as connection:
+            connection.execute(
+                "UPDATE unified_committed_inputs SET lease_expires_at=?",
+                (time.time() - 1,),
+            )
+    elif failure == "wrong_fingerprint":
+        args["fingerprint"] = fingerprint("changed")
+    else:
+        journal.complete(
+            **args, result={"ok": True}, completed_at="2030-01-01T00:00:01Z"
+        )
+    with pytest.raises(FormalTaskViolation) as lost:
+        journal.bind_semantic(**args, semantic_binding={"decision": "first"})
+    assert lost.value.reason == "UNIFIED_INPUT_EXECUTION_LEASE_LOST"
+    with journal._connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT semantic_binding_json FROM unified_committed_inputs"
+            ).fetchone()[0]
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM unified_foreground_effects"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_reclaimed_owner_can_only_reuse_original_semantics(tmp_path):
+    database = tmp_path / "freeze.sqlite3"
+    journal = SqliteUnifiedCommittedInputJournal(database)
+    args = dict(voice_identity_sha256=digest("voice"), fingerprint=fingerprint("input"))
+    journal.admit(request_id="original", created_at="2030-01-01T00:00:00Z", **args)
+    data = {"decision": "original"}
+    journal.bind_semantic(**args, semantic_binding=data)
+    with journal._connect() as connection:
+        connection.execute(
+            "UPDATE unified_committed_inputs SET lease_expires_at=?", (time.time() - 1,)
+        )
+    owner = SqliteUnifiedCommittedInputJournal(database)
+    assert owner.admit(
+        request_id="retry", created_at="2030-01-01T00:00:01Z", **args
+    ).execute
+    assert owner.bind_semantic(**args, semantic_binding=data) == data
+    with pytest.raises(FormalTaskViolation):
+        owner.bind_semantic(**args, semantic_binding={"decision": "new"})
+    with pytest.raises(FormalTaskViolation):
+        journal.bind_semantic(**args, semantic_binding=data)
 
 
 def test_journal_connections_enforce_request_binding_foreign_key(tmp_path) -> None:

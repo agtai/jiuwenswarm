@@ -2,13 +2,15 @@
 
 """Independent durable replay owner for committed hands-free voice input.
 
-The journal stores only opaque digests and bounded control results.  It never
-stores raw audio, bearer credentials, Gateway receipts, or task result text.
+The journal stores digests, bounded control recovery and pre-command semantic
+context. It never stores raw audio, bearer credentials or Gateway receipts.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import sqlite3
 import time
@@ -17,9 +19,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode
+from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    Assurance,
+    ErrorCode,
+    ScopeRef,
+    canonical_json_bytes,
+)
 
 from .formal_task_models import FormalTaskViolation
+from .p3_confirmation import P3_CONFIRMATION_MAX_CAPACITY, P3_CONFIRMATION_MAX_TTL
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +47,18 @@ class UnifiedForegroundEffectAdmission:
     recovery: dict[str, object] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PendingSemanticContext:
+    context_id: str
+    kind: str
+    source_id: str
+    version: int
+    payload: dict[str, object]
+    issued_at: float
+    expires_at: float
+    consumed_by: str | None
+
+
 class SqliteUnifiedCommittedInputJournal:
     """Bind request and Gateway voice identities before any business effect."""
 
@@ -50,9 +70,7 @@ class SqliteUnifiedCommittedInputJournal:
 
         return max(0.001, min(10.0, self._LEASE_SECONDS / 3.0))
 
-    _FOREGROUND_EFFECT_KINDS = frozenset(
-        {"agent_submit", "authoritative_presentation"}
-    )
+    _FOREGROUND_EFFECT_KINDS = frozenset({"agent_submit", "authoritative_presentation"})
 
     def __init__(self, database: str | os.PathLike[str]) -> None:
         self.database_path = Path(database).resolve(strict=False)
@@ -147,6 +165,320 @@ class SqliteUnifiedCommittedInputJournal:
                     "ALTER TABLE unified_foreground_effects "
                     "ADD COLUMN recovery_json TEXT"
                 )
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS semantic_pending_contexts (
+                    context_id TEXT PRIMARY KEY,
+                    scope_sha256 TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('proposal', 'clarification', 'confirmation')),
+                    source_id TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK(version > 0),
+                    payload_json TEXT NOT NULL,
+                    payload_sha256 TEXT NOT NULL,
+                    issued_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    consumed_by TEXT,
+                    record_sha256 TEXT NOT NULL,
+                    UNIQUE(scope_sha256, kind, source_id)
+                )
+            """)
+
+    @staticmethod
+    def _semantic_scope_key(scope: ScopeRef) -> str:
+        if (
+            not isinstance(scope, ScopeRef)
+            or scope.assurance is not Assurance.AUTHENTICATED
+            or not scope.session_id
+        ):
+            raise FormalTaskViolation(
+                "SEMANTIC_CONTEXT_SCOPE_REQUIRED",
+                "semantic context requires an authenticated conversation",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        return hashlib.sha256(canonical_json_bytes(scope.to_dict())).hexdigest()
+
+    @staticmethod
+    def _semantic_time(value: float) -> float:
+        if type(value) not in {int, float} or not math.isfinite(value) or value < 0:
+            raise FormalTaskViolation(
+                "SEMANTIC_CONTEXT_TIME_INVALID",
+                "invalid context time",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        return float(value)
+
+    @staticmethod
+    def _semantic_text(value: str) -> str:
+        if (
+            type(value) is not str
+            or not value.strip()
+            or "\x00" in value
+            or len(value.encode("utf-8")) > 256
+        ):
+            raise FormalTaskViolation(
+                "SEMANTIC_CONTEXT_ID_INVALID",
+                "invalid context identity",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        return value
+
+    @staticmethod
+    def _semantic_record_digest(row: Mapping[str, object]) -> str:
+        return hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    field: row[field]
+                    for field in (
+                        "context_id",
+                        "scope_sha256",
+                        "kind",
+                        "source_id",
+                        "version",
+                        "payload_sha256",
+                        "issued_at",
+                        "expires_at",
+                        "consumed_by",
+                    )
+                }
+            )
+        ).hexdigest()
+
+    @staticmethod
+    def _pending_context(row: sqlite3.Row) -> PendingSemanticContext:
+        try:
+            if (
+                SqliteUnifiedCommittedInputJournal._semantic_record_digest(row)
+                != row["record_sha256"]
+            ):
+                raise ValueError
+            payload = json.loads(row["payload_json"])
+            if type(payload) is not dict or len(canonical_json_bytes(payload)) > 32_768:
+                raise ValueError
+            if (
+                hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+                != row["payload_sha256"]
+            ):
+                raise ValueError
+            return PendingSemanticContext(
+                str(row["context_id"]),
+                str(row["kind"]),
+                str(row["source_id"]),
+                int(row["version"]),
+                payload,
+                float(row["issued_at"]),
+                float(row["expires_at"]),
+                row["consumed_by"],
+            )
+        except (ValueError, TypeError, KeyError) as error:
+            raise FormalTaskViolation(
+                "SEMANTIC_CONTEXT_CORRUPT",
+                "persisted semantic context failed integrity checks",
+                ErrorCode.INTERNAL,
+            ) from error
+
+    def retain_semantic_context(
+        self,
+        *,
+        scope: ScopeRef,
+        kind: str,
+        source_id: str,
+        payload: Mapping[str, object],
+        issued_at: float,
+        expires_at: float,
+        now: float | None = None,
+    ) -> PendingSemanticContext:
+        """Persist pre-command data, never a Task or an authorization receipt.
+
+        Source and expiry are server facts. Replaying an Agent presentation or
+        reconnecting cannot change payload, refresh expiry or mint another ID.
+        """
+        scope_key = self._semantic_scope_key(scope)
+        source_id = self._semantic_text(source_id)
+        issued, expires = (
+            self._semantic_time(issued_at),
+            self._semantic_time(expires_at),
+        )
+        observed = self._semantic_time(time.time() if now is None else now)
+        if kind not in {"proposal", "clarification", "confirmation"} or not isinstance(
+            payload, Mapping
+        ):
+            raise FormalTaskViolation(
+                "SEMANTIC_CONTEXT_INVALID",
+                "invalid pre-command context",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        encoded = canonical_json_bytes(dict(payload))
+        if (
+            len(encoded) > 32_768
+            or not issued <= observed < expires
+            or expires - issued > P3_CONFIRMATION_MAX_TTL.total_seconds()
+        ):
+            raise FormalTaskViolation(
+                "SEMANTIC_CONTEXT_BOUND_EXCEEDED",
+                "context bounds or expiry rejected",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        digest = hashlib.sha256(encoded).hexdigest()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM semantic_pending_contexts WHERE scope_sha256=? AND kind=? AND source_id=?",
+                (scope_key, kind, source_id),
+            ).fetchone()
+            if existing is not None:
+                record = self._pending_context(existing)
+                if (
+                    existing["payload_sha256"] != digest
+                    or record.issued_at != issued
+                    or record.expires_at != expires
+                ):
+                    raise FormalTaskViolation(
+                        "SEMANTIC_CONTEXT_SOURCE_CONFLICT",
+                        "source context cannot change",
+                        ErrorCode.CONFLICT,
+                    )
+                return record
+            # Retain expired source anchors: forgetting one would allow an old
+            # Agent presentation to mint new work with a refreshed expiry. The
+            # global capacity includes anchors and fails closed when full.
+            count = connection.execute(
+                "SELECT COUNT(*) FROM semantic_pending_contexts"
+            ).fetchone()[0]
+            scoped = connection.execute(
+                "SELECT COUNT(*) FROM semantic_pending_contexts WHERE scope_sha256=? AND consumed_by IS NULL AND expires_at>?",
+                (scope_key, observed),
+            ).fetchone()[0]
+            if count >= P3_CONFIRMATION_MAX_CAPACITY or scoped >= 8:
+                raise FormalTaskViolation(
+                    "SEMANTIC_CONTEXT_CAPACITY_EXCEEDED",
+                    "bounded pending context is full",
+                    ErrorCode.UNAVAILABLE,
+                )
+            context_id = f"semantic-{uuid.uuid4().hex}"
+            record_digest = self._semantic_record_digest(
+                {
+                    "context_id": context_id,
+                    "scope_sha256": scope_key,
+                    "kind": kind,
+                    "source_id": source_id,
+                    "version": 1,
+                    "payload_sha256": digest,
+                    "issued_at": issued,
+                    "expires_at": expires,
+                    "consumed_by": None,
+                }
+            )
+            connection.execute(
+                "INSERT INTO semantic_pending_contexts VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, ?)",
+                (
+                    context_id,
+                    scope_key,
+                    kind,
+                    source_id,
+                    encoded.decode("utf-8"),
+                    digest,
+                    issued,
+                    expires,
+                    record_digest,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM semantic_pending_contexts WHERE context_id=?",
+                (context_id,),
+            ).fetchone()
+            assert row is not None
+            return self._pending_context(row)
+
+    def read_semantic_contexts(
+        self,
+        *,
+        scope: ScopeRef,
+        now: float | None = None,
+    ) -> tuple[PendingSemanticContext, ...]:
+        scope_key = self._semantic_scope_key(scope)
+        observed = self._semantic_time(time.time() if now is None else now)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM semantic_pending_contexts WHERE scope_sha256=? AND consumed_by IS NULL AND issued_at<=? AND expires_at>? "
+                "ORDER BY issued_at, context_id LIMIT 9",
+                (scope_key, observed, observed),
+            ).fetchall()
+        if len(rows) > 8:
+            raise FormalTaskViolation(
+                "SEMANTIC_CONTEXT_CORRUPT",
+                "pending context bound exceeded",
+                ErrorCode.INTERNAL,
+            )
+        return tuple(self._pending_context(row) for row in rows)
+
+    def consume_semantic_context(
+        self,
+        *,
+        scope: ScopeRef,
+        context_id: str,
+        version: int,
+        commit_sha256: str,
+        now: float | None = None,
+    ) -> PendingSemanticContext:
+        """Single-input CAS; not confirmation or permission to execute a Task."""
+        scope_key = self._semantic_scope_key(scope)
+        context_id = self._semantic_text(context_id)
+        observed = self._semantic_time(time.time() if now is None else now)
+        if (
+            type(version) is not int
+            or version < 1
+            or type(commit_sha256) is not str
+            or len(commit_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in commit_sha256)
+        ):
+            raise FormalTaskViolation(
+                "SEMANTIC_CONTEXT_CONSUMPTION_INVALID",
+                "invalid context consumption",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM semantic_pending_contexts WHERE context_id=? AND scope_sha256=? AND version=?",
+                (context_id, scope_key, version),
+            ).fetchone()
+            if row is None:
+                raise FormalTaskViolation(
+                    "SEMANTIC_CONTEXT_UNAVAILABLE",
+                    "exact pending context unavailable",
+                    ErrorCode.CONFLICT,
+                )
+            record = self._pending_context(row)
+            if record.consumed_by == commit_sha256:
+                return record
+            if (
+                record.consumed_by is not None
+                or not record.issued_at <= observed < record.expires_at
+            ):
+                raise FormalTaskViolation(
+                    "SEMANTIC_CONTEXT_STALE",
+                    "context expired or already consumed",
+                    ErrorCode.CONFLICT,
+                )
+            connection.execute(
+                "UPDATE semantic_pending_contexts SET consumed_by=?, record_sha256=? "
+                "WHERE context_id=? AND consumed_by IS NULL",
+                (
+                    commit_sha256,
+                    self._semantic_record_digest(
+                        {
+                            **dict(row),
+                            "consumed_by": commit_sha256,
+                        }
+                    ),
+                    context_id,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM semantic_pending_contexts WHERE context_id=?",
+                (context_id,),
+            ).fetchone()
+            assert row is not None
+            return self._pending_context(row)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=30.0)
@@ -169,7 +501,10 @@ class SqliteUnifiedCommittedInputJournal:
             )
         if (
             len(voice_identity_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in voice_identity_sha256)
+            or any(
+                character not in "0123456789abcdef"
+                for character in voice_identity_sha256
+            )
             or type(fingerprint) is not bytes
             or len(fingerprint) != 32
         ):
@@ -426,6 +761,75 @@ class SqliteUnifiedCommittedInputJournal:
                 ErrorCode.CONFLICT,
             )
 
+    def bind_semantic(
+        self,
+        *,
+        voice_identity_sha256: str,
+        fingerprint: bytes,
+        semantic_binding: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Freeze data once, after admission and before any protected effect.
+
+        This operation does not validate a speech source, mint an origin grant,
+        or authorize a Task. Only the still-live execution owner can bind; an
+        exact retry is harmless, but cannot replace a previous interpretation.
+        """
+
+        try:
+            encoded = json.dumps(
+                dict(semantic_binding),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (ValueError, TypeError, RecursionError) as error:
+            raise FormalTaskViolation(
+                "UNIFIED_INPUT_SEMANTIC_BINDING_INVALID",
+                "semantic binding must be bounded JSON data",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from error
+        if len(encoded.encode("utf-8")) > 131_072:
+            raise FormalTaskViolation(
+                "UNIFIED_INPUT_SEMANTIC_BINDING_TOO_LARGE",
+                "semantic binding exceeds its closed bound",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM unified_committed_inputs WHERE voice_identity_sha256=?",
+                (voice_identity_sha256,),
+            ).fetchone()
+            if (
+                row is None
+                or bytes(row["fingerprint"]) != fingerprint
+                or row["status"] != "pending"
+                or row["execution_owner"] != self._execution_owner
+                or not isinstance(row["lease_expires_at"], (int, float))
+                or row["lease_expires_at"] <= time.time()
+            ):
+                raise FormalTaskViolation(
+                    "UNIFIED_INPUT_EXECUTION_LEASE_LOST",
+                    "semantic binding requires the exact live execution lease",
+                    ErrorCode.CONFLICT,
+                )
+            retained = self._decode_semantic_binding(row)
+            value = json.loads(encoded)
+            if retained is not None and retained != value:
+                raise FormalTaskViolation(
+                    "UNIFIED_INPUT_SEMANTIC_BINDING_CONFLICT",
+                    "an admitted input cannot change its frozen interpretation",
+                    ErrorCode.CONFLICT,
+                )
+            if retained is None:
+                connection.execute(
+                    "UPDATE unified_committed_inputs SET semantic_binding_json=? "
+                    "WHERE voice_identity_sha256=?",
+                    (encoded, voice_identity_sha256),
+                )
+            return value
+
     def wait_for_completion(
         self,
         *,
@@ -495,10 +899,7 @@ class SqliteUnifiedCommittedInputJournal:
                 effect_kind=str(row["effect_kind"]),
                 recovery=self._decode_recovery(row),
             )
-        if (
-            row["recovery_json"] is not None
-            and row["effect_kind"] == "agent_submit"
-        ):
+        if row["recovery_json"] is not None and row["effect_kind"] == "agent_submit":
             # Agent submission has a strict synchronous handoff: no event-loop
             # yield is permitted between the local Harness/Bridge commit and
             # promotion of the exact accepted result.  If only this
@@ -590,10 +991,7 @@ class SqliteUnifiedCommittedInputJournal:
                         effect_kind=effect_kind,
                         recovery=self._decode_recovery(row),
                     )
-                if (
-                    row["recovery_json"] is not None
-                    and effect_kind != "agent_submit"
-                ):
+                if row["recovery_json"] is not None and effect_kind != "agent_submit":
                     return UnifiedForegroundEffectAdmission(
                         False,
                         None,
@@ -717,12 +1115,15 @@ class SqliteUnifiedCommittedInputJournal:
                 )
             if row["result_json"] is not None:
                 existing = self._decode_result(row)
-                if json.dumps(
-                    existing,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ) != encoded:
+                if (
+                    json.dumps(
+                        existing,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    != encoded
+                ):
                     raise FormalTaskViolation(
                         "UNIFIED_FOREGROUND_EFFECT_CONFLICT",
                         "unified foreground effect outcome is immutable",
@@ -776,9 +1177,8 @@ class SqliteUnifiedCommittedInputJournal:
             dict(recovery), ensure_ascii=False, separators=(",", ":"), sort_keys=True
         )
         if (
-            (result_json is not None and len(result_json.encode("utf-8")) > 262_144)
-            or len(recovery_json.encode("utf-8")) > 65_536
-        ):
+            result_json is not None and len(result_json.encode("utf-8")) > 262_144
+        ) or len(recovery_json.encode("utf-8")) > 65_536:
             raise FormalTaskViolation(
                 "UNIFIED_INPUT_RESULT_TOO_LARGE",
                 "unified foreground effect checkpoint exceeds its closed bound",
@@ -966,17 +1366,20 @@ class SqliteUnifiedCommittedInputJournal:
                 )
             if row["status"] == "completed":
                 existing = self._decode_result(row)
-                if json.dumps(
-                    existing,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ) != encoded:
+                if (
+                    json.dumps(
+                        existing,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    != encoded
+                ):
                     raise FormalTaskViolation(
                         "UNIFIED_FOREGROUND_EFFECT_CONFLICT",
                         "unified foreground effect outcome is immutable",
                         ErrorCode.CONFLICT,
-                )
+                    )
                 return existing
             if row["execution_owner"] != self._execution_owner:
                 raise FormalTaskViolation(
@@ -994,12 +1397,15 @@ class SqliteUnifiedCommittedInputJournal:
                 )
             if row["result_json"] is not None:
                 existing = self._decode_result(row)
-                if json.dumps(
-                    existing,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ) != encoded:
+                if (
+                    json.dumps(
+                        existing,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    != encoded
+                ):
                     raise FormalTaskViolation(
                         "UNIFIED_FOREGROUND_EFFECT_CONFLICT",
                         "unified foreground effect outcome is immutable",
@@ -1052,12 +1458,15 @@ class SqliteUnifiedCommittedInputJournal:
                 )
             if row["status"] == "completed":
                 existing = self._decode_result(row)
-                if json.dumps(
-                    existing,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ) != encoded:
+                if (
+                    json.dumps(
+                        existing,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    != encoded
+                ):
                     raise FormalTaskViolation(
                         "UNIFIED_INPUT_RESULT_CONFLICT",
                         "unified input cannot complete with different control facts",

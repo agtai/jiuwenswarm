@@ -1269,6 +1269,17 @@
   artificial waits and bypasses. Do not add running `task.update`, arbitrary
   pause/resume or an Executor. Version a generic checkpoint profile rather than
   changing the meaning of an existing immutable profile snapshot.
+- The existing committed-input execution lease must be admitted before model
+  invocation. Its owner may freeze one bounded semantic record into the existing
+  semantic-binding column using an exact lease/fingerprint CAS. The new record
+  limit is 128 KiB (the model context remains 96 KiB); legacy pre-admission
+  bindings keep their 16 KiB bound. A digest covers the stored record. Replays
+  reuse the recorded proposal, commit/context/config identities and original
+  reference facts, not a fresh interpretation of a changed Task list. These
+  are data only: restoration cannot accept a TurnCommit into its ledger or
+  deserialize a permission/confirmation grant. Current ingress provenance and
+  final deterministic authorization are still mandatory. Crash before a record
+  is frozen may retry parsing; no protected effect may precede the freeze.
 - Re-scope the discovered cross-Task adjustment blockage into the Tier-3
   Core/Store boundary: bounded in-flight deliveries retain exact outbox claim
   ownership with renewal, preserve per-Task adjustment order, allow unrelated

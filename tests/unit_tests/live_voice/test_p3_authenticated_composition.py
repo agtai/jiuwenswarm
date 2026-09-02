@@ -795,6 +795,308 @@ def _production_registry_text_params(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
+async def test_semantic_context_authentication_precedes_model_and_never_writes_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    native: bool,
+) -> None:
+    harness = _harness(
+        tmp_path, allowed_operations=P3_OPERATIONS | frozenset({"agent.chat"})
+    )
+    await harness.composition.start()
+    calls = []
+    text = "Please analyze the project information first."
+    commit = TurnCommit.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "commit_id": "semantic-commit",
+            "turn_id": "semantic-turn",
+            "interaction_id": "semantic-interaction",
+            "text": text,
+            "scope": _scope().to_dict(),
+            "hypothesis_provenance": {},
+            "context_refs": [],
+            "committed_at": NOW,
+        }
+    )
+
+    class Model:
+        async def invoke(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                tool_calls=[],
+                content=json.dumps(
+                    {
+                        "route": "dialogue",
+                        "operation": None,
+                        "target": None,
+                        "target_kind": None,
+                        "arguments": {},
+                        "message": None,
+                        "reference_id": None,
+                        "reference_version": None,
+                        "continuation_action": None,
+                        "extractions": [
+                            {
+                                "field_name": "dialogue",
+                                "source_start": 0,
+                                "source_end": len(text),
+                            }
+                        ],
+                    }
+                ),
+            )
+
+    monkeypatch.setattr(
+        harness.models,
+        "resolve",
+        lambda *args, **kwargs: ResolvedP3Model(Model(), "test-model", "test-config"),
+    )
+    authority = (
+        harness.composition.prepare_native_activation_authority(
+            bearer_token=TOKEN,
+            session_id="session-1",
+            correlation_id="semantic-correlation",
+        )
+        if native
+        else None
+    )
+    before = _store_counts(harness.database)
+    try:
+        with pytest.raises(FormalTaskViolation):
+            await harness.composition.resolve_production_semantics(
+                commit=replace(commit, scope=_scope(project_id="wrong-project")),
+                bearer_token=None if native else TOKEN,
+                session_id="session-1",
+                native_authority=authority,
+            )
+        assert calls == []
+        decision = await harness.composition.resolve_production_semantics(
+            commit=commit,
+            bearer_token=None if native else TOKEN,
+            session_id="session-1",
+            native_authority=authority,
+        )
+        assert decision.route == "dialogue"
+        assert len(calls) == 1 and calls[0]["tools"] == []
+        assert (
+            json.loads(calls[0]["messages"][1].content)["context"]["scope"]
+            == _scope().to_dict()
+        )
+        assert _store_counts(harness.database) == before
+        assert (
+            harness.executor.dispatches
+            == harness.executor.cancels
+            == harness.executor.adjustments
+            == []
+        )
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["bad_bearer", "native_expired", "native_scope", "native_operation"]
+)
+async def test_semantic_context_rejects_invalid_authority_before_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    observed = [NOW]
+    operations = (
+        frozenset({"agent.chat"})
+        if failure == "native_operation"
+        else P3_OPERATIONS | frozenset({"agent.chat"})
+    )
+    harness = _harness(
+        tmp_path, allowed_operations=operations, clock=lambda: observed[0]
+    )
+    await harness.composition.start()
+    authority = harness.composition.prepare_native_activation_authority(
+        bearer_token=TOKEN,
+        session_id="session-1",
+        correlation_id="semantic-correlation",
+    )
+    before = _store_counts(harness.database)
+    if failure == "native_expired":
+        observed[0] = "2026-08-05T14:00:00Z"
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unauthorized request reached semantic Provider")
+
+    monkeypatch.setattr(harness.models, "resolve", forbidden)
+    try:
+        with pytest.raises(FormalTaskViolation):
+            await harness.composition.resolve_production_semantics(
+                commit=None,
+                bearer_token="wrong" if failure == "bad_bearer" else None,
+                session_id="session-2" if failure == "native_scope" else "session-1",
+                native_authority=None if failure == "bad_bearer" else authority,
+            )
+        assert _store_counts(harness.database) == before
+        assert (
+            harness.executor.dispatches
+            == harness.executor.cancels
+            == harness.executor.adjustments
+            == []
+        )
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "before_read",
+        "during_model_build",
+        "revision_only",
+        "expired_task",
+        "redacted_context",
+    ],
+)
+async def test_semantic_context_checks_exact_task_project_before_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    native: bool,
+    drift: str,
+) -> None:
+    observed = [NOW]
+    harness = _harness(
+        tmp_path,
+        allowed_operations=P3_OPERATIONS | frozenset({"agent.chat"}),
+        expires_at="2026-08-06T13:00:00Z",
+        clock=lambda: observed[0],
+    )
+    await harness.composition.start()
+    try:
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=_issued_create_params(harness),
+            request_id="semantic-context-fixture",
+            session_id="session-1",
+        )
+        assert created.ok
+        await harness.composition.reconcile_once()
+        task_id = created.payload["result"]["task_id"]
+        original_context = harness.authority.contexts["session-1"]
+
+        def change_context():
+            changes = {
+                "revision_only": {"revision_value": "next-version"},
+                "expired_task": {"expires_at": "2026-08-06T13:00:00Z"},
+                "redacted_context": {"redacted": True, "redacted_fields": ("private",)},
+            }.get(drift, {"uri": (tmp_path / "remapped-project").resolve().as_uri()})
+            harness.authority.contexts["session-1"] = replace(
+                original_context,
+                **changes,
+            )
+            if drift == "expired_task":
+                observed[0] = "2026-08-05T14:00:00Z"
+
+        if drift not in {"during_model_build", "redacted_context"}:
+            change_context()
+        native_authority = (
+            harness.composition.prepare_native_activation_authority(
+                bearer_token=TOKEN,
+                session_id="session-1",
+                correlation_id="semantic-context",
+            )
+            if native
+            else None
+        )
+        if drift == "redacted_context":
+            change_context()
+        calls = []
+
+        class Model:
+            async def invoke(self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(
+                    tool_calls=[],
+                    content=json.dumps(
+                        {
+                            "route": "dialogue",
+                            "operation": None,
+                            "target": None,
+                            "target_kind": None,
+                            "arguments": {},
+                            "message": None,
+                            "reference_id": None,
+                            "reference_version": None,
+                            "continuation_action": None,
+                            "extractions": [
+                                {
+                                    "field_name": "dialogue",
+                                    "source_start": 0,
+                                    "source_end": 7,
+                                }
+                            ],
+                        }
+                    ),
+                )
+
+        def build(*args, **kwargs):
+            if drift == "during_model_build":
+                change_context()
+            return ResolvedP3Model(Model(), "model", "config")
+
+        monkeypatch.setattr(harness.models, "resolve", build)
+        commit = TurnCommit.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "commit_id": "semantic-context-commit",
+                "turn_id": "semantic-context-turn",
+                "interaction_id": "semantic-context-interaction",
+                "text": "Analyze",
+                "scope": _scope().to_dict(),
+                "hypothesis_provenance": {},
+                "context_refs": [],
+                "committed_at": NOW,
+            }
+        )
+        before = _store_counts(harness.database)
+        effects = (
+            tuple(harness.executor.dispatches),
+            tuple(harness.executor.cancels),
+            tuple(harness.executor.adjustments),
+        )
+
+        async def resolve():
+            return await harness.composition.resolve_production_semantics(
+                commit=commit,
+                bearer_token=None if native else TOKEN,
+                session_id="session-1",
+                native_authority=native_authority,
+            )
+
+        if drift == "revision_only":
+            assert (await resolve()).route == "dialogue"
+            assert len(calls) == 1
+            assert (
+                json.loads(calls[0]["messages"][1].content)["context"]["tasks"][0][
+                    "task_id"
+                ]
+                == task_id
+            )
+        else:
+            with pytest.raises(FormalTaskViolation):
+                await resolve()
+            assert calls == []
+        assert _store_counts(harness.database) == before
+        assert (
+            tuple(harness.executor.dispatches),
+            tuple(harness.executor.cancels),
+            tuple(harness.executor.adjustments),
+        ) == effects
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
 async def test_native_activation_authority_reuses_principal_without_bearer(
     tmp_path: Path,
 ) -> None:
@@ -3230,8 +3532,10 @@ async def test_production_classifier_bridge_store_and_authenticated_core_queries
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
 async def test_production_confirmation_is_consumed_once_before_exact_core_cancel(
     tmp_path: Path,
+    native: bool,
 ) -> None:
     run_now = "2026-08-21T02:00:00Z"
     run_expiry = "2026-08-22T04:00:00Z"
@@ -3240,7 +3544,7 @@ async def test_production_confirmation_is_consumed_once_before_exact_core_cancel
         tmp_path,
         contexts={"session-1": context},
         expires_at=run_expiry,
-        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS | frozenset({"agent.chat"}),
         executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
         clock=lambda: run_now,
     )
@@ -3362,10 +3666,20 @@ async def test_production_confirmation_is_consumed_once_before_exact_core_cancel
         )
         assert confirmed.confirmation == "confirmed"
         before = _store_counts(harness.database)
+        native_authority = (
+            harness.composition.prepare_native_activation_authority(
+                bearer_token=TOKEN,
+                session_id="session-1",
+                correlation_id="correlation-production-cancel",
+            )
+            if native
+            else None
+        )
 
         routed = await harness.composition.handle_production_resolution(
             resolution=confirmed,
-            bearer_token=TOKEN,
+            bearer_token=None if native else TOKEN,
+            native_authority=native_authority,
             request_id="request-production-cancel",
             session_id="session-1",
             correlation_id="correlation-production-cancel",
@@ -3377,7 +3691,8 @@ async def test_production_confirmation_is_consumed_once_before_exact_core_cancel
         after = _store_counts(harness.database)
         replay = await harness.composition.handle_production_resolution(
             resolution=confirmed,
-            bearer_token=TOKEN,
+            bearer_token=None if native else TOKEN,
+            native_authority=native_authority,
             request_id="request-production-cancel-replay",
             session_id="session-1",
             correlation_id="correlation-production-cancel",

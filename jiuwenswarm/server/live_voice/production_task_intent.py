@@ -476,6 +476,7 @@ class ProductionOriginBinding:
     extractions: tuple[BoundProductionFieldExtraction, ...]
     structured_semantic_sha256: str | None = None
     clarification_answer_sha256: str | None = None
+    semantic_context_binding: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         _require_opaque(self.principal_id, "origin_principal_id")
@@ -487,6 +488,14 @@ class ProductionOriginBinding:
             raise ValueError("INVALID_PRODUCTION_INTENT_ORIGIN")
         _require_opaque(self.source_id, "origin_source_id")
         natural = self.origin is not ProductionIntentOrigin.STRUCTURED
+        if self.semantic_context_binding is not None:
+            if not natural:
+                raise ValueError("STRUCTURED_ORIGIN_FORBIDS_MODEL_SEMANTICS")
+            object.__setattr__(
+                self,
+                "semantic_context_binding",
+                _semantic_context_binding(self.semantic_context_binding),
+            )
         if natural != (self.commit_id is not None and self.commit_sha256 is not None):
             raise ValueError("INVALID_ORIGIN_COMMIT_BINDING")
         if self.commit_id is not None:
@@ -528,6 +537,13 @@ class ProductionOriginBinding:
                 "scope": self.scope.to_dict(),
                 "source_id": self.source_id,
                 "structured_semantic_sha256": self.structured_semantic_sha256,
+                **(
+                    {}
+                    if self.semantic_context_binding is None
+                    else {
+                        "semantic_context_binding": dict(self.semantic_context_binding),
+                    }
+                ),
             }
         )
 
@@ -752,6 +768,7 @@ class ProductionTaskIntentRequest:
     clarification_answer: ClarificationAnswer | None = None
     clarification_answer_fingerprint: str | None = None
     confirmation_id: str | None = None
+    semantic_context_binding: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.origin, ProductionIntentOrigin):
@@ -776,6 +793,14 @@ class ProductionTaskIntentRequest:
                 raise ValueError("CLARIFICATION_ANSWER_DIGEST_MISMATCH")
         if self.confirmation_id is not None:
             _require_opaque(self.confirmation_id, "confirmation_id")
+        if self.semantic_context_binding is not None:
+            if self.origin is ProductionIntentOrigin.STRUCTURED:
+                raise ValueError("STRUCTURED_ORIGIN_FORBIDS_MODEL_SEMANTICS")
+            object.__setattr__(
+                self,
+                "semantic_context_binding",
+                _semantic_context_binding(self.semantic_context_binding),
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1088,6 +1113,23 @@ def _structured_semantic_digest(proposal: ProductionTaskIntentProposal) -> str:
     return _sha256(semantic)
 
 
+def _semantic_context_binding(value: Mapping[str, str]) -> Mapping[str, str]:
+    fields = {
+        "context_sha256",
+        "semantic_config_sha256",
+        "model_identity",
+        "model_config_version",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ValueError("INVALID_SEMANTIC_CONTEXT_BINDING")
+    frozen = dict(value)
+    for key, item in frozen.items():
+        _require_text(item, key, maximum=512)
+        if key.endswith("sha256") and _SHA256.fullmatch(item) is None:
+            raise ValueError("INVALID_SEMANTIC_CONTEXT_DIGEST")
+    return MappingProxyType(frozen)
+
+
 def _build_origin_binding(
     request: ProductionTaskIntentRequest,
 ) -> ProductionOriginBinding:
@@ -1139,6 +1181,7 @@ def _build_origin_binding(
         extractions=tuple(bound),
         structured_semantic_sha256=None,
         clarification_answer_sha256=clarification_answer_sha256,
+        semantic_context_binding=request.semantic_context_binding,
     )
 
 
