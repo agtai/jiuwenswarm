@@ -1110,3 +1110,14 @@
 - 安全边界：该决定不把任意 dirty worktree 变成合法输入，不接受人工 tracked/untracked 改动、changed HEAD、unsafe link、foreign scope/project、nonterminal 或 failed/cancelled/interrupted/unknown attempt、cleanup/effect unknown，也不自动 commit/stash/reset/clean 或回滚用户文件。串行后继以实际 dispatch 时已经验证的前序 completed tree 为输入；并发覆盖或 apply-time 漂移仍冲突且零部分应用。
 - 范围与证据：这是 Task authority + Direct D2 durability 的 Tier-3 修复；允许修改 production projection、authenticated project baseline reader、Direct journal reader及其自动化，不新增 SQLite schema、canonical lifecycle state、Executor profile、第二 authority、D1 或正向 `provide_input/pause/resume`。必须覆盖 P/N/B/S/T/C/R/I/F/K/X 的适用维度、zero forbidden effects、reopen/restart、真实 Direct file-Tool seam、正式 Web 投影和 clean isolated redeployment；完成前不恢复产品候选 PASS。
 - 重新评估条件：需要跨 scope/project 接受效果、接受非 Direct/非 completed/unknown effect、合并任意用户脏改、自动 Git history/worktree mutation、schema migration、新 canonical state/Executor profile/primitive，或无法在现有 Store+journal 双重事实下证明同项目串行安全。
+
+## D-099 异步确认绑定稳定意图，attempt 初始化绑定 seed 后基线
+
+- 日期：2026-09-02
+- 状态：Accepted root repair decision（用户在第二次真实多 Task 验收暴露下一层失败后，明确要求先定位共同根因，再批准按根因修复并重新部署）。
+- 确认合同：material Task confirmation 绑定 principal/scope、origin、command、operation、精确 `task_id`、精确 `attempt_id`、参数、capability、context 和 model；完整可见 Task 集合及其 admission/event/result 等运行时快照只是签发与消费时各自的观测，不进入稳定 intent fingerprint。无关 Task 的创建、进度或终态以及同一 queued attempt 的合法 admission 重验不得使确认失效。消费前仍须从当前 Store 重解目标与策略；目标 attempt、capability、context、model、operation 或参数变化必须拒绝。
+- 并发安全：放宽外层集合快照不放宽 Core mutation。最终调用以最新 canonical target 构造 precondition，`task.reprioritize` 继续在 SQLite 同一事务内校验精确 attempt/event head、accepted/unclaimed pending dispatch、无 cancel/fence/reconciliation 冲突；若 claim/running/terminal 或并发命令先发生，则返回 state/stale conflict 且零业务副作用。该决定不允许确认跨 retry attempt，也不复用已消费确认。
+- 隔离基线：Direct attempt 同时维护两种不同事实：dispatch 时目标项目的原始 optimistic baseline，以及受信任 seed 将该 baseline 复制并 staged 后的隔离 baseline。`git add -A` 导致的 untracked→staged 表示变化是 seed 的预期内部变化，不是 Agent 副作用；attempt Agent 初始化后必须与 seed 后 tree/support/HEAD 比较。最终 patch 仍只包含 Agent 相对 seed 的变化，并仅在目标仍匹配原始 baseline 时应用。
+- 风险与证据：这是 confirmation authority + Direct D2 isolated execution 的 Tier-3 修复；自动化必须覆盖确认期间无关 Task 漂移、queued reprioritize 真正 applied、目标 attempt/config drift 拒绝、前一 Task 留下 untracked 结果后后一 Task 完成，以及真实 initializer 写入仍 fail closed。保留现有确认单次消费、跨 scope/target 拒绝、apply-time drift、unsafe link、cleanup/restart 和零副作用负向合同。
+- 明确排除：不改变项目 `exclusive` 串行、不增加抢占或自动重排、不开放 `provide_input/pause/resume`、不允许 running update/reprioritize、不接受任意用户脏改、不新增 SQLite schema/Task state/Executor profile/第二 authority，也不赋予本地部署产品或 Production 通过信用。
+- 重新评估条件：需要确认跨 attempt/retry、按名称而非冻结 task identity 消费、允许 capability/context/model 漂移、移除 Store 原子 precondition、改变 seed staging/patch 语义，或引入 schema/公开协议迁移。

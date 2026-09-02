@@ -179,7 +179,7 @@ class CallLocalProductionConfirmationConsumer:
     ) -> TrustedConfirmationConsumptionReceipt:
         if (
             confirmation_id != self._validated.confirmation_id
-            or binding != self._expected
+            or binding.fingerprint != self._expected.fingerprint
         ):
             raise _reader_violation(
                 "PRODUCTION_CONFIRMATION_BINDING_MISMATCH",
@@ -253,7 +253,8 @@ class CallLocalProductionConfirmationConsumer:
             if (
                 resolution.outcome is not ProductionTaskPolicyOutcome.PROPOSED
                 or resolution.confirmation != "confirmed"
-                or resolution.confirmation_binding != expected
+                or resolution.confirmation_binding is None
+                or resolution.confirmation_binding.fingerprint != expected.fingerprint
                 or resolution.confirmation_consumption_id != consumption_id
                 or resolution.command_id != expected.command_id
                 or resolution.operation != expected.operation
@@ -261,7 +262,6 @@ class CallLocalProductionConfirmationConsumer:
                 or resolution.origin_receipt_id != expected.origin_receipt_id
                 or resolution.origin_binding_fingerprint
                 != expected.origin_binding_fingerprint
-                or resolution.task_set_fingerprint != expected.task_set_fingerprint
                 or hashlib.sha256(
                     canonical_json_bytes(dict(resolution.arguments))
                 ).hexdigest()

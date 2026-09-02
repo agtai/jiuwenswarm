@@ -2268,6 +2268,118 @@ async def test_direct_d0_attempt_executor_binds_exact_worktree_and_releases_befo
 
 
 @pytest.mark.asyncio
+async def test_direct_d0_second_attempt_seeds_predecessor_untracked_result(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    attempt_roots: list[Path] = []
+
+    class AttemptExecutor:
+        def __init__(self, root: Path) -> None:
+            self.root = root
+
+        def get_project_execution_root(self) -> str:
+            return str(self.root)
+
+        async def process_background_code_task_stream(self, request):
+            attempt_id = request.metadata["formal_attempt_id"]
+            (self.root / f"{attempt_id}.txt").write_text(
+                f"{attempt_id}\n", encoding="utf-8"
+            )
+            yield AgentResponseChunk(
+                request.request_id,
+                request.channel_id,
+                payload={"event_type": "chat.final", "content": attempt_id},
+                is_complete=True,
+            )
+
+    async def acquire(attempt_root: str) -> AttemptProjectExecutorLease:
+        root = Path(attempt_root).resolve()
+        attempt_roots.append(root)
+
+        async def release() -> None:
+            return None
+
+        return AttemptProjectExecutorLease(AttemptExecutor(root), str(root), release)
+
+    binding = replace(
+        _direct_binding(project, _DirectProjectExecutor(project)),
+        attempt_executor_factory=acquire,
+    )
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(binding),
+        tmp_path / "p3.sqlite3",
+    )
+
+    await adapter.dispatch(_item(project))
+    await _wait_direct_settled(adapter)
+    first_task, first_attempt = _direct_task_attempt(project)
+    first = await adapter.status(first_task, first_attempt)
+    assert first.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+    assert _git(project, "status", "--porcelain") == "?? attempt-1.txt"
+
+    second_item = replace(
+        _item(project),
+        outbox_id="outbox-2",
+        task_id="task-2",
+        attempt_id="attempt-2",
+        command_id="command-2",
+    )
+    await adapter.dispatch(second_item)
+    await _wait_direct_settled(adapter)
+    second_task, second_attempt = _direct_task_attempt(
+        project, task_id="task-2", attempt_id="attempt-2"
+    )
+    second = await adapter.status(second_task, second_attempt)
+
+    assert second.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+    assert (project / "attempt-1.txt").read_text(encoding="utf-8") == "attempt-1\n"
+    assert (project / "attempt-2.txt").read_text(encoding="utf-8") == "attempt-2\n"
+    assert len(attempt_roots) == 2
+    assert all(not root.exists() for root in attempt_roots)
+
+
+@pytest.mark.asyncio
+async def test_direct_d0_rejects_real_attempt_initializer_mutation(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+
+    async def acquire(attempt_root: str) -> AttemptProjectExecutorLease:
+        root = Path(attempt_root).resolve()
+        (root / "initializer-side-effect.txt").write_text(
+            "forbidden\n", encoding="utf-8"
+        )
+        executor = _ExactRootDirectProjectExecutor(root)
+
+        async def release() -> None:
+            return None
+
+        return AttemptProjectExecutorLease(executor, str(root), release)
+
+    binding = replace(
+        _direct_binding(project, _DirectProjectExecutor(project)),
+        attempt_executor_factory=acquire,
+    )
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(binding),
+        tmp_path / "p3.sqlite3",
+    )
+
+    await adapter.dispatch(_item(project))
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.FAILED
+    assert terminal.observations[-1].error == "EXECUTOR_INITIALIZATION_MUTATED_TARGET"
+    assert not (project / "initializer-side-effect.txt").exists()
+    assert _git(project, "status", "--porcelain") == ""
+
+
+@pytest.mark.asyncio
 async def test_direct_d0_accepts_exact_patch_when_autocrlf_changes_raw_bytes(
     tmp_path: Path,
 ) -> None:

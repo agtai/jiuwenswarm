@@ -130,15 +130,16 @@
   CONTROLLED-CANDIDATE ATTEMPT REMAINS FAIL.** [D-086](decisions/DECISIONS.md)
   accepts the sequencing risk and removes the failed P1/P2 hands-free condition
   as a P3-1 Gate without changing that immutable older-source result.
-- **Current highest priority:** the newly reproduced formal multi-Task defect
-  repair below is active under D-098. A product status read may currently mix
-  an older `accepted/queued + EXECUTOR_PROJECT_BUSY` projection with a newer
-  taken-over capability generation, hiding a truthful queued
-  `task.reprioritize`. A second queued Task can also fail after the preceding
-  same-project Direct Task applies its verified file effect because dispatch
-  revalidation treats that owned effect as an arbitrary dirty worktree. The
-  affected acceptance is blocked until the Tier-3 repair, automated Gate,
-  clean isolated redeployment and repeated human journey pass. The earlier
+- **Current highest priority:** the formal multi-Task root repair below is
+  implemented under D-098/D-099, its affected automated Gate passes, and clean
+  redeployment is pending. The second real journey proved that a queued reprioritize
+  confirmation was rejected merely because another Task changed the visible
+  collection, and that the next same-project attempt compared its expected
+  seed staging change with the pre-seed target fingerprint. Stable confirmation
+  intent is now separated from current atomic mutation preconditions, and the
+  target optimistic baseline is separated from the isolated seed baseline. The
+  affected acceptance remains blocked until the automated Gate, clean
+  redeployment and repeated human journey pass. The earlier
   P3-9 result remains exact-source history and grants no credit to this repair.
   The consolidated P1/P2 lifecycle repair packet is closed; do not reopen its
   four frozen production boundaries without a new
@@ -294,8 +295,7 @@ exact-source Alpha result.
 
 ### Formal multi-Task coherent status and managed-baseline repair
 
-- **Status/source:** **IMPLEMENTED / CLEAN REDEPLOYMENT PENDING / HUMAN
-  REACCEPTANCE BLOCKED**. The
+- **Status/source:** **AFFECTED AUTOMATED GATE PASSED / REDEPLOYMENT PENDING**. The
   original implementation is commit `7f8673e1`, and
   queued-reconciliation/order repair is commit `a179d02a`. The final running
   source must be a clean descendant containing the repairs below.
@@ -325,6 +325,17 @@ exact-source Alpha result.
   contained a roughly twenty-second streaming Speech timeout/fallback; this is
   retained as an adjacent responsiveness observation, not attributed to Task
   mutation authority without a separate reproduced causal oracle.
+  The next real journey on source `6f0fb8fa` consumed the Panel confirmation,
+  but the Registry rejected it as `TASK_INTENT_CONFIRMATION_FACTS_CHANGED`
+  after an unrelated Task/admission observation changed the full collection
+  fingerprint; no reprioritize command reached the Store and A remained
+  `normal`. B completed and left `food-b.md` untracked as the exact managed
+  target baseline. A was then accepted/running but failed
+  `EXECUTOR_INITIALIZATION_MUTATED_TARGET` because trusted seed staging changed
+  that inherited file from untracked to staged before the post-initialization
+  guard compared it with the pre-seed target tree. D-099 owns both asynchronous
+  boundary corrections; the retained log is
+  `logs/swarm-20260902-141447.log`.
 - **Capability/risk/dependencies:** Task Control/Store status authority plus
   Direct D2 Executor project-effect admission; Tier 3 under root `TESTING.md`.
   This repair depends on D-087/D-088 queued update/reprioritize rules, D-089
@@ -436,6 +447,20 @@ exact-source Alpha result.
   compileall and diff checks pass. A cold complete-diff self-review found no
   repair-scope issue; an independent reviewer is unavailable in the current
   execution environment. A fresh real deployment and the human journey remain
+  required.
+- **D-099 root-repair evidence:** the combined affected resolver, confirmation,
+  authenticated composition, atomic reprioritize and Direct seed/initializer
+  set exits cleanly at `217 passed`. It proves an unrelated Task may change the
+  collection between issue and consume while the exact queued Attempt is still
+  reprioritized once, and proves a second isolated attempt inherits a prior
+  untracked result without misclassifying trusted staging; a real initializer
+  write is still rejected with zero target effect. The complete Executor module
+  reports `127 passed, 2 skipped, 2 failed`: the close/handoff timing case passes
+  once the previous deployment is stopped; the remaining noncooperative-agent
+  cancellation-signal deadline assertion is a previously recorded strict timing
+  failure outside the changed attempt-factory seed branch. No complete-module
+  PASS is claimed. Changed-file Ruff, compileall, diff checks and the Live Voice
+  frontend build pass. A clean controlled redeployment and human journey remain
   required.
 
 ### P3-9 cumulative one-product acceptance

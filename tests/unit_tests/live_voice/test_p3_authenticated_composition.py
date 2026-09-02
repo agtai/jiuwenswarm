@@ -1102,6 +1102,39 @@ async def test_registry_production_classifier_bridge_store_and_core_without_hint
     assert isinstance(reprioritize_pending_result, dict)
     reprioritize_token = reprioritize_pending_result["confirmation_token"]
     assert isinstance(reprioritize_token, str)
+    unrelated_pending = await registry.handle_p3_intent(
+        params={
+            "auth_token": TOKEN,
+            "session_id": "session-1",
+            "correlation_id": "production-correlation-reprioritize-unrelated",
+            "source": "structured",
+            "source_id": "reprioritize-unrelated-create",
+            "structured_intent": {
+                "operation": "task.create",
+                "target": None,
+                "arguments": {
+                    "name": "Unrelated queued task",
+                    "instruction": "Create unrelated.md with one sentence.",
+                },
+            },
+        },
+        request_id="production-intent-reprioritize-unrelated-create",
+        session_id="session-1",
+    )
+    unrelated_result = unrelated_pending.payload["result"]
+    assert isinstance(unrelated_result, dict)
+    unrelated_token = unrelated_result["confirmation_token"]
+    assert isinstance(unrelated_token, str)
+    unrelated_created = await registry.handle_p3_intent(
+        params=_production_registry_text_params(
+            stem="reprioritize-unrelated-confirm",
+            text=f"confirm task request {unrelated_token}",
+            continuation_id=unrelated_token,
+        ),
+        request_id="production-intent-reprioritize-unrelated-confirm",
+        session_id="session-1",
+    )
+    assert unrelated_created.ok is True, unrelated_created.payload
     reprioritized = await registry.handle_p3_intent(
         params=_production_registry_text_params(
             stem="reprioritize-confirm",
@@ -2423,7 +2456,7 @@ async def test_registry_production_clarification_is_owner_bound_and_single_use(
 
 
 @pytest.mark.asyncio
-async def test_registry_production_confirmation_task_set_drift_has_zero_effect(
+async def test_registry_production_confirmation_survives_unrelated_task_set_drift(
     tmp_path: Path,
 ) -> None:
     commits = TurnCommitLedger()
@@ -2489,9 +2522,9 @@ async def test_registry_production_confirmation_task_set_drift_has_zero_effect(
         session_id="session-1",
     )
     assert accepted.ok is True, accepted.payload
-    before_stale_confirmation = harness.composition._core.store.counts()
+    before_original_confirmation = harness.composition._core.store.counts()
 
-    rejected = await registry.handle_p3_intent(
+    original_confirmed = await registry.handle_p3_intent(
         params=_production_registry_text_params(
             stem="stale-confirm",
             text=f"confirm task request {stale_token}",
@@ -2500,11 +2533,10 @@ async def test_registry_production_confirmation_task_set_drift_has_zero_effect(
         request_id="stale-confirm",
         session_id="session-1",
     )
-    assert rejected.ok is False
-    assert rejected.payload["error"]["reason"] == (
-        "TASK_INTENT_CONFIRMATION_FACTS_CHANGED"
-    )
-    assert harness.composition._core.store.counts() == before_stale_confirmation
+    assert original_confirmed.ok is True, original_confirmed.payload
+    assert original_confirmed.payload["result"]["status"] == "dispatched"
+    after_original_confirmation = harness.composition._core.store.counts()
+    assert after_original_confirmation != before_original_confirmation
     assert stale_token not in registry._pending_production_task_intents
 
     replay = await registry.handle_p3_intent(
@@ -2518,7 +2550,7 @@ async def test_registry_production_confirmation_task_set_drift_has_zero_effect(
     )
     assert replay.ok is False
     assert replay.payload["error"]["reason"] == ("TASK_INTENT_CONTINUATION_UNAVAILABLE")
-    assert harness.composition._core.store.counts() == before_stale_confirmation
+    assert harness.composition._core.store.counts() == after_original_confirmation
 
     await registry.stop()
     await harness.composition.stop()

@@ -5048,14 +5048,20 @@ class DirectProjectCodeExecutorAdapter:
                 record.before_tree,
             )
             await asyncio.to_thread(_reject_git_visible_symlinks, created_worktree)
+            seeded_support = await asyncio.to_thread(
+                _target_support_fingerprints, created_worktree
+            )
             if await asyncio.to_thread(
                 _git_head, created_worktree
-            ) != record.before_head or await asyncio.to_thread(
-                _target_support_fingerprints, created_worktree
-            ) != json.loads(record.protected_support_json):
+            ) != record.before_head or seeded_support != json.loads(
+                record.protected_support_json
+            ):
                 raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH")
             project_executor = binding.project_executor
             if binding.attempt_executor_factory is not None:
+                seeded_tree = await asyncio.to_thread(
+                    _project_tree_fingerprint, created_worktree
+                )
                 attempt_agent_acquire = asyncio.create_task(
                     binding.attempt_executor_factory(str(created_worktree)),
                     name=f"live-voice-d0-agent-acquire-{item.attempt_id}",
@@ -5117,11 +5123,11 @@ class DirectProjectCodeExecutorAdapter:
                     or await asyncio.to_thread(
                         _project_tree_fingerprint, created_worktree
                     )
-                    != record.before_tree
+                    != seeded_tree
                     or await asyncio.to_thread(
                         _target_support_fingerprints, created_worktree
                     )
-                    != json.loads(record.protected_support_json)
+                    != seeded_support
                 ):
                     raise FormalTaskViolation(
                         "EXECUTOR_INITIALIZATION_MUTATED_TARGET",
