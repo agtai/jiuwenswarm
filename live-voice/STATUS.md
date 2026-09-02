@@ -130,16 +130,23 @@
   CONTROLLED-CANDIDATE ATTEMPT REMAINS FAIL.** [D-086](decisions/DECISIONS.md)
   accepts the sequencing risk and removes the failed P1/P2 hands-free condition
   as a P3-1 Gate without changing that immutable older-source result.
-- **Current highest priority:** the formal multi-Task root repair below is
-  implemented under D-098/D-099, its affected automated Gate passes, and clean
-  redeployment is pending. The second real journey proved that a queued reprioritize
-  confirmation was rejected merely because another Task changed the visible
-  collection, and that the next same-project attempt compared its expected
-  seed staging change with the pre-seed target fingerprint. Stable confirmation
-  intent is now separated from current atomic mutation preconditions, and the
-  target optimistic baseline is separated from the isolated seed baseline. The
-  affected acceptance remains blocked until the automated Gate, clean
-  redeployment and repeated human journey pass. The earlier
+- **Current highest priority:** the formal multi-Task root repair below now
+  includes D-100's bounded authority-generation convergence and definitive
+  rejection recovery. The third real journey proved that D-099's stable
+  confirmation binding was necessary but not sufficient: the resolver could
+  still compare three individually valid `list/get/status` reads from different
+  scheduler-admission generations, and the formal Panel then mislabeled that
+  explicit `TASK_AUTHORITY_CHANGED` rejection as an unknown outcome that locked
+  every Task control. Store snapshots and exact-target resolver reads now retry
+  only bounded stale-generation signals; persistent drift and every identity,
+  scope, capability, context, model or Core precondition change still fail
+  closed. A definitive server rejection now renders `rejected` and releases the
+  form, while timeout/disconnect/malformed outcomes remain `unknown` and locked.
+  The affected backend Gate passes `389/389`, the focused formal P3 Web suite
+  passes `18/18`, and the production Web build passes; controlled redeployment
+  remains pending. The affected acceptance
+  remains blocked until the clean controlled redeployment and repeated human
+  journey pass. The earlier
   P3-9 result remains exact-source history and grants no credit to this repair.
   The consolidated P1/P2 lifecycle repair packet is closed; do not reopen its
   four frozen production boundaries without a new

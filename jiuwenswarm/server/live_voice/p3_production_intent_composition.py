@@ -69,6 +69,7 @@ _NO_EXECUTOR_PROFILE_DIGEST = hashlib.sha256(
         }
     )
 ).hexdigest()
+_AUTHORITY_SNAPSHOT_CONVERGENCE_ATTEMPTS = 3
 
 
 def production_context_fingerprint(context: ResolvedTaskContext) -> str:
@@ -577,7 +578,7 @@ class StoreProductionTaskAuthorityReader:
             operations.add("task.create_successor")
         return frozenset(operations)
 
-    def list_visible_tasks(self, scope: ScopeRef) -> TaskAuthorityRead:
+    def _list_visible_tasks_once(self, scope: ScopeRef) -> TaskAuthorityRead:
         self._require_scope(scope)
         first, first_cursor, first_more = self._read_complete_page()
         heads: dict[str, object] = {}
@@ -751,6 +752,26 @@ class StoreProductionTaskAuthorityReader:
                 self._collection_model_binding_fingerprint
             ),
         )
+
+    def list_visible_tasks(self, scope: ScopeRef) -> TaskAuthorityRead:
+        """Return one coherent generation after bounded transient convergence.
+
+        Scheduler admission and terminal settlement may advance while the
+        adapter performs its deliberately bounded auxiliary reads.  Retry only
+        that explicit stale-generation signal; corruption, scope, capacity and
+        every other authority failure still fail closed immediately.
+        """
+
+        for attempt in range(_AUTHORITY_SNAPSHOT_CONVERGENCE_ATTEMPTS):
+            try:
+                return self._list_visible_tasks_once(scope)
+            except FormalTaskViolation as error:
+                if (
+                    error.reason != "PRODUCTION_TASK_AUTHORITY_CHANGED"
+                    or attempt + 1 == _AUTHORITY_SNAPSHOT_CONVERGENCE_ATTEMPTS
+                ):
+                    raise
+        raise AssertionError("unreachable authority convergence loop")
 
     def get_task(self, scope: ScopeRef, task_id: str) -> AuthenticatedTaskFact | None:
         authority = self.list_visible_tasks(scope)

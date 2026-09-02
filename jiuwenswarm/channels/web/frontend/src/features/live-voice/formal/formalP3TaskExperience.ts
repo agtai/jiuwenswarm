@@ -126,6 +126,8 @@ let requestSequence = 0;
 
 type JsonObject = Record<string, unknown>;
 
+class FormalP3DefinitiveRejection extends Error {}
+
 function objectValue(value: unknown): JsonObject | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : null;
 }
@@ -148,13 +150,27 @@ function integer(value: unknown, field: string, minimum = 0): number {
 
 function envelope(value: unknown, requestId: string): JsonObject {
   const raw = objectValue(value);
-  if (raw === null || raw.request_id !== requestId || raw.ok !== true || raw.error !== null) {
+  if (raw === null || raw.request_id !== requestId) {
+    throw new Error('FORMAL_P3_REQUEST_REJECTED');
+  }
+  if (raw.ok === false) {
     const error = objectValue(raw?.error);
+    throw new FormalP3DefinitiveRejection(optionalText(error?.reason, 'formal P3 error reason') ?? 'FORMAL_P3_REQUEST_REJECTED');
+  }
+  if (raw.ok !== true || raw.error !== null) {
+    const error = objectValue(raw.error);
     throw new Error(optionalText(error?.reason, 'formal P3 error reason') ?? 'FORMAL_P3_REQUEST_REJECTED');
   }
   const result = objectValue(raw.result);
   if (result === null) throw new Error('formal P3 response result is invalid');
   return result;
+}
+
+function serverRejectionReason(error: unknown, requestId: string): string | null {
+  const raw = objectValue(error);
+  if (raw === null || raw.requestId !== requestId || raw.retriable !== false || objectValue(raw.payload) === null) return null;
+  const exact = typeof raw.reason === 'string' && raw.reason.trim() ? raw.reason.trim() : null;
+  return exact ?? reason(error);
 }
 
 function scope(value: unknown, expectedSessionId: string): Readonly<{ subject_id: string; session_id: string; project_id: string }> {
@@ -690,13 +706,13 @@ export class FormalP3TaskExperienceOwner {
           || current.event_head !== pending.command.event_head
           || current.revision_number !== pending.command.revision_number
         ) {
-          throw new Error('FORMAL_P3_TASK_CONFIRMATION_STALE');
+          throw new FormalP3DefinitiveRejection('FORMAL_P3_TASK_CONFIRMATION_STALE');
         }
       }
       let result: JsonObject;
       if (pending.input.operation === 'task.retry') {
         const id = requestId('formal-p3-retry-mutate');
-        const response = await this.#request(FORMAL_P3_TASK_METHODS.mutate, {
+        const response = await this.#requestRecognizingRejection(FORMAL_P3_TASK_METHODS.mutate, {
           session_id: this.#state.session_id,
           operation: pending.input.operation,
           command_id: pending.command.command_id,
@@ -722,11 +738,12 @@ export class FormalP3TaskExperienceOwner {
       return this.#state;
     } catch (error) {
       const retained = this.#state.command?.command_id === pending.command.command_id ? this.#state.command : pending.command;
+      const definitive = error instanceof FormalP3DefinitiveRejection;
       this.#publish({
         ...this.#state,
         command: retained.accepted
           ? Object.freeze({ ...retained, reason: reason(error) })
-          : Object.freeze({ ...retained, phase: 'unknown', reason: reason(error) }),
+          : Object.freeze({ ...retained, phase: definitive ? 'rejected' : 'unknown', reason: reason(error) }),
       });
       throw error;
     }
@@ -786,7 +803,7 @@ export class FormalP3TaskExperienceOwner {
 
   async #sendStructured(structured: Readonly<Record<string, unknown>>, command: FormalP3TaskCommand, correlationId: string, continuationId: string | null): Promise<Readonly<{ value: unknown; request_id: string }>> {
     const id = requestId('formal-p3-structured-intent');
-    const value = await this.#request(FORMAL_P3_TASK_METHODS.intent, {
+    const value = await this.#requestRecognizingRejection(FORMAL_P3_TASK_METHODS.intent, {
       session_id: this.#state.session_id,
       correlation_id: correlationId,
       source: 'structured',
@@ -801,9 +818,21 @@ export class FormalP3TaskExperienceOwner {
     return Object.freeze({ value, request_id: id });
   }
 
+  async #requestRecognizingRejection(method: string, params: Record<string, unknown>, id: string): Promise<unknown> {
+    try {
+      return await this.#request(method, params, id);
+    } catch (error) {
+      const exactReason = serverRejectionReason(error, id);
+      if (exactReason !== null) throw new FormalP3DefinitiveRejection(exactReason);
+      throw error;
+    }
+  }
+
   async #settle(result: JsonObject, command: FormalP3TaskCommand, taskId: string | null): Promise<void> {
     const status = result.status;
-    if (status !== 'dispatched' && status !== 'mutation_processed') throw new Error(optionalText(result.reason, 'mutation reason') ?? 'FORMAL_P3_MUTATION_REJECTED');
+    if (status !== 'dispatched' && status !== 'mutation_processed') {
+      throw new FormalP3DefinitiveRejection(optionalText(result.reason, 'mutation reason') ?? 'FORMAL_P3_MUTATION_REJECTED');
+    }
     if (result.operation !== command.operation) throw new Error('formal P3 mutation operation binding mismatch');
     if (
       (status === 'mutation_processed'
