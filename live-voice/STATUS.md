@@ -131,8 +131,9 @@
   accepts the sequencing risk and removes the failed P1/P2 hands-free condition
   as a P3-1 Gate without changing that immutable older-source result.
 - **Current highest priority:** the formal multi-Task root repair below is
-  implemented under D-098/D-099, its affected automated Gate passes, and clean
-  redeployment is pending. The second real journey proved that a queued reprioritize
+  implemented under D-098/D-099, its affected automated Gate passes, and its
+  controlled redeployment is validation-ready for a repeated human journey.
+  The second real journey proved that a queued reprioritize
   confirmation was rejected merely because another Task changed the visible
   collection, and that the next same-project attempt compared its expected
   seed staging change with the pre-seed target fingerprint. Stable confirmation
@@ -295,7 +296,8 @@ exact-source Alpha result.
 
 ### Formal multi-Task coherent status and managed-baseline repair
 
-- **Status/source:** **AFFECTED AUTOMATED GATE PASSED / REDEPLOYMENT PENDING**. The
+- **Status/source:** **REPAIRED DEPLOYMENT VALIDATION-READY / HUMAN
+  REACCEPTANCE PENDING**. The
   original implementation is commit `7f8673e1`, and
   queued-reconciliation/order repair is commit `a179d02a`. The final running
   source must be a clean descendant containing this record and the repair below.
@@ -528,9 +530,16 @@ exact-source Alpha result.
   descendant containing this record. The later human run in
   `logs/swarm-20260902-141447.log` exposed the D-099 confirmation and seed
   baseline defects, so the old process was stopped and this environment is not
-  validation-ready until the user removes generated project files and the
-  repaired source is redeployed. Reuse of the same registered project/data root
-  is permitted for speed; no product acceptance credit carries forward.
+  validation-ready on that source. The user then removed generated project
+  files; controlled preflight and relaunch pass from clean repaired source
+  `9fbce7fb`. The runtime contract binds Formal Web validation, exact Direct D2,
+  the same registered clean/no-remote project and all four fixed ports; real
+  Speech TTS→STT, the critical receipt, identity-mismatch and forged-claim
+  zero-side-effect checks pass, and HTTP returns 200. The successful repair log
+  is `logs/swarm-20260902-151841.log`; the final restart must use its clean
+  documentation-only descendant. Reuse of the same registered project/data
+  root is permitted for speed; historical Task rows and all earlier product
+  acceptance credit remain excluded from the new browser-session journey.
 - **Failed isolated deployment retained:** validation label `aeeb4a70` uses project
   `proj_9a8b984a` at
   `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-project-aeeb4a708abd4161ab31a7791e4aae8e`
