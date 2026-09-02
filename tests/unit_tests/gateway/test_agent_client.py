@@ -1,8 +1,10 @@
 import asyncio
+import json
 import logging
 
 import pytest
 from websockets.exceptions import ConnectionClosedError
+from websockets.legacy.server import serve
 
 from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -442,6 +444,133 @@ async def test_send_request_coalesces_exact_inflight_unary_replay():
     assert first_response.payload == {"status": "notification"}
     assert second_response.payload == first_response.payload
     assert client.has_message_queue_for_test("rid-exact-replay") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("application_ok", [True, False])
+async def test_completed_unary_replay_uses_real_websocket_receiver(
+    monkeypatch, application_ok
+):
+    # A completed observation must reach the server again to authorize new media.
+    # Injecting directly into the waiter's queue misses receiver tombstone drops.
+    monkeypatch.setattr(agent_client, "_UNARY_REQUEST_TIMEOUT_SECONDS", 0.5)
+    received = []
+
+    async def server(ws):
+        await ws.send(json.dumps({"type": "event", "event": "connection.ack"}))
+        async for raw in ws:
+            request = json.loads(raw)
+            received.append(request)
+            await ws.send(json.dumps(encode_agent_response_for_wire(
+                AgentResponse(
+                    request_id=request["request_id"],
+                    channel_id="web",
+                    ok=application_ok,
+                    payload={"observation": len(received)},
+                ),
+                response_id=request["request_id"],
+            )))
+
+    client = WebSocketAgentServerClient()
+    async with serve(server, "127.0.0.1", 0) as endpoint:
+        port = endpoint.sockets[0].getsockname()[1]
+        await client.connect(f"ws://127.0.0.1:{port}")
+        try:
+            env = message_to_e2a(Message(
+                id="rid-completed-notification-replay",
+                type="req",
+                channel_id="web",
+                session_id="sess-completed-notification-replay",
+                params={"notification_sequence": 1},
+                timestamp=1.0,
+                ok=True,
+                req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
+            ))
+            first = await client.send_request(env)
+            second = await client.send_request(env)
+
+            assert first.ok is application_ok
+            assert second.ok is application_ok
+            assert first.payload == {"observation": 1}
+            assert second.payload == {"observation": 2}
+            assert len(received) == 2
+            assert received[0] == received[1]
+        finally:
+            await client.disconnect()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["timeout", "malformed", "cancelled_stream"])
+async def test_failed_request_residual_is_fenced_by_real_websocket_receiver(
+    monkeypatch, failure
+):
+    monkeypatch.setattr(agent_client, "_UNARY_REQUEST_TIMEOUT_SECONDS", 0.5)
+    rid = "rid-failed-observation"
+    received = []
+
+    def response(request_id, payload):
+        return json.dumps(encode_agent_response_for_wire(
+            AgentResponse(request_id=request_id, channel_id="web", payload=payload),
+            response_id=request_id,
+        ))
+
+    async def server(ws):
+        await ws.send(json.dumps({"type": "event", "event": "connection.ack"}))
+        async for raw in ws:
+            request = json.loads(raw)
+            received.append(request["request_id"])
+            if request["request_id"] == rid:
+                if failure == "malformed":
+                    await ws.send(json.dumps({"request_id": rid, "invalid": True}))
+                elif failure == "cancelled_stream":
+                    await ws.send(json.dumps(encode_agent_chunk_for_wire(
+                        AgentResponseChunk(
+                            request_id=rid,
+                            channel_id="web",
+                            payload={"content": "partial", "event_type": "chat.delta"},
+                            is_complete=False,
+                        ),
+                        response_id=rid,
+                        sequence=0,
+                    )))
+                # Timeout deliberately has no initial response.
+            else:
+                # WebSocket ordering makes the unrelated response a barrier:
+                # its receipt proves the receiver processed the residual first.
+                await ws.send(response(rid, {"content": "cancelled residual"}))
+                await ws.send(response(request["request_id"], {"content": "current"}))
+
+    client = AgentClientHarness()
+    async with serve(server, "127.0.0.1", 0) as endpoint:
+        port = endpoint.sockets[0].getsockname()[1]
+        await client.connect(f"ws://127.0.0.1:{port}")
+        try:
+            env = e2a_from_agent_fields(
+                request_id=rid, channel_id="web", session_id="sess-failed",
+                params={"content": "first"}, is_stream=False,
+            )
+            if failure == "cancelled_stream":
+                stream = client.send_request_stream(env)
+                assert (await anext(stream)).payload["content"] == "partial"
+                await stream.aclose()
+            else:
+                expected = RuntimeError if failure == "timeout" else ValueError
+                with pytest.raises(expected):
+                    await client.send_request(env)
+
+            # A replacement queue must not weaken a genuine cancellation fence.
+            replacement = asyncio.Queue()
+            client.set_message_queue_for_test(rid, replacement)
+            unrelated = e2a_from_agent_fields(
+                request_id="rid-unrelated", channel_id="web", session_id="sess-other",
+                params={"content": "second"}, is_stream=False,
+            )
+            result = await client.send_request(unrelated)
+            assert result.payload == {"content": "current"}
+            assert replacement.empty()
+            assert received == [rid, "rid-unrelated"]
+        finally:
+            await client.disconnect()
 
 
 @pytest.mark.asyncio

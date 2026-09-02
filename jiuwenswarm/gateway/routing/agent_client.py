@@ -324,8 +324,8 @@ class WebSocketAgentServerClient(AgentServerClient):
                         # 删 queue 后会保留 _cancelled_request_ids 标记 2s，若在此窗口内
                         # 新请求复用同 rid 并建新 queue，放行旧请求的残余响应会串进新请求
                         # 的 queue，导致新请求拿到错误响应（响应串线，比超时更危险）。
-                        # send_request 已有 "duplicate in-flight request_id" 防护（402行），
-                        # 正常路径下 queue 不被提前删；此处 2s 丢弃窗口仅针对已取消的残余。
+                        # 完整 unary 响应不创建取消标记；流式结束或未完成的 unary
+                        # 仍保留残余隔离，不能因同 rid 出现新 queue 而绕过。
                         if request_id in self._cancelled_request_ids:
                             logger.debug(
                                 "[WebSocketAgentServerClient] 收到已取消请求的残余消息，已丢弃: request_id=%s",
@@ -665,6 +665,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 )
             self._message_queues[rid] = queue
 
+        unary_completed = False
         try:
             # 发送请求
             async with self._lock:
@@ -696,10 +697,15 @@ class WebSocketAgentServerClient(AgentServerClient):
                     f"AgentServer 非流式请求超时 (request_id={rid}, timeout={_UNARY_REQUEST_TIMEOUT_SECONDS}s)"
                 ) from e
             resp = parse_agent_server_wire_unary(data)
+            unary_completed = True
             return resp
         finally:
-            # 清理队列
-            await self._drain_and_remove_queue(rid, queue)
+            # A parsed unary response (including application rejection) ends the
+            # operation. Quarantining that ID drops an immediate exact replay's
+            # response, which P2 needs to reauthorize a new media owner.
+            await self._drain_and_remove_queue(
+                rid, queue, quarantine=not unary_completed
+            )
 
     async def send_request_stream(
         self, envelope: E2AEnvelope
@@ -801,20 +807,25 @@ class WebSocketAgentServerClient(AgentServerClient):
         self,
         rid: str,
         expected_queue: asyncio.Queue,
+        *,
+        quarantine: bool = True,
     ) -> None:
         """Drain one owned queue and remove its registration only on identity match.
 
         A replaced same-id registration belongs to a different connection owner
-        and must remain untouched.
+        and must remain untouched. Only a fully parsed unary response may skip
+        residual quarantine; stream cleanup and incomplete unary keep the fence.
         """
         async with self._queue_lock:
             queue = self._message_queues.get(rid)
             owns_registration = queue is expected_queue
+            cancellation_token = None
             if owns_registration:
-                # Mark before deleting so residual frames cannot be routed to a
-                # later same-id owner on this connection.
-                cancellation_token = object()
-                self._cancelled_request_ids[rid] = cancellation_token
+                if quarantine:
+                    # Mark before deleting so residual frames cannot be routed
+                    # to a later same-id owner on this connection.
+                    cancellation_token = object()
+                    self._cancelled_request_ids[rid] = cancellation_token
                 del self._message_queues[rid]
 
             # Always drain only the caller-owned queue. A generator from an old
@@ -832,7 +843,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 rid,
                 drained_count,
             )
-            if owns_registration:
+            if cancellation_token is not None:
                 asyncio.create_task(
                     self._delayed_cleanup_cancelled_request_id(
                         rid,
