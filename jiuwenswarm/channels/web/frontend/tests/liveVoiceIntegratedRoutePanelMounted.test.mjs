@@ -5539,14 +5539,17 @@ test('mounted Task AUDIO failure adopts server TEXT fallback through visible run
   }
 });
 
-for (const { recognitionFailure, recognitionStart, recovery = 'play' } of [
+for (const { recognitionFailure, recognitionStart, recovery = 'play', arrivalDuringRecovery = false } of [
   ...['SPEECH_PROVIDER_EMPTY_TRANSCRIPT', 'STREAMING_SPEECH_PROVIDER_TIMEOUT'].flatMap(recognitionFailure =>
     ['deadline', 'natural_eot'].map(recognitionStart => ({ recognitionFailure, recognitionStart }))),
   { recognitionFailure: 'SPEECH_PROVIDER_EMPTY_TRANSCRIPT', recognitionStart: 'deadline', recovery: 'exit' },
   { recognitionFailure: 'STREAMING_SPEECH_PROVIDER_TIMEOUT', recognitionStart: 'deadline', recovery: 'replay_failure' },
   { recognitionFailure: 'STREAMING_SPEECH_PROVIDER_TIMEOUT', recognitionStart: 'deadline', recovery: 'exit_during_replay' },
+  { recognitionFailure: 'SPEECH_PROVIDER_EMPTY_TRANSCRIPT', recognitionStart: 'natural_eot', arrivalDuringRecovery: true },
+  { recognitionFailure: 'SPEECH_PROVIDER_EMPTY_TRANSCRIPT', recognitionStart: 'natural_eot', arrivalDuringRecovery: true, recovery: 'replay_failure' },
+  { recognitionFailure: 'SPEECH_PROVIDER_EMPTY_TRANSCRIPT', recognitionStart: 'natural_eot', arrivalDuringRecovery: true, recovery: 'exit_during_replay' },
 ]) {
-  test(`mounted captured terminal AUDIO waits for owned recognition settlement: ${recognitionFailure}/${recognitionStart}/${recovery}`, async () => {
+  test(`mounted captured terminal AUDIO waits for owned recognition settlement: ${recognitionFailure}/${recognitionStart}/${recovery}${arrivalDuringRecovery ? '/media_start' : ''}`, async () => {
     const i18n = await createI18n();
     const sessionId = `mounted-captured-terminal-${recognitionFailure}-${recognitionStart}`;
     const taskId = 'mounted-captured-terminal-task';
@@ -5561,12 +5564,15 @@ for (const { recognitionFailure, recognitionStart, recovery = 'play' } of [
     let taskBinding;
     let progressActivation;
     let activeMediaBinding;
+    let mediaAuthorityAvailable = false;
     let rejectRecognition;
     let recognitionCount = 0;
     let taskTerminal = false;
     let terminalMediaAuthorization;
     let releaseReplay;
     let terminalReplayCount = 0;
+    let releaseMediaActivation;
+    let synthesisAuthorizationFailures = 0;
     let renderer;
     const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
     const activateP2 = createMountedP2ActivationResponder();
@@ -5580,7 +5586,9 @@ for (const { recognitionFailure, recognitionStart, recovery = 'play' } of [
       },
     });
     const publish = value => {
-      if (value.result.response.response_id === 'captured-terminal') terminalMediaAuthorization = activeMediaBinding;
+      if (value.result.response.response_id === 'captured-terminal') {
+        terminalMediaAuthorization = mediaAuthorityAvailable ? activeMediaBinding : null;
+      }
       const waiter = waiters.shift();
       if (waiter) {
         replayable.set(waiter.requestId, value);
@@ -5629,7 +5637,11 @@ for (const { recognitionFailure, recognitionStart, recovery = 'play' } of [
       }
       if (method === 'live_voice.composition.p3.progress.close') return { ok: true, result: { status: 'closed', ...params } };
       if (method === 'live_voice.media.activate') {
+        if (arrivalDuringRecovery && recognitionCount > 1 && !taskTerminal) {
+          await new Promise(resolve => { releaseMediaActivation = resolve; });
+        }
         activeMediaBinding = mountedMediaBinding(params, calls.filter(call => call.method === method).length);
+        mediaAuthorityAvailable = true;
         return {
           status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED', subject_id: 'mounted-captured-terminal-subject',
           endpoint_path: '/ws/live-voice/media', media_ticket: 'C'.repeat(43), subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000,
@@ -5637,7 +5649,10 @@ for (const { recognitionFailure, recognitionStart, recovery = 'play' } of [
           binding: activeMediaBinding, privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
         };
       }
-      if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      if (method === 'live_voice.media.close') {
+        mediaAuthorityAvailable = false;
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
       if (method === 'live_voice.media.playout_receipt') return {
         status: 'media_playout_acknowledged', reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
         receipt_id: `receipt-${params.response_id}`, ...params, duplex_media_observed: false,
@@ -5655,8 +5670,10 @@ for (const { recognitionFailure, recognitionStart, recovery = 'play' } of [
         };
       }
       if (method === 'live_voice.speech.synthesize_batch') {
-        if (params.response.response_id === 'captured-terminal') assert.equal(terminalMediaAuthorization, activeMediaBinding,
-          'terminal TTS used a new media owner without exact P2 reauthorization');
+        if (params.response.response_id === 'captured-terminal' && terminalMediaAuthorization !== activeMediaBinding) {
+          synthesisAuthorizationFailures += 1;
+          throw Object.assign(new Error('terminal TTS lacks authorization on the active media route'), { reason: 'SPEECH_OPERATION_NOT_AUTHORIZED' });
+        }
         return {
         contract_version: 'live-voice.contract.v2', request_id: params.request_id, operation_id: params.operation_id, ok: true, error: null,
         result: {
@@ -5672,7 +5689,7 @@ for (const { recognitionFailure, recognitionStart, recovery = 'play' } of [
       await act(async () => {
         renderer = create(mountedFullyEnabledElement(i18n, sessionId, request, true, {
           productVoiceControlRef: controlRef, progressSubscribe: () => () => undefined,
-          taskNotificationPlayoutTimeoutMs: 50,
+          taskNotificationPlayoutTimeoutMs: arrivalDuringRecovery ? 500 : 50,
           onProductVoiceStateChange: state => states.push(state), onProductVoiceMessage: entry => messages.push(entry),
         }));
         await waitForMounted(() => states.at(-1)?.available === true, 'captured terminal route unavailable');
@@ -5688,10 +5705,12 @@ for (const { recognitionFailure, recognitionStart, recovery = 'play' } of [
         await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'listening did not restart');
         await browser.emitFirstFrame(0.25);
         await waitForMounted(() => states.at(-1)?.p1_status === 'capturing' && waiters.length > 0, 'speech-marked capture not ready');
-        taskTerminal = true;
-        publish(presentation('captured-terminal', 2, 'The background task is complete and its result is ready.'));
+        if (!arrivalDuringRecovery) {
+          taskTerminal = true;
+          publish(presentation('captured-terminal', 2, 'The background task is complete and its result is ready.'));
+        }
         if (recognitionStart === 'natural_eot') {
-          await waitForMounted(() => states.at(-1)?.terminal_announcement_state === 'queued', 'terminal notification was not parked');
+          if (!arrivalDuringRecovery) await waitForMounted(() => states.at(-1)?.terminal_announcement_state === 'queued', 'terminal notification was not parked');
           await browser.emitSpeechEndOfTurn();
         }
         await waitForMounted(() => typeof rejectRecognition === 'function', 'notification did not settle the speech-marked capture');
@@ -5709,8 +5728,27 @@ for (const { recognitionFailure, recognitionStart, recovery = 'play' } of [
           return;
         }
         rejectRecognition(Object.assign(new Error('injected recognition settlement'), { reason: recognitionFailure }));
-        if (recognitionFailure !== 'SPEECH_PROVIDER_EMPTY_TRANSCRIPT') {
+        if (arrivalDuringRecovery) {
+          const waiter = waiters.shift();
+          waiter?.resolve({ ok: true, result: {
+            status: 'notification', ...p2Binding, kind: 'transport.keepalive',
+            response: null, agent_event: null, progress_event: null, presentation_unit: null,
+          } });
+        }
+        if (recognitionFailure !== 'SPEECH_PROVIDER_EMPTY_TRANSCRIPT' || arrivalDuringRecovery) {
           await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'failed recognition owner was not recovered');
+          if (arrivalDuringRecovery) {
+            await waitForMounted(() => typeof releaseMediaActivation === 'function', 'successor media activation was not held');
+            assert.equal(mediaAuthorityAvailable, false, 'predecessor media must be revoked before the terminal is observed');
+            taskTerminal = true;
+            publish(presentation('captured-terminal', 2, 'The background task is complete and its result is ready.'));
+            // Let the in-flight notification settle while media.activate is
+            // still held; React may batch the intermediate queued render.
+            await new Promise(resolve => setTimeout(resolve, 10));
+            assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.failed').length, 0);
+            assert.equal(browser.counts.sourceStarts, 1);
+            releaseMediaActivation();
+          }
           await browser.emitFirstFrame(0);
         }
         if (recovery === 'replay_failure') {
@@ -5724,7 +5762,8 @@ for (const { recognitionFailure, recognitionStart, recovery = 'play' } of [
           await new Promise(resolve => setTimeout(resolve, 120));
           return;
         }
-        await waitForMounted(() => browser.counts.sourceStarts === 2, 'retained terminal AUDIO did not play after recognition settled');
+        await waitForMounted(() => browser.counts.sourceStarts === 2 || synthesisAuthorizationFailures > 0, 'retained terminal AUDIO did not play after recognition settled');
+        assert.equal(synthesisAuthorizationFailures, 0, 'terminal TTS used a new media route without exact P2 reauthorization');
         assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === 'captured-terminal').length, 0);
         browser.endLatestSource();
         await waitForMounted(() => calls.some(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === 'captured-terminal'), 'terminal AUDIO not ACKed');
@@ -5752,13 +5791,14 @@ for (const { recognitionFailure, recognitionStart, recovery = 'play' } of [
       assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === 'captured-terminal').length, 1);
       assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 1);
       assert.equal(messages.filter(entry => entry.message.content === 'The background task is complete and its result is ready.').length, 1);
-      assert.equal(terminalReplayCount, recognitionFailure === 'STREAMING_SPEECH_PROVIDER_TIMEOUT' ? 1 : 0);
+      assert.equal(terminalReplayCount, 1);
       assert.equal(calls.some(call => call.method.includes('task.cancel') || call.method.includes('.mutate')), false);
       await act(async () => controlRef.current.close());
       assert.equal(browser.counts.stoppedTracks, browser.counts.getUserMedia);
       assert.equal(browser.counts.closedAudioContexts, browser.counts.audioContexts);
       assert.equal(browser.counts.socketCloses, browser.counts.socketOpens);
     } finally {
+      releaseMediaActivation?.();
       rejectRecognition?.(Object.assign(new Error('test cleanup'), { reason: 'SPEECH_PROVIDER_EMPTY_TRANSCRIPT' }));
       releaseReplay?.();
       if (renderer) await act(async () => renderer.unmount());

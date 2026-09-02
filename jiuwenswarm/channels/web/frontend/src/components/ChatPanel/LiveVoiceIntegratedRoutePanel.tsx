@@ -4391,15 +4391,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             return;
           }
           const playoutOwner = p1VoiceOwnerRef.current;
-          if (
-            capturedTaskNotification.disposition.task_notification_terminal &&
-            capturedTaskNotification.capture_owner !== playoutOwner
-          ) {
+          if (capturedTaskNotification.disposition.task_notification_terminal) {
             try {
-              // A failed recognition owner is replaced through the existing
-              // arbiter. Refreshing its media authority can retire the earlier
-              // speech authorization, so re-observe the exact pop-on-read P2
-              // delivery (same request/response/unit), never fetch a new one.
+              // The same P1 owner can start a new media route. A notification
+              // observed during that startup may authorize only its predecessor,
+              // so owner identity cannot prove synthesis authority. Once capture
+              // arbitration settles, re-observe the exact P2 delivery on the
+              // ready route (same request/response/unit), never fetch a new one.
               const replay = capturedTaskNotification.media_replay;
               // React can replace the polling effect during the same media
               // transition. Those continuations share one exact replay.
