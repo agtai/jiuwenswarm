@@ -49,6 +49,7 @@ _MATERIAL_OPERATIONS = frozenset(
     }
 )
 _TASK_PRIORITIES = frozenset({"low", "normal", "high", "urgent"})
+_TARGET_AUTHORITY_CONVERGENCE_ATTEMPTS = 3
 _ARGUMENT_FIELDS = {
     "task.create": frozenset({"name", "instruction"}),
     "task.get": frozenset({"query_kind"}),
@@ -1457,19 +1458,60 @@ class ProductionMultiTaskResolver:
 
         reread: AuthenticatedTaskFact | None = None
         if target is not None:
-            reread = authority.get_task(request.scope, target.task_id)
-            status = authority.task_status(request.scope, target.task_id)
-            if (
-                reread is None
-                or status is None
-                or reread.fingerprint != target.fingerprint
-                or status.fingerprint != reread.fingerprint
-            ):
+            target_task_id = target.task_id
+            converged = False
+            for attempt in range(_TARGET_AUTHORITY_CONVERGENCE_ATTEMPTS):
+                reread = authority.get_task(request.scope, target_task_id)
+                status = authority.task_status(request.scope, target_task_id)
+                if (
+                    reread is not None
+                    and status is not None
+                    and reread.fingerprint == target.fingerprint
+                    and status.fingerprint == reread.fingerprint
+                ):
+                    converged = True
+                    break
+                # A queue admission/retry projection can legitimately advance
+                # between the list/get/status reads.  Re-read the entire
+                # authority generation, but never re-resolve the exact target
+                # selected by the command.  Ambiguity clarifications remain
+                # bound to their original complete Task set and cannot drift.
+                if (
+                    attempt + 1 == _TARGET_AUTHORITY_CONVERGENCE_ATTEMPTS
+                    or request.clarification_answer is not None
+                ):
+                    break
+                refreshed = authority.list_visible_tasks(request.scope)
+                if refreshed.scope != request.scope:
+                    return self._safe(
+                        request,
+                        "rejected",
+                        operation,
+                        target_task_id,
+                        proposal.arguments,
+                        "not_applicable",
+                        ProductionTaskPolicyOutcome.REJECTED,
+                        "TASK_AUTHORITY_SCOPE_MISMATCH",
+                        **origin_fields,
+                    )
+                refreshed_target = next(
+                    (
+                        item
+                        for item in refreshed.tasks
+                        if item.task_id == target_task_id
+                    ),
+                    None,
+                )
+                if refreshed_target is None:
+                    break
+                visible = refreshed
+                target = refreshed_target
+            if not converged:
                 return self._safe(
                     request,
                     "task_intent",
                     operation,
-                    target.task_id,
+                    target_task_id,
                     proposal.arguments,
                     "not_applicable",
                     ProductionTaskPolicyOutcome.CONFLICT,

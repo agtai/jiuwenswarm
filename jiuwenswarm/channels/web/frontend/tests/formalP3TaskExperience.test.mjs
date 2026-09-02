@@ -392,6 +392,70 @@ test('structured adjustment separates confirmation, accepted/applied and termina
   assert.ok(fixture.calls.filter(call => call.method === FORMAL_P3_TASK_METHODS.status).length >= 3);
 });
 
+test('definitive confirmation rejection is exact and unlocks later Task controls', async () => {
+  const fixture = authoritativeFixture({
+    selectedHint: 'task-b',
+    taskBOperations: ['task.adjust', 'task.cancel', 'task.status'],
+  });
+  let intentCalls = 0;
+  const request = async (method, params, id) => {
+    if (method !== FORMAL_P3_TASK_METHODS.intent) return fixture.request(method, params, id);
+    intentCalls += 1;
+    if (intentCalls === 1) return fixture.request(method, params, id);
+    if (intentCalls === 2) {
+      throw Object.assign(new Error('production Task intent failed closed'), {
+        requestId: id,
+        retriable: false,
+        reason: 'TASK_AUTHORITY_CHANGED',
+        payload: { error: { reason: 'TASK_AUTHORITY_CHANGED' } },
+      });
+    }
+    return envelope(id, {
+      status: 'clarification',
+      reason: 'TASK_CONFIRMATION_REQUIRED',
+      operation: 'task.cancel',
+      task_id: 'task-b',
+      confirmation_token: 'confirmation-cancel-after-rejection',
+      confirmation_form: 'confirm task request confirmation-cancel-after-rejection',
+      partial_command_count: 0,
+    });
+  };
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, request, store: fixture.store });
+  await owner.refresh(sessionId);
+  await owner.issue({ operation: 'task.adjust', task_id: 'task-b', adjustment: 'advance checkpoint' });
+
+  await assert.rejects(owner.confirm(), /TASK_AUTHORITY_CHANGED/);
+  const rejected = owner.snapshot();
+  assert.equal(rejected.status, 'ready');
+  assert.equal(rejected.command.phase, 'rejected');
+  assert.equal(rejected.command.accepted, false);
+  assert.equal(rejected.command.applied, false);
+  assert.equal(rejected.command.reason, 'TASK_AUTHORITY_CHANGED');
+
+  const next = await owner.issue({ operation: 'task.cancel', task_id: 'task-b' });
+  assert.equal(next.command.phase, 'confirmation_required');
+});
+
+test('transport-unknown confirmation outcome remains locked for safe recovery', async () => {
+  const fixture = authoritativeFixture({ selectedHint: 'task-b' });
+  let intentCalls = 0;
+  const request = async (method, params, id) => {
+    if (method !== FORMAL_P3_TASK_METHODS.intent) return fixture.request(method, params, id);
+    intentCalls += 1;
+    if (intentCalls === 1) return fixture.request(method, params, id);
+    throw Object.assign(new Error('request timed out'), {
+      requestId: id,
+      retriable: true,
+    });
+  };
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, request, store: fixture.store });
+  await owner.refresh(sessionId);
+  await owner.issue({ operation: 'task.adjust', task_id: 'task-b', adjustment: 'advance checkpoint' });
+
+  await assert.rejects(owner.confirm(), /request timed out/);
+  assert.equal(owner.snapshot().command.phase, 'unknown');
+});
+
 test('five production structured controls preserve their exact closed operation target and arguments', async () => {
   const cases = [
     {

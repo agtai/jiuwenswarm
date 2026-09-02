@@ -583,7 +583,7 @@ def test_store_reader_keeps_cancel_pending_decision_task_readable(
     assert "task.cancel" not in fact.supported_operations
 
 
-def test_store_reader_completion_between_task_and_result_reads_is_stale(
+def test_store_reader_converges_completion_between_task_and_result_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -619,10 +619,50 @@ def test_store_reader_completion_between_task_and_result_reads_is_stale(
         scope=SCOPE,
     )
 
+    authority = reader.list_visible_tasks(SCOPE)
+    fact = next(item for item in authority.tasks if item.task_id == task_id)
+
+    assert completed
+    assert fact.state.value == "terminal"
+    assert fact.outcome is TerminalOutcome.COMPLETED
+    assert fact.result_digest is not None
+
+
+def test_store_reader_persistent_generation_churn_fails_closed_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "production-reader-persistent-race.sqlite3")
+    _seed_selected_task(store, tmp_path, suffix="persistent-race")
+    original_page = store.list_task_read_snapshots_page
+    call_count = 0
+
+    def alternating_page(scope: ScopeRef, *, limit: int, cursor: str | None = None):
+        nonlocal call_count
+        page = original_page(scope, limit=limit, cursor=cursor)
+        call_count += 1
+        if call_count % 2 == 1:
+            return page
+        rows, next_cursor, has_more = page
+        task, attempt, admission = rows[0]
+        assert admission is not None
+        changed = replace(admission, queued=not admission.queued)
+        return (((task, attempt, changed),), next_cursor, has_more)
+
+    monkeypatch.setattr(store, "list_task_read_snapshots_page", alternating_page)
+    reader = StoreProductionTaskAuthorityReader(
+        store=store,
+        principal_id=SCOPE.subject_id,
+        scope=SCOPE,
+    )
+    before = store.counts()
+
     with pytest.raises(FormalTaskViolation) as stale:
         reader.list_visible_tasks(SCOPE)
 
     assert stale.value.reason == "PRODUCTION_TASK_AUTHORITY_CHANGED"
+    assert call_count == 6
+    assert store.counts() == before
 
 
 def test_store_reader_projects_completed_result_digest(tmp_path: Path) -> None:

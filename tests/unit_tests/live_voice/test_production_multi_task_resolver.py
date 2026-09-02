@@ -176,6 +176,27 @@ class RecordingAuthority:
         ).result_digest
 
 
+class TransientGenerationAuthority(RecordingAuthority):
+    def __init__(
+        self,
+        initial: AuthenticatedTaskFact,
+        settled: AuthenticatedTaskFact,
+    ) -> None:
+        super().__init__((initial,))
+        self._settled = settled
+
+    def get_task(self, scope: ScopeRef, task_id: str) -> AuthenticatedTaskFact | None:
+        self.calls.append("get")
+        self.facts = (self._settled,)
+        return self._settled if self._settled.task_id == task_id else None
+
+    def task_status(
+        self, scope: ScopeRef, task_id: str
+    ) -> AuthenticatedTaskFact | None:
+        self.calls.append("status")
+        return self._settled if self._settled.task_id == task_id else None
+
+
 class AcceptedOriginAuthority:
     def __init__(self) -> None:
         self.commits: dict[str, TurnCommit] = {}
@@ -526,6 +547,44 @@ def test_target_reread_and_observed_revision_fail_closed() -> None:
     assert stale.reason == "TASK_SNAPSHOT_STALE"
     assert changed.reason == "TASK_AUTHORITY_CHANGED"
     assert stale.zero_effects == changed.zero_effects == ZERO_EFFECTS
+
+
+def test_target_reread_converges_one_transient_admission_generation() -> None:
+    initial = _fact(
+        capabilities=frozenset({"task.reprioritize"}),
+        admission_fingerprint="b" * 64,
+    )
+    settled = replace(initial, admission_fingerprint="c" * 64)
+    authority = TransientGenerationAuthority(initial, settled)
+    origin = AcceptedOriginAuthority()
+    proposal = ProductionTaskIntentProposal(
+        "task.reprioritize",
+        initial.task_id,
+        {"priority": "urgent"},
+        1.0,
+        True,
+        target_kind="task_id",
+    )
+
+    result = _resolve(
+        _request(
+            proposal,
+            origin,
+            origin=ProductionIntentOrigin.STRUCTURED,
+            commit_id="structured-transient-admission",
+        ),
+        authority,
+        origin,
+    )
+
+    assert result.outcome is ProductionTaskPolicyOutcome.PROPOSED
+    assert result.reason == "TASK_REPRIORITIZE_POLICY_ACCEPTED"
+    assert result.confirmation == "required"
+    assert result.authority_fingerprint == settled.fingerprint
+    assert result.confirmation_binding is not None
+    assert result.confirmation_binding.target_attempt_id == settled.attempt_id
+    assert authority.calls == ["list", "get", "status", "list", "get", "status"]
+    assert result.zero_effects == ZERO_EFFECTS
 
 
 def test_clarification_is_new_commit_single_use_and_restart_invalidates() -> None:

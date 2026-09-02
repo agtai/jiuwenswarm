@@ -1121,3 +1121,14 @@
 - 风险与证据：这是 confirmation authority + Direct D2 isolated execution 的 Tier-3 修复；自动化必须覆盖确认期间无关 Task 漂移、queued reprioritize 真正 applied、目标 attempt/config drift 拒绝、前一 Task 留下 untracked 结果后后一 Task 完成，以及真实 initializer 写入仍 fail closed。保留现有确认单次消费、跨 scope/target 拒绝、apply-time drift、unsafe link、cleanup/restart 和零副作用负向合同。
 - 明确排除：不改变项目 `exclusive` 串行、不增加抢占或自动重排、不开放 `provide_input/pause/resume`、不允许 running update/reprioritize、不接受任意用户脏改、不新增 SQLite schema/Task state/Executor profile/第二 authority，也不赋予本地部署产品或 Production 通过信用。
 - 重新评估条件：需要确认跨 attempt/retry、按名称而非冻结 task identity 消费、允许 capability/context/model 漂移、移除 Store 原子 precondition、改变 seed staging/patch 语义，或引入 schema/公开协议迁移。
+
+## D-100 Task 权威读取有界收敛，明确拒绝不再锁死控制面板
+
+- 日期：2026-09-02
+- 状态：Accepted root repair decision（用户在 D-099 后续真实验收再次复现 queued reprioritize 失败和 A/B 全局控制锁死，明确要求从日志定位、根因修复并重新部署）。
+- 已证实根因：同一个 accepted/queued Attempt 的 admission retry 可在 Resolver 依次执行完整 `list`、`get`、`status` 的只读期间合法推进。三次调用各自一致，但来自不同 generation；旧实现立即返回 `TASK_AUTHORITY_CHANGED`，所以 `urgent` 从未进入 Store。浏览器已经收到带 request identity、非 retriable 标志和结构化 error payload 的明确服务端拒绝，却把所有未 accepted 的确认异常统一记为 `unknown`；正式 Panel 对 `unknown` 的全局安全锁因此把 A/B 都锁住。
+- 后端合同：Store authority adapter 对且仅对 `PRODUCTION_TASK_AUTHORITY_CHANGED` 做最多三次完整快照收敛读取；Resolver 对且仅对冻结的 exact `task_id` 做最多三代 `list/get/status` 收敛。每代仍要求 scope、Task/Attempt fingerprint 和 status 一致；ambiguity clarification 不跨原 candidate set 收敛。持续 churn、目标消失、scope/attempt/capability/context/model 变化以及最终 Core transaction precondition 冲突继续 fail closed，并保持零 mutation/Executor/file/audio side effect。
+- 前端合同：确认后收到 exact request-bound、non-retriable、structured server error，或合法响应明确返回 rejected status 时，命令进入 `rejected`，保留 exact reason、`accepted=false`、`applied=false` 并释放 Panel 控制。响应超时、断线、请求取消、response identity/binding 不合法或 malformed response 仍进入 `unknown` 并保持全局锁；不得用下拉框 draft、语音提示或旧 command 推断 applied。
+- 验收判读：成功 reprioritize 必须同时看到所选 A 的 authoritative admission priority 为 `urgent`（排队时为 `queued urgent ...`，已 claim 后仍显示 retained `urgent`）以及命令卡 `已接受 true / 已应用 true`。所选 B 显示的 `not queued normal` 只证明 B 自身，不是 A 的结果。当前修复不开放 running update/reprioritize，不改变同项目 exclusive 串行、不新增 schema/Task state/Executor profile/第二 authority，也不放宽 `provide_input/pause/resume`。
+- 自动化范围：新增 transient admission generation 正向收敛、persistent churn 零写入失败关闭、Store completion race 收敛、明确服务端拒绝解锁与 transport-unknown 保持锁定；受影响 Python 组合链路和 formal P3 Web owner 必须通过，production build、静态检查、exact-source launcher 和真实重复旅程仍是部署/人工关闭门。
+- 重新评估条件：三次有界读取不能覆盖正常 admission cadence；需要跨 clarification candidate set 或跨 attempt 收敛；服务端无法提供 request-bound structured rejection；需要自动重试 mutation 而不只是重读 authority；或修复要求放宽 Core 原子 precondition、引入锁/事务跨网络读取、新 schema/state/profile/primitive。
