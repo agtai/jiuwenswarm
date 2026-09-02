@@ -194,6 +194,10 @@ class SynthesisProviderSupport:
     exact_audio_cursor: CapabilityProvenance = CapabilityProvenance.UNAVAILABLE
     provider_cancel_ack: CapabilityProvenance = CapabilityProvenance.UNAVAILABLE
     chunk_text_spans: CapabilityProvenance = CapabilityProvenance.UNAVAILABLE
+    bounded_pause: CapabilityProvenance = CapabilityProvenance.UNAVAILABLE
+    # Optional transport-liveness capability.  It is intentionally excluded
+    # from ``acceptance_gaps`` because ordinary synthesis does not require it.
+    parked_pause: CapabilityProvenance = CapabilityProvenance.UNAVAILABLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,6 +397,25 @@ class NativeStreamingSpeechProvider(Protocol):
         self, ref: SynthesisStreamRef, *, timeout_seconds: float
     ) -> StreamingSynthesisEvent: ...
 
+    async def pause_synthesis(self, ref: SynthesisStreamRef) -> None: ...
+
+    async def resume_synthesis(self, ref: SynthesisStreamRef) -> None: ...
+
+    async def park_synthesis_for_promotion(
+        self,
+        ref: SynthesisStreamRef,
+        *,
+        park_generation: int,
+        max_pause_seconds: float,
+    ) -> None: ...
+
+    async def promote_parked_synthesis(
+        self,
+        ref: SynthesisStreamRef,
+        *,
+        park_generation: int,
+    ) -> None: ...
+
     async def cancel_synthesis(
         self, ref: SynthesisStreamRef, *, reason: str = "caller_cancel"
     ) -> None: ...
@@ -451,6 +474,7 @@ class _RecognitionState:
 class _SynthesisState:
     request: SynthesisStreamRequest
     event_deadline: float
+    paused_event_remaining_seconds: float | None = None
     next_event_seq: int = 0
     next_audio_cursor: int = 0
     next_display_cursor: int = 0
@@ -1060,6 +1084,11 @@ class StreamingSpeechConformance:
             state = self._require_synthesis(event.ref)
             self._require_not_terminal_synthesis(state)
             try:
+                if state.paused_event_remaining_seconds is not None:
+                    raise StreamingSpeechViolation(
+                        "SYNTHESIS_EVENT_WHILE_PAUSED",
+                        "synthesis cannot accept Provider output while paused",
+                    )
                 if not (
                     state.cancel_requested
                     and event.kind is SynthesisEventKind.CANCELLED
@@ -1138,6 +1167,52 @@ class StreamingSpeechConformance:
                     self._fail_synthesis(state, error.reason)
                 raise
 
+    def pause_synthesis_events(self, ref: SynthesisStreamRef) -> None:
+        with self._lock:
+            state = self._require_synthesis_control(ref)
+            self._require_not_terminal_synthesis(state)
+            if state.cancel_requested or state.output_fenced:
+                raise StreamingSpeechViolation(
+                    "SYNTHESIS_OUTPUT_FENCED",
+                    "synthesis cannot pause events after cancel or failure",
+                )
+            if state.paused_event_remaining_seconds is not None:
+                raise StreamingSpeechViolation(
+                    "SYNTHESIS_EVENTS_ALREADY_PAUSED",
+                    "synthesis event deadline is already paused",
+                )
+            self._require_before_deadline_synthesis(state)
+            remaining = state.event_deadline - self._now()
+            if not math.isfinite(remaining) or remaining <= 0:
+                raise StreamingSpeechViolation(
+                    "SYNTHESIS_STREAM_TIMEOUT",
+                    "synthesis session crossed its next-event deadline",
+                )
+            state.paused_event_remaining_seconds = remaining
+
+    def resume_synthesis_events(self, ref: SynthesisStreamRef) -> None:
+        with self._lock:
+            state = self._require_synthesis_control(ref)
+            self._require_not_terminal_synthesis(state)
+            if state.cancel_requested or state.output_fenced:
+                raise StreamingSpeechViolation(
+                    "SYNTHESIS_OUTPUT_FENCED",
+                    "synthesis cannot resume events after cancel or failure",
+                )
+            remaining = state.paused_event_remaining_seconds
+            if remaining is None:
+                raise StreamingSpeechViolation(
+                    "SYNTHESIS_EVENTS_NOT_PAUSED",
+                    "synthesis event deadline is not paused",
+                )
+            if not math.isfinite(remaining) or remaining <= 0:
+                raise StreamingSpeechViolation(
+                    "INVALID_SYNTHESIS_PAUSE_BUDGET",
+                    "paused synthesis event budget must remain positive and finite",
+                )
+            state.event_deadline = self._now() + remaining
+            state.paused_event_remaining_seconds = None
+
     def request_synthesis_cancel(
         self, ref: SynthesisStreamRef, *, reason: str = "caller_cancel"
     ) -> None:
@@ -1178,6 +1253,7 @@ class StreamingSpeechConformance:
                 if (
                     not synthesis_state.terminal
                     and not synthesis_state.cancel_requested
+                    and synthesis_state.paused_event_remaining_seconds is None
                     and now >= synthesis_state.event_deadline
                 ):
                     self._request_synthesis_cancel(synthesis_state, "timeout")
@@ -1497,6 +1573,20 @@ class StreamingSpeechConformance:
             raise StreamingSpeechViolation(
                 "SYNTHESIS_IDENTITY_MISMATCH",
                 "synthesis callback changed response, generation, unit, or sequence",
+            )
+        return state
+
+    def _require_synthesis_control(
+        self, ref: SynthesisStreamRef
+    ) -> _SynthesisState:
+        _validate_synthesis_ref(ref)
+        state = self._synthesis.get(_synthesis_key(ref))
+        if state is None:
+            return self._require_synthesis(ref)
+        if state.request.ref != ref:
+            raise StreamingSpeechViolation(
+                "SYNTHESIS_IDENTITY_MISMATCH",
+                "synthesis control changed response, generation, unit, or sequence",
             )
         return state
 

@@ -79,6 +79,7 @@ MIN_BATCH_TIMEOUT_MS = 100
 DEFAULT_BATCH_TIMEOUT_MS = 15_000
 MAX_COMPLETED_OPERATIONS = 128
 MAX_IDENTITY_TOMBSTONES = 512
+MAX_SYNTHESIS_UNITS_PER_RESPONSE = 1_024
 MIN_CLOSE_TIMEOUT_MS = 10
 MAX_CLOSE_TIMEOUT_MS = 5_000
 DEFAULT_CLOSE_TIMEOUT_MS = 1_000
@@ -86,6 +87,8 @@ MAX_VOICE_COMMIT_RECEIPTS = 512
 VOICE_COMMIT_RECEIPT_TTL_SECONDS = 300.0
 MAX_RESPONSE_IDENTITY_CHARACTERS = 256
 MAX_RESPONSE_IDENTITY_UTF8_BYTES = 1_024
+MAX_SYNTHESIS_UNIT_ID_CHARACTERS = 256
+MAX_SYNTHESIS_UNIT_ID_UTF8_BYTES = 512
 
 _PCM16_SAMPLE_WIDTH_BYTES = 2
 _PCM_WAV_HEADER_BYTES = 44
@@ -204,6 +207,24 @@ def _safe_response_identity(payload: object, field: str) -> str:
     if len(encoded) > MAX_RESPONSE_IDENTITY_UTF8_BYTES:
         return "unknown"
     return value
+
+
+def _synthesis_unit_id(value: object) -> str:
+    unit_id = _required_text(value, "unit_id")
+    if (
+        len(unit_id) > MAX_SYNTHESIS_UNIT_ID_CHARACTERS
+        or len(unit_id.encode("utf-8")) > MAX_SYNTHESIS_UNIT_ID_UTF8_BYTES
+    ):
+        raise _fail(
+            ErrorCode.INVALID_ARGUMENT,
+            "SYNTHESIS_UNIT_ID_LIMIT_EXCEEDED",
+            "synthesis unit identity exceeds the package limit",
+            details={
+                "max_chars": MAX_SYNTHESIS_UNIT_ID_CHARACTERS,
+                "max_utf8_bytes": MAX_SYNTHESIS_UNIT_ID_UTF8_BYTES,
+            },
+        )
+    return unit_id
 
 
 def _required_dict(value: object, field: str) -> dict[str, object]:
@@ -969,6 +990,7 @@ class SynthesisBatchRequest:
     scope: ScopeRef
     response: ResponseRef
     unit_id: str
+    unit_seq: int | None
     display_text: str
     spoken_text: str
     transforms: tuple[RenderTransform, ...]
@@ -976,6 +998,7 @@ class SynthesisBatchRequest:
     voice: str | None
     required_sample_rate_hz: int
     timeout_ms: int
+    prefetch_promotion_capability: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1024,6 +1047,7 @@ def _parse_common(
     *,
     operation: str,
     extra_keys: set[str],
+    optional_extra_keys: set[str] = frozenset(),
 ) -> tuple[dict[str, object], str, str, str, ScopeRef, int]:
     data = _required_dict(payload, "speech_request")
     _exact_keys(
@@ -1039,6 +1063,7 @@ def _parse_common(
             "timeout_ms",
             *extra_keys,
         },
+        optional=optional_extra_keys,
         field="speech_request",
     )
     if data["contract_version"] != CONTRACT_VERSION:
@@ -1186,6 +1211,7 @@ def parse_synthesis_batch_request(
             "voice",
             "required_sample_rate_hz",
         },
+        optional_extra_keys={"unit_seq", "prefetch_promotion_capability"},
     )
     if data["authoritative_agent_text"] is not True:
         raise _fail(
@@ -1210,13 +1236,31 @@ def parse_synthesis_batch_request(
         )
     voice_value = data["voice"]
     voice = None if voice_value is None else _required_text(voice_value, "voice")
+    unit_seq = (
+        None
+        if "unit_seq" not in data
+        else _non_negative_int(data["unit_seq"], "unit_seq")
+    )
+    prefetch_capability = data.get("prefetch_promotion_capability")
+    if prefetch_capability is not None:
+        if (
+            prefetch_capability != "live-voice.media.prefetch-promotion.v1"
+            or unit_seq is None
+            or unit_seq <= 0
+        ):
+            raise _fail(
+                ErrorCode.INVALID_ARGUMENT,
+                "INVALID_PREFETCH_PROMOTION_CAPABILITY",
+                "prefetch promotion requires the exact continuation capability",
+            )
     return SynthesisBatchRequest(
         request_id=request_id,
         operation_id=operation_id,
         correlation_id=correlation_id,
         scope=scope,
         response=_parse_response(data["response"]),
-        unit_id=_required_text(data["unit_id"], "unit_id"),
+        unit_id=_synthesis_unit_id(data["unit_id"]),
+        unit_seq=unit_seq,
         display_text=display_text,
         spoken_text=spoken_text,
         transforms=_parse_transforms(plan["transforms"], display_text),
@@ -1226,6 +1270,7 @@ def parse_synthesis_batch_request(
             data["required_sample_rate_hz"], "required_sample_rate_hz"
         ),
         timeout_ms=timeout,
+        prefetch_promotion_capability=prefetch_capability,
     )
 
 
@@ -1271,6 +1316,7 @@ def _synthesis_authorization_binding(
                     "response_generation": request.response.response_generation,
                 },
                 "unit_id": request.unit_id,
+                "unit_seq": 0 if request.unit_seq is None else request.unit_seq,
                 "display_text": request.display_text,
                 "spoken_text": request.spoken_text,
                 "transforms": [
@@ -1348,6 +1394,12 @@ class _VoiceCommitReceipt:
     claimed_binding: tuple[str, str, str, str, str, str] | None = None
 
 
+@dataclass(slots=True)
+class _SynthesisResponseReservation:
+    response: ResponseRef
+    unit_ids: OrderedDict[str, None]
+
+
 class FormalBatchSpeechService:
     def __init__(
         self,
@@ -1357,6 +1409,7 @@ class FormalBatchSpeechService:
         monotonic: Callable[[], float] = time.monotonic,
         max_completed_operations: int = MAX_COMPLETED_OPERATIONS,
         max_identity_tombstones: int = MAX_IDENTITY_TOMBSTONES,
+        max_synthesis_units_per_response: int = MAX_SYNTHESIS_UNITS_PER_RESPONSE,
         trusted_demo_critical_bypass: bool | None = None,
     ) -> None:
         self._provider = provider
@@ -1383,6 +1436,9 @@ class FormalBatchSpeechService:
         self._monotonic = monotonic
         self._max_completed = max(1, max_completed_operations)
         self._max_identity_tombstones = max(1, max_identity_tombstones)
+        self._max_synthesis_units_per_response = max(
+            1, max_synthesis_units_per_response
+        )
         self._trusted_demo_critical_bypass = (
             _enabled(os.getenv(PRODUCT_DEMO_POLICY_BYPASS_ENV))
             if trusted_demo_critical_bypass is None
@@ -1398,7 +1454,9 @@ class FormalBatchSpeechService:
         )
         self._seen_captures: OrderedDict[tuple[ScopeRef, str], int] = OrderedDict()
         self._current_capture: OrderedDict[ScopeRef, tuple[str, int]] = OrderedDict()
-        self._seen_response_ids: OrderedDict[tuple[ScopeRef, str], None] = OrderedDict()
+        self._seen_response_ids: OrderedDict[
+            tuple[ScopeRef, str], _SynthesisResponseReservation
+        ] = OrderedDict()
         self._last_response_generation: OrderedDict[tuple[ScopeRef, str], int] = (
             OrderedDict()
         )
@@ -1634,6 +1692,9 @@ class FormalBatchSpeechService:
                     "max_operation_capacity": self._max_completed,
                     "operation_replay_window": self._max_completed,
                     "identity_tombstone_window": self._max_identity_tombstones,
+                    "max_synthesis_units_per_response": self._max_synthesis_units_per_response,
+                    "max_synthesis_unit_id_chars": MAX_SYNTHESIS_UNIT_ID_CHARACTERS,
+                    "max_synthesis_unit_id_utf8_bytes": MAX_SYNTHESIS_UNIT_ID_UTF8_BYTES,
                     "close_timeout_max_ms": MAX_CLOSE_TIMEOUT_MS,
                     "authorization": "authenticated_server_owned_exact_binding",
                 },
@@ -2265,20 +2326,55 @@ class FormalBatchSpeechService:
         response = request.response
         response_id_key = (request.scope, response.response_id)
         interaction_key = (request.scope, response.interaction_id)
-        if response_id_key in self._seen_response_ids:
+        reservation = self._seen_response_ids.get(response_id_key)
+        last = self._last_response_generation.get(interaction_key, -1)
+        if reservation is not None and reservation.response != response:
             raise _fail(
                 ErrorCode.CONFLICT,
                 "RESPONSE_ID_REUSED",
-                "response_id cannot be reused for synthesis",
+                "response_id cannot be rebound to another synthesis response",
             )
-        last = self._last_response_generation.get(interaction_key, -1)
+        if reservation is not None:
+            # One authoritative Agent response may contain several immutable
+            # presentation units.  The response identity stays unique while
+            # each exact unit receives at most one Provider synthesis effect.
+            if response.response_generation != last:
+                raise _fail(
+                    ErrorCode.STALE,
+                    "STALE_SYNTHESIS_RESPONSE",
+                    "synthesis continuation does not bind the current response",
+                )
+            if request.unit_id in reservation.unit_ids:
+                raise _fail(
+                    ErrorCode.STALE,
+                    "SYNTHESIS_UNIT_REUSED",
+                    "a response unit identifier cannot be synthesized twice",
+                )
+            if len(reservation.unit_ids) >= self._max_synthesis_units_per_response:
+                raise _fail(
+                    ErrorCode.UNAVAILABLE,
+                    "SYNTHESIS_UNIT_IDENTITY_CAPACITY_EXHAUSTED",
+                    "synthesis response unit identity capacity is exhausted",
+                )
+            reservation.unit_ids[request.unit_id] = None
+            reservation.unit_ids.move_to_end(request.unit_id)
+            self._seen_response_ids.move_to_end(response_id_key)
+            self._last_response_generation.move_to_end(interaction_key)
+            return
         if response.response_generation <= last:
             raise _fail(
                 ErrorCode.STALE,
                 "STALE_SYNTHESIS_RESPONSE",
                 "response generation is stale",
             )
-        self._bounded_identity_put(self._seen_response_ids, response_id_key, None)
+        self._bounded_identity_put(
+            self._seen_response_ids,
+            response_id_key,
+            _SynthesisResponseReservation(
+                response=response,
+                unit_ids=OrderedDict(((request.unit_id, None),)),
+            ),
+        )
         self._bounded_identity_put(
             self._last_response_generation,
             interaction_key,

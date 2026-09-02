@@ -16,7 +16,9 @@ import inspect
 import logging
 import math
 import struct
+import time
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Generic, TypeVar, cast
@@ -59,6 +61,12 @@ _DEFAULT_MAX_PENDING_FRAMES = 8
 _DEFAULT_OPEN_TIMEOUT_SECONDS = 15.0
 _DEFAULT_EVENT_TIMEOUT_SECONDS = 20.0
 _DEFAULT_QUEUE_WAIT_SECONDS = 2.0
+# Leave a five-second resume/cleanup margin inside the Provider's hard 60s
+# pause lifetime so independent bounds cannot expire in the same tick.
+_DEFAULT_PAUSE_WAIT_SECONDS = 55.0
+_PROVIDER_PARK_MARGIN_SECONDS = 5.0
+_MAX_PROVIDER_PARK_SECONDS = 185.0
+_PROVIDER_EVENT_SETTLEMENT_MARGIN_SECONDS = 1.0
 _PROVIDER_CLEANUP_TIMEOUT_SECONDS = 5.0
 _MAX_ROUTE_IDENTITIES = 256
 _DEFAULT_MAX_RETAINED_TASKS = 32
@@ -99,6 +107,15 @@ def _discard_awaitable(awaitable: Awaitable[object]) -> None:
         awaitable.close()
     elif isinstance(awaitable, asyncio.Future):
         awaitable.cancel()
+
+
+def _consume_task_result(task: asyncio.Task[_T]) -> None:
+    """Prevent a cancelled, hostile queue write from leaking an exception."""
+
+    try:
+        task.exception()
+    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit, GeneratorExit):
+        return
 
 
 class _BoundedHardDeadlineOwner:
@@ -282,6 +299,10 @@ class StreamingSynthesisRouteViolation(ValueError):
         self.reason = reason
 
 
+class _ProviderEventWaitElapsed(TimeoutError):
+    """The Provider call itself settled without delivering an event."""
+
+
 class StreamingSynthesisFallbackAction(StrEnum):
     NONE = "none"
     BATCH_ELIGIBLE = "batch_eligible"
@@ -299,6 +320,7 @@ class StreamingSynthesisReason(StrEnum):
     ROUTE_ABORTED = "STREAMING_SYNTHESIS_ROUTE_ABORTED"
     RESPONSE_SUPERSEDED = "STREAMING_SYNTHESIS_RESPONSE_SUPERSEDED"
     OWNER_CLOSED = "STREAMING_SYNTHESIS_OWNER_CLOSED"
+    PROMOTION_TIMEOUT = "STREAMING_SPEECH_PROMOTION_TIMEOUT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,6 +335,8 @@ class StreamingSynthesisCapabilityProvenance:
     exact_audio_cursor: CapabilityProvenance
     provider_cancel_ack: CapabilityProvenance
     chunk_text_spans: CapabilityProvenance
+    bounded_pause: CapabilityProvenance
+    parked_pause: CapabilityProvenance
 
     def safe_dict(self) -> dict[str, object]:
         return {
@@ -326,6 +350,8 @@ class StreamingSynthesisCapabilityProvenance:
             "exact_audio_cursor": self.exact_audio_cursor.value,
             "provider_cancel_ack": self.provider_cancel_ack.value,
             "chunk_text_spans": self.chunk_text_spans.value,
+            "bounded_pause": self.bounded_pause.value,
+            "parked_pause": self.parked_pause.value,
         }
 
 
@@ -347,6 +373,8 @@ class StreamingSynthesisRouteFact:
     exact_audio_cursor: CapabilityProvenance
     provider_cancel_ack: CapabilityProvenance
     chunk_text_spans: CapabilityProvenance
+    bounded_pause: CapabilityProvenance
+    parked_pause: CapabilityProvenance
     visible: bool = True
     operation: str = "speech.synthesis.stream"
     x_obs_event: str = "live_voice.speech.degradation"
@@ -370,6 +398,8 @@ class StreamingSynthesisRouteFact:
             "exact_audio_cursor": self.exact_audio_cursor.value,
             "provider_cancel_ack": self.provider_cancel_ack.value,
             "chunk_text_spans": self.chunk_text_spans.value,
+            "bounded_pause": self.bounded_pause.value,
+            "parked_pause": self.parked_pause.value,
             "visible": self.visible,
             "x_obs_event": self.x_obs_event,
             "x_obs_metric": self.x_obs_metric,
@@ -426,6 +456,7 @@ class StreamingSynthesisChunk:
             "exact_audio_cursor": self.capability.exact_audio_cursor.value,
             "provider_cancel_ack": self.capability.provider_cancel_ack.value,
             "chunk_text_spans": self.capability.chunk_text_spans.value,
+            "bounded_pause": self.capability.bounded_pause.value,
             "source_event_seq": self.source_event_seq,
             "provider_cursor_through": self.provider_cursor_through,
         }
@@ -470,6 +501,17 @@ class _CloseResult:
 _QueueValue = StreamingSynthesisChunk | _TerminalSignal
 
 
+class StreamingSynthesisFlowState(StrEnum):
+    ACTIVE = "active"
+    ORDINARY_PAUSING = "ordinary_pausing"
+    ORDINARY_PAUSED = "ordinary_paused"
+    ORDINARY_RESUMING = "ordinary_resuming"
+    PARK_REQUESTED = "park_requested"
+    PREFETCH_PARKED = "prefetch_parked"
+    PROMOTED = "promoted"
+    TERMINAL = "terminal"
+
+
 @dataclass(slots=True)
 class StreamingSynthesisHandle:
     ref: SynthesisStreamRef
@@ -489,10 +531,15 @@ class StreamingSynthesisHandle:
     state_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     pull_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    provider_control_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, repr=False
+    )
     next_provider_seq: int = 0
     next_provider_cursor: int = 0
     next_frame_seq: int = 0
     next_frame_cursor: int = 0
+    frames_enqueued: int = 0
+    frames_pulled: int = 0
     started: bool = False
     first_audio_emitted: bool = False
     terminal_delivered: bool = False
@@ -502,6 +549,25 @@ class StreamingSynthesisHandle:
     cleanup_done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     terminal_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     process_control: BaseException | None = field(default=None, repr=False)
+    prefetch_candidate: bool = False
+    prefetch_decision_deadline: float | None = None
+    prefetch_decision_event: asyncio.Event = field(
+        default_factory=asyncio.Event, repr=False
+    )
+    flow_state: StreamingSynthesisFlowState = StreamingSynthesisFlowState.ACTIVE
+    park_generation: int | None = None
+    park_deadline: float | None = None
+    park_requested_event: asyncio.Event = field(
+        default_factory=asyncio.Event, repr=False
+    )
+    parked_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    promoted_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    promotion_timeout_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    promotion_lease_expired: bool = False
+    park_adopted_resuming: bool = False
+    promotion_timeout_callback: Callable[[], None] | None = field(
+        default=None, repr=False
+    )
 
 
 StreamingSpeechSelector = Callable[[], Awaitable[StreamingSpeechSelection]]
@@ -519,6 +585,7 @@ class StreamingSynthesisRouteOwner:
         open_timeout_seconds: float = _DEFAULT_OPEN_TIMEOUT_SECONDS,
         event_timeout_seconds: float = _DEFAULT_EVENT_TIMEOUT_SECONDS,
         queue_wait_seconds: float = _DEFAULT_QUEUE_WAIT_SECONDS,
+        pause_wait_seconds: float = _DEFAULT_PAUSE_WAIT_SECONDS,
         max_retained_tasks: int = _DEFAULT_MAX_RETAINED_TASKS,
     ) -> None:
         if not callable(selector):
@@ -532,6 +599,7 @@ class StreamingSynthesisRouteOwner:
         _bounded_timeout(open_timeout_seconds, "open_timeout_seconds")
         _bounded_timeout(event_timeout_seconds, "event_timeout_seconds")
         _bounded_timeout(queue_wait_seconds, "queue_wait_seconds")
+        _bounded_timeout(pause_wait_seconds, "pause_wait_seconds")
         _bounded_positive_int(
             max_retained_tasks, "max_retained_tasks", _DEFAULT_MAX_RETAINED_TASKS
         )
@@ -541,6 +609,7 @@ class StreamingSynthesisRouteOwner:
         self._open_timeout_seconds = float(open_timeout_seconds)
         self._event_timeout_seconds = float(event_timeout_seconds)
         self._queue_wait_seconds = float(queue_wait_seconds)
+        self._pause_wait_seconds = float(pause_wait_seconds)
         self._task_owner = _BoundedHardDeadlineOwner(max_tasks=max_retained_tasks)
         self._selection_lock = asyncio.Lock()
         self._begin_lock = asyncio.Lock()
@@ -608,24 +677,67 @@ class StreamingSynthesisRouteOwner:
             is CapabilityProvenance.UNAVAILABLE
         )
 
+    async def parked_pause_available(self) -> bool:
+        """Return whether the selected Provider can own explicit PARK."""
+
+        if not await self.available():
+            return False
+        selection = self._selection
+        provider = None if selection is None else selection.provider
+        if provider is None:
+            return False
+        try:
+            return (
+                provider.capability.synthesis.parked_pause
+                is not CapabilityProvenance.UNAVAILABLE
+            )
+        except _PROCESS_CONTROL:
+            raise
+        except BaseException:
+            return False
+
     async def begin(
         self,
         request: SynthesisStreamRequest,
         *,
         scope_identity: StreamingSynthesisScopeIdentity | None = None,
+        require_prefetch_decision: bool = False,
+        prefetch_decision_timeout_seconds: float = 180.0,
+        on_prefetch_promotion_timeout: Callable[[], None] | None = None,
     ) -> tuple[StreamingSynthesisHandle | None, StreamingSynthesisOutcome | None]:
         scope = _synthesis_scope_identity(scope_identity)
+        decision_timeout = (
+            _bounded_timeout(
+                prefetch_decision_timeout_seconds,
+                "prefetch_decision_timeout_seconds",
+            )
+            if require_prefetch_decision
+            else None
+        )
+        if on_prefetch_promotion_timeout is not None and decision_timeout is None:
+            raise StreamingSynthesisRouteViolation(
+                "SYNTHESIS_PREFETCH_TIMEOUT_CALLBACK_INVALID",
+                "prefetch timeout callback requires a selected successor",
+            )
         prepared, validation_failure = _prepare_synthesis_request(request)
         request = None  # type: ignore[assignment]  # raw text leaves throwing frames
         if prepared is None:
             assert validation_failure is not None
             raise StreamingSynthesisRouteViolation(*validation_failure) from None
-        return await self._begin_prepared(prepared, scope)
+        return await self._begin_prepared(
+            prepared,
+            scope,
+            prefetch_decision_timeout=decision_timeout,
+            promotion_timeout_callback=on_prefetch_promotion_timeout,
+        )
 
     async def _begin_prepared(
         self,
         prepared: _PreparedSynthesisRequest,
         scope_identity: StreamingSynthesisScopeIdentity,
+        *,
+        prefetch_decision_timeout: float | None,
+        promotion_timeout_callback: Callable[[], None] | None,
     ) -> tuple[StreamingSynthesisHandle | None, StreamingSynthesisOutcome | None]:
         binding_ref = prepared.binding_ref
         ref = prepared.ref
@@ -856,6 +968,13 @@ class StreamingSynthesisRouteOwner:
                 capability=capability,
                 provider=provider,
                 queue=asyncio.Queue(self._max_pending_frames),
+                prefetch_candidate=prefetch_decision_timeout is not None,
+                prefetch_decision_deadline=(
+                    None
+                    if prefetch_decision_timeout is None
+                    else time.monotonic() + prefetch_decision_timeout
+                ),
+                promotion_timeout_callback=promotion_timeout_callback,
             )
             async with self._lifecycle_lock:
                 closed_after_open = self._closed
@@ -918,6 +1037,394 @@ class StreamingSynthesisRouteOwner:
             )
         return handle, None
 
+    async def promote_unparked_prefetch(self, handle: StreamingSynthesisHandle) -> None:
+        """Resolve a short selected successor without Provider PARK/PROMOTE."""
+
+        self._require_handle(handle)
+        async with handle.state_lock:
+            if not handle.prefetch_candidate or handle.park_generation is not None:
+                raise StreamingSynthesisRouteViolation(
+                    "SYNTHESIS_PREFETCH_DECISION_MISMATCH",
+                    "unparked promotion does not match an undecided successor",
+                )
+            if handle.outcome is not None and not handle.outcome.completed:
+                raise StreamingSynthesisRouteViolation(
+                    "SYNTHESIS_TERMINAL_NOT_PROMOTABLE",
+                    "failed synthesis cannot acknowledge unparked promotion",
+                )
+            handle.prefetch_candidate = False
+            handle.park_adopted_resuming = False
+            handle.prefetch_decision_deadline = None
+            handle.prefetch_decision_event.set()
+            handle.park_requested_event.clear()
+            handle.promotion_timeout_callback = None
+
+    async def park_prefetch(
+        self,
+        handle: StreamingSynthesisHandle,
+        *,
+        park_generation: int,
+        timeout_seconds: float = 180.0,
+    ) -> None:
+        self._require_handle(handle)
+        timeout = _bounded_timeout(timeout_seconds, "timeout_seconds")
+        if type(park_generation) is not int or park_generation < 0:
+            raise StreamingSynthesisRouteViolation(
+                "INVALID_SYNTHESIS_PARK_GENERATION",
+                "park generation must be a non-negative integer",
+            )
+        async with handle.state_lock:
+            _LOGGER.info(
+                "live_voice_prefetch_transition_trace stage=route_park_received "
+                "response_generation=%s unit_seq=%s park_generation=%s "
+                "flow_state=%s queue_size=%s queue_capacity=%s",
+                handle.ref.response.response_generation,
+                handle.ref.unit_seq,
+                park_generation,
+                handle.flow_state.value,
+                handle.queue.qsize(),
+                handle.queue.maxsize,
+            )
+            if (
+                handle.fenced
+                or handle.flow_state is StreamingSynthesisFlowState.TERMINAL
+            ):
+                if handle.outcome is not None and handle.outcome.completed:
+                    if handle.park_generation not in {None, park_generation}:
+                        raise StreamingSynthesisRouteViolation(
+                            "SYNTHESIS_PARK_GENERATION_MISMATCH",
+                            "terminal park generation does not match",
+                        )
+                    if handle.park_generation == park_generation:
+                        return
+                    handle.park_generation = park_generation
+                    handle.park_deadline = time.monotonic() + timeout
+                    handle.prefetch_decision_event.set()
+                    handle.parked_event.set()
+                    handle.promotion_lease_expired = False
+                    handle.promotion_timeout_task = asyncio.create_task(
+                        self._expire_parked_prefetch(
+                            handle,
+                            park_generation=park_generation,
+                            deadline=handle.park_deadline,
+                        ),
+                        name="live-voice-streaming-tts-promotion-lease",
+                    )
+                    return
+                raise StreamingSynthesisRouteViolation(
+                    "SYNTHESIS_TERMINAL_NOT_PROMOTABLE",
+                    "failed or fenced synthesis cannot acknowledge park",
+                )
+            if handle.flow_state is StreamingSynthesisFlowState.PREFETCH_PARKED:
+                if handle.park_generation != park_generation:
+                    raise StreamingSynthesisRouteViolation(
+                        "SYNTHESIS_PARK_GENERATION_MISMATCH",
+                        "park generation does not match parked synthesis",
+                    )
+                return
+            if handle.park_generation is not None:
+                raise StreamingSynthesisRouteViolation(
+                    "SYNTHESIS_PARK_GENERATION_MISMATCH",
+                    "synthesis already owns another park generation",
+                )
+            if handle.capability.parked_pause is CapabilityProvenance.UNAVAILABLE:
+                raise StreamingSynthesisRouteViolation(
+                    "SYNTHESIS_PARKED_PAUSE_UNAVAILABLE",
+                    "selected Provider does not support parked pause",
+                )
+            adopt_resuming = (
+                handle.flow_state is StreamingSynthesisFlowState.ORDINARY_RESUMING
+            )
+            handle.park_adopted_resuming = adopt_resuming
+            handle.park_generation = park_generation
+            handle.park_deadline = time.monotonic() + timeout
+            handle.prefetch_decision_event.set()
+            handle.promotion_lease_expired = False
+            handle.promoted_event.clear()
+            handle.flow_state = StreamingSynthesisFlowState.PARK_REQUESTED
+            handle.park_requested_event.set()
+            _LOGGER.info(
+                "live_voice_prefetch_transition_trace "
+                "stage=route_park_state_committed response_generation=%s "
+                "unit_seq=%s park_generation=%s adopt_resuming=%s",
+                handle.ref.response.response_generation,
+                handle.ref.unit_seq,
+                park_generation,
+                adopt_resuming,
+            )
+            handle.promotion_timeout_task = asyncio.create_task(
+                self._expire_parked_prefetch(
+                    handle,
+                    park_generation=park_generation,
+                    deadline=handle.park_deadline,
+                ),
+                name="live-voice-streaming-tts-promotion-lease",
+            )
+        try:
+
+            async def park_provider() -> None:
+                _LOGGER.info(
+                    "live_voice_prefetch_transition_trace "
+                    "stage=route_adapter_park_requested response_generation=%s "
+                    "unit_seq=%s park_generation=%s adopt_resuming=%s",
+                    handle.ref.response.response_generation,
+                    handle.ref.unit_seq,
+                    park_generation,
+                    adopt_resuming,
+                )
+                await self._task_owner.run(
+                    handle.provider.park_synthesis_for_promotion(
+                        handle.ref,
+                        park_generation=park_generation,
+                        max_pause_seconds=min(
+                            timeout + _PROVIDER_PARK_MARGIN_SECONDS,
+                            _MAX_PROVIDER_PARK_SECONDS,
+                        ),
+                    ),
+                    timeout_seconds=min(timeout, self._queue_wait_seconds),
+                    operation="provider-park-prefetch",
+                )
+                _LOGGER.info(
+                    "live_voice_prefetch_transition_trace "
+                    "stage=route_adapter_park_acknowledged response_generation=%s "
+                    "unit_seq=%s park_generation=%s",
+                    handle.ref.response.response_generation,
+                    handle.ref.unit_seq,
+                    park_generation,
+                )
+
+            if adopt_resuming:
+                # The Adapter owns the atomic ordinary-resume -> PARK handoff.
+                # Waiting for the Route control lock here would let its reader
+                # escape before the PARK intent became visible.
+                await park_provider()
+            else:
+                async with handle.provider_control_lock:
+                    await park_provider()
+        except BaseException:
+            async with handle.state_lock:
+                handle.park_adopted_resuming = False
+                handle.park_generation = None
+                handle.park_deadline = None
+                handle.prefetch_decision_event.clear()
+                handle.park_requested_event.clear()
+                self._cancel_promotion_timeout(handle)
+                if not handle.fenced:
+                    handle.flow_state = StreamingSynthesisFlowState.ACTIVE
+            raise
+        async with handle.state_lock:
+            if handle.fenced:
+                if (
+                    handle.outcome is not None
+                    and handle.outcome.completed
+                    and handle.park_generation == park_generation
+                ):
+                    if (
+                        handle.promotion_timeout_task is None
+                        and handle.park_deadline is not None
+                    ):
+                        handle.promotion_timeout_task = asyncio.create_task(
+                            self._expire_parked_prefetch(
+                                handle,
+                                park_generation=park_generation,
+                                deadline=handle.park_deadline,
+                            ),
+                            name="live-voice-streaming-tts-promotion-lease",
+                        )
+                    return
+                raise StreamingSynthesisRouteViolation(
+                    "SYNTHESIS_TERMINAL_NOT_PROMOTABLE",
+                    "synthesis failed while Provider park was pending",
+                )
+            handle.flow_state = StreamingSynthesisFlowState.PREFETCH_PARKED
+            handle.parked_event.set()
+            _LOGGER.info(
+                "live_voice_prefetch_transition_trace stage=route_park_acknowledged "
+                "response_generation=%s unit_seq=%s park_generation=%s",
+                handle.ref.response.response_generation,
+                handle.ref.unit_seq,
+                park_generation,
+            )
+
+    async def reject_required_parked_pause(
+        self, handle: StreamingSynthesisHandle
+    ) -> StreamingSynthesisOutcome:
+        """Fail before delivery while preserving existing Batch eligibility."""
+
+        self._require_handle(handle)
+        return await self._terminate(
+            handle,
+            StreamingSynthesisReason.PROVIDER_PROTOCOL,
+            allow_batch=True,
+            cancel_provider=True,
+        )
+
+    async def promote_prefetch(
+        self,
+        handle: StreamingSynthesisHandle,
+        *,
+        park_generation: int,
+    ) -> None:
+        self._require_handle(handle)
+        async with handle.state_lock:
+            _LOGGER.info(
+                "live_voice_prefetch_transition_trace "
+                "stage=route_promotion_received response_generation=%s "
+                "unit_seq=%s park_generation=%s flow_state=%s",
+                handle.ref.response.response_generation,
+                handle.ref.unit_seq,
+                park_generation,
+                handle.flow_state.value,
+            )
+            if handle.promotion_lease_expired:
+                raise StreamingSynthesisRouteViolation(
+                    StreamingSynthesisReason.PROMOTION_TIMEOUT.value,
+                    "parked synthesis promotion lease expired",
+                )
+            if (
+                handle.fenced
+                or handle.flow_state is StreamingSynthesisFlowState.TERMINAL
+            ):
+                if (
+                    handle.outcome is not None
+                    and handle.outcome.completed
+                    and handle.park_generation == park_generation
+                ):
+                    handle.park_generation = None
+                    handle.park_adopted_resuming = False
+                    handle.park_deadline = None
+                    handle.prefetch_decision_event.set()
+                    handle.park_requested_event.clear()
+                    handle.promotion_timeout_callback = None
+                    handle.promoted_event.set()
+                    handle.parked_event.clear()
+                    self._cancel_promotion_timeout(handle)
+                    return
+                if handle.outcome is not None and handle.outcome.completed:
+                    raise StreamingSynthesisRouteViolation(
+                        "SYNTHESIS_PARK_GENERATION_MISMATCH",
+                        "terminal promotion does not match",
+                    )
+                raise StreamingSynthesisRouteViolation(
+                    "SYNTHESIS_TERMINAL_NOT_PROMOTABLE",
+                    "failed or fenced synthesis cannot acknowledge promotion",
+                )
+            if (
+                handle.flow_state is not StreamingSynthesisFlowState.PREFETCH_PARKED
+                or handle.park_generation != park_generation
+            ):
+                raise StreamingSynthesisRouteViolation(
+                    "SYNTHESIS_PARK_GENERATION_MISMATCH",
+                    "promotion does not match parked synthesis",
+                )
+            adopted_resuming = handle.park_adopted_resuming
+
+        async def promote_provider() -> None:
+            _LOGGER.info(
+                "live_voice_prefetch_transition_trace "
+                "stage=route_adapter_promotion_requested response_generation=%s "
+                "unit_seq=%s park_generation=%s adopted_resuming=%s",
+                handle.ref.response.response_generation,
+                handle.ref.unit_seq,
+                park_generation,
+                adopted_resuming,
+            )
+            await self._task_owner.run(
+                handle.provider.promote_parked_synthesis(
+                    handle.ref, park_generation=park_generation
+                ),
+                timeout_seconds=self._queue_wait_seconds,
+                operation="provider-promote-prefetch",
+            )
+            _LOGGER.info(
+                "live_voice_prefetch_transition_trace "
+                "stage=route_adapter_promotion_acknowledged response_generation=%s "
+                "unit_seq=%s park_generation=%s",
+                handle.ref.response.response_generation,
+                handle.ref.unit_seq,
+                park_generation,
+            )
+
+        if adopted_resuming:
+            await promote_provider()
+        else:
+            async with handle.provider_control_lock:
+                await promote_provider()
+        async with handle.state_lock:
+            if handle.fenced:
+                return
+            handle.flow_state = StreamingSynthesisFlowState.PROMOTED
+            handle.prefetch_candidate = False
+            handle.park_adopted_resuming = False
+            handle.park_deadline = None
+            handle.prefetch_decision_deadline = None
+            handle.prefetch_decision_event.set()
+            handle.park_requested_event.clear()
+            handle.promotion_timeout_callback = None
+            handle.promoted_event.set()
+            handle.parked_event.clear()
+            self._cancel_promotion_timeout(handle)
+            _LOGGER.info(
+                "live_voice_prefetch_transition_trace "
+                "stage=route_promotion_acknowledged response_generation=%s "
+                "unit_seq=%s park_generation=%s",
+                handle.ref.response.response_generation,
+                handle.ref.unit_seq,
+                park_generation,
+            )
+
+    async def _expire_parked_prefetch(
+        self,
+        handle: StreamingSynthesisHandle,
+        *,
+        park_generation: int,
+        deadline: float,
+    ) -> None:
+        try:
+            await asyncio.sleep(max(0.0, deadline - time.monotonic()))
+        except asyncio.CancelledError:
+            return
+        async with handle.state_lock:
+            parked_flow = handle.flow_state in {
+                StreamingSynthesisFlowState.PARK_REQUESTED,
+                StreamingSynthesisFlowState.PREFETCH_PARKED,
+            }
+            completed_terminal = bool(
+                handle.outcome is not None and handle.outcome.completed
+            )
+            expired = bool(
+                handle.park_generation == park_generation
+                and ((not handle.fenced and parked_flow) or completed_terminal)
+            )
+            if expired:
+                handle.promotion_lease_expired = True
+                timeout_callback = handle.promotion_timeout_callback
+                handle.promotion_timeout_callback = None
+            else:
+                timeout_callback = None
+        if timeout_callback is not None:
+            try:
+                timeout_callback()
+            except BaseException:
+                _LOGGER.exception(
+                    "live_voice_prefetch_promotion_timeout_callback_failed"
+                )
+        if expired:
+            await self._terminate(
+                handle,
+                StreamingSynthesisReason.PROMOTION_TIMEOUT,
+                allow_batch=False,
+                cancel_provider=True,
+                cancel_producer=True,
+            )
+
+    @staticmethod
+    def _cancel_promotion_timeout(handle: StreamingSynthesisHandle) -> None:
+        task = handle.promotion_timeout_task
+        handle.promotion_timeout_task = None
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+
     async def next_chunk(
         self,
         handle: StreamingSynthesisHandle,
@@ -963,6 +1470,24 @@ class StreamingSynthesisRouteOwner:
                 operation="queue-get",
             )
         except TimeoutError:
+            producer = handle.producer_task
+            _LOGGER.warning(
+                "live_voice_streaming_synthesis_progress "
+                "stage=consumer_pull_timeout response_generation=%s unit_seq=%s "
+                "queue_size=%s queue_capacity=%s frames_enqueued=%s "
+                "frames_pulled=%s next_provider_seq=%s "
+                "next_provider_cursor=%s producer_done=%s flow_state=%s",
+                handle.ref.response.response_generation,
+                handle.ref.unit_seq,
+                handle.queue.qsize(),
+                handle.queue.maxsize,
+                handle.frames_enqueued,
+                handle.frames_pulled,
+                handle.next_provider_seq,
+                handle.next_provider_cursor,
+                bool(producer is not None and producer.done()),
+                handle.flow_state.value,
+            )
             outcome = await self._terminate(
                 handle,
                 StreamingSynthesisReason.PROVIDER_TIMEOUT,
@@ -980,6 +1505,9 @@ class StreamingSynthesisRouteOwner:
                 cancel_provider=True,
             )
             return StreamingSynthesisPull(None, outcome)
+
+        if isinstance(item, StreamingSynthesisChunk):
+            handle.frames_pulled += 1
 
         late_control = await self._take_process_control(handle)
         if late_control is not None:
@@ -1078,9 +1606,7 @@ class StreamingSynthesisRouteOwner:
                     break
             raise caller_cancel
 
-    async def wait_for_retained_cleanup(
-        self, handle: StreamingSynthesisHandle
-    ) -> bool:
+    async def wait_for_retained_cleanup(self, handle: StreamingSynthesisHandle) -> bool:
         """Boundedly join this handle's retained Provider cancellation."""
 
         self._require_handle(handle)
@@ -1405,12 +1931,9 @@ class StreamingSynthesisRouteOwner:
         )
         try:
             while True:
-                event = await self._task_owner.run(
-                    handle.provider.next_synthesis_event(
-                        handle.ref, timeout_seconds=event_timeout_seconds
-                    ),
+                event = await self._next_provider_event(
+                    handle,
                     timeout_seconds=event_timeout_seconds,
-                    operation="provider-event",
                 )
                 self._validate_event(handle, event)
                 handle.next_provider_seq += 1
@@ -1453,6 +1976,7 @@ class StreamingSynthesisRouteOwner:
                             tuple(pending),
                             source_event_seq=pending_source_seq,
                             provider_cursor_through=provider_cursor,
+                            provider_terminal=True,
                         )
                         pending.clear()
                     if handle.next_frame_seq <= 0:
@@ -1499,6 +2023,142 @@ class StreamingSynthesisRouteOwner:
                 return
         finally:
             pending.clear()
+
+    async def _next_provider_event(
+        self,
+        handle: StreamingSynthesisHandle,
+        *,
+        timeout_seconds: float,
+    ) -> StreamingSynthesisEvent:
+        """Charge the event deadline only while PARK does not own progress.
+
+        The Provider await stays alive across PARK so an event already removed
+        from its queue cannot be lost through cancellation.  A Provider-side
+        timeout while parked is safe to reopen: no event was returned by that
+        call, and the Route's active-time budget remains unchanged.
+        """
+
+        remaining_active = timeout_seconds
+        provider_call_timeout = (
+            MAX_STREAM_TIMEOUT_SECONDS - _PROVIDER_EVENT_SETTLEMENT_MARGIN_SECONDS
+        )
+        event_task: asyncio.Task[StreamingSynthesisEvent] | None = None
+        state_task: asyncio.Task[object] | None = None
+        suspended = False
+        try:
+            while True:
+                if event_task is None:
+                    event_task = asyncio.create_task(
+                        self._task_owner.run(
+                            self._provider_event_wait(
+                                handle,
+                                timeout_seconds=provider_call_timeout,
+                            ),
+                            timeout_seconds=MAX_STREAM_TIMEOUT_SECONDS,
+                            operation="provider-event",
+                        )
+                    )
+
+                if handle.park_requested_event.is_set():
+                    if not suspended:
+                        suspended = True
+                        _LOGGER.info(
+                            "live_voice_streaming_synthesis_backpressure "
+                            "stage=provider_event_wait_suspended "
+                            "response_generation=%s unit_seq=%s",
+                            handle.ref.response.response_generation,
+                            handle.ref.unit_seq,
+                        )
+                    state_task = asyncio.create_task(
+                        self._wait_for_prefetch_promotion(handle)
+                    )
+                    done, _ = await asyncio.wait(
+                        {event_task, state_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if event_task in done:
+                        state_task.cancel()
+                        await asyncio.gather(state_task, return_exceptions=True)
+                        state_task = None
+                        try:
+                            return await event_task
+                        except _ProviderEventWaitElapsed:
+                            # The Provider's own bounded queue wait elapsed
+                            # while PARK owned progress.  Reopening is safe
+                            # because a timed-out call returned no event.
+                            event_task = None
+                            continue
+                    await state_task
+                    state_task = None
+                    suspended = False
+                    _LOGGER.info(
+                        "live_voice_streaming_synthesis_backpressure "
+                        "stage=provider_event_wait_resumed "
+                        "response_generation=%s unit_seq=%s "
+                        "remaining_active_seconds=%.6f",
+                        handle.ref.response.response_generation,
+                        handle.ref.unit_seq,
+                        remaining_active,
+                    )
+                    continue
+
+                state_task = asyncio.create_task(handle.park_requested_event.wait())
+                active_started = time.monotonic()
+                done, _ = await asyncio.wait(
+                    {event_task, state_task},
+                    timeout=remaining_active,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                remaining_active = max(
+                    0.0,
+                    remaining_active - (time.monotonic() - active_started),
+                )
+                if event_task in done:
+                    state_task.cancel()
+                    await asyncio.gather(state_task, return_exceptions=True)
+                    state_task = None
+                    try:
+                        return await event_task
+                    except _ProviderEventWaitElapsed:
+                        # The Provider deadline may have elapsed during an
+                        # earlier PARK.  The Route's active clock is the
+                        # authority for whether this is terminal.
+                        event_task = None
+                        if remaining_active <= 0:
+                            raise
+                        continue
+                if state_task in done and handle.park_requested_event.is_set():
+                    await state_task
+                    state_task = None
+                    continue
+                state_task.cancel()
+                await asyncio.gather(state_task, return_exceptions=True)
+                state_task = None
+                raise TimeoutError("active provider-event deadline expired")
+        finally:
+            for task in (state_task, event_task):
+                if task is None:
+                    continue
+                if task.done():
+                    _consume_task_result(task)
+                    continue
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    @staticmethod
+    async def _provider_event_wait(
+        handle: StreamingSynthesisHandle,
+        *,
+        timeout_seconds: float,
+    ) -> StreamingSynthesisEvent:
+        """Distinguish a settled Provider wait from the owner's hard timeout."""
+
+        try:
+            return await handle.provider.next_synthesis_event(
+                handle.ref, timeout_seconds=timeout_seconds
+            )
+        except TimeoutError as exc:
+            raise _ProviderEventWaitElapsed from exc
 
     def _validate_event(
         self, handle: StreamingSynthesisHandle, event: StreamingSynthesisEvent
@@ -1576,6 +2236,7 @@ class StreamingSynthesisRouteOwner:
         *,
         source_event_seq: int,
         provider_cursor_through: int,
+        provider_terminal: bool = False,
     ) -> None:
         async with handle.state_lock:
             if handle.fenced:
@@ -1599,17 +2260,271 @@ class StreamingSynthesisRouteOwner:
             )
             handle.next_frame_seq += 1
             handle.next_frame_cursor += len(samples)
+        paused = False
+        parked_owned = False
+        drain_only = bool(
+            provider_terminal
+            and handle.capability.bounded_pause is not CapabilityProvenance.UNAVAILABLE
+        )
         try:
-            await self._task_owner.run(
-                self._queue_put_guarded(handle, chunk),
-                timeout_seconds=self._queue_wait_seconds,
-                operation="queue-put-audio",
+            if (
+                handle.queue.full()
+                and not drain_only
+                and handle.capability.bounded_pause
+                is not CapabilityProvenance.UNAVAILABLE
+            ):
+                async with handle.provider_control_lock:
+                    async with handle.state_lock:
+                        if handle.flow_state in {
+                            StreamingSynthesisFlowState.PARK_REQUESTED,
+                            StreamingSynthesisFlowState.PREFETCH_PARKED,
+                        }:
+                            parked_owned = True
+                        elif handle.flow_state in {
+                            StreamingSynthesisFlowState.ACTIVE,
+                            StreamingSynthesisFlowState.PROMOTED,
+                        }:
+                            handle.flow_state = (
+                                StreamingSynthesisFlowState.ORDINARY_PAUSING
+                            )
+                            paused = True
+                    if paused:
+                        _LOGGER.info(
+                            "live_voice_streaming_synthesis_backpressure "
+                            "stage=pause_requested response_generation=%s "
+                            "unit_seq=%s queue_size=%s queue_capacity=%s "
+                            "frames_enqueued=%s frames_pulled=%s",
+                            handle.ref.response.response_generation,
+                            handle.ref.unit_seq,
+                            handle.queue.qsize(),
+                            handle.queue.maxsize,
+                            handle.frames_enqueued,
+                            handle.frames_pulled,
+                        )
+                        await self._task_owner.run(
+                            handle.provider.pause_synthesis(handle.ref),
+                            timeout_seconds=self._queue_wait_seconds,
+                            operation="provider-pause",
+                        )
+                        async with handle.state_lock:
+                            if (
+                                handle.flow_state
+                                is StreamingSynthesisFlowState.ORDINARY_PAUSING
+                            ):
+                                handle.flow_state = (
+                                    StreamingSynthesisFlowState.ORDINARY_PAUSED
+                                )
+                        _LOGGER.info(
+                            "live_voice_streaming_synthesis_backpressure "
+                            "stage=pause_acknowledged response_generation=%s "
+                            "unit_seq=%s",
+                            handle.ref.response.response_generation,
+                            handle.ref.unit_seq,
+                        )
+            queued_at = time.monotonic()
+            parked_owned = await self._queue_put_with_optional_prefetch(
+                handle,
+                chunk,
+                timeout_seconds=(
+                    self._pause_wait_seconds
+                    if paused or drain_only
+                    else self._queue_wait_seconds
+                ),
             )
+            handle.frames_enqueued += 1
         except TimeoutError as exc:
+            _LOGGER.warning(
+                "live_voice_streaming_synthesis_queue_pressure",
+                extra={
+                    "response_id": handle.ref.response.response_id,
+                    "response_generation": handle.ref.response.response_generation,
+                    "unit_id": handle.ref.unit_id,
+                    "unit_seq": handle.ref.unit_seq,
+                    "queue_size": handle.queue.qsize(),
+                    "queue_capacity": handle.queue.maxsize,
+                    "frames_enqueued": handle.frames_enqueued,
+                    "frames_pulled": handle.frames_pulled,
+                    "source_state": "queue_put_timeout",
+                    "wait_elapsed_ms": round(
+                        max(0.0, time.monotonic() - queued_at) * 1000, 3
+                    ),
+                },
+            )
             raise StreamingSynthesisRouteViolation(
                 StreamingSynthesisReason.QUEUE_EXHAUSTED.value,
                 "streaming synthesis output queue is exhausted",
             ) from exc
+        finally:
+            if paused:
+                try:
+                    if handle.prefetch_candidate:
+                        async with handle.state_lock:
+                            pending_park_decision = (
+                                not handle.fenced
+                                and handle.flow_state
+                                is StreamingSynthesisFlowState.ORDINARY_PAUSED
+                            )
+                        if pending_park_decision:
+                            deadline = handle.prefetch_decision_deadline
+                            if deadline is None:
+                                raise StreamingSynthesisRouteViolation(
+                                    "SYNTHESIS_PREFETCH_DECISION_MISSING",
+                                    "selected successor has no decision deadline",
+                                )
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise StreamingSynthesisRouteViolation(
+                                    StreamingSynthesisReason.PROMOTION_TIMEOUT.value,
+                                    "selected successor decision deadline expired",
+                                )
+                            # PARK is reachable only after the Browser retains
+                            # 25 frames, while this route queue holds eight.
+                            # Ordinary pressure must therefore resume until an
+                            # actual PARK request transfers pause ownership.
+                    async with handle.state_lock:
+                        if handle.flow_state in {
+                            StreamingSynthesisFlowState.PARK_REQUESTED,
+                            StreamingSynthesisFlowState.PREFETCH_PARKED,
+                            StreamingSynthesisFlowState.PROMOTED,
+                        }:
+                            parked_owned = True
+                        elif not handle.fenced:
+                            handle.flow_state = (
+                                StreamingSynthesisFlowState.ORDINARY_RESUMING
+                            )
+                    if not parked_owned:
+                        async with handle.provider_control_lock:
+                            async with handle.state_lock:
+                                parked_owned = handle.flow_state in {
+                                    StreamingSynthesisFlowState.PARK_REQUESTED,
+                                    StreamingSynthesisFlowState.PREFETCH_PARKED,
+                                    StreamingSynthesisFlowState.PROMOTED,
+                                }
+                            if not parked_owned:
+                                _LOGGER.info(
+                                    "live_voice_streaming_synthesis_backpressure "
+                                    "stage=resume_requested response_generation=%s unit_seq=%s",
+                                    handle.ref.response.response_generation,
+                                    handle.ref.unit_seq,
+                                )
+                                await self._task_owner.run(
+                                    handle.provider.resume_synthesis(handle.ref),
+                                    timeout_seconds=self._queue_wait_seconds,
+                                    operation="provider-resume",
+                                )
+                                async with handle.state_lock:
+                                    if (
+                                        not handle.fenced
+                                        and handle.flow_state
+                                        is StreamingSynthesisFlowState.ORDINARY_RESUMING
+                                    ):
+                                        handle.flow_state = (
+                                            StreamingSynthesisFlowState.ACTIVE
+                                        )
+                        # A concurrent PARK queues behind the in-flight resume.
+                        # Cross that control boundary before another local frame
+                        # or Provider event can be consumed, then wait for the
+                        # exact promotion if ownership transferred.
+                        async with handle.provider_control_lock:
+                            pass
+                        await self._wait_for_prefetch_promotion(handle)
+                except _PROCESS_CONTROL:
+                    raise
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if not handle.fenced:
+                        raise
+
+    async def _wait_for_prefetch_promotion(
+        self, handle: StreamingSynthesisHandle
+    ) -> None:
+        """Fence output after an in-flight ordinary resume transfers to PARK."""
+
+        async with handle.state_lock:
+            if handle.fenced:
+                return
+            if handle.flow_state not in {
+                StreamingSynthesisFlowState.PARK_REQUESTED,
+                StreamingSynthesisFlowState.PREFETCH_PARKED,
+            }:
+                return
+            deadline = handle.park_deadline
+        if deadline is None:
+            raise StreamingSynthesisRouteViolation(
+                "SYNTHESIS_PARK_STATE_INVALID",
+                "parked synthesis has no promotion deadline",
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise StreamingSynthesisRouteViolation(
+                StreamingSynthesisReason.PROMOTION_TIMEOUT.value,
+                "parked synthesis promotion lease expired",
+            )
+        try:
+            await asyncio.wait_for(handle.promoted_event.wait(), timeout=remaining)
+        except TimeoutError as exc:
+            raise StreamingSynthesisRouteViolation(
+                StreamingSynthesisReason.PROMOTION_TIMEOUT.value,
+                "parked synthesis promotion lease expired",
+            ) from exc
+
+    async def _queue_put_with_optional_prefetch(
+        self,
+        handle: StreamingSynthesisHandle,
+        chunk: StreamingSynthesisChunk,
+        *,
+        timeout_seconds: float,
+    ) -> bool:
+        """Transfer one blocked put from the ordinary deadline to PARK."""
+
+        put_task = asyncio.create_task(self._queue_put_guarded(handle, chunk))
+        park_task = asyncio.create_task(handle.parked_event.wait())
+        put_task.add_done_callback(_consume_task_result)
+        park_task.add_done_callback(_consume_task_result)
+        try:
+            done, _ = await asyncio.wait(
+                {put_task, park_task},
+                timeout=timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if put_task in done:
+                await put_task
+                return False
+            if park_task not in done:
+                raise TimeoutError("ordinary synthesis queue deadline expired")
+            put_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await put_task
+            deadline = handle.park_deadline
+            if deadline is None:
+                raise StreamingSynthesisRouteViolation(
+                    "SYNTHESIS_PARK_STATE_INVALID",
+                    "parked synthesis has no promotion deadline",
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise StreamingSynthesisRouteViolation(
+                    StreamingSynthesisReason.PROMOTION_TIMEOUT.value,
+                    "parked synthesis promotion lease expired",
+                )
+            try:
+                await asyncio.wait_for(handle.promoted_event.wait(), timeout=remaining)
+            except TimeoutError as exc:
+                raise StreamingSynthesisRouteViolation(
+                    StreamingSynthesisReason.PROMOTION_TIMEOUT.value,
+                    "parked synthesis promotion lease expired",
+                ) from exc
+            await self._task_owner.run(
+                self._queue_put_guarded(handle, chunk),
+                timeout_seconds=timeout_seconds,
+                operation="queue-put-promoted-audio",
+            )
+            return True
+        finally:
+            for task in (put_task, park_task):
+                if not task.done():
+                    task.cancel()
 
     async def _complete(self, handle: StreamingSynthesisHandle) -> None:
         outcome = StreamingSynthesisOutcome(
@@ -1627,7 +2542,12 @@ class StreamingSynthesisRouteOwner:
         try:
             await self._task_owner.run(
                 self._queue_put_guarded(handle, _TerminalSignal(outcome)),
-                timeout_seconds=self._queue_wait_seconds,
+                timeout_seconds=(
+                    self._pause_wait_seconds
+                    if handle.capability.bounded_pause
+                    is not CapabilityProvenance.UNAVAILABLE
+                    else self._queue_wait_seconds
+                ),
                 operation="queue-put-terminal",
             )
         except TimeoutError as exc:
@@ -1639,6 +2559,10 @@ class StreamingSynthesisRouteOwner:
             if handle.outcome is None:
                 handle.outcome = outcome
             handle.fenced = True
+            handle.flow_state = StreamingSynthesisFlowState.TERMINAL
+            if handle.park_generation is None:
+                handle.promoted_event.set()
+                self._cancel_promotion_timeout(handle)
             handle.terminal_ready.set()
 
     @staticmethod
@@ -1695,6 +2619,18 @@ class StreamingSynthesisRouteOwner:
                 and handle.outcome.completed
                 and handle.terminal_delivered
             ):
+                handle.park_generation = None
+                handle.park_adopted_resuming = False
+                handle.park_deadline = None
+                handle.prefetch_candidate = False
+                handle.prefetch_decision_deadline = None
+                handle.prefetch_decision_event.set()
+                handle.park_requested_event.clear()
+                handle.parked_event.clear()
+                handle.promotion_timeout_callback = None
+                self._cancel_promotion_timeout(handle)
+                handle.cleanup_complete = True
+                handle.cleanup_done.set()
                 return handle.outcome
             else:
                 first_audio = handle.first_audio_emitted
@@ -1714,6 +2650,14 @@ class StreamingSynthesisRouteOwner:
                 )
                 handle.outcome = outcome
                 handle.fenced = True
+                handle.flow_state = StreamingSynthesisFlowState.TERMINAL
+                handle.park_adopted_resuming = False
+                handle.prefetch_candidate = False
+                handle.prefetch_decision_event.set()
+                handle.park_requested_event.clear()
+                handle.promotion_timeout_callback = None
+                handle.promoted_event.set()
+                self._cancel_promotion_timeout(handle)
                 handle.terminal_ready.set()
                 _drain_queue(handle.queue)
         process_control: BaseException | None = None
@@ -1971,6 +2915,16 @@ class StreamingSynthesisRouteOwner:
                 if capability is not None
                 else CapabilityProvenance.UNAVAILABLE
             ),
+            bounded_pause=(
+                capability.bounded_pause
+                if capability is not None
+                else CapabilityProvenance.UNAVAILABLE
+            ),
+            parked_pause=(
+                capability.parked_pause
+                if capability is not None
+                else CapabilityProvenance.UNAVAILABLE
+            ),
             visible=not normal_control,
             x_obs_event=(
                 "live_voice.speech.control"
@@ -2167,6 +3121,8 @@ def _capability_provenance(
         exact_audio_cursor=support.exact_audio_cursor,
         provider_cancel_ack=support.provider_cancel_ack,
         chunk_text_spans=support.chunk_text_spans,
+        bounded_pause=support.bounded_pause,
+        parked_pause=support.parked_pause,
     )
 
 
@@ -2235,6 +3191,8 @@ def _reason_for_exception(exc: BaseException) -> StreamingSynthesisReason:
         return StreamingSynthesisReason.CAPACITY_EXHAUSTED
     if reason == StreamingSynthesisReason.QUEUE_EXHAUSTED.value:
         return StreamingSynthesisReason.QUEUE_EXHAUSTED
+    if reason == StreamingSynthesisReason.PROMOTION_TIMEOUT.value:
+        return StreamingSynthesisReason.PROMOTION_TIMEOUT
     if isinstance(exc, StreamingSynthesisRouteViolation):
         return StreamingSynthesisReason.PROVIDER_PROTOCOL
     return StreamingSynthesisReason.PROVIDER_UNAVAILABLE
@@ -2262,6 +3220,7 @@ __all__ = [
     "StreamingSynthesisChunk",
     "StreamingSynthesisFallbackAction",
     "StreamingSynthesisHandle",
+    "StreamingSynthesisFlowState",
     "StreamingSynthesisOutcome",
     "StreamingSynthesisPull",
     "StreamingSynthesisReason",

@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable, Mapping, NoReturn, cast
+from typing import Any, Callable, Mapping, NoReturn, cast
 
 import pytest
 
@@ -131,6 +131,7 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
 from jiuwenswarm.server.live_voice import product_composition_registry
 from jiuwenswarm.server.live_voice.latency_measurement import L0Milestone
 from jiuwenswarm.server.live_voice.presentation_ledger import (
+    PresentationProjectionRole,
     PresentationSurface,
     PresentationUnit,
     TaskPresentationDelivery,
@@ -12668,8 +12669,10 @@ async def test_p2_notification_batch_drains_observers_through_first_authoritativ
             response_ref=response,
             agent_event=event(2, "chat.final"),
             presentation_unit=unit,
+            presentation_text="chunk-2",
+            presentation_delivery="display_and_speak",
         ),
-        critical_key=("presentation", "request-p2-batch-submit"),
+        critical_key=("presentation", unit.unit_id),
     )
     runtime._publish(
         AgentConversationNotification(
@@ -12750,6 +12753,111 @@ async def test_p2_notification_batch_drains_observers_through_first_authoritativ
     assert len(next_notifications) == 1
     assert next_notifications[0]["presentation_unit"] is not None
     await registry.close_active_routes()
+
+
+def test_p2_notification_serializes_projection_text_and_delivery_exactly() -> None:
+    response = ResponseRef("interaction-1", "response-prefix-1", 0)
+    presentation = PresentationUnit(
+        ref=response,
+        surface=PresentationSurface.AUDIO,
+        unit_id="agent-prefix:fixture:0",
+        seq=0,
+        source_start_utf8=0,
+        source_end_utf8=16,
+        content_ref="sha256:prefix",
+        projection_role=PresentationProjectionRole.AUDIO_SEGMENT,
+    )
+    notification = AgentConversationNotification(
+        kind="agent.output",
+        request_id="request-prefix-1",
+        round_id="round-prefix-1",
+        response_ref=response,
+        agent_event=AgentEvent(
+            request_id="request-prefix-1",
+            interaction_id="interaction-1",
+            turn_id="turn-1",
+            commit_id="commit-1",
+            seq=1,
+            event_type="chat.delta",
+            source_provenance="formal",
+            text="First sentence. ",
+            capability="agent.chat.append_only_delta.v1",
+        ),
+        presentation_unit=presentation,
+        presentation_text="First sentence. ",
+        presentation_delivery="speak_only",
+    )
+
+    serialized = AgentServerProductCompositionRegistry._serialize_p2_notification(
+        notification
+    )
+
+    assert serialized["presentation_text"] == "First sentence. "
+    assert serialized["presentation_delivery"] == "speak_only"
+    assert serialized["presentation_unit"] == {
+        "surface": "audio",
+        "unit_id": "agent-prefix:fixture:0",
+        "seq": 0,
+        "source_start_utf8": 0,
+        "source_end_utf8": 16,
+        "content_ref": "sha256:prefix",
+        "projection_role": "audio_segment",
+    }
+
+
+@pytest.mark.parametrize(
+    ("projection_role", "surface", "text", "delivery"),
+    (
+        (
+            PresentationProjectionRole.AUDIO_SEGMENT,
+            PresentationSurface.AUDIO,
+            None,
+            "speak_only",
+        ),
+        (
+            PresentationProjectionRole.AUDIO_SEGMENT,
+            PresentationSurface.AUDIO,
+            "prefix",
+            "display_only",
+        ),
+        (
+            PresentationProjectionRole.AUTHORITATIVE_TEXT_ROOT,
+            PresentationSurface.AUDIO,
+            "complete",
+            "display_only",
+        ),
+    ),
+)
+def test_p2_notification_rejects_projection_delivery_conflicts(
+    projection_role: PresentationProjectionRole,
+    surface: PresentationSurface,
+    text: str | None,
+    delivery: str,
+) -> None:
+    response = ResponseRef("interaction-1", "response-invalid-1", 0)
+    presentation = PresentationUnit(
+        ref=response,
+        surface=surface,
+        unit_id="unit-invalid-1",
+        seq=0,
+        source_start_utf8=0,
+        source_end_utf8=8,
+        content_ref="sha256:invalid",
+        projection_role=projection_role,
+    )
+    notification = AgentConversationNotification(
+        kind="agent.output",
+        request_id="request-invalid-1",
+        round_id="round-invalid-1",
+        response_ref=response,
+        presentation_unit=presentation,
+        presentation_text=text,
+        presentation_delivery=cast(Any, delivery),
+    )
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        AgentServerProductCompositionRegistry._serialize_p2_notification(notification)
+    assert rejected.value.reason == "INVALID_PRESENTATION_NOTIFICATION"
 
 
 @pytest.mark.asyncio

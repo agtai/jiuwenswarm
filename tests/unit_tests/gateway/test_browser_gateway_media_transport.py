@@ -12,6 +12,7 @@ import pytest
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MEDIA_CONTRACT_VERSION,
     MEDIA_END_OF_TURN_CAPABILITY,
+    MEDIA_PREFETCH_PROMOTION_CAPABILITY,
     MEDIA_TRANSPORT_KIND,
     MEDIA_WIRE_CODEC,
     ActiveMediaActivation,
@@ -31,6 +32,9 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaGenerationKind,
     MediaPlayoutBinding,
     MediaPlaybackStopOutcome,
+    MediaPrefetchTransition,
+    MediaPrefetchTransitionAck,
+    MediaPrefetchTransitionState,
     MediaSpeechStart,
     MediaTransportViolation,
     create_gateway_media_activation,
@@ -128,6 +132,49 @@ def test_lvm1_frame_and_typed_control_round_trip() -> None:
     assert decoded.sample_cursor == frame.sample_cursor
     assert decoded.samples == pytest.approx(frame.samples, abs=1e-7)
     assert decoded_control == attach
+
+
+@pytest.mark.parametrize(
+    ("state", "transition_seq"),
+    [
+        (MediaPrefetchTransitionState.PREFETCH_PARKED, 0),
+        (MediaPrefetchTransitionState.PROMOTED, 1),
+        (MediaPrefetchTransitionState.PROMOTED_UNPARKED, 0),
+    ],
+)
+def test_prefetch_transition_and_ack_are_closed_roundtrip_vectors(
+    state: MediaPrefetchTransitionState, transition_seq: int
+) -> None:
+    values = {
+        "lease_id": "lease-opaque-01",
+        "generation": 7,
+        "session_id": "session-01",
+        "correlation_id": "correlation-01",
+        "interaction_id": "interaction-01",
+        "response_id": "response-01",
+        "response_generation": 7,
+        "unit_id": "unit-01",
+        "unit_seq": 1,
+        "transition_seq": transition_seq,
+        "state": state,
+        "retained_through_seq": 24,
+    }
+    transition = MediaPrefetchTransition(**values)
+    acknowledgement = MediaPrefetchTransitionAck(**values)
+
+    assert deserialize_media_control(serialize_media_control(transition)) == transition
+    assert (
+        deserialize_media_control(serialize_media_control(acknowledgement))
+        == acknowledgement
+    )
+    raw = json.loads(serialize_media_control(transition))
+    assert raw["capability_version"] == MEDIA_PREFETCH_PROMOTION_CAPABILITY
+    assert raw["business_cancel_count_delta"] == 0
+
+    raw["business_cancel_count_delta"] = 1
+    with pytest.raises(MediaTransportViolation) as invalid:
+        deserialize_media_control(json.dumps(raw))
+    assert invalid.value.reason_id == "MEDIA_MALFORMED_CONTROL"
     assert MEDIA_CONTRACT_VERSION == "live-voice.media.v1"
     assert MEDIA_TRANSPORT_KIND == "websocket_binary"
     assert MEDIA_WIRE_CODEC == "pcm_f32le"

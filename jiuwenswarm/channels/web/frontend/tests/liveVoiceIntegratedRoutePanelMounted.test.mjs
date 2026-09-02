@@ -279,6 +279,29 @@ const {
   hasDurableProductVoiceSession,
 } = await import(`${fullyEnabledBundleUrl.href}?enabled=${Date.now()}`);
 
+const prefetchEnabledBundleUrl = pathToFileURL(join(mountedBundleDirectory, 'LiveVoiceIntegratedRoutePanelPrefetchEnabled.mjs'));
+await build({
+  entryPoints: [fileURLToPath(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url))],
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  packages: 'external',
+  loader: { '.css': 'empty' },
+  outfile: fileURLToPath(prefetchEnabledBundleUrl),
+  define: {
+    'import.meta.env': JSON.stringify({
+      VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB: 'true',
+      VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1: 'true',
+      VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION: 'true',
+      VITE_FEATURE_LIVE_VOICE_TASK_DEMO: 'false',
+      VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH: 'false',
+      VITE_FEATURE_LIVE_VOICE_PREFETCH_PROMOTION: 'true',
+    }),
+  },
+});
+const { LiveVoiceIntegratedRoutePanel: PrefetchEnabledLiveVoiceIntegratedRoutePanel } =
+  await import(`${prefetchEnabledBundleUrl.href}?enabled=${Date.now()}`);
+
 const commandBarBundleUrl = pathToFileURL(join(mountedBundleDirectory, 'LiveVoiceCommandBar.mjs'));
 await build({
   entryPoints: [fileURLToPath(new URL('../src/components/ChatPanel/LiveVoiceDemoBar.tsx', import.meta.url))],
@@ -393,6 +416,7 @@ function installP1BrowserEnvironment({
   mediaBinding = null,
   getUserMedia: getUserMediaOverride = null,
   holdDownlinkDetach = false,
+  holdPrefetchPromotionAck = false,
   closeAudioContext: closeAudioContextOverride = null,
   startAudioSource: startAudioSourceOverride = null,
 } = {}) {
@@ -421,6 +445,7 @@ function installP1BrowserEnvironment({
   };
   let latestWorklet = null;
   let latestSource = null;
+  let releasePrefetchPromotionAck = null;
   let nextWorkletFirstFrameSamples = null;
   const sockets = [];
   const speechStartSignals = [];
@@ -569,6 +594,7 @@ function installP1BrowserEnvironment({
     onclose = null;
     binarySeq = 0;
     binding = null;
+    sent = [];
 
     constructor() {
       sockets.push(this);
@@ -587,6 +613,7 @@ function installP1BrowserEnvironment({
     }
 
     send(value) {
+      this.sent.push(value);
       if (typeof value === 'string') {
         const control = JSON.parse(value);
         if (control.type === 'media.auth') {
@@ -601,10 +628,26 @@ function installP1BrowserEnvironment({
         if (control.type === 'media.detach') {
           queueMicrotask(() => this.onmessage?.({ data: value }));
         }
+        if (control.type === 'media.prefetch_transition') {
+          const acknowledge = () => this.onmessage?.({
+            data: serializeMediaControl({
+              ...control,
+              type: 'media.prefetch_transition_ack',
+            }),
+          });
+          if (holdPrefetchPromotionAck && control.state !== 'prefetch_parked') {
+            releasePrefetchPromotionAck = acknowledge;
+          } else {
+            queueMicrotask(acknowledge);
+          }
+          return;
+        }
         if (
           control.type === 'media.ack'
           && this.binding?.direction === 'downlink'
-          && !holdDownlinkDetach
+          && !(typeof holdDownlinkDetach === 'function'
+            ? holdDownlinkDetach(this.binding)
+            : holdDownlinkDetach)
         ) {
           queueMicrotask(() =>
             this.onmessage?.({
@@ -770,7 +813,9 @@ function installP1BrowserEnvironment({
         `dedicated downlink media route did not attach; sockets=${sockets.map(socket => socket.binding?.direction ?? 'unbound').join(',')}`,
       );
       await new Promise(resolve => setImmediate(resolve));
-      const socket = sockets.find(candidate => candidate.binding?.direction === 'downlink');
+      const socket =
+        sockets.filter(candidate => candidate.binding?.direction === 'downlink' && candidate.readyState === FakeWebSocket.OPEN).at(-1)
+        ?? sockets.filter(candidate => candidate.binding?.direction === 'downlink').at(-1);
       socket.onmessage?.({
         data: encodeAudioFrame(socket.binding, {
           seq: 0,
@@ -779,6 +824,23 @@ function installP1BrowserEnvironment({
         }),
       });
       await new Promise(resolve => setImmediate(resolve));
+    },
+    latestDownlinkControlTypes() {
+      const socket = sockets
+        .filter(candidate => candidate.binding?.direction === 'downlink')
+        .at(-1);
+      return socket === undefined
+        ? []
+        : socket.sent
+          .filter(value => typeof value === 'string')
+          .map(JSON.parse)
+          .map(control => control.type);
+    },
+    releasePrefetchPromotion() {
+      const release = releasePrefetchPromotionAck;
+      releasePrefetchPromotionAck = null;
+      assert.equal(typeof release, 'function', 'no retained prefetch promotion ACK exists');
+      release();
     },
     async emitSpeechStartDuringPlayout() {
       await waitForMounted(
@@ -937,6 +999,21 @@ function mountedFullyEnabledElement(i18n, sessionId, request, isConnected = true
     I18nextProvider,
     { i18n },
     React.createElement(FullyEnabledLiveVoiceIntegratedRoutePanel, {
+      activeSessionId: sessionId,
+      isConnected,
+      agentRouteAvailable: true,
+      taskCompatibilityAvailable: false,
+      request,
+      ...extraProps,
+    }),
+  );
+}
+
+function mountedPrefetchEnabledElement(i18n, sessionId, request, isConnected = true, extraProps = {}) {
+  return React.createElement(
+    I18nextProvider,
+    { i18n },
+    React.createElement(PrefetchEnabledLiveVoiceIntegratedRoutePanel, {
       activeSessionId: sessionId,
       isConnected,
       agentRouteAvailable: true,
@@ -5762,7 +5839,13 @@ for (const { recognitionFailure, recognitionStart, recovery = 'play', arrivalDur
           await new Promise(resolve => setTimeout(resolve, 120));
           return;
         }
-        await waitForMounted(() => browser.counts.sourceStarts === 2 || synthesisAuthorizationFailures > 0, 'retained terminal AUDIO did not play after recognition settled');
+        await waitForMounted(
+          () => browser.counts.sourceStarts === 2 || synthesisAuthorizationFailures > 0,
+          `retained terminal AUDIO did not play after recognition settled; states=${states
+            .slice(-16)
+            .map(state => `${state.p1_status}/${state.text_status}/${state.terminal_announcement_state}`)
+            .join(',')}; methods=${calls.slice(-24).map(call => call.method).join(',')}`,
+        );
         assert.equal(synthesisAuthorizationFailures, 0, 'terminal TTS used a new media route without exact P2 reauthorization');
         assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === 'captured-terminal').length, 0);
         browser.endLatestSource();
@@ -12037,6 +12120,677 @@ test('mounted Exit retires a deferred stale Task AUDIO owner before same-Session
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();
   }
+});
+
+async function runMountedC2FirstTailScenario({
+  bargeDuringPrefetch = false,
+  bargeWhileAttaching = false,
+  closeWhileBuffered = false,
+  delayPrefixAck = false,
+  twoTails = false,
+  rejectPrefixAck = false,
+  retryablePrefixAck = false,
+  prefetchPromotion = false,
+  batchTails = false,
+  admissionOnly = false,
+} = {}) {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-c2-continuation-session';
+  const controlRef = { current: null };
+  const states = [];
+  const calls = [];
+  const projectedMessages = [];
+  const lifecycle = [];
+  const queuedNotifications = [];
+  const notificationWaiters = [];
+  let activeMediaBinding = null;
+  let notificationBinding = null;
+  let releasePrefixAck = null;
+  let renderer;
+  const browser = installP1BrowserEnvironment({
+    mediaBinding: () => activeMediaBinding,
+    holdDownlinkDetach: prefetchPromotion
+      ? binding => binding.playout?.unit_id !== 'mounted-c2-prefix'
+      : false,
+    holdPrefetchPromotionAck: admissionOnly,
+  });
+  const activateP2 = createMountedP2ActivationResponder();
+  const response = {
+    interaction_id: 'mounted-c2-interaction',
+    response_id: 'mounted-c2-response',
+    response_generation: 1,
+  };
+  const firstTailText = twoTails ? 'Second stable sentence. ' : 'Final tail.';
+  const secondTailText = 'Final tail.';
+  const completeText = `First stable sentence. ${firstTailText}${twoTails ? secondTailText : ''}`;
+  const prefixEndUtf8 = Buffer.byteLength('First stable sentence. ', 'utf8');
+  const firstTailEndUtf8 = prefixEndUtf8 + Buffer.byteLength(firstTailText, 'utf8');
+  const completeEndUtf8 = Buffer.byteLength(completeText, 'utf8');
+  const notifications = [
+    {
+      eventType: 'chat.delta',
+      text: 'First stable sentence. ',
+      surface: 'audio',
+      unitId: 'mounted-c2-prefix',
+      seq: 0,
+      sourceStartUtf8: 0,
+      sourceEndUtf8: prefixEndUtf8,
+      projectionRole: 'audio_segment',
+      delivery: 'speak_only',
+      digest: 'a',
+    },
+    {
+      eventType: twoTails ? 'chat.delta' : 'chat.final',
+      text: firstTailText,
+      surface: 'audio',
+      unitId: 'mounted-c2-tail',
+      seq: 1,
+      sourceStartUtf8: prefixEndUtf8,
+      sourceEndUtf8: firstTailEndUtf8,
+      projectionRole: 'audio_segment',
+      delivery: 'speak_only',
+      digest: 'b',
+    },
+    ...(twoTails ? [{
+      eventType: 'chat.final',
+      text: secondTailText,
+      surface: 'audio',
+      unitId: 'mounted-c2-tail-2',
+      seq: 2,
+      sourceStartUtf8: firstTailEndUtf8,
+      sourceEndUtf8: completeEndUtf8,
+      projectionRole: 'audio_segment',
+      delivery: 'speak_only',
+      digest: 'd',
+    }] : []),
+    {
+      eventType: 'chat.final',
+      text: completeText,
+      surface: 'text',
+      unitId: 'mounted-c2-root',
+      seq: 0,
+      sourceStartUtf8: 0,
+      sourceEndUtf8: completeEndUtf8,
+      projectionRole: 'authoritative_text_root',
+      delivery: 'display_only',
+      digest: 'c',
+    },
+  ];
+  const publishNotification = notification => {
+    assert.ok(notificationWaiters.length <= 1, 'C2 fixture created concurrent notification waiters');
+    const waiter = notificationWaiters.shift();
+    if (waiter) waiter(notification);
+    else queuedNotifications.push(notification);
+  };
+  const productNotification = (item, binding) => ({
+    ok: true,
+    result: {
+      status: 'notification',
+      session_id: sessionId,
+      correlation_id: binding.correlation_id,
+      interaction_id: response.interaction_id,
+      activation_id: binding.activation_id,
+      activation_generation: binding.activation_generation,
+      kind: 'agent.output',
+      request_id: 'mounted-c2-agent-request',
+      round_id: 'mounted-c2-round',
+      response,
+      agent_event: { event_type: item.eventType, text: item.text },
+      source_event: null,
+      progress_event: null,
+      presentation_unit: {
+        surface: item.surface,
+        unit_id: item.unitId,
+        seq: item.seq,
+        source_start_utf8: item.sourceStartUtf8,
+        source_end_utf8: item.sourceEndUtf8,
+        content_ref: `sha256:${item.digest.repeat(64)}`,
+        projection_role: item.projectionRole,
+      },
+      presentation_text: item.text,
+      presentation_delivery: item.delivery,
+      error_reason: null,
+      publish_seq: item.seq + 1,
+    },
+  });
+
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.media.prefetch.capability.negotiate') {
+      return { selected: 'live-voice.media.prefetch-promotion.v1' };
+    }
+    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') {
+      if (queuedNotifications.length > 0) return queuedNotifications.shift();
+      return new Promise(resolve => notificationWaiters.push(resolve));
+    }
+    if (method === 'live_voice.composition.p2.presentation.ack') {
+      const nextIndex =
+        params.unit_id === (twoTails ? 'mounted-c2-tail-2' : 'mounted-c2-tail')
+            ? notifications.length - 1
+            : null;
+      if (nextIndex !== null) {
+        assert.ok(notificationBinding);
+        setTimeout(
+          () => publishNotification(productNotification(notifications[nextIndex], notificationBinding)),
+          0,
+        );
+      }
+      const result = {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'presentation_acknowledged',
+          ...params,
+          accepted: true,
+          replayed: false,
+          history_records_written: params.surface === 'text' ? 1 : 0,
+          history_pending: params.surface !== 'text',
+        },
+      };
+      if (rejectPrefixAck && params.unit_id === 'mounted-c2-prefix') {
+        throw Object.assign(new Error('prefix presentation ACK was rejected'), {
+          code: 'CONFLICT',
+          reason: 'CONFLICT',
+          retriable: false,
+        });
+      }
+      if (retryablePrefixAck && params.unit_id === 'mounted-c2-prefix') {
+        throw Object.assign(new Error('prefix presentation ACK result is unknown'), {
+          code: 'REQUEST_TIMEOUT',
+          reason: 'REQUEST_TIMEOUT',
+          retriable: true,
+        });
+      }
+      if (delayPrefixAck && params.unit_id === 'mounted-c2-prefix') {
+        return new Promise(resolve => {
+          releasePrefixAck = () => resolve(result);
+        });
+      }
+      return result;
+    }
+    if (method === 'live_voice.composition.p2.barge_in') {
+      return {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'barge_in_applied',
+          ...params,
+          applied: true,
+          replayed: false,
+          effect_ids: ['mounted-c2-response-cancel'],
+        },
+      };
+    }
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.media.activate') {
+      const index = calls.filter(call => call.method === method).length;
+      activeMediaBinding = mountedMediaBinding(params, index);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: `mounted-c2-media-${index}`,
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'C'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    if (method === 'live_voice.media.playout_receipt') {
+      return {
+        status: 'media_playout_acknowledged',
+        reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
+        receipt_id: `mounted-c2-receipt-${params.unit_id}`,
+        ...params,
+        duplex_media_observed: false,
+      };
+    }
+    if (method === 'live_voice.speech.recognize_batch') return mountedRecognition(params, 'Explain Paris.', 1);
+    if (method === 'live_voice.composition.unified.submit') {
+      response.interaction_id = params.interaction_id;
+      notificationBinding = { ...params };
+      return {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'round_accepted',
+          session_id: params.session_id,
+          correlation_id: params.correlation_id,
+          interaction_id: params.interaction_id,
+          activation_id: params.activation_id,
+          activation_generation: params.activation_generation,
+          turn_id: params.turn_id,
+          commit_id: params.commit_id,
+          request_id: 'mounted-c2-agent-request',
+          round_id: 'mounted-c2-round',
+          response,
+        },
+      };
+    }
+    if (method === 'live_voice.speech.synthesize_batch') {
+      const downlink = mountedDownlinkBinding(
+        params.response,
+        params.unit_id,
+        calls.filter(call => call.method === method).length,
+        activeMediaBinding,
+      );
+      return {
+        contract_version: 'live-voice.contract.v2',
+        request_id: params.request_id,
+        operation_id: params.operation_id,
+        ok: true,
+        error: null,
+        result: {
+          operation: 'speech.synthesize.batch',
+          response: params.response,
+          unit_id: params.unit_id,
+          audio: {
+            format: 'pcm_f32_mono_20ms',
+            sample_rate_hz: 48_000,
+            channel_count: 1,
+            delivery: 'dedicated_media_downlink',
+            endpoint_path: '/ws/live-voice/media',
+            media_ticket: 'D'.repeat(43),
+            subprotocol: 'live-voice.media.v1',
+            ticket_ttl_ms: 30_000,
+            frame_count: 1,
+            streaming: false,
+            degradation_reason: null,
+            binding: downlink,
+            max_pending_frames: 8,
+            max_pending_bytes: 131_072,
+            ...(params.prefetch_promotion_capability === undefined
+              ? {}
+              : { prefetch_promotion_capability: params.prefetch_promotion_capability }),
+          },
+          provider: {
+            provider_id: 'mounted-provider',
+            implementation_class: 'formal',
+            fallback_from: null,
+            model: 'mounted-tts',
+            voice: 'mounted-voice',
+          },
+          presented: false,
+        },
+      };
+    }
+    throw new Error(`unexpected mounted C2 request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(
+        (prefetchPromotion ? mountedPrefetchEnabledElement : mountedFullyEnabledElement)(i18n, sessionId, request, true, {
+          productVoiceControlRef: controlRef,
+          onProductVoiceStateChange: state => states.push(state),
+          onProductVoiceMessage: event => projectedMessages.push(event),
+        }),
+      );
+      await waitForMounted(() => controlRef.current !== null && states.at(-1)?.available === true, 'C2 route unavailable');
+      void controlRef.current.start();
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'C2 initial capture unavailable');
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.unified.submit'),
+        'C2 unified submit did not retain its response binding',
+      );
+      assert.ok(notificationBinding);
+      await waitForMounted(
+        () => notificationWaiters.length === 1,
+        'C2 prefix notification owner was not waiting',
+      );
+      publishNotification(productNotification(notifications[0], notificationBinding));
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length === 1,
+        `C2 prefix synthesis did not start; queued=${queuedNotifications.length} waiters=${notificationWaiters.length} states=${states.slice(-8).map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')} calls=${calls.map(call => call.method).join(',')}`,
+      );
+      await browser.emitDownlinkFrame();
+      await waitForMounted(
+        () => browser.counts.sourceStarts === 1,
+        `C2 prefix did not start; states=${states.map(state => `${state.p1_status}/${state.p1_reason}/${state.text_status}/${state.text_reason}/${state.recovery_diagnostic?.reason ?? 'none'}`).join(',')} calls=${calls.map(call => call.method).join(',')}`,
+      );
+      await waitForMounted(
+        () => browser.counts.getUserMedia === 2 && browser.counts.workletPorts === 2,
+        'C2 successor capture did not allocate during prefix playout',
+      );
+      await browser.emitFirstFrame(0);
+      await waitForMounted(
+        () => notificationWaiters.length === 1,
+        'C2 first-tail prefetch owner was not waiting during prefix playout',
+      );
+      if (batchTails) {
+        publishNotification({
+          ok: true,
+          result: {
+            status: 'notification_batch',
+            session_id: sessionId,
+            correlation_id: notificationBinding.correlation_id,
+            interaction_id: response.interaction_id,
+            activation_id: notificationBinding.activation_id,
+            activation_generation: notificationBinding.activation_generation,
+            notifications: [
+              productNotification(notifications[1], notificationBinding).result,
+              productNotification(notifications[2], notificationBinding).result,
+            ],
+          },
+        });
+      } else {
+        publishNotification(productNotification(notifications[1], notificationBinding));
+      }
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length === 2,
+        `C2 first-tail preparation did not overlap prefix playout; synthesized=${calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').map(call => call.params.unit_id).join(',')} notifications=${calls.filter(call => call.method === 'live_voice.composition.p2.notification.next').length} states=${states.slice(-8).map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')}`,
+        5_000,
+      );
+      if (prefetchPromotion) {
+        assert.equal(
+          calls.filter(call => call.method === 'live_voice.speech.synthesize_batch')[1]?.params.prefetch_promotion_capability,
+          'live-voice.media.prefetch-promotion.v1',
+          'mounted successor synthesis did not retain negotiated prefetch capability',
+        );
+      }
+      lifecycle.push('preparing', 'attaching');
+      await waitForMounted(
+        () => browser.counts.socketOpens >= 4,
+        'C2 first-tail downlink did not attach during prefix playout',
+      );
+      lifecycle.push('attached');
+      if (bargeWhileAttaching) {
+        await browser.emitSpeechStartDuringPlayout();
+        await waitForMounted(
+          () => calls.some(call => call.method === 'live_voice.composition.p2.barge_in'),
+          'C2 barge did not fence the attaching first tail',
+        );
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(browser.counts.sourceStarts, 1, 'attaching first tail reached playout after barge');
+        assert.equal(
+          calls.some(
+            call => call.method === 'live_voice.composition.p2.presentation.ack'
+              && call.params.unit_id === 'mounted-c2-tail',
+          ),
+          false,
+          'attaching first tail received a presentation ACK after barge',
+        );
+        assert.equal(projectedMessages.some(event => event.message.role === 'assistant'), false);
+        return;
+      }
+      await browser.emitDownlinkFrame();
+      lifecycle.push('buffered');
+      assert.equal(browser.counts.sourceStarts, 1, 'prepared tail played before prefix completion');
+      if (admissionOnly) {
+        assert.deepEqual(
+          calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').map(call => call.params.unit_id),
+          ['mounted-c2-prefix', 'mounted-c2-tail'],
+          'second batched tail crossed synthesis while its predecessor remained unpromoted',
+        );
+      }
+      if (!batchTails) {
+        assert.equal(
+          calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length,
+          0,
+          'prefix ACK was emitted before its audio completed',
+        );
+      }
+      if (closeWhileBuffered) {
+        await controlRef.current.close();
+        await waitForMounted(() => states.at(-1)?.p1_status === 'closed', 'C2 Exit did not close buffered successor');
+        assert.equal(browser.counts.sourceStarts, 1, 'buffered first tail reached playout after Exit');
+        assert.equal(
+          calls.some(
+            call => call.method === 'live_voice.composition.p2.presentation.ack'
+              && call.params.unit_id === 'mounted-c2-tail',
+          ),
+          false,
+          'buffered first tail received a presentation ACK after Exit',
+        );
+        assert.equal(projectedMessages.some(event => event.message.role === 'assistant'), false);
+        assert.equal(browser.counts.socketCloses, browser.counts.socketOpens, 'C2 Exit leaked a staged media socket');
+        return;
+      }
+      if (bargeDuringPrefetch) {
+        await browser.emitSpeechStartDuringPlayout();
+        await waitForMounted(
+          () => calls.some(call => call.method === 'live_voice.composition.p2.barge_in'),
+          'C2 barge did not fence the response during muted first-tail preparation',
+        );
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(browser.counts.sourceStarts, 1, 'cancelled first tail reached playout');
+        assert.equal(
+          calls.some(
+            call => call.method === 'live_voice.composition.p2.presentation.ack' &&
+              call.params.unit_id === 'mounted-c2-tail',
+          ),
+          false,
+          'cancelled first tail received a presentation ACK',
+        );
+        assert.equal(
+          projectedMessages.some(event => event.message.role === 'assistant'),
+          false,
+          'cancelled first-tail response wrote authoritative assistant history',
+        );
+        return;
+      }
+    });
+    if (admissionOnly) {
+      await act(async () => {
+        browser.endLatestSource();
+        await waitForMounted(
+          () => browser.latestDownlinkControlTypes().includes('media.prefetch_transition'),
+          'mounted scheduler did not request exact successor promotion',
+        );
+        assert.deepEqual(
+          calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').map(call => call.params.unit_id),
+          ['mounted-c2-prefix', 'mounted-c2-tail'],
+          'second batched tail crossed synthesis before exact promotion ACK',
+        );
+        browser.releasePrefetchPromotion();
+        await waitForMounted(
+          () => calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length === 3,
+          'exact promotion ACK did not admit the second batched tail',
+        );
+        const synthesisCalls = calls.filter(
+          call => call.method === 'live_voice.speech.synthesize_batch',
+        );
+        assert.deepEqual(
+          synthesisCalls.map(call => call.params.unit_id),
+          ['mounted-c2-prefix', 'mounted-c2-tail', 'mounted-c2-tail-2'],
+        );
+        assert.equal(
+          synthesisCalls[2].params.prefetch_promotion_capability,
+          'live-voice.media.prefetch-promotion.v1',
+        );
+        for (let turn = 0; turn < 5; turn += 1) {
+          await new Promise(resolve => setImmediate(resolve));
+        }
+        assert.equal(
+          calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length,
+          3,
+          'exact promotion ACK duplicated the admitted successor synthesis',
+        );
+        await controlRef.current.close();
+      });
+      return;
+    }
+    if (bargeDuringPrefetch || bargeWhileAttaching || closeWhileBuffered) return;
+    await act(async () => {
+      browser.endLatestSource();
+      lifecycle.push('predecessor_rendered');
+      await waitForMounted(
+        () => calls.some(
+          call => call.method === 'live_voice.composition.p2.presentation.ack' &&
+            call.params.unit_id === 'mounted-c2-prefix',
+        ),
+        `C2 prefix ACK did not enter settlement; calls=${calls.map(call => call.method).join(',')} states=${states.slice(-12).map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')}`,
+        5_000,
+      );
+      if (delayPrefixAck) {
+        assert.equal(typeof releasePrefixAck, 'function', 'prefix ACK was not retained in flight');
+      }
+      await waitForMounted(
+        () => browser.counts.sourceStarts === 2,
+        `C2 tail did not start; sources=${browser.counts.sourceStarts}/${browser.counts.sourceEnds} acks=${calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').map(call => call.params.unit_id).join(',')} states=${states.slice(-10).map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')}`,
+      );
+      lifecycle.push('promoted');
+      assert.equal(browser.latestDownlinkControlTypes().includes('media.ack'), true);
+      lifecycle.push('media_acked');
+      if (rejectPrefixAck || retryablePrefixAck) {
+        browser.endLatestSource();
+        await new Promise(resolve => setTimeout(resolve, retryablePrefixAck ? 1_200 : 50));
+        assert.equal(
+          calls.some(
+            call => call.method === 'live_voice.composition.p2.presentation.ack'
+              && call.params.unit_id === 'mounted-c2-tail',
+          ),
+          false,
+          'unsettled prefix authority released a later tail ACK',
+        );
+        assert.equal(
+          projectedMessages.some(event => event.message.role === 'assistant'),
+          false,
+          'unsettled prefix authority wrote assistant history',
+        );
+        return;
+      }
+      if (!twoTails) releasePrefixAck?.();
+    });
+    if (rejectPrefixAck || retryablePrefixAck) return;
+    if (twoTails) {
+      await act(async () => {
+        if (!batchTails) {
+          await waitForMounted(
+            () => notificationWaiters.length === 1,
+            'C2 second-tail prefetch owner was not waiting while first tail played',
+          );
+          publishNotification(productNotification(notifications[2], notificationBinding));
+        }
+        await waitForMounted(
+          () => calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length === 3,
+          'released first tail did not start second-tail synthesis while it still played',
+        );
+        assert.equal(browser.counts.sourceStarts, 2, 'prepared second tail started before first-tail render completion');
+        assert.equal(
+          calls.some(
+            call => call.method === 'live_voice.composition.p2.presentation.ack'
+              && call.params.unit_id === 'mounted-c2-tail-2',
+          ),
+          false,
+          'prepared second tail received a presentation ACK before first-tail render completion',
+        );
+        releasePrefixAck?.();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(browser.counts.sourceStarts, 2, 'prefix ACK adopted the second tail before first-tail render completion');
+        assert.equal(states.some(state => state.text_status === 'failed'), false, 'prefix ACK failed the active first tail');
+        browser.endLatestSource();
+        await browser.emitDownlinkFrame();
+        await waitForMounted(
+          () => browser.counts.sourceStarts === 3,
+          'first-tail render completion did not promote the second tail',
+        );
+      });
+    }
+    await act(async () => {
+      browser.endLatestSource();
+      lifecycle.push('rendered');
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length === (twoTails ? 4 : 3),
+        `C2 root did not settle after both audio units; sources=${browser.counts.sourceStarts}/${browser.counts.sourceEnds} acks=${calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').map(call => call.params.unit_id).join(',')} states=${states.slice(-10).map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')}`,
+      );
+      lifecycle.push('presentation_acked');
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'C2 did not retain successor capture');
+    });
+
+    assert.deepEqual(
+      calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').map(call => call.params.unit_id),
+      twoTails
+        ? ['mounted-c2-prefix', 'mounted-c2-tail', 'mounted-c2-tail-2']
+        : ['mounted-c2-prefix', 'mounted-c2-tail'],
+    );
+    assert.deepEqual(
+      calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').map(call => call.params.unit_id),
+      twoTails
+        ? ['mounted-c2-prefix', 'mounted-c2-tail', 'mounted-c2-tail-2', 'mounted-c2-root']
+        : ['mounted-c2-prefix', 'mounted-c2-tail', 'mounted-c2-root'],
+    );
+    assert.deepEqual(projectedMessages.map(event => [event.message.role, event.message.content]), [
+      ['user', 'Explain Paris.'],
+      ['assistant', completeText],
+    ]);
+    assert.equal(browser.counts.getUserMedia, 2);
+    assert.equal(states.some(state => state.text_reason === 'PRODUCT_AGENT_OUTPUT_FAILED'), false);
+    await act(async () => controlRef.current.close());
+    lifecycle.push('closed');
+    assert.deepEqual(lifecycle, [
+      'preparing',
+      'attaching',
+      'attached',
+      'buffered',
+      'predecessor_rendered',
+      'promoted',
+      'media_acked',
+      'rendered',
+      'presentation_acked',
+      'closed',
+    ]);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+}
+
+test('mounted C2 prebuffers the first tail and completes the ordered lifecycle', async () => {
+  await runMountedC2FirstTailScenario();
+});
+
+test('mounted C2 promotes the staged tail before a delayed prefix ACK settles', async () => {
+  await runMountedC2FirstTailScenario({ delayPrefixAck: true });
+});
+
+test('mounted C2 keeps local render as the sole adoption authority across two prefetched tails', async () => {
+  await runMountedC2FirstTailScenario({ delayPrefixAck: true, twoTails: true });
+});
+
+test('mounted C2 notification batch defers the second negotiated tail until exact promotion ACK', async () => {
+  await runMountedC2FirstTailScenario({
+    twoTails: true,
+    prefetchPromotion: true,
+    batchTails: true,
+    admissionOnly: true,
+  });
+});
+
+test('mounted C2 terminal prefix ACK rejection fences every later tail ACK and history effect', async () => {
+  await runMountedC2FirstTailScenario({ rejectPrefixAck: true });
+});
+
+test('mounted C2 retryable prefix ACK uncertainty retains FIFO ownership over later tail ACKs', async () => {
+  await runMountedC2FirstTailScenario({ retryablePrefixAck: true });
+});
+
+test('mounted C2 barge during muted first-tail preparation releases no tail audio or ACK', async () => {
+  await runMountedC2FirstTailScenario({ bargeDuringPrefetch: true });
+});
+
+test('mounted C2 barge while the first tail attaches fences every late tail effect', async () => {
+  await runMountedC2FirstTailScenario({ bargeWhileAttaching: true });
+});
+
+test('mounted C2 Exit while the first tail is buffered closes the staged slot exactly once', async () => {
+  await runMountedC2FirstTailScenario({ closeWhileBuffered: true });
 });
 
 test('mounted unified hands-free itinerary journey auto-submits and keeps one current task', async () => {

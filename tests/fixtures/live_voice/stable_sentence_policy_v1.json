@@ -1,0 +1,51 @@
+[
+  {
+    "case_id": "append-only-english",
+    "fragments": ["Paris is the capital of France. ", "It is known for the Eiffel Tower"],
+    "expected_candidate": "Paris is the capital of France. ",
+    "final": "Paris is the capital of France. It is known for the Eiffel Tower.",
+    "expected_disposition": "exact_prefix"
+  },
+  {
+    "case_id": "append-only-chinese",
+    "fragments": ["巴黎是法国的首都。", "它以埃菲尔铁塔闻名"],
+    "expected_candidate": "巴黎是法国的首都。",
+    "final": "巴黎是法国的首都。它以埃菲尔铁塔闻名。",
+    "expected_disposition": "exact_prefix"
+  },
+  {
+    "case_id": "decimal",
+    "fragments": ["Version 3.14159 is stable. ", "The next version is pending"],
+    "expected_candidate": "Version 3.14159 is stable. ",
+    "final": "Version 3.14159 is stable. The next version is pending.",
+    "expected_disposition": "exact_prefix"
+  },
+  {
+    "case_id": "abbreviation",
+    "fragments": ["Dr. Smith works in Paris. ", "She is a researcher"],
+    "expected_candidate": "Dr. Smith works in Paris. ",
+    "final": "Dr. Smith works in Paris. She is a researcher.",
+    "expected_disposition": "exact_prefix"
+  },
+  {
+    "case_id": "closed-code-fence",
+    "fragments": ["The example is complete. ```python\nprint('ok')\n``` ", "The explanation continues"],
+    "expected_candidate": "The example is complete. ",
+    "final": "The example is complete. ```python\nprint('ok')\n``` The explanation continues.",
+    "expected_disposition": "exact_prefix"
+  },
+  {
+    "case_id": "unclosed-code-fence",
+    "fragments": ["The example follows. ```python\n", "print('not closed')"],
+    "expected_candidate": null,
+    "final": "The example follows. ```python\nprint('not closed')\n```",
+    "expected_disposition": "rewrite_before_commit"
+  },
+  {
+    "case_id": "prefix-mismatch",
+    "fragments": ["Paris is the capital of France. ", "It is well known"],
+    "expected_candidate": "Paris is the capital of France. ",
+    "final": "Paris is the largest city in France.",
+    "expected_disposition": "rewrite_after_commit"
+  }
+]

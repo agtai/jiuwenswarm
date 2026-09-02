@@ -2187,6 +2187,50 @@ test('playout schedules exact current response and acknowledges only contiguous 
   assert.equal(adapter.businessCancelCount(), 0);
 });
 
+test('playout continues a settled response with a new unit without stopping response authority', async () => {
+  const fake = fakeEnvironment();
+  const events = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: { onPlayoutState: event => events.push(event) },
+  });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  const prefixSource = fake.contexts[0].bufferSources[0];
+  prefixSource.end();
+
+  adapter.beginPlayout(firstResponse, { continuation_unit_id: 'unit-2' });
+  assert.equal(
+    adapter.enqueuePlayout(pcmChunk(firstResponse, 0, { unit_id: 'unit-2' })),
+    true,
+  );
+  assert.equal(prefixSource.stopCount, 0);
+  assert.equal(events.some(event => event.reason === 'response_replaced'), false);
+  assert.equal(fake.contexts[0].bufferSources.length, 2);
+});
+
+test('playout continuation rejects pending and duplicate units without replacing active audio', async () => {
+  const fake = fakeEnvironment();
+  const adapter = new BrowserAudioIOAdapter({ enabled: true, environment: fake.environment });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 0));
+  const prefixSource = fake.contexts[0].bufferSources[0];
+  assert.throws(
+    () => adapter.beginPlayout(firstResponse, { continuation_unit_id: 'unit-2' }),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'AUDIO_CONTINUATION_PENDING',
+  );
+  assert.equal(prefixSource.stopCount, 0);
+  prefixSource.end();
+  assert.throws(
+    () => adapter.beginPlayout(firstResponse, { continuation_unit_id: 'unit-1' }),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'AUDIO_UNIT_REUSED',
+  );
+  assert.equal(fake.contexts[0].bufferSources.length, 1);
+});
+
 test('playout uses the exact injected bounded startup lead', async () => {
   const fake = fakeEnvironment();
   const adapter = new BrowserAudioIOAdapter({

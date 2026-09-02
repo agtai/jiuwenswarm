@@ -25,6 +25,35 @@ export type UnifiedAuthoritativeFinal = Readonly<{
   voice_commit_receipt: string;
 }>;
 
+/**
+ * Public identity only for temporary pipeline diagnostics. Recognized text
+ * and the opaque speech receipt deliberately never cross this boundary.
+ */
+export function unifiedCommittedInputDiagnosticContext(
+  binding: UnifiedCommittedInputBinding,
+  input: UnifiedAuthoritativeFinal,
+): Readonly<{
+  session_id: string;
+  correlation_id: string;
+  interaction_id: string;
+  activation_id: string;
+  activation_generation: number;
+  request_id: string;
+  commit_id: string;
+  turn_id: string;
+}> {
+  return Object.freeze({
+    session_id: binding.session_id,
+    correlation_id: binding.correlation_id,
+    interaction_id: binding.interaction_id,
+    activation_id: binding.activation_id,
+    activation_generation: binding.activation_generation,
+    request_id: input.request_id,
+    commit_id: input.commit_id,
+    turn_id: input.turn_id,
+  });
+}
+
 function requiredText(value: unknown, name: string, maximum = 100_000): string {
   if (typeof value !== 'string' || !value.trim() || new TextEncoder().encode(value).length > maximum) {
     throw new Error(`${name} is invalid`);
@@ -223,12 +252,22 @@ export class ProductUnifiedCommittedInputOwner {
       }
       return this.#pending.promise.then(result => bindCachedResult(cacheBusinessResult(result), requestId));
     }
+    const diagnostic = unifiedCommittedInputDiagnosticContext(binding, input);
+    console.info('[LiveVoicePipeline] unified_submit_requested', diagnostic);
     const promise = this.#request(PRODUCT_UNIFIED_COMMITTED_INPUT_METHOD, params, requestId)
       .then(value => {
         const result = exactControlResult(value, requestId, binding, input);
+        console.info('[LiveVoicePipeline] unified_submit_accepted', diagnostic);
         if (this.#completed.size >= 128) this.#completed.delete(this.#completed.keys().next().value as string);
         this.#completed.set(fingerprint, cacheBusinessResult(result));
         return result;
+      })
+      .catch(error => {
+        console.warn('[LiveVoicePipeline] unified_submit_failed', {
+          ...diagnostic,
+          error_name: error instanceof Error ? error.name : typeof error,
+        });
+        throw error;
       })
       .finally(() => {
         if (this.#pending?.promise === promise) this.#pending = null;

@@ -69,6 +69,48 @@ test('sequence gaps and response reuse reject without queued audio', () => {
   );
 });
 
+test('an exact settled response continues with one previously unseen audio unit', () => {
+  const port = new AudioPort();
+  port.begin(first);
+  port.enqueue(chunk(first, 0));
+  assert.equal(port.acknowledge(first, 'unit-1', 0), 1);
+
+  port.continueResponse(first, 'unit-2');
+  assert.equal(
+    port.enqueue(chunk(first, 0, { unit_id: 'unit-2' })),
+    true,
+  );
+  assert.deepEqual(
+    port.pending(first).map(item => [item.unit_id, item.seq]),
+    [['unit-2', 0]],
+  );
+});
+
+test('continuation rejects unresolved, duplicate, foreign and stopped responses without effects', () => {
+  const port = new AudioPort();
+  port.begin(first);
+  port.enqueue(chunk(first, 0));
+  assert.throws(
+    () => port.continueResponse(first, 'unit-2'),
+    error => error instanceof AudioPortViolation && error.reason === 'AUDIO_CONTINUATION_PENDING',
+  );
+  assert.equal(port.acknowledge(first, 'unit-1', 0), 1);
+  assert.throws(
+    () => port.continueResponse(first, 'unit-1'),
+    error => error instanceof AudioPortViolation && error.reason === 'AUDIO_UNIT_REUSED',
+  );
+  assert.throws(
+    () => port.continueResponse(second, 'unit-2'),
+    error => error instanceof AudioPortViolation && error.reason === 'AUDIO_CONTINUATION_RESPONSE_MISMATCH',
+  );
+  assert.equal(port.stopLocal(first), true);
+  assert.throws(
+    () => port.continueResponse(first, 'unit-2'),
+    error => error instanceof AudioPortViolation && error.reason === 'AUDIO_CONTINUATION_RESPONSE_MISMATCH',
+  );
+  assert.deepEqual(port.pending(first), []);
+});
+
 test('fallback provenance remains visible and cannot be omitted', () => {
   const port = new AudioPort();
   port.begin(first);

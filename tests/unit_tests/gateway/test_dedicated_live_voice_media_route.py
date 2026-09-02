@@ -33,6 +33,9 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaSpeechStart,
     MediaPlayoutBinding,
     MediaPlaybackStopOutcome,
+    MediaPrefetchTransition,
+    MediaPrefetchTransitionAck,
+    MediaPrefetchTransitionState,
     MediaTransportViolation,
     create_playback_stop_receipt,
     decode_audio_frame,
@@ -47,6 +50,7 @@ from jiuwenswarm.gateway.live_voice.dedicated_media_route import (
     ActiveDedicatedMediaRoute,
     DedicatedMediaLeafCleanupOwner,
     DedicatedMediaDownlinkSourceFailure,
+    DedicatedMediaSocketLeafResult,
     DedicatedMediaRouteEvidence,
     DedicatedMediaRouteReason,
     DedicatedMediaRouteRequest,
@@ -836,6 +840,30 @@ def _downlink_binding() -> MediaAuthorityBinding:
             7,
             "unit-dedicated-01",
         ),
+    )
+
+
+def _prefetch_transition(
+    binding: MediaAuthorityBinding,
+    *,
+    state: MediaPrefetchTransitionState,
+    transition_seq: int,
+    retained_through_seq: int,
+) -> MediaPrefetchTransition:
+    assert binding.playout is not None
+    return MediaPrefetchTransition(
+        lease_id=binding.lease_id,
+        generation=binding.generation.value,
+        session_id=binding.session_id,
+        correlation_id=binding.correlation_id,
+        interaction_id=binding.interaction_id,
+        response_id=binding.playout.response_id,
+        response_generation=binding.playout.response_generation,
+        unit_id=binding.playout.unit_id,
+        unit_seq=1,
+        transition_seq=transition_seq,
+        state=state,
+        retained_through_seq=retained_through_seq,
     )
 
 
@@ -1841,6 +1869,154 @@ async def test_downlink_socket_leaf_bounds_frames_waits_for_ack_and_accepts_exac
         "history": 0,
         "persistence": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_downlink_prefetch_park_is_control_only_until_exact_promotion() -> None:
+    binding = _downlink_binding()
+    park = _prefetch_transition(
+        binding,
+        state=MediaPrefetchTransitionState.PREFETCH_PARKED,
+        transition_seq=0,
+        retained_through_seq=24,
+    )
+    promote = _prefetch_transition(
+        binding,
+        state=MediaPrefetchTransitionState.PROMOTED,
+        transition_seq=1,
+        retained_through_seq=24,
+    )
+    incoming = [
+        serialize_media_control(
+            MediaAck(binding.lease_id, binding.generation.value, seq)
+        )
+        for seq in range(25)
+    ]
+    incoming.extend([serialize_media_control(park), serialize_media_control(promote)])
+    incoming.extend(
+        serialize_media_control(
+            MediaAck(binding.lease_id, binding.generation.value, seq)
+        )
+        for seq in range(25, 30)
+    )
+    socket = _FakeDedicatedSocket(incoming)
+    observed: list[MediaPrefetchTransition] = []
+
+    async def transition(
+        control: MediaPrefetchTransition,
+    ) -> MediaPrefetchTransitionAck:
+        observed.append(control)
+        return MediaPrefetchTransitionAck(
+            lease_id=control.lease_id,
+            generation=control.generation,
+            session_id=control.session_id,
+            correlation_id=control.correlation_id,
+            interaction_id=control.interaction_id,
+            response_id=control.response_id,
+            response_generation=control.response_generation,
+            unit_id=control.unit_id,
+            unit_seq=control.unit_seq,
+            transition_seq=control.transition_seq,
+            state=control.state,
+            retained_through_seq=control.retained_through_seq,
+        )
+
+    result = await run_dedicated_media_downlink_socket_leaf(
+        _request(binding),
+        socket=socket,
+        frames=[_frame(seq, seq * 160) for seq in range(30)],
+        on_playback_stop=lambda _receipt: None,
+        on_prefetch_transition=transition,
+        max_pending_frames=8,
+        max_pending_bytes=131_072,
+    )
+
+    assert observed == [park, promote]
+    controls = [
+        deserialize_media_control(item) for item in socket.sent if isinstance(item, str)
+    ]
+    assert [control.state for control in controls[1:3]] == [
+        MediaPrefetchTransitionState.PREFETCH_PARKED,
+        MediaPrefetchTransitionState.PROMOTED,
+    ]
+    assert result.reason_id is MediaDetachReason.LOCAL_CLOSE
+    assert result.sent_frames == 30
+
+
+@pytest.mark.asyncio
+async def test_parked_downlink_promotion_timeout_wakes_blocked_receive() -> None:
+    binding = _downlink_binding()
+    park = _prefetch_transition(
+        binding,
+        state=MediaPrefetchTransitionState.PREFETCH_PARKED,
+        transition_seq=0,
+        retained_through_seq=24,
+    )
+    incoming = [
+        serialize_media_control(
+            MediaAck(binding.lease_id, binding.generation.value, seq)
+        )
+        for seq in range(25)
+    ]
+    incoming.append(serialize_media_control(park))
+
+    class _ParkThenBlockSocket(_FakeDedicatedSocket):
+        def __init__(self) -> None:
+            super().__init__(incoming)
+            self.blocked = asyncio.Event()
+
+        async def recv(self) -> str | bytes:
+            if self.incoming:
+                return await super().recv()
+            self.blocked.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    async def transition(
+        control: MediaPrefetchTransition,
+    ) -> MediaPrefetchTransitionAck:
+        return MediaPrefetchTransitionAck(
+            lease_id=control.lease_id,
+            generation=control.generation,
+            session_id=control.session_id,
+            correlation_id=control.correlation_id,
+            interaction_id=control.interaction_id,
+            response_id=control.response_id,
+            response_generation=control.response_generation,
+            unit_id=control.unit_id,
+            unit_seq=control.unit_seq,
+            transition_seq=control.transition_seq,
+            state=control.state,
+            retained_through_seq=control.retained_through_seq,
+        )
+
+    socket = _ParkThenBlockSocket()
+    terminal_event = asyncio.Event()
+    completed: list[DedicatedMediaSocketLeafResult] = []
+    operation = asyncio.create_task(
+        run_dedicated_media_downlink_socket_leaf(
+            _request(binding),
+            socket=socket,
+            frames=[_frame(seq, seq * 160) for seq in range(30)],
+            on_playback_stop=lambda _receipt: None,
+            on_complete=completed.append,
+            on_prefetch_transition=transition,
+            prefetch_terminal_event=terminal_event,
+            max_pending_frames=8,
+            max_pending_bytes=131_072,
+        )
+    )
+    await asyncio.wait_for(socket.blocked.wait(), timeout=1)
+    terminal_event.set()
+    result = await asyncio.wait_for(operation, timeout=1)
+
+    assert result.reason_id is MediaDetachReason.STREAMING_SPEECH_PROMOTION_TIMEOUT
+    assert completed == [result]
+    assert socket.close_calls == [(1000, "live-voice media downlink leaf closed")]
+    terminal = deserialize_media_control(socket.sent[-1])
+    assert isinstance(terminal, MediaDetach)
+    assert terminal.reason_id is MediaDetachReason.STREAMING_SPEECH_PROMOTION_TIMEOUT
+    assert result.business_cancel_count_delta == 0
 
 
 @pytest.mark.asyncio

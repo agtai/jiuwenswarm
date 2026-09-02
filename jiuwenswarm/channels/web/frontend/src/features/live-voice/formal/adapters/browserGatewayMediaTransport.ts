@@ -6,6 +6,7 @@ export const MEDIA_WIRE_CODEC = 'pcm_f32le' as const;
 export const MEDIA_CAPTURE_ENCODING = 'pcm_f32' as const;
 export const MEDIA_FRAME_DURATION_MS = 20 as const;
 export const MEDIA_END_OF_TURN_CAPABILITY = 'media.end_of_turn.v1' as const;
+export const MEDIA_PREFETCH_PROMOTION_CAPABILITY = 'live-voice.media.prefetch-promotion.v1' as const;
 
 const WIRE_MAGIC = [0x4c, 0x56, 0x4d, 0x31] as const;
 const WIRE_VERSION = 1;
@@ -57,6 +58,7 @@ export type MediaDetachReason =
   | 'MEDIA_SEQUENCE_VIOLATION'
   | 'MEDIA_STALE_GENERATION'
   | 'MEDIA_STREAMING_TTS_TEXT_OR_RETRY'
+  | 'MEDIA_STREAMING_SPEECH_PROMOTION_TIMEOUT'
   | 'MEDIA_TRANSPORT_CLOSED'
   | 'MEDIA_TRANSPORT_PROTOCOL_ERROR'
   | 'MEDIA_TRANSPORT_SEND_FAILED';
@@ -93,6 +95,7 @@ const MEDIA_DETACH_REASONS: readonly MediaDetachReason[] = Object.freeze([
   'MEDIA_SEQUENCE_VIOLATION',
   'MEDIA_STALE_GENERATION',
   'MEDIA_STREAMING_TTS_TEXT_OR_RETRY',
+  'MEDIA_STREAMING_SPEECH_PROMOTION_TIMEOUT',
   'MEDIA_TRANSPORT_CLOSED',
   'MEDIA_TRANSPORT_PROTOCOL_ERROR',
   'MEDIA_TRANSPORT_SEND_FAILED',
@@ -207,7 +210,31 @@ export interface MediaPlaybackStopReceipt {
   readonly business_cancel_count_delta: 0;
 }
 
-export type MediaControl = MediaAttach | MediaAck | MediaDetach | MediaSpeechStart | MediaEndOfTurn | MediaPlaybackStopReceipt;
+export type MediaPrefetchTransitionState = 'prefetch_parked' | 'promoted' | 'promoted_unparked';
+
+export interface MediaPrefetchTransition {
+  readonly type: 'media.prefetch_transition';
+  readonly capability_version: typeof MEDIA_PREFETCH_PROMOTION_CAPABILITY;
+  readonly lease_id: string;
+  readonly generation: number;
+  readonly session_id: string;
+  readonly correlation_id: string;
+  readonly interaction_id: string;
+  readonly response_id: string;
+  readonly response_generation: number;
+  readonly unit_id: string;
+  readonly unit_seq: number;
+  readonly transition_seq: number;
+  readonly state: MediaPrefetchTransitionState;
+  readonly retained_through_seq: number;
+  readonly business_cancel_count_delta: 0;
+}
+
+export interface MediaPrefetchTransitionAck extends Omit<MediaPrefetchTransition, 'type'> {
+  readonly type: 'media.prefetch_transition_ack';
+}
+
+export type MediaControl = MediaAttach | MediaAck | MediaDetach | MediaSpeechStart | MediaEndOfTurn | MediaPlaybackStopReceipt | MediaPrefetchTransition | MediaPrefetchTransitionAck;
 
 export interface MediaAudioFrame {
   readonly seq: number;
@@ -752,6 +779,29 @@ export function serializeMediaControl(control: MediaControl): string {
         'playback stop cannot carry business cancellation',
       );
     }
+  } else if (control.type === 'media.prefetch_transition' || control.type === 'media.prefetch_transition_ack') {
+    for (const [name, value] of Object.entries({
+      lease_id: control.lease_id,
+      session_id: control.session_id,
+      correlation_id: control.correlation_id,
+      interaction_id: control.interaction_id,
+      response_id: control.response_id,
+      unit_id: control.unit_id,
+    })) requireId(name, value);
+    for (const [name, value] of Object.entries({
+      generation: control.generation,
+      response_generation: control.response_generation,
+      unit_seq: control.unit_seq,
+      transition_seq: control.transition_seq,
+      retained_through_seq: control.retained_through_seq,
+    })) requireSafeUint(name, value);
+    const expectedSeq = control.state === 'promoted' ? 1 : 0;
+    if (
+      control.capability_version !== MEDIA_PREFETCH_PROMOTION_CAPABILITY
+      || !['prefetch_parked', 'promoted', 'promoted_unparked'].includes(control.state)
+      || control.transition_seq !== expectedSeq
+      || control.business_cancel_count_delta !== 0
+    ) throw new MediaTransportViolation('MEDIA_INVALID_CONTROL', 'prefetch transition is not exact');
   } else if (control.type === 'media.speech_start') {
     requireId('lease_id', control.lease_id, MAX_LEASE_ID_BYTES);
     requireSafeUint('generation', control.generation);
@@ -974,6 +1024,45 @@ export function deserializeMediaControl(text: string): MediaControl {
       confirmed_through_seq: raw.confirmed_through_seq as number | null,
       business_cancel_count_delta: 0,
     });
+  }
+  if (raw.type === 'media.prefetch_transition' || raw.type === 'media.prefetch_transition_ack') {
+    requireExactKeys(raw, [
+      'type', 'contract_version', 'capability_version', 'lease_id', 'generation',
+      'session_id', 'correlation_id', 'interaction_id', 'response_id',
+      'response_generation', 'unit_id', 'unit_seq', 'transition_seq', 'state',
+      'retained_through_seq', 'business_cancel_count_delta',
+    ], 'prefetch_transition');
+    for (const name of ['lease_id', 'session_id', 'correlation_id', 'interaction_id', 'response_id', 'unit_id']) {
+      requireId(name, raw[name]);
+    }
+    for (const name of ['generation', 'response_generation', 'unit_seq', 'transition_seq', 'retained_through_seq']) {
+      requireSafeUint(name, raw[name], 'MEDIA_MALFORMED_CONTROL');
+    }
+    const state = raw.state;
+    const expectedSeq = state === 'promoted' ? 1 : 0;
+    if (
+      raw.capability_version !== MEDIA_PREFETCH_PROMOTION_CAPABILITY
+      || !['prefetch_parked', 'promoted', 'promoted_unparked'].includes(String(state))
+      || raw.transition_seq !== expectedSeq
+      || raw.business_cancel_count_delta !== 0
+    ) throw new MediaTransportViolation('MEDIA_MALFORMED_CONTROL', 'prefetch transition is not exact');
+    return Object.freeze({
+      type: raw.type,
+      capability_version: MEDIA_PREFETCH_PROMOTION_CAPABILITY,
+      lease_id: raw.lease_id,
+      generation: raw.generation,
+      session_id: raw.session_id,
+      correlation_id: raw.correlation_id,
+      interaction_id: raw.interaction_id,
+      response_id: raw.response_id,
+      response_generation: raw.response_generation,
+      unit_id: raw.unit_id,
+      unit_seq: raw.unit_seq,
+      transition_seq: raw.transition_seq,
+      state: state as MediaPrefetchTransitionState,
+      retained_through_seq: raw.retained_through_seq,
+      business_cancel_count_delta: 0,
+    } as MediaPrefetchTransition | MediaPrefetchTransitionAck);
   }
   throw new MediaTransportViolation('MEDIA_MALFORMED_CONTROL', 'unknown control type');
 }

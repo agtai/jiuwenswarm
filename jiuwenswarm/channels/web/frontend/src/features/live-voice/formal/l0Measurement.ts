@@ -21,15 +21,33 @@ export type BrowserL0Milestone =
   | 'fence_cancel_completion'
   | 'browser_failure'
   | 'fallback'
-  | 'discarded_work';
+  | 'discarded_work'
+  | 'unit_tts_requested'
+  | 'unit_first_pcm'
+  | 'unit_prepared'
+  | 'unit_playout_started'
+  | 'unit_playout_completed'
+  | 'unit_acknowledged'
+  | 'successor_tts_requested'
+  | 'successor_downlink_attached'
+  | 'successor_first_frame_buffered'
+  | 'successor_promoted_to_playout'
+  | 'successor_park_requested'
+  | 'successor_parked'
+  | 'successor_promotion_requested'
+  | 'successor_promoted'
+  | 'successor_promoted_unparked';
 
 export interface BrowserL0Binding {
   readonly correlation_id: string;
   readonly session_id: string;
   readonly interaction_id: string;
+  readonly activation_id: string;
   readonly activation_generation: number;
   readonly response_id: string | null;
   readonly response_generation: number | null;
+  readonly unit_id: string | null;
+  readonly unit_seq: number | null;
   readonly turn_id: string | null;
   readonly round_id: string | null;
   readonly task_id: string | null;
@@ -110,6 +128,21 @@ const MARKERS: Readonly<Record<BrowserL0Milestone, Readonly<MarkerRule>>> = Obje
   browser_failure: Object.freeze({ event_name: 'failure.observed', segment_name: 'runtime.response', source_component: 'measurement.browser.failure', reason_code: 'UNAVAILABLE', error_code: 'UNAVAILABLE' }),
   fallback: Object.freeze({ event_name: 'route.selected', segment_name: 'route.fallback', source_component: 'measurement.runtime.fallback', reason_code: 'ROUTE_FALLBACK', route_class: 'fallback' }),
   discarded_work: Object.freeze({ event_name: 'fence.stale_dropped', segment_name: 'runtime.presentation', source_component: 'measurement.runtime.discarded_work', reason_code: 'STALE_GENERATION', error_code: 'STALE' }),
+  unit_tts_requested: Object.freeze({ event_name: 'segment.started', segment_name: 'speech.synthesis', source_component: 'measurement.browser.unit_tts_requested' }),
+  unit_first_pcm: Object.freeze({ event_name: 'speech.playout_state', segment_name: 'speech.synthesis', source_component: 'measurement.browser.unit_first_pcm', state: 'ready' }),
+  unit_prepared: Object.freeze({ event_name: 'segment.completed', segment_name: 'speech.synthesis', source_component: 'measurement.browser.unit_prepared', state: 'terminal', outcome: 'completed' }),
+  unit_playout_started: Object.freeze({ event_name: 'segment.started', segment_name: 'speech.playout', source_component: 'measurement.browser.unit_playout_started' }),
+  unit_playout_completed: Object.freeze({ event_name: 'segment.completed', segment_name: 'speech.playout', source_component: 'measurement.browser.unit_playout_completed', state: 'terminal', outcome: 'completed' }),
+  unit_acknowledged: Object.freeze({ event_name: 'presentation.acknowledged', segment_name: 'runtime.presentation', source_component: 'measurement.browser.unit_acknowledged', state: 'terminal', outcome: 'completed' }),
+  successor_tts_requested: Object.freeze({ event_name: 'segment.started', segment_name: 'speech.synthesis', source_component: 'measurement.browser.successor_tts_requested' }),
+  successor_downlink_attached: Object.freeze({ event_name: 'segment.started', segment_name: 'speech.playout', source_component: 'measurement.browser.successor_downlink_attached' }),
+  successor_first_frame_buffered: Object.freeze({ event_name: 'speech.playout_state', segment_name: 'speech.playout', source_component: 'measurement.browser.successor_first_frame_buffered', state: 'ready' }),
+  successor_promoted_to_playout: Object.freeze({ event_name: 'speech.playout_state', segment_name: 'speech.playout', source_component: 'measurement.browser.successor_promoted_to_playout', state: 'ready' }),
+  successor_park_requested: Object.freeze({ event_name: 'segment.started', segment_name: 'speech.transport', source_component: 'measurement.browser.successor_park_requested' }),
+  successor_parked: Object.freeze({ event_name: 'segment.completed', segment_name: 'speech.transport', source_component: 'measurement.browser.successor_parked', outcome: 'completed' }),
+  successor_promotion_requested: Object.freeze({ event_name: 'segment.started', segment_name: 'speech.transport', source_component: 'measurement.browser.successor_promotion_requested' }),
+  successor_promoted: Object.freeze({ event_name: 'segment.completed', segment_name: 'speech.transport', source_component: 'measurement.browser.successor_promoted', outcome: 'completed' }),
+  successor_promoted_unparked: Object.freeze({ event_name: 'segment.completed', segment_name: 'speech.transport', source_component: 'measurement.browser.successor_promoted_unparked', outcome: 'completed' }),
 });
 
 function stableToken(value: unknown, field: string): string {
@@ -161,26 +194,32 @@ function normalizeLabels(value: Readonly<BrowserL0RunLabels>): Readonly<BrowserL
 
 function normalizeBinding(value: Readonly<BrowserL0Binding>): Readonly<BrowserL0Binding> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('binding is invalid');
-  exactKeys(value, ['correlation_id', 'session_id', 'interaction_id', 'activation_generation', 'response_id', 'response_generation', 'turn_id', 'round_id', 'task_id', 'attempt_id'], 'binding');
+  exactKeys(value, ['correlation_id', 'session_id', 'interaction_id', 'activation_id', 'activation_generation', 'response_id', 'response_generation', 'unit_id', 'unit_seq', 'turn_id', 'round_id', 'task_id', 'attempt_id'], 'binding');
   const normalized = {
     correlation_id: opaqueIdentity(value.correlation_id, 'correlation_id'),
     session_id: opaqueIdentity(value.session_id, 'session_id'),
     interaction_id: opaqueIdentity(value.interaction_id, 'interaction_id'),
+    activation_id: opaqueIdentity(value.activation_id, 'activation_id'),
     activation_generation: value.activation_generation,
     response_id: value.response_id,
     response_generation: value.response_generation,
+    unit_id: value.unit_id,
+    unit_seq: value.unit_seq,
     turn_id: value.turn_id,
     round_id: value.round_id,
     task_id: value.task_id,
     attempt_id: value.attempt_id,
   };
   if (!Number.isSafeInteger(normalized.activation_generation) || normalized.activation_generation <= 0) throw new TypeError('activation_generation is invalid');
-  for (const field of ['response_id', 'turn_id', 'round_id', 'task_id', 'attempt_id'] as const) {
+  for (const field of ['response_id', 'unit_id', 'turn_id', 'round_id', 'task_id', 'attempt_id'] as const) {
     const item = normalized[field];
     if (item !== null) opaqueIdentity(item, field);
   }
   if ((normalized.response_id === null) !== (normalized.response_generation === null)) throw new TypeError('response identity is incomplete');
   if (normalized.response_generation !== null && (!Number.isSafeInteger(normalized.response_generation) || normalized.response_generation < 0)) throw new TypeError('response_generation is invalid');
+  if (normalized.unit_seq !== null && (!Number.isSafeInteger(normalized.unit_seq) || normalized.unit_seq < 0)) throw new TypeError('unit_seq is invalid');
+  if (normalized.unit_seq !== null && normalized.response_id === null) throw new TypeError('unit response identity is incomplete');
+  if ((normalized.unit_id === null) !== (normalized.unit_seq === null)) throw new TypeError('unit identity is incomplete');
   if ((normalized.task_id === null) !== (normalized.attempt_id === null)) throw new TypeError('task identity is incomplete');
   return Object.freeze(normalized);
 }
@@ -222,6 +261,7 @@ function responseKey(binding: Readonly<BrowserL0Binding>): string | null {
     binding.correlation_id,
     binding.session_id,
     binding.interaction_id,
+    binding.activation_id,
     binding.activation_generation,
     binding.response_id,
     binding.response_generation,
@@ -320,6 +360,23 @@ export function recordBrowserL0Milestone(input: Readonly<{
     const marker = MARKERS[input.milestone];
     if (marker === undefined) return false;
     const binding = normalizeBinding(input.binding);
+    const requiresUnitIdentity =
+      input.milestone.startsWith('unit_')
+      || [
+        'successor_tts_requested',
+        'successor_downlink_attached',
+        'successor_first_frame_buffered',
+        'successor_promoted_to_playout',
+        'successor_park_requested',
+        'successor_parked',
+        'successor_promotion_requested',
+        'successor_promoted',
+        'successor_promoted_unparked',
+      ].includes(input.milestone);
+    if (
+      requiresUnitIdentity
+      && (binding.response_id === null || binding.unit_id === null || binding.unit_seq === null)
+    ) return false;
     const duration = input.duration_ms;
     if (duration !== undefined && (!Number.isFinite(duration) || duration < 0)) return false;
     if ((input.observed_at === undefined) !== (input.monotonic_ms === undefined)) return false;

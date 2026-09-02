@@ -15,6 +15,8 @@ export const SPEECH_RECOGNIZE_BATCH_METHOD = 'live_voice.speech.recognize_batch'
 export const SPEECH_RECOGNIZE_STREAMING_RESULT_METHOD = 'live_voice.speech.recognize_streaming_result';
 export const SPEECH_SYNTHESIZE_BATCH_METHOD = 'live_voice.speech.synthesize_batch';
 export const SPEECH_CANCEL_METHOD = 'live_voice.speech.cancel';
+export const MEDIA_PREFETCH_CAPABILITY_METHOD = 'live_voice.composition.media.prefetch.capability.negotiate';
+export const MEDIA_PREFETCH_PROMOTION_CAPABILITY = 'live-voice.media.prefetch-promotion.v1' as const;
 
 export const STREAMING_SPEECH_DEGRADATION_REASONS = Object.freeze([
   'STREAMING_SPEECH_FEATURE_OFF',
@@ -185,6 +187,7 @@ export interface FormalSynthesisDownlink {
   readonly binding: Readonly<Record<string, unknown>>;
   readonly max_pending_frames: number;
   readonly max_pending_bytes: number;
+  readonly prefetch_promotion_capability: typeof MEDIA_PREFETCH_PROMOTION_CAPABILITY | null;
 }
 
 export interface FormalRecognitionInput {
@@ -200,6 +203,8 @@ export interface FormalRecognitionInput {
 export interface FormalSynthesisInput {
   readonly response: Readonly<AudioResponseRef>;
   readonly unitId: string;
+  /** Authoritative PresentationUnit sequence when the caller has one. */
+  readonly unitSeq?: number;
   readonly renderPlan: Readonly<AudioRenderPlan>;
   readonly authoritativeAgentText: true;
   readonly locale: string;
@@ -214,6 +219,13 @@ export interface FormalSynthesisInput {
    */
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  readonly prefetchPromotionCapability?: typeof MEDIA_PREFETCH_PROMOTION_CAPABILITY;
+}
+
+export interface PrefetchPromotionScope {
+  readonly session_id: string;
+  readonly activation_id: string;
+  readonly activation_generation: number;
 }
 
 export interface LocalSpeechCapability {
@@ -590,6 +602,15 @@ function sameResponse(left: Readonly<AudioResponseRef>, right: Readonly<AudioRes
   return left.interaction_id === right.interaction_id && left.response_id === right.response_id && left.response_generation === right.response_generation;
 }
 
+function synthesisOperationKey(response: Readonly<AudioResponseRef>, unitId: string): string {
+  return JSON.stringify([
+    response.interaction_id,
+    response.response_id,
+    response.response_generation,
+    unitId,
+  ]);
+}
+
 export class GatewayBatchSpeechClient {
   readonly #enabled: boolean;
   readonly #transport: GatewaySpeechTransport | null;
@@ -598,8 +619,22 @@ export class GatewayBatchSpeechClient {
   #token = 0;
   #activeRecognition: ActiveRecognition | null = null;
   readonly #seenCaptures = new Map<string, number>();
-  readonly #responses = new Map<string, ActiveOperation>();
-  readonly #responseGenerations = new Map<string, number>();
+  readonly #responses = new Map<
+    string,
+    Readonly<{
+      response: Readonly<AudioResponseRef>;
+      unitId: string;
+      operation: ActiveOperation;
+    }>
+  >();
+  readonly #responseUnits = new Map<
+    string,
+    {
+      readonly responseId: string;
+      readonly generation: number;
+      readonly unitIds: ReadonlySet<string>;
+    }
+  >();
 
   constructor(
     options: Readonly<{
@@ -768,6 +803,35 @@ export class GatewayBatchSpeechClient {
       }),
       gateway: sanitizedGateway,
     });
+  }
+
+  async negotiatePrefetchPromotion(
+    scope: Readonly<PrefetchPromotionScope>,
+  ): Promise<typeof MEDIA_PREFETCH_PROMOTION_CAPABILITY | null> {
+    this.#requireEnabled();
+    if (scope.session_id !== this.#scope!.session_id) {
+      throw new GatewayBatchSpeechError('INVALID_ARGUMENT', 'SESSION_MISMATCH', 'prefetch negotiation Session is not exact');
+    }
+    const activationId = requiredText(scope.activation_id, 'activation_id');
+    const activationGeneration = nonNegativeSafeInteger(scope.activation_generation, 'activation_generation');
+    let raw: unknown;
+    try {
+      raw = await this.#transport!.request(MEDIA_PREFETCH_CAPABILITY_METHOD, {
+        session_id: scope.session_id,
+        activation_id: activationId,
+        activation_generation: activationGeneration,
+        offered: [MEDIA_PREFETCH_PROMOTION_CAPABILITY],
+      });
+    } catch (error: unknown) {
+      if (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'METHOD_NOT_FOUND') return null;
+      throw error;
+    }
+    const result = objectValue(raw, 'prefetch_capability');
+    if (result.selected === null) return null;
+    if (result.selected !== MEDIA_PREFETCH_PROMOTION_CAPABILITY) {
+      throw new GatewayBatchSpeechError('PROTOCOL_VIOLATION', 'INVALID_PREFETCH_CAPABILITY', 'Gateway selected an unknown prefetch capability');
+    }
+    return MEDIA_PREFETCH_PROMOTION_CAPABILITY;
   }
 
   async recognizeStreamingFinal(input: Readonly<FormalRecognitionInput>): Promise<Readonly<FormalStreamingRecognitionDecision>> {
@@ -994,8 +1058,21 @@ export class GatewayBatchSpeechClient {
     requiredText(response.interaction_id, 'response.interaction_id');
     requiredText(response.response_id, 'response.response_id');
     const generation = nonNegativeSafeInteger(response.response_generation, 'response.response_generation');
-    const last = this.#responseGenerations.get(response.interaction_id) ?? -1;
-    if (generation <= last) {
+    const unitId = requiredText(input.unitId, 'unit_id');
+    const unitSeq = input.unitSeq === undefined
+      ? undefined
+      : nonNegativeSafeInteger(input.unitSeq, 'unit_seq');
+    if (
+      input.prefetchPromotionCapability !== undefined
+      && (input.prefetchPromotionCapability !== MEDIA_PREFETCH_PROMOTION_CAPABILITY || unitSeq === undefined || unitSeq <= 0)
+    ) throw new GatewayBatchSpeechError('INVALID_ARGUMENT', 'INVALID_PREFETCH_CAPABILITY', 'prefetch promotion requires a continuation unit');
+    const priorUnits = this.#responseUnits.get(response.interaction_id);
+    if (
+      priorUnits !== undefined &&
+      (generation < priorUnits.generation ||
+        (generation === priorUnits.generation &&
+          (response.response_id !== priorUnits.responseId || priorUnits.unitIds.has(unitId))))
+    ) {
       throw new GatewayBatchSpeechError('STALE', 'STALE_SYNTHESIS_RESPONSE', 'response generation is stale or duplicated');
     }
     if (input.authoritativeAgentText !== true) {
@@ -1027,10 +1104,30 @@ export class GatewayBatchSpeechClient {
       );
     }
     const operation = this.#beginOperation(input.operationId, input.correlationId);
-    const prior = this.#responses.get(response.interaction_id);
-    if (prior !== undefined) void this.#cancelBestEffort(prior);
-    this.#responses.set(response.interaction_id, operation);
-    this.#boundedSet(this.#responseGenerations, response.interaction_id, generation);
+    const operationKey = synthesisOperationKey(response, unitId);
+    for (const [key, active] of this.#responses) {
+      if (
+        active.response.interaction_id === response.interaction_id
+        && active.response.response_generation < generation
+      ) {
+        this.#responses.delete(key);
+        void this.#cancelBestEffort(active.operation);
+      }
+    }
+    this.#responses.set(
+      operationKey,
+      Object.freeze({ response: Object.freeze({ ...response }), unitId, operation }),
+    );
+    const unitIds =
+      priorUnits?.generation === generation
+        ? new Set(priorUnits.unitIds)
+        : new Set<string>();
+    unitIds.add(unitId);
+    this.#boundedSet(
+      this.#responseUnits,
+      response.interaction_id,
+      Object.freeze({ responseId: response.response_id, generation, unitIds: Object.freeze(unitIds) }),
+    );
     const timeoutMs = input.timeoutMs ?? DEFAULT_SYNTHESIS_EVENT_TIMEOUT_MS;
     const requestId = this.#createId();
     let raw: unknown;
@@ -1047,7 +1144,11 @@ export class GatewayBatchSpeechClient {
           scope: this.#scope!,
           timeout_ms: timeoutMs,
           response: { ...response },
-          unit_id: requiredText(input.unitId, 'unit_id'),
+          unit_id: unitId,
+          ...(unitSeq === undefined ? {} : { unit_seq: unitSeq }),
+          ...(input.prefetchPromotionCapability === undefined
+            ? {}
+            : { prefetch_promotion_capability: input.prefetchPromotionCapability }),
           render_plan: {
             display_text: renderPlan.display_text,
             spoken_text: renderPlan.spoken_text,
@@ -1061,7 +1162,9 @@ export class GatewayBatchSpeechClient {
         { timeoutMs: timeoutMs + 1000, signal: input.signal }
       );
     } catch (error) {
-      if (this.#responses.get(response.interaction_id)?.token === operation.token) this.#responses.delete(response.interaction_id);
+      if (this.#responses.get(operationKey)?.operation.token === operation.token) {
+        this.#responses.delete(operationKey);
+      }
       if (
         input.signal?.aborted ||
         (typeof error === 'object' && error !== null && ['REQUEST_TIMEOUT', 'REQUEST_ABORTED'].includes(String((error as { code?: unknown }).code)))
@@ -1070,15 +1173,15 @@ export class GatewayBatchSpeechClient {
       }
       throw error;
     }
-    if (this.#responses.get(response.interaction_id)?.token !== operation.token) return null;
-    this.#responses.delete(response.interaction_id);
+    if (this.#responses.get(operationKey)?.operation.token !== operation.token) return null;
+    this.#responses.delete(operationKey);
     const result = parseEnvelope(raw, requestId, operation.operationId);
     const resultResponse = objectValue(result.response, 'result.response');
     const audio = objectValue(result.audio, 'result.audio');
     if (
       result.operation !== 'speech.synthesize.batch' ||
       !sameResponse(resultResponse as unknown as AudioResponseRef, response) ||
-      result.unit_id !== input.unitId ||
+      result.unit_id !== unitId ||
       result.presented !== false ||
       audio.channel_count !== 1
     ) {
@@ -1100,6 +1203,7 @@ export class GatewayBatchSpeechClient {
         'frame_count', 'max_pending_bytes', 'max_pending_frames',
         'media_ticket', 'sample_rate_hz', 'streaming', 'subprotocol',
         'ticket_ttl_ms', 'degradation_reason',
+        ...(input.prefetchPromotionCapability === undefined ? [] : ['prefetch_promotion_capability']),
       ].sort();
       if (
         actualKeys.length !== expectedKeys.length
@@ -1154,6 +1258,11 @@ export class GatewayBatchSpeechClient {
         );
       }
       const mediaTicket = consumePrivateText(audio, 'media_ticket', 'audio.media_ticket');
+      const prefetchPromotionCapability = input.prefetchPromotionCapability === undefined
+        ? null
+        : (audio.prefetch_promotion_capability === MEDIA_PREFETCH_PROMOTION_CAPABILITY
+          ? MEDIA_PREFETCH_PROMOTION_CAPABILITY
+          : (() => { throw new GatewayBatchSpeechError('PROTOCOL_VIOLATION', 'INVALID_PREFETCH_CAPABILITY', 'Gateway did not echo selected prefetch capability'); })());
       return Object.freeze({
         operation: 'speech.synthesize.batch',
         response: Object.freeze({ ...response }),
@@ -1171,6 +1280,7 @@ export class GatewayBatchSpeechClient {
           binding: Object.freeze({ ...objectValue(audio.binding, 'audio.binding') }),
           max_pending_frames: maxPendingFrames,
           max_pending_bytes: maxPendingBytes,
+          prefetch_promotion_capability: prefetchPromotionCapability,
         }),
         provider,
         presented: false,
@@ -1222,10 +1332,14 @@ export class GatewayBatchSpeechClient {
   }
 
   async fenceSynthesis(interactionId: string): Promise<void> {
-    const active = this.#responses.get(requiredText(interactionId, 'interaction_id'));
-    if (active === undefined) return;
-    this.#responses.delete(interactionId);
-    await this.#cancelBestEffort(active);
+    const expectedInteractionId = requiredText(interactionId, 'interaction_id');
+    const cancellations: Promise<void>[] = [];
+    for (const [key, active] of this.#responses) {
+      if (active.response.interaction_id !== expectedInteractionId) continue;
+      this.#responses.delete(key);
+      cancellations.push(this.#cancelBestEffort(active.operation));
+    }
+    await Promise.all(cancellations);
   }
 
   #beginOperation(operationId: string | undefined, correlationId: string): ActiveOperation {

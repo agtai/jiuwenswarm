@@ -220,6 +220,10 @@ def test_native_capability_is_truthful_and_polling_cannot_claim_streaming() -> N
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     assert runtime.capability.has_declared_acceptance_gaps is False
     assert runtime.capability.acceptance_gaps == ()
+    assert (
+        runtime.capability.synthesis.parked_pause
+        is CapabilityProvenance.UNAVAILABLE
+    )
     assert runtime.capability.recognition.transport is ProviderTransport.NATIVE_STREAM
     assert (
         runtime.capability.synthesis.chunk_text_spans
@@ -1516,6 +1520,241 @@ def test_synthesis_event_timeout_slides_after_each_valid_event() -> None:
         runtime,
         kind=ProviderControlKind.CANCEL_SYNTHESIS,
         expected_ref=request.ref,
+    )
+    assert_zero_authority_effects(runtime)
+
+
+def test_synthesis_pause_freezes_only_remaining_event_budget() -> None:
+    now = [0.0]
+    runtime = StreamingSpeechConformance(
+        native_capability(), enabled=True, monotonic=lambda: now[0]
+    )
+    response_ref = response()
+    request = synthesis_request(
+        response_ref=response_ref, event_timeout_seconds=15.0
+    )
+    runtime.activate_response(response_ref)
+    runtime.start_synthesis(request)
+    runtime.accept_synthesis_event(
+        synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+
+    now[0] = 2.0
+    runtime.pause_synthesis_events(request.ref)
+    now[0] = 56.0
+    assert runtime.expire() == 0
+    runtime.resume_synthesis_events(request.ref)
+
+    now[0] = 68.9
+    assert runtime.expire() == 0
+    runtime.accept_synthesis_event(
+        synthesis_event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=2,
+            display_span=request.display_span,
+            spoken_span=TextSpan(0, len(request.spoken_text)),
+        )
+    )
+
+    now[0] = 83.9
+    assert runtime.expire() == 1
+    assert_one_provider_cancel(
+        runtime,
+        kind=ProviderControlKind.CANCEL_SYNTHESIS,
+        expected_ref=request.ref,
+    )
+    with pytest.raises(StreamingSpeechViolation) as expired:
+        runtime.accept_synthesis_event(
+            synthesis_event(
+                request,
+                seq=2,
+                cursor=2,
+                kind=SynthesisEventKind.CHUNK,
+                samples=1,
+                display_span=TextSpan(request.display_span.end, request.display_span.end),
+                spoken_span=TextSpan(len(request.spoken_text), len(request.spoken_text)),
+            )
+        )
+    assert expired.value.reason == "SYNTHESIS_STREAM_TIMEOUT"
+    assert_zero_authority_effects(runtime)
+
+
+def test_synthesis_pause_rejects_invalid_state_without_renewing_budget() -> None:
+    now = [0.0]
+    runtime = StreamingSpeechConformance(
+        native_capability(), enabled=True, monotonic=lambda: now[0]
+    )
+    response_ref = response()
+    request = synthesis_request(
+        response_ref=response_ref, event_timeout_seconds=15.0
+    )
+    runtime.activate_response(response_ref)
+    runtime.start_synthesis(request)
+    runtime.accept_synthesis_event(
+        synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+
+    with pytest.raises(StreamingSpeechViolation) as idle_resume:
+        runtime.resume_synthesis_events(request.ref)
+    assert idle_resume.value.reason == "SYNTHESIS_EVENTS_NOT_PAUSED"
+
+    now[0] = 2.0
+    runtime.pause_synthesis_events(request.ref)
+    with pytest.raises(StreamingSpeechViolation) as duplicate_pause:
+        runtime.pause_synthesis_events(request.ref)
+    assert duplicate_pause.value.reason == "SYNTHESIS_EVENTS_ALREADY_PAUSED"
+    now[0] = 52.0
+    runtime.resume_synthesis_events(request.ref)
+    now[0] = 53.0
+    runtime.pause_synthesis_events(request.ref)
+    now[0] = 63.0
+    runtime.resume_synthesis_events(request.ref)
+    now[0] = 74.9
+    assert runtime.expire() == 0
+    now[0] = 75.0
+    assert runtime.expire() == 1
+    assert_one_provider_cancel(
+        runtime,
+        kind=ProviderControlKind.CANCEL_SYNTHESIS,
+        expected_ref=request.ref,
+    )
+    assert_zero_authority_effects(runtime)
+
+
+def test_foreign_pause_resume_control_has_zero_effect_on_exact_stream() -> None:
+    runtime = StreamingSpeechConformance(native_capability(), enabled=True)
+    response_ref = response()
+    request = synthesis_request(response_ref=response_ref)
+    runtime.activate_response(response_ref)
+    runtime.start_synthesis(request)
+    foreign = replace(request.ref, unit_id="foreign-unit")
+
+    with pytest.raises(StreamingSpeechViolation) as foreign_pause:
+        runtime.pause_synthesis_events(foreign)
+    assert foreign_pause.value.reason == "SYNTHESIS_IDENTITY_MISMATCH"
+    assert runtime.take_provider_controls() == ()
+    assert runtime.snapshot().active_synthesis == 1
+
+    runtime.pause_synthesis_events(request.ref)
+    with pytest.raises(StreamingSpeechViolation) as foreign_resume:
+        runtime.resume_synthesis_events(foreign)
+    assert foreign_resume.value.reason == "SYNTHESIS_IDENTITY_MISMATCH"
+    assert runtime.take_provider_controls() == ()
+    assert runtime.snapshot().active_synthesis == 1
+
+    runtime.resume_synthesis_events(request.ref)
+    started = runtime.accept_synthesis_event(
+        synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    assert started.kind is SynthesisEventKind.STARTED
+    assert_zero_authority_effects(runtime)
+
+
+def test_synthesis_event_while_paused_fails_before_cursor_progress() -> None:
+    runtime = StreamingSpeechConformance(native_capability(), enabled=True)
+    response_ref = response()
+    request = synthesis_request(response_ref=response_ref)
+    runtime.activate_response(response_ref)
+    runtime.start_synthesis(request)
+    runtime.accept_synthesis_event(
+        synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    runtime.pause_synthesis_events(request.ref)
+
+    with pytest.raises(StreamingSpeechViolation) as paused:
+        runtime.accept_synthesis_event(
+            synthesis_event(
+                request,
+                seq=1,
+                cursor=0,
+                kind=SynthesisEventKind.CHUNK,
+                samples=2,
+                display_span=request.display_span,
+                spoken_span=TextSpan(0, len(request.spoken_text)),
+            )
+        )
+    assert paused.value.reason == "SYNTHESIS_EVENT_WHILE_PAUSED"
+    assert_one_provider_cancel(
+        runtime,
+        kind=ProviderControlKind.CANCEL_SYNTHESIS,
+        expected_ref=request.ref,
+    )
+    with pytest.raises(StreamingSpeechViolation) as late_resume:
+        runtime.resume_synthesis_events(request.ref)
+    assert late_resume.value.reason == "SYNTHESIS_OUTPUT_FENCED"
+    assert_zero_authority_effects(runtime)
+
+
+def test_synthesis_pause_cannot_rescue_expired_event_deadline() -> None:
+    now = [0.0]
+    runtime = StreamingSpeechConformance(
+        native_capability(), enabled=True, monotonic=lambda: now[0]
+    )
+    response_ref = response()
+    request = synthesis_request(response_ref=response_ref, event_timeout_seconds=1)
+    runtime.activate_response(response_ref)
+    runtime.start_synthesis(request)
+    now[0] = 1.0
+
+    with pytest.raises(StreamingSpeechViolation) as expired:
+        runtime.pause_synthesis_events(request.ref)
+    assert expired.value.reason == "SYNTHESIS_STREAM_TIMEOUT"
+    assert_one_provider_cancel(
+        runtime,
+        kind=ProviderControlKind.CANCEL_SYNTHESIS,
+        expected_ref=request.ref,
+    )
+    assert_zero_authority_effects(runtime)
+
+
+def test_two_paused_synthesis_event_budgets_are_isolated() -> None:
+    now = [0.0]
+    runtime = StreamingSpeechConformance(
+        native_capability(), enabled=True, monotonic=lambda: now[0]
+    )
+    first_response = response()
+    second_response = response(interaction_id="interaction-2", response_id="response-2")
+    first = synthesis_request(response_ref=first_response, event_timeout_seconds=10)
+    second = synthesis_request(
+        response_ref=second_response,
+        stream_id="synthesis-2",
+        unit_id="unit-2",
+        event_timeout_seconds=20,
+    )
+    runtime.activate_response(first_response)
+    runtime.activate_response(second_response)
+    runtime.start_synthesis(first)
+    runtime.start_synthesis(second)
+    now[0] = 2.0
+    runtime.pause_synthesis_events(first.ref)
+    now[0] = 5.0
+    runtime.pause_synthesis_events(second.ref)
+    now[0] = 50.0
+    assert runtime.expire() == 0
+
+    runtime.resume_synthesis_events(first.ref)
+    now[0] = 57.9
+    assert runtime.expire() == 0
+    now[0] = 58.0
+    assert runtime.expire() == 1
+    assert_one_provider_cancel(
+        runtime,
+        kind=ProviderControlKind.CANCEL_SYNTHESIS,
+        expected_ref=first.ref,
+    )
+    assert runtime.expire() == 0
+    runtime.resume_synthesis_events(second.ref)
+    now[0] = 72.9
+    assert runtime.expire() == 0
+    now[0] = 73.0
+    assert runtime.expire() == 1
+    assert_one_provider_cancel(
+        runtime,
+        kind=ProviderControlKind.CANCEL_SYNTHESIS,
+        expected_ref=second.ref,
     )
     assert_zero_authority_effects(runtime)
 

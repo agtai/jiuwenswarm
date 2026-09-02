@@ -34,6 +34,7 @@ from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
     DedicatedMediaProductRegistry,
     MEDIA_AUTH_CONTRACT_VERSION,
     MEDIA_ACTIVATE_METHOD,
+    MEDIA_PREFETCH_CAPABILITY_METHOD,
     register_dedicated_media_rpc_handlers,
     handle_registered_media_socket,
 )
@@ -243,6 +244,57 @@ def test_feature_off_and_provider_off_create_no_route() -> None:
         "status": "unavailable",
         "reason_id": "MEDIA_PROVIDER_UNAVAILABLE",
     }
+
+
+@pytest.mark.asyncio
+async def test_prefetch_capability_negotiation_binds_exact_activation() -> None:
+    registry = _active_registry()
+    params = _params()
+    _activate(
+        registry,
+        params=params,
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+
+    class _Owner:
+        async def parked_pause_available(self) -> bool:
+            return True
+
+    registry._streaming_synthesis_owner = _Owner()  # type: ignore[assignment]
+    selected = await registry.negotiate_prefetch_promotion(
+        params={
+            "session_id": "session-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+            "offered": ["live-voice.media.prefetch-promotion.v1"],
+        },
+        routed_session_id="session-1",
+        connection_id="connection-1",
+        user_id=None,
+    )
+    assert selected == {"selected": "live-voice.media.prefetch-promotion.v1"}
+
+    unavailable = await registry.negotiate_prefetch_promotion(
+        params={
+            "session_id": "session-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+            "offered": [],
+        },
+        routed_session_id="session-1",
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    assert unavailable == {"selected": None}
+    registered: dict[str, object] = {}
+
+    class _Channel:
+        def register_method(self, name: str, handler: object) -> None:
+            registered[name] = handler
+
+    register_dedicated_media_rpc_handlers(_Channel(), registry=registry)
+    assert MEDIA_PREFETCH_CAPABILITY_METHOD in registered
 
 
 def test_websocket_transport_debug_cannot_persist_binary_media(
@@ -461,6 +513,31 @@ def test_expired_unconsumed_ticket_releases_capacity_before_authority_ttl() -> N
 
     assert replacement["status"] == "active"
     assert len(registry._records) == 1
+
+
+def test_consumed_downlink_survives_ticket_ttl_until_authority_terminal() -> None:
+    now = 0.0
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        monotonic=lambda: now,
+        ticket_ttl_seconds=1,
+        authority_ttl_seconds=100,
+    )
+    registry.set_provider_available(True)
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    ticket = _media_ticket(activation)
+    record = registry.consume_ticket(ticket, request_origin=ORIGIN)
+    assert record is not None
+
+    now = 2.0
+    assert registry.consume_ticket("Z" * 43, request_origin=ORIGIN) is None
+    assert record in registry._records.values()
+    assert record.ticket_consumed is True
 
 
 def test_exact_media_close_is_idempotent_and_revokes_all_speech_authority() -> None:
@@ -923,6 +1000,42 @@ async def test_exceptional_media_socket_exit_clears_every_raw_audio_byte(
     assert record.route_completed is True
     assert record.pcm == bytearray()
     assert record.recognition_content_sha256 is None
+
+
+def test_uplink_consumer_failure_logs_safe_callback_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _active_registry()
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-owner",
+    )
+    record = _pending_record(registry, _media_ticket(activation))
+    frame = MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.25,) * 320)
+    observed: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        dedicated_media_registration._LOGGER,
+        "warning",
+        lambda template, *args: observed.append((template, *args)),
+    )
+
+    dedicated_media_registration._log_uplink_consumer_failure(
+        record,
+        frame,
+        phase="streaming_frame",
+        error=RuntimeError("streaming consumer failed"),
+    )
+
+    assert len(observed) == 1
+    template, *args = observed[0]
+    message = str(template) % tuple(args)
+    assert "live_voice_uplink_consumer_failed phase=streaming_frame" in message
+    assert f"session_id={record.binding.session_id}" in message
+    assert "frame_seq=0" in message
+    assert "error_type=RuntimeError" in message
+    assert "streaming consumer failed" not in message
 
 
 @pytest.mark.asyncio
@@ -1564,6 +1677,117 @@ def test_agent_notification_authorizes_only_exact_agent_text_render_plan() -> No
     assert registry.authorize(wrong) is None
 
 
+def test_c2_audio_segment_notification_authorizes_its_exact_spoken_text() -> None:
+    registry = _active_registry()
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    record = registry.consume_ticket(_media_ticket(activation), request_origin=ORIGIN)
+    assert record is not None
+    record.route_completed = True
+    response = {
+        "interaction_id": "interaction-1",
+        "response_id": "response-c2-prefix",
+        "response_generation": 0,
+    }
+
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification",
+                "kind": "agent.output",
+                "session_id": "session-1",
+                "correlation_id": "correlation-1",
+                "activation_id": "activation-1",
+                "activation_generation": 1,
+                "response": response,
+                "agent_event": {"event_type": "chat.delta", "text": "ignored"},
+                "presentation_unit": {
+                    "surface": "audio",
+                    "unit_id": "unit-c2-prefix",
+                    "seq": 0,
+                    "projection_role": "audio_segment",
+                },
+                "presentation_text": "First stable sentence.",
+                "presentation_delivery": "speak_only",
+            },
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+
+    ref = ResponseRef("interaction-1", "response-c2-prefix", 0)
+    expected = record.synthesis_content_sha256[(ref, "unit-c2-prefix")]
+    scope = ScopeRef(
+        str(activation["subject_id"]), None, "session-1", Assurance.AUTHENTICATED
+    )
+    exact = SpeechAuthorizationBinding(
+        subject_id=scope.subject_id,
+        scope=scope,
+        operation=SYNTHESIZE_OPERATION,
+        operation_id="synthesize-c2-prefix",
+        correlation_id="correlation-1",
+        capture_id=None,
+        capture_generation=None,
+        track_id=None,
+        response=ref,
+        unit_id="unit-c2-prefix",
+        content_sha256=expected,
+    )
+    assert registry.authorize(exact) == exact
+
+
+def test_c2_display_only_text_root_grants_zero_synthesis_authority() -> None:
+    registry = _active_registry()
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    record = registry.consume_ticket(_media_ticket(activation), request_origin=ORIGIN)
+    assert record is not None
+    record.route_completed = True
+    ref = ResponseRef("interaction-1", "response-c2-root", 0)
+
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification",
+                "kind": "agent.output",
+                "session_id": "session-1",
+                "correlation_id": "correlation-1",
+                "activation_id": "activation-1",
+                "activation_generation": 1,
+                "response": {
+                    "interaction_id": ref.interaction_id,
+                    "response_id": ref.response_id,
+                    "response_generation": ref.response_generation,
+                },
+                "agent_event": {"event_type": "chat.final", "text": "Complete final."},
+                "presentation_unit": {
+                    "surface": "text",
+                    "unit_id": "unit-c2-root",
+                    "projection_role": "authoritative_text_root",
+                },
+                "presentation_text": "Complete final.",
+                "presentation_delivery": "display_only",
+            },
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+
+    assert (ref, "unit-c2-root") not in record.synthesis_content_sha256
+
+
 def _observe_task_notification(
     registry: DedicatedMediaProductRegistry,
     *,
@@ -1764,7 +1988,9 @@ def test_non_task_audio_notification_never_retains_speech_authority(
 
 
 @pytest.mark.asyncio
-async def test_task_notification_speech_transfer_claims_one_successor_operation() -> None:
+async def test_task_notification_speech_transfer_claims_one_successor_operation() -> (
+    None
+):
     registry = _active_registry()
     initial = _activate(
         registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
@@ -1793,7 +2019,9 @@ async def test_task_notification_speech_transfer_claims_one_successor_operation(
     )
     no_owner_result = await service.synthesize(
         no_owner,
-        SpeechRpcContext(str(initial["subject_id"]), "session-1", Assurance.AUTHENTICATED),
+        SpeechRpcContext(
+            str(initial["subject_id"]), "session-1", Assurance.AUTHENTICATED
+        ),
     )
     assert no_owner_result["error"]["reason"] == "SPEECH_OPERATION_NOT_AUTHORIZED"
     assert provider.synthesize_calls == 0
@@ -1839,9 +2067,7 @@ async def test_task_notification_speech_transfer_claims_one_successor_operation(
         connection_id="connection-1",
         user_id="user-1",
     )
-    later_record = registry.consume_ticket(
-        _media_ticket(later), request_origin=ORIGIN
-    )
+    later_record = registry.consume_ticket(_media_ticket(later), request_origin=ORIGIN)
     assert later_record is not None
     later_record.route_completed = True
     replay = await service.synthesize(
@@ -2009,7 +2235,9 @@ async def test_task_notification_speech_authority_failures_never_call_provider(
     assert provider.synthesize_calls == 0
 
 
-def test_task_notification_transfer_ledger_has_deterministic_capacity_and_expiry() -> None:
+def test_task_notification_transfer_ledger_has_deterministic_capacity_and_expiry() -> (
+    None
+):
     now = [0.0]
     registry = DedicatedMediaProductRegistry(
         enabled=True,
@@ -2043,31 +2271,36 @@ def test_task_notification_transfer_ledger_has_deterministic_capacity_and_expiry
     ) not in authority.synthesis_content_sha256
 
     now[0] = 2.0
-    assert registry.authorize(
-        SpeechAuthorizationBinding(
-            subject_id=str(activation["subject_id"]),
-            scope=ScopeRef(
-                str(activation["subject_id"]),
-                None,
-                "session-1",
-                Assurance.AUTHENTICATED,
-            ),
-            operation=SYNTHESIZE_OPERATION,
-            operation_id="operation-expired",
-            correlation_id="correlation-1",
-            capture_id=None,
-            capture_generation=None,
-            track_id=None,
-            response=ResponseRef("interaction-1", "response-capacity-16", 16),
-            unit_id="unit-capacity-16",
-            content_sha256="0" * 64,
+    assert (
+        registry.authorize(
+            SpeechAuthorizationBinding(
+                subject_id=str(activation["subject_id"]),
+                scope=ScopeRef(
+                    str(activation["subject_id"]),
+                    None,
+                    "session-1",
+                    Assurance.AUTHENTICATED,
+                ),
+                operation=SYNTHESIZE_OPERATION,
+                operation_id="operation-expired",
+                correlation_id="correlation-1",
+                capture_id=None,
+                capture_generation=None,
+                track_id=None,
+                response=ResponseRef("interaction-1", "response-capacity-16", 16),
+                unit_id="unit-capacity-16",
+                content_sha256="0" * 64,
+            )
         )
-    ) is None
+        is None
+    )
     assert registry._product_activations == {}
     assert authority.synthesis_content_sha256 == {}
 
 
-def test_task_notification_transfer_expiry_is_not_renewed_by_later_notifications() -> None:
+def test_task_notification_transfer_expiry_is_not_renewed_by_later_notifications() -> (
+    None
+):
     now = [0.0]
     registry = DedicatedMediaProductRegistry(
         enabled=True,
@@ -2181,6 +2414,68 @@ def test_mismatched_notification_batch_has_zero_partial_speech_authority() -> No
     )
 
     assert record.synthesis_content_sha256 == {}
+
+
+def test_c2_batch_retains_audio_segment_speech_authority() -> None:
+    registry = _active_registry()
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    record = registry.consume_ticket(_media_ticket(activation), request_origin=ORIGIN)
+    assert record is not None
+    record.route_completed = True
+    binding = {
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+    }
+    prefix = {
+        "status": "notification",
+        "kind": "agent.output",
+        "request_id": "request-c2-prefix",
+        "round_id": "round-c2-prefix",
+        **binding,
+        "response": {
+            "interaction_id": "interaction-1",
+            "response_id": "response-c2-prefix-batch",
+            "response_generation": 0,
+        },
+        "agent_event": {"event_type": "chat.delta", "text": "ignored"},
+        "source_event": None,
+        "progress_event": None,
+        "presentation_unit": {
+            "surface": "audio",
+            "unit_id": "unit-c2-prefix-batch",
+            "seq": 0,
+            "projection_role": "audio_segment",
+        },
+        "presentation_text": "First stable sentence.",
+        "presentation_delivery": "speak_only",
+        "error_reason": None,
+        "publish_seq": 0,
+    }
+
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification_batch",
+                "notifications": [prefix],
+                **binding,
+            },
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+
+    ref = ResponseRef("interaction-1", "response-c2-prefix-batch", 0)
+    assert (ref, "unit-c2-prefix-batch") in record.synthesis_content_sha256
 
 
 def test_same_binding_final_before_invalid_batch_tail_has_zero_speech_authority() -> (
@@ -2353,7 +2648,11 @@ def test_playout_receipt_requires_exact_authenticated_media_and_synthesis_flow()
 
 @pytest.mark.parametrize(
     ("successor_frame_timing", "expected_duplex"),
-    (("none", False), ("before_downlink_complete", True), ("after_downlink_complete", False)),
+    (
+        ("none", False),
+        ("before_downlink_complete", True),
+        ("after_downlink_complete", False),
+    ),
 )
 def test_synthesis_downlink_receipt_reports_early_duplex_without_rejecting_playout(
     successor_frame_timing: str, expected_duplex: bool

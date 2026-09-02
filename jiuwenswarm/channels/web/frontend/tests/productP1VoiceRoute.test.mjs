@@ -3622,6 +3622,7 @@ async function runConcurrentCaptureJourney(options = {}) {
   const statusSnapshots = [];
   const sockets = [];
   const socketOpenTasks = [];
+  const mediaLifecycleEvents = [];
   let activationCount = 0;
   let concurrentFailureSnapshot = null;
   let concurrentAudioReleased = false;
@@ -3643,6 +3644,7 @@ async function runConcurrentCaptureJourney(options = {}) {
   let bargeInSpeechStartCalls = 0;
   let bargeInEotCalls = 0;
   let bargeInStopped = null;
+  const continuationBarge = { attempted: false, stopped: null, snapshot: null };
   let captureRotationSnapshot = null;
   let overlapRotationRaceSnapshot = null;
   let staleSpeechStartSnapshot = null;
@@ -3787,6 +3789,15 @@ async function runConcurrentCaptureJourney(options = {}) {
         }
       } else if (this.serverBinding.direction === 'downlink' && typeof value === 'string') {
         const control = JSON.parse(value);
+        if (control.type === 'media.prefetch_transition') {
+          queueMicrotask(() => {
+            this.onmessage?.({
+              data: serializeMediaControl({ ...control, type: 'media.prefetch_transition_ack' }),
+            });
+            if (control.state !== 'prefetch_parked') this.pumpDownlink();
+          });
+          return;
+        }
         if (control.type !== 'media.ack') return;
         this.downlinkAckedSeq = Math.max(this.downlinkAckedSeq, control.through_seq);
         if (control.through_seq === options.earlyDownlinkDetachThroughSeq) {
@@ -3827,6 +3838,7 @@ async function runConcurrentCaptureJourney(options = {}) {
 
   const owner = new ProductP1VoiceRouteOwner({
     enabled: true,
+    prefetch_promotion_enabled: options.prefetchPromotion === true,
     expected_origin: 'https://voice.example.test',
     on_status: status => {
       statuses.push(status);
@@ -3834,6 +3846,17 @@ async function runConcurrentCaptureJourney(options = {}) {
         status,
         source_start_count: environment.contexts[0]?.sourceStartCount ?? 0,
       });
+      if (
+        options.stopOnContinuationPlaying?.armed === true
+        && status === 'playing'
+        && !continuationBarge.attempted
+      ) {
+        continuationBarge.attempted = true;
+        queueMicrotask(() => {
+          continuationBarge.stopped = owner.stopAgentPlayout(response);
+          continuationBarge.snapshot = owner.status();
+        });
+      }
     },
     on_concurrent_capture_started: () => {
       concurrentCaptureStartedCalls += 1;
@@ -3863,8 +3886,16 @@ async function runConcurrentCaptureJourney(options = {}) {
     socket_factory: (socketFactory = url => {
       assert.equal(new URL(url).pathname, '/ws/live-voice/media');
       const socket = new DuplexSocket();
+      const socketIndex = sockets.length;
       sockets.push(socket);
       const openTask = Promise.resolve().then(async () => {
+        if (
+          socketIndex === 1
+          && Number.isFinite(options.firstDownlinkSocketOpenDelayMs)
+          && options.firstDownlinkSocketOpenDelayMs > 0
+        ) {
+          await new Promise(resolve => setTimeout(resolve, options.firstDownlinkSocketOpenDelayMs));
+        }
         socket.protocol = 'live-voice.media.v1';
         socket.readyState = 1;
         socket.onopen?.({});
@@ -3873,10 +3904,20 @@ async function runConcurrentCaptureJourney(options = {}) {
         // before this queued fake open runs. That is a valid cancelled route,
         // not a missing authority on an active route.
         if (binding === null) return;
+        if (
+          binding.direction === 'downlink'
+          && environment.failNextDownlinkAttach === true
+        ) {
+          environment.failNextDownlinkAttach = false;
+          socket.readyState = 3;
+          socket.onclose?.({ code: 1006, reason: 'injected staged attach failure' });
+          return;
+        }
         socket.onmessage?.({
           data: serializeMediaControl({ type: 'media.attach', binding }),
         });
         if (binding.direction === 'downlink') {
+          mediaLifecycleEvents.push('downlink_attached');
           if (options.useRealProcessorForSecondCapture === true) {
             for (let turn = 0; turn < 500 && realProcessorHarness === null; turn += 1) {
               await new Promise(resolve => setImmediate(resolve));
@@ -3965,8 +4006,16 @@ async function runConcurrentCaptureJourney(options = {}) {
     request: (request = async (method, params, transportOptions) => {
       calls.push([method, params]);
       requestOptions.push([method, transportOptions]);
+      if (method === 'live_voice.composition.media.prefetch.capability.negotiate') {
+        return {
+          selected: options.prefetchPromotionUnavailable === true
+            ? null
+            : 'live-voice.media.prefetch-promotion.v1',
+        };
+      }
       if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
         activationCount += 1;
+        if (activationCount === 2) mediaLifecycleEvents.push('successor_activation_requested');
         const binding = makeUplinkBinding(params, activationCount);
         const path = '/ws/live-voice/media';
         if (activationCount === 2 && options.failSecondCaptureWithMute === true) {
@@ -4049,7 +4098,16 @@ async function runConcurrentCaptureJourney(options = {}) {
         };
       }
       if (method === 'live_voice.speech.synthesize_batch') {
-        receiptSubjectId = `media-subject-${activationCount}`;
+        if (
+          options.synthesisGate !== undefined
+          && options.synthesisGateUnitSeq === params.unit_seq
+        ) await options.synthesisGate;
+        if (options.synthesisFailureUnitSeq === params.unit_seq) {
+          throw Object.assign(new Error('injected Provider synthesis timeout'), {
+            code: 'REQUEST_TIMEOUT',
+          });
+        }
+        receiptSubjectId = params.scope.subject_id;
         const path = '/ws/live-voice/media';
         return {
           contract_version: 'live-voice.contract.v2',
@@ -4071,11 +4129,17 @@ async function runConcurrentCaptureJourney(options = {}) {
               media_ticket: 'D'.repeat(43),
               subprotocol: 'live-voice.media.v1',
               ticket_ttl_ms: 30_000,
-              binding: downlinkBinding,
+              binding: {
+                ...downlinkBinding,
+                playout: { ...downlinkBinding.playout, unit_id: params.unit_id },
+              },
               max_pending_frames: 8,
               max_pending_bytes: 131_072,
               streaming: options.streamingDownlink === true,
               degradation_reason: options.downlinkDegradationReason ?? null,
+              ...(params.prefetch_promotion_capability === undefined
+                ? {}
+                : { prefetch_promotion_capability: params.prefetch_promotion_capability }),
             },
             provider: {
               provider_id: 'provider-test',
@@ -4106,6 +4170,10 @@ async function runConcurrentCaptureJourney(options = {}) {
         }
         return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
       }
+      if (method === 'live_voice.speech.cancel') {
+        if (options.speechCancelGate !== undefined) await options.speechCancelGate;
+        return { status: 'cancelled' };
+      }
       throw new Error(`unexpected method ${method}`);
     }),
   });
@@ -4133,6 +4201,7 @@ async function runConcurrentCaptureJourney(options = {}) {
     unit_id: 'unit-duplex-1',
     text: options.agentText ?? 'duplex Agent response',
     ...(options.captureDuringPlayout === false ? { capture_during_playout: false } : {}),
+    ...(options.responseContinuation === true ? { response_continuation: true } : {}),
   });
   void playing.catch(() => undefined);
   if (options.sendSecondFrame !== false) {
@@ -4655,6 +4724,7 @@ async function runConcurrentCaptureJourney(options = {}) {
     statuses,
     statusSnapshots,
     sockets,
+    mediaLifecycleEvents,
     activationCount,
     playError,
     capturingBeforeConcurrent,
@@ -4677,6 +4747,7 @@ async function runConcurrentCaptureJourney(options = {}) {
     bargeInSpeechStartCalls,
     bargeInEotCalls,
     bargeInStopped,
+    continuationBarge,
     captureRotationSnapshot,
     overlapRotationRaceSnapshot,
     staleSpeechStartSnapshot,
@@ -4799,6 +4870,11 @@ test('formal P1 initial and successor Speech adapters forward the exact request 
 });
 
 test('formal P1 L0 success waits for the authoritative playout receipt and retains render time', () => {
+  assert.match(
+    productP1VoiceRouteSource,
+    /const renderedUnitCompletion = this\.#currentL0PlayoutCompletion\(\);[\s\S]*?'unit_playout_completed'[\s\S]*?renderedUnitCompletion\.elapsedMs[\s\S]*?'success'[\s\S]*?renderedUnitCompletion[\s\S]*?pendingPlayout\.unitSeq[\s\S]*?pendingPlayout\.unitId/s,
+    'unit completion must carry the same authoritative render clock and duration required by the L0 schema',
+  );
   assert.match(
     productP1VoiceRouteSource,
     /await this\.#acknowledgePlayout\(pendingPlayout\);[\s\S]*?this\.#l0Record\([\s\S]*?'playout_completed'[\s\S]*?'success'[\s\S]*?completed/s,
@@ -5004,6 +5080,1040 @@ test('formal P1 starts one bounded successor capture without gating a long-answe
   assert.equal(calls.some(([, params]) => params?.reason === PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON), false);
   assert.equal(environment.contexts[0].sourceEndCount, 3);
   await owner.close();
+});
+
+test('formal P1 plays a same-response continuation over one retained successor capture', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+  });
+
+  assert.equal(journey.playError, null);
+  assert.equal(journey.activationCount, 2);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  await journey.owner.playAgentText({
+    response: journey.response,
+    unit_id: 'unit-duplex-2',
+    text: 'same response tail',
+    response_continuation: true,
+  });
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length,
+    2,
+  );
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length,
+    2,
+  );
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.scope.subject_id),
+    ['media-subject-1', 'media-subject-1'],
+    'same-response tail synthesis must retain the completed predecessor speech authority',
+  );
+  assert.equal(
+    journey.calls.some(
+      ([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1',
+    ),
+    true,
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 preserves same-response identity when a successor is prepared during playout', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+  });
+  assert.equal(journey.playError, null);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+
+  journey.environment.deferSourceEnds = true;
+  const firstTail = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-prefetched-1',
+    unit_seq: 1,
+    text: 'first authoritative tail',
+    response_continuation: true,
+  });
+  const firstTailPlayout = journey.owner.playPreparedAgentText(firstTail);
+  void firstTailPlayout.catch(() => undefined);
+  for (let turn = 0; turn < 500 && journey.owner.status().status !== 'playing'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(journey.owner.status().status, 'playing', 'first prefetched tail did not start');
+
+  const secondTail = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-prefetched-2',
+    unit_seq: 2,
+    text: 'second authoritative tail',
+    response_continuation: true,
+  });
+  journey.environment.deferSourceEnds = false;
+  journey.environment.contexts[0].releaseSourceEnds();
+  await firstTailPlayout;
+  await journey.owner.playPreparedAgentText(secondTail);
+
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_id),
+    ['unit-duplex-1', 'unit-prefetched-1', 'unit-prefetched-2'],
+  );
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length,
+    3,
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 stages one successor transport receipt without WebAudio or presentation truth', async () => {
+  const journey = await runConcurrentCaptureJourney({ responseContinuation: true });
+  assert.equal(journey.playError, null);
+  const initialSourceStarts = journey.environment.contexts[0].sourceStartCount;
+  const initialDownlinks = journey.sockets.filter(
+    socket => socket.serverBinding?.direction === 'downlink',
+  ).length;
+  const tail = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-staged-1',
+    unit_seq: 1,
+    text: 'first authoritative staged tail',
+    response_continuation: true,
+  });
+
+  await journey.owner.stagePreparedAgentText(tail);
+  await new Promise(resolve => setImmediate(resolve));
+  const downlinks = journey.sockets.filter(
+    socket => socket.serverBinding?.direction === 'downlink',
+  );
+  assert.equal(downlinks.length, initialDownlinks + 1);
+  assert.equal(journey.environment.contexts[0].sourceStartCount, initialSourceStarts);
+  assert.deepEqual(
+    downlinks.at(-1).sent
+      .filter(value => typeof value === 'string')
+      .map(JSON.parse)
+      .filter(control => control.type === 'media.ack')
+      .map(control => control.through_seq),
+    [0],
+  );
+
+  await journey.owner.playPreparedAgentText(tail);
+  assert.deepEqual(
+    downlinks.at(-1).sent
+      .filter(value => typeof value === 'string')
+      .map(JSON.parse)
+      .filter(control => control.type === 'media.ack')
+      .map(control => control.through_seq),
+    [0],
+    'promotion must not replay the staged transport ACK',
+  );
+  assert.equal(journey.environment.contexts[0].sourceStartCount, initialSourceStarts + 1);
+  await journey.owner.close();
+});
+
+test('formal P1 reserves at most one second of successor audio before stopping transport ACKs', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    downlinkFrameCount: 51,
+    downlinkFramesToSend: 51,
+  });
+  assert.equal(journey.playError, null);
+  const initialSourceStarts = journey.environment.contexts[0].sourceStartCount;
+  const receipts = journey.calls.filter(
+    ([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD,
+  ).length;
+  const tail = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-staged-reserve-ceiling',
+    unit_seq: 1,
+    text: 'bounded authoritative staged tail',
+    response_continuation: true,
+  });
+
+  await journey.owner.stagePreparedAgentText(tail);
+  const downlink = journey.sockets.at(-1);
+  for (let turn = 0; turn < 100; turn += 1) {
+    const acknowledged = downlink.sent
+      .filter(value => typeof value === 'string')
+      .map(JSON.parse)
+      .filter(control => control.type === 'media.ack');
+    if (acknowledged.length === 42) break;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  const acknowledged = downlink.sent
+    .filter(value => typeof value === 'string')
+    .map(JSON.parse)
+    .filter(control => control.type === 'media.ack')
+    .map(control => control.through_seq);
+  assert.deepEqual(acknowledged, Array.from({ length: 42 }, (_value, index) => index));
+  assert.equal(downlink.downlinkNextSeq, 50, 'the final frame remains upstream of the bounded reserve');
+  assert.equal(journey.environment.contexts[0].sourceStartCount, initialSourceStarts);
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length,
+    receipts,
+  );
+
+  await journey.owner.cancelPreparedResponse(journey.response, 'TEST_RESERVE_CEILING');
+  await journey.owner.close();
+});
+
+test('formal P1 parks at 500ms and promotes before successor WebAudio', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+    downlinkFrameCount: 35,
+    downlinkFramesToSend: 35,
+  });
+  assert.equal(journey.playError, null);
+  const startsBefore = journey.environment.contexts[0].sourceStartCount;
+  const tail = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-parked-successor',
+    unit_seq: 1,
+    text: 'authoritative parked successor long enough for the target',
+    response_continuation: true,
+  });
+  await journey.owner.stagePreparedAgentText(tail);
+  const downlink = journey.sockets.at(-1);
+  for (let turn = 0; turn < 200; turn += 1) {
+    if (downlink.sent.some(value => typeof value === 'string' && JSON.parse(value).type === 'media.prefetch_transition')) break;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  const beforePromotion = downlink.sent
+    .filter(value => typeof value === 'string')
+    .map(JSON.parse)
+    .filter(control => control.type === 'media.prefetch_transition');
+  assert.equal(beforePromotion.length, 1);
+  assert.equal(beforePromotion[0].state, 'prefetch_parked');
+  assert.equal(beforePromotion[0].retained_through_seq, 24);
+  assert.equal(journey.environment.contexts[0].sourceStartCount, startsBefore);
+
+  await journey.owner.playPreparedAgentText(tail);
+  const transitions = downlink.sent
+    .filter(value => typeof value === 'string')
+    .map(JSON.parse)
+    .filter(control => control.type === 'media.prefetch_transition');
+  assert.deepEqual(transitions.map(control => control.state), ['prefetch_parked', 'promoted']);
+  assert.equal(journey.environment.contexts[0].sourceStartCount, startsBefore + 35);
+  await journey.owner.close();
+});
+
+test('formal P1 rejects a second staged successor and a foreign prepared handle before effects', async () => {
+  const journey = await runConcurrentCaptureJourney({ responseContinuation: true });
+  assert.equal(journey.playError, null);
+  const sourceStarts = journey.environment.contexts[0].sourceStartCount;
+  const receipts = journey.calls.filter(
+    ([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD,
+  ).length;
+  const first = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-staged-bound-1',
+    unit_seq: 1,
+    text: 'first bounded staged successor',
+    response_continuation: true,
+  });
+  const second = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-staged-bound-2',
+    unit_seq: 2,
+    text: 'second bounded staged successor',
+    response_continuation: true,
+  });
+
+  await journey.owner.stagePreparedAgentText(first);
+  await assert.rejects(
+    () => journey.owner.stagePreparedAgentText(second),
+    /already staged/,
+  );
+  await assert.rejects(
+    () => journey.owner.stagePreparedAgentText(Object.freeze({ ...first })),
+    /stale, foreign, or already consumed/,
+  );
+  assert.equal(journey.environment.contexts[0].sourceStartCount, sourceStarts);
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length,
+    receipts,
+  );
+  assert.equal(
+    journey.calls.some(
+      ([method]) => method.includes('agent') || method.includes('task') || method.includes('history'),
+    ),
+    false,
+  );
+  await journey.owner.cancelPreparedResponse(journey.response, 'TEST_CLEANUP');
+  await journey.owner.close();
+});
+
+test('formal P1 close before promotion fences staged audio and every later play attempt', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+    downlinkFrameCount: 35,
+    downlinkFramesToSend: 35,
+  });
+  assert.equal(journey.playError, null);
+  const sourceStarts = journey.environment.contexts[0].sourceStartCount;
+  const receipts = journey.calls.filter(
+    ([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD,
+  ).length;
+  const tail = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-staged-close-1',
+    unit_seq: 1,
+    text: 'staged successor closed before promotion',
+    response_continuation: true,
+  });
+  const deferredOutcomes = [2, 3].map(unitSeq =>
+    journey.owner.prepareAgentText({
+      response: journey.response,
+      unit_id: `unit-staged-close-${unitSeq}`,
+      unit_seq: unitSeq,
+      text: `deferred successor ${unitSeq} closed before promotion`,
+      response_continuation: true,
+    }).then(
+      () => null,
+      error => error,
+    ),
+  );
+
+  await journey.owner.stagePreparedAgentText(tail);
+  await journey.owner.close();
+  assert.equal((await Promise.all(deferredOutcomes)).every(error => error instanceof Error), true);
+  await assert.rejects(
+    () => journey.owner.playPreparedAgentText(tail),
+    /stale, foreign, or already consumed/,
+  );
+  assert.equal(journey.environment.contexts[0].sourceStartCount, sourceStarts);
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length,
+    receipts,
+  );
+  assert.equal(
+    journey.sockets
+      .filter(socket => socket.serverBinding?.direction === 'downlink')
+      .every(socket => socket.readyState === 3),
+    true,
+  );
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_seq),
+    [0, 1],
+  );
+});
+
+test('formal P1 staged attach failure fences a late frame with zero playout effect', async () => {
+  const journey = await runConcurrentCaptureJourney({ responseContinuation: true });
+  assert.equal(journey.playError, null);
+  const sourceStarts = journey.environment.contexts[0].sourceStartCount;
+  const receipts = journey.calls.filter(
+    ([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD,
+  ).length;
+  const tail = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-staged-attach-failure',
+    unit_seq: 1,
+    text: 'staged successor with an injected attach failure',
+    response_continuation: true,
+  });
+  journey.environment.failNextDownlinkAttach = true;
+
+  await assert.rejects(
+    () => journey.owner.stagePreparedAgentText(tail),
+    /closed before attach|injected staged attach failure/,
+  );
+  const failedSocket = journey.sockets.at(-1);
+  assert.equal(failedSocket.readyState, 3);
+  failedSocket.onmessage?.({
+    data: encodeAudioFrame(failedSocket.serverBinding, {
+      seq: 0,
+      sample_cursor: 0,
+      samples: new Float32Array(960).fill(0.5),
+    }),
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(journey.environment.contexts[0].sourceStartCount, sourceStarts);
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length,
+    receipts,
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 C019 continuation survives a notification pause without reusing response authority', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+  });
+  assert.equal(journey.playError, null);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+
+  assert.equal(await journey.owner.pauseIdleCaptureForNotification(), 'paused');
+  assert.deepEqual(journey.owner.status(), { status: 'recognized', reason: null });
+
+  const tailError = await outcomeWithin(
+    journey.owner.playAgentText({
+      response: journey.response,
+      unit_id: 'unit-c019-after-notification-pause',
+      unit_seq: 1,
+      text: 'authoritative continuation after notification pause',
+      response_continuation: true,
+    }),
+    'C019 continuation timed out',
+  );
+
+  assert.equal(tailError, null);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length,
+    2,
+  );
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_id),
+    ['unit-duplex-1', 'unit-c019-after-notification-pause'],
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 prepares two same-response tails before ordered playout without reusing response authority', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+  });
+  assert.equal(journey.playError, null);
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+
+  const [firstTail, secondTail] = await Promise.all([
+    journey.owner.prepareAgentText({
+      response: journey.response,
+      unit_id: 'unit-prefetched-before-play-1',
+      unit_seq: 1,
+      text: 'first authoritative tail',
+      response_continuation: true,
+    }),
+    journey.owner.prepareAgentText({
+      response: journey.response,
+      unit_id: 'unit-prefetched-before-play-2',
+      unit_seq: 2,
+      text: 'second authoritative tail',
+      response_continuation: true,
+    }),
+  ]);
+
+  await journey.owner.playPreparedAgentText(firstTail);
+  await journey.owner.playPreparedAgentText(secondTail);
+
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_id),
+    [
+      'unit-duplex-1',
+      'unit-prefetched-before-play-1',
+      'unit-prefetched-before-play-2',
+    ],
+  );
+  assert.equal(
+    journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length,
+    3,
+  );
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  await journey.owner.close();
+});
+
+test('formal P1 preserves legacy concurrent preparation when prefetch capability is unavailable', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+    prefetchPromotionUnavailable: true,
+  });
+  assert.equal(journey.playError, null);
+  const prepared = await Promise.all([1, 2].map(unitSeq =>
+    journey.owner.prepareAgentText({
+      response: journey.response,
+      unit_id: `unit-capability-null-${unitSeq}`,
+      unit_seq: unitSeq,
+      text: `legacy prepared tail ${unitSeq}`,
+      response_continuation: true,
+    }),
+  ));
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => [params.unit_seq, params.prefetch_promotion_capability ?? null]),
+    [[0, null], [1, null], [2, null]],
+  );
+  await journey.owner.cancelPreparedResponse(journey.response, 'TEST_CAPABILITY_NULL_CLEANUP');
+  for (const item of prepared) {
+    await assert.rejects(
+      () => journey.owner.playPreparedAgentText(item),
+      /stale, foreign, or already consumed/,
+    );
+  }
+  await journey.owner.close();
+});
+
+test('formal P1 defers a second negotiated continuation until exact promotion', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+    downlinkFrameCount: 35,
+    downlinkFramesToSend: 35,
+  });
+  assert.equal(journey.playError, null);
+
+  const firstPromise = journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-1',
+    unit_seq: 1,
+    text: 'first admitted continuation',
+    response_continuation: true,
+  });
+  let secondSettled = false;
+  const secondPromise = journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-2',
+    unit_seq: 2,
+    text: 'second deferred continuation',
+    response_continuation: true,
+  }).then(prepared => {
+    secondSettled = true;
+    return prepared;
+  });
+  let thirdSettled = false;
+  const thirdPromise = journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-3',
+    unit_seq: 3,
+    text: 'third deferred continuation',
+    response_continuation: true,
+  }).then(prepared => {
+    thirdSettled = true;
+    return prepared;
+  });
+  const first = await firstPromise;
+  for (let turn = 0; turn < 5; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(secondSettled, false);
+  assert.equal(thirdSettled, false);
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_seq),
+    [0, 1],
+  );
+
+  await journey.owner.stagePreparedAgentText(first);
+  await journey.owner.playPreparedAgentText(first);
+  const second = await secondPromise;
+  assert.equal(thirdSettled, false);
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_seq),
+    [0, 1, 2],
+  );
+  await journey.owner.stagePreparedAgentText(second);
+  await journey.owner.playPreparedAgentText(second);
+  const third = await thirdPromise;
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_seq),
+    [0, 1, 2, 3],
+  );
+  await journey.owner.cancelPreparedResponse(journey.response, 'TEST_CLEANUP');
+  await assert.rejects(
+    () => journey.owner.playPreparedAgentText(third),
+    /stale, foreign, or already consumed/,
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 continuation admission abort drains deferred work before synthesis', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+    downlinkFrameCount: 35,
+    downlinkFramesToSend: 35,
+  });
+  assert.equal(journey.playError, null);
+
+  const first = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-abort-1',
+    unit_seq: 1,
+    text: 'first admitted continuation before cancellation',
+    response_continuation: true,
+  });
+  const controller = new AbortController();
+  const secondOutcome = journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-abort-2',
+    unit_seq: 2,
+    text: 'deferred continuation that must remain silent',
+    response_continuation: true,
+  }, controller.signal).then(
+    () => null,
+    error => error,
+  );
+  const thirdOutcome = journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-abort-3',
+    unit_seq: 3,
+    text: 'later deferred continuation that must also remain silent',
+    response_continuation: true,
+  }).then(
+    () => null,
+    error => error,
+  );
+  controller.abort();
+  const error = await secondOutcome;
+
+  assert.equal(error?.reason, 'TTS_CONTINUATION_CANCELLED');
+  assert.equal((await thirdOutcome) instanceof Error, true);
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_seq),
+    [0, 1],
+  );
+  await assert.rejects(
+    () => journey.owner.playPreparedAgentText(first),
+    /stale, foreign, or already consumed/,
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 prepared continuation cancellation fences its deferred successor and late play', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+    downlinkFrameCount: 35,
+    downlinkFramesToSend: 35,
+  });
+  assert.equal(journey.playError, null);
+  const first = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-cancel-1',
+    unit_seq: 1,
+    text: 'prepared continuation that is never played',
+    response_continuation: true,
+  });
+  const secondOutcome = journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-cancel-2',
+    unit_seq: 2,
+    text: 'deferred continuation that must never synthesize',
+    response_continuation: true,
+  }).then(
+    () => null,
+    error => error,
+  );
+  const thirdOutcome = journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-cancel-3',
+    unit_seq: 3,
+    text: 'second deferred continuation that must never synthesize',
+    response_continuation: true,
+  }).then(
+    () => null,
+    error => error,
+  );
+
+  await journey.owner.cancelPreparedResponse(journey.response, 'TEST_PREPARED_ABANDONED');
+  assert.equal((await secondOutcome) instanceof Error, true);
+  assert.equal((await thirdOutcome) instanceof Error, true);
+  await assert.rejects(
+    () => journey.owner.playPreparedAgentText(first),
+    /stale, foreign, or already consumed/,
+  );
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_seq),
+    [0, 1],
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 continuation admission retains cleanup until the synthesis fence settles', async () => {
+  const synthesisGate = deferred();
+  const cancelGate = deferred();
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+    downlinkFrameCount: 35,
+    downlinkFramesToSend: 35,
+    synthesisGate: synthesisGate.promise,
+    synthesisGateUnitSeq: 2,
+    speechCancelGate: cancelGate.promise,
+  });
+  assert.equal(journey.playError, null);
+  const first = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-delayed-fence-1',
+    unit_seq: 1,
+    text: 'active continuation with delayed cleanup',
+    response_continuation: true,
+  });
+  const secondOutcome = journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-delayed-fence-2',
+    unit_seq: 2,
+    text: 'deferred continuation during delayed cleanup',
+    response_continuation: true,
+  }).then(
+    () => null,
+    error => error,
+  );
+  await journey.owner.stagePreparedAgentText(first);
+  await journey.owner.playPreparedAgentText(first);
+  for (let turn = 0; turn < 20; turn += 1) {
+    if (journey.calls.some(([method, params]) =>
+      method === 'live_voice.speech.synthesize_batch' && params.unit_seq === 2)) break;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(journey.calls.some(([method, params]) =>
+    method === 'live_voice.speech.synthesize_batch' && params.unit_seq === 2), true);
+  let cleanupSettled = false;
+  const cleanup = journey.owner.cancelPreparedResponse(
+    journey.response,
+    'TEST_DELAYED_CONTINUATION_FENCE',
+  ).then(() => {
+    cleanupSettled = true;
+  });
+  for (let turn = 0; turn < 5; turn += 1) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(cleanupSettled, false);
+  await assert.rejects(
+    () => journey.owner.playPreparedAgentText(first),
+    /stale, foreign, or already consumed/,
+  );
+  const blockedOutcome = journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-delayed-fence-3',
+    unit_seq: 3,
+    text: 'must not enter while cleanup is retained',
+    response_continuation: true,
+  }).then(
+    () => null,
+    error => error,
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_seq),
+    [0, 1, 2],
+  );
+  cancelGate.resolve();
+  await cleanup;
+  synthesisGate.resolve();
+  assert.equal((await secondOutcome) instanceof Error, true);
+  assert.equal((await blockedOutcome) instanceof Error, true);
+  assert.equal(cleanupSettled, true);
+  await journey.owner.close();
+});
+
+test('formal P1 Provider timeout drains two deferred continuation admissions without effects', async () => {
+  const synthesisGate = deferred();
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+    synthesisGate: synthesisGate.promise,
+    synthesisGateUnitSeq: 1,
+    synthesisFailureUnitSeq: 1,
+  });
+  assert.equal(journey.playError, null);
+  const firstOutcome = journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-provider-timeout-1',
+    unit_seq: 1,
+    text: 'active continuation with an injected Provider timeout',
+    response_continuation: true,
+  }).then(
+    () => null,
+    error => error,
+  );
+  for (let turn = 0; turn < 20; turn += 1) {
+    if (journey.calls.some(([method, params]) =>
+      method === 'live_voice.speech.synthesize_batch' && params.unit_seq === 1)) break;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  const deferredOutcomes = [2, 3].map(unitSeq =>
+    journey.owner.prepareAgentText({
+      response: journey.response,
+      unit_id: `unit-admission-provider-timeout-${unitSeq}`,
+      unit_seq: unitSeq,
+      text: `deferred continuation ${unitSeq}`,
+      response_continuation: true,
+    }).then(
+      () => null,
+      error => error,
+    ),
+  );
+  synthesisGate.resolve();
+  assert.equal((await firstOutcome) instanceof Error, true);
+  assert.equal((await Promise.all(deferredOutcomes)).every(error => error instanceof Error), true);
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_seq),
+    [0, 1],
+  );
+  assert.equal(journey.owner.status().status, 'failed');
+  await journey.owner.close();
+});
+
+test('formal P1 media close drains two deferred continuation admissions and fences late play', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+    downlinkFrameCount: 35,
+    downlinkFramesToSend: 35,
+  });
+  assert.equal(journey.playError, null);
+  const first = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-media-close-1',
+    unit_seq: 1,
+    text: 'active continuation whose media route closes',
+    response_continuation: true,
+  });
+  const deferredOutcomes = [2, 3].map(unitSeq =>
+    journey.owner.prepareAgentText({
+      response: journey.response,
+      unit_id: `unit-admission-media-close-${unitSeq}`,
+      unit_seq: unitSeq,
+      text: `deferred continuation ${unitSeq}`,
+      response_continuation: true,
+    }).then(
+      () => null,
+      error => error,
+    ),
+  );
+  await journey.owner.stagePreparedAgentText(first);
+  const stagedSocket = journey.sockets
+    .filter(socket => socket.serverBinding?.direction === 'downlink')
+    .at(-1);
+  assert.ok(stagedSocket);
+  stagedSocket.readyState = 3;
+  stagedSocket.onclose?.({ code: 1006, reason: 'injected staged media close' });
+  for (let turn = 0; turn < 100 && journey.owner.status().status !== 'failed'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal((await Promise.all(deferredOutcomes)).every(error => error instanceof Error), true);
+  await assert.rejects(
+    () => journey.owner.playPreparedAgentText(first),
+    /stale, foreign, or already consumed/,
+  );
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_seq),
+    [0, 1],
+  );
+  assert.equal(journey.owner.status().status, 'failed');
+  await journey.owner.close();
+});
+
+test('formal P1 barge-in reports cleanup pending until admitted successor synthesis is fenced', async () => {
+  const synthesisGate = deferred();
+  const cancelGate = deferred();
+  const stopTrigger = { armed: false };
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+    downlinkFrameCount: 35,
+    downlinkFramesToSend: 35,
+    synthesisGate: synthesisGate.promise,
+    synthesisGateUnitSeq: 2,
+    speechCancelGate: cancelGate.promise,
+    stopOnContinuationPlaying: stopTrigger,
+  });
+  assert.equal(journey.playError, null);
+  stopTrigger.armed = true;
+  journey.environment.deferSourceEnds = true;
+  const first = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-barge-1',
+    unit_seq: 1,
+    text: 'active audible continuation before barge in',
+    response_continuation: true,
+  });
+  const secondOutcome = journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-barge-2',
+    unit_seq: 2,
+    text: 'admitted successor that must be fenced',
+    response_continuation: true,
+  }).then(
+    () => null,
+    error => error,
+  );
+  const playOutcome = journey.owner.playPreparedAgentText(first).then(
+    () => null,
+    error => error,
+  );
+  for (let turn = 0; turn < 100 && journey.continuationBarge.stopped === null; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(journey.continuationBarge.stopped, true);
+  assert.deepEqual(journey.continuationBarge.snapshot, {
+    status: 'cleanup_pending',
+    reason: 'FORMAL_P1_CLEANUP_IN_PROGRESS',
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(journey.owner.status().status, 'cleanup_pending');
+  cancelGate.resolve();
+  synthesisGate.resolve();
+  assert.equal(await playOutcome, null);
+  assert.equal((await secondOutcome) instanceof Error, true);
+  assert.equal(journey.owner.status().status, 'capturing');
+  journey.environment.deferSourceEnds = false;
+  journey.environment.contexts[0].releaseSourceEnds();
+  await journey.owner.close();
+});
+
+test('formal P1 continuation admission rejects a sequence gap before successor synthesis', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+  });
+  assert.equal(journey.playError, null);
+  await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-admission-gap-1',
+    unit_seq: 1,
+    text: 'active continuation',
+    response_continuation: true,
+  });
+  await assert.rejects(
+    () => journey.owner.prepareAgentText({
+      response: journey.response,
+      unit_id: 'unit-admission-gap-3',
+      unit_seq: 3,
+      text: 'skipped continuation',
+      response_continuation: true,
+    }),
+    /sequence is not contiguous/,
+  );
+  assert.deepEqual(
+    journey.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_seq),
+    [0, 1],
+  );
+  await journey.owner.close();
+});
+
+test('formal P1 continuation admission rejects foreign identity and capacity overflow before synthesis', async () => {
+  const foreignJourney = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+  });
+  assert.equal(foreignJourney.playError, null);
+  await assert.rejects(
+    () => foreignJourney.owner.prepareAgentText({
+      response: { ...foreignJourney.response, response_id: 'response-foreign' },
+      unit_id: 'unit-admission-foreign',
+      unit_seq: 1,
+      text: 'must never reach synthesis',
+      response_continuation: true,
+    }),
+    /stale or foreign/,
+  );
+  assert.deepEqual(
+    foreignJourney.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_seq),
+    [0],
+  );
+  await foreignJourney.owner.close();
+
+  const capacityJourney = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+    downlinkFrameCount: 35,
+    downlinkFramesToSend: 35,
+  });
+  assert.equal(capacityJourney.playError, null);
+  await capacityJourney.owner.prepareAgentText({
+    response: capacityJourney.response,
+    unit_id: 'unit-admission-capacity-1',
+    unit_seq: 1,
+    text: 'active successor',
+    response_continuation: true,
+  });
+  const deferred = [2, 3, 4].map(unitSeq =>
+    capacityJourney.owner.prepareAgentText({
+      response: capacityJourney.response,
+      unit_id: `unit-admission-capacity-${unitSeq}`,
+      unit_seq: unitSeq,
+      text: `deferred successor ${unitSeq}`,
+      response_continuation: true,
+    }).then(
+      () => null,
+      error => error,
+    ),
+  );
+  const overflow = await capacityJourney.owner.prepareAgentText({
+    response: capacityJourney.response,
+    unit_id: 'unit-admission-capacity-5',
+    unit_seq: 5,
+    text: 'overflow successor',
+    response_continuation: true,
+  }).then(
+    () => null,
+    error => error,
+  );
+  assert.equal(overflow?.reason, 'CONTINUATION_ADMISSION_CAPACITY_EXHAUSTED');
+  assert.deepEqual(
+    capacityJourney.calls
+      .filter(([method]) => method === 'live_voice.speech.synthesize_batch')
+      .map(([, params]) => params.unit_seq),
+    [0, 1],
+  );
+  const deferredOutcomes = await Promise.all(deferred);
+  assert.equal(deferredOutcomes.every(error => error instanceof Error), true);
+  await capacityJourney.owner.close();
+});
+
+test('formal P1 barge-in fences every later same-response continuation', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    negotiatedEot: true,
+    triggerBargeInEot: true,
+    holdDownlinkDetachAfterFinalRender: true,
+    deferSourceEndsUntilTransportAck: true,
+  });
+
+  assert.equal(journey.bargeInStopped, true);
+  await assert.rejects(
+    () => journey.owner.playAgentText({
+      response: journey.response,
+      unit_id: 'unit-after-barge',
+      text: 'must remain silent',
+      response_continuation: true,
+    }),
+    /formal P1 capture must settle before Agent playout/,
+  );
+  assert.equal(
+    journey.calls.filter(([method]) => method === 'live_voice.speech.synthesize_batch').length,
+    1,
+  );
+  assert.equal(
+    journey.calls.some(
+      ([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1',
+    ),
+    true,
+  );
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  await journey.owner.close();
 });
 
 test('formal P1 rotates thirty seconds of silent overlap during active long playout without dropping the boundary frame', async () => {
@@ -6490,6 +7600,23 @@ test('formal P1 concurrent playing-window mute releases audio and compensates ex
   assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
   assert.equal(sockets.some(socket => socket.serverBinding?.direction === 'downlink'), true);
   await owner.close();
+});
+
+test('formal P1 attaches the predecessor downlink before successor media activation', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    sendSecondFrame: false,
+    firstDownlinkSocketOpenDelayMs: 50,
+  });
+
+  assert.equal(journey.playError, null);
+  assert.ok(journey.mediaLifecycleEvents.includes('downlink_attached'));
+  assert.ok(journey.mediaLifecycleEvents.includes('successor_activation_requested'));
+  assert.ok(
+    journey.mediaLifecycleEvents.indexOf('downlink_attached')
+      < journey.mediaLifecycleEvents.indexOf('successor_activation_requested'),
+    `unexpected media ordering: ${journey.mediaLifecycleEvents.join(' -> ')}`,
+  );
+  await journey.owner.close();
 });
 
 test('formal P1 persistent concurrent input gap stops playout with the exact stable reason', async () => {

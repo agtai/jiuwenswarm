@@ -20,6 +20,8 @@ import {
   capturedTaskNotificationDeadlineAction,
   capturedTaskNotificationRequiresAnnouncementRequeue,
   classifyProductP2Notification,
+  productP2NotificationFailureDiagnostic,
+  productPresentationSettlementAction,
   createProductP2ActivationOwner,
   extractWebErrorReason,
   formalTaskIntentResultSummary,
@@ -724,6 +726,8 @@ test('P2 notification classification surfaces failures and treats transport keep
       agent_event: null,
       progress_event: null,
       presentation_unit: null,
+      presentation_text: null,
+      presentation_delivery: null,
     }),
     { kind: 'continue' },
   );
@@ -741,7 +745,10 @@ test('P2 notification classification surfaces failures and treats transport keep
         unit_id: 'unit-stable',
         seq: 0,
         content_ref: `sha256:${'a'.repeat(64)}`,
+        projection_role: 'aligned',
       },
+      presentation_text: '已开始处理。',
+      presentation_delivery: 'display_and_speak',
     },
     true,
   );
@@ -767,7 +774,9 @@ test('P2 notification classification surfaces failures and treats transport keep
       state: 'terminal',
       outcome: 'completed',
     },
-    presentation_unit: { surface: 'text', unit_id: 'unit-dialogue-claim', seq: 0 },
+    presentation_unit: { surface: 'text', unit_id: 'unit-dialogue-claim', seq: 0, projection_role: 'aligned' },
+    presentation_text: '修改已经应用，后台任务已完成，结果已经生成。',
+    presentation_delivery: 'display_and_speak',
   });
   assert.equal(dialogueTaskClaim.kind, 'presentation');
   assert.equal(dialogueTaskClaim.task_notification, false);
@@ -784,7 +793,9 @@ test('P2 notification classification surfaces failures and treats transport keep
       text: 'The background task is complete and its result is ready.',
       source_provenance: 'server.task_notification',
     },
-    presentation_unit: { surface: 'text', unit_id: 'unit-terminal', seq: 0 },
+    presentation_unit: { surface: 'text', unit_id: 'unit-terminal', seq: 0, projection_role: 'aligned' },
+    presentation_text: 'The background task is complete and its result is ready.',
+    presentation_delivery: 'display_and_speak',
   });
   assert.equal(terminalPresentation.kind, 'presentation');
   assert.equal(terminalPresentation.task_notification, true);
@@ -807,7 +818,10 @@ test('P2 notification classification surfaces failures and treats transport keep
       unit_id: 'unit-task-audio',
       seq: 0,
       content_ref: `sha256:${'b'.repeat(64)}`,
+      projection_role: 'aligned',
     },
+    presentation_text: 'The background task is running.',
+    presentation_delivery: 'display_and_speak',
   });
   assert.equal(audioTaskPresentation.kind, 'presentation');
   assert.equal(audioTaskPresentation.task_notification, true);
@@ -842,7 +856,9 @@ test('P2 notification classification surfaces failures and treats transport keep
       text: 'The requested change was added to the current task.',
       source_provenance: 'server.background.adjustment',
     },
-    presentation_unit: { surface: 'text', unit_id: 'unit-adjustment', seq: 0 },
+    presentation_unit: { surface: 'text', unit_id: 'unit-adjustment', seq: 0, projection_role: 'aligned' },
+    presentation_text: 'The requested change was added to the current task.',
+    presentation_delivery: 'display_and_speak',
   });
   assert.equal(adjustmentPresentation.kind, 'presentation');
   assert.equal(adjustmentPresentation.task_notification, false);
@@ -876,6 +892,223 @@ test('P2 notification classification surfaces failures and treats transport keep
       true,
     ),
     { kind: 'continue' },
+  );
+  assert.deepEqual(
+    classifyProductP2Notification(
+      {
+        kind: 'work.progress',
+        response: {
+          interaction_id: 'interaction-1',
+          response_id: 'response-segmented',
+          response_generation: 11,
+        },
+        progress_event: { payload: { state: 'terminal', outcome: 'completed' } },
+      },
+      false,
+      true,
+    ),
+    { kind: 'continue' },
+    'a terminal event must use response-final truth, not exact-unit replay truth',
+  );
+});
+
+test('P2 failure diagnostic correlates an agent failure without retaining presentation text', () => {
+  const notification = {
+    kind: 'agent.output',
+    response: {
+      interaction_id: 'interaction-p2-failure',
+      response_id: 'response-p2-failure',
+      response_generation: 4,
+    },
+    agent_event: {
+      event_type: 'agent.failed',
+      error_reason: 'UPSTREAM_AGENT_FAILURE',
+      text: 'private agent response must never be diagnostic data',
+    },
+    presentation_unit: { unit_id: 'unit-p2-failure', seq: 2 },
+    presentation_text: 'private presentation must never be diagnostic data',
+  };
+  const disposition = classifyProductP2Notification(notification);
+  assert.deepEqual(disposition, {
+    kind: 'failed',
+    reason: 'UPSTREAM_AGENT_FAILURE',
+    response: {
+      interaction_id: 'interaction-p2-failure',
+      response_id: 'response-p2-failure',
+      response_generation: 4,
+    },
+  });
+
+  const diagnostic = productP2NotificationFailureDiagnostic(
+    notification,
+    disposition,
+    {
+      session_id: 'session-p2-failure',
+      correlation_id: 'correlation-p2-failure',
+      interaction_id: 'interaction-p2-failure',
+      activation_id: 'activation-p2-failure',
+      activation_generation: 7,
+      owner_current: true,
+      voice_loop_current: false,
+    },
+  );
+  assert.deepEqual(diagnostic, {
+    kind: 'agent.output',
+    event_type: 'agent.failed',
+    error_reason: 'UNRECOGNIZED_FAILURE_REASON',
+    session_id: 'session-p2-failure',
+    correlation_id: 'correlation-p2-failure',
+    interaction_id: 'interaction-p2-failure',
+    activation_id: 'activation-p2-failure',
+    response_id: 'response-p2-failure',
+    response_generation: 4,
+    unit_id: 'unit-p2-failure',
+    unit_seq: 2,
+    classification: 'failed',
+    classification_reason: 'UNRECOGNIZED_FAILURE_REASON',
+    activation_generation: 7,
+    owner_current: true,
+    voice_loop_current: false,
+  });
+  assert.equal(JSON.stringify(diagnostic).includes('private'), false);
+});
+
+test('P2 failure diagnostic identifies the generic agent-output failure without a raw payload', () => {
+  const notification = {
+    kind: 'agent.error',
+    response: {
+      interaction_id: 'interaction-p2-generic',
+      response_id: 'response-p2-generic',
+      response_generation: 5,
+    },
+    agent_event: { event_type: 'agent.error', text: 'private provider error text' },
+    presentation_text: 'private presentation text',
+  };
+  const disposition = classifyProductP2Notification(notification);
+  assert.deepEqual(disposition, {
+    kind: 'failed',
+    reason: 'PRODUCT_AGENT_OUTPUT_FAILED',
+    response: {
+      interaction_id: 'interaction-p2-generic',
+      response_id: 'response-p2-generic',
+      response_generation: 5,
+    },
+  });
+  const diagnostic = productP2NotificationFailureDiagnostic(
+    notification,
+    disposition,
+    {
+      session_id: 'session-p2-generic',
+      correlation_id: 'correlation-p2-generic',
+      interaction_id: 'interaction-p2-generic',
+      activation_id: 'activation-p2-generic',
+      activation_generation: 8,
+      owner_current: false,
+      voice_loop_current: true,
+    },
+  );
+  assert.equal(diagnostic.classification_reason, 'PRODUCT_AGENT_OUTPUT_FAILED');
+  assert.equal(diagnostic.error_reason, 'UNRECOGNIZED_FAILURE_REASON');
+  assert.equal(diagnostic.response_id, 'response-p2-generic');
+  assert.equal(JSON.stringify(diagnostic).includes('secret response'), false);
+  assert.equal(JSON.stringify(diagnostic).includes('private.event.type'), false);
+});
+
+test('P2 failure diagnostic replaces arbitrary server error text with a closed token', () => {
+  const notification = {
+    kind: 'private provider failure text',
+    error_reason: 'secret response: tell the user about their private document',
+    agent_event: { event_type: 'private.event.type', text: 'private text' },
+    response: {
+      interaction_id: 'interaction-p2-private',
+      response_id: 'response-p2-private',
+      response_generation: 6,
+    },
+  };
+  const disposition = classifyProductP2Notification(notification);
+  const diagnostic = productP2NotificationFailureDiagnostic(
+    notification,
+    disposition,
+    {
+      session_id: 'session-p2-private',
+      correlation_id: 'correlation-p2-private',
+      interaction_id: 'interaction-p2-private',
+      activation_id: 'activation-p2-private',
+      activation_generation: 9,
+      owner_current: true,
+      voice_loop_current: true,
+    },
+  );
+  assert.equal(diagnostic.kind, 'unrecognized');
+  assert.equal(diagnostic.event_type, 'unrecognized');
+  assert.equal(diagnostic.error_reason, 'UNRECOGNIZED_FAILURE_REASON');
+  assert.equal(JSON.stringify(diagnostic).includes('secret response'), false);
+  assert.equal(JSON.stringify(diagnostic).includes('private.event.type'), false);
+  assert.equal(diagnostic.session_id, 'session-p2-private');
+  assert.equal(diagnostic.interaction_id, 'interaction-p2-private');
+});
+
+test('P2 notification classification preserves the closed C2 projection and delivery contract', () => {
+  const response = {
+    interaction_id: 'interaction-c2',
+    response_id: 'response-c2',
+    response_generation: 3,
+  };
+  const prefix = classifyProductP2Notification({
+    kind: 'agent.output',
+    response,
+    agent_event: { event_type: 'chat.delta', text: 'First stable sentence.' },
+    presentation_unit: {
+      surface: 'audio',
+      unit_id: 'unit-prefix',
+      seq: 0,
+      content_ref: `sha256:${'b'.repeat(64)}`,
+      projection_role: 'audio_segment',
+    },
+    presentation_text: 'First stable sentence.',
+    presentation_delivery: 'speak_only',
+  });
+  assert.equal(prefix.kind, 'presentation');
+  assert.equal(prefix.projection_role, 'audio_segment');
+  assert.equal(prefix.presentation_delivery, 'speak_only');
+  assert.equal(prefix.history_message_id, null);
+  assert.equal(productPresentationSettlementAction(prefix), 'repoll_same_response');
+
+  const root = classifyProductP2Notification({
+    kind: 'agent.output',
+    response,
+    agent_event: { event_type: 'chat.final', text: 'First stable sentence. Final tail.' },
+    presentation_unit: {
+      surface: 'text',
+      unit_id: 'unit-root',
+      seq: 0,
+      content_ref: `sha256:${'c'.repeat(64)}`,
+      projection_role: 'authoritative_text_root',
+    },
+    presentation_text: 'First stable sentence. Final tail.',
+    presentation_delivery: 'display_only',
+  });
+  assert.equal(root.kind, 'presentation');
+  assert.equal(root.projection_role, 'authoritative_text_root');
+  assert.equal(root.presentation_delivery, 'display_only');
+  assert.equal(root.history_message_id, `live-voice:interaction-c2:response-c2:3:text:0:0:${'c'.repeat(64)}`);
+  assert.equal(productPresentationSettlementAction(root), 'release_capture');
+
+  assert.deepEqual(
+    classifyProductP2Notification({
+      kind: 'agent.output',
+      response,
+      agent_event: { event_type: 'chat.delta', text: 'must not display' },
+      presentation_unit: {
+        surface: 'audio',
+        unit_id: 'unit-invalid',
+        seq: 1,
+        projection_role: 'audio_segment',
+      },
+      presentation_text: 'must not display',
+      presentation_delivery: 'display_only',
+    }),
+    { kind: 'failed', reason: 'PRODUCT_PRESENTATION_PROTOCOL_INVALID', response },
   );
 });
 
@@ -912,6 +1145,25 @@ test('speech-marked capture gets one bounded settlement before Task AUDIO falls 
   assert.equal(capturedTaskNotificationDeadlineAction(input), 'settle_capture');
   assert.equal(
     capturedTaskNotificationDeadlineAction({ ...input, capture_settlement_requested: true }),
+    'fallback_text',
+  );
+  assert.equal(
+    capturedTaskNotificationDeadlineAction({
+      ...input,
+      capture_settlement_requested: true,
+      p1_status: 'starting',
+      capture_binding_available: false,
+    }),
+    'await_media_owner',
+  );
+  assert.equal(
+    capturedTaskNotificationDeadlineAction({
+      ...input,
+      capture_settlement_requested: true,
+      capture_recovery_waited: true,
+      p1_status: 'starting',
+      capture_binding_available: false,
+    }),
     'fallback_text',
   );
   assert.equal(capturedTaskNotificationDeadlineAction({ ...input, p1_status: 'recognizing' }), 'fallback_text');
@@ -2143,8 +2395,8 @@ test('overlap capture publishes its exact binding before playout EOT can race co
 
 test('Task AUDIO playout suppresses overlap capture before post-ACK listening resumes', async () => {
   const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
-  const start = source.indexOf('const playout = voiceOwner.playAgentText({');
-  const end = source.indexOf('void (disposition.task_notification', start);
+  const start = source.indexOf('playoutOperation = voiceOwner.playAgentText({');
+  const end = source.indexOf('const observedPlayout = disposition.task_notification', start);
   const handler = source.slice(start, end);
 
   assert.equal(start >= 0 && end > start, true);

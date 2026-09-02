@@ -468,6 +468,8 @@ const PRODUCT_P2_NOTIFICATION_ITEM_KEYS = Object.freeze([
   'source_event',
   'progress_event',
   'presentation_unit',
+  'presentation_text',
+  'presentation_delivery',
   'error_reason',
   'publish_seq',
   'session_id',
@@ -486,8 +488,55 @@ function isP2BatchObserver(notification: Readonly<Record<string, unknown>>): boo
     notification.source_event === null &&
     notification.progress_event === null &&
     notification.presentation_unit === null &&
+    notification.presentation_text === null &&
+    notification.presentation_delivery === null &&
     notification.error_reason === null
   );
+}
+
+type P2BatchPresentation = Readonly<{
+  responseKey: string;
+  role: 'aligned' | 'authoritative_text_root' | 'audio_segment';
+  seq: number;
+  sourceStartUtf8: number;
+  sourceEndUtf8: number;
+}>;
+
+function p2BatchPresentation(notification: Readonly<Record<string, unknown>>): P2BatchPresentation | null {
+  const response = objectValue(notification.response);
+  const unit = objectValue(notification.presentation_unit);
+  if (
+    notification.kind !== 'agent.output' ||
+    response === null ||
+    unit === null ||
+    typeof response.interaction_id !== 'string' ||
+    typeof response.response_id !== 'string' ||
+    !Number.isSafeInteger(response.response_generation) ||
+    !['aligned', 'authoritative_text_root', 'audio_segment'].includes(String(unit.projection_role)) ||
+    !Number.isSafeInteger(unit.seq) ||
+    !Number.isSafeInteger(unit.source_start_utf8) ||
+    !Number.isSafeInteger(unit.source_end_utf8) ||
+    (unit.source_start_utf8 as number) < 0 ||
+    (unit.source_end_utf8 as number) <= (unit.source_start_utf8 as number) ||
+    typeof notification.presentation_text !== 'string' ||
+    notification.presentation_text.length === 0 ||
+    (unit.projection_role === 'audio_segment' &&
+      (unit.surface !== 'audio' || notification.presentation_delivery !== 'speak_only')) ||
+    (unit.projection_role === 'authoritative_text_root' &&
+      (unit.surface !== 'text' || notification.presentation_delivery !== 'display_only')) ||
+    (unit.projection_role === 'aligned' && notification.presentation_delivery !== 'display_and_speak')
+  ) return null;
+  return Object.freeze({
+    responseKey: JSON.stringify([
+      response.interaction_id,
+      response.response_id,
+      response.response_generation,
+    ]),
+    role: unit.projection_role as P2BatchPresentation['role'],
+    seq: unit.seq as number,
+    sourceStartUtf8: unit.source_start_utf8 as number,
+    sourceEndUtf8: unit.source_end_utf8 as number,
+  });
 }
 
 function requireP2NotificationResult(
@@ -526,6 +575,10 @@ function requireP2NotificationResult(
   }
   const notifications: JsonObject[] = [];
   let priorPublishSeq = priorBatchPublishSeq;
+  let presentationResponseKey: string | null = null;
+  let priorAudio: P2BatchPresentation | null = null;
+  let presentationSuffixStarted = false;
+  let rootSeen = false;
   for (let index = 0; index < result.notifications.length; index += 1) {
     let notification: Record<string, unknown>;
     try {
@@ -555,7 +608,43 @@ function requireP2NotificationResult(
       }
       priorPublishSeq = publishSeq as number;
     }
-    if (index < result.notifications.length - 1 && !isP2BatchObserver(notification)) {
+    const observer = isP2BatchObserver(notification);
+    const presentation = p2BatchPresentation(notification);
+    if (observer) {
+      if (presentationSuffixStarted) {
+        throw new Error('product P2 notification batch barrier is invalid');
+      }
+    } else if (presentation !== null) {
+      presentationSuffixStarted = true;
+      if (
+        (presentationResponseKey !== null && presentationResponseKey !== presentation.responseKey) ||
+        rootSeen
+      ) {
+        throw new Error('product P2 notification batch presentation owner is invalid');
+      }
+      presentationResponseKey ??= presentation.responseKey;
+      if (presentation.role === 'audio_segment') {
+        if (
+          priorAudio !== null &&
+          (presentation.seq !== priorAudio.seq + 1 ||
+            presentation.sourceStartUtf8 !== priorAudio.sourceEndUtf8)
+        ) {
+          throw new Error('product P2 notification batch presentation order is invalid');
+        }
+        priorAudio = presentation;
+      } else {
+        rootSeen = true;
+        if (index !== result.notifications.length - 1) {
+          throw new Error('product P2 notification batch root is not terminal');
+        }
+        if (
+          priorAudio !== null &&
+          presentation.role !== 'authoritative_text_root'
+        ) {
+          throw new Error('product P2 notification batch root role is invalid');
+        }
+      }
+    } else if (presentationSuffixStarted || index < result.notifications.length - 1) {
       throw new Error('product P2 notification batch barrier is invalid');
     }
     notifications.push(Object.freeze({ ...notification }));

@@ -14,6 +14,9 @@ from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
     HarnessRoundHandle,
     HarnessRoundViolation,
 )
+from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+    FORMAL_APPEND_ONLY_DELTA_CAPABILITY,
+)
 
 
 def _tool_result_succeeded(payload: dict[str, object]) -> bool | None:
@@ -36,6 +39,19 @@ def _tool_result_succeeded(payload: dict[str, object]) -> bool | None:
         "failure",
     }
     return succeeded and not failed
+
+
+def _text_stream_capability(payload: dict[str, object]) -> str:
+    capability = payload.get("text_stream_capability")
+    if capability is None:
+        return "agent.chat"
+    if capability == FORMAL_APPEND_ONLY_DELTA_CAPABILITY:
+        return FORMAL_APPEND_ONLY_DELTA_CAPABILITY
+    raise HarnessRoundViolation(
+        "INVALID_FORMAL_AGENT_OUTPUT",
+        "Agent text stream declared an unsupported capability",
+        ErrorCode.PROTOCOL_VIOLATION,
+    )
 
 
 class JiuWenSwarmAgentAdapter:
@@ -81,7 +97,7 @@ class JiuWenSwarmAgentAdapter:
                 event_type=event_type,
                 source_provenance=request.source_provenance,
                 text=content if isinstance(content, str) else None,
-                capability="agent.chat",
+                capability=_text_stream_capability(payload),
                 error_reason=error if isinstance(error, str) else None,
                 tool_result_succeeded=_tool_result_succeeded(payload),
             )

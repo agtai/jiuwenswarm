@@ -170,6 +170,7 @@ from .product_p3_text_adapter import (
 )
 from .presentation_ledger import (
     PresentationAck,
+    PresentationProjectionRole,
     PresentationSurface,
     TaskPresentationConsumptionOwner,
     TaskPresentationDelivery,
@@ -894,6 +895,38 @@ def _bind_unified_response_request(
     bound = dict(payload)
     bound["request_id"] = request_id
     return bound
+
+
+def _pipeline_diagnostic_fields(
+    *,
+    event: str,
+    session_id: str,
+    correlation_id: str,
+    interaction_id: str,
+    activation_id: str,
+    activation_generation: int,
+    request_id: str,
+    detail: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Build a content-free record for temporary end-to-end diagnosis.
+
+    Transcript text, speech receipts, auth material and Provider payloads are
+    intentionally excluded. The public route identity is sufficient to join
+    Browser, media gateway and P2 composition events for one voice turn.
+    """
+
+    fields: dict[str, object] = {
+        "event": event,
+        "session_id": session_id,
+        "correlation_id": correlation_id,
+        "interaction_id": interaction_id,
+        "activation_id": activation_id,
+        "activation_generation": activation_generation,
+        "request_id": request_id,
+    }
+    if detail is not None:
+        fields.update(detail)
+    return fields
 
 
 def _formal_live_voice_capable(agent: object) -> bool:
@@ -6587,6 +6620,19 @@ class AgentServerProductCompositionRegistry:
             )
 
         async def submit() -> P3RouteResult:
+            logger.info(
+                "live_voice_pipeline_diagnostic %s",
+                _pipeline_diagnostic_fields(
+                    event="agent_submit_dispatched",
+                    session_id=retained.binding.session_id,
+                    correlation_id=retained.binding.correlation_id,
+                    interaction_id=retained.binding.interaction_id,
+                    activation_id=retained.binding.activation_id,
+                    activation_generation=retained.binding.activation_generation,
+                    request_id=request_id,
+                ),
+            )
+
             async def checkpoint(response_ref: ResponseRef, round_id: str) -> None:
                 await asyncio.to_thread(
                     journal.checkpoint_foreground_effect,
@@ -6636,7 +6682,7 @@ class AgentServerProductCompositionRegistry:
                     result=outcome.payload,
                 )
 
-            return await self._run_p2_submit(
+            outcome = await self._run_p2_submit(
                 retained=retained,
                 request_id=request_id,
                 response_id=response_id,
@@ -6653,6 +6699,20 @@ class AgentServerProductCompositionRegistry:
                 after_agent_dispatch=checkpoint_accepted,
                 allow_agent_tools=allow_tools,
             )
+            logger.info(
+                "live_voice_pipeline_diagnostic %s",
+                _pipeline_diagnostic_fields(
+                    event="agent_submit_settled",
+                    session_id=retained.binding.session_id,
+                    correlation_id=retained.binding.correlation_id,
+                    interaction_id=retained.binding.interaction_id,
+                    activation_id=retained.binding.activation_id,
+                    activation_generation=retained.binding.activation_generation,
+                    request_id=request_id,
+                    detail={"ok": outcome.ok},
+                ),
+            )
+            return outcome
 
         return await self._run_unified_foreground_effect(
             voice_identity=voice_identity,
@@ -7563,6 +7623,18 @@ class AgentServerProductCompositionRegistry:
             self._ensure_running()
             parsed = self._parse_p2_route_binding(params, session_id=session_id)
             routed_session, correlation_id, interaction_id, _, _, _ = parsed
+            logger.info(
+                "live_voice_pipeline_diagnostic %s",
+                _pipeline_diagnostic_fields(
+                    event="unified_submit_received",
+                    session_id=routed_session,
+                    correlation_id=correlation_id,
+                    interaction_id=interaction_id,
+                    activation_id=parsed[3],
+                    activation_generation=parsed[4],
+                    request_id=request_id,
+                ),
+            )
             if params.get("input_state") != "final":
                 raise FormalTaskViolation(
                     "INPUT_NOT_FINAL",
@@ -7722,6 +7794,19 @@ class AgentServerProductCompositionRegistry:
             resolution = self._restore_unified_semantic_binding(
                 semantic_binding,
                 commit=commit,
+            )
+            logger.info(
+                "live_voice_pipeline_diagnostic %s",
+                _pipeline_diagnostic_fields(
+                    event="unified_commit_admitted",
+                    session_id=routed_session,
+                    correlation_id=correlation_id,
+                    interaction_id=interaction_id,
+                    activation_id=parsed[3],
+                    activation_generation=parsed[4],
+                    request_id=request_id,
+                    detail={"route": resolution.route.value},
+                ),
             )
             if resolution.route in {
                 UnifiedCommittedInputRoute.BACKGROUND_UPDATE,
@@ -8083,6 +8168,42 @@ class AgentServerProductCompositionRegistry:
         ref = notification.response_ref
         unit = notification.presentation_unit
         agent_event = notification.agent_event
+        presentation_text = notification.presentation_text
+        presentation_delivery = notification.presentation_delivery
+        if unit is None:
+            if presentation_text is not None or presentation_delivery is not None:
+                raise FormalTaskViolation(
+                    "INVALID_PRESENTATION_NOTIFICATION",
+                    "presentation metadata requires one exact unit",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        else:
+            expected = {
+                PresentationProjectionRole.ALIGNED: (
+                    None,
+                    "display_and_speak",
+                ),
+                PresentationProjectionRole.AUTHORITATIVE_TEXT_ROOT: (
+                    PresentationSurface.TEXT,
+                    "display_only",
+                ),
+                PresentationProjectionRole.AUDIO_SEGMENT: (
+                    PresentationSurface.AUDIO,
+                    "speak_only",
+                ),
+            }.get(unit.projection_role)
+            if (
+                not isinstance(presentation_text, str)
+                or not presentation_text
+                or expected is None
+                or (expected[0] is not None and unit.surface is not expected[0])
+                or presentation_delivery != expected[1]
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_PRESENTATION_NOTIFICATION",
+                    "presentation projection, surface and delivery conflict",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
         return {
             "status": "notification",
             "kind": notification.kind,
@@ -8125,8 +8246,11 @@ class AgentServerProductCompositionRegistry:
                     "source_start_utf8": unit.source_start_utf8,
                     "source_end_utf8": unit.source_end_utf8,
                     "content_ref": unit.content_ref,
+                    "projection_role": unit.projection_role.value,
                 }
             ),
+            "presentation_text": presentation_text,
+            "presentation_delivery": presentation_delivery,
             "error_reason": notification.error_reason,
             "publish_seq": notification.publish_seq,
         }
@@ -8141,6 +8265,8 @@ class AgentServerProductCompositionRegistry:
             and notification.source_event is None
             and notification.progress_event is None
             and notification.presentation_unit is None
+            and notification.presentation_text is None
+            and notification.presentation_delivery is None
             and notification.error_reason is None
         )
 
@@ -8169,6 +8295,8 @@ class AgentServerProductCompositionRegistry:
             "source_event": None,
             "progress_event": None,
             "presentation_unit": None,
+            "presentation_text": None,
+            "presentation_delivery": None,
             "error_reason": None,
             "publish_seq": None,
         }
@@ -8227,6 +8355,24 @@ class AgentServerProductCompositionRegistry:
                     self._serialize_p2_notification(notification), retained.binding
                 )
                 for notification in notifications
+            )
+            logger.info(
+                "live_voice_pipeline_diagnostic %s",
+                _pipeline_diagnostic_fields(
+                    event="p2_notification_published",
+                    session_id=retained.binding.session_id,
+                    correlation_id=retained.binding.correlation_id,
+                    interaction_id=retained.binding.interaction_id,
+                    activation_id=retained.binding.activation_id,
+                    activation_generation=retained.binding.activation_generation,
+                    request_id=request_id,
+                    detail={
+                        "notification_count": len(serialized),
+                        "notification_kinds": ",".join(
+                            str(item["kind"]) for item in serialized
+                        ),
+                    },
+                ),
             )
             if max_notifications > 1:
                 payload: dict[str, object] = {

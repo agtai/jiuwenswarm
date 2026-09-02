@@ -72,6 +72,27 @@ function frame(seq = 0, sampleCursor = 0) {
   };
 }
 
+test('prefetch PARK and PROMOTE controls round trip with exact identity', () => {
+  const common = {
+    capability_version: 'live-voice.media.prefetch-promotion.v1',
+    lease_id: 'lease-opaque-01',
+    generation: 7,
+    session_id: 'session-01',
+    correlation_id: 'correlation-01',
+    interaction_id: 'interaction-01',
+    response_id: 'response-01',
+    response_generation: 7,
+    unit_id: 'unit-01',
+    unit_seq: 1,
+    retained_through_seq: 24,
+    business_cancel_count_delta: 0,
+  };
+  for (const [state, transitionSeq] of [['prefetch_parked', 0], ['promoted', 1]]) {
+    const control = { type: 'media.prefetch_transition', ...common, state, transition_seq: transitionSeq };
+    assert.deepEqual(deserializeMediaControl(serializeMediaControl(control)), control);
+  }
+});
+
 function active({ exactBinding = binding(), maxPendingFrames, maxPendingBytes, effects } = {}) {
   const counters = effects ?? { audio: 0 };
   const result = createBrowserGatewayMediaActivation({

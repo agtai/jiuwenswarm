@@ -19,6 +19,8 @@ import {
   type MediaEnqueueResult,
   type MediaAudioFrame,
   type MediaPlaybackStopReceipt,
+  type MediaPrefetchTransition,
+  type MediaPrefetchTransitionAck,
   type MediaRegistrationOwnerCloseResult,
 } from './browserGatewayMediaTransport.js';
 
@@ -43,6 +45,7 @@ const MAX_DRAIN_RETRY_DELAY_MS = 1_000;
 const MAX_DRAIN_STALL_RETRIES = 10_000;
 const MAX_LOCAL_STOP_CURSOR_FACTS = 256;
 const MAX_MEDIA_TICKET_CHARS = 128;
+const PREFETCH_TRANSITION_TIMEOUT_MS = 5_000;
 const MAX_MEDIA_AUTH_FRAME_BYTES = 8 * 1024;
 const DEDICATED_MEDIA_LEAF_CONSTRUCTION_TOKEN = Symbol('dedicated-media-socket-leaf');
 const BROWSER_AUDIO_LOCAL_STOP_OUTCOMES: ReadonlySet<string> = new Set([
@@ -119,6 +122,24 @@ export interface DedicatedMediaSocketMessageEventLike {
   readonly data: unknown;
 }
 
+function socketCloseFacts(value: unknown): Readonly<{
+  code: number | null;
+  reason: string | null;
+  was_clean: boolean | null;
+}> {
+  if (typeof value !== 'object' || value === null) {
+    return Object.freeze({ code: null, reason: null, was_clean: null });
+  }
+  const candidate = value as { code?: unknown; reason?: unknown; wasClean?: unknown };
+  return Object.freeze({
+    code: Number.isSafeInteger(candidate.code) ? candidate.code as number : null,
+    reason: typeof candidate.reason === 'string' && candidate.reason.length <= 256
+      ? candidate.reason
+      : null,
+    was_clean: typeof candidate.wasClean === 'boolean' ? candidate.wasClean : null,
+  });
+}
+
 export interface DedicatedMediaSocketLike {
   readonly readyState: number;
   readonly bufferedAmount: number;
@@ -173,6 +194,7 @@ export interface BrowserDedicatedMediaRouteRequest {
   readonly transport_available: boolean;
   readonly socket_factory: DedicatedMediaSocketFactory;
   readonly on_audio_frame: (frame: MediaAudioFrame) => void;
+  readonly on_attached?: () => void;
   readonly on_uplink_frame_sent?: (seq: number) => void;
   readonly on_uplink_frame_acknowledged?: (throughSeq: number) => void;
   readonly on_first_frame_diagnostic?: (fact: Readonly<MediaFirstFrameDiagnostic>) => void;
@@ -189,6 +211,8 @@ export interface BrowserDedicatedMediaRouteRequest {
   readonly cancel_drain_retry?: DedicatedMediaDrainRetryCanceller;
   /** Hold downlink ACKs until the corresponding browser audio chunk renders. */
   readonly defer_downlink_ack?: boolean;
+  readonly prefetch_promotion_capability?: 'live-voice.media.prefetch-promotion.v1';
+  readonly unit_seq?: number;
 }
 
 export interface DedicatedMediaRouteCapability {
@@ -523,6 +547,9 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
   if (request.on_terminal !== undefined && typeof request.on_terminal !== 'function') {
     throw new TypeError('on_terminal must be a function');
   }
+  if (request.on_attached !== undefined && typeof request.on_attached !== 'function') {
+    throw new TypeError('on_attached must be a function');
+  }
   if (request.on_uplink_frame_sent !== undefined && typeof request.on_uplink_frame_sent !== 'function') {
     throw new TypeError('on_uplink_frame_sent must be a function');
   }
@@ -570,6 +597,12 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
     throw new TypeError('cancel_drain_retry must be a function');
   }
   if (request.defer_downlink_ack !== undefined && typeof request.defer_downlink_ack !== 'boolean') throw new TypeError('defer_downlink_ack must be boolean');
+  if (
+    (request.prefetch_promotion_capability === undefined) !== (request.unit_seq === undefined)
+    || (request.prefetch_promotion_capability !== undefined
+      && request.prefetch_promotion_capability !== 'live-voice.media.prefetch-promotion.v1')
+    || (request.unit_seq !== undefined && (!Number.isSafeInteger(request.unit_seq) || request.unit_seq <= 0))
+  ) throw new TypeError('prefetch promotion requires the exact continuation capability');
 
   const activation = createBrowserGatewayMediaActivation({
     enabled: true,
@@ -601,7 +634,10 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
       customDrainScheduler ?? scheduleDefaultDrainRetry,
       customDrainCanceller ?? cancelDefaultDrainRetry,
       request.defer_downlink_ack === true,
+      request.prefetch_promotion_capability,
+      request.unit_seq,
       authenticationFrame,
+      request.on_attached,
       request.on_terminal,
       request.on_uplink_frame_sent,
       request.on_uplink_frame_acknowledged,
@@ -642,7 +678,10 @@ export class BrowserDedicatedMediaSocketLeaf {
   readonly #scheduleDrainRetry: DedicatedMediaDrainRetryScheduler;
   readonly #cancelDrainRetry: DedicatedMediaDrainRetryCanceller;
   readonly #deferDownlinkAck: boolean;
+  readonly #prefetchPromotionCapability?: 'live-voice.media.prefetch-promotion.v1';
+  readonly #unitSeq?: number;
   #pendingAuthenticationFrame: string | null;
+  readonly #onAttached?: () => void;
   readonly #onTerminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void;
   readonly #onUplinkFrameSent?: (seq: number) => void;
   readonly #onUplinkFrameAcknowledged?: (throughSeq: number) => void;
@@ -660,6 +699,7 @@ export class BrowserDedicatedMediaSocketLeaf {
   #retainedClose: MediaRegistrationOwnerCloseResult | null = null;
   #pendingUplinkCompletion: PendingUplinkCompletion | null = null;
   #terminalNotified = false;
+  #terminalSource: DedicatedMediaTerminalSource | null = null;
   #speechStartSeen = false;
   #speechStartProviderMs: number | null = null;
   #endOfTurnSeen = false;
@@ -667,6 +707,17 @@ export class BrowserDedicatedMediaSocketLeaf {
   #drainRetryGeneration = 0;
   #drainStallRetries = 0;
   #lastUplinkAckNotified = -1;
+  #authenticationFrameSent = false;
+  #receivedMessageCount = 0;
+  #firstBinaryMessageObserved = false;
+  #pendingPrefetchTransition: Readonly<{
+    control: Readonly<MediaPrefetchTransition>;
+    resolve: (ack: Readonly<MediaPrefetchTransitionAck>) => void;
+    reject: (error: unknown) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }> | null = null;
+  #parkedRetainedThroughSeq: number | null = null;
+  #lastPrefetchAck: Readonly<MediaPrefetchTransitionAck> | null = null;
 
   constructor(
     activation: ActiveMediaActivation,
@@ -679,7 +730,10 @@ export class BrowserDedicatedMediaSocketLeaf {
     scheduleDrainRetry: DedicatedMediaDrainRetryScheduler,
     cancelDrainRetry: DedicatedMediaDrainRetryCanceller,
     deferDownlinkAck: boolean,
+    prefetchPromotionCapability: 'live-voice.media.prefetch-promotion.v1' | undefined,
+    unitSeq: number | undefined,
     authenticationFrame: string | null,
+    onAttached?: () => void,
     onTerminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void,
     onUplinkFrameSent?: (seq: number) => void,
     onUplinkFrameAcknowledged?: (throughSeq: number) => void,
@@ -703,7 +757,10 @@ export class BrowserDedicatedMediaSocketLeaf {
     this.#scheduleDrainRetry = scheduleDrainRetry;
     this.#cancelDrainRetry = cancelDrainRetry;
     this.#deferDownlinkAck = deferDownlinkAck;
+    this.#prefetchPromotionCapability = prefetchPromotionCapability;
+    this.#unitSeq = unitSeq;
     this.#pendingAuthenticationFrame = authenticationFrame;
+    this.#onAttached = onAttached;
     this.#onTerminal = onTerminal;
     this.#onUplinkFrameSent = onUplinkFrameSent;
     this.#onUplinkFrameAcknowledged = onUplinkFrameAcknowledged;
@@ -716,6 +773,13 @@ export class BrowserDedicatedMediaSocketLeaf {
     socket.binaryType = 'arraybuffer';
     socket.onopen = () => {
       if (this.#closed) return;
+      console.info('[LiveVoiceDedicatedMedia] diagnostic', {
+        event: 'socket_open',
+        direction: this.binding.direction,
+        negotiated_protocol: socket.protocol,
+        expected_protocol: DEDICATED_MEDIA_SUBPROTOCOL,
+        authentication_frame_pending: this.#pendingAuthenticationFrame !== null,
+      });
       if (socket.protocol !== DEDICATED_MEDIA_SUBPROTOCOL) {
         this.#terminate('MEDIA_TRANSPORT_PROTOCOL_ERROR', false);
         return;
@@ -725,18 +789,64 @@ export class BrowserDedicatedMediaSocketLeaf {
         this.#pendingAuthenticationFrame = null;
         try {
           socket.send(authenticationFrame);
+          this.#authenticationFrameSent = true;
+          console.info('[LiveVoiceDedicatedMedia] diagnostic', {
+            event: 'authentication_frame_sent',
+            direction: this.binding.direction,
+          });
         } catch {
           this.#terminate('MEDIA_TRANSPORT_SEND_FAILED', false);
         }
       }
     };
     socket.onmessage = event => {
+      this.#receivedMessageCount += 1;
+      if (typeof event.data !== 'string' && !this.#firstBinaryMessageObserved) {
+        this.#firstBinaryMessageObserved = true;
+        console.info('[LiveVoiceDedicatedMedia] diagnostic', {
+          event: 'first_binary_message_received',
+          direction: this.binding.direction,
+          attached: this.#attached,
+          message_count: this.#receivedMessageCount,
+        });
+      }
       this.#acceptMessage(event.data);
     };
     socket.onerror = () => {
+      console.warn('[LiveVoiceDedicatedMedia] diagnostic', {
+        event: 'socket_error',
+        direction: this.binding.direction,
+        ready_state: socket.readyState,
+        authentication_frame_sent: this.#authenticationFrameSent,
+        attached: this.#attached,
+        leaf_closed: this.#closed,
+        terminal_source: this.#terminalSource,
+        retained_reason_id: this.#retainedClose?.reason_id ?? null,
+        session_id: this.binding.session_id,
+        correlation_id: this.binding.correlation_id,
+        interaction_id: this.binding.interaction_id,
+        message_count: this.#receivedMessageCount,
+        first_binary_message_observed: this.#firstBinaryMessageObserved,
+      });
       this.#terminate('MEDIA_TRANSPORT_CLOSED', false, 'transport_close');
     };
-    socket.onclose = () => {
+    socket.onclose = event => {
+      console.warn('[LiveVoiceDedicatedMedia] diagnostic', {
+        event: 'socket_close',
+        direction: this.binding.direction,
+        ready_state: socket.readyState,
+        authentication_frame_sent: this.#authenticationFrameSent,
+        attached: this.#attached,
+        leaf_closed: this.#closed,
+        terminal_source: this.#terminalSource,
+        retained_reason_id: this.#retainedClose?.reason_id ?? null,
+        session_id: this.binding.session_id,
+        correlation_id: this.binding.correlation_id,
+        interaction_id: this.binding.interaction_id,
+        message_count: this.#receivedMessageCount,
+        first_binary_message_observed: this.#firstBinaryMessageObserved,
+        ...socketCloseFacts(event),
+      });
       this.#terminate('MEDIA_TRANSPORT_CLOSED', false, 'transport_close');
     };
   }
@@ -1006,6 +1116,81 @@ export class BrowserDedicatedMediaSocketLeaf {
     this.#sendControl(retained.ack);
   }
 
+  parkPrefetch(retainedThroughSeq: number): Promise<Readonly<MediaPrefetchTransitionAck>> {
+    return this.#sendPrefetchTransition('prefetch_parked', 0, retainedThroughSeq);
+  }
+
+  promotePrefetch(): Promise<Readonly<MediaPrefetchTransitionAck>> {
+    if (this.#parkedRetainedThroughSeq === null) {
+      return Promise.reject(new MediaTransportViolation('MEDIA_INVALID_CONTROL', 'no parked successor exists'));
+    }
+    return this.#sendPrefetchTransition('promoted', 1, this.#parkedRetainedThroughSeq);
+  }
+
+  promoteUnparked(retainedThroughSeq: number): Promise<Readonly<MediaPrefetchTransitionAck>> {
+    return this.#sendPrefetchTransition('promoted_unparked', 0, retainedThroughSeq);
+  }
+
+  #sendPrefetchTransition(
+    state: MediaPrefetchTransition['state'],
+    transitionSeq: number,
+    retainedThroughSeq: number,
+  ): Promise<Readonly<MediaPrefetchTransitionAck>> {
+    if (
+      this.#prefetchPromotionCapability === undefined
+      || this.#unitSeq === undefined
+      || this.binding.direction !== 'downlink'
+      || this.binding.playout === null
+      || this.#pendingPrefetchTransition !== null
+      || this.closed
+      || !this.#attached
+    ) return Promise.reject(new MediaTransportViolation('MEDIA_INVALID_CONTROL', 'prefetch transition is unavailable'));
+    const control: Readonly<MediaPrefetchTransition> = Object.freeze({
+      type: 'media.prefetch_transition',
+      capability_version: this.#prefetchPromotionCapability,
+      lease_id: this.binding.lease_id,
+      generation: this.binding.generation.value,
+      session_id: this.binding.session_id,
+      correlation_id: this.binding.correlation_id,
+      interaction_id: this.binding.interaction_id,
+      response_id: this.binding.playout.response_id,
+      response_generation: this.binding.playout.response_generation,
+      unit_id: this.binding.playout.unit_id,
+      unit_seq: this.#unitSeq,
+      transition_seq: transitionSeq,
+      state,
+      retained_through_seq: retainedThroughSeq,
+      business_cancel_count_delta: 0,
+    });
+    console.info('[LiveVoiceC019] transition diagnostic', {
+      event: 'browser_transition_sent',
+      correlation_id: control.correlation_id,
+      response_generation: control.response_generation,
+      unit_seq: control.unit_seq,
+      transition_seq: control.transition_seq,
+      state: control.state,
+      retained_through_seq: control.retained_through_seq,
+    });
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.#pendingPrefetchTransition?.control === control) {
+          this.#pendingPrefetchTransition = null;
+          console.warn('[LiveVoiceC019] transition diagnostic', {
+            event: 'browser_transition_timeout',
+            correlation_id: control.correlation_id,
+            response_generation: control.response_generation,
+            unit_seq: control.unit_seq,
+            transition_seq: control.transition_seq,
+            state: control.state,
+          });
+          reject(new MediaTransportViolation('MEDIA_TRANSPORT_CLOSED', 'prefetch transition timed out'));
+        }
+      }, PREFETCH_TRANSITION_TIMEOUT_MS);
+      this.#pendingPrefetchTransition = Object.freeze({ control, resolve, reject, timer });
+      this.#sendControl(control);
+    });
+  }
+
   #acceptMessage(value: unknown): void {
     if (this.#pendingUplinkCompletion !== null) {
       if (typeof value !== 'string') {
@@ -1071,10 +1256,66 @@ export class BrowserDedicatedMediaSocketLeaf {
         return;
       }
       this.#attached = true;
+      try {
+        this.#onAttached?.();
+      } catch {
+        this.#terminate('MEDIA_CONSUMER_FAILED');
+        return;
+      }
+      console.info('[LiveVoiceDedicatedMedia] diagnostic', {
+        event: 'media_attach_accepted',
+        direction: this.binding.direction,
+        message_count: this.#receivedMessageCount,
+      });
       return;
     }
     if (!this.#attached) {
       this.#terminate('MEDIA_NOT_ATTACHED');
+      return;
+    }
+    if (control.type === 'media.prefetch_transition_ack') {
+      const pending = this.#pendingPrefetchTransition;
+      if (pending === null) {
+        if (
+          this.#lastPrefetchAck !== null
+          && JSON.stringify(control) === JSON.stringify(this.#lastPrefetchAck)
+        ) return;
+        this.#terminate('MEDIA_TRANSPORT_PROTOCOL_ERROR');
+        return;
+      }
+      const expected = pending.control;
+      if (
+        control.lease_id !== expected.lease_id
+        || control.generation !== expected.generation
+        || control.session_id !== expected.session_id
+        || control.correlation_id !== expected.correlation_id
+        || control.interaction_id !== expected.interaction_id
+        || control.response_id !== expected.response_id
+        || control.response_generation !== expected.response_generation
+        || control.unit_id !== expected.unit_id
+        || control.unit_seq !== expected.unit_seq
+        || control.transition_seq !== expected.transition_seq
+        || control.state !== expected.state
+        || control.retained_through_seq !== expected.retained_through_seq
+      ) {
+        this.#terminate('MEDIA_TRANSPORT_PROTOCOL_ERROR');
+        return;
+      }
+      clearTimeout(pending.timer);
+      this.#pendingPrefetchTransition = null;
+      this.#lastPrefetchAck = control;
+      console.info('[LiveVoiceC019] transition diagnostic', {
+        event: 'browser_transition_ack_received',
+        correlation_id: control.correlation_id,
+        response_generation: control.response_generation,
+        unit_seq: control.unit_seq,
+        transition_seq: control.transition_seq,
+        state: control.state,
+        retained_through_seq: control.retained_through_seq,
+      });
+      if (control.state === 'prefetch_parked') this.#parkedRetainedThroughSeq = control.retained_through_seq;
+      if (control.state !== 'prefetch_parked') this.#parkedRetainedThroughSeq = null;
+      pending.resolve(control);
       return;
     }
     if (control.type === 'media.detach') {
@@ -1289,6 +1530,12 @@ export class BrowserDedicatedMediaSocketLeaf {
 
   #terminate(reasonId: MediaDetachReason, sendDetach = true, source: DedicatedMediaTerminalSource = 'internal_failure'): MediaRegistrationOwnerCloseResult {
     this.#pendingAuthenticationFrame = null;
+    const prefetch = this.#pendingPrefetchTransition;
+    if (prefetch !== null) {
+      clearTimeout(prefetch.timer);
+      this.#pendingPrefetchTransition = null;
+      prefetch.reject(new MediaTransportViolation(reasonId, 'prefetch transition was not acknowledged'));
+    }
     if (this.#pendingUplinkCompletion !== null) {
       const retained = this.#retainedClose ?? this.#activation.owner.close(reasonId);
       this.#retainedClose = retained;
@@ -1322,6 +1569,7 @@ export class BrowserDedicatedMediaSocketLeaf {
   #notifyTerminal(reasonId: MediaDetachReason, source: DedicatedMediaTerminalSource, attachedBeforeClose: boolean): void {
     if (this.#terminalNotified) return;
     this.#terminalNotified = true;
+    this.#terminalSource = source;
     try {
       this.#onTerminal?.(
         Object.freeze({

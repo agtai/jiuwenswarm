@@ -13,6 +13,14 @@ from dataclasses import replace
 
 import pytest
 
+from tests.unit_tests.live_voice.c019_lifecycle_model import (
+    from_adapter_snapshot,
+    violations as lifecycle_violations,
+    with_delivery_snapshot,
+    with_gateway_snapshot,
+    with_transport_observation,
+)
+
 from jiuwenswarm.gateway.live_voice import streaming_synthesis_route as route_module
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
 from jiuwenswarm.gateway.live_voice.product_streaming_synthesis import (
@@ -93,6 +101,100 @@ class _FakeSseStream:
         self.closed = True
 
 
+class _ObservedFakeSseStream(_FakeSseStream):
+    def __init__(self, lines: tuple[str, ...]) -> None:
+        super().__init__(lines)
+        self.yielded_lines = 0
+        self._progressed = asyncio.Condition()
+
+    async def __aiter__(self):
+        for line in self._lines:
+            async with self._progressed:
+                self.yielded_lines += 1
+                self._progressed.notify_all()
+            yield line
+
+    async def wait_until_yielded(self, count: int) -> None:
+        async with self._progressed:
+            await asyncio.wait_for(
+                self._progressed.wait_for(lambda: self.yielded_lines >= count),
+                timeout=1,
+            )
+
+
+class _CloseGatedObservedFakeSseStream(_ObservedFakeSseStream):
+    def __init__(self, lines: tuple[str, ...]) -> None:
+        super().__init__(lines)
+        self.close_started = asyncio.Event()
+        self.release_close = asyncio.Event()
+
+    async def aclose(self) -> None:
+        self.close_started.set()
+        await self.release_close.wait()
+        await super().aclose()
+
+
+class _TwoStageGatedSseStream(_FakeSseStream):
+    def __init__(
+        self,
+        prefix: tuple[str, ...],
+        middle: tuple[str, ...],
+        suffix: tuple[str, ...],
+    ) -> None:
+        super().__init__(prefix + middle + suffix)
+        self._prefix = prefix
+        self._middle = middle
+        self._suffix = suffix
+        self.first_gate_waiting = asyncio.Event()
+        self.release_first_gate = asyncio.Event()
+        self.second_gate_waiting = asyncio.Event()
+        self.release_second_gate = asyncio.Event()
+
+    async def __aiter__(self):
+        for line in self._prefix:
+            yield line
+        self.first_gate_waiting.set()
+        await self.release_first_gate.wait()
+        for line in self._middle:
+            yield line
+        self.second_gate_waiting.set()
+        await self.release_second_gate.wait()
+        for line in self._suffix:
+            yield line
+
+
+class _FirstPullGatedOpenAIProvider(OpenAIStreamingSpeechProvider):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.first_pull_started = asyncio.Event()
+        self.release_first_pull = asyncio.Event()
+        self._first_pull_released = False
+
+    async def next_synthesis_event(self, ref, *, timeout_seconds: float):
+        if not self._first_pull_released:
+            self.first_pull_started.set()
+            await self.release_first_pull.wait()
+            self._first_pull_released = True
+        return await super().next_synthesis_event(ref, timeout_seconds=timeout_seconds)
+
+
+class _ObservedControlOpenAIProvider(OpenAIStreamingSpeechProvider):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.pause_called = asyncio.Event()
+        self.pause_calls = 0
+        self.resume_calls = 0
+
+    async def pause_synthesis(self, ref: SynthesisStreamRef) -> None:
+        self.pause_calls += 1
+        self.pause_called.set()
+        await super().pause_synthesis(ref)
+
+    async def resume_synthesis(self, ref: SynthesisStreamRef) -> None:
+        self.resume_calls += 1
+        await super().resume_synthesis(ref)
+
+
 class _FakeProvider(NativeStreamingSpeechProvider):
     def __init__(self, capability: StreamingProviderCapability = _CAPABILITY) -> None:
         self._capability = capability
@@ -108,6 +210,19 @@ class _FakeProvider(NativeStreamingSpeechProvider):
         self.open_count = 0
         self.requests: list[SynthesisStreamRequest] = []
         self.cancelled: list[SynthesisStreamRef] = []
+        self.paused: list[SynthesisStreamRef] = []
+        self.resumed: list[SynthesisStreamRef] = []
+        self.pause_started = asyncio.Event()
+        self.resume_started = asyncio.Event()
+        self.parked: list[tuple[SynthesisStreamRef, int, float]] = []
+        self.park_started = asyncio.Event()
+        self.park_gate: asyncio.Event | None = None
+        self.promoted: list[tuple[SynthesisStreamRef, int]] = []
+        self.promote_started = asyncio.Event()
+        self.promote_gate: asyncio.Event | None = None
+        self.pause_error: BaseException | None = None
+        self.resume_error: BaseException | None = None
+        self.resume_gate: asyncio.Event | None = None
         self.closed = 0
         self.open_error: BaseException | None = None
         self.open_gate: asyncio.Event | None = None
@@ -117,6 +232,7 @@ class _FakeProvider(NativeStreamingSpeechProvider):
         self.event_gate: asyncio.Event | None = None
         self.ignore_event_cancel = False
         self.event_started = asyncio.Event()
+        self.event_calls = 0
         self.cancel_gate: asyncio.Event | None = None
         self.ignore_cancel_cancel = False
         self.cancel_error: BaseException | None = None
@@ -150,6 +266,7 @@ class _FakeProvider(NativeStreamingSpeechProvider):
         self, ref: SynthesisStreamRef, *, timeout_seconds: float
     ) -> StreamingSynthesisEvent:
         del timeout_seconds
+        self.event_calls += 1
         self.event_started.set()
         if self.event_gate is not None:
             await _wait_gate(self.event_gate, ignore_cancel=self.ignore_event_cancel)
@@ -163,6 +280,43 @@ class _FakeProvider(NativeStreamingSpeechProvider):
         }:
             self._conformance.reap_terminal()
         return accepted
+
+    async def pause_synthesis(self, ref: SynthesisStreamRef) -> None:
+        self.paused.append(ref)
+        self.pause_started.set()
+        if self.pause_error is not None:
+            raise self.pause_error
+
+    async def resume_synthesis(self, ref: SynthesisStreamRef) -> None:
+        self.resumed.append(ref)
+        self.resume_started.set()
+        if self.resume_gate is not None:
+            await self.resume_gate.wait()
+        if self.resume_error is not None:
+            raise self.resume_error
+
+    async def park_synthesis_for_promotion(
+        self,
+        ref: SynthesisStreamRef,
+        *,
+        park_generation: int,
+        max_pause_seconds: float,
+    ) -> None:
+        self.parked.append((ref, park_generation, max_pause_seconds))
+        self.park_started.set()
+        if self.park_gate is not None:
+            await self.park_gate.wait()
+
+    async def promote_parked_synthesis(
+        self,
+        ref: SynthesisStreamRef,
+        *,
+        park_generation: int,
+    ) -> None:
+        self.promoted.append((ref, park_generation))
+        self.promote_started.set()
+        if self.promote_gate is not None:
+            await self.promote_gate.wait()
 
     async def cancel_synthesis(
         self, ref: SynthesisStreamRef, *, reason: str = "caller_cancel"
@@ -235,6 +389,55 @@ class _CancellationHostileQueue(asyncio.Queue):
         await super().put(item)
 
 
+class _ParkedCancellationHostileProvider(_FakeProvider):
+    def __init__(self, capability: StreamingProviderCapability) -> None:
+        super().__init__(capability)
+        self.second_event_started = asyncio.Event()
+        self.release_second_event = asyncio.Event()
+
+    async def next_synthesis_event(
+        self, ref: SynthesisStreamRef, *, timeout_seconds: float
+    ) -> StreamingSynthesisEvent:
+        if self.event_calls == 0:
+            return await super().next_synthesis_event(
+                ref, timeout_seconds=timeout_seconds
+            )
+        self.event_calls += 1
+        self.second_event_started.set()
+        await _wait_gate(self.release_second_event, ignore_cancel=True)
+        raise TimeoutError("settled hostile test wait")
+
+
+class _ConclusiveEventTimeoutProvider(_FakeProvider):
+    def __init__(self, capability: StreamingProviderCapability) -> None:
+        super().__init__(capability)
+        self.active_event_calls = 0
+        self.max_concurrent_event_calls = 0
+
+    async def next_synthesis_event(
+        self, ref: SynthesisStreamRef, *, timeout_seconds: float
+    ) -> StreamingSynthesisEvent:
+        self.event_calls += 1
+        self.event_started.set()
+        self.active_event_calls += 1
+        self.max_concurrent_event_calls = max(
+            self.max_concurrent_event_calls, self.active_event_calls
+        )
+        try:
+            item = await asyncio.wait_for(self.events.get(), timeout=timeout_seconds)
+        finally:
+            self.active_event_calls -= 1
+        if isinstance(item, BaseException):
+            raise item
+        accepted = self._conformance.accept_synthesis_event(item)
+        if accepted.kind in {
+            SynthesisEventKind.COMPLETED,
+            SynthesisEventKind.CANCELLED,
+        }:
+            self._conformance.reap_terminal()
+        return accepted
+
+
 class _ObservedQueue(asyncio.Queue):
     def __init__(self, maxsize: int = 0) -> None:
         super().__init__(maxsize)
@@ -248,6 +451,19 @@ class _ObservedQueue(asyncio.Queue):
     async def get(self):
         self.get_started.set()
         return await super().get()
+
+
+class _ObservedBoundedQueue(asyncio.Queue):
+    def __init__(self, maxsize: int) -> None:
+        super().__init__(maxsize=maxsize)
+        self.put_attempts = 0
+        self.blocked_put_started = asyncio.Event()
+
+    async def put(self, item) -> None:
+        self.put_attempts += 1
+        if self.put_attempts > self.maxsize:
+            self.blocked_put_started.set()
+        await super().put(item)
 
 
 def _request(
@@ -309,13 +525,22 @@ def _event(
 async def _begin(
     provider: _FakeProvider,
     request: SynthesisStreamRequest,
+    *,
+    require_prefetch_decision: bool = False,
+    prefetch_decision_timeout_seconds: float = 180.0,
+    on_prefetch_promotion_timeout=None,
     **owner_options,
 ):
     async def selector() -> StreamingSpeechSelection:
         return _selection(provider)
 
     owner = StreamingSynthesisRouteOwner(selector, **owner_options)
-    handle, outcome = await owner.begin(request)
+    handle, outcome = await owner.begin(
+        request,
+        require_prefetch_decision=require_prefetch_decision,
+        prefetch_decision_timeout_seconds=prefetch_decision_timeout_seconds,
+        on_prefetch_promotion_timeout=on_prefetch_promotion_timeout,
+    )
     assert handle is not None
     assert outcome is None
     return owner, handle
@@ -394,6 +619,7 @@ async def test_streams_ordered_20ms_frames_with_exact_content_hidden_binding() -
         "exact_audio_cursor",
         "provider_cancel_ack",
         "chunk_text_spans",
+        "bounded_pause",
         "source_event_seq",
         "provider_cursor_through",
     }
@@ -461,6 +687,862 @@ async def test_real_openai_adapter_streams_through_route_without_batch_materiali
     assert provider.conformance.snapshot().task_mutations == 0
     assert provider.conformance.snapshot().chat_mutations == 0
     assert provider.conformance.snapshot().turn_commits == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_real_adapter_drains_provider_completed_audio_through_bounded_pause() -> (
+    None
+):
+    pcm = struct.pack("<5760h", *((1000,) * 5760))
+    stream = _FakeSseStream(
+        (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "speech.audio.delta",
+                    "audio": base64.b64encode(pcm).decode("ascii"),
+                }
+            ),
+            "",
+            'data: {"type":"speech.audio.done"}',
+            "",
+        )
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        OpenAIStreamingSpeechConfig(
+            api_base="https://api.openai.com/v1",
+            api_key="private-test-key",
+        ),
+        sse_factory=sse_factory,
+    )
+
+    async def selector() -> StreamingSpeechSelection:
+        return StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None)
+
+    owner = StreamingSynthesisRouteOwner(
+        selector,
+        max_pending_frames=8,
+        queue_wait_seconds=0.05,
+        pause_wait_seconds=0.5,
+    )
+    request = _request()
+    handle, begin_outcome = await owner.begin(request)
+    assert handle is not None and begin_outcome is None
+    await asyncio.sleep(0.08)
+
+    frame_sequences: list[int] = []
+    while True:
+        pull = await owner.next_chunk(handle)
+        if pull.chunk is not None:
+            frame_sequences.append(pull.chunk.frame.seq)
+            continue
+        assert pull.outcome is not None and pull.outcome.completed is True
+        break
+    assert frame_sequences == list(range(12))
+    assert stream.closed is True
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_real_adapter_provider_done_dominates_gateway_late_pause_resume() -> None:
+    frame_samples = 24_000 // 50
+    frame_count = 9
+    pcm = struct.pack(
+        f"<{frame_samples * frame_count}h",
+        *((1000,) * (frame_samples * frame_count)),
+    )
+    stream = _CloseGatedObservedFakeSseStream(
+        (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "speech.audio.delta",
+                    "audio": base64.b64encode(pcm).decode("ascii"),
+                }
+            ),
+            "",
+            'data: {"type":"speech.audio.done"}',
+            "",
+        )
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = _ObservedControlOpenAIProvider(
+        OpenAIStreamingSpeechConfig(
+            api_base="https://api.openai.com/v1",
+            api_key="private-test-key",
+        ),
+        sse_factory=sse_factory,
+        synthesis_pause_timeout_seconds=0.1,
+    )
+
+    async def selector() -> StreamingSpeechSelection:
+        return StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None)
+
+    owner = StreamingSynthesisRouteOwner(
+        selector,
+        max_pending_frames=8,
+        queue_wait_seconds=0.2,
+        pause_wait_seconds=0.5,
+    )
+    request = _request(sample_rate_hz=24_000)
+    handle, begin_outcome = await owner.begin(request)
+    assert handle is not None and begin_outcome is None
+    try:
+        await asyncio.wait_for(stream.close_started.wait(), timeout=1)
+        await asyncio.wait_for(provider.pause_called.wait(), timeout=1)
+        session = provider._require_synthesis(request.ref)
+        snapshot = provider._synthesis_lifecycle_snapshot(session)
+        assert snapshot.provider_state.value == "done"
+        assert snapshot.reader_state.value == "exited"
+        oracle_state = from_adapter_snapshot(
+            reader_state=snapshot.reader_state.value,
+            provider_state=snapshot.provider_state.value,
+            outcome_state=snapshot.outcome_state.value,
+            pause_requested=snapshot.pause_requested,
+            pause_acknowledged=snapshot.pause_acknowledged,
+            resume_signal_set=snapshot.resume_signal_set,
+            pause_mode=(
+                None if snapshot.pause_mode is None else snapshot.pause_mode.value
+            ),
+            closing=snapshot.closing,
+        )
+        oracle_state = with_gateway_snapshot(
+            oracle_state,
+            queue_size=handle.queue.qsize(),
+            queue_capacity=handle.queue.maxsize,
+            browser_reserved_frames=0,
+            prefetch_candidate=handle.prefetch_candidate,
+            waiting_for_park=False,
+        )
+        assert lifecycle_violations(oracle_state) == ()
+        assert handle.queue.qsize() == handle.queue.maxsize == 8
+
+        stream.release_close.set()
+        frame_sequences: list[int] = []
+        while True:
+            pull = await owner.next_chunk(handle, timeout_seconds=1)
+            if pull.chunk is not None:
+                frame_sequences.append(pull.chunk.frame.seq)
+                continue
+            assert pull.outcome is not None and pull.outcome.completed is True
+            break
+
+        assert frame_sequences == list(range(frame_count))
+        assert provider.pause_calls == 1
+        assert provider.resume_calls == 1
+        assert provider.degradation_facts == ()
+        assert stream.closed is True
+        oracle_state = with_delivery_snapshot(
+            oracle_state,
+            accepted_audio_frames=frame_count,
+            delivered_audio_frames=len(frame_sequences),
+            completed_published=True,
+        )
+        oracle_state = with_transport_observation(
+            oracle_state,
+            attached=True,
+            closed=stream.closed,
+            expected_close=True,
+            failure_reported=False,
+        )
+        assert lifecycle_violations(oracle_state) == ()
+        snapshot = provider.conformance.snapshot()
+        assert snapshot.agent_dispatches == 0
+        assert snapshot.tool_dispatches == 0
+        assert snapshot.task_mutations == 0
+        assert snapshot.chat_mutations == 0
+        assert snapshot.turn_commits == 0
+    finally:
+        stream.release_close.set()
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_real_adapter_dual_full_queues_resume_without_deadlock() -> None:
+    samples_per_delta = 5760
+    frames_per_delta = samples_per_delta // 480
+    pcm = struct.pack(f"<{samples_per_delta}h", *((1000,) * samples_per_delta))
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    delta_count = 80
+    stream = _ObservedFakeSseStream(
+        tuple(line for _ in range(delta_count) for line in (audio_event, ""))
+        + ('data: {"type":"speech.audio.done"}', "")
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = _FirstPullGatedOpenAIProvider(
+        OpenAIStreamingSpeechConfig(
+            api_base="https://api.openai.com/v1",
+            api_key="private-test-key",
+        ),
+        sse_factory=sse_factory,
+        event_queue_wait_seconds=0.5,
+        synthesis_pause_timeout_seconds=1.0,
+    )
+
+    async def selector() -> StreamingSpeechSelection:
+        return StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None)
+
+    owner = StreamingSynthesisRouteOwner(
+        selector,
+        max_pending_frames=8,
+        queue_wait_seconds=0.05,
+        pause_wait_seconds=0.5,
+    )
+    request = _request()
+    handle, begin_outcome = await owner.begin(request)
+    assert handle is not None and begin_outcome is None
+    session = provider._require_synthesis(request.ref)
+
+    await asyncio.wait_for(provider.first_pull_started.wait(), timeout=1)
+    await stream.wait_until_yielded(128)
+    assert session.events.qsize() == session.events.maxsize == 64
+    provider.release_first_pull.set()
+
+    async def wait_for_dual_saturation() -> None:
+        while (
+            session.events.qsize() < session.events.maxsize or handle.queue.qsize() < 8
+        ):
+            await asyncio.sleep(0)
+
+    try:
+        await asyncio.wait_for(wait_for_dual_saturation(), timeout=1)
+        assert stream.yielded_lines >= 128
+        assert session.events.qsize() == session.events.maxsize == 64
+        assert handle.queue.qsize() == handle.queue.maxsize == 8
+
+        frame_sequences: list[int] = []
+        while True:
+            pull = await owner.next_chunk(handle, timeout_seconds=1)
+            if pull.chunk is not None:
+                frame_sequences.append(pull.chunk.frame.seq)
+                continue
+            assert pull.outcome is not None and pull.outcome.completed is True
+            break
+
+        assert frame_sequences == list(range(delta_count * frames_per_delta))
+        assert provider.degradation_facts == ()
+        assert stream.closed is True
+        snapshot = provider.conformance.snapshot()
+        assert snapshot.agent_dispatches == 0
+        assert snapshot.tool_dispatches == 0
+        assert snapshot.task_mutations == 0
+        assert snapshot.chat_mutations == 0
+        assert snapshot.turn_commits == 0
+    finally:
+        await owner.close()
+    assert owner.retained_task_count == 0
+
+
+@pytest.mark.asyncio
+async def test_promoted_prefetch_resumes_later_ordinary_queue_pressure() -> None:
+    """A promoted successor must not retain PARK ownership of later pauses."""
+
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="post-promotion-ordinary-pressure")
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=1,
+        queue_wait_seconds=0.05,
+        pause_wait_seconds=0.5,
+        event_timeout_seconds=0.2,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=0.03,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * 480,
+        )
+    )
+    first = await owner.next_chunk(handle, timeout_seconds=1)
+    assert first.chunk is not None and first.chunk.frame.seq == 0
+
+    await owner.park_prefetch(handle, park_generation=7, timeout_seconds=1.0)
+    await owner.promote_prefetch(handle, park_generation=7)
+    assert handle.flow_state.value == "promoted"
+    await asyncio.sleep(0.04)
+
+    provider.pause_started.clear()
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=2,
+            cursor=480,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * (480 * 3),
+        )
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=3,
+            cursor=480 * 4,
+            kind=SynthesisEventKind.COMPLETED,
+        )
+    )
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+
+    frame_sequences = [first.chunk.frame.seq]
+    while True:
+        pull = await owner.next_chunk(handle, timeout_seconds=1)
+        if pull.chunk is not None:
+            frame_sequences.append(pull.chunk.frame.seq)
+            continue
+        assert pull.outcome is not None and pull.outcome.completed is True
+        break
+
+    assert frame_sequences == [0, 1, 2, 3]
+    assert provider.paused
+    assert provider.resumed
+    assert provider.cancelled == []
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.agent_dispatches == 0
+    assert snapshot.tool_dispatches == 0
+    assert snapshot.task_mutations == 0
+    assert snapshot.chat_mutations == 0
+    assert snapshot.turn_commits == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_parked_pressure_does_not_issue_a_second_ordinary_pause() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="parked-pressure-before-promotion")
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=1,
+        queue_wait_seconds=0.05,
+        pause_wait_seconds=0.5,
+        event_timeout_seconds=0.2,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=1.0,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * 480,
+        )
+    )
+    while handle.queue.qsize() != 1:
+        await asyncio.sleep(0)
+    await owner.park_prefetch(handle, park_generation=8, timeout_seconds=1.0)
+
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=2,
+            cursor=480,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * 480,
+        )
+    )
+    await asyncio.sleep(0.02)
+    assert provider.paused == []
+
+    await owner.promote_prefetch(handle, park_generation=8)
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=3,
+            cursor=960,
+            kind=SynthesisEventKind.COMPLETED,
+        )
+    )
+    frames = []
+    while True:
+        pull = await owner.next_chunk(handle, timeout_seconds=1)
+        if pull.chunk is not None:
+            frames.append(pull.chunk.frame.seq)
+            continue
+        assert pull.outcome is not None and pull.outcome.completed is True
+        break
+    assert frames == [0, 1]
+    assert provider.cancelled == []
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_promotion_winning_control_lock_reclassifies_pending_pressure() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    provider.promote_gate = asyncio.Event()
+    request = _request(stream_id="promotion-wins-pending-pressure")
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=1,
+        queue_wait_seconds=0.05,
+        pause_wait_seconds=0.5,
+        event_timeout_seconds=0.2,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=1.0,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * 480,
+        )
+    )
+    while handle.queue.qsize() != 1:
+        await asyncio.sleep(0)
+    await owner.park_prefetch(handle, park_generation=9, timeout_seconds=1.0)
+    promotion = asyncio.create_task(owner.promote_prefetch(handle, park_generation=9))
+    await asyncio.wait_for(provider.promote_started.wait(), timeout=1)
+
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=2,
+            cursor=480,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * 480,
+        )
+    )
+    await asyncio.sleep(0)
+    provider.promote_gate.set()
+    await asyncio.wait_for(promotion, timeout=1)
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=3,
+            cursor=960,
+            kind=SynthesisEventKind.COMPLETED,
+        )
+    )
+
+    frames = []
+    while True:
+        pull = await owner.next_chunk(handle, timeout_seconds=1)
+        if pull.chunk is not None:
+            frames.append(pull.chunk.frame.seq)
+            continue
+        assert pull.outcome is not None and pull.outcome.completed is True
+        break
+    assert frames == [0, 1]
+    assert provider.paused
+    assert provider.resumed
+    assert provider.cancelled == []
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_real_adapter_reads_done_after_post_promotion_pause_resume() -> None:
+    frame = struct.pack("<480h", *((1000,) * 480))
+    three_frames = struct.pack("<1440h", *((1000,) * 1440))
+
+    def audio_line(pcm: bytes) -> str:
+        return "data: " + json.dumps(
+            {
+                "type": "speech.audio.delta",
+                "audio": base64.b64encode(pcm).decode("ascii"),
+            }
+        )
+
+    stream = _TwoStageGatedSseStream(
+        (audio_line(frame), "", audio_line(three_frames), ""),
+        (audio_line(frame), ""),
+        (audio_line(frame), "", 'data: {"type":"speech.audio.done"}', ""),
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = _ObservedControlOpenAIProvider(
+        OpenAIStreamingSpeechConfig(
+            api_base="https://api.openai.com/v1",
+            api_key="private-test-key",
+        ),
+        sse_factory=sse_factory,
+        event_queue_wait_seconds=0.5,
+        synthesis_pause_timeout_seconds=1.0,
+    )
+
+    async def selector() -> StreamingSpeechSelection:
+        return StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None)
+
+    owner = StreamingSynthesisRouteOwner(
+        selector,
+        max_pending_frames=1,
+        queue_wait_seconds=0.2,
+        pause_wait_seconds=0.5,
+        event_timeout_seconds=0.5,
+    )
+    request = _request(stream_id="real-adapter-post-promotion-done")
+    handle, begin_outcome = await owner.begin(
+        request,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=1.0,
+    )
+    assert handle is not None and begin_outcome is None
+    first = await owner.next_chunk(handle, timeout_seconds=1)
+    assert first.chunk is not None and first.chunk.frame.seq == 0
+    await asyncio.wait_for(stream.first_gate_waiting.wait(), timeout=1)
+
+    park = asyncio.create_task(
+        owner.park_prefetch(handle, park_generation=10, timeout_seconds=1.0)
+    )
+    session = provider._require_synthesis(request.ref)
+    while not session.pause_requested.is_set():
+        await asyncio.sleep(0)
+    stream.release_first_gate.set()
+    await asyncio.wait_for(park, timeout=1)
+    await owner.promote_prefetch(handle, park_generation=10)
+    await asyncio.wait_for(stream.second_gate_waiting.wait(), timeout=1)
+    provider.pause_called.clear()
+    provider.pause_calls = 0
+    provider.resume_calls = 0
+
+    async def drain() -> tuple[list[int], bool]:
+        frames = [first.chunk.frame.seq]
+        while True:
+            pull = await owner.next_chunk(handle, timeout_seconds=1)
+            if pull.chunk is not None:
+                frames.append(pull.chunk.frame.seq)
+                continue
+            assert pull.outcome is not None
+            return frames, pull.outcome.completed
+
+    drain_task = asyncio.create_task(drain())
+    await asyncio.wait_for(provider.pause_called.wait(), timeout=1)
+    while not session.pause_requested.is_set():
+        await asyncio.sleep(0)
+    stream.release_second_gate.set()
+    frame_sequences, completed = await asyncio.wait_for(drain_task, timeout=2)
+
+    assert completed is True
+    assert frame_sequences == [0, 1, 2, 3, 4, 5]
+    assert provider.pause_calls >= 1
+    assert provider.resume_calls == provider.pause_calls
+    assert provider.degradation_facts == ()
+    assert stream.closed is True
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.agent_dispatches == 0
+    assert snapshot.tool_dispatches == 0
+    assert snapshot.task_mutations == 0
+    assert snapshot.chat_mutations == 0
+    assert snapshot.turn_commits == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_park_suspends_inflight_gateway_provider_event_deadline() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="park-suspends-provider-event-deadline")
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=2,
+        queue_wait_seconds=0.05,
+        pause_wait_seconds=0.5,
+        event_timeout_seconds=0.03,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=1.0,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    while provider.event_calls < 2:
+        await asyncio.sleep(0)
+
+    await owner.park_prefetch(handle, park_generation=11, timeout_seconds=1.0)
+    await asyncio.sleep(0.05)
+    assert handle.cleanup_done.is_set() is False
+    assert provider.event_calls == 2
+    assert owner._task_owner.retained_count == 1
+
+    await owner.promote_prefetch(handle, park_generation=11)
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * 480,
+        )
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=2,
+            cursor=480,
+            kind=SynthesisEventKind.COMPLETED,
+        )
+    )
+
+    first = await owner.next_chunk(handle, timeout_seconds=1)
+    terminal = await owner.next_chunk(handle, timeout_seconds=1)
+    assert first.chunk is not None and first.chunk.frame.seq == 0
+    assert terminal.outcome is not None and terminal.outcome.completed is True
+    assert provider.event_calls == 3
+    assert owner._task_owner.retained_count == 0
+    assert provider.cancelled == []
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.agent_dispatches == 0
+    assert snapshot.tool_dispatches == 0
+    assert snapshot.task_mutations == 0
+    assert snapshot.chat_mutations == 0
+    assert snapshot.turn_commits == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_settled_provider_wait_reopens_without_overlap_or_active_time_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        route_module, "_PROVIDER_EVENT_SETTLEMENT_MARGIN_SECONDS", 299.97
+    )
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _ConclusiveEventTimeoutProvider(capability)
+    request = _request(stream_id="parked-settled-provider-timeout")
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    owner, handle = await _begin(
+        provider,
+        request,
+        event_timeout_seconds=0.04,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=1.0,
+    )
+    while provider.event_calls < 2:
+        await asyncio.sleep(0)
+    await owner.park_prefetch(handle, park_generation=14, timeout_seconds=1.0)
+    while provider.event_calls < 3:
+        await asyncio.sleep(0)
+
+    assert provider.max_concurrent_event_calls == 1
+    assert handle.cleanup_done.is_set() is False
+    await owner.promote_prefetch(handle, park_generation=14)
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * 480,
+        )
+    )
+    provider.events.put_nowait(
+        _event(request, seq=2, cursor=480, kind=SynthesisEventKind.COMPLETED)
+    )
+
+    first = await owner.next_chunk(handle, timeout_seconds=1)
+    terminal = await owner.next_chunk(handle, timeout_seconds=1)
+    assert first.chunk is not None and first.chunk.frame.seq == 0
+    assert terminal.outcome is not None and terminal.outcome.completed is True
+    assert provider.event_calls == 4
+    assert provider.max_concurrent_event_calls == 1
+    assert owner.retained_task_count == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_parked_hostile_provider_event_never_opens_a_second_pull() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _ParkedCancellationHostileProvider(capability)
+    request = _request(stream_id="parked-hostile-provider-event")
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    owner, handle = await _begin(
+        provider,
+        request,
+        event_timeout_seconds=0.03,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=1.0,
+    )
+    await asyncio.wait_for(provider.second_event_started.wait(), timeout=1)
+    await owner.park_prefetch(handle, park_generation=12, timeout_seconds=1.0)
+
+    outcome = await owner.cancel(handle)
+
+    assert outcome.reason is StreamingSynthesisReason.ROUTE_ABORTED
+    assert provider.event_calls == 2
+    assert 0 < owner.retained_task_count <= owner.retained_task_capacity
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.agent_dispatches == 0
+    assert snapshot.tool_dispatches == 0
+    assert snapshot.task_mutations == 0
+    assert snapshot.chat_mutations == 0
+    assert snapshot.turn_commits == 0
+
+    provider.release_second_event.set()
+    await _wait_for_retained_cleanup(owner)
+    assert provider.event_calls == 2
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_parked_provider_event_process_control_cleans_and_rethrows() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="parked-provider-event-control")
+    owner, handle = await _begin(
+        provider,
+        request,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=1.0,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    while provider.event_calls < 2:
+        await asyncio.sleep(0)
+    await owner.park_prefetch(handle, park_generation=13, timeout_seconds=1.0)
+
+    provider.events.put_nowait(GeneratorExit())
+    with pytest.raises(GeneratorExit):
+        await owner.next_chunk(handle, timeout_seconds=1)
+
+    assert provider.event_calls == 2
+    assert provider.cancelled == [handle.ref]
+    assert owner.active_count == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_completed_partial_tail_drains_without_late_pause() -> None:
+    pcm = struct.pack("<500h", *((1000,) * 500))
+    stream = _FakeSseStream(
+        (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "speech.audio.delta",
+                    "audio": base64.b64encode(pcm).decode("ascii"),
+                }
+            ),
+            "",
+            'data: {"type":"speech.audio.done"}',
+            "",
+        )
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        OpenAIStreamingSpeechConfig(
+            api_base="https://api.openai.com/v1",
+            api_key="private-test-key",
+        ),
+        sse_factory=sse_factory,
+    )
+
+    async def selector() -> StreamingSpeechSelection:
+        return StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None)
+
+    owner = StreamingSynthesisRouteOwner(
+        selector,
+        max_pending_frames=1,
+        queue_wait_seconds=0.05,
+        pause_wait_seconds=0.5,
+    )
+    request = _request()
+    handle, begin_outcome = await owner.begin(request)
+    assert handle is not None and begin_outcome is None
+    await asyncio.sleep(0.08)
+
+    frames: list[int] = []
+    while True:
+        pull = await owner.next_chunk(handle)
+        if pull.chunk is not None:
+            frames.append(pull.chunk.frame.seq)
+            continue
+        assert pull.outcome is not None and pull.outcome.completed is True
+        break
+    assert frames == [0, 1]
+    assert stream.closed is True
     await owner.close()
 
 
@@ -567,7 +1649,9 @@ async def test_failure_after_first_delivery_never_allows_batch_replay() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bounded_queue_failure_before_delivery_clears_retained_pcm() -> None:
+async def test_bounded_queue_failure_before_delivery_clears_retained_pcm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = _FakeProvider()
     request = _request()
     owner, handle = await _begin(
@@ -577,6 +1661,15 @@ async def test_bounded_queue_failure_before_delivery_clears_retained_pcm() -> No
         queue_wait_seconds=0.01,
         event_timeout_seconds=0.2,
     )
+    diagnostics: list[dict[str, object]] = []
+
+    def record_pressure(message: str, *args: object, **kwargs: object) -> None:
+        if message == "live_voice_streaming_synthesis_queue_pressure":
+            extra = kwargs.get("extra")
+            assert isinstance(extra, dict)
+            diagnostics.append(extra)
+
+    monkeypatch.setattr(route_module._LOGGER, "warning", record_pressure)
     provider.events.put_nowait(
         _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
     )
@@ -596,7 +1689,916 @@ async def test_bounded_queue_failure_before_delivery_clears_retained_pcm() -> No
     assert terminal.outcome.reason is StreamingSynthesisReason.QUEUE_EXHAUSTED
     assert terminal.outcome.batch_eligible is True
     assert handle.queue.qsize() == 0
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["queue_size"] == 1
+    assert diagnostics[0]["queue_capacity"] == 1
+    assert diagnostics[0]["frames_enqueued"] == 1
+    assert diagnostics[0]["frames_pulled"] == 0
+    assert diagnostics[0]["unit_seq"] == 0
+    assert "private display text" not in repr(diagnostics[0])
+    assert "private spoken text" not in repr(diagnostics[0])
     assert "samples=" not in repr(handle)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_burst_audio_waits_for_a_bounded_consumer_without_losing_frame_order() -> (
+    None
+):
+    provider = _FakeProvider()
+    request = _request()
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=2,
+        queue_wait_seconds=0.2,
+        event_timeout_seconds=0.2,
+    )
+    observed_queue = _ObservedBoundedQueue(maxsize=2)
+    handle.queue = observed_queue
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * (480 * 3),
+        )
+    )
+    provider.events.put_nowait(
+        _event(request, seq=2, cursor=480 * 3, kind=SynthesisEventKind.COMPLETED)
+    )
+
+    await asyncio.wait_for(observed_queue.blocked_put_started.wait(), timeout=1.0)
+    assert observed_queue.qsize() == 2
+
+    first = await owner.next_chunk(handle)
+    second = await owner.next_chunk(handle)
+    third = await owner.next_chunk(handle)
+    terminal = await owner.next_chunk(handle)
+
+    assert first.chunk is not None
+    assert second.chunk is not None
+    assert third.chunk is not None
+    assert [first.chunk.frame.seq, second.chunk.frame.seq, third.chunk.frame.seq] == [
+        0,
+        1,
+        2,
+    ]
+    assert [
+        first.chunk.frame.sample_cursor,
+        second.chunk.frame.sample_cursor,
+        third.chunk.frame.sample_cursor,
+    ] == [0, 480, 960]
+    assert terminal.outcome is not None and terminal.outcome.completed is True
+    assert terminal.outcome.first_audio_emitted is True
+    assert observed_queue.put_attempts == 4
+    assert handle.frames_enqueued == 3
+    assert handle.frames_pulled == 3
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_declared_provider_pause_survives_legacy_queue_wait_and_resumes() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request()
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=1,
+        queue_wait_seconds=0.05,
+        pause_wait_seconds=0.5,
+        event_timeout_seconds=0.5,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * 1920,
+        )
+    )
+    provider.events.put_nowait(
+        _event(request, seq=2, cursor=1920, kind=SynthesisEventKind.COMPLETED)
+    )
+
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+    await asyncio.sleep(0.08)
+    assert handle.cleanup_done.is_set() is False
+
+    first = await owner.next_chunk(handle)
+    assert first.chunk is not None and first.chunk.frame.seq == 0
+    await asyncio.wait_for(provider.resume_started.wait(), timeout=1)
+    frame_sequences = [first.chunk.frame.seq]
+    while True:
+        pull = await owner.next_chunk(handle)
+        if pull.chunk is not None:
+            frame_sequences.append(pull.chunk.frame.seq)
+            continue
+        assert pull.outcome is not None and pull.outcome.completed is True
+        break
+    assert frame_sequences == [0, 1, 2, 3]
+    assert provider.paused
+    assert provider.paused == provider.resumed
+    assert set(provider.paused) == {request.ref}
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_staged_successor_reaches_ordinary_queue_deadline() -> None:
+    """Freeze the pre-PARK failure when a Browser retains one successor."""
+
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="legacy-staged-successor")
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=8,
+        queue_wait_seconds=0.01,
+        pause_wait_seconds=0.05,
+        event_timeout_seconds=0.2,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * (480 * 60),
+        )
+    )
+
+    # The old protocol has no explicit PARK transition.  Model the Browser
+    # retaining its 500 ms target (25 x 20 ms frames) and then withholding
+    # further transport acknowledgement while the predecessor is playing.
+    retained = []
+    for _ in range(25):
+        pull = await owner.next_chunk(handle, timeout_seconds=0.2)
+        assert pull.chunk is not None
+        retained.append(pull.chunk.frame.seq)
+    assert retained == list(range(25))
+
+    await asyncio.wait_for(handle.cleanup_done.wait(), timeout=1.0)
+    terminal = await owner.next_chunk(handle)
+    assert terminal.outcome is not None
+    assert terminal.outcome.reason is StreamingSynthesisReason.QUEUE_EXHAUSTED
+    assert terminal.outcome.first_audio_emitted is True
+    assert handle.queue.qsize() == 0
+    assert provider.paused == [request.ref]
+    assert provider.resumed == [request.ref]
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.agent_dispatches == 0
+    assert snapshot.tool_dispatches == 0
+    assert snapshot.task_mutations == 0
+    assert snapshot.chat_mutations == 0
+    assert snapshot.turn_commits == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_park_prefetch_adopts_ordinary_queue_pause_without_timeout() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="park-adopts-ordinary")
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=1,
+        queue_wait_seconds=0.01,
+        pause_wait_seconds=0.05,
+        event_timeout_seconds=0.2,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * (480 * 4),
+        )
+    )
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+
+    await owner.park_prefetch(handle, park_generation=3, timeout_seconds=0.3)
+    await asyncio.sleep(0.08)  # Cross the superseded ordinary 50 ms deadline.
+    assert handle.cleanup_done.is_set() is False
+    assert provider.parked == [(request.ref, 3, 5.3)]
+    assert provider.resumed == []
+
+    await owner.promote_prefetch(handle, park_generation=3)
+    frames = []
+    for _ in range(4):
+        pull = await owner.next_chunk(handle, timeout_seconds=0.2)
+        assert pull.chunk is not None
+        frames.append(pull.chunk.frame.seq)
+    assert frames == [0, 1, 2, 3]
+    assert provider.promoted == [(request.ref, 3)]
+    assert provider.resumed == []
+    await owner.cancel(handle, reason=StreamingSynthesisReason.ROUTE_ABORTED)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_park_prefetch_has_independent_nonrenewable_promotion_lease() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="park-independent-lease")
+    owner, handle = await _begin(
+        provider,
+        request,
+        queue_wait_seconds=0.05,
+        event_timeout_seconds=0.2,
+    )
+
+    await owner.park_prefetch(handle, park_generation=4, timeout_seconds=0.03)
+    await asyncio.wait_for(handle.cleanup_done.wait(), timeout=1)
+    terminal = await owner.next_chunk(handle)
+    assert terminal.outcome is not None
+    assert terminal.outcome.reason is StreamingSynthesisReason.PROMOTION_TIMEOUT
+    assert provider.cancelled == [request.ref]
+    assert provider.resumed == []
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_prefetch_candidate_reaches_park_reserve_larger_than_route_queue() -> (
+    None
+):
+    """Ordinary pressure must not wait for PARK before PARK is reachable."""
+
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="prefetch-reserve-exceeds-route-queue")
+    promotion_timeouts = []
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=8,
+        queue_wait_seconds=0.05,
+        pause_wait_seconds=0.3,
+        event_timeout_seconds=0.05,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=0.5,
+        on_prefetch_promotion_timeout=lambda: promotion_timeouts.append(True),
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * (480 * 60),
+        )
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=2,
+            cursor=480 * 60,
+            kind=SynthesisEventKind.COMPLETED,
+        )
+    )
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+    assert handle.queue.maxsize == 8
+    assert handle.queue.qsize() == 8
+
+    retained = []
+    for _ in range(25):
+        pull = await owner.next_chunk(handle)
+        assert pull.chunk is not None
+        retained.append(pull.chunk.frame.seq)
+
+    assert retained == list(range(25))
+    assert provider.resumed
+    await owner.park_prefetch(handle, park_generation=5, timeout_seconds=0.3)
+    assert handle.flow_state.value == "prefetch_parked"
+    await owner.promote_prefetch(handle, park_generation=5)
+
+    while True:
+        pull = await owner.next_chunk(handle)
+        if pull.chunk is not None:
+            retained.append(pull.chunk.frame.seq)
+            continue
+        assert pull.outcome is not None and pull.outcome.completed
+        break
+
+    assert retained == list(range(60))
+    # PARK/PROMOTE settles its own pause owner. Any later bounded queue
+    # pressure is ordinary again and therefore has an exact RESUME.
+    assert len(provider.paused) == len(provider.resumed)
+    assert provider.parked == [(request.ref, 5, 5.3)]
+    assert provider.promoted == [(request.ref, 5)]
+    assert provider.cancelled == []
+    assert promotion_timeouts == []
+    await _wait_for_retained_cleanup(owner)
+    assert owner.active_count == 0
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.agent_dispatches == 0
+    assert snapshot.tool_dispatches == 0
+    assert snapshot.task_mutations == 0
+    assert snapshot.chat_mutations == 0
+    assert snapshot.turn_commits == 0
+    await owner.close()
+    assert owner.retained_task_count == 0
+
+
+@pytest.mark.asyncio
+async def test_prefetch_candidate_hands_ordinary_pause_to_park_before_resume() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="park-races-ordinary-resume")
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=1,
+        queue_wait_seconds=0.05,
+        pause_wait_seconds=0.3,
+        event_timeout_seconds=0.3,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=0.3,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * (480 * 3),
+        )
+    )
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+    reads_before_park = provider.event_calls
+
+    park = asyncio.create_task(
+        owner.park_prefetch(handle, park_generation=5, timeout_seconds=0.3)
+    )
+    await asyncio.wait_for(park, timeout=1)
+    first = await owner.next_chunk(handle)
+    assert first.chunk is not None
+    assert handle.flow_state.value == "prefetch_parked"
+    assert provider.resumed == []
+    assert provider.event_calls == reads_before_park
+    assert provider.parked == [(request.ref, 5, 5.3)]
+
+    await owner.promote_prefetch(handle, park_generation=5)
+    assert provider.promoted == [(request.ref, 5)]
+    await owner.cancel(handle, reason=StreamingSynthesisReason.ROUTE_ABORTED)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_park_arriving_during_resume_blocks_next_provider_read() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    provider.resume_gate = asyncio.Event()
+    request = _request(stream_id="park-during-ordinary-resume")
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=1,
+        queue_wait_seconds=0.1,
+        pause_wait_seconds=0.3,
+        event_timeout_seconds=0.3,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=0.5,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * (480 * 2),
+        )
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=2,
+            cursor=480 * 2,
+            kind=SynthesisEventKind.COMPLETED,
+        )
+    )
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+    assert (await owner.next_chunk(handle)).chunk is not None
+    await asyncio.wait_for(provider.resume_started.wait(), timeout=1)
+    reads_before_park = provider.event_calls
+
+    park = asyncio.create_task(
+        owner.park_prefetch(handle, park_generation=6, timeout_seconds=0.3)
+    )
+    for _ in range(100):
+        if handle.flow_state.value == "park_requested":
+            break
+        await asyncio.sleep(0)
+    assert handle.flow_state.value == "park_requested"
+    provider.resume_gate.set()
+    await asyncio.wait_for(park, timeout=1)
+    await asyncio.sleep(0)
+
+    assert handle.flow_state.value == "prefetch_parked"
+    assert provider.event_calls == reads_before_park
+    await owner.promote_prefetch(handle, park_generation=6)
+    assert (await owner.next_chunk(handle)).chunk is not None
+    terminal = await owner.next_chunk(handle)
+    assert terminal.outcome is not None and terminal.outcome.completed
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_prefetch_candidate_without_media_decision_fails_at_exact_deadline() -> (
+    None
+):
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="prefetch-decision-timeout")
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=1,
+        queue_wait_seconds=0.01,
+        pause_wait_seconds=0.2,
+        event_timeout_seconds=0.3,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=0.03,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * (480 * 3),
+        )
+    )
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+    await asyncio.sleep(0.04)
+    assert (await owner.next_chunk(handle)).chunk is not None
+    await asyncio.wait_for(handle.cleanup_done.wait(), timeout=1)
+    terminal = await owner.next_chunk(handle)
+    assert terminal.outcome is not None
+    assert terminal.outcome.reason is StreamingSynthesisReason.PROMOTION_TIMEOUT
+    assert provider.resumed == []
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_promotion_lease_starts_when_park_is_accepted() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    provider.park_gate = asyncio.Event()
+    request = _request(stream_id="park-lease-not-renewed-by-provider-settlement")
+    owner, handle = await _begin(
+        provider,
+        request,
+        queue_wait_seconds=0.2,
+        event_timeout_seconds=0.2,
+    )
+
+    park = asyncio.create_task(
+        owner.park_prefetch(handle, park_generation=8, timeout_seconds=0.03)
+    )
+    await asyncio.wait_for(provider.park_started.wait(), timeout=1)
+    await asyncio.wait_for(handle.cleanup_done.wait(), timeout=1)
+    provider.park_gate.set()
+    await asyncio.gather(park, return_exceptions=True)
+    terminal = await owner.next_chunk(handle)
+    assert terminal.outcome is not None
+    assert terminal.outcome.reason is StreamingSynthesisReason.PROMOTION_TIMEOUT
+    assert provider.cancelled == [request.ref]
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_park_and_promotion_are_exact_provider_noops() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="terminal-park-noop")
+    owner, handle = await _begin(provider, request)
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * 480,
+        )
+    )
+    provider.events.put_nowait(
+        _event(request, seq=2, cursor=480, kind=SynthesisEventKind.COMPLETED)
+    )
+    assert (await owner.next_chunk(handle)).chunk is not None
+    assert (await owner.next_chunk(handle)).outcome is not None
+
+    await owner.park_prefetch(handle, park_generation=6, timeout_seconds=0.1)
+    await owner.promote_prefetch(handle, park_generation=6)
+    assert provider.parked == []
+    assert provider.promoted == []
+    with pytest.raises(StreamingSynthesisRouteViolation):
+        await owner.promote_prefetch(handle, park_generation=7)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_buffered_terminal_park_cannot_renew_promotion_lease() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="buffered-terminal-park-lease")
+    owner, handle = await _begin(provider, request)
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * 480,
+        )
+    )
+    provider.events.put_nowait(
+        _event(request, seq=2, cursor=480, kind=SynthesisEventKind.COMPLETED)
+    )
+    await asyncio.wait_for(handle.terminal_ready.wait(), timeout=1)
+
+    await owner.park_prefetch(handle, park_generation=7, timeout_seconds=0.03)
+    await asyncio.sleep(0.02)
+    await owner.park_prefetch(handle, park_generation=7, timeout_seconds=0.03)
+    await asyncio.sleep(0.02)
+    terminal = await owner.next_chunk(handle)
+    assert terminal.outcome is not None
+    assert terminal.outcome.reason is StreamingSynthesisReason.PROMOTION_TIMEOUT
+    assert provider.parked == []
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_delivered_terminal_park_expires_before_late_promotion() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="delivered-terminal-park-lease")
+    timeout_observed = []
+    owner, handle = await _begin(
+        provider,
+        request,
+        require_prefetch_decision=True,
+        on_prefetch_promotion_timeout=lambda: timeout_observed.append(True),
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * 480,
+        )
+    )
+    provider.events.put_nowait(
+        _event(request, seq=2, cursor=480, kind=SynthesisEventKind.COMPLETED)
+    )
+    assert (await owner.next_chunk(handle)).chunk is not None
+    assert (await owner.next_chunk(handle)).outcome is not None
+
+    await owner.park_prefetch(handle, park_generation=10, timeout_seconds=0.03)
+    await asyncio.sleep(0.04)
+    assert handle.promotion_lease_expired is True
+    assert timeout_observed == [True]
+    assert handle.cleanup_done.is_set() is True
+    assert owner.retained_task_count == 0
+    with pytest.raises(StreamingSynthesisRouteViolation):
+        await owner.promote_prefetch(handle, park_generation=10)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_delivered_terminal_close_releases_promotion_lease() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="delivered-terminal-close-releases-park")
+    owner, handle = await _begin(provider, request)
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * 480,
+        )
+    )
+    provider.events.put_nowait(
+        _event(request, seq=2, cursor=480, kind=SynthesisEventKind.COMPLETED)
+    )
+    assert (await owner.next_chunk(handle)).chunk is not None
+    assert (await owner.next_chunk(handle)).outcome is not None
+    await owner.park_prefetch(handle, park_generation=12, timeout_seconds=0.03)
+
+    await owner.cancel(handle, reason=StreamingSynthesisReason.ROUTE_ABORTED)
+    await asyncio.sleep(0.04)
+    assert handle.park_generation is None
+    assert handle.promotion_lease_expired is False
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_failure_during_provider_park_cannot_ack_success() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    provider.park_gate = asyncio.Event()
+    request = _request(stream_id="park-races-terminal-failure")
+    owner, handle = await _begin(provider, request, queue_wait_seconds=0.2)
+    park = asyncio.create_task(
+        owner.park_prefetch(handle, park_generation=11, timeout_seconds=0.1)
+    )
+    await asyncio.wait_for(provider.park_started.wait(), timeout=1)
+    await owner.cancel(handle, reason=StreamingSynthesisReason.ROUTE_ABORTED)
+    provider.park_gate.set()
+    with pytest.raises(StreamingSynthesisRouteViolation):
+        await park
+    assert handle.outcome is not None and handle.outcome.completed is False
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_delivered_while_provider_park_settles_is_valid_noop() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    provider.park_gate = asyncio.Event()
+    request = _request(stream_id="completed-delivered-during-provider-park")
+    owner, handle = await _begin(provider, request, queue_wait_seconds=0.2)
+    park = asyncio.create_task(
+        owner.park_prefetch(handle, park_generation=13, timeout_seconds=0.1)
+    )
+    await asyncio.wait_for(provider.park_started.wait(), timeout=1)
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * 480,
+        )
+    )
+    provider.events.put_nowait(
+        _event(request, seq=2, cursor=480, kind=SynthesisEventKind.COMPLETED)
+    )
+    assert (await owner.next_chunk(handle)).chunk is not None
+    assert (await owner.next_chunk(handle)).outcome is not None
+
+    provider.park_gate.set()
+    await asyncio.wait_for(park, timeout=1)
+    assert handle.park_generation == 13
+    assert handle.promotion_timeout_task is not None
+    await owner.promote_prefetch(handle, park_generation=13)
+    assert provider.promoted == []
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_terminal_cannot_ack_park_or_promotion() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="failed-terminal-cannot-promote")
+    owner, handle = await _begin(provider, request)
+    provider.events.put_nowait(RuntimeError("private provider failure"))
+    await asyncio.wait_for(handle.cleanup_done.wait(), timeout=1)
+    terminal = await owner.next_chunk(handle)
+    assert terminal.outcome is not None
+    assert terminal.outcome.completed is False
+
+    with pytest.raises(StreamingSynthesisRouteViolation):
+        await owner.park_prefetch(handle, park_generation=9, timeout_seconds=0.1)
+    with pytest.raises(StreamingSynthesisRouteViolation):
+        await owner.promote_prefetch(handle, park_generation=9)
+    assert provider.parked == []
+    assert provider.promoted == []
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_declared_provider_pause_timeout_fails_closed_and_resumes_once() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request()
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=1,
+        queue_wait_seconds=0.01,
+        pause_wait_seconds=0.05,
+        event_timeout_seconds=0.2,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * 960,
+        )
+    )
+
+    await asyncio.wait_for(handle.cleanup_done.wait(), timeout=1)
+    terminal = await owner.next_chunk(handle)
+    assert terminal.outcome is not None
+    assert terminal.outcome.reason is StreamingSynthesisReason.QUEUE_EXHAUSTED
+    assert terminal.outcome.batch_eligible is True
+    assert provider.paused == provider.resumed == [request.ref]
+    assert provider.cancelled == [request.ref]
+    assert handle.queue.qsize() == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_resume_process_control_rethrows_after_paused_cleanup() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    provider.resume_error = GeneratorExit()
+    request = _request(stream_id="pause-resume-control")
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=1,
+        pause_wait_seconds=0.5,
+        event_timeout_seconds=0.5,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1,) * 960,
+        )
+    )
+
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+    first = await owner.next_chunk(handle)
+    assert first.chunk is not None and first.chunk.frame.seq == 0
+    await asyncio.wait_for(handle.cleanup_done.wait(), timeout=1)
+    with pytest.raises(GeneratorExit):
+        await owner.next_chunk(handle)
+    assert provider.paused == provider.resumed == [request.ref]
+    assert owner.active_count == 0
+    provider.resume_error = None
     await owner.close()
 
 
@@ -1226,8 +3228,8 @@ async def test_invalid_request_traceback_locals_do_not_retain_text() -> None:
         route_traceback = error.__traceback__
         while (
             route_traceback is not None
-            and "jiuwenswarm\\gateway\\live_voice\\streaming_synthesis_route.py"
-            not in route_traceback.tb_frame.f_code.co_filename
+            and os.path.basename(route_traceback.tb_frame.f_code.co_filename)
+            != "streaming_synthesis_route.py"
         ):
             route_traceback = route_traceback.tb_next
         assert route_traceback is not None

@@ -9253,6 +9253,14 @@ class JiuWenSwarmDeepAdapter:
             metadata=request.metadata,
         )
 
+    def formal_live_voice_text_capabilities(self) -> tuple[str, ...]:
+        """Declare the proven fragment-order guarantee of this narrow parser."""
+        from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+            FORMAL_APPEND_ONLY_DELTA_CAPABILITY,
+        )
+
+        return (FORMAL_APPEND_ONLY_DELTA_CAPABILITY,)
+
     async def process_formal_live_voice_stream_impl(
         self, request: AgentRequest, inputs: dict[str, Any]
     ) -> AsyncIterator[AgentResponseChunk]:

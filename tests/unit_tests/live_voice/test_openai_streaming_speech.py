@@ -11,6 +11,15 @@ from dataclasses import replace
 
 import pytest
 
+from tests.unit_tests.live_voice.c019_lifecycle_model import (
+    LifecycleState,
+    from_adapter_snapshot,
+    violations as lifecycle_violations,
+    with_delivery_snapshot,
+    with_identity_observation,
+    with_transport_observation,
+)
+
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
 from jiuwenswarm.server.live_voice.batch_speech import (
     FORMAL_BATCH_SPEECH_FLAG,
@@ -124,6 +133,57 @@ class PacedSseStream(FakeSseStream):
             yield line
 
 
+class ObservedSseStream(FakeSseStream):
+    def __init__(self, lines: tuple[str, ...]) -> None:
+        super().__init__(lines)
+        self.yielded_lines = 0
+        self.progressed = asyncio.Condition()
+
+    async def __aiter__(self):
+        for line in self.lines:
+            await asyncio.sleep(0)
+            async with self.progressed:
+                self.yielded_lines += 1
+                self.progressed.notify_all()
+            yield line
+
+    async def wait_until_yielded(self, count: int) -> None:
+        async with self.progressed:
+            await asyncio.wait_for(
+                self.progressed.wait_for(lambda: self.yielded_lines >= count),
+                timeout=1,
+            )
+
+
+class CloseGatedObservedSseStream(ObservedSseStream):
+    def __init__(self, lines: tuple[str, ...]) -> None:
+        super().__init__(lines)
+        self.close_started = asyncio.Event()
+        self.release_close = asyncio.Event()
+
+    async def aclose(self) -> None:
+        self.close_started.set()
+        await self.release_close.wait()
+        await super().aclose()
+
+
+class BlockedFirstObservedSseStream(ObservedSseStream):
+    def __init__(self, lines: tuple[str, ...]) -> None:
+        super().__init__(lines)
+        self.read_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def __aiter__(self):
+        for index, line in enumerate(self.lines):
+            if index == 0:
+                self.read_started.set()
+                await self.release_first.wait()
+            async with self.progressed:
+                self.yielded_lines += 1
+                self.progressed.notify_all()
+            yield line
+
+
 class BlockingSseStream:
     def __init__(self) -> None:
         self.closed = False
@@ -138,6 +198,32 @@ class BlockingSseStream:
     async def aclose(self) -> None:
         self.closed = True
         self.closed_event.set()
+
+
+class BlockedFailingSseStream(BlockingSseStream):
+    def __init__(self) -> None:
+        super().__init__()
+        self.read_started = asyncio.Event()
+        self.release_failure = asyncio.Event()
+
+    async def __aiter__(self):
+        self.read_started.set()
+        await self.release_failure.wait()
+        raise TimeoutError("private in-flight read failure")
+        if False:
+            yield ""
+
+
+class RetireGatedOpenAIStreamingSpeechProvider(OpenAIStreamingSpeechProvider):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.synthesis_retire_started = asyncio.Event()
+        self.release_synthesis_retire = asyncio.Event()
+
+    async def _retire_synthesis(self, session) -> None:
+        self.synthesis_retire_started.set()
+        await self.release_synthesis_retire.wait()
+        await super()._retire_synthesis(session)
 
 
 class FailingSendSocket(FakeSocket):
@@ -359,6 +445,19 @@ def assert_zero_business_effects(provider: OpenAIStreamingSpeechProvider) -> Non
     assert snapshot.task_mutations == 0
     assert snapshot.chat_mutations == 0
     assert snapshot.turn_commits == 0
+
+
+def business_effect_count(provider: OpenAIStreamingSpeechProvider) -> int:
+    snapshot = provider.conformance.snapshot()
+    return sum(
+        (
+            snapshot.agent_dispatches,
+            snapshot.tool_dispatches,
+            snapshot.task_mutations,
+            snapshot.chat_mutations,
+            snapshot.turn_commits,
+        )
+    )
 
 
 @pytest.mark.asyncio
@@ -1920,6 +2019,1406 @@ async def test_synthesis_timeout_is_per_event_not_whole_stream() -> None:
 
 
 @pytest.mark.asyncio
+async def test_synthesis_full_event_queue_backpressures_sse_reader_and_resumes() -> (
+    None
+):
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    delta_count = 70
+    stream = ObservedSseStream(
+        tuple(line for _ in range(delta_count) for line in (audio_event, ""))
+        + ('data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        event_queue_wait_seconds=0.5,
+    )
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+
+    # STARTED plus 63 chunks fill the 64-event queue. The 64th delta has been
+    # read, but publishing it must block before the iterator reads delta 65.
+    await stream.wait_until_yielded(128)
+    paused_at = stream.yielded_lines
+    await asyncio.sleep(0.05)
+    assert stream.yielded_lines == paused_at == 128
+
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+    await stream.wait_until_yielded(paused_at + 1)
+
+    chunks = 0
+    while True:
+        event = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        if event.kind is SynthesisEventKind.CHUNK:
+            chunks += 1
+            continue
+        assert event.kind is SynthesisEventKind.COMPLETED
+        break
+    # The stateful resampler flushes one final tail chunk at Provider EOF.
+    assert chunks == delta_count + 1
+    assert stream.closed is True
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_synthesis_pause_stops_sse_read_until_exact_resume() -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    stream = ObservedSseStream(
+        (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "speech.audio.delta",
+                    "audio": base64.b64encode(pcm).decode("ascii"),
+                }
+            ),
+            "",
+            'data: {"type":"speech.audio.done","usage":{}}',
+            "",
+        )
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    logs = CapturingLogHandler()
+    _LOGGER.addHandler(logs)
+    await provider.open_synthesis(request)
+    await provider.pause_synthesis(request.ref)
+
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+    await asyncio.sleep(0.05)
+    assert stream.yielded_lines == 0
+
+    await provider.resume_synthesis(request.ref)
+    await stream.wait_until_yielded(1)
+    events = [
+        await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        for _ in range(3)
+    ]
+    assert [event.kind for event in events] == [
+        SynthesisEventKind.CHUNK,
+        SynthesisEventKind.CHUNK,
+        SynthesisEventKind.COMPLETED,
+    ]
+    assert stream.closed is True
+    _LOGGER.removeHandler(logs)
+    safe_logs = "\n".join(logs.messages)
+    assert "live_voice_synthesis_backpressure stage=pause_requested" in safe_logs
+    assert "live_voice_synthesis_backpressure stage=pause_acknowledged" in safe_logs
+    assert "live_voice_synthesis_backpressure stage=resume_requested" in safe_logs
+    assert request.spoken_text not in safe_logs
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_parked_pause_blocks_until_exact_promotion() -> None:
+    stream = BlockingSseStream()
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+
+    await provider.park_synthesis_for_promotion(
+        request.ref,
+        park_generation=1,
+        max_pause_seconds=0.5,
+    )
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+    await asyncio.sleep(0.02)
+    assert stream.closed is False
+
+    # An exact duplicate is idempotent and cannot renew the lease.
+    await provider.park_synthesis_for_promotion(
+        request.ref,
+        park_generation=1,
+        max_pause_seconds=0.5,
+    )
+    with pytest.raises(OpenAIStreamingSpeechError) as wrong_generation:
+        await provider.promote_parked_synthesis(request.ref, park_generation=2)
+    assert wrong_generation.value.reason == "SYNTHESIS_PARK_GENERATION_MISMATCH"
+
+    await provider.promote_parked_synthesis(request.ref, park_generation=1)
+    await provider.cancel_synthesis(request.ref, reason="test-complete")
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_pause_adopts_promotion_without_intermediate_resume() -> None:
+    stream = BlockingSseStream()
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        synthesis_pause_timeout_seconds=0.05,
+    )
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await provider.pause_synthesis(request.ref)
+
+    await provider.park_synthesis_for_promotion(
+        request.ref,
+        park_generation=7,
+        max_pause_seconds=0.3,
+    )
+    await asyncio.sleep(0.08)  # Cross the superseded ordinary 50 ms deadline.
+    session = provider._require_synthesis(request.ref)
+    assert session.conformance_pause_active is True
+    assert session.resume_acknowledged.is_set() is False
+
+    await provider.promote_parked_synthesis(request.ref, park_generation=7)
+    assert session.conformance_pause_active is False
+    await provider.cancel_synthesis(request.ref, reason="test-complete")
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("park_queues_first", [False, True])
+async def test_park_handoff_fences_sse_reader_during_inflight_resume(
+    park_queues_first: bool,
+) -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    stream = ObservedSseStream(
+        (audio_event, "", audio_event, "")
+        + ('data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        synthesis_pause_timeout_seconds=0.3,
+    )
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await provider.pause_synthesis(request.ref)
+    session = provider._require_synthesis(request.ref)
+    assert stream.yielded_lines == 0
+
+    await session.control_lock.acquire()
+    try:
+        if park_queues_first:
+            park = asyncio.create_task(
+                provider.park_synthesis_for_promotion(
+                    request.ref,
+                    park_generation=8,
+                    max_pause_seconds=0.3,
+                )
+            )
+            await asyncio.wait_for(session.park_handoff_requested.wait(), timeout=1)
+            resume = asyncio.create_task(provider.resume_synthesis(request.ref))
+            await asyncio.wait_for(session.resume_event.wait(), timeout=1)
+        else:
+            resume = asyncio.create_task(provider.resume_synthesis(request.ref))
+            await asyncio.wait_for(session.resume_event.wait(), timeout=1)
+            park = asyncio.create_task(
+                provider.park_synthesis_for_promotion(
+                    request.ref,
+                    park_generation=8,
+                    max_pause_seconds=0.3,
+                )
+            )
+            await asyncio.wait_for(session.park_handoff_requested.wait(), timeout=1)
+    finally:
+        session.control_lock.release()
+
+    await asyncio.wait_for(park, timeout=1)
+    await asyncio.sleep(0.02)
+    assert resume.done() is False
+    assert stream.yielded_lines == 0
+    assert session.conformance_pause_active is True
+
+    promotion = asyncio.create_task(
+        provider.promote_parked_synthesis(request.ref, park_generation=8)
+    )
+    await asyncio.wait_for(promotion, timeout=1)
+    await asyncio.wait_for(resume, timeout=1)
+    kinds: list[SynthesisEventKind] = []
+    while True:
+        event = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        kinds.append(event.kind)
+        if event.kind is SynthesisEventKind.COMPLETED:
+            break
+    assert kinds.count(SynthesisEventKind.CHUNK) == 3
+    assert kinds[-1] is SynthesisEventKind.COMPLETED
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_ack_fences_immediate_next_pause_generation() -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    stream = ObservedSseStream(
+        (audio_event, "", audio_event, "", audio_event, "")
+        + ('data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        synthesis_pause_timeout_seconds=0.2,
+    )
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+
+    await provider.pause_synthesis(request.ref)
+    assert stream.yielded_lines == 0
+    await provider.resume_synthesis(request.ref)
+    await provider.pause_synthesis(request.ref)
+    await asyncio.sleep(0.05)
+    # Resume ACK closes the old pause generation. A new pause may race one SSE
+    # event already in flight, but it must stop before consuming the full stream.
+    assert stream.yielded_lines <= 4
+
+    await provider.resume_synthesis(request.ref)
+    kinds: list[SynthesisEventKind] = []
+    while True:
+        event = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        kinds.append(event.kind)
+        if event.kind is SynthesisEventKind.COMPLETED:
+            break
+    assert kinds[0] is SynthesisEventKind.STARTED
+    assert kinds[-1] is SynthesisEventKind.COMPLETED
+    assert kinds.count(SynthesisEventKind.CHUNK) == 4
+    assert stream.closed is True
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_pause_waits_for_reader_ack_during_inflight_sse_read() -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    stream = BlockedFirstObservedSseStream(
+        (
+            audio_event,
+            "",
+            audio_event,
+            "",
+            'data: {"type":"speech.audio.done","usage":{}}',
+            "",
+        )
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+    await asyncio.wait_for(stream.read_started.wait(), timeout=1)
+
+    pause = asyncio.create_task(provider.pause_synthesis(request.ref))
+    await asyncio.sleep(0.02)
+    assert pause.done() is False
+    stream.release_first.set()
+    await asyncio.wait_for(pause, timeout=1)
+    assert stream.yielded_lines == 2
+    await asyncio.sleep(0.02)
+    assert stream.yielded_lines == 2
+
+    await provider.resume_synthesis(request.ref)
+    chunks = 0
+    while True:
+        event = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        if event.kind is SynthesisEventKind.CHUNK:
+            chunks += 1
+            continue
+        assert event.kind is SynthesisEventKind.COMPLETED
+        break
+    assert chunks == 3
+    assert stream.closed is True
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_inflight_read_failure_wakes_pause_as_failure_not_ack() -> None:
+    facts: list[SpeechDegradationFact] = []
+    stream = BlockedFailingSseStream()
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(), sse_factory=sse_factory, degradation_sink=facts.append
+    )
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+    await asyncio.wait_for(stream.read_started.wait(), timeout=1)
+
+    pause = asyncio.create_task(provider.pause_synthesis(request.ref))
+    await asyncio.sleep(0.02)
+    assert pause.done() is False
+    stream.release_failure.set()
+    with pytest.raises(OpenAIStreamingSpeechError) as rejected:
+        await asyncio.wait_for(pause, timeout=1)
+    assert rejected.value.reason == "SYNTHESIS_PAUSE_NOT_ACKNOWLEDGED"
+    await asyncio.wait_for(stream.closed_event.wait(), timeout=1)
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_TIMEOUT
+    assert provider.conformance.snapshot().active_synthesis == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_pause_dominates_legacy_full_event_queue_timeout() -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    delta_count = 70
+    stream = ObservedSseStream(
+        tuple(line for _ in range(delta_count) for line in (audio_event, ""))
+        + ('data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+    facts: list[SpeechDegradationFact] = []
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        degradation_sink=facts.append,
+        event_queue_wait_seconds=0.05,
+    )
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+
+    await stream.wait_until_yielded(128)
+    await provider.pause_synthesis(request.ref)
+    await asyncio.sleep(0.08)
+    assert stream.closed is False
+    assert facts == []
+
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+    await provider.resume_synthesis(request.ref)
+    chunks = 0
+    while True:
+        event = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        if event.kind is SynthesisEventKind.CHUNK:
+            chunks += 1
+            continue
+        assert event.kind is SynthesisEventKind.COMPLETED
+        break
+    assert chunks == delta_count + 1
+    assert stream.closed is True
+    assert facts == []
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_full_event_queue_resume_acknowledges_before_pending_put() -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    delta_count = 70
+    stream = ObservedSseStream(
+        tuple(line for _ in range(delta_count) for line in (audio_event, ""))
+        + ('data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        event_queue_wait_seconds=0.5,
+        synthesis_pause_timeout_seconds=1.0,
+    )
+    request = synthesis_request(event_timeout_seconds=2)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    try:
+        await stream.wait_until_yielded(128)
+        session = provider._require_synthesis(request.ref)
+        assert session.events.qsize() == session.events.maxsize == 64
+
+        await provider.pause_synthesis(request.ref)
+        await asyncio.wait_for(provider.resume_synthesis(request.ref), timeout=0.2)
+        assert session.resume_acknowledged.is_set()
+
+        second_pause = asyncio.create_task(provider.pause_synthesis(request.ref))
+        await asyncio.wait_for(second_pause, timeout=0.2)
+        await provider.resume_synthesis(request.ref)
+
+        started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        assert started.kind is SynthesisEventKind.STARTED
+
+        chunks = 0
+        while True:
+            event = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+            if event.kind is SynthesisEventKind.CHUNK:
+                chunks += 1
+                continue
+            assert event.kind is SynthesisEventKind.COMPLETED
+            break
+        assert chunks == delta_count + 1
+        assert stream.closed is True
+        assert provider.degradation_facts == ()
+        assert_zero_business_effects(provider)
+    finally:
+        await provider.close()
+
+
+async def _open_synthesis_with_completed_pending_on_full_queue():
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    delta_count = 63
+    stream = ObservedSseStream(
+        tuple(line for _ in range(delta_count) for line in (audio_event, ""))
+        + ('data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        event_queue_wait_seconds=0.5,
+        synthesis_pause_timeout_seconds=0.5,
+    )
+    request = synthesis_request(event_timeout_seconds=2)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await stream.wait_until_yielded((delta_count + 1) * 2)
+    session = provider._require_synthesis(request.ref)
+    assert session.events.qsize() == session.events.maxsize == 64
+
+    # The resampler tail is the first pending write. Releasing STARTED admits
+    # that tail; the worker then closes Provider transport, accepts COMPLETED
+    # in conformance, and blocks its terminal queue admission.
+    first = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert first.kind is SynthesisEventKind.STARTED
+
+    async def wait_for_terminal_admission_window() -> None:
+        while not stream.closed or session.events.qsize() < session.events.maxsize:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_terminal_admission_window(), timeout=1)
+    assert session.task is not None and session.task.done() is False
+    return provider, request, stream, session, first
+
+
+@pytest.mark.asyncio
+async def test_terminal_event_pending_on_full_queue_dominates_late_pause() -> None:
+    """A terminal Provider event must not be turned into a pause violation."""
+
+    (
+        provider,
+        request,
+        stream,
+        _session,
+        first,
+    ) = await _open_synthesis_with_completed_pending_on_full_queue()
+    try:
+        await asyncio.wait_for(provider.pause_synthesis(request.ref), timeout=0.2)
+        await asyncio.wait_for(provider.resume_synthesis(request.ref), timeout=0.2)
+        await asyncio.wait_for(
+            provider.park_synthesis_for_promotion(
+                request.ref,
+                park_generation=9,
+                max_pause_seconds=0.5,
+            ),
+            timeout=0.2,
+        )
+        await asyncio.wait_for(
+            provider.promote_parked_synthesis(request.ref, park_generation=9),
+            timeout=0.2,
+        )
+
+        kinds: list[SynthesisEventKind] = [first.kind]
+        while True:
+            event = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+            kinds.append(event.kind)
+            if event.kind is SynthesisEventKind.COMPLETED:
+                break
+
+        assert kinds[0] is SynthesisEventKind.STARTED
+        assert kinds.count(SynthesisEventKind.CHUNK) == 64
+        assert kinds[-1] is SynthesisEventKind.COMPLETED
+        assert provider.degradation_facts == ()
+        assert stream.closed is True
+        assert_zero_business_effects(provider)
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_dominates_completed_pending_on_full_queue() -> None:
+    (
+        provider,
+        request,
+        stream,
+        _session,
+        _first,
+    ) = await _open_synthesis_with_completed_pending_on_full_queue()
+    try:
+        await asyncio.wait_for(
+            provider.cancel_synthesis(request.ref, reason="barge_in"), timeout=0.2
+        )
+
+        assert stream.closed is True
+        assert provider.degradation_facts == ()
+        assert provider.conformance.snapshot().active_synthesis == 0
+        assert provider.cleanup_snapshot.clean is True
+        assert_zero_business_effects(provider)
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_pause_requested_while_provider_closes_cannot_race_terminal_admission() -> (
+    None
+):
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    delta_count = 63
+    stream = CloseGatedObservedSseStream(
+        tuple(line for _ in range(delta_count) for line in (audio_event, ""))
+        + ('data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        event_queue_wait_seconds=0.5,
+        synthesis_pause_timeout_seconds=0.5,
+    )
+    request = synthesis_request(event_timeout_seconds=2)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    try:
+        await stream.wait_until_yielded((delta_count + 1) * 2)
+        session = provider._require_synthesis(request.ref)
+        assert session.events.qsize() == session.events.maxsize == 64
+        first = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        assert first.kind is SynthesisEventKind.STARTED
+        await asyncio.wait_for(stream.close_started.wait(), timeout=1)
+
+        pause = asyncio.create_task(provider.pause_synthesis(request.ref))
+        await asyncio.sleep(0)
+        assert pause.done() is True
+        stream.release_close.set()
+        await asyncio.wait_for(pause, timeout=0.2)
+        await asyncio.wait_for(provider.resume_synthesis(request.ref), timeout=0.2)
+
+        kinds = [first.kind]
+        while True:
+            event = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+            kinds.append(event.kind)
+            if event.kind is SynthesisEventKind.COMPLETED:
+                break
+        assert kinds.count(SynthesisEventKind.CHUNK) == 64
+        assert kinds[-1] is SynthesisEventKind.COMPLETED
+        assert provider.degradation_facts == ()
+        assert_zero_business_effects(provider)
+    finally:
+        stream.release_close.set()
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_done_with_free_adapter_queue_dominates_late_pause_resume() -> (
+    None
+):
+    """A dead Provider reader cannot remain the owner of a late resume ACK."""
+
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    stream = CloseGatedObservedSseStream(
+        (audio_event, "", 'data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        event_queue_wait_seconds=0.5,
+        synthesis_pause_timeout_seconds=0.1,
+    )
+    request = replace(synthesis_request(event_timeout_seconds=2), sample_rate_hz=24_000)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    try:
+        await asyncio.wait_for(stream.close_started.wait(), timeout=1)
+        session = provider._require_synthesis(request.ref)
+        assert session.events.qsize() < session.events.maxsize
+        snapshot = provider._synthesis_lifecycle_snapshot(session)
+        assert snapshot.provider_state.value == "done"
+        assert snapshot.reader_state.value == "exited"
+        assert snapshot.pause_requested is False
+        oracle_state = from_adapter_snapshot(
+            reader_state=snapshot.reader_state.value,
+            provider_state=snapshot.provider_state.value,
+            outcome_state=snapshot.outcome_state.value,
+            pause_requested=snapshot.pause_requested,
+            pause_acknowledged=snapshot.pause_acknowledged,
+            resume_signal_set=snapshot.resume_signal_set,
+            pause_mode=(
+                None if snapshot.pause_mode is None else snapshot.pause_mode.value
+            ),
+            closing=snapshot.closing,
+        )
+        assert lifecycle_violations(oracle_state) == ()
+
+        pause = asyncio.create_task(provider.pause_synthesis(request.ref))
+        await asyncio.sleep(0)
+        # audio.done already ended the sole reader, so PAUSE is a successful
+        # terminal no-op rather than a request for an impossible reader ACK.
+        assert pause.done() is True
+        stream.release_close.set()
+        await asyncio.wait_for(pause, timeout=0.2)
+
+        await asyncio.wait_for(provider.resume_synthesis(request.ref), timeout=0.2)
+        await asyncio.wait_for(
+            provider.park_synthesis_for_promotion(
+                request.ref,
+                park_generation=11,
+                max_pause_seconds=0.1,
+            ),
+            timeout=0.2,
+        )
+        await asyncio.wait_for(
+            provider.promote_parked_synthesis(
+                request.ref,
+                park_generation=11,
+            ),
+            timeout=0.2,
+        )
+
+        kinds: list[SynthesisEventKind] = []
+        while True:
+            event = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+            kinds.append(event.kind)
+            if event.kind is SynthesisEventKind.COMPLETED:
+                break
+        assert kinds == [
+            SynthesisEventKind.STARTED,
+            SynthesisEventKind.CHUNK,
+            SynthesisEventKind.COMPLETED,
+        ]
+        oracle_state = with_delivery_snapshot(
+            oracle_state,
+            accepted_audio_frames=1,
+            delivered_audio_frames=1,
+            completed_published=True,
+        )
+        oracle_state = with_transport_observation(
+            oracle_state,
+            attached=True,
+            closed=stream.closed,
+            expected_close=True,
+            failure_reported=False,
+        )
+        assert lifecycle_violations(oracle_state) == ()
+        assert provider.degradation_facts == ()
+        assert_zero_business_effects(provider)
+    finally:
+        stream.release_close.set()
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_before_retire_rejects_every_late_control() -> None:
+    stream = FakeSseStream(('data: {"type":"error"}', ""))
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = RetireGatedOpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+    )
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    try:
+        await asyncio.wait_for(provider.synthesis_retire_started.wait(), timeout=1)
+        session = provider._require_synthesis(request.ref)
+        snapshot = provider._synthesis_lifecycle_snapshot(session)
+        assert snapshot.provider_state.value == "failed"
+        assert snapshot.reader_state.value == "exited"
+
+        controls = (
+            provider.pause_synthesis(request.ref),
+            provider.resume_synthesis(request.ref),
+            provider.park_synthesis_for_promotion(
+                request.ref,
+                park_generation=3,
+                max_pause_seconds=0.1,
+            ),
+            provider.promote_parked_synthesis(
+                request.ref,
+                park_generation=3,
+            ),
+        )
+        for control in controls:
+            with pytest.raises(OpenAIStreamingSpeechError) as rejected:
+                await control
+            assert rejected.value.reason == "SYNTHESIS_STREAM_NOT_ACTIVE"
+
+        assert_zero_business_effects(provider)
+    finally:
+        provider.release_synthesis_retire.set()
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_post_done_completed_admission_failure_rejects_late_control() -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    stream = ObservedSseStream(
+        tuple(line for _ in range(63) for line in (audio_event, ""))
+        + ('data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = RetireGatedOpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        event_queue_wait_seconds=0.02,
+    )
+    request = replace(synthesis_request(event_timeout_seconds=1), sample_rate_hz=24_000)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    try:
+        await asyncio.wait_for(provider.synthesis_retire_started.wait(), timeout=1)
+        session = provider._require_synthesis(request.ref)
+        snapshot = provider._synthesis_lifecycle_snapshot(session)
+        assert snapshot.provider_state.value == "done"
+        assert snapshot.outcome_state.value == "failed"
+        assert snapshot.reader_state.value == "exited"
+
+        controls = (
+            provider.pause_synthesis(request.ref),
+            provider.resume_synthesis(request.ref),
+            provider.park_synthesis_for_promotion(
+                request.ref,
+                park_generation=6,
+                max_pause_seconds=0.1,
+            ),
+            provider.promote_parked_synthesis(
+                request.ref,
+                park_generation=6,
+            ),
+        )
+        for control in controls:
+            with pytest.raises(OpenAIStreamingSpeechError) as rejected:
+                await control
+            assert rejected.value.reason == "SYNTHESIS_STREAM_NOT_ACTIVE"
+        assert_zero_business_effects(provider)
+    finally:
+        provider.release_synthesis_retire.set()
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_provider_done_drain_dominates_late_control() -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    stream = CloseGatedObservedSseStream(
+        (audio_event, "", 'data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
+    request = replace(synthesis_request(event_timeout_seconds=2), sample_rate_hz=24_000)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    cancel: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(stream.close_started.wait(), timeout=1)
+        cancel = asyncio.create_task(
+            provider.cancel_synthesis(request.ref, reason="barge_in")
+        )
+
+        async def wait_for_closing() -> None:
+            while not provider._require_synthesis(request.ref).closing:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_closing(), timeout=1)
+        controls = (
+            provider.pause_synthesis(request.ref),
+            provider.resume_synthesis(request.ref),
+            provider.park_synthesis_for_promotion(
+                request.ref,
+                park_generation=4,
+                max_pause_seconds=0.1,
+            ),
+            provider.promote_parked_synthesis(
+                request.ref,
+                park_generation=4,
+            ),
+        )
+        for control in controls:
+            with pytest.raises(OpenAIStreamingSpeechError) as rejected:
+                await control
+            assert rejected.value.reason == "SYNTHESIS_STREAM_NOT_ACTIVE"
+
+        stream.release_close.set()
+        await asyncio.wait_for(cancel, timeout=1)
+        cancel = None
+        assert provider.conformance.snapshot().active_synthesis == 0
+        assert_zero_business_effects(provider)
+    finally:
+        stream.release_close.set()
+        if cancel is not None:
+            await asyncio.gather(cancel, return_exceptions=True)
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_pause_freezes_conformance_event_budget() -> None:
+    now = [0.0]
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    delta_count = 70
+    stream = ObservedSseStream(
+        tuple(line for _ in range(delta_count) for line in (audio_event, ""))
+        + ('data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        monotonic=lambda: now[0],
+        event_queue_wait_seconds=0.5,
+        synthesis_pause_timeout_seconds=60.0,
+    )
+    request = synthesis_request(event_timeout_seconds=15)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    try:
+        await stream.wait_until_yielded(128)
+        session = provider._require_synthesis(request.ref)
+        assert session.events.qsize() == session.events.maxsize == 64
+
+        now[0] = 2.0
+        await provider.pause_synthesis(request.ref)
+        now[0] = 56.0
+        await provider.resume_synthesis(request.ref)
+
+        chunks = 0
+        while True:
+            event = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+            if event.kind is SynthesisEventKind.STARTED:
+                continue
+            if event.kind is SynthesisEventKind.CHUNK:
+                chunks += 1
+                continue
+            assert event.kind is SynthesisEventKind.COMPLETED
+            break
+        assert chunks == delta_count + 1
+        assert provider.degradation_facts == ()
+        assert stream.closed is True
+        assert_zero_business_effects(provider)
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_dominates_pause_from_full_event_queue() -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    stream = ObservedSseStream(
+        tuple(line for _ in range(70) for line in (audio_event, ""))
+        + ('data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        event_queue_wait_seconds=0.5,
+        synthesis_pause_timeout_seconds=1.0,
+    )
+    request = synthesis_request(event_timeout_seconds=2)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    try:
+        await stream.wait_until_yielded(128)
+        session = provider._require_synthesis(request.ref)
+        assert session.events.qsize() == session.events.maxsize == 64
+        await provider.pause_synthesis(request.ref)
+
+        await provider.cancel_synthesis(request.ref, reason="replacement")
+        assert stream.closed is True
+        with pytest.raises(OpenAIStreamingSpeechError) as stale:
+            await provider.resume_synthesis(request.ref)
+        assert stale.value.reason == "SYNTHESIS_STREAM_NOT_FOUND"
+        assert provider.degradation_facts == ()
+        assert provider.cleanup_snapshot.clean is True
+        assert_zero_business_effects(provider)
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_close_wakes_resume_waiting_from_full_event_queue() -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    stream = ObservedSseStream(
+        tuple(line for _ in range(70) for line in (audio_event, ""))
+        + ('data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        event_queue_wait_seconds=0.5,
+        synthesis_pause_timeout_seconds=1.0,
+    )
+    request = synthesis_request(event_timeout_seconds=2)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await stream.wait_until_yielded(128)
+    session = provider._require_synthesis(request.ref)
+    assert session.events.qsize() == session.events.maxsize == 64
+    await provider.pause_synthesis(request.ref)
+
+    resume = asyncio.create_task(provider.resume_synthesis(request.ref))
+    await asyncio.sleep(0)
+    assert resume.done() is False
+    await provider.close()
+    with pytest.raises(OpenAIStreamingSpeechError) as rejected:
+        await resume
+    assert rejected.value.reason == "SYNTHESIS_RESUME_NOT_ACKNOWLEDGED"
+    assert stream.closed is True
+    assert provider.cleanup_snapshot.clean is True
+    assert_zero_business_effects(provider)
+
+
+@pytest.mark.asyncio
+async def test_full_event_queue_pause_times_out_without_consumer() -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    facts: list[SpeechDegradationFact] = []
+    stream = ObservedSseStream(
+        tuple(line for _ in range(70) for line in (audio_event, ""))
+        + ('data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        degradation_sink=facts.append,
+        event_queue_wait_seconds=0.5,
+        synthesis_pause_timeout_seconds=0.05,
+    )
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    try:
+        await stream.wait_until_yielded(128)
+        session = provider._require_synthesis(request.ref)
+        assert session.events.qsize() == session.events.maxsize == 64
+        await provider.pause_synthesis(request.ref)
+
+        await asyncio.wait_for(stream.closed_event.wait(), timeout=0.2)
+        assert facts[-1].reason is SpeechDegradationReason.PROVIDER_TIMEOUT
+        assert provider.conformance.snapshot().active_synthesis == 0
+        assert_zero_business_effects(provider)
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_two_full_event_queue_pause_cycles_are_isolated() -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    first_stream, second_stream = [
+        ObservedSseStream(
+            tuple(line for _ in range(70) for line in (audio_event, ""))
+            + ('data: {"type":"speech.audio.done","usage":{}}', "")
+        )
+        for _ in range(2)
+    ]
+    pending_streams = [first_stream, second_stream]
+
+    async def sse_factory(*_args):
+        return pending_streams.pop(0)
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        event_queue_wait_seconds=0.5,
+        synthesis_pause_timeout_seconds=1.0,
+    )
+    first = synthesis_request(event_timeout_seconds=2)
+    second_response = ResponseRef("interaction-2", "response-2", 0)
+    second = replace(
+        synthesis_request(event_timeout_seconds=2),
+        ref=SynthesisStreamRef("synthesis-2", 0, second_response, "unit-2", 0),
+    )
+    provider.conformance.activate_response(first.ref.response)
+    provider.conformance.activate_response(second.ref.response)
+    await provider.open_synthesis(first)
+    await provider.open_synthesis(second)
+    try:
+        await asyncio.gather(
+            first_stream.wait_until_yielded(128),
+            second_stream.wait_until_yielded(128),
+        )
+        first_session = provider._require_synthesis(first.ref)
+        second_session = provider._require_synthesis(second.ref)
+        assert first_session.events.qsize() == first_session.events.maxsize == 64
+        assert second_session.events.qsize() == second_session.events.maxsize == 64
+
+        await asyncio.gather(
+            provider.pause_synthesis(first.ref),
+            provider.pause_synthesis(second.ref),
+        )
+        assert first_session.pause_acknowledged.is_set()
+        assert second_session.pause_acknowledged.is_set()
+        await asyncio.gather(
+            provider.resume_synthesis(second.ref),
+            provider.resume_synthesis(first.ref),
+        )
+
+        async def drain(request: SynthesisStreamRequest) -> int:
+            chunks = 0
+            while True:
+                event = await provider.next_synthesis_event(
+                    request.ref, timeout_seconds=1
+                )
+                if event.kind is SynthesisEventKind.STARTED:
+                    continue
+                if event.kind is SynthesisEventKind.CHUNK:
+                    chunks += 1
+                    continue
+                assert event.kind is SynthesisEventKind.COMPLETED
+                return chunks
+
+        assert await asyncio.gather(drain(first), drain(second)) == [71, 71]
+        assert first_stream.closed is True
+        assert second_stream.closed is True
+        assert provider.degradation_facts == ()
+        assert_zero_business_effects(provider)
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_pause_uses_one_deadline_across_full_queue_and_resume_wait() -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_event = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    stream = ObservedSseStream(
+        tuple(line for _ in range(70) for line in (audio_event, ""))
+        + ('data: {"type":"speech.audio.done","usage":{}}', "")
+    )
+    facts: list[SpeechDegradationFact] = []
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        degradation_sink=facts.append,
+        event_queue_wait_seconds=0.05,
+        synthesis_pause_timeout_seconds=0.1,
+    )
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await stream.wait_until_yielded(128)
+
+    loop = asyncio.get_running_loop()
+    paused_at = loop.time()
+    await provider.pause_synthesis(request.ref)
+    await asyncio.sleep(0.06)
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+
+    await asyncio.wait_for(stream.closed_event.wait(), timeout=0.2)
+    assert loop.time() - paused_at < 0.16
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_TIMEOUT
+    assert provider.conformance.snapshot().active_synthesis == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_dominates_paused_synthesis_and_late_resume_cannot_revive() -> (
+    None
+):
+    facts: list[SpeechDegradationFact] = []
+    stream = BlockingSseStream()
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(), sse_factory=sse_factory, degradation_sink=facts.append
+    )
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await provider.pause_synthesis(request.ref)
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+
+    await provider.cancel_synthesis(request.ref, reason="replacement")
+    assert stream.closed is True
+    assert facts == []
+    with pytest.raises(OpenAIStreamingSpeechError) as stale:
+        await provider.resume_synthesis(request.ref)
+    assert stale.value.reason == "SYNTHESIS_STREAM_NOT_FOUND"
+    assert provider.conformance.snapshot().active_synthesis == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_pause_does_not_renew_deadline_and_foreign_ref_is_zero_effect() -> (
+    None
+):
+    facts: list[SpeechDegradationFact] = []
+    stream = BlockingSseStream()
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        degradation_sink=facts.append,
+        synthesis_pause_timeout_seconds=0.1,
+    )
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await provider.pause_synthesis(request.ref)
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+    await asyncio.sleep(0.06)
+    await provider.pause_synthesis(request.ref)
+
+    foreign = replace(request.ref, stream_id="foreign-stream")
+    effects_before = business_effect_count(provider)
+    with pytest.raises(OpenAIStreamingSpeechError) as rejected:
+        await provider.resume_synthesis(foreign)
+    assert rejected.value.reason == "SYNTHESIS_STREAM_NOT_FOUND"
+    identity_state = with_identity_observation(
+        LifecycleState(),
+        rejected_foreign_control=True,
+        authority_effects_before=effects_before,
+        authority_effects_after=business_effect_count(provider),
+    )
+    assert lifecycle_violations(identity_state) == ()
+
+    await asyncio.wait_for(stream.closed_event.wait(), timeout=0.1)
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_TIMEOUT
+    assert provider.conformance.snapshot().active_synthesis == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_close_dominates_paused_synthesis_without_retained_task() -> (
+    None
+):
+    stream = BlockingSseStream()
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await provider.pause_synthesis(request.ref)
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+
+    await provider.close()
+    assert stream.closed is True
+    assert provider.cleanup_snapshot.clean is True
+    assert provider.conformance.snapshot().active_synthesis == 0
+    assert_zero_business_effects(provider)
+
+
+@pytest.mark.asyncio
+async def test_synthesis_pause_lifetime_is_bounded_and_visible() -> None:
+    facts: list[SpeechDegradationFact] = []
+    stream = BlockingSseStream()
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        sse_factory=sse_factory,
+        degradation_sink=facts.append,
+        synthesis_pause_timeout_seconds=0.05,
+    )
+    request = synthesis_request(event_timeout_seconds=1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    await provider.pause_synthesis(request.ref)
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+
+    await asyncio.wait_for(stream.closed_event.wait(), timeout=1)
+    assert len(facts) == 1
+    assert facts[0].reason is SpeechDegradationReason.PROVIDER_TIMEOUT
+    assert provider.conformance.snapshot().active_synthesis == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_synthesis_sse_comments_do_not_renew_event_timeout() -> None:
     facts: list[SpeechDegradationFact] = []
     stream = PacedSseStream(tuple((0.04, ": keep-alive") for _ in range(5)))
@@ -1995,6 +3494,40 @@ async def test_tts_request_failure_retains_only_safe_fact_and_no_task_exception(
     assert private_transport_value not in safe_logs
     assert facts[-1].reason is SpeechDegradationReason.PROVIDER_UNAVAILABLE
     assert provider.conformance.snapshot().active_synthesis == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_synthesis_protocol_log_has_safe_subreason_without_provider_content() -> (
+    None
+):
+    private_event_body = "private-provider-event-body"
+    request = synthesis_request()
+    stream = FakeSseStream(
+        (
+            f'data: {{"type":"{private_event_body}"}}',
+            "",
+        )
+    )
+    logs = CapturingLogHandler()
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
+    provider.conformance.activate_response(request.ref.response)
+    _LOGGER.addHandler(logs)
+    try:
+        await provider.open_synthesis(request)
+        await asyncio.wait_for(stream.closed_event.wait(), timeout=1)
+    finally:
+        _LOGGER.removeHandler(logs)
+    safe_logs = "\n".join(logs.messages)
+    assert "provider_subreason=SPEECH_PROVIDER_UNKNOWN_SSE_EVENT" in safe_logs
+    assert "private-test-key" not in safe_logs
+    assert request.spoken_text not in safe_logs
+    assert private_event_body not in safe_logs
     assert_zero_business_effects(provider)
     await provider.close()
 

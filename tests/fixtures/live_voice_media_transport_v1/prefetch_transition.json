@@ -1,0 +1,38 @@
+{
+  "park": {
+    "business_cancel_count_delta": 0,
+    "capability_version": "live-voice.media.prefetch-promotion.v1",
+    "contract_version": "live-voice.media.v1",
+    "correlation_id": "correlation-01",
+    "generation": 7,
+    "interaction_id": "interaction-01",
+    "lease_id": "lease-opaque-01",
+    "response_generation": 7,
+    "response_id": "response-01",
+    "retained_through_seq": 24,
+    "session_id": "session-01",
+    "state": "prefetch_parked",
+    "transition_seq": 0,
+    "type": "media.prefetch_transition",
+    "unit_id": "unit-01",
+    "unit_seq": 1
+  },
+  "promote": {
+    "business_cancel_count_delta": 0,
+    "capability_version": "live-voice.media.prefetch-promotion.v1",
+    "contract_version": "live-voice.media.v1",
+    "correlation_id": "correlation-01",
+    "generation": 7,
+    "interaction_id": "interaction-01",
+    "lease_id": "lease-opaque-01",
+    "response_generation": 7,
+    "response_id": "response-01",
+    "retained_through_seq": 24,
+    "session_id": "session-01",
+    "state": "promoted",
+    "transition_seq": 1,
+    "type": "media.prefetch_transition",
+    "unit_id": "unit-01",
+    "unit_seq": 1
+  }
+}

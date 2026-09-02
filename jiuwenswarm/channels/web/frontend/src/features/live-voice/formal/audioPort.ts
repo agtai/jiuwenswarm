@@ -215,6 +215,34 @@ export class AudioPort {
     });
   }
 
+  continueResponse(input: Readonly<AudioResponseRef>, unitId: string): void {
+    const ref = normalizeRef(input);
+    const state = this.#byInteraction.get(ref.interaction_id);
+    if (
+      state === undefined ||
+      refKey(state.ref) !== refKey(ref) ||
+      state.stopped
+    ) {
+      throw new AudioPortViolation(
+        'AUDIO_CONTINUATION_RESPONSE_MISMATCH',
+        'audio continuation requires the exact active response',
+      );
+    }
+    const unit = requiredText(unitId, 'unit_id');
+    if (state.chunks.length !== 0) {
+      throw new AudioPortViolation(
+        'AUDIO_CONTINUATION_PENDING',
+        'audio continuation requires every prior chunk to be acknowledged',
+      );
+    }
+    if (state.nextSeq.has(unit)) {
+      throw new AudioPortViolation(
+        'AUDIO_UNIT_REUSED',
+        'audio continuation unit identifiers cannot be reused',
+      );
+    }
+  }
+
   enqueue(input: Readonly<AudioChunk>): boolean {
     const ref = normalizeRef(input.response);
     const state = this.#byInteraction.get(ref.interaction_id);

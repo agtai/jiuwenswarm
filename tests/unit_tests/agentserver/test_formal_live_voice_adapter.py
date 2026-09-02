@@ -23,6 +23,9 @@ from jiuwenswarm.server.runtime.agent_adapter import interface_deep
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
 )
+from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+    FORMAL_APPEND_ONLY_DELTA_CAPABILITY,
+)
 from jiuwenswarm.server.runtime.session import session_history
 
 
@@ -137,6 +140,34 @@ def adapter_with(instance: FormalInstance) -> JiuWenSwarmDeepAdapter:
     adapter._update_runtime_config = update
     adapter.formal_runtime_configs = seen
     return adapter
+
+
+@pytest.mark.asyncio
+async def test_formal_deep_seam_declares_fragment_order_preserving_text() -> None:
+    lease = OutputLease(
+        [
+            RawChunk("delta", {"content": "First "}),
+            RawChunk("delta", {"content": "sentence. "}),
+            RawChunk("answer", {"output": {"output": "First sentence. Done."}}),
+        ]
+    )
+    adapter = adapter_with(FormalInstance(lease))
+    request, inputs = formal_request()
+
+    assert adapter.formal_live_voice_text_capabilities() == (
+        FORMAL_APPEND_ONLY_DELTA_CAPABILITY,
+    )
+    chunks = [
+        chunk
+        async for chunk in adapter.process_formal_live_voice_stream_impl(
+            request, inputs
+        )
+    ]
+    assert [chunk.payload for chunk in chunks] == [
+        {"event_type": "chat.delta", "content": "First "},
+        {"event_type": "chat.delta", "content": "sentence. "},
+        {"event_type": "chat.final", "content": "First sentence. Done."},
+    ]
 
 
 @pytest.mark.asyncio

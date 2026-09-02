@@ -10,6 +10,7 @@ import struct
 import threading
 import time
 import wave
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -22,6 +23,8 @@ from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAudioFrame,
     MediaDetachReason,
+    MediaPrefetchTransition,
+    MediaPrefetchTransitionState,
     MediaTransportViolation,
 )
 from jiuwenswarm.gateway.live_voice.dedicated_media_route import (
@@ -77,8 +80,15 @@ _CAPABILITY = StreamingProviderCapability(
 
 
 class _Provider:
-    def __init__(self, *, fail_open: bool = False, fail_after_audio: bool = False):
-        self._conformance = StreamingSpeechConformance(_CAPABILITY, enabled=True)
+    def __init__(
+        self,
+        *,
+        fail_open: bool = False,
+        fail_after_audio: bool = False,
+        capability: StreamingProviderCapability = _CAPABILITY,
+    ):
+        self._capability = capability
+        self._conformance = StreamingSpeechConformance(capability, enabled=True)
         self.fail_open = fail_open
         self.fail_after_audio = fail_after_audio
         self.cancelled: list[SynthesisStreamRef] = []
@@ -86,10 +96,12 @@ class _Provider:
         self.events: asyncio.Queue[StreamingSynthesisEvent | BaseException] = (
             asyncio.Queue()
         )
+        self.parked: list[tuple[SynthesisStreamRef, int]] = []
+        self.promoted: list[tuple[SynthesisStreamRef, int]] = []
 
     @property
     def capability(self) -> StreamingProviderCapability:
-        return _CAPABILITY
+        return self._capability
 
     @property
     def conformance(self) -> StreamingSpeechConformance:
@@ -153,6 +165,27 @@ class _Provider:
         except StreamingSpeechViolation:
             pass
         self._conformance.reap_terminal()
+
+    async def pause_synthesis(self, _ref: SynthesisStreamRef) -> None:
+        return None
+
+    async def resume_synthesis(self, _ref: SynthesisStreamRef) -> None:
+        return None
+
+    async def park_synthesis_for_promotion(
+        self,
+        ref: SynthesisStreamRef,
+        *,
+        park_generation: int,
+        max_pause_seconds: float,
+    ) -> None:
+        del max_pause_seconds
+        self.parked.append((ref, park_generation))
+
+    async def promote_parked_synthesis(
+        self, ref: SynthesisStreamRef, *, park_generation: int
+    ) -> None:
+        self.promoted.append((ref, park_generation))
 
     async def close(self) -> None:
         self._conformance.close()
@@ -560,6 +593,295 @@ async def test_batched_agent_final_opens_real_streaming_product_downlink() -> No
     assert len(provider.requests) == 1
     assert provider.requests[0].ref.response.response_id == "response-1"
     assert provider.requests[0].ref.unit_id == "unit-1"
+    assert batch.calls == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_same_response_successor_preserves_authoritative_unit_sequence() -> None:
+    """A C019 successor must not be reconstructed as the first TTS unit."""
+
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _Provider(capability=capability)
+    registry, owner, context, params = _authorized_registry(provider)
+    selected = await registry.negotiate_prefetch_promotion(
+        params={
+            "session_id": "session-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+            "offered": ["live-voice.media.prefetch-promotion.v1"],
+        },
+        routed_session_id="session-1",
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    assert selected == {"selected": "live-voice.media.prefetch-promotion.v1"}
+    batch = _Batch()
+    first = await registry.try_streaming_synthesis(
+        "speech.synthesize.batch",
+        params,
+        context,
+        "session-1",
+        batch_service=batch,  # type: ignore[arg-type]
+    )
+    assert first is not None and first["ok"] is True
+    first_audio = first["result"]["audio"]  # type: ignore[index]
+    first_downlink = registry.consume_ticket(
+        str(first_audio["media_ticket"]), request_origin=ORIGIN
+    )
+    assert (
+        first_downlink is not None and first_downlink.downlink_stream_source is not None
+    )
+    first_source = first_downlink.downlink_stream_source
+    assert (await first_source.__anext__()).seq == 0
+    with pytest.raises(StopAsyncIteration):
+        await first_source.__anext__()
+
+    successor_text = "authoritative successor text"
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification",
+                "kind": "agent.output",
+                "session_id": "session-1",
+                "correlation_id": "correlation-1",
+                "interaction_id": "interaction-1",
+                "activation_id": "activation-1",
+                "activation_generation": 1,
+                "response": {
+                    "interaction_id": "interaction-1",
+                    "response_id": "response-1",
+                    "response_generation": 0,
+                },
+                "agent_event": {"event_type": "chat.final", "text": successor_text},
+                "presentation_unit": {
+                    "surface": "text",
+                    "unit_id": "unit-2",
+                    "seq": 1,
+                },
+                "source_event": None,
+                "progress_event": None,
+                "error_reason": None,
+                "publish_seq": 1,
+            },
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+    successor_params = json.loads(json.dumps(params))
+    successor_params["request_id"] = "request-2"
+    successor_params["operation_id"] = "operation-2"
+    successor_params["unit_id"] = "unit-2"
+    successor_params["unit_seq"] = 1
+    successor_params["prefetch_promotion_capability"] = (
+        "live-voice.media.prefetch-promotion.v1"
+    )
+    successor_params["render_plan"] = {
+        "display_text": successor_text,
+        "spoken_text": successor_text,
+        "transforms": [],
+    }
+    out_of_order = json.loads(json.dumps(successor_params))
+    out_of_order["request_id"] = "request-out-of-order"
+    out_of_order["operation_id"] = "operation-out-of-order"
+    out_of_order["unit_seq"] = 2
+    rejected = await registry.try_streaming_synthesis(
+        "speech.synthesize.batch",
+        out_of_order,
+        context,
+        "session-1",
+        batch_service=batch,  # type: ignore[arg-type]
+    )
+    assert rejected is not None and rejected["ok"] is False
+    assert len(provider.requests) == 1
+
+    successor = await registry.try_streaming_synthesis(
+        "speech.synthesize.batch",
+        successor_params,
+        context,
+        "session-1",
+        batch_service=batch,  # type: ignore[arg-type]
+    )
+
+    assert successor is not None and successor["ok"] is True
+    successor_audio = successor["result"]["audio"]  # type: ignore[index]
+    assert (
+        successor_audio["prefetch_promotion_capability"]
+        == "live-voice.media.prefetch-promotion.v1"
+    )
+    successor_record = registry.consume_ticket(
+        str(successor_audio["media_ticket"]), request_origin=ORIGIN
+    )
+    assert successor_record is not None
+    assert successor_record.successor_reservation_key is not None
+    successor_binding = successor_record.binding
+    assert successor_binding.playout is not None
+    promoted_unparked = MediaPrefetchTransition(
+        lease_id=successor_binding.lease_id,
+        generation=successor_binding.generation.value,
+        session_id=successor_binding.session_id,
+        correlation_id=successor_binding.correlation_id,
+        interaction_id=successor_binding.interaction_id,
+        response_id=successor_binding.playout.response_id,
+        response_generation=successor_binding.playout.response_generation,
+        unit_id=successor_binding.playout.unit_id,
+        unit_seq=1,
+        transition_seq=0,
+        state=MediaPrefetchTransitionState.PROMOTED_UNPARKED,
+        retained_through_seq=0,
+    )
+    transition_ack = await registry.apply_prefetch_transition(
+        successor_record, promoted_unparked
+    )
+    assert transition_ack.state is MediaPrefetchTransitionState.PROMOTED_UNPARKED
+    assert successor_record.successor_reservation_key is None
+    assert provider.parked == []
+    assert provider.promoted == []
+    assert [request.ref.unit_seq for request in provider.requests] == [0, 1]
+    assert batch.calls == 0
+
+    timeout_text = "authoritative timeout successor"
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification",
+                "kind": "agent.output",
+                "session_id": "session-1",
+                "correlation_id": "correlation-1",
+                "interaction_id": "interaction-1",
+                "activation_id": "activation-1",
+                "activation_generation": 1,
+                "response": {
+                    "interaction_id": "interaction-1",
+                    "response_id": "response-1",
+                    "response_generation": 0,
+                },
+                "agent_event": {"event_type": "chat.final", "text": timeout_text},
+                "presentation_unit": {
+                    "surface": "text",
+                    "unit_id": "unit-3",
+                    "seq": 2,
+                },
+                "source_event": None,
+                "progress_event": None,
+                "error_reason": None,
+                "publish_seq": 2,
+            },
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+    timeout_params = json.loads(json.dumps(successor_params))
+    timeout_params.update(
+        {
+            "request_id": "request-3",
+            "operation_id": "operation-3",
+            "unit_id": "unit-3",
+            "unit_seq": 2,
+            "render_plan": {
+                "display_text": timeout_text,
+                "spoken_text": timeout_text,
+                "transforms": [],
+            },
+        }
+    )
+    timeout_result = await registry.try_streaming_synthesis(
+        "speech.synthesize.batch",
+        timeout_params,
+        context,
+        "session-1",
+        batch_service=batch,  # type: ignore[arg-type]
+    )
+    assert timeout_result is not None and timeout_result["ok"] is True
+    timeout_audio = timeout_result["result"]["audio"]  # type: ignore[index]
+    timeout_record = registry.consume_ticket(
+        str(timeout_audio["media_ticket"]), request_origin=ORIGIN
+    )
+    assert timeout_record is not None
+    timeout_source = timeout_record.downlink_stream_source
+    assert timeout_source is not None
+    timeout_callback = timeout_source.handle.promotion_timeout_callback
+    assert timeout_callback is not None
+    timeout_callback()
+    assert timeout_record.successor_reservation_key is None
+    assert timeout_record.downlink_stream_source is None
+    assert registry._successor_reservations == {}
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_c019_audio_segment_without_sequence_has_zero_synthesis_effect() -> None:
+    """Only the old aligned presentation spelling may use implicit sequence zero."""
+
+    provider = _Provider()
+    registry, owner, context, params = _authorized_registry(provider)
+    batch = _Batch()
+    c019_text = "authoritative C019 text"
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification",
+                "kind": "agent.output",
+                "session_id": "session-1",
+                "correlation_id": "correlation-1",
+                "interaction_id": "interaction-1",
+                "activation_id": "activation-1",
+                "activation_generation": 1,
+                "response": {
+                    "interaction_id": "interaction-1",
+                    "response_id": "response-1",
+                    "response_generation": 0,
+                },
+                "agent_event": {"event_type": "chat.delta", "text": c019_text},
+                "presentation_unit": {
+                    "surface": "audio",
+                    "unit_id": "unit-c019-missing-seq",
+                    "projection_role": "audio_segment",
+                },
+                "presentation_text": c019_text,
+                "presentation_delivery": "speak_only",
+                "source_event": None,
+                "progress_event": None,
+                "error_reason": None,
+                "publish_seq": 1,
+            },
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+    malformed_params = json.loads(json.dumps(params))
+    malformed_params["request_id"] = "request-c019"
+    malformed_params["operation_id"] = "operation-c019"
+    malformed_params["unit_id"] = "unit-c019-missing-seq"
+    malformed_params["unit_seq"] = 0
+    malformed_params["render_plan"] = {
+        "display_text": c019_text,
+        "spoken_text": c019_text,
+        "transforms": [],
+    }
+
+    result = await registry.try_streaming_synthesis(
+        "speech.synthesize.batch",
+        malformed_params,
+        context,
+        "session-1",
+        batch_service=batch,  # type: ignore[arg-type]
+    )
+
+    assert result is None
+    assert provider.requests == []
     assert batch.calls == 0
     await owner.close()
 

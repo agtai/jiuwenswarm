@@ -27,6 +27,7 @@ from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
     ConversationRuntimeLoopViolation,
     EffectState,
 )
+from jiuwenswarm.server.live_voice import presentation_ledger
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     HistorySurfacePolicy,
     PresentationAck,
@@ -104,7 +105,13 @@ def unit(
     start: int,
     end: int,
     content_ref: str,
+    projection_role: object | None = None,
 ) -> PresentationUnit:
+    projection = (
+        {}
+        if projection_role is None
+        else {"projection_role": projection_role}
+    )
     return PresentationUnit(
         ref=ref,
         surface=surface,
@@ -113,6 +120,7 @@ def unit(
         source_start_utf8=start,
         source_end_utf8=end,
         content_ref=content_ref,
+        **projection,
     )
 
 
@@ -669,6 +677,190 @@ async def test_wrong_generation_ack_and_cross_surface_conflict_have_zero_effect(
     with pytest.raises(PresentationLedgerViolation) as empty_error:
         await runtime.produce_unit(empty)
     assert empty_error.value.reason == "EMPTY_PRESENTATION_SOURCE_SPAN"
+
+
+@pytest.mark.asyncio
+async def test_text_root_contains_ordered_audio_segments_and_replays_exactly(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    runtime, ref = await prepared(loop_factory, policy=HistorySurfacePolicy.TEXT)
+    roles = presentation_ledger.PresentationProjectionRole
+    prefix = unit(
+        ref,
+        PresentationSurface.AUDIO,
+        "audio-prefix-0",
+        0,
+        0,
+        16,
+        "sha256:prefix",
+        roles.AUDIO_SEGMENT,
+    )
+    root = unit(
+        ref,
+        PresentationSurface.TEXT,
+        "text-root-0",
+        0,
+        0,
+        32,
+        "sha256:complete",
+        roles.AUTHORITATIVE_TEXT_ROOT,
+    )
+    tail = unit(
+        ref,
+        PresentationSurface.AUDIO,
+        "audio-tail-1",
+        1,
+        16,
+        32,
+        "sha256:tail",
+        roles.AUDIO_SEGMENT,
+    )
+
+    assert await runtime.produce_unit(prefix) is True
+    assert await runtime.produce_unit(root) is True
+    assert await runtime.produce_unit(tail) is True
+    assert await runtime.produce_unit(root) is False
+    records = runtime.snapshot().presentation.records
+    assert [record.unit for record in records] == [root, prefix, tail]
+    assert runtime.snapshot().effects == ()
+
+
+@pytest.mark.parametrize(
+    "policy",
+    (HistorySurfacePolicy.AUDIO, HistorySurfacePolicy.UNION),
+)
+@pytest.mark.asyncio
+async def test_projection_overlay_is_rejected_outside_text_history_without_effect(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+    policy: HistorySurfacePolicy,
+) -> None:
+    runtime, ref = await prepared(loop_factory, policy=policy)
+    roles = presentation_ledger.PresentationProjectionRole
+    root = unit(
+        ref,
+        PresentationSurface.TEXT,
+        "text-root-0",
+        0,
+        0,
+        32,
+        "sha256:complete",
+        roles.AUTHORITATIVE_TEXT_ROOT,
+    )
+    assert await runtime.produce_unit(root) is True
+    before = runtime.snapshot()
+    segment = unit(
+        ref,
+        PresentationSurface.AUDIO,
+        "audio-prefix-0",
+        0,
+        0,
+        16,
+        "sha256:prefix",
+        roles.AUDIO_SEGMENT,
+    )
+
+    with pytest.raises(PresentationLedgerViolation) as rejected:
+        await runtime.produce_unit(segment)
+    assert rejected.value.reason == "CROSS_SURFACE_CONTENT_CONFLICT"
+    assert runtime.snapshot() == before
+
+
+@pytest.mark.asyncio
+async def test_projection_rejects_unknown_root_reuse_and_segment_outside_root(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    runtime, ref = await prepared(loop_factory, policy=HistorySurfacePolicy.TEXT)
+    roles = presentation_ledger.PresentationProjectionRole
+    root = unit(
+        ref,
+        PresentationSurface.TEXT,
+        "text-root-0",
+        0,
+        0,
+        32,
+        "sha256:complete",
+        roles.AUTHORITATIVE_TEXT_ROOT,
+    )
+    assert await runtime.produce_unit(root) is True
+
+    invalid = (
+        unit(
+            ref,
+            PresentationSurface.AUDIO,
+            "audio-unknown-0",
+            0,
+            0,
+            16,
+            "sha256:prefix",
+            "future_projection_role",
+        ),
+        unit(
+            ref,
+            PresentationSurface.TEXT,
+            "text-root-1",
+            1,
+            32,
+            40,
+            "sha256:second-root",
+            roles.AUTHORITATIVE_TEXT_ROOT,
+        ),
+        unit(
+            ref,
+            PresentationSurface.AUDIO,
+            "audio-outside-0",
+            0,
+            0,
+            33,
+            "sha256:outside",
+            roles.AUDIO_SEGMENT,
+        ),
+    )
+    expected = (
+        "INVALID_PRESENTATION_PROJECTION_ROLE",
+        "INVALID_PRESENTATION_PROJECTION",
+        "CROSS_SURFACE_CONTENT_CONFLICT",
+    )
+    for item, reason in zip(invalid, expected, strict=True):
+        before = runtime.snapshot()
+        with pytest.raises(PresentationLedgerViolation) as rejected:
+            await runtime.produce_unit(item)
+        assert rejected.value.reason == reason
+        assert runtime.snapshot() == before
+
+
+@pytest.mark.asyncio
+async def test_audio_segment_sequence_remains_contiguous_under_projection(
+    loop_factory: Callable[..., ConversationRuntimeLoop],
+) -> None:
+    runtime, ref = await prepared(loop_factory, policy=HistorySurfacePolicy.TEXT)
+    roles = presentation_ledger.PresentationProjectionRole
+    first = unit(
+        ref,
+        PresentationSurface.AUDIO,
+        "audio-0",
+        0,
+        0,
+        16,
+        "sha256:first",
+        roles.AUDIO_SEGMENT,
+    )
+    assert await runtime.produce_unit(first) is True
+    before = runtime.snapshot()
+    overlapping = unit(
+        ref,
+        PresentationSurface.AUDIO,
+        "audio-1",
+        1,
+        8,
+        24,
+        "sha256:overlap",
+        roles.AUDIO_SEGMENT,
+    )
+
+    with pytest.raises(PresentationLedgerViolation) as rejected:
+        await runtime.produce_unit(overlapping)
+    assert rejected.value.reason == "NON_CONTIGUOUS_SOURCE_SPAN"
+    assert runtime.snapshot() == before
 
 
 async def test_barge_in_stops_only_audio_then_optional_cancel_fences_text(

@@ -27,6 +27,125 @@ export interface OrdinaryChromeBatchConfig {
   readonly nonce: string;
 }
 
+export interface ProductTtsUnitLatencySummary {
+  readonly unit_count: number;
+  readonly request_count: number;
+  readonly cancelled_unit_count: number;
+  readonly wasted_prefetch_count: number;
+  readonly prefix_end_to_tail_start_ms: number | null;
+  readonly inter_unit_gap_ms: readonly number[];
+  readonly inter_unit_gap_max_ms: number | null;
+  readonly inter_unit_gap_p95_ms: number | null;
+  readonly prepared_wait_ms: readonly number[];
+  readonly total_response_playout_ms: number | null;
+}
+
+type UnitClocks = Partial<Record<
+  | 'unit_tts_requested'
+  | 'unit_first_pcm'
+  | 'unit_prepared'
+  | 'unit_playout_started'
+  | 'unit_playout_completed'
+  | 'unit_acknowledged',
+  number
+>>;
+
+export function reduceProductTtsUnitLatency(
+  records: readonly Readonly<BrowserL0Envelope>[],
+): Readonly<ProductTtsUnitLatencySummary> {
+  const elapsed = (start: number, end: number, field: string): number => {
+    const value = end - start;
+    if (!Number.isFinite(value) || value < 0) {
+      throw new TypeError(`${field} clocks are contradictory`);
+    }
+    return value;
+  };
+  const units = new Map<number, UnitClocks>();
+  let responseKey: string | null = null;
+  for (const record of records) {
+    if (!record.milestone.startsWith('unit_')) continue;
+    const binding = record.binding;
+    if (
+      binding.response_id === null ||
+      binding.response_generation === null ||
+      binding.unit_seq === null
+    ) continue;
+    const key = JSON.stringify([
+      binding.session_id,
+      binding.interaction_id,
+      binding.response_id,
+      binding.response_generation,
+    ]);
+    if (responseKey !== null && responseKey !== key) {
+      throw new TypeError('unit latency records cross authoritative responses');
+    }
+    responseKey = key;
+    const clocks = units.get(binding.unit_seq) ?? {};
+    const milestone = record.milestone as keyof UnitClocks;
+    if (clocks[milestone] !== undefined) {
+      throw new TypeError('unit latency milestone is duplicated');
+    }
+    clocks[milestone] = record.observation.monotonic_ms;
+    units.set(binding.unit_seq, clocks);
+  }
+  const ordered = [...units.entries()].sort(([left], [right]) => left - right);
+  const requests = ordered.filter(([, clocks]) => clocks.unit_tts_requested !== undefined);
+  const preparedWait = ordered.flatMap(([, clocks]) =>
+    clocks.unit_prepared !== undefined && clocks.unit_playout_started !== undefined
+      ? [elapsed(clocks.unit_prepared, clocks.unit_playout_started, 'prepared wait')]
+      : []
+  );
+  const gaps: number[] = [];
+  for (let index = 1; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1][1];
+    const current = ordered[index][1];
+    if (
+      previous.unit_playout_completed !== undefined &&
+      current.unit_playout_started !== undefined &&
+      current.unit_prepared !== undefined
+    ) {
+      gaps.push(elapsed(
+        previous.unit_playout_completed,
+        current.unit_playout_started,
+        'inter-unit gap',
+      ));
+    }
+  }
+  const sortedGaps = [...gaps].sort((left, right) => left - right);
+  const played = ordered.filter(([, clocks]) =>
+    clocks.unit_playout_started !== undefined && clocks.unit_playout_completed !== undefined
+  );
+  const first = played.at(0)?.[1] ?? null;
+  const last = played.at(-1)?.[1] ?? null;
+  const prefix = units.get(0) ?? null;
+  const firstTail = units.get(1) ?? null;
+  return Object.freeze({
+    unit_count: ordered.length,
+    request_count: requests.length,
+    cancelled_unit_count: requests.filter(([, clocks]) => clocks.unit_acknowledged === undefined).length,
+    wasted_prefetch_count: requests.filter(([, clocks]) =>
+      clocks.unit_prepared !== undefined && clocks.unit_playout_started === undefined
+    ).length,
+    prefix_end_to_tail_start_ms:
+      prefix?.unit_playout_completed !== undefined &&
+      firstTail?.unit_prepared !== undefined &&
+      firstTail.unit_playout_started !== undefined
+        ? elapsed(prefix.unit_playout_completed, firstTail.unit_playout_started, 'prefix-tail gap')
+        : null,
+    inter_unit_gap_ms: Object.freeze(gaps),
+    inter_unit_gap_max_ms: sortedGaps.length === 0 ? null : sortedGaps[sortedGaps.length - 1],
+    inter_unit_gap_p95_ms:
+      sortedGaps.length < 20
+        ? null
+        : sortedGaps[Math.ceil(sortedGaps.length * 0.95) - 1],
+    prepared_wait_ms: Object.freeze(preparedWait),
+    total_response_playout_ms:
+      first?.unit_playout_started !== undefined && last?.unit_playout_completed !== undefined
+        ? elapsed(first.unit_playout_started, last.unit_playout_completed, 'total playout')
+        : null,
+  });
+}
+
 export type OrdinaryChromeBatchProgress = Readonly<{
   status: 'idle' | 'connecting' | 'warming' | 'running' | 'settling' | 'waiting_epoch' | 'complete' | 'failed' | 'cancelled';
   temperature: 'cold' | 'warm' | null;

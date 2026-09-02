@@ -21,6 +21,63 @@ test('ordinary batch query is exact loopback-only and feature-off is inert', asy
   );
 });
 
+test('per-unit reducer reports exact gaps waits waste and total without small-sample p95', async () => {
+  const { reduceProductTtsUnitLatency } = await import(moduleUrl);
+  const record = (unitSeq, milestone, monotonicMs) => ({
+    milestone,
+    binding: {
+      session_id: 'session-1', interaction_id: 'interaction-1',
+      response_id: 'response-1', response_generation: 0,
+      unit_id: unitSeq === null ? null : `unit-${unitSeq}`, unit_seq: unitSeq,
+    },
+    observation: { monotonic_ms: monotonicMs },
+  });
+  const records = [
+    record(0, 'unit_tts_requested', 0), record(0, 'unit_prepared', 30),
+    record(0, 'unit_playout_started', 50), record(0, 'unit_playout_completed', 100),
+    record(0, 'unit_acknowledged', 105),
+    record(1, 'unit_tts_requested', 60), record(1, 'unit_prepared', 130),
+    record(1, 'unit_playout_started', 140), record(1, 'unit_playout_completed', 200),
+    record(1, 'unit_acknowledged', 205),
+    record(2, 'unit_tts_requested', 150), record(2, 'unit_prepared', 200),
+    record(2, 'unit_playout_started', 210), record(2, 'unit_playout_completed', 300),
+    record(2, 'unit_acknowledged', 305),
+    record(3, 'unit_tts_requested', 220), record(3, 'unit_prepared', 250),
+  ];
+  assert.deepEqual(reduceProductTtsUnitLatency(records), {
+    unit_count: 4,
+    request_count: 4,
+    cancelled_unit_count: 1,
+    wasted_prefetch_count: 1,
+    prefix_end_to_tail_start_ms: 40,
+    inter_unit_gap_ms: [40, 10],
+    inter_unit_gap_max_ms: 40,
+    inter_unit_gap_p95_ms: null,
+    prepared_wait_ms: [20, 10, 10],
+    total_response_playout_ms: 250,
+  });
+  const population = [];
+  let priorCompleted = 10;
+  population.push(record(0, 'unit_playout_started', 0), record(0, 'unit_playout_completed', priorCompleted));
+  for (let seq = 1; seq <= 20; seq += 1) {
+    const started = priorCompleted + seq - 1;
+    priorCompleted = started + 10;
+    population.push(
+      record(seq, 'unit_prepared', Math.max(0, started - 1)),
+      record(seq, 'unit_playout_started', started),
+      record(seq, 'unit_playout_completed', priorCompleted),
+    );
+  }
+  assert.equal(reduceProductTtsUnitLatency(population).inter_unit_gap_p95_ms, 18);
+  assert.throws(
+    () => reduceProductTtsUnitLatency([
+      record(0, 'unit_prepared', 20),
+      record(0, 'unit_playout_started', 19),
+    ]),
+    /clocks are contradictory/,
+  );
+});
+
 test('one gesture drives warm-up and a complete first-audio sample without an operator verdict', async () => {
   const batch = await import(moduleUrl);
   const labels = {

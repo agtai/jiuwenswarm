@@ -30,6 +30,33 @@ function ids() {
   return () => `generated-${++value}`;
 }
 
+test('prefetch promotion negotiation selects v1 and exact METHOD_NOT_FOUND degrades', async () => {
+  const calls = [];
+  const client = new GatewayBatchSpeechClient({
+    enabled: true,
+    scope: { ...scope, assurance: 'authenticated' },
+    transport: {
+      request: async (method, params) => {
+        calls.push([method, params]);
+        return { selected: 'live-voice.media.prefetch-promotion.v1' };
+      },
+    },
+  });
+  assert.equal(await client.negotiatePrefetchPromotion({
+    session_id: 'session-1', activation_id: 'activation-1', activation_generation: 1,
+  }), 'live-voice.media.prefetch-promotion.v1');
+  assert.equal(calls.length, 1);
+
+  const legacy = new GatewayBatchSpeechClient({
+    enabled: true,
+    scope: { ...scope, assurance: 'authenticated' },
+    transport: { request: async () => { throw { code: 'METHOD_NOT_FOUND' }; } },
+  });
+  assert.equal(await legacy.negotiatePrefetchPromotion({
+    session_id: 'session-1', activation_id: 'activation-1', activation_generation: 1,
+  }), null);
+});
+
 function frame(generation = 1, seq = 0, value = 0.25, captureId = 'capture-1') {
   return {
     capture: {
@@ -293,6 +320,83 @@ test('authoritative Agent text declares the synthesis event budget and maps exac
   assert.equal(result.chunks[0].samples.length, 320);
   assert.equal(result.chunks[1].seq, 1);
   assert.deepEqual(result.chunks[0].provider, result.provider);
+});
+
+test('authoritative synthesis permits ordered unseen units of one response and rejects exact unit replay', async () => {
+  const calls = [];
+  const transport = {
+    async request(_method, params) {
+      calls.push({ unit_id: params.unit_id, unit_seq: params.unit_seq });
+      return synthesisEnvelope(params);
+    },
+  };
+  const client = new GatewayBatchSpeechClient({ enabled: true, transport, scope, createId: ids() });
+  const response = { interaction_id: 'interaction-c2', response_id: 'response-c2', response_generation: 2 };
+  const synthesize = (unitId, unitSeq) => client.synthesizeAuthoritative({
+    response,
+    unitId,
+    unitSeq,
+    renderPlan: { display_text: unitId, spoken_text: unitId, transforms: [] },
+    authoritativeAgentText: true,
+    locale: 'en-US',
+    requiredSampleRateHz: 16000,
+    correlationId: 'correlation-c2',
+  });
+
+  await synthesize('prefix-unit', 0);
+  await synthesize('tail-unit', 1);
+  await assert.rejects(
+    synthesize('tail-unit', 1),
+    error => error instanceof GatewayBatchSpeechError && error.reason === 'STALE_SYNTHESIS_RESPONSE',
+  );
+  await assert.rejects(
+    client.synthesizeAuthoritative({
+      response: { ...response, response_id: 'response-collision' },
+      unitId: 'foreign-unit',
+      renderPlan: { display_text: 'foreign', spoken_text: 'foreign', transforms: [] },
+      authoritativeAgentText: true,
+      locale: 'en-US',
+      requiredSampleRateHz: 16000,
+      correlationId: 'correlation-c2',
+    }),
+    error => error instanceof GatewayBatchSpeechError && error.reason === 'STALE_SYNTHESIS_RESPONSE',
+  );
+  assert.deepEqual(calls, [
+    { unit_id: 'prefix-unit', unit_seq: 0 },
+    { unit_id: 'tail-unit', unit_seq: 1 },
+  ]);
+});
+
+test('authoritative synthesis keeps two same-response units active through reverse completion', async () => {
+  const pending = new Map();
+  const calls = [];
+  const transport = {
+    async request(method, params) {
+      calls.push({ method, params });
+      if (method === SPEECH_CANCEL_METHOD) return { ok: true };
+      return new Promise(resolve => pending.set(params.unit_id, () => resolve(synthesisEnvelope(params))));
+    },
+  };
+  const client = new GatewayBatchSpeechClient({ enabled: true, transport, scope, createId: ids() });
+  const response = { interaction_id: 'interaction-c3', response_id: 'response-c3', response_generation: 3 };
+  const synthesize = unitId => client.synthesizeAuthoritative({
+    response,
+    unitId,
+    renderPlan: { display_text: unitId, spoken_text: unitId, transforms: [] },
+    authoritativeAgentText: true,
+    locale: 'en-US',
+    requiredSampleRateHz: 16000,
+    correlationId: 'correlation-c3',
+  });
+
+  const first = synthesize('tail-1');
+  const second = synthesize('tail-2');
+  await new Promise(resolve => setImmediate(resolve));
+  pending.get('tail-2')();
+  assert.equal((await second).unit_id, 'tail-2');
+  pending.get('tail-1')();
+  assert.equal((await first).unit_id, 'tail-1');
+  assert.equal(calls.filter(call => call.method === SPEECH_CANCEL_METHOD).length, 0);
 });
 
 test('authoritative synthesis accepts one closed dedicated downlink without exposing inline audio', async () => {

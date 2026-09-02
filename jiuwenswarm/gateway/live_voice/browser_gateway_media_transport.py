@@ -23,6 +23,7 @@ MEDIA_WIRE_CODEC = "pcm_f32le"
 MEDIA_CAPTURE_ENCODING = "pcm_f32"
 MEDIA_FRAME_DURATION_MS = 20
 MEDIA_END_OF_TURN_CAPABILITY = "media.end_of_turn.v1"
+MEDIA_PREFETCH_PROMOTION_CAPABILITY = "live-voice.media.prefetch-promotion.v1"
 
 _WIRE_MAGIC = b"LVM1"
 _WIRE_VERSION = 1
@@ -68,6 +69,12 @@ class MediaPlaybackStopOutcome(str, Enum):
     ADAPTER_CLOSED = "adapter_closed"
 
 
+class MediaPrefetchTransitionState(str, Enum):
+    PREFETCH_PARKED = "prefetch_parked"
+    PROMOTED = "promoted"
+    PROMOTED_UNPARKED = "promoted_unparked"
+
+
 class MediaDetachReason(str, Enum):
     ACK_GAP = "MEDIA_ACK_GAP"
     ACK_OUT_OF_ORDER = "MEDIA_ACK_OUT_OF_ORDER"
@@ -90,6 +97,9 @@ class MediaDetachReason(str, Enum):
     SEQUENCE_VIOLATION = "MEDIA_SEQUENCE_VIOLATION"
     STALE_GENERATION = "MEDIA_STALE_GENERATION"
     STREAMING_TTS_TEXT_OR_RETRY = "MEDIA_STREAMING_TTS_TEXT_OR_RETRY"
+    STREAMING_SPEECH_PROMOTION_TIMEOUT = (
+        "MEDIA_STREAMING_SPEECH_PROMOTION_TIMEOUT"
+    )
     TRANSPORT_CLOSED = "MEDIA_TRANSPORT_CLOSED"
     TRANSPORT_PROTOCOL_ERROR = "MEDIA_TRANSPORT_PROTOCOL_ERROR"
     TRANSPORT_SEND_FAILED = "MEDIA_TRANSPORT_SEND_FAILED"
@@ -435,6 +445,89 @@ class MediaPlaybackStopReceipt:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class MediaPrefetchTransition:
+    lease_id: str
+    generation: int
+    session_id: str
+    correlation_id: str
+    interaction_id: str
+    response_id: str
+    response_generation: int
+    unit_id: str
+    unit_seq: int
+    transition_seq: int
+    state: MediaPrefetchTransitionState
+    retained_through_seq: int
+    capability_version: str = MEDIA_PREFETCH_PROMOTION_CAPABILITY
+    business_cancel_count_delta: int = 0
+    type: str = field(default="media.prefetch_transition", init=False)
+
+    def __post_init__(self) -> None:
+        _validate_prefetch_transition_fields(self)
+
+
+@dataclass(frozen=True, slots=True)
+class MediaPrefetchTransitionAck:
+    lease_id: str
+    generation: int
+    session_id: str
+    correlation_id: str
+    interaction_id: str
+    response_id: str
+    response_generation: int
+    unit_id: str
+    unit_seq: int
+    transition_seq: int
+    state: MediaPrefetchTransitionState
+    retained_through_seq: int
+    capability_version: str = MEDIA_PREFETCH_PROMOTION_CAPABILITY
+    business_cancel_count_delta: int = 0
+    type: str = field(default="media.prefetch_transition_ack", init=False)
+
+    def __post_init__(self) -> None:
+        _validate_prefetch_transition_fields(self)
+
+
+def _validate_prefetch_transition_fields(
+    control: MediaPrefetchTransition | MediaPrefetchTransitionAck,
+) -> None:
+    if control.capability_version != MEDIA_PREFETCH_PROMOTION_CAPABILITY:
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONTROL", "prefetch capability is not exact"
+        )
+    for name in (
+        "lease_id",
+        "session_id",
+        "correlation_id",
+        "interaction_id",
+        "response_id",
+        "unit_id",
+    ):
+        _require_id(name, getattr(control, name))
+    for name in (
+        "generation",
+        "response_generation",
+        "unit_seq",
+        "transition_seq",
+        "retained_through_seq",
+    ):
+        _require_safe_uint(name, getattr(control, name))
+    if not isinstance(control.state, MediaPrefetchTransitionState):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONTROL", "prefetch transition state is not closed"
+        )
+    expected = 1 if control.state is MediaPrefetchTransitionState.PROMOTED else 0
+    if control.transition_seq != expected:
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONTROL", "prefetch transition sequence is not exact"
+        )
+    _require_zero_business_cancel(
+        control.business_cancel_count_delta,
+        reason_id="MEDIA_CANCEL_SCOPE_VIOLATION",
+    )
+
+
 MediaControl: TypeAlias = (
     MediaAttach
     | MediaAck
@@ -442,6 +535,8 @@ MediaControl: TypeAlias = (
     | MediaSpeechStart
     | MediaEndOfTurn
     | MediaPlaybackStopReceipt
+    | MediaPrefetchTransition
+    | MediaPrefetchTransitionAck
 )
 
 
@@ -660,7 +755,15 @@ def serialize_media_control(control: MediaControl) -> str:
             control.business_cancel_count_delta,
             reason_id="MEDIA_CANCEL_SCOPE_VIOLATION",
         )
-    elif isinstance(control, (MediaSpeechStart, MediaEndOfTurn)):
+    elif isinstance(
+        control,
+        (
+            MediaSpeechStart,
+            MediaEndOfTurn,
+            MediaPrefetchTransition,
+            MediaPrefetchTransitionAck,
+        ),
+    ):
         # Frozen typed controls were validated at construction.
         pass
     elif not isinstance(control, MediaAttach):
@@ -970,6 +1073,70 @@ def deserialize_media_control(text: str) -> MediaControl:
             outcome=outcome,
             confirmed_through_seq=confirmed,  # type: ignore[arg-type]
         )
+    if control_type in {
+        "media.prefetch_transition",
+        "media.prefetch_transition_ack",
+    }:
+        _require_exact_keys(
+            value,
+            {
+                "type",
+                "contract_version",
+                "capability_version",
+                "lease_id",
+                "generation",
+                "session_id",
+                "correlation_id",
+                "interaction_id",
+                "response_id",
+                "response_generation",
+                "unit_id",
+                "unit_seq",
+                "transition_seq",
+                "state",
+                "retained_through_seq",
+                "business_cancel_count_delta",
+            },
+            "prefetch_transition",
+        )
+        try:
+            state = MediaPrefetchTransitionState(value["state"])
+        except (TypeError, ValueError) as error:
+            raise MediaTransportViolation(
+                "MEDIA_MALFORMED_CONTROL", "prefetch transition state is not closed"
+            ) from error
+        cls = (
+            MediaPrefetchTransition
+            if control_type == "media.prefetch_transition"
+            else MediaPrefetchTransitionAck
+        )
+        try:
+            return cls(
+                capability_version=value["capability_version"],  # type: ignore[arg-type]
+                lease_id=_check_control_id(
+                    "lease_id", value["lease_id"], max_chars=_MAX_LEASE_ID_BYTES
+                ),
+                generation=value["generation"],  # type: ignore[arg-type]
+                session_id=_check_control_id("session_id", value["session_id"]),
+                correlation_id=_check_control_id(
+                    "correlation_id", value["correlation_id"]
+                ),
+                interaction_id=_check_control_id(
+                    "interaction_id", value["interaction_id"]
+                ),
+                response_id=_check_control_id("response_id", value["response_id"]),
+                response_generation=value["response_generation"],  # type: ignore[arg-type]
+                unit_id=_check_control_id("unit_id", value["unit_id"]),
+                unit_seq=value["unit_seq"],  # type: ignore[arg-type]
+                transition_seq=value["transition_seq"],  # type: ignore[arg-type]
+                state=state,
+                retained_through_seq=value["retained_through_seq"],  # type: ignore[arg-type]
+                business_cancel_count_delta=value["business_cancel_count_delta"],  # type: ignore[arg-type]
+            )
+        except MediaTransportViolation as error:
+            raise MediaTransportViolation(
+                "MEDIA_MALFORMED_CONTROL", str(error)
+            ) from error
     raise MediaTransportViolation("MEDIA_MALFORMED_CONTROL", "unknown control type")
 
 

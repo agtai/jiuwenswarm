@@ -12,7 +12,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Protocol
+from typing import Literal, Protocol
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CommandEnvelope,
@@ -36,6 +36,10 @@ from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
     AgentBridgeRuntimeViolation,
     AgentEventDelivery,
     WorkProgressDelivery,
+)
+from jiuwenswarm.server.live_voice.authoritative_final_chunking import (
+    AuthoritativeFinalChunkingViolation,
+    chunk_authoritative_final_tail,
 )
 from jiuwenswarm.server.live_voice.conversation_runtime import (
     ConversationRuntimeViolation,
@@ -71,16 +75,28 @@ from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     HistorySurfacePolicy,
     PresentationAck,
+    PresentationLedgerViolation,
+    PresentationProjectionRole,
     PresentationState,
     PresentationSurface,
     PresentationUnit,
     TaskPresentationRuntimeReceipt,
+)
+from jiuwenswarm.server.live_voice.stable_sentence_policy import (
+    FinalReconciliationDisposition,
+    StableSentenceStreamState,
+    StableSentenceViolation,
+    candidate_content,
+    commit_candidate,
+    observe_agent_event,
+    reconcile_final,
 )
 from jiuwenswarm.server.live_voice.task_progress_return import (
     TaskProgressNotificationIntent,
     TaskProgressOriginKind,
 )
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+    FORMAL_APPEND_ONLY_DELTA_CAPABILITY,
     FormalContextEntry,
     FormalContextSnapshot,
 )
@@ -135,6 +151,10 @@ class AgentConversationNotification:
     source_event: EventEnvelope | None = None
     progress_event: EventEnvelope | None = None
     presentation_unit: PresentationUnit | None = None
+    presentation_text: str | None = None
+    presentation_delivery: Literal[
+        "display_and_speak", "display_only", "speak_only"
+    ] | None = None
     error_reason: str | None = None
     publish_seq: int | None = None
 
@@ -175,6 +195,7 @@ class AgentConversationEffectAckResult:
 class _QueuedNotification:
     publish_seq: int
     notification: AgentConversationNotification
+    critical_key: tuple[str, str] | None
 
 
 class _NotificationBufferClosed(RuntimeError):
@@ -234,6 +255,7 @@ class _BoundedNotificationBuffer:
         queued = _QueuedNotification(
             publish_seq=publish_seq,
             notification=replace(notification, publish_seq=publish_seq),
+            critical_key=critical_key,
         )
         if critical_key is not None:
             self._critical_keys.add(critical_key)
@@ -305,12 +327,20 @@ class _BoundedNotificationBuffer:
     def discard_pending_presentations(self) -> int:
         """Remove output notices invalidated by retained CR shutdown."""
 
+        removed = tuple(
+            queued
+            for queued in self._critical
+            if queued.notification.presentation_unit is not None
+        )
         retained = deque(
             queued
             for queued in self._critical
             if queued.notification.presentation_unit is None
         )
-        discarded = len(self._critical) - len(retained)
+        discarded = len(removed)
+        for queued in removed:
+            if queued.critical_key is not None:
+                self._critical_keys.discard(queued.critical_key)
         self._critical = retained
         if not self._observer and not self._critical:
             self._ready.clear()
@@ -322,13 +352,22 @@ class _BoundedNotificationBuffer:
         discarded = 0
         for name in ("_critical", "_observer"):
             source = getattr(self, name)
+            removed = tuple(
+                queued
+                for queued in source
+                if queued.notification.response_ref == ref
+                and queued.notification.presentation_unit is not None
+            )
             retained = deque(
                 queued
                 for queued in source
                 if queued.notification.response_ref != ref
                 or queued.notification.presentation_unit is None
             )
-            discarded += len(source) - len(retained)
+            discarded += len(removed)
+            for queued in removed:
+                if queued.critical_key is not None:
+                    self._critical_keys.discard(queued.critical_key)
             setattr(self, name, retained)
         if not self._observer and not self._critical:
             self._ready.clear()
@@ -399,6 +438,8 @@ class _BoundedNotificationBuffer:
             return None
         if not self._observer and not self._critical:
             self._ready.clear()
+        if queued.critical_key is not None:
+            self._critical_keys.discard(queued.critical_key)
         return queued
 
 
@@ -544,12 +585,17 @@ class _ResponseOutputState:
     channel_id: str
     handle: HarnessRoundHandle | None
     unit_contents: dict[str, bytes]
+    history_policy: HistorySurfacePolicy
     source_provenance: str = "server.agent"
     notification_published: bool = True
     total_utf8: int = 0
     usable_finals: int = 0
     terminal_outcome: TerminalOutcome | None = None
     terminal_event: EventEnvelope | None = None
+    stable_state: StableSentenceStreamState | None = None
+    audio_units_emitted: int = 0
+    audio_unit_ids: tuple[str, ...] = ()
+    final_text_unit_id: str | None = None
 
 
 class AgentConversationRuntime:
@@ -1458,6 +1504,9 @@ class AgentConversationRuntime:
                     channel_id=channel_id,
                     handle=None,
                     unit_contents={unit.unit_id: content},
+                    history_policy=HistorySurfacePolicy(
+                        _presentation_surface.value
+                    ),
                     source_provenance=_source_provenance,
                     notification_published=_publish_notification,
                     total_utf8=len(content),
@@ -1496,8 +1545,10 @@ class AgentConversationRuntime:
                             response_ref=response_ref,
                             agent_event=event,
                             presentation_unit=unit,
+                            presentation_text=text,
+                            presentation_delivery="display_and_speak",
                         ),
-                        critical_key=("presentation", request_id),
+                        critical_key=("presentation", unit.unit_id),
                     )
                 await self._cr.transition_response(
                     response_ref,
@@ -3021,6 +3072,7 @@ class AgentConversationRuntime:
                 channel_id=channel_id,
                 handle=round_handle,
                 unit_contents={},
+                history_policy=HistorySurfacePolicy.TEXT,
             )
             history_task = asyncio.create_task(
                 self._persist_user_history(reservation.binding.commit, channel_id),
@@ -3139,10 +3191,98 @@ class AgentConversationRuntime:
         state = self._outputs.get(request.response_ref)
         if state is None:
             return
-        presentation: PresentationUnit | None = None
+        presentations: list[
+            tuple[
+                PresentationUnit,
+                str,
+                Literal["display_and_speak", "display_only", "speak_only"],
+            ]
+        ] = []
         error_reason: str | None = None
         consumable_event: AgentEvent | None = event
-        if event.event_type == "chat.final":
+        candidate = None
+
+        text_event = event.event_type in {"chat.delta", "chat.final"}
+        if state.stable_state is None and text_event and (
+            event.capability == FORMAL_APPEND_ONLY_DELTA_CAPABILITY
+        ):
+            if state.history_policy is not HistorySurfacePolicy.TEXT:
+                error_reason = "PRE_FINAL_AUDIO_REQUIRES_TEXT_HISTORY"
+            else:
+                state.stable_state = StableSentenceStreamState.create(
+                    request.response_ref
+                )
+        elif state.stable_state is not None and text_event and (
+            event.capability != FORMAL_APPEND_ONLY_DELTA_CAPABILITY
+        ):
+            error_reason = "AGENT_TEXT_CAPABILITY_CHANGED"
+
+        if state.stable_state is not None and error_reason is None:
+            try:
+                observed = observe_agent_event(state.stable_state, event)
+            except StableSentenceViolation as error:
+                error_reason = error.reason
+            else:
+                state.stable_state = observed.state
+                candidate = observed.candidate
+
+        async def register_unit(unit: PresentationUnit, content: bytes) -> None:
+            state.unit_contents[unit.unit_id] = content
+            try:
+                await self._cr.produce_unit(unit)
+                await self._cr.enqueue_unit(unit.ref, unit.surface, unit.unit_id)
+            except (
+                ConversationRuntimeLoopViolation,
+                ConversationRuntimeViolation,
+                PresentationLedgerViolation,
+            ):
+                state.unit_contents.pop(unit.unit_id, None)
+                raise
+
+        if (
+            error_reason is None
+            and event.event_type == "chat.delta"
+            and candidate is not None
+            and state.audio_units_emitted == 0
+            and state.stable_state is not None
+        ):
+            try:
+                content = candidate_content(state.stable_state, candidate)
+                committed = commit_candidate(
+                    state.stable_state, candidate.candidate_id
+                )
+                unit = PresentationUnit(
+                    ref=request.response_ref,
+                    surface=PresentationSurface.AUDIO,
+                    unit_id=(
+                        "agent-prefix:"
+                        f"{request.request_id.encode('utf-8').hex()}:0"
+                    ),
+                    seq=0,
+                    source_start_utf8=candidate.source_start_utf8,
+                    source_end_utf8=candidate.source_end_utf8,
+                    content_ref=f"sha256:{hashlib.sha256(content).hexdigest()}",
+                    projection_role=PresentationProjectionRole.AUDIO_SEGMENT,
+                )
+                await register_unit(unit, content)
+                presentation_text = content.decode("utf-8")
+            except (
+                StableSentenceViolation,
+                ConversationRuntimeLoopViolation,
+                ConversationRuntimeViolation,
+                PresentationLedgerViolation,
+                UnicodeDecodeError,
+            ) as error:
+                error_reason = getattr(
+                    error, "reason", "PRE_FINAL_PRESENTATION_FAILED"
+                )
+            else:
+                state.stable_state = committed.state
+                state.audio_units_emitted = 1
+                state.audio_unit_ids = (unit.unit_id,)
+                presentations.append((unit, presentation_text, "speak_only"))
+
+        if error_reason is None and event.event_type == "chat.final":
             text = event.text
             if not isinstance(text, str) or not text.strip():
                 error_reason = "EMPTY_AGENT_FINAL"
@@ -3150,53 +3290,161 @@ class AgentConversationRuntime:
                 error_reason = "DUPLICATE_AGENT_FINAL"
             else:
                 content = text.encode("utf-8")
-                digest = hashlib.sha256(content).hexdigest()
-                seq = state.usable_finals
-                presentation = PresentationUnit(
-                    ref=request.response_ref,
-                    surface=PresentationSurface.TEXT,
-                    unit_id=f"agent-final:{request.request_id.encode('utf-8').hex()}:{seq}",
-                    seq=seq,
-                    source_start_utf8=state.total_utf8,
-                    source_end_utf8=state.total_utf8 + len(content),
-                    content_ref=f"sha256:{digest}",
-                )
-                state.unit_contents[presentation.unit_id] = content
                 try:
-                    await self._cr.produce_unit(presentation)
-                    await self._cr.enqueue_unit(
-                        presentation.ref,
-                        presentation.surface,
-                        presentation.unit_id,
+                    reconciliation = (
+                        None
+                        if state.stable_state is None
+                        else reconcile_final(state.stable_state, text)
                     )
+                    if (
+                        reconciliation is not None
+                        and reconciliation.disposition
+                        is FinalReconciliationDisposition.REWRITE_AFTER_COMMIT
+                    ):
+                        raise StableSentenceViolation(
+                            "PRE_FINAL_PREFIX_CONFLICT",
+                            "authoritative final rewrote already spoken text",
+                        )
+                    committed_end = (
+                        0
+                        if state.stable_state is None
+                        else state.stable_state.committed_utf8_end
+                    )
+                    final_role = (
+                        PresentationProjectionRole.ALIGNED
+                        if committed_end == 0
+                        else PresentationProjectionRole.AUTHORITATIVE_TEXT_ROOT
+                    )
+                    delivery_mode: Literal[
+                        "display_and_speak", "display_only"
+                    ] = (
+                        "display_and_speak"
+                        if committed_end == 0
+                        else "display_only"
+                    )
+                    final_unit = PresentationUnit(
+                        ref=request.response_ref,
+                        surface=PresentationSurface.TEXT,
+                        unit_id=(
+                            "agent-final:"
+                            f"{request.request_id.encode('utf-8').hex()}:0"
+                        ),
+                        seq=0,
+                        source_start_utf8=0,
+                        source_end_utf8=len(content),
+                        content_ref=f"sha256:{hashlib.sha256(content).hexdigest()}",
+                        projection_role=final_role,
+                    )
+                    await register_unit(final_unit, content)
+                    if committed_end > 0:
+                        tail_chunks = chunk_authoritative_final_tail(
+                            text,
+                            spoken_prefix_end_utf8=committed_end,
+                        )
+                        for chunk in tail_chunks:
+                            tail_unit = PresentationUnit(
+                                ref=request.response_ref,
+                                surface=PresentationSurface.AUDIO,
+                                unit_id=(
+                                    "agent-tail:"
+                                    f"{request.request_id.encode('utf-8').hex()}"
+                                    f":{chunk.seq}"
+                                ),
+                                seq=chunk.seq,
+                                source_start_utf8=chunk.source_start_utf8,
+                                source_end_utf8=chunk.source_end_utf8,
+                                content_ref=(
+                                    "sha256:"
+                                    f"{hashlib.sha256(chunk.content).hexdigest()}"
+                                ),
+                                projection_role=(
+                                    PresentationProjectionRole.AUDIO_SEGMENT
+                                ),
+                            )
+                            await register_unit(tail_unit, chunk.content)
+                            presentations.append(
+                                (
+                                    tail_unit,
+                                    chunk.content.decode("utf-8"),
+                                    "speak_only",
+                                )
+                            )
+                            state.audio_unit_ids = (
+                                *state.audio_unit_ids,
+                                tail_unit.unit_id,
+                            )
+                        state.audio_units_emitted = len(state.audio_unit_ids)
+                        spoken = b"".join(
+                            state.unit_contents[unit_id]
+                            for unit_id in state.audio_unit_ids
+                        )
+                        if spoken != content:
+                            raise StableSentenceViolation(
+                                "PRE_FINAL_SPOKEN_COVERAGE_MISMATCH",
+                                "spoken AUDIO segments do not equal chat.final",
+                            )
+                    # AUDIO units continue the response.  Publish the complete
+                    # TEXT root last so it is the exact browser/history barrier
+                    # that releases the successor capture.
+                    presentations.append((final_unit, text, delivery_mode))
+                    if reconciliation is not None:
+                        state.stable_state = reconciliation.state
                 except (
+                    AuthoritativeFinalChunkingViolation,
+                    StableSentenceViolation,
                     ConversationRuntimeLoopViolation,
                     ConversationRuntimeViolation,
+                    PresentationLedgerViolation,
+                    UnicodeDecodeError,
                 ) as error:
-                    state.unit_contents.pop(presentation.unit_id, None)
-                    presentation = None
-                    error_reason = error.reason
+                    presentations.clear()
+                    error_reason = getattr(
+                        error, "reason", "AGENT_FINAL_PRESENTATION_FAILED"
+                    )
+                    try:
+                        await self._cr.invalidate_presentation(
+                            request.response_ref, reason=error_reason
+                        )
+                    except (
+                        ConversationRuntimeLoopViolation,
+                        ConversationRuntimeViolation,
+                    ):
+                        pass
+                    self._notifications.discard_presentation(request.response_ref)
                 else:
                     state.usable_finals += 1
-                    state.total_utf8 += len(content)
-            if presentation is None:
+                    state.total_utf8 = len(content)
+                    state.final_text_unit_id = final_unit.unit_id
+            if not presentations:
                 consumable_event = None
-        self._publish(
-            AgentConversationNotification(
-                kind="agent.output",
-                request_id=request.request_id,
-                round_id=request.round_id,
-                response_ref=request.response_ref,
-                agent_event=consumable_event,
-                presentation_unit=presentation,
-                error_reason=error_reason,
-            ),
-            critical_key=(
-                ("presentation", request.request_id)
-                if presentation is not None
-                else None
-            ),
-        )
+
+        if not presentations:
+            self._publish(
+                AgentConversationNotification(
+                    kind="agent.output",
+                    request_id=request.request_id,
+                    round_id=request.round_id,
+                    response_ref=request.response_ref,
+                    agent_event=consumable_event,
+                    error_reason=error_reason,
+                )
+            )
+            return
+
+        for presentation, presentation_text, delivery_mode in presentations:
+            self._publish(
+                AgentConversationNotification(
+                    kind="agent.output",
+                    request_id=request.request_id,
+                    round_id=request.round_id,
+                    response_ref=request.response_ref,
+                    agent_event=event,
+                    presentation_unit=presentation,
+                    presentation_text=presentation_text,
+                    presentation_delivery=delivery_mode,
+                ),
+                critical_key=("presentation", presentation.unit_id),
+            )
 
     async def _consume_progress(self, delivery: WorkProgressDelivery) -> None:
         request = delivery.request

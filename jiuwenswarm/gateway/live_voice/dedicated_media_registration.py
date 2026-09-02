@@ -41,6 +41,7 @@ from jiuwenswarm.common.security.ws_origin import (
 )
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MEDIA_END_OF_TURN_CAPABILITY,
+    MEDIA_PREFETCH_PROMOTION_CAPABILITY,
     MediaAck,
     MediaAudioFrame,
     MediaAuthorityBinding,
@@ -51,6 +52,9 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaEndOfTurn,
     MediaSpeechStart,
     MediaPlayoutBinding,
+    MediaPrefetchTransition,
+    MediaPrefetchTransitionAck,
+    MediaPrefetchTransitionState,
     MediaTransportViolation,
     MediaAttach,
     deserialize_media_control,
@@ -119,6 +123,9 @@ MEDIA_ACTIVATE_METHOD = "live_voice.media.activate"
 MEDIA_CLOSE_METHOD = "live_voice.media.close"
 MEDIA_PLAYOUT_RECEIPT_METHOD = "live_voice.media.playout_receipt"
 STREAMING_RECOGNITION_RESULT_METHOD = "live_voice.speech.recognize_streaming_result"
+MEDIA_PREFETCH_CAPABILITY_METHOD = (
+    "live_voice.composition.media.prefetch.capability.negotiate"
+)
 MEDIA_ROUTE_PATH = "/ws/live-voice/media"
 MEDIA_SUBPROTOCOL = "live-voice.media.v1"
 MEDIA_FEATURE_ENV = "JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED"
@@ -152,6 +159,16 @@ _STREAMING_RESULT_TIMEOUT_SECONDS = 36.0
 _STREAMING_OBSERVABILITY_QUEUE_CAPACITY = 64
 _STREAMING_OBSERVABILITY_CLOSE_BUDGET_SECONDS = 0.05
 _LOCALES = frozenset({"en", "en-US", "zh", "zh-CN"})
+
+
+def _ticket_diagnostic_fingerprint(ticket: object) -> str:
+    """Return a bounded correlation marker without exposing capability bytes."""
+
+    if not isinstance(ticket, str):
+        return "invalid"
+    return hashlib.sha256(ticket.encode("utf-8")).hexdigest()[:12]
+
+
 _PRODUCT_CONTRACT_VERSION = "live-voice.product-composition.gate0.v1"
 _P2_NOTIFICATION_BATCH_MAX = 16
 _P2_NOTIFICATION_BATCH_KEYS = frozenset(
@@ -165,7 +182,7 @@ _P2_NOTIFICATION_BATCH_KEYS = frozenset(
         "activation_generation",
     }
 )
-_P2_NOTIFICATION_ITEM_KEYS = frozenset(
+_LEGACY_P2_NOTIFICATION_ITEM_KEYS = frozenset(
     {
         "status",
         "kind",
@@ -183,6 +200,13 @@ _P2_NOTIFICATION_ITEM_KEYS = frozenset(
         "interaction_id",
         "activation_id",
         "activation_generation",
+    }
+)
+_P2_NOTIFICATION_ITEM_KEYS = frozenset(
+    {
+        *_LEGACY_P2_NOTIFICATION_ITEM_KEYS,
+        "presentation_text",
+        "presentation_delivery",
     }
 )
 _STREAMING_DIAGNOSTIC_QUEUE_CAPACITY = 16
@@ -264,6 +288,32 @@ class _MediaFirstFrameDiagnosticWorker:
 
 
 _MEDIA_FIRST_FRAME_DIAGNOSTIC_WORKER = _MediaFirstFrameDiagnosticWorker()
+
+
+def _log_synthesis_unit_identity(
+    *,
+    stage: str,
+    correlation_id: str,
+    response: ResponseRef,
+    unit_id: str,
+    unit_seq: int,
+    unit_seq_source: str,
+) -> None:
+    """Log only the structural unit identity needed to diagnose C019 flow."""
+
+    _LOGGER.info(
+        "live_voice_synthesis_unit_identity stage=%s correlation_id=%s "
+        "response_id=%s response_generation=%s unit_id=%s unit_seq=%s "
+        "unit_seq_source=%s",
+        stage,
+        correlation_id,
+        response.response_id,
+        response.response_generation,
+        unit_id,
+        unit_seq,
+        unit_seq_source,
+    )
+
 
 StreamingXObsEvent = Literal["failure.observed", "degradation.activated"]
 StreamingXObsMetric = Literal[
@@ -592,6 +642,7 @@ def _synthesis_authorization_binding(
                     "response_generation": request.response.response_generation,
                 },
                 "unit_id": request.unit_id,
+                "unit_seq": 0 if request.unit_seq is None else request.unit_seq,
                 "display_text": request.display_text,
                 "spoken_text": request.spoken_text,
                 "transforms": [
@@ -707,11 +758,43 @@ class _MediaAuthority:
     )
     downlink_response: ResponseRef | None = None
     downlink_unit_id: str | None = None
+    downlink_unit_seq: int | None = None
     downlink_content_sha256: str | None = field(default=None, repr=False)
     downlink_overlap_record_id: str | None = None
     downlink_overlap_observed: bool = False
+    prefetch_promotion_capability: str | None = None
+    successor_reservation_key: tuple[object, ...] | None = field(
+        default=None, repr=False
+    )
+    prefetch_terminal_event: asyncio.Event | None = field(default=None, repr=False)
     downlink_results: dict[tuple[ResponseRef, str], dict[str, object]] = field(
         default_factory=dict, repr=False
+    )
+
+
+def _log_uplink_consumer_failure(
+    record: _MediaAuthority,
+    frame: MediaAudioFrame,
+    *,
+    phase: str,
+    error: Exception,
+) -> None:
+    """Record a content-free failure at the server-side uplink consumer."""
+
+    _LOGGER.warning(
+        "live_voice_uplink_consumer_failed phase=%s "
+        "session_id=%s correlation_id=%s interaction_id=%s "
+        "activation_generation=%s frame_seq=%s frame_sample_cursor=%s "
+        "error_type=%s reason=%s",
+        phase,
+        record.binding.session_id,
+        record.binding.correlation_id,
+        record.binding.interaction_id,
+        record.product_activation_generation,
+        frame.seq,
+        frame.sample_cursor,
+        type(error).__name__,
+        getattr(error, "reason_id", "unclassified"),
     )
 
 
@@ -744,6 +827,7 @@ class _SynthesisAuthorityTransfer:
 
     content_sha256: str
     expires_at: float
+    unit_seq: int = 0
     claimed_subject_id: str | None = None
     claimed_operation_id: str | None = None
 
@@ -760,6 +844,13 @@ class _ProductActivationAuthority:
     synthesis_content_sha256: OrderedDict[
         tuple[ResponseRef, str, str, int], _SynthesisAuthorityTransfer
     ] = field(default_factory=OrderedDict)
+
+
+@dataclass(slots=True)
+class _SuccessorReservation:
+    key: tuple[object, ...]
+    identity: tuple[object, ...]
+    transferred_record_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -962,6 +1053,7 @@ class DedicatedMediaProductRegistry:
         self._ticket_ttl = ticket_ttl_seconds
         self._authority_ttl = authority_ttl_seconds
         self._capacity = max(1, min(capacity, _MAX_RECORDS))
+        self._diagnostic_registry_id = secrets.token_hex(4)
         self.end_of_turn_enabled = end_of_turn_enabled is True
         self._records: OrderedDict[str, _MediaAuthority] = OrderedDict()
         # One-use credentials exist only in this pre-authentication index.  All
@@ -971,6 +1063,11 @@ class DedicatedMediaProductRegistry:
         self._product_activations: OrderedDict[
             tuple[str, str, str], _ProductActivationAuthority
         ] = OrderedDict()
+        self._prefetch_capability_ledger: set[tuple[str, str, str, int]] = set()
+        self._prefetch_next_unit_seq: dict[tuple[str, str, str, int], int] = {}
+        self._successor_reservations: dict[
+            tuple[object, ...], _SuccessorReservation
+        ] = {}
         self._revoked: OrderedDict[str, tuple[str, str, str, str, int, str]] = (
             OrderedDict()
         )
@@ -1130,6 +1227,76 @@ class DedicatedMediaProductRegistry:
                 self._observe_streaming_outcome
             )
 
+    async def negotiate_prefetch_promotion(
+        self,
+        *,
+        params: Mapping[str, object],
+        routed_session_id: str,
+        connection_id: str,
+        user_id: str | None,
+    ) -> dict[str, object]:
+        """Bind one optional transport capability to an authenticated activation."""
+
+        del user_id
+
+        if set(params) != {
+            "session_id",
+            "activation_id",
+            "activation_generation",
+            "offered",
+        }:
+            raise MediaTransportViolation(
+                "MEDIA_INVALID_PREFETCH_NEGOTIATION",
+                "prefetch capability negotiation fields are not closed",
+            )
+        session_id = _required_id(params.get("session_id"), "session_id")
+        activation_id = _required_id(params.get("activation_id"), "activation_id")
+        activation_generation = _safe_uint(
+            params.get("activation_generation"), "activation_generation"
+        )
+        offered = params.get("offered")
+        if session_id != routed_session_id:
+            raise MediaTransportViolation(
+                "MEDIA_SESSION_MISMATCH",
+                "prefetch negotiation is not bound to the routed Session",
+            )
+        if not isinstance(offered, list) or any(
+            not isinstance(item, str) for item in offered
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_INVALID_PREFETCH_NEGOTIATION",
+                "prefetch capability offer must be a string list",
+            )
+        ledger_key = (
+            session_id,
+            connection_id,
+            activation_id,
+            activation_generation,
+        )
+        with self._lock:
+            self._prune(self._monotonic())
+            activation_valid = any(
+                authority.session_id == session_id
+                and authority.connection_id == connection_id
+                and authority.activation_id == activation_id
+                and authority.activation_generation == activation_generation
+                and self._monotonic() <= authority.expires_at
+                for authority in self._product_activations.values()
+            )
+        selected: str | None = None
+        if (
+            self.enabled
+            and activation_valid
+            and MEDIA_PREFETCH_PROMOTION_CAPABILITY in offered
+            and self._streaming_synthesis_owner is not None
+            and await self._streaming_synthesis_owner.parked_pause_available()
+        ):
+            with self._lock:
+                self._prefetch_capability_ledger.add(ledger_key)
+                self._prefetch_next_unit_seq.setdefault(ledger_key, 1)
+            selected = MEDIA_PREFETCH_PROMOTION_CAPABILITY
+        return {"selected": selected}
+
     @property
     def streaming_diagnostics_cleanup_complete(self) -> bool | None:
         return self._streaming_diagnostics_cleanup_complete
@@ -1263,6 +1430,7 @@ class DedicatedMediaProductRegistry:
             owner.submit(context, outcome)
 
     def _release_stream_source(self, record: _MediaAuthority) -> None:
+        self._release_successor_reservation(record)
         source = record.downlink_stream_source
         record.downlink_stream_source = None
         if source is None:
@@ -1275,6 +1443,24 @@ class DedicatedMediaProductRegistry:
             return
         self._stream_cleanup_tasks.add(task)
         task.add_done_callback(self._consume_stream_cleanup)
+
+    def _release_successor_reservation(
+        self, record: _MediaAuthority, *, promoted: bool = False
+    ) -> None:
+        key = record.successor_reservation_key
+        if key is None:
+            return
+        record.successor_reservation_key = None
+        reservation = self._successor_reservations.pop(key, None)
+        if promoted and reservation is not None:
+            ledger_key = reservation.identity[:4]
+            unit_seq = reservation.identity[-1]
+            if (
+                len(ledger_key) == 4
+                and isinstance(unit_seq, int)
+                and self._prefetch_next_unit_seq.get(ledger_key) == unit_seq
+            ):
+                self._prefetch_next_unit_seq[ledger_key] = unit_seq + 1
 
     def _consume_stream_cleanup(self, task: asyncio.Task[None]) -> None:
         self._stream_cleanup_tasks.discard(task)
@@ -1446,6 +1632,12 @@ class DedicatedMediaProductRegistry:
             self._records[record_id] = record
             self._pending_tickets[ticket] = record_id
             self._subjects[(session_id, subject_id)] = record_id
+        _LOGGER.info(
+            "live_voice_media_ticket_issued registry_id=%s direction=uplink "
+            "ticket_fp=%s",
+            self._diagnostic_registry_id,
+            _ticket_diagnostic_fingerprint(ticket),
+        )
         route_descriptor = {"endpoint_path": MEDIA_ROUTE_PATH, "media_ticket": ticket}
         streaming_descriptor = (
             {}
@@ -1525,21 +1717,68 @@ class DedicatedMediaProductRegistry:
                 if hmac.compare_digest(pending_ticket.encode("utf-8"), candidate):
                     matched_ticket = pending_ticket
             if matched_ticket is None:
+                pending_fingerprints = ",".join(
+                    _ticket_diagnostic_fingerprint(item)
+                    for item in tuple(self._pending_tickets)[:4]
+                )
+                _LOGGER.warning(
+                    "live_voice_media_auth_rejected reason=ticket_not_found "
+                    "registry_id=%s candidate_fp=%s pending_ticket_count=%d "
+                    "pending_fps=%s",
+                    self._diagnostic_registry_id,
+                    _ticket_diagnostic_fingerprint(ticket),
+                    len(self._pending_tickets),
+                    pending_fingerprints or "none",
+                )
                 return None
             record_id = self._pending_tickets.get(matched_ticket)
             record = self._records.get(record_id or "")
-            if (
-                record is None
-                or record.ticket_consumed
-                or now > record.ticket_expires_at
-                or request_origin != record.expected_origin
-                or not is_allowed_browser_origin(request_origin)
-                or (claimed_binding is not None and claimed_binding != record.binding)
-            ):
+            rejection_reason = (
+                "record_missing"
+                if record is None
+                else "ticket_consumed"
+                if record.ticket_consumed
+                else "ticket_expired"
+                if now > record.ticket_expires_at
+                else "origin_not_allowed"
+                if not is_allowed_browser_origin(request_origin)
+                else "origin_mismatch"
+                if request_origin != record.expected_origin
+                else "binding_mismatch"
+                if claimed_binding is not None and claimed_binding != record.binding
+                else None
+            )
+            if rejection_reason is not None:
+                _LOGGER.warning(
+                    "live_voice_media_auth_rejected registry_id=%s reason=%s direction=%s "
+                    "ticket_age_ms=%d ticket_fp=%s",
+                    self._diagnostic_registry_id,
+                    rejection_reason,
+                    (
+                        record.binding.direction.value
+                        if record is not None
+                        else "unknown"
+                    ),
+                    (
+                        max(0, int((now - record.issued_at) * 1000))
+                        if record is not None
+                        else -1
+                    ),
+                    _ticket_diagnostic_fingerprint(ticket),
+                )
                 return None
             assert matched_ticket is not None
+            assert record is not None
             self._pending_tickets.pop(matched_ticket, None)
             record.ticket_consumed = True
+            _LOGGER.info(
+                "live_voice_media_auth_accepted registry_id=%s direction=%s ticket_age_ms=%d "
+                "ticket_fp=%s",
+                self._diagnostic_registry_id,
+                record.binding.direction.value,
+                max(0, int((now - record.issued_at) * 1000)),
+                _ticket_diagnostic_fingerprint(ticket),
+            )
             return record
 
     def start_streaming_recognition(self, record: _MediaAuthority) -> None:
@@ -1683,7 +1922,14 @@ class DedicatedMediaProductRegistry:
                     raise RuntimeError("end-of-turn authority became stale")
             _LOGGER.info(
                 "live_voice_end_of_turn_observed detector=server_vad "
-                "timing_basis=provider_time provenance=adapter_derived"
+                "timing_basis=provider_time provenance=adapter_derived "
+                "session_id=%s correlation_id=%s interaction_id=%s "
+                "activation_id=%s activation_generation=%s",
+                record.binding.session_id,
+                record.binding.correlation_id,
+                record.binding.interaction_id,
+                record.product_activation_id,
+                record.product_activation_generation,
             )
             emit_runtime_l0_milestone(
                 component="gateway",
@@ -1853,9 +2099,7 @@ class DedicatedMediaProductRegistry:
             and outcome.final_text is not None
             and record.streaming_started_at is not None
         ):
-            elapsed_ms = (
-                self._monotonic() - record.streaming_started_at
-            ) * 1000.0
+            elapsed_ms = (self._monotonic() - record.streaming_started_at) * 1000.0
             emit_runtime_l0_milestone(
                 component="gateway",
                 milestone=L0Milestone.STT_FINAL_AVAILABLE,
@@ -2382,9 +2626,7 @@ class DedicatedMediaProductRegistry:
 
         observed_monotonic = self._monotonic()
         observed_at = (
-            datetime.now(UTC)
-            .isoformat(timespec="milliseconds")
-            .replace("+00:00", "Z")
+            datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         )
         log_first_ack = False
         with self._lock:
@@ -2398,8 +2640,7 @@ class DedicatedMediaProductRegistry:
                 or acknowledgement.through_seq >= record.accepted_frames
                 or (
                     record.last_uplink_ack_through_seq is not None
-                    and acknowledgement.through_seq
-                    < record.last_uplink_ack_through_seq
+                    and acknowledgement.through_seq < record.last_uplink_ack_through_seq
                 )
             ):
                 return
@@ -2619,7 +2860,9 @@ class DedicatedMediaProductRegistry:
                 for owned_record_id, owned in zip(
                     owned_record_ids, owned_records, strict=True
                 ):
-                    self._drop_pending_for_record_id(owned_record_id)
+                    self._drop_pending_for_record_id(
+                        owned_record_id, reason="explicit_media_revoke"
+                    )
                     owned.route_completed = True
                     owned.recognition_content_sha256 = None
                     owned.synthesis_content_sha256.clear()
@@ -2730,7 +2973,9 @@ class DedicatedMediaProductRegistry:
                 ):
                     self._revoke_media_for_product_activation(existing)
                 elif existing is not None:
-                    authority.synthesis_content_sha256.update(existing.synthesis_content_sha256)
+                    authority.synthesis_content_sha256.update(
+                        existing.synthesis_content_sha256
+                    )
                 self._product_activations[key] = authority
                 self._product_activations.move_to_end(key)
                 while len(self._product_activations) > self._capacity:
@@ -2760,7 +3005,11 @@ class DedicatedMediaProductRegistry:
                 for notification in notifications:
                     if (
                         not isinstance(notification, Mapping)
-                        or set(notification) != _P2_NOTIFICATION_ITEM_KEYS
+                        or set(notification)
+                        not in {
+                            _LEGACY_P2_NOTIFICATION_ITEM_KEYS,
+                            _P2_NOTIFICATION_ITEM_KEYS,
+                        }
                         or notification.get("status") != "notification"
                     ):
                         return
@@ -2803,12 +3052,13 @@ class DedicatedMediaProductRegistry:
                 event = notification.get("agent_event")
                 if (
                     not isinstance(event, Mapping)
-                    or event.get("event_type")
-                    not in {"chat.delta", "chat.reasoning"}
+                    or event.get("event_type") not in {"chat.delta", "chat.reasoning"}
                     or event.get("error_reason") is not None
                     or notification.get("source_event") is not None
                     or notification.get("progress_event") is not None
                     or notification.get("presentation_unit") is not None
+                    or notification.get("presentation_text") is not None
+                    or notification.get("presentation_delivery") is not None
                     or notification.get("error_reason") is not None
                 ):
                     return
@@ -2844,13 +3094,58 @@ class DedicatedMediaProductRegistry:
             surface == "audio"
             and event.get("source_provenance") == "server.task_notification"
         )
-        if (
-            result.get("kind") != "agent.output"
-            or event.get("event_type") != "chat.final"
-            or (surface != "text" and not trusted_task_audio)
-            or not isinstance(event.get("text"), str)
-            or not str(event["text"]).strip()
-        ):
+        legacy_aligned = (
+            "presentation_text" not in result
+            and "presentation_delivery" not in result
+            and "projection_role" not in unit
+        )
+        # C019 units are a newer authoritative presentation shape.  They must
+        # carry their server-issued ordinal; implicit zero is reserved only for
+        # the historical aligned single-unit spelling.
+        if not legacy_aligned and "seq" not in unit:
+            return
+        if legacy_aligned:
+            if (
+                result.get("kind") != "agent.output"
+                or event.get("event_type") != "chat.final"
+                or (surface != "text" and not trusted_task_audio)
+                or not isinstance(event.get("text"), str)
+                or not str(event["text"]).strip()
+            ):
+                return
+            text = str(event["text"])
+        else:
+            text_value = result.get("presentation_text")
+            delivery = result.get("presentation_delivery")
+            role = unit.get("projection_role")
+            surface = unit.get("surface")
+            if delivery == "display_only":
+                return
+            if (
+                result.get("kind") != "agent.output"
+                or not isinstance(text_value, str)
+                or not text_value.strip()
+                or (
+                    role == "audio_segment"
+                    and not (
+                        delivery == "speak_only"
+                        and surface == "audio"
+                        and event.get("event_type") in {"chat.delta", "chat.final"}
+                    )
+                )
+                or (
+                    role == "aligned"
+                    and not (
+                        delivery == "display_and_speak"
+                        and surface in {"text", "audio"}
+                        and event.get("event_type") == "chat.final"
+                    )
+                )
+                or role not in {"audio_segment", "aligned"}
+            ):
+                return
+            text = text_value
+        if not text.strip():
             return
         try:
             session_id = _required_id(result.get("session_id"), "session_id")
@@ -2876,9 +3171,9 @@ class DedicatedMediaProductRegistry:
                 ),
             )
             unit_id = _required_id(unit.get("unit_id"), "unit_id")
+            unit_seq = _safe_uint(unit.get("seq", 0), "presentation_unit.seq")
         except Exception:
             return
-        text = str(event["text"])
         with self._lock:
             now = self._monotonic()
             self._prune(now)
@@ -2926,6 +3221,7 @@ class DedicatedMediaProductRegistry:
                                 "response_generation": ref.response_generation,
                             },
                             "unit_id": unit_id,
+                            "unit_seq": unit_seq,
                             "display_text": text,
                             "spoken_text": text,
                             "transforms": [],
@@ -2948,8 +3244,21 @@ class DedicatedMediaProductRegistry:
                     content_sha256=content_sha256,
                     now=now,
                     expires_at=now + self._authority_ttl,
+                    unit_seq=unit_seq,
                 )
                 if transfer is not None:
+                    _log_synthesis_unit_identity(
+                        stage="p2_presentation_retained",
+                        correlation_id=correlation_id,
+                        response=ref,
+                        unit_id=unit_id,
+                        unit_seq=unit_seq,
+                        unit_seq_source=(
+                            "presentation_unit"
+                            if "seq" in unit
+                            else "legacy_first_unit"
+                        ),
+                    )
                     record.synthesis_content_sha256[(ref, unit_id)] = (
                         transfer.content_sha256
                     )
@@ -2962,7 +3271,7 @@ class DedicatedMediaProductRegistry:
                     # unclaimed transfer rather than inheriting its claim.
                     retained_synthesis_content[transfer_key] = (
                         _SynthesisAuthorityTransfer(
-                            content_sha256, now + self._authority_ttl
+                            content_sha256, now + self._authority_ttl, unit_seq
                         )
                     )
                     record.synthesis_content_sha256[(ref, unit_id)] = content_sha256
@@ -2988,11 +3297,15 @@ class DedicatedMediaProductRegistry:
         content_sha256: str,
         now: float,
         expires_at: float,
+        unit_seq: int,
     ) -> _SynthesisAuthorityTransfer | None:
         DedicatedMediaProductRegistry._prune_synthesis_transfers(transfers, now)
         existing = transfers.get(key)
         if existing is not None:
-            if existing.content_sha256 != content_sha256:
+            if (
+                existing.content_sha256 != content_sha256
+                or existing.unit_seq != unit_seq
+            ):
                 return None
             transfers.move_to_end(key)
             return existing
@@ -3008,7 +3321,7 @@ class DedicatedMediaProductRegistry:
             if evicted_key is None:
                 return None
             transfers.pop(evicted_key)
-        transfer = _SynthesisAuthorityTransfer(content_sha256, expires_at)
+        transfer = _SynthesisAuthorityTransfer(content_sha256, expires_at, unit_seq)
         transfers[key] = transfer
         return transfer
 
@@ -3121,7 +3434,10 @@ class DedicatedMediaProductRegistry:
                         record.binding.frame_format.sample_rate_hz,
                     )
                 )
-                if transfer is None or transfer.content_sha256 != binding.content_sha256:
+                if (
+                    transfer is None
+                    or transfer.content_sha256 != binding.content_sha256
+                ):
                     return None
                 if transfer.claimed_subject_id is None:
                     transfer.claimed_subject_id = record.subject_id
@@ -3167,9 +3483,70 @@ class DedicatedMediaProductRegistry:
         # contract instead of being silently approximated.
         if request.transforms or request.voice is not None:
             return None
+        unit_seq = 0 if request.unit_seq is None else request.unit_seq
+        if request.prefetch_promotion_capability is not None:
+            with self._lock:
+                preflight_record_id = self._subjects.get(
+                    (session_id, context.subject_id)
+                )
+                preflight_parent = self._records.get(preflight_record_id or "")
+                ledger_key = (
+                    (
+                        session_id,
+                        preflight_parent.binding.connection_id,
+                        preflight_parent.product_activation_id,
+                        preflight_parent.product_activation_generation,
+                    )
+                    if preflight_parent is not None
+                    else None
+                )
+                activation = (
+                    None
+                    if preflight_parent is None
+                    else self._product_activations.get(
+                        (
+                            session_id,
+                            preflight_parent.binding.connection_id,
+                            request.response.interaction_id,
+                        )
+                    )
+                )
+                transfer = (
+                    None
+                    if activation is None
+                    else activation.synthesis_content_sha256.get(
+                        (
+                            request.response,
+                            request.unit_id,
+                            request.locale,
+                            request.required_sample_rate_hz,
+                        )
+                    )
+                )
+                if (
+                    ledger_key is None
+                    or ledger_key not in self._prefetch_capability_ledger
+                    or transfer is None
+                    or transfer.unit_seq != unit_seq
+                    or unit_seq <= 0
+                    or self._prefetch_next_unit_seq.get(ledger_key) != unit_seq
+                ):
+                    return _streaming_error_envelope(
+                        request, "MEDIA_PREFETCH_SUCCESSOR_UNAVAILABLE"
+                    )
         binding = _synthesis_authorization_binding(request)
         if self.authorize(binding) != binding:
             return None
+        _log_synthesis_unit_identity(
+            stage="gateway_streaming_request",
+            correlation_id=request.correlation_id,
+            response=request.response,
+            unit_id=request.unit_id,
+            unit_seq=unit_seq,
+            unit_seq_source=(
+                "legacy_first_unit" if request.unit_seq is None else "presentation_unit"
+            ),
+        )
         with self._lock:
             l0_parent_id = self._subjects.get((session_id, context.subject_id))
             l0_parent = self._records.get(l0_parent_id or "")
@@ -3192,6 +3569,64 @@ class DedicatedMediaProductRegistry:
                 binding=response_measurement_binding,
                 event_nonce=request.operation_id,
             )
+        successor_reservation: _SuccessorReservation | None = None
+        if request.prefetch_promotion_capability is not None:
+            if l0_parent is None:
+                return _streaming_error_envelope(
+                    request, "MEDIA_PREFETCH_CAPABILITY_NOT_NEGOTIATED"
+                )
+            ledger_key = (
+                session_id,
+                l0_parent.binding.connection_id,
+                l0_parent.product_activation_id,
+                l0_parent.product_activation_generation,
+            )
+            reservation_key = (
+                *ledger_key,
+                "selected-successor-slot",
+            )
+            reservation_identity = (
+                *ledger_key,
+                request.response.interaction_id,
+                request.response.response_id,
+                request.response.response_generation,
+                unit_seq,
+            )
+            with self._lock:
+                activation = self._product_activations.get(
+                    (
+                        session_id,
+                        l0_parent.binding.connection_id,
+                        request.response.interaction_id,
+                    )
+                )
+                transfer = (
+                    None
+                    if activation is None
+                    else activation.synthesis_content_sha256.get(
+                        (
+                            request.response,
+                            request.unit_id,
+                            request.locale,
+                            request.required_sample_rate_hz,
+                        )
+                    )
+                )
+                if (
+                    ledger_key not in self._prefetch_capability_ledger
+                    or reservation_key in self._successor_reservations
+                    or transfer is None
+                    or transfer.unit_seq != unit_seq
+                    or unit_seq <= 0
+                    or self._prefetch_next_unit_seq.get(ledger_key) != unit_seq
+                ):
+                    return _streaming_error_envelope(
+                        request, "MEDIA_PREFETCH_SUCCESSOR_UNAVAILABLE"
+                    )
+                successor_reservation = _SuccessorReservation(
+                    reservation_key, reservation_identity
+                )
+                self._successor_reservations[reservation_key] = successor_reservation
         stream_identity = hashlib.sha256(
             canonical_json_bytes(
                 {
@@ -3199,6 +3634,7 @@ class DedicatedMediaProductRegistry:
                     "response_id": request.response.response_id,
                     "response_generation": request.response.response_generation,
                     "unit_id": request.unit_id,
+                    "unit_seq": unit_seq,
                 }
             )
         ).hexdigest()[:40]
@@ -3208,9 +3644,36 @@ class DedicatedMediaProductRegistry:
             request.response,
             self._monotonic(),
         )
+        prefetch_terminal_event = (
+            asyncio.Event() if successor_reservation is not None else None
+        )
 
         def observe_outcome(outcome: StreamingSynthesisOutcome) -> None:
+            if successor_reservation is not None and not outcome.completed:
+                with self._lock:
+                    self._successor_reservations.pop(successor_reservation.key, None)
             self._schedule_streaming_outcome(observation_context, outcome)
+
+        def expire_prefetch_promotion() -> None:
+            if successor_reservation is None:
+                return
+            assert prefetch_terminal_event is not None
+            prefetch_terminal_event.set()
+            with self._lock:
+                retained = self._successor_reservations.get(
+                    successor_reservation.key
+                )
+                if retained is not successor_reservation:
+                    return
+                record = (
+                    self._records.get(retained.transferred_record_id)
+                    if retained.transferred_record_id is not None
+                    else None
+                )
+                if record is None:
+                    self._successor_reservations.pop(retained.key, None)
+                    return
+                self._release_stream_source(record)
 
         start = await start_product_streaming_synthesis(
             owner,
@@ -3220,7 +3683,7 @@ class DedicatedMediaProductRegistry:
                     stream_generation=0,
                     response=request.response,
                     unit_id=request.unit_id,
-                    unit_seq=0,
+                    unit_seq=unit_seq,
                 ),
                 display_text=request.display_text,
                 spoken_text=request.spoken_text,
@@ -3234,8 +3697,17 @@ class DedicatedMediaProductRegistry:
                 request.correlation_id,
             ),
             on_outcome=observe_outcome,
+            required_parked_pause=successor_reservation is not None,
+            on_prefetch_promotion_timeout=(
+                expire_prefetch_promotion
+                if successor_reservation is not None
+                else None
+            ),
         )
         if start.source is None:
+            if successor_reservation is not None:
+                with self._lock:
+                    self._successor_reservations.pop(successor_reservation.key, None)
             outcome = start.outcome
             assert outcome is not None
             if l0_parent is not None:
@@ -3276,6 +3748,9 @@ class DedicatedMediaProductRegistry:
             if implementation_class != "formal":
                 raise TypeError("streaming Provider is not a formal route")
         except BaseException:
+            if successor_reservation is not None:
+                with self._lock:
+                    self._successor_reservations.pop(successor_reservation.key, None)
             await source.aclose()
             return _streaming_error_envelope(
                 request, "MEDIA_STREAMING_TTS_TEXT_OR_RETRY"
@@ -3340,16 +3815,39 @@ class DedicatedMediaProductRegistry:
                     downlink_stream_source=source,
                     downlink_response=request.response,
                     downlink_unit_id=request.unit_id,
+                    downlink_unit_seq=unit_seq,
                     downlink_content_sha256=binding.content_sha256,
+                    prefetch_promotion_capability=(
+                        MEDIA_PREFETCH_PROMOTION_CAPABILITY
+                        if successor_reservation is not None
+                        else None
+                    ),
+                    successor_reservation_key=(
+                        successor_reservation.key
+                        if successor_reservation is not None
+                        else None
+                    ),
+                    prefetch_terminal_event=prefetch_terminal_event,
                 )
+                if successor_reservation is not None:
+                    successor_reservation.transferred_record_id = record_id
                 self._pending_tickets[ticket] = record_id
                 stored = ticket, media_binding
         if stored is None:
+            if successor_reservation is not None:
+                with self._lock:
+                    self._successor_reservations.pop(successor_reservation.key, None)
             await source.aclose()
             return _streaming_error_envelope(
                 request, "MEDIA_STREAMING_TTS_TEXT_OR_RETRY"
             )
         ticket, media_binding = stored
+        _LOGGER.info(
+            "live_voice_media_ticket_issued registry_id=%s direction=downlink "
+            "delivery=streaming ticket_fp=%s",
+            self._diagnostic_registry_id,
+            _ticket_diagnostic_fingerprint(ticket),
+        )
         if l0_parent is not None:
             emit_runtime_l0_milestone(
                 component="gateway",
@@ -3373,6 +3871,8 @@ class DedicatedMediaProductRegistry:
             "streaming": True,
             "degradation_reason": None,
         }
+        if successor_reservation is not None:
+            audio["prefetch_promotion_capability"] = MEDIA_PREFETCH_PROMOTION_CAPABILITY
         provider = {
             "provider_id": source.provider_id,
             "implementation_class": implementation_class,
@@ -3550,6 +4050,12 @@ class DedicatedMediaProductRegistry:
             )
             self._records[record_id] = record
             self._pending_tickets[ticket] = record_id
+        _LOGGER.info(
+            "live_voice_media_ticket_issued registry_id=%s direction=downlink "
+            "delivery=batch ticket_fp=%s",
+            self._diagnostic_registry_id,
+            _ticket_diagnostic_fingerprint(ticket),
+        )
         route_descriptor = {"endpoint_path": MEDIA_ROUTE_PATH, "media_ticket": ticket}
         transformed_audio = {
             "format": "pcm_f32_mono_20ms",
@@ -3593,6 +4099,107 @@ class DedicatedMediaProductRegistry:
                 None,
             )
             record.downlink_overlap_observed = False
+
+    async def apply_prefetch_transition(
+        self,
+        record: _MediaAuthority,
+        control: MediaPrefetchTransition,
+    ) -> MediaPrefetchTransitionAck:
+        """Apply one exact transport/liveness transition to its product source."""
+
+        _LOGGER.info(
+            "live_voice_prefetch_transition_trace "
+            "stage=registration_transition_received response_generation=%s "
+            "unit_seq=%s transition_seq=%s state=%s retained_through_seq=%s",
+            control.response_generation,
+            control.unit_seq,
+            control.transition_seq,
+            control.state.value,
+            control.retained_through_seq,
+        )
+
+        with self._lock:
+            source = record.downlink_stream_source
+            if (
+                record.prefetch_promotion_capability
+                != MEDIA_PREFETCH_PROMOTION_CAPABILITY
+                or record.successor_reservation_key is None
+                or source is None
+                or record.downlink_response is None
+                or record.downlink_unit_id is None
+                or record.downlink_unit_seq is None
+                or control.unit_seq != record.downlink_unit_seq
+                or control.response_id != record.downlink_response.response_id
+                or control.response_generation
+                != record.downlink_response.response_generation
+                or control.unit_id != record.downlink_unit_id
+            ):
+                raise MediaTransportViolation(
+                    "MEDIA_PREFETCH_BINDING_MISMATCH",
+                    "prefetch transition is not bound to the selected successor",
+                )
+        if control.state is MediaPrefetchTransitionState.PREFETCH_PARKED:
+            _LOGGER.info(
+                "live_voice_prefetch_transition_trace "
+                "stage=registration_route_park_requested response_generation=%s "
+                "unit_seq=%s park_generation=%s",
+                control.response_generation,
+                control.unit_seq,
+                control.transition_seq,
+            )
+            await source.park_prefetch(
+                park_generation=control.transition_seq,
+                timeout_seconds=180.0,
+            )
+            _LOGGER.info(
+                "live_voice_prefetch_transition_trace "
+                "stage=registration_route_park_acknowledged response_generation=%s "
+                "unit_seq=%s park_generation=%s",
+                control.response_generation,
+                control.unit_seq,
+                control.transition_seq,
+            )
+        elif control.state is MediaPrefetchTransitionState.PROMOTED:
+            _LOGGER.info(
+                "live_voice_prefetch_transition_trace "
+                "stage=registration_route_promotion_requested response_generation=%s "
+                "unit_seq=%s park_generation=0",
+                control.response_generation,
+                control.unit_seq,
+            )
+            await source.promote_prefetch(park_generation=0)
+            _LOGGER.info(
+                "live_voice_prefetch_transition_trace "
+                "stage=registration_route_promotion_acknowledged "
+                "response_generation=%s unit_seq=%s park_generation=0",
+                control.response_generation,
+                control.unit_seq,
+            )
+            with self._lock:
+                self._release_successor_reservation(record, promoted=True)
+        elif control.state is MediaPrefetchTransitionState.PROMOTED_UNPARKED:
+            await source.promote_unparked_prefetch()
+            with self._lock:
+                self._release_successor_reservation(record, promoted=True)
+        else:
+            raise MediaTransportViolation(
+                "MEDIA_INVALID_PREFETCH_TRANSITION",
+                "prefetch transition state is not closed",
+            )
+        return MediaPrefetchTransitionAck(
+            lease_id=control.lease_id,
+            generation=control.generation,
+            session_id=control.session_id,
+            correlation_id=control.correlation_id,
+            interaction_id=control.interaction_id,
+            response_id=control.response_id,
+            response_generation=control.response_generation,
+            unit_id=control.unit_id,
+            unit_seq=control.unit_seq,
+            transition_seq=control.transition_seq,
+            state=control.state,
+            retained_through_seq=control.retained_through_seq,
+        )
 
     def complete_downlink(
         self, record: _MediaAuthority, result: DedicatedMediaSocketLeafResult
@@ -3832,10 +4439,17 @@ class DedicatedMediaProductRegistry:
             record.playout_receipt_content_sha256[key] = content_sha256
             return dict(payload)
 
-    def _drop_pending_for_record_id(self, record_id: str) -> None:
+    def _drop_pending_for_record_id(self, record_id: str, *, reason: str) -> None:
         for ticket, pending_record_id in tuple(self._pending_tickets.items()):
             if pending_record_id == record_id:
                 self._pending_tickets.pop(ticket, None)
+                _LOGGER.warning(
+                    "live_voice_media_ticket_removed registry_id=%s reason=%s "
+                    "ticket_fp=%s",
+                    self._diagnostic_registry_id,
+                    reason,
+                    _ticket_diagnostic_fingerprint(ticket),
+                )
 
     def _prune(self, now: float) -> None:
         for authority in self._product_activations.values():
@@ -3848,7 +4462,14 @@ class DedicatedMediaProductRegistry:
         ]
         for record_id in expired:
             record = self._records.pop(record_id)
-            self._drop_pending_for_record_id(record_id)
+            self._drop_pending_for_record_id(
+                record_id,
+                reason=(
+                    "authority_expired"
+                    if now > record.authority_expires_at
+                    else "ticket_expired"
+                ),
+            )
             subject_key = (record.binding.session_id, record.subject_id)
             if self._subjects.get(subject_key) == record_id:
                 self._subjects.pop(subject_key, None)
@@ -3903,6 +4524,23 @@ class DedicatedMediaProductRegistry:
     def _revoke_media_for_product_activation(
         self, authority: _ProductActivationAuthority
     ) -> None:
+        self._prefetch_capability_ledger.discard(
+            (
+                authority.session_id,
+                authority.connection_id,
+                authority.activation_id,
+                authority.activation_generation,
+            )
+        )
+        self._prefetch_next_unit_seq.pop(
+            (
+                authority.session_id,
+                authority.connection_id,
+                authority.activation_id,
+                authority.activation_generation,
+            ),
+            None,
+        )
         authority.synthesis_content_sha256.clear()
         record_ids = [
             record_id
@@ -3919,7 +4557,9 @@ class DedicatedMediaProductRegistry:
         ]
         for record_id in record_ids:
             record = self._records.pop(record_id)
-            self._drop_pending_for_record_id(record_id)
+            self._drop_pending_for_record_id(
+                record_id, reason="product_activation_revoked"
+            )
             self._subjects.pop((record.binding.session_id, record.subject_id), None)
             self._remember_revoked(
                 record.subject_id,
@@ -4104,12 +4744,40 @@ def register_dedicated_media_rpc_handlers(
                 ws, req_id, ok=False, error=str(exc), code=exc.reason_id
             )
 
+    async def prefetch_capability_handler(
+        ws: Any,
+        req_id: str,
+        params: object,
+        session_id: str,
+        user_id: str | None = None,
+    ) -> None:
+        try:
+            if not isinstance(params, Mapping):
+                raise MediaTransportViolation(
+                    "MEDIA_INVALID_PREFETCH_NEGOTIATION",
+                    "prefetch capability negotiation must be an object",
+                )
+            payload = await registry.negotiate_prefetch_promotion(
+                params=params,
+                routed_session_id=session_id,
+                connection_id=str(getattr(ws, "_jiuwen_ws_id", "") or id(ws)),
+                user_id=user_id,
+            )
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except MediaTransportViolation as exc:
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code=exc.reason_id
+            )
+
     channel.register_method(MEDIA_ACTIVATE_METHOD, activation_handler)
     channel.register_method(MEDIA_CLOSE_METHOD, close_handler)
     channel.register_method(MEDIA_PLAYOUT_RECEIPT_METHOD, playout_receipt_handler)
     channel.register_method(
         STREAMING_RECOGNITION_RESULT_METHOD,
         streaming_recognition_result_handler,
+    )
+    channel.register_method(
+        MEDIA_PREFETCH_CAPABILITY_METHOD, prefetch_capability_handler
     )
 
 
@@ -4126,15 +4794,26 @@ async def _authenticate_registered_media_socket(
     claimed_binding: MediaAuthorityBinding | None = None
     try:
         if request_path != MEDIA_ROUTE_PATH:
+            _LOGGER.warning("live_voice_media_auth_rejected reason=route_path_mismatch")
             return None
         try:
             first_frame = await asyncio.wait_for(
                 ws.recv(), timeout=_MEDIA_AUTH_TIMEOUT_SECONDS
             )
-        except Exception:
+        except Exception as error:
+            _LOGGER.warning(
+                "live_voice_media_auth_rejected "
+                "reason=auth_frame_receive_failed error_type=%s",
+                type(error).__name__,
+            )
             return None
         parsed_auth = _parse_media_auth_frame(first_frame)
         if parsed_auth is None:
+            _LOGGER.warning(
+                "live_voice_media_auth_rejected reason=malformed_auth_frame "
+                "frame_type=%s",
+                type(first_frame).__name__,
+            )
             return None
         ticket, claimed_binding = parsed_auth
         return registry.consume_ticket(
@@ -4162,6 +4841,7 @@ async def handle_registered_media_socket(
     if request_path != MEDIA_ROUTE_PATH:
         return False
     if getattr(ws, "subprotocol", None) != MEDIA_SUBPROTOCOL:
+        _LOGGER.warning("live_voice_media_auth_rejected reason=subprotocol_mismatch")
         await ws.close(code=1008, reason="invalid live-voice media route")
         return True
 
@@ -4208,6 +4888,16 @@ async def handle_registered_media_socket(
                 ),
                 on_playback_stop=lambda _receipt: None,
                 on_complete=retain_downlink_completion,
+                on_prefetch_transition=(
+                    (
+                        lambda control: registry.apply_prefetch_transition(
+                            record, control
+                        )
+                    )
+                    if record.prefetch_promotion_capability is not None
+                    else None
+                ),
+                prefetch_terminal_event=record.prefetch_terminal_event,
                 max_pending_frames=8,
                 max_pending_bytes=131_072,
             )
@@ -4241,8 +4931,20 @@ async def handle_registered_media_socket(
                 # Batch fallback retains only its existing bounded digest path;
                 # the Provider mirror is independently bounded and cannot
                 # interrupt capture if it degrades.
-                registry.accept_frame(record, frame)
-                registry.accept_streaming_frame(record, frame)
+                try:
+                    registry.accept_frame(record, frame)
+                except Exception as error:
+                    _log_uplink_consumer_failure(
+                        record, frame, phase="batch_frame", error=error
+                    )
+                    raise
+                try:
+                    registry.accept_streaming_frame(record, frame)
+                except Exception as error:
+                    _log_uplink_consumer_failure(
+                        record, frame, phase="streaming_frame", error=error
+                    )
+                    raise
 
             result = await run_dedicated_media_socket_leaf(
                 request,
@@ -4286,7 +4988,13 @@ async def handle_registered_media_socket(
                 "MEDIA_ROUTE_COMPLETION_UNAVAILABLE",
                 "media route completion callback was not retained",
             )
-    except BaseException:
+    except BaseException as error:
+        _LOGGER.warning(
+            "live_voice_media_route_failed direction=%s error_type=%s reason=%s",
+            record.binding.direction.value,
+            type(error).__name__,
+            getattr(error, "reason_id", "unclassified"),
+        )
         if record.binding.direction is MediaDirection.UPLINK:
             await asyncio.shield(registry.abort_streaming_recognition(record))
         if not route_completion_retained:

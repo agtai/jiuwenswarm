@@ -51,6 +51,9 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaEndOfTurn,
     MediaSpeechStart,
     MediaPlaybackStopReceipt,
+    MediaPrefetchTransition,
+    MediaPrefetchTransitionAck,
+    MediaPrefetchTransitionState,
     MediaTransportViolation,
     StrictMediaReceiver,
     deserialize_media_control,
@@ -1215,6 +1218,11 @@ async def run_dedicated_media_downlink_socket_leaf(
     frames: Iterable[MediaAudioFrame] | AsyncIterable[MediaAudioFrame],
     on_playback_stop: Callable[[MediaPlaybackStopReceipt], None],
     on_complete: Callable[[DedicatedMediaSocketLeafResult], None] | None = None,
+    on_prefetch_transition: Callable[
+        [MediaPrefetchTransition], Awaitable[MediaPrefetchTransitionAck]
+    ]
+    | None = None,
+    prefetch_terminal_event: asyncio.Event | None = None,
     max_pending_frames: int = 8,
     max_pending_bytes: int = 131_072,
 ) -> DedicatedMediaSocketLeafResult:
@@ -1262,6 +1270,16 @@ async def run_dedicated_media_downlink_socket_leaf(
         raise MediaTransportViolation(
             "MEDIA_INVALID_CONSUMER", "downlink completion consumer must be callable"
         )
+    if on_prefetch_transition is not None and not callable(on_prefetch_transition):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER", "prefetch transition consumer must be callable"
+        )
+    if prefetch_terminal_event is not None and not isinstance(
+        prefetch_terminal_event, asyncio.Event
+    ):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER", "prefetch terminal signal must be an event"
+        )
     if (
         type(max_pending_frames) is not int
         or not 0 < max_pending_frames <= _MAX_PENDING_FRAMES
@@ -1301,6 +1319,11 @@ async def run_dedicated_media_downlink_socket_leaf(
     playback_stop_receipts = 0
     peak_pending_frames = 0
     peak_pending_bytes = 0
+    prefetch_parked = False
+    parked_cursor: int | None = None
+    transition_ledger: dict[
+        int, tuple[MediaPrefetchTransition, MediaPrefetchTransitionAck]
+    ] = {}
 
     async def close_socket() -> None:
         nonlocal socket_touched
@@ -1417,7 +1440,7 @@ async def run_dedicated_media_downlink_socket_leaf(
 
     try:
         while True:
-            while not source_exhausted:
+            while not source_exhausted and not prefetch_parked:
                 if pending_frame is None:
                     try:
                         pending_frame = await take_source_frame()
@@ -1467,7 +1490,11 @@ async def run_dedicated_media_downlink_socket_leaf(
                     )
                 sent_frames += 1
 
-            if source_exhausted and sender.pending_frames == 0:
+            if (
+                source_exhausted
+                and sender.pending_frames == 0
+                and (on_prefetch_transition is None or transition_ledger)
+            ):
                 return await terminate(MediaDetachReason.LOCAL_CLOSE)
 
             try:
@@ -1477,9 +1504,40 @@ async def run_dedicated_media_downlink_socket_leaf(
             if not callable(recv):
                 return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
             socket_touched = True
+            recv_task: asyncio.Task[str | bytes] | None = None
+            terminal_task: asyncio.Task[bool] | None = None
             try:
-                message = await recv()
+                if prefetch_terminal_event is None:
+                    message = await recv()
+                else:
+                    recv_task = asyncio.create_task(recv())
+                    terminal_task = asyncio.create_task(
+                        prefetch_terminal_event.wait()
+                    )
+                    done, _ = await asyncio.wait(
+                        {recv_task, terminal_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if terminal_task in done:
+                        recv_task.cancel()
+                        await asyncio.gather(recv_task, return_exceptions=True)
+                        return await terminate(
+                            MediaDetachReason.STREAMING_SPEECH_PROMOTION_TIMEOUT
+                        )
+                    terminal_task.cancel()
+                    await asyncio.gather(terminal_task, return_exceptions=True)
+                    message = await recv_task
             except asyncio.CancelledError:
+                pending_tasks = [
+                    task
+                    for task in (recv_task, terminal_task)
+                    if task is not None and not task.done()
+                ]
+                for task in pending_tasks:
+                    if not task.done():
+                        task.cancel()
+                if pending_tasks:
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
                 sender.close(MediaDetachReason.TRANSPORT_CLOSED)
                 await asyncio.shield(close_socket())
                 raise
@@ -1499,6 +1557,93 @@ async def run_dedicated_media_downlink_socket_leaf(
                 if detach is not None:
                     return await terminate(detach.reason_id)
                 acknowledged_through_seq = control.through_seq
+                continue
+            if isinstance(control, MediaPrefetchTransition):
+                if on_prefetch_transition is None:
+                    return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+                if (
+                    control.lease_id != binding.lease_id
+                    or control.generation != binding.generation.value
+                    or control.session_id != binding.session_id
+                    or control.correlation_id != binding.correlation_id
+                    or control.interaction_id != binding.interaction_id
+                    or binding.playout is None
+                    or control.response_id != binding.playout.response_id
+                    or control.response_generation
+                    != binding.playout.response_generation
+                    or control.unit_id != binding.playout.unit_id
+                ):
+                    return await terminate(MediaDetachReason.BINDING_MISMATCH)
+                prior = transition_ledger.get(control.transition_seq)
+                if prior is not None:
+                    if prior[0] != control:
+                        return await terminate(
+                            MediaDetachReason.TRANSPORT_PROTOCOL_ERROR
+                        )
+                    if not await send_message(serialize_media_control(prior[1])):
+                        return await terminate(
+                            MediaDetachReason.TRANSPORT_SEND_FAILED,
+                            send_detach=False,
+                        )
+                    continue
+                if acknowledged_through_seq != control.retained_through_seq or (
+                    control.retained_through_seq >= sent_frames
+                ):
+                    return await terminate(MediaDetachReason.ACK_UNSENT)
+                retained_frames = control.retained_through_seq + 1
+                if control.state is MediaPrefetchTransitionState.PREFETCH_PARKED:
+                    valid_state = (
+                        not prefetch_parked
+                        and not transition_ledger
+                        and 25 <= retained_frames <= 50
+                    )
+                elif control.state is MediaPrefetchTransitionState.PROMOTED:
+                    valid_state = (
+                        prefetch_parked
+                        and parked_cursor == control.retained_through_seq
+                        and set(transition_ledger) == {0}
+                    )
+                else:
+                    valid_state = (
+                        not prefetch_parked
+                        and not transition_ledger
+                        and 1 <= retained_frames <= 24
+                    )
+                if not valid_state:
+                    return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+                try:
+                    transition_ack = await on_prefetch_transition(control)
+                except asyncio.CancelledError:
+                    raise
+                except BaseException:
+                    return await terminate(MediaDetachReason.CONSUMER_FAILED)
+                expected_ack = MediaPrefetchTransitionAck(
+                    lease_id=control.lease_id,
+                    generation=control.generation,
+                    session_id=control.session_id,
+                    correlation_id=control.correlation_id,
+                    interaction_id=control.interaction_id,
+                    response_id=control.response_id,
+                    response_generation=control.response_generation,
+                    unit_id=control.unit_id,
+                    unit_seq=control.unit_seq,
+                    transition_seq=control.transition_seq,
+                    state=control.state,
+                    retained_through_seq=control.retained_through_seq,
+                )
+                if transition_ack != expected_ack:
+                    return await terminate(MediaDetachReason.CONSUMER_FAILED)
+                transition_ledger[control.transition_seq] = (control, transition_ack)
+                if not await send_message(serialize_media_control(transition_ack)):
+                    return await terminate(
+                        MediaDetachReason.TRANSPORT_SEND_FAILED,
+                        send_detach=False,
+                    )
+                if control.state is MediaPrefetchTransitionState.PREFETCH_PARKED:
+                    prefetch_parked = True
+                    parked_cursor = control.retained_through_seq
+                else:
+                    prefetch_parked = False
                 continue
             if isinstance(control, MediaPlaybackStopReceipt):
                 try:

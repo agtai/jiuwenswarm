@@ -302,6 +302,8 @@ function notificationItem(sequence, changes = {}) {
     source_event: null,
     progress_event: null,
     presentation_unit: null,
+    presentation_text: null,
+    presentation_delivery: null,
     error_reason: null,
     publish_seq: sequence,
     ...binding,
@@ -632,7 +634,10 @@ test('bounded P2 notification owner delivers eighteen ordered items through two 
             source_start_utf8: 0,
             source_end_utf8: 8,
             content_ref: 'sha256:fixture',
+            projection_role: 'aligned',
           },
+          presentation_text: 'chunk-17',
+          presentation_delivery: 'display_and_speak',
         });
       }
       return notificationBatch(notifications);
@@ -803,6 +808,94 @@ test('P2 notification replay rejects audio that is not a server Task notificatio
   await owner.close();
 });
 
+test('bounded P2 batch atomically admits one exact multi-unit audio suffix and terminal text root', async () => {
+  let calls = 0;
+  const responseRef = {
+    interaction_id: binding.interaction_id,
+    response_id: 'response-c3',
+    response_generation: 3,
+  };
+  const presentation = (publishSeq, role, seq, start, end) => notificationItem(publishSeq, {
+    response: responseRef,
+    agent_event: {
+      ...notificationItem(publishSeq).agent_event,
+      event_type: role === 'audio_segment' && seq === 0 ? 'chat.delta' : 'chat.final',
+      text: `unit-${publishSeq}`,
+    },
+    presentation_unit: {
+      surface: role === 'authoritative_text_root' ? 'text' : 'audio',
+      unit_id: `unit-c3-${publishSeq}`,
+      seq,
+      source_start_utf8: start,
+      source_end_utf8: end,
+      content_ref: `sha256:${'a'.repeat(64)}`,
+      projection_role: role,
+    },
+    presentation_text: `unit-${publishSeq}`,
+    presentation_delivery: role === 'authoritative_text_root' ? 'display_only' : 'speak_only',
+  });
+  const notifications = [
+    presentation(0, 'audio_segment', 0, 0, 100),
+    presentation(1, 'audio_segment', 1, 100, 200),
+    presentation(2, 'audio_segment', 2, 200, 300),
+    presentation(3, 'authoritative_text_root', 0, 0, 300),
+  ];
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    notification_batch_size: 16,
+    request: async method => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      calls += 1;
+      return notificationBatch(notifications);
+    },
+  });
+  await owner.start(binding);
+
+  const observed = [];
+  for (let index = 0; index < notifications.length; index += 1) {
+    observed.push(await owner.nextNotification());
+  }
+  assert.deepEqual(observed.map(item => item.presentation_unit.unit_id), [
+    'unit-c3-0',
+    'unit-c3-1',
+    'unit-c3-2',
+    'unit-c3-3',
+  ]);
+  assert.equal(calls, 1);
+});
+
+test('bounded P2 batch rejects a future C3 span gap before exposing its valid prefix', async () => {
+  let calls = 0;
+  const first = notificationItem(0, {
+    presentation_unit: {
+      surface: 'audio', unit_id: 'unit-1', seq: 1,
+      source_start_utf8: 100, source_end_utf8: 200,
+      content_ref: `sha256:${'b'.repeat(64)}`, projection_role: 'audio_segment',
+    },
+    presentation_text: 'first', presentation_delivery: 'speak_only',
+  });
+  const malformed = notificationItem(1, {
+    presentation_unit: {
+      surface: 'audio', unit_id: 'unit-2', seq: 2,
+      source_start_utf8: 201, source_end_utf8: 300,
+      content_ref: `sha256:${'c'.repeat(64)}`, projection_role: 'audio_segment',
+    },
+    presentation_text: 'second', presentation_delivery: 'speak_only',
+  });
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    notification_batch_size: 16,
+    request: async method => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      calls += 1;
+      return notificationBatch([first, malformed]);
+    },
+  });
+  await owner.start(binding);
+  await assert.rejects(owner.nextNotification(), /presentation order is invalid/);
+  assert.equal(calls, 1);
+});
+
 test('bounded P2 notification owner rejects malformed or authority-crossing batches', async () => {
   const cases = [
     ['empty', []],
@@ -819,6 +912,37 @@ test('bounded P2 notification owner rejects malformed or authority-crossing batc
           agent_event: { ...notificationItem(0).agent_event, error_reason: 'AGENT_STREAM_FAILED' },
         }),
         notificationItem(1),
+      ],
+    ],
+    [
+      'c019-presentation-before-task-terminal',
+      [
+        notificationItem(0, {
+          presentation_unit: {
+            surface: 'audio', unit_id: 'unit-c019-prefix', seq: 0,
+            source_start_utf8: 0, source_end_utf8: 100,
+            content_ref: `sha256:${'d'.repeat(64)}`, projection_role: 'audio_segment',
+          },
+          presentation_text: 'prefix', presentation_delivery: 'speak_only',
+        }),
+        notificationItem(1, {
+          response: {
+            interaction_id: binding.interaction_id,
+            response_id: 'response-task-terminal',
+            response_generation: 1,
+          },
+          agent_event: {
+            ...notificationItem(1).agent_event,
+            event_type: 'chat.final',
+            source_provenance: 'server.task_notification',
+            text: 'Task completed.',
+          },
+          presentation_unit: {
+            surface: 'audio', unit_id: 'unit-task-terminal', seq: 0,
+            source_start_utf8: 0, source_end_utf8: 15,
+            content_ref: `sha256:${'e'.repeat(64)}`,
+          },
+        }),
       ],
     ],
   ];

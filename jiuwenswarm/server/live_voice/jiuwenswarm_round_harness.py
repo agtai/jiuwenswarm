@@ -28,6 +28,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     canonical_json_bytes,
 )
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+    FORMAL_APPEND_ONLY_DELTA_CAPABILITY,
     FormalAgentExecution,
     FormalContextSnapshot,
 )
@@ -153,6 +154,8 @@ class HarnessRoundSnapshot:
 
 class FormalAgentFacade(Protocol):
     def supports_formal_live_voice(self) -> bool: ...
+
+    def formal_live_voice_text_capabilities(self) -> tuple[str, ...]: ...
 
     def process_formal_live_voice_stream(
         self, execution: FormalAgentExecution
@@ -830,9 +833,10 @@ class JiuWenSwarmRoundHarness:
             if record.cancel_requested:
                 record.cancel_observed = True
                 raise asyncio.CancelledError
+            text_capabilities = self._formal_text_capabilities(facade)
             source_stream = facade.process_formal_live_voice_stream(execution)
             async for chunk in source_stream:
-                self._validate_chunk(chunk, execution)
+                self._validate_chunk(chunk, execution, text_capabilities)
                 payload = chunk.payload if isinstance(chunk.payload, dict) else {}
                 event_type = payload.get("event_type")
                 if not execution.allow_tools and event_type == "chat.delta":
@@ -1018,7 +1022,9 @@ class JiuWenSwarmRoundHarness:
 
     @staticmethod
     def _validate_chunk(
-        chunk: AgentResponseChunk, execution: FormalAgentExecution
+        chunk: AgentResponseChunk,
+        execution: FormalAgentExecution,
+        text_capabilities: tuple[str, ...],
     ) -> None:
         if not isinstance(chunk, AgentResponseChunk):
             raise HarnessRoundViolation(
@@ -1036,6 +1042,35 @@ class JiuWenSwarmRoundHarness:
                 "formal Agent output changed request provenance",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
+        payload = chunk.payload
+        event_type = payload.get("event_type")
+        declared = payload.get("text_stream_capability")
+        expected = (
+            FORMAL_APPEND_ONLY_DELTA_CAPABILITY
+            if text_capabilities == (FORMAL_APPEND_ONLY_DELTA_CAPABILITY,)
+            and event_type in {"chat.delta", "chat.final"}
+            else None
+        )
+        if declared != expected:
+            raise HarnessRoundViolation(
+                "INVALID_FORMAL_AGENT_OUTPUT",
+                "formal Agent output conflicts with its text capability",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+    @staticmethod
+    def _formal_text_capabilities(facade: FormalAgentFacade) -> tuple[str, ...]:
+        provider = getattr(facade, "formal_live_voice_text_capabilities", None)
+        if not callable(provider):
+            return ()
+        capabilities = provider()
+        if capabilities in {(), (FORMAL_APPEND_ONLY_DELTA_CAPABILITY,)}:
+            return capabilities
+        raise HarnessRoundViolation(
+            "INVALID_FORMAL_AGENT_OUTPUT",
+            "formal Agent facade declared an unsupported text capability",
+            ErrorCode.PROTOCOL_VIOLATION,
+        )
 
     @staticmethod
     def _require_formal_facade(facade: FormalAgentFacade) -> None:

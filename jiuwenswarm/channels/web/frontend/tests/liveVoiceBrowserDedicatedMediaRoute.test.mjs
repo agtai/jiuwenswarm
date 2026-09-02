@@ -154,6 +154,41 @@ class FakeDrainScheduler {
   }
 }
 
+test('media close diagnostic retains local terminal provenance after socket close', () => {
+  const diagnostics = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => diagnostics.push(args);
+  try {
+    const route = active();
+    attach(route);
+    route.activation.leaf.close('MEDIA_LOCAL_CLOSE');
+    route.socket.transportClose();
+  } finally {
+    console.warn = originalWarn;
+  }
+  const close = diagnostics.find(([, value]) => value?.event === 'socket_close')?.[1];
+  assert.deepEqual(
+    {
+      terminal_source: close?.terminal_source,
+      retained_reason_id: close?.retained_reason_id,
+      leaf_closed: close?.leaf_closed,
+      direction: close?.direction,
+      session_id: close?.session_id,
+      correlation_id: close?.correlation_id,
+      interaction_id: close?.interaction_id,
+    },
+    {
+      terminal_source: 'local_close',
+      retained_reason_id: 'MEDIA_LOCAL_CLOSE',
+      leaf_closed: true,
+      direction: 'uplink',
+      session_id: 'session-dedicated-01',
+      correlation_id: 'correlation-dedicated-01',
+      interaction_id: 'interaction-dedicated-01',
+    },
+  );
+});
+
 function active({
   exactBinding = binding(),
   socket = new FakeSocket(),
@@ -163,6 +198,7 @@ function active({
   highWater,
   deferDownlinkAck,
   onTerminal,
+  onAudioFrame,
   onUplinkFrameSent,
   onUplinkFrameAcknowledged,
   onFirstFrameDiagnostic,
@@ -187,9 +223,9 @@ function active({
       factoryCalls.push({ url, protocols });
       return socket;
     },
-    on_audio_frame: () => {
+    on_audio_frame: onAudioFrame ?? (() => {
       counters.audio += 1;
-    },
+    }),
     max_pending_frames: maxPendingFrames,
     max_pending_bytes: maxPendingBytes,
     socket_high_water_bytes: highWater,
@@ -605,6 +641,33 @@ test('downlink accepts exact binary sequence, invokes audio once, and returns ty
     through_seq: 0,
   });
   assert.deepEqual(effects, { audio: 1, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
+});
+
+test('downlink consumer failure closes the exact leaf with no ACK or business effect', () => {
+  const terminal = [];
+  const route = active({
+    exactBinding: binding({ direction: 'downlink' }),
+    onTerminal: event => terminal.push(event),
+    onAudioFrame: () => {
+      throw new Error('test consumer failure');
+    },
+  });
+  attach(route);
+
+  route.socket.message(encodeAudioFrame(route.activation.binding, mediaFrame()));
+
+  assert.equal(route.activation.leaf.closed, true);
+  assert.deepEqual(terminal, [{
+    reason_id: 'MEDIA_CONSUMER_FAILED',
+    source: 'internal_failure',
+    direction: 'downlink',
+    attached_before_close: true,
+  }]);
+  assert.equal(
+    route.socket.sent.some(value => typeof value === 'string' && deserializeMediaControl(value).type === 'media.ack'),
+    false,
+  );
+  assert.deepEqual(route.effects, { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
 });
 
 test('downlink can defer its bounded ACK until browser rendering confirms the frame', () => {

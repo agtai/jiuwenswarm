@@ -15,6 +15,9 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 
 
+FORMAL_APPEND_ONLY_DELTA_CAPABILITY = "agent.chat.append_only_delta.v1"
+
+
 class FormalLiveVoiceViolation(ValueError):
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)

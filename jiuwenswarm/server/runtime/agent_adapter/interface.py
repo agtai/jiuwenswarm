@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-import json
 import logging
 import os
 import re
@@ -1039,6 +1038,25 @@ class JiuWenSwarm:
             )
         )
 
+    def formal_live_voice_text_capabilities(self) -> tuple[str, ...]:
+        """Return only text-stream guarantees declared by the active adapter."""
+        from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+            FORMAL_APPEND_ONLY_DELTA_CAPABILITY,
+        )
+
+        adapter = self._adapter
+        if adapter is None or getattr(adapter, "_is_code_agent", False):
+            return ()
+        provider = getattr(adapter, "formal_live_voice_text_capabilities", None)
+        if not callable(provider):
+            return ()
+        capabilities = provider()
+        if capabilities == ():
+            return ()
+        if capabilities != (FORMAL_APPEND_ONLY_DELTA_CAPABILITY,):
+            raise RuntimeError("FORMAL_TEXT_CAPABILITY_INVALID")
+        return capabilities
+
     async def process_background_code_task_stream(
         self,
         request: AgentRequest,
@@ -1172,11 +1190,30 @@ class JiuWenSwarm:
             raise RuntimeError(
                 "FORMAL_EXECUTION_UNSUPPORTED: lower Agent adapter has no formal seam"
             )
+        capabilities = self.formal_live_voice_text_capabilities()
+        text_capability = (
+            capabilities[0]
+            if capabilities
+            else None
+        )
         async for chunk in formal_stream(
             formal_request,
             inputs,
         ):
-            yield chunk
+            payload = chunk.payload if isinstance(chunk.payload, dict) else None
+            event_type = payload.get("event_type") if payload is not None else None
+            if text_capability is None or event_type not in {"chat.delta", "chat.final"}:
+                yield chunk
+                continue
+            if "text_stream_capability" in payload:
+                raise RuntimeError("FORMAL_TEXT_CAPABILITY_FORGED")
+            yield replace(
+                chunk,
+                payload={
+                    **payload,
+                    "text_stream_capability": text_capability,
+                },
+            )
 
     def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, UserTurn]:
         """构建 adapter 所需的 inputs 字典.

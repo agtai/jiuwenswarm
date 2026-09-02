@@ -53,6 +53,12 @@ class PresentationSurface(StrEnum):
     AUDIO = "audio"
 
 
+class PresentationProjectionRole(StrEnum):
+    ALIGNED = "aligned"
+    AUTHORITATIVE_TEXT_ROOT = "authoritative_text_root"
+    AUDIO_SEGMENT = "audio_segment"
+
+
 class HistorySurfacePolicy(StrEnum):
     TEXT = "text"
     AUDIO = "audio"
@@ -78,6 +84,7 @@ class PresentationUnit:
     source_start_utf8: int
     source_end_utf8: int
     content_ref: str
+    projection_role: PresentationProjectionRole = PresentationProjectionRole.ALIGNED
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,6 +391,35 @@ class PresentationLedger:
                 "presentation surface must be text or audio",
                 ErrorCode.INVALID_ARGUMENT,
             )
+        if not isinstance(unit.projection_role, PresentationProjectionRole):
+            raise PresentationLedgerViolation(
+                "INVALID_PRESENTATION_PROJECTION_ROLE",
+                "presentation projection role is not supported",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            unit.projection_role
+            is PresentationProjectionRole.AUTHORITATIVE_TEXT_ROOT
+            and (
+                unit.surface is not PresentationSurface.TEXT
+                or unit.seq != 0
+                or unit.source_start_utf8 != 0
+            )
+        ):
+            raise PresentationLedgerViolation(
+                "INVALID_PRESENTATION_PROJECTION",
+                "authoritative text root must be the first complete TEXT span",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if (
+            unit.projection_role is PresentationProjectionRole.AUDIO_SEGMENT
+            and unit.surface is not PresentationSurface.AUDIO
+        ):
+            raise PresentationLedgerViolation(
+                "INVALID_PRESENTATION_PROJECTION",
+                "audio segment projection requires the AUDIO surface",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
         self._require_text(unit.unit_id, "unit_id")
         self._require_uint(unit.seq, "seq")
         self._require_uint(unit.source_start_utf8, "source_start_utf8")
@@ -426,6 +462,35 @@ class PresentationLedger:
                 unit.source_end_utf8, other.source_end_utf8
             )
             if not overlaps:
+                continue
+            policy = self._policies[unit.ref]
+            text_root = (
+                unit
+                if unit.projection_role
+                is PresentationProjectionRole.AUTHORITATIVE_TEXT_ROOT
+                else other
+                if other.projection_role
+                is PresentationProjectionRole.AUTHORITATIVE_TEXT_ROOT
+                else None
+            )
+            audio_segment = (
+                unit
+                if unit.projection_role is PresentationProjectionRole.AUDIO_SEGMENT
+                else other
+                if other.projection_role
+                is PresentationProjectionRole.AUDIO_SEGMENT
+                else None
+            )
+            if (
+                policy is HistorySurfacePolicy.TEXT
+                and text_root is not None
+                and audio_segment is not None
+                and text_root.surface is PresentationSurface.TEXT
+                and audio_segment.surface is PresentationSurface.AUDIO
+                and text_root.source_start_utf8
+                <= audio_segment.source_start_utf8
+                and audio_segment.source_end_utf8 <= text_root.source_end_utf8
+            ):
                 continue
             if (
                 unit.seq != other.seq

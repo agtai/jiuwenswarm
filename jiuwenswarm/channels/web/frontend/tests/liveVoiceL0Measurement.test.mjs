@@ -21,9 +21,12 @@ function binding(response = false) {
     correlation_id: 'correlation:opaque:1',
     session_id: 'session:opaque:1',
     interaction_id: 'interaction:opaque:1',
+    activation_id: 'activation:opaque:1',
     activation_generation: 3,
     response_id: response ? 'response:opaque:1' : null,
     response_generation: response ? 2 : null,
+    unit_id: null,
+    unit_seq: null,
     turn_id: null,
     round_id: null,
     task_id: null,
@@ -270,4 +273,79 @@ test('response registration freezes sample ownership and rejects late cross-samp
   assert.equal(snapshot.accepted_records, 1);
   assert.equal(snapshot.records[0].scenario_id, 'long-answer-zh');
   assert.equal(snapshot.records[0].sample_index, 21);
+});
+
+test('per-unit milestones require exact response identity and non-negative unit sequence', async () => {
+  const measurement = await import(`${moduleUrl}?enabled`);
+  const control = globalThis.__JIUWENSWARM_LIVE_VOICE_L0__;
+  control.disable();
+  assert.equal(control.configure({
+    profile_id: 'profile-unit',
+    scenario_id: 'scenario-unit',
+    sample_index: 0,
+    temperature: 'warm',
+    evidence_source: 'physical',
+  }), true);
+  const exact = {
+    ...binding(true),
+    response_id: 'response:unit:2',
+    unit_id: 'unit:opaque:2',
+    unit_seq: 2,
+  };
+  assert.equal(measurement.registerBrowserL0Response(exact), true);
+  assert.equal(measurement.recordBrowserL0Milestone({
+    milestone: 'unit_tts_requested',
+    binding: { ...exact, unit_seq: null },
+  }), false);
+  assert.equal(measurement.recordBrowserL0Milestone({
+    milestone: 'unit_tts_requested',
+    binding: { ...exact, unit_id: null },
+  }), false);
+  assert.equal(measurement.recordBrowserL0Milestone({
+    milestone: 'unit_tts_requested',
+    binding: exact,
+  }), true);
+  assert.equal(control.snapshot().records.at(-1).binding.unit_seq, 2);
+  assert.equal(control.snapshot().records.at(-1).binding.unit_id, 'unit:opaque:2');
+});
+
+test('successor prebuffer milestones retain exact unit identity', async () => {
+  const measurement = await import(`${moduleUrl}?enabled`);
+  const control = globalThis.__JIUWENSWARM_LIVE_VOICE_L0__;
+  control.disable();
+  assert.equal(control.configure({
+    profile_id: 'profile-successor',
+    scenario_id: 'scenario-successor',
+    sample_index: 0,
+    temperature: 'warm',
+    evidence_source: 'physical',
+  }), true);
+  const exact = {
+    ...binding(true),
+    response_id: 'response:successor:1',
+    unit_id: 'unit:successor:1',
+    unit_seq: 1,
+  };
+  assert.equal(measurement.registerBrowserL0Response(exact), true);
+  for (const milestone of [
+    'successor_tts_requested',
+    'successor_downlink_attached',
+    'successor_first_frame_buffered',
+    'successor_promoted_to_playout',
+  ]) {
+    assert.equal(measurement.recordBrowserL0Milestone({ milestone, binding: exact }), true, milestone);
+  }
+  assert.deepEqual(
+    control.snapshot().records.slice(-4).map(record => [
+      record.milestone,
+      record.binding.unit_id,
+      record.binding.unit_seq,
+    ]),
+    [
+      ['successor_tts_requested', 'unit:successor:1', 1],
+      ['successor_downlink_attached', 'unit:successor:1', 1],
+      ['successor_first_frame_buffered', 'unit:successor:1', 1],
+      ['successor_promoted_to_playout', 'unit:successor:1', 1],
+    ],
+  );
 });

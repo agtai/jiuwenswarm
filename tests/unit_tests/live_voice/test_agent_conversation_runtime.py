@@ -20,6 +20,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TerminalOutcome,
     TurnCommit,
     WorkProgressEventV2,
+    WorkState,
     canonical_json_bytes,
 )
 from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
@@ -50,6 +51,7 @@ from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationAck,
     PresentationLedgerViolation,
     PresentationState,
+    PresentationProjectionRole,
     PresentationSurface,
     PresentationUnit,
 )
@@ -68,6 +70,7 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
     project_task_progress_event,
 )
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+    FORMAL_APPEND_ONLY_DELTA_CAPABILITY,
     FormalContextSnapshot,
 )
 from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
@@ -173,6 +176,44 @@ class ScriptedFormalAdapter(LowerFormalAdapter):
                 payload=payload,
                 is_complete=payload.get("event_type")
                 in {"chat.final", "chat.error"},
+            )
+
+
+class AppendOnlyStreamingLowerAdapter(LowerFormalAdapter):
+    def __init__(
+        self,
+        events: tuple[tuple[str, str | None], ...],
+        *,
+        append_only: bool = True,
+        final_release: asyncio.Event | None = None,
+    ) -> None:
+        super().__init__(final=None)
+        self.events = events
+        self.append_only = append_only
+        self.final_release = final_release
+
+    def formal_live_voice_text_capabilities(self) -> tuple[str, ...]:
+        return (
+            (FORMAL_APPEND_ONLY_DELTA_CAPABILITY,)
+            if self.append_only
+            else ()
+        )
+
+    async def process_formal_live_voice_stream_impl(
+        self, request, inputs
+    ) -> AsyncIterator[AgentResponseChunk]:
+        self.calls += 1
+        self.requests.append(request)
+        self.inputs.append(inputs)
+        self.started.set()
+        for event_type, content in self.events:
+            if event_type == "chat.final" and self.final_release is not None:
+                await self.final_release.wait()
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={"event_type": event_type, "content": content},
+                is_complete=event_type == "chat.final",
             )
 
 
@@ -1552,6 +1593,347 @@ async def test_real_facade_round_truth_reaches_cr_and_text_ack_history() -> None
     assert (await current.close(timeout_seconds=1)).status is (
         AgentConversationShutdownStatus.CLOSED
     )
+
+
+@pytest.mark.asyncio
+async def test_append_only_stream_publishes_prefix_text_root_and_exact_tail() -> None:
+    lower = AppendOnlyStreamingLowerAdapter(
+        (
+            ("chat.delta", "First sentence. "),
+            ("chat.delta", "Second sentence"),
+            ("chat.final", "First sentence. Second sentence."),
+        )
+    )
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+
+    notifications = []
+    while True:
+        notification = await asyncio.wait_for(current.next_notification(), timeout=1)
+        notifications.append(notification)
+        if notification.progress_event is not None:
+            progress = WorkProgressEventV2.from_dict(notification.progress_event.payload)
+            if progress.state is WorkState.TERMINAL:
+                break
+
+    presentations = [
+        item for item in notifications if item.presentation_unit is not None
+    ]
+    assert [item.presentation_unit.surface for item in presentations] == [
+        PresentationSurface.AUDIO,
+        PresentationSurface.AUDIO,
+        PresentationSurface.TEXT,
+    ]
+    assert [item.presentation_unit.projection_role for item in presentations] == [
+        PresentationProjectionRole.AUDIO_SEGMENT,
+        PresentationProjectionRole.AUDIO_SEGMENT,
+        PresentationProjectionRole.AUTHORITATIVE_TEXT_ROOT,
+    ]
+    assert [item.presentation_text for item in presentations] == [
+        "First sentence. ",
+        "Second sentence.",
+        "First sentence. Second sentence.",
+    ]
+    assert [item.presentation_delivery for item in presentations] == [
+        "speak_only",
+        "speak_only",
+        "display_only",
+    ]
+    prefix, tail, final_text = [item.presentation_unit for item in presentations]
+    assert (prefix.seq, prefix.source_start_utf8, prefix.source_end_utf8) == (
+        0,
+        0,
+        len(b"First sentence. "),
+    )
+    assert (final_text.seq, final_text.source_start_utf8, final_text.source_end_utf8) == (
+        0,
+        0,
+        len(b"First sentence. Second sentence."),
+    )
+    assert (tail.seq, tail.source_start_utf8, tail.source_end_utf8) == (
+        1,
+        len(b"First sentence. "),
+        len(b"First sentence. Second sentence."),
+    )
+
+    for notification in presentations:
+        item = notification.presentation_unit
+        result = await current.acknowledge_presentation(
+            PresentationAck(
+                ref=handle.response_ref,
+                surface=item.surface,
+                unit_id=item.unit_id,
+                contiguous_cursor=item.seq,
+                presented_at="2026-08-26T08:00:02Z",
+            )
+        )
+        assert result.accepted is True
+    assert len(history.assistant_intents) == 1
+    assert history.assistant_intents[0][0].contents[0].content_utf8 == (
+        b"First sentence. Second sentence."
+    )
+    await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_append_only_long_final_publishes_bounded_exact_tail_chunks() -> None:
+    prefix = "First sentence. "
+    tail_parts = tuple(
+        f"Segment {index} " + (chr(96 + index) * 150) + ". "
+        for index in range(1, 6)
+    )
+    final_text = prefix + "".join(tail_parts)
+    lower = AppendOnlyStreamingLowerAdapter(
+        (
+            ("chat.delta", prefix),
+            ("chat.delta", "More follows"),
+            ("chat.final", final_text),
+        )
+    )
+    current = runtime(lower, RecordingHistoryWriter())
+    selected = await prepare(current)
+    await dispatch(current, selected)
+
+    presentations = []
+    while True:
+        notification = await asyncio.wait_for(current.next_notification(), timeout=1)
+        if notification.presentation_unit is not None:
+            presentations.append(notification)
+        if notification.progress_event is not None:
+            progress = WorkProgressEventV2.from_dict(notification.progress_event.payload)
+            if progress.state is WorkState.TERMINAL:
+                break
+
+    audio = [
+        item
+        for item in presentations
+        if item.presentation_unit.surface is PresentationSurface.AUDIO
+    ]
+    assert 2 < len(audio) <= 5  # one pre-final prefix plus at most four tail chunks
+    assert [item.presentation_unit.seq for item in audio] == list(range(len(audio)))
+    assert "".join(item.presentation_text for item in audio) == final_text
+    assert [
+        item.presentation_unit.source_start_utf8 for item in audio[1:]
+    ] == [item.presentation_unit.source_end_utf8 for item in audio[:-1]]
+    assert presentations[-1].presentation_unit.projection_role is (
+        PresentationProjectionRole.AUTHORITATIVE_TEXT_ROOT
+    )
+    assert presentations[-1].presentation_text == final_text
+    await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_append_only_stream_over_256_events_reaches_final_without_gap() -> None:
+    prefix = "First sentence. "
+    fragments = ("Long continuation ", *("word " for _ in range(493)))
+    final_text = prefix + "".join(fragments)
+    lower = AppendOnlyStreamingLowerAdapter(
+        (
+            ("chat.delta", prefix),
+            *(("chat.delta", fragment) for fragment in fragments),
+            ("chat.final", final_text),
+        )
+    )
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = await prepare(current)
+    await dispatch(current, selected)
+
+    presentations = []
+    errors = []
+    while True:
+        notification = await asyncio.wait_for(current.next_notification(), timeout=2)
+        if notification.presentation_unit is not None:
+            presentations.append(notification)
+        if notification.error_reason is not None:
+            errors.append(notification.error_reason)
+        if notification.progress_event is not None:
+            progress = WorkProgressEventV2.from_dict(notification.progress_event.payload)
+            if progress.state is WorkState.TERMINAL:
+                break
+
+    assert errors == []
+    assert presentations[-1].presentation_unit.projection_role is (
+        PresentationProjectionRole.AUTHORITATIVE_TEXT_ROOT
+    )
+    assert presentations[-1].presentation_text == final_text
+    await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_append_only_short_final_preserves_aligned_final_only_path() -> None:
+    lower = AppendOnlyStreamingLowerAdapter(
+        (("chat.final", "Paris is in France."),)
+    )
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+    presentations = []
+    while True:
+        notification = await asyncio.wait_for(current.next_notification(), timeout=1)
+        if notification.presentation_unit is not None:
+            presentations.append(notification)
+        if notification.progress_event is not None:
+            progress = WorkProgressEventV2.from_dict(notification.progress_event.payload)
+            if progress.state is WorkState.TERMINAL:
+                break
+
+    assert len(presentations) == 1
+    final = presentations[0]
+    assert final.presentation_unit.surface is PresentationSurface.TEXT
+    assert final.presentation_unit.projection_role is PresentationProjectionRole.ALIGNED
+    assert final.presentation_text == "Paris is in France."
+    assert final.presentation_delivery == "display_and_speak"
+    acknowledged = await current.acknowledge_presentation(
+        PresentationAck(
+            ref=handle.response_ref,
+            surface=PresentationSurface.TEXT,
+            unit_id=final.presentation_unit.unit_id,
+            contiguous_cursor=0,
+            presented_at="2026-08-26T08:00:02Z",
+        )
+    )
+    assert acknowledged.history_records_written == 1
+    assert history.assistant_intents[0][0].contents[0].content_utf8 == (
+        b"Paris is in France."
+    )
+    await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_missing_append_only_capability_never_publishes_pre_final_audio() -> None:
+    lower = AppendOnlyStreamingLowerAdapter(
+        (
+            ("chat.delta", "First sentence. "),
+            ("chat.delta", "More follows"),
+            ("chat.final", "First sentence. More follows."),
+        ),
+        append_only=False,
+    )
+    current = runtime(lower, RecordingHistoryWriter())
+    selected = await prepare(current)
+    await dispatch(current, selected)
+    presentations = []
+    while True:
+        notification = await asyncio.wait_for(current.next_notification(), timeout=1)
+        if notification.presentation_unit is not None:
+            presentations.append(notification)
+        if notification.progress_event is not None:
+            progress = WorkProgressEventV2.from_dict(notification.progress_event.payload)
+            if progress.state is WorkState.TERMINAL:
+                break
+
+    assert len(presentations) == 1
+    assert presentations[0].presentation_unit.surface is PresentationSurface.TEXT
+    assert presentations[0].presentation_unit.projection_role is (
+        PresentationProjectionRole.ALIGNED
+    )
+    assert presentations[0].presentation_delivery == "display_and_speak"
+    await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_tool_barrier_blocks_prefix_without_changing_text_capability() -> None:
+    lower = AppendOnlyStreamingLowerAdapter(
+        (
+            ("chat.delta", "First sentence. "),
+            ("chat.tool_call", None),
+            ("chat.delta", "More follows"),
+            ("chat.final", "First sentence. More follows."),
+        )
+    )
+    current = runtime(lower, RecordingHistoryWriter())
+    selected = await prepare(current)
+    await dispatch(current, selected)
+    presentations = []
+    errors = []
+    while True:
+        notification = await asyncio.wait_for(current.next_notification(), timeout=1)
+        if notification.presentation_unit is not None:
+            presentations.append(notification)
+        if notification.error_reason is not None:
+            errors.append(notification.error_reason)
+        if notification.progress_event is not None:
+            progress = WorkProgressEventV2.from_dict(notification.progress_event.payload)
+            if progress.state is WorkState.TERMINAL:
+                break
+
+    assert errors == []
+    assert len(presentations) == 1
+    assert presentations[0].presentation_unit.surface is PresentationSurface.TEXT
+    assert presentations[0].presentation_unit.projection_role is (
+        PresentationProjectionRole.ALIGNED
+    )
+    await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_final_rewrite_after_presented_prefix_has_zero_text_history() -> None:
+    final_release = asyncio.Event()
+    lower = AppendOnlyStreamingLowerAdapter(
+        (
+            ("chat.delta", "Paris is the capital. "),
+            ("chat.delta", "More follows"),
+            ("chat.final", "Paris is the largest city."),
+        ),
+        final_release=final_release,
+    )
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+
+    prefix = None
+    while prefix is None:
+        notification = await asyncio.wait_for(current.next_notification(), timeout=1)
+        if notification.presentation_unit is not None:
+            prefix = notification
+    assert prefix.presentation_unit.surface is PresentationSurface.AUDIO
+    prefix_ack = await current.acknowledge_presentation(
+        PresentationAck(
+            ref=handle.response_ref,
+            surface=PresentationSurface.AUDIO,
+            unit_id=prefix.presentation_unit.unit_id,
+            contiguous_cursor=0,
+            presented_at="2026-08-26T08:00:02Z",
+        )
+    )
+    assert prefix_ack.accepted is True
+    assert prefix_ack.history_records_written == 0
+    final_release.set()
+
+    errors = []
+    terminal = None
+    while terminal is None:
+        notification = await asyncio.wait_for(current.next_notification(), timeout=1)
+        if notification.error_reason is not None:
+            errors.append(notification.error_reason)
+        if notification.progress_event is not None:
+            progress = WorkProgressEventV2.from_dict(notification.progress_event.payload)
+            if progress.state is WorkState.TERMINAL:
+                terminal = progress
+
+    assert errors == ["PRE_FINAL_PREFIX_CONFLICT"]
+    assert terminal.outcome is TerminalOutcome.COMPLETED
+    response = next(
+        item
+        for item in current.snapshot().conversation.conversation.responses
+        if item.ref == handle.response_ref
+    )
+    assert response.outcome is TerminalOutcome.UNKNOWN
+    records = [
+        record
+        for record in current.snapshot().conversation.presentation.records
+        if record.unit.ref == handle.response_ref
+    ]
+    assert [(record.unit.surface, record.state) for record in records] == [
+        (PresentationSurface.AUDIO, PresentationState.PRESENTED)
+    ]
+    assert history.assistant_intents == []
+    await current.close(timeout_seconds=1)
 
 
 @pytest.mark.asyncio
@@ -3174,6 +3556,69 @@ def test_duplicate_or_exhausted_critical_reserve_fails_closed_without_growth() -
     assert snapshot.queued_critical_notifications == 2
     assert snapshot.published_notifications == 2
     assert snapshot.critical_notification_invariant_failures == 2
+
+
+@pytest.mark.asyncio
+async def test_delivered_critical_notifications_release_bounded_reserve() -> None:
+    current = runtime(LowerFormalAdapter(), RecordingHistoryWriter(), max_requests=1)
+    response_ref = ResponseRef("interaction-critical", "response-critical", 0)
+    for ordinal in range(3):
+        notification = AgentConversationNotification(
+            kind="agent.output",
+            request_id=f"request-critical-{ordinal}",
+            round_id=f"round-critical-{ordinal}",
+            response_ref=response_ref,
+        )
+        current._publish(  # noqa: SLF001 - invariant-level regression
+            notification,
+            critical_key=("presentation", f"unit-{ordinal}"),
+        )
+        delivered = await asyncio.wait_for(current.next_notification(), timeout=1)
+        assert delivered.request_id == notification.request_id
+
+    snapshot = current.snapshot()
+    assert snapshot.queued_critical_notifications == 0
+    assert snapshot.published_notifications == 3
+    assert snapshot.critical_notification_invariant_failures == 0
+
+
+def test_discarded_presentations_release_bounded_critical_reserve() -> None:
+    current = runtime(LowerFormalAdapter(), RecordingHistoryWriter(), max_requests=1)
+    response_ref = ResponseRef("interaction-critical", "response-critical", 0)
+    for ordinal in range(2):
+        item = PresentationUnit(
+            ref=response_ref,
+            surface=PresentationSurface.AUDIO,
+            unit_id=f"unit-{ordinal}",
+            seq=ordinal,
+            source_start_utf8=ordinal,
+            source_end_utf8=ordinal + 1,
+            content_ref=f"sha256:{ordinal}",
+        )
+        current._publish(  # noqa: SLF001 - invariant-level regression
+            AgentConversationNotification(
+                kind="agent.output",
+                request_id="request-critical",
+                round_id="round-critical",
+                response_ref=response_ref,
+                presentation_unit=item,
+            ),
+            critical_key=("presentation", item.unit_id),
+        )
+
+    assert current._notifications.discard_presentation(response_ref) == 2  # noqa: SLF001
+    replacement = AgentConversationNotification(
+        kind="work.progress",
+        request_id="request-replacement",
+        round_id="round-replacement",
+        response_ref=response_ref,
+    )
+    current._publish(  # noqa: SLF001 - invariant-level regression
+        replacement,
+        critical_key=("terminal", replacement.request_id),
+    )
+    assert current.snapshot().queued_critical_notifications == 1
+    assert current.snapshot().critical_notification_invariant_failures == 0
 
 
 @pytest.mark.asyncio

@@ -51,6 +51,7 @@ from jiuwenswarm.server.live_voice.batch_speech import (
     UnavailableBatchSpeechProvider,
     create_environment_batch_speech_provider,
     inspect_pcm16_mono_wav,
+    parse_synthesis_batch_request,
 )
 
 
@@ -313,12 +314,14 @@ def _service(
     resolver: SpeechAuthorizationResolver | None = None,
     max_completed_operations: int = 128,
     max_identity_tombstones: int = 512,
+    max_synthesis_units_per_response: int = 1_024,
 ) -> FormalBatchSpeechService:
     return FormalBatchSpeechService(
         provider,
         authorization_resolver=resolver or ExactAuthorizationResolver(),
         max_completed_operations=max_completed_operations,
         max_identity_tombstones=max_identity_tombstones,
+        max_synthesis_units_per_response=max_synthesis_units_per_response,
     )
 
 
@@ -369,7 +372,10 @@ def _synthesize_request(
     *,
     request_id: str = "request-s0",
     operation_id: str = "operation-s0",
+    interaction_id: str = "interaction-1",
+    response_id: str | None = None,
     generation: int = 0,
+    unit_id: str = "unit-1",
     timeout_ms: int = 1000,
 ) -> dict[str, object]:
     return {
@@ -382,11 +388,11 @@ def _synthesize_request(
         "scope": dict(SCOPE),
         "timeout_ms": timeout_ms,
         "response": {
-            "interaction_id": "interaction-1",
-            "response_id": f"response-{generation}",
+            "interaction_id": interaction_id,
+            "response_id": response_id or f"response-{generation}",
             "response_generation": generation,
         },
-        "unit_id": "unit-1",
+        "unit_id": unit_id,
         "render_plan": {
             "display_text": "Hello formal speech",
             "spoken_text": "Hello formal speech",
@@ -397,6 +403,250 @@ def _synthesize_request(
         "voice": None,
         "required_sample_rate_hz": 16_000,
     }
+
+
+def test_prefetch_promotion_capability_is_only_valid_for_continuation() -> None:
+    request = _synthesize_request()
+    request["unit_seq"] = 1
+    request["prefetch_promotion_capability"] = "live-voice.media.prefetch-promotion.v1"
+    parsed = parse_synthesis_batch_request(request, CONTEXT)
+    assert (
+        parsed.prefetch_promotion_capability == "live-voice.media.prefetch-promotion.v1"
+    )
+
+    ordinary = _synthesize_request(operation_id="ordinary-unit")
+    ordinary["prefetch_promotion_capability"] = "live-voice.media.prefetch-promotion.v1"
+    with pytest.raises(BatchSpeechError) as invalid:
+        parse_synthesis_batch_request(ordinary, CONTEXT)
+    assert invalid.value.error.reason == "INVALID_PREFETCH_PROMOTION_CAPABILITY"
+
+
+@pytest.mark.asyncio
+async def test_synthesis_accepts_distinct_units_of_one_exact_response_concurrently() -> (
+    None
+):
+    provider = ControlledProvider(delay=True)
+    service = _service(provider)
+    first_request = _synthesize_request(
+        request_id="request-unit-0",
+        operation_id="operation-unit-0",
+        unit_id="unit-0",
+    )
+    second_request = _synthesize_request(
+        request_id="request-unit-1",
+        operation_id="operation-unit-1",
+        unit_id="unit-1",
+    )
+
+    first = asyncio.create_task(service.synthesize(first_request, CONTEXT))
+    second = asyncio.create_task(service.synthesize(second_request, CONTEXT))
+    await asyncio.wait_for(provider.started.wait(), timeout=0.2)
+    await asyncio.sleep(0)
+    provider.release.set()
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert first_result["ok"] is True
+    assert second_result["ok"] is True
+    assert first_result["result"]["unit_id"] == "unit-0"
+    assert second_result["result"]["unit_id"] == "unit-1"
+    assert provider.synthesize_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_synthesis_continuation_identity_failures_have_zero_provider_effects() -> (
+    None
+):
+    provider = ControlledProvider()
+    service = _service(provider, max_synthesis_units_per_response=2)
+
+    first = await service.synthesize(
+        _synthesize_request(
+            request_id="request-first",
+            operation_id="operation-first",
+            unit_id="unit-0",
+        ),
+        CONTEXT,
+    )
+    duplicate_unit = await service.synthesize(
+        _synthesize_request(
+            request_id="request-duplicate",
+            operation_id="operation-duplicate",
+            unit_id="unit-0",
+        ),
+        CONTEXT,
+    )
+    reused_response_id = await service.synthesize(
+        _synthesize_request(
+            request_id="request-reused-response",
+            operation_id="operation-reused-response",
+            interaction_id="interaction-other",
+            response_id="response-0",
+            generation=1,
+            unit_id="unit-other",
+        ),
+        CONTEXT,
+    )
+
+    assert first["ok"] is True
+    assert duplicate_unit["error"]["reason"] == "SYNTHESIS_UNIT_REUSED"
+    assert reused_response_id["error"]["reason"] == "RESPONSE_ID_REUSED"
+    assert provider.synthesize_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_synthesis_continuation_is_bounded_and_cannot_revive_a_stale_response() -> (
+    None
+):
+    provider = ControlledProvider()
+    service = _service(provider, max_synthesis_units_per_response=1)
+
+    first = await service.synthesize(
+        _synthesize_request(
+            request_id="request-first",
+            operation_id="operation-first",
+            unit_id="unit-0",
+        ),
+        CONTEXT,
+    )
+    over_capacity = await service.synthesize(
+        _synthesize_request(
+            request_id="request-over-capacity",
+            operation_id="operation-over-capacity",
+            unit_id="unit-1",
+        ),
+        CONTEXT,
+    )
+    replacement = await service.synthesize(
+        _synthesize_request(
+            request_id="request-replacement",
+            operation_id="operation-replacement",
+            generation=1,
+            unit_id="replacement-unit",
+        ),
+        CONTEXT,
+    )
+    stale_continuation = await service.synthesize(
+        _synthesize_request(
+            request_id="request-stale-continuation",
+            operation_id="operation-stale-continuation",
+            response_id="response-0",
+            generation=0,
+            unit_id="late-unit",
+        ),
+        CONTEXT,
+    )
+
+    assert first["ok"] is True
+    assert (
+        over_capacity["error"]["reason"] == "SYNTHESIS_UNIT_IDENTITY_CAPACITY_EXHAUSTED"
+    )
+    assert replacement["ok"] is True
+    assert stale_continuation["error"]["reason"] == "STALE_SYNTHESIS_RESPONSE"
+    assert provider.synthesize_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_synthesis_continuation_keeps_response_and_generation_lru_aligned() -> (
+    None
+):
+    provider = ControlledProvider()
+    service = _service(provider, max_identity_tombstones=2)
+
+    async def synthesize(
+        *, interaction_id: str, response_id: str, unit_id: str, operation: str
+    ) -> dict[str, object]:
+        return await service.synthesize(
+            _synthesize_request(
+                request_id=f"request-{operation}",
+                operation_id=f"operation-{operation}",
+                interaction_id=interaction_id,
+                response_id=response_id,
+                unit_id=unit_id,
+            ),
+            CONTEXT,
+        )
+
+    assert (
+        await synthesize(
+            interaction_id="interaction-a",
+            response_id="response-a",
+            unit_id="unit-a0",
+            operation="a0",
+        )
+    )["ok"] is True
+    assert (
+        await synthesize(
+            interaction_id="interaction-b",
+            response_id="response-b",
+            unit_id="unit-b0",
+            operation="b0",
+        )
+    )["ok"] is True
+    assert (
+        await synthesize(
+            interaction_id="interaction-a",
+            response_id="response-a",
+            unit_id="unit-a1",
+            operation="a1",
+        )
+    )["ok"] is True
+    assert (
+        await synthesize(
+            interaction_id="interaction-c",
+            response_id="response-c",
+            unit_id="unit-c0",
+            operation="c0",
+        )
+    )["ok"] is True
+    continued = await synthesize(
+        interaction_id="interaction-a",
+        response_id="response-a",
+        unit_id="unit-a2",
+        operation="a2",
+    )
+
+    assert continued["ok"] is True
+    assert provider.synthesize_calls == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unit_id",
+    ["u" * 257, "𐍈" * 256],
+    ids=["character-limit", "utf8-byte-limit"],
+)
+async def test_synthesis_rejects_unbounded_unit_identity_before_provider(
+    unit_id: str,
+) -> None:
+    provider = ControlledProvider()
+    service = _service(provider)
+
+    result = await service.synthesize(
+        _synthesize_request(unit_id=unit_id),
+        CONTEXT,
+    )
+
+    assert result["error"]["reason"] == "SYNTHESIS_UNIT_ID_LIMIT_EXCEEDED"
+    assert provider.synthesize_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unit_id",
+    ["u" * 256, "𐍈" * 128],
+    ids=["exact-character-limit", "exact-utf8-byte-limit"],
+)
+async def test_synthesis_accepts_exact_unit_identity_limits(unit_id: str) -> None:
+    provider = ControlledProvider()
+    service = _service(provider)
+
+    result = await service.synthesize(
+        _synthesize_request(unit_id=unit_id),
+        CONTEXT,
+    )
+
+    assert result["ok"] is True
+    assert provider.synthesize_calls == 1
 
 
 def _cancel_request(target: str) -> dict[str, object]:
@@ -563,7 +813,9 @@ async def test_critical_voice_receipt_requires_confirmation_and_expires() -> Non
 
 
 @pytest.mark.asyncio
-async def test_trusted_demo_receipt_bypasses_critical_confirmation_without_forging_it() -> None:
+async def test_trusted_demo_receipt_bypasses_critical_confirmation_without_forging_it() -> (
+    None
+):
     service = FormalBatchSpeechService(
         CriticalTextProvider(),
         authorization_resolver=ExactAuthorizationResolver(),

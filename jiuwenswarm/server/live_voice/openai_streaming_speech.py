@@ -85,6 +85,8 @@ MAX_SSE_EVENT_BYTES = 1_048_576
 MAX_STREAM_AUDIO_BYTES = 8 * 1024 * 1024
 MAX_PROVIDER_AUDIO_DELTA_BYTES = 96_000
 MAX_EVENT_QUEUE = 64
+MAX_SYNTHESIS_PAUSE_SECONDS = 60.0
+MAX_SYNTHESIS_PARKED_PAUSE_SECONDS = 185.0
 # How long a full event queue may hold the Provider reader before the stream is
 # declared exhausted. Every other link in the pipeline already waits under a
 # bound; this one refused instantly, so a consumer draining at real playout speed
@@ -113,6 +115,23 @@ MAX_INCOMPLETE_TRANSPORT_CLEANUPS = 32
 
 _PROVIDER = ProviderRef("openai-streaming-speech", "formal")
 _LOGGER = logging.getLogger(__name__)
+_SAFE_SYNTHESIS_PROVIDER_SUBREASONS = frozenset(
+    {
+        "SPEECH_PROVIDER_REQUEST_REJECTED",
+        "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE",
+        "SPEECH_PROVIDER_UNSUPPORTED_CONTENT_ENCODING",
+        "SPEECH_PROVIDER_INVALID_CONTENT_TYPE",
+        "SPEECH_PROVIDER_SSE_LINE_LIMIT",
+        "SPEECH_PROVIDER_SSE_EVENT_LIMIT",
+        "SPEECH_PROVIDER_INVALID_AUDIO",
+        "SPEECH_PROVIDER_AUDIO_LIMIT",
+        "SPEECH_PROVIDER_UNKNOWN_SSE_EVENT",
+        "SPEECH_PROVIDER_SYNTHESIS_FAILED",
+        "SPEECH_PROVIDER_TTS_INCOMPLETE",
+        "SPEECH_PROVIDER_PAUSE_TIMEOUT",
+        "SPEECH_EVENT_QUEUE_EXHAUSTED",
+    }
+)
 _QueueValue = TypeVar("_QueueValue")
 
 
@@ -667,6 +686,46 @@ class _RecognitionSession:
         return self.request.ref
 
 
+class _SynthesisPauseMode(StrEnum):
+    ORDINARY = "ordinary"
+    PARKED = "parked"
+
+
+class _SynthesisReaderState(StrEnum):
+    RUNNING = "running"
+    EXITED = "exited"
+
+
+class _SynthesisProviderState(StrEnum):
+    ACTIVE = "active"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class _SynthesisOutcomeState(StrEnum):
+    ACTIVE = "active"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True, slots=True)
+class _SynthesisLifecycleSnapshot:
+    reader_state: _SynthesisReaderState
+    provider_state: _SynthesisProviderState
+    outcome_state: _SynthesisOutcomeState
+    pause_requested: bool
+    pause_acknowledged: bool
+    resume_signal_set: bool
+    resume_acknowledged: bool
+    pause_mode: _SynthesisPauseMode | None
+    park_generation: int | None
+    terminal_event_pending: bool
+    closing: bool
+    terminal: bool
+
+
 @dataclass(slots=True)
 class _SynthesisSession:
     request: SynthesisStreamRequest = field(repr=False)
@@ -677,6 +736,30 @@ class _SynthesisSession:
     event_seq: int = 0
     audio_cursor: int = 0
     wire_audio_bytes: int = 0
+    resume_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    pause_requested: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    pause_acknowledged: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    resume_acknowledged: asyncio.Event = field(
+        default_factory=asyncio.Event, repr=False
+    )
+    pause_mode_changed: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    park_handoff_requested: asyncio.Event = field(
+        default_factory=asyncio.Event, repr=False
+    )
+    promotion_requested: asyncio.Event = field(
+        default_factory=asyncio.Event, repr=False
+    )
+    control_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    pause_mode: _SynthesisPauseMode | None = None
+    park_generation: int | None = None
+    pause_deadline: float | None = None
+    pause_failed: bool = False
+    resume_failed: bool = False
+    conformance_pause_active: bool = False
+    terminal_event_pending: bool = False
+    reader_state: _SynthesisReaderState = _SynthesisReaderState.RUNNING
+    provider_state: _SynthesisProviderState = _SynthesisProviderState.ACTIVE
+    outcome_state: _SynthesisOutcomeState = _SynthesisOutcomeState.ACTIVE
     closing: bool = False
     terminal: bool = False
 
@@ -833,6 +916,7 @@ class OpenAIStreamingSpeechProvider:
         fallback_tier: SpeechRouteTier = SpeechRouteTier.TEXT,
         monotonic: Callable[[], float] = time.monotonic,
         event_queue_wait_seconds: float = EVENT_QUEUE_WAIT_SECONDS,
+        synthesis_pause_timeout_seconds: float = MAX_SYNTHESIS_PAUSE_SECONDS,
     ) -> None:
         if not isinstance(config, OpenAIStreamingSpeechConfig):
             raise TypeError("config must be OpenAIStreamingSpeechConfig")
@@ -843,7 +927,15 @@ class OpenAIStreamingSpeechProvider:
             raise ValueError(
                 "event_queue_wait_seconds must be a bounded positive float"
             )
+        if (
+            type(synthesis_pause_timeout_seconds) is not float
+            or not 0.0 < synthesis_pause_timeout_seconds <= MAX_SYNTHESIS_PAUSE_SECONDS
+        ):
+            raise ValueError(
+                "synthesis_pause_timeout_seconds must be a bounded positive float"
+            )
         self._event_queue_wait_seconds = event_queue_wait_seconds
+        self._synthesis_pause_timeout_seconds = synthesis_pause_timeout_seconds
         self._config = config
         self._socket_factory = socket_factory or _default_socket_factory
         self._sse_factory = sse_factory or _default_sse_factory
@@ -874,6 +966,8 @@ class OpenAIStreamingSpeechProvider:
                 exact_audio_cursor=CapabilityProvenance.ADAPTER_DERIVED,
                 provider_cancel_ack=CapabilityProvenance.UNAVAILABLE,
                 chunk_text_spans=CapabilityProvenance.UNAVAILABLE,
+                bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+                parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
             ),
         )
         self._conformance = StreamingSpeechConformance(
@@ -1192,6 +1286,7 @@ class OpenAIStreamingSpeechProvider:
                     OPENAI_PCM_RATE_HZ, request.sample_rate_hz
                 ),
             )
+            session.resume_event.set()
             async with self._lock:
                 if self._closed or key in self._synthesis:
                     raise OpenAIStreamingSpeechError(
@@ -1227,18 +1322,361 @@ class OpenAIStreamingSpeechProvider:
             await self._retire_synthesis(session)
         return event
 
+    async def pause_synthesis(self, ref: SynthesisStreamRef) -> None:
+        session = self._require_synthesis(ref)
+        async with session.control_lock:
+            if session.closing:
+                raise OpenAIStreamingSpeechError(
+                    "SYNTHESIS_STREAM_NOT_ACTIVE",
+                    "synthesis stream cannot be paused after terminalization",
+                )
+            if self._synthesis_reader_is_terminal(session):
+                self._require_successful_synthesis_terminal_control(session)
+                # Provider terminal truth may precede bounded queue admission
+                # and downstream draining. No live reader remains to pause.
+                _LOGGER.info(
+                    "live_voice_synthesis_backpressure stage=pause_terminal_noop "
+                    "stream_generation=%s",
+                    ref.stream_generation,
+                )
+                return
+            if not session.pause_requested.is_set():
+                self._start_synthesis_pause(
+                    session,
+                    mode=_SynthesisPauseMode.ORDINARY,
+                    deadline=(
+                        self._monotonic() + self._synthesis_pause_timeout_seconds
+                    ),
+                    park_generation=None,
+                )
+                _LOGGER.info(
+                    "live_voice_synthesis_backpressure stage=pause_requested "
+                    "stream_generation=%s",
+                    ref.stream_generation,
+                )
+            remaining = self._remaining_synthesis_pause(session)
+        try:
+            await asyncio.wait_for(
+                session.pause_acknowledged.wait(),
+                timeout=remaining,
+            )
+        except TimeoutError as exc:
+            raise self._synthesis_pause_timeout() from exc
+        if session.pause_failed:
+            _LOGGER.warning(
+                "live_voice_synthesis_backpressure "
+                "stage=pause_terminal_wakeup stream_generation=%s",
+                ref.stream_generation,
+            )
+            raise OpenAIStreamingSpeechError(
+                "SYNTHESIS_PAUSE_NOT_ACKNOWLEDGED",
+                "synthesis stream terminated before acknowledging pause",
+            )
+        _LOGGER.info(
+            "live_voice_synthesis_backpressure stage=pause_acknowledged "
+            "stream_generation=%s",
+            ref.stream_generation,
+        )
+
+    async def park_synthesis_for_promotion(
+        self,
+        ref: SynthesisStreamRef,
+        *,
+        park_generation: int,
+        max_pause_seconds: float,
+    ) -> None:
+        if type(park_generation) is not int or park_generation < 0:
+            raise OpenAIStreamingSpeechError(
+                "SYNTHESIS_PARK_GENERATION_INVALID",
+                "park generation must be a non-negative integer",
+            )
+        if (
+            type(max_pause_seconds) is not float
+            or not 0 < max_pause_seconds <= MAX_SYNTHESIS_PARKED_PAUSE_SECONDS
+        ):
+            raise OpenAIStreamingSpeechError(
+                "SYNTHESIS_PARK_TIMEOUT_INVALID",
+                "parked synthesis pause must have a bounded positive lifetime",
+            )
+        session = self._require_synthesis(ref)
+        _LOGGER.info(
+            "live_voice_synthesis_park_trace stage=adapter_park_requested "
+            "stream_generation=%s unit_seq=%s park_generation=%s "
+            "pause_requested=%s pause_mode=%s reader_state=%s provider_state=%s",
+            ref.stream_generation,
+            ref.unit_seq,
+            park_generation,
+            session.pause_requested.is_set(),
+            None if session.pause_mode is None else session.pause_mode.value,
+            session.reader_state.value,
+            session.provider_state.value,
+        )
+        # Publish intent before contending with a resume commit.  The SSE
+        # reader checks this event under control_lock, so PARK linearized here
+        # cannot leak one additional Provider read.
+        session.park_handoff_requested.set()
+        try:
+            async with session.control_lock:
+                if session.closing:
+                    raise OpenAIStreamingSpeechError(
+                        "SYNTHESIS_STREAM_NOT_ACTIVE",
+                        "synthesis stream cannot be parked after terminalization",
+                    )
+                if self._synthesis_reader_is_terminal(session):
+                    self._require_successful_synthesis_terminal_control(session)
+                    if session.park_generation not in {None, park_generation}:
+                        raise OpenAIStreamingSpeechError(
+                            "SYNTHESIS_PARK_GENERATION_MISMATCH",
+                            "park generation does not match terminal synthesis",
+                        )
+                    session.park_generation = park_generation
+                    _LOGGER.info(
+                        "live_voice_synthesis_park_trace "
+                        "stage=adapter_park_terminal_noop stream_generation=%s "
+                        "unit_seq=%s park_generation=%s",
+                        ref.stream_generation,
+                        ref.unit_seq,
+                        park_generation,
+                    )
+                    return
+                if session.pause_mode is _SynthesisPauseMode.PARKED:
+                    if session.park_generation != park_generation:
+                        raise OpenAIStreamingSpeechError(
+                            "SYNTHESIS_PARK_GENERATION_MISMATCH",
+                            "park generation does not match the active parked pause",
+                        )
+                elif session.pause_requested.is_set():
+                    # Transfer the existing conformance pause in place.  No
+                    # resume is issued and the superseded ordinary deadline
+                    # cannot fire, including a resume already in flight.
+                    session.resume_event.clear()
+                    session.pause_mode = _SynthesisPauseMode.PARKED
+                    session.park_generation = park_generation
+                    session.pause_deadline = self._monotonic() + max_pause_seconds
+                    session.pause_mode_changed.set()
+                    _LOGGER.info(
+                        "live_voice_synthesis_park_trace "
+                        "stage=adapter_ordinary_pause_adopted stream_generation=%s "
+                        "unit_seq=%s park_generation=%s",
+                        ref.stream_generation,
+                        ref.unit_seq,
+                        park_generation,
+                    )
+                else:
+                    self._start_synthesis_pause(
+                        session,
+                        mode=_SynthesisPauseMode.PARKED,
+                        deadline=self._monotonic() + max_pause_seconds,
+                        park_generation=park_generation,
+                    )
+        finally:
+            session.park_handoff_requested.clear()
+        try:
+            await asyncio.wait_for(
+                session.pause_acknowledged.wait(),
+                timeout=self._remaining_synthesis_pause(session),
+            )
+        except TimeoutError as exc:
+            raise self._synthesis_pause_timeout() from exc
+        if session.pause_failed:
+            raise OpenAIStreamingSpeechError(
+                "SYNTHESIS_PAUSE_NOT_ACKNOWLEDGED",
+                "synthesis stream terminated before acknowledging parked pause",
+            )
+        _LOGGER.info(
+            "live_voice_synthesis_park_trace stage=adapter_park_acknowledged "
+            "stream_generation=%s unit_seq=%s park_generation=%s",
+            ref.stream_generation,
+            ref.unit_seq,
+            park_generation,
+        )
+
+    async def promote_parked_synthesis(
+        self,
+        ref: SynthesisStreamRef,
+        *,
+        park_generation: int,
+    ) -> None:
+        session = self._require_synthesis(ref)
+        _LOGGER.info(
+            "live_voice_synthesis_park_trace stage=adapter_promotion_requested "
+            "stream_generation=%s unit_seq=%s park_generation=%s "
+            "pause_mode=%s reader_state=%s provider_state=%s",
+            ref.stream_generation,
+            ref.unit_seq,
+            park_generation,
+            None if session.pause_mode is None else session.pause_mode.value,
+            session.reader_state.value,
+            session.provider_state.value,
+        )
+        async with session.control_lock:
+            if session.closing:
+                raise OpenAIStreamingSpeechError(
+                    "SYNTHESIS_STREAM_NOT_ACTIVE",
+                    "synthesis stream cannot be promoted after terminalization",
+                )
+            if self._synthesis_reader_is_terminal(session):
+                self._require_successful_synthesis_terminal_control(session)
+                if session.park_generation != park_generation:
+                    raise OpenAIStreamingSpeechError(
+                        "SYNTHESIS_PARK_GENERATION_MISMATCH",
+                        "promotion does not match terminal synthesis",
+                    )
+                session.park_generation = None
+                _LOGGER.info(
+                    "live_voice_synthesis_park_trace "
+                    "stage=adapter_promotion_terminal_noop stream_generation=%s "
+                    "unit_seq=%s park_generation=%s",
+                    ref.stream_generation,
+                    ref.unit_seq,
+                    park_generation,
+                )
+                return
+            if (
+                session.pause_mode is not _SynthesisPauseMode.PARKED
+                or session.park_generation != park_generation
+            ):
+                raise OpenAIStreamingSpeechError(
+                    "SYNTHESIS_PARK_GENERATION_MISMATCH",
+                    "promotion does not match the active parked pause",
+                )
+            remaining = self._remaining_synthesis_pause(session)
+            session.promotion_requested.set()
+            session.resume_event.set()
+            _LOGGER.info(
+                "live_voice_synthesis_park_trace "
+                "stage=adapter_promotion_resume_requested stream_generation=%s "
+                "unit_seq=%s park_generation=%s",
+                ref.stream_generation,
+                ref.unit_seq,
+                park_generation,
+            )
+        try:
+            await asyncio.wait_for(
+                session.resume_acknowledged.wait(), timeout=remaining
+            )
+        except TimeoutError as exc:
+            raise self._synthesis_pause_timeout() from exc
+        if session.resume_failed or session.closing:
+            raise OpenAIStreamingSpeechError(
+                "SYNTHESIS_RESUME_NOT_ACKNOWLEDGED",
+                "synthesis stream terminated before acknowledging promotion",
+            )
+        _LOGGER.info(
+            "live_voice_synthesis_park_trace "
+            "stage=adapter_promotion_resume_acknowledged stream_generation=%s "
+            "unit_seq=%s park_generation=%s",
+            ref.stream_generation,
+            ref.unit_seq,
+            park_generation,
+        )
+
+    @staticmethod
+    def _start_synthesis_pause(
+        session: _SynthesisSession,
+        *,
+        mode: _SynthesisPauseMode,
+        deadline: float,
+        park_generation: int | None,
+    ) -> None:
+        session.resume_event.clear()
+        session.pause_acknowledged.clear()
+        session.resume_acknowledged.clear()
+        session.pause_mode_changed.clear()
+        session.promotion_requested.clear()
+        session.pause_failed = False
+        session.resume_failed = False
+        session.pause_mode = mode
+        session.park_generation = park_generation
+        session.pause_deadline = deadline
+        session.pause_requested.set()
+
+    async def resume_synthesis(self, ref: SynthesisStreamRef) -> None:
+        session = self._require_synthesis(ref)
+        # Publish the handoff before contending with PARK's control-lock
+        # commit. The sole reader also rechecks terminal/PARK truth under that
+        # lock before honoring this event.
+        park_handoff_pending = session.park_handoff_requested.is_set()
+        session.resume_event.set()
+        async with session.control_lock:
+            if session.closing:
+                session.resume_event.clear()
+                raise OpenAIStreamingSpeechError(
+                    "SYNTHESIS_STREAM_NOT_ACTIVE",
+                    "synthesis stream cannot resume after terminalization",
+                )
+            if self._synthesis_reader_is_terminal(session):
+                session.resume_event.clear()
+                self._require_successful_synthesis_terminal_control(session)
+                _LOGGER.info(
+                    "live_voice_synthesis_backpressure stage=resume_terminal_noop "
+                    "stream_generation=%s",
+                    ref.stream_generation,
+                )
+                return
+            if not session.pause_requested.is_set():
+                session.resume_event.clear()
+                _LOGGER.info(
+                    "live_voice_synthesis_backpressure stage=resume_idle_noop "
+                    "stream_generation=%s",
+                    ref.stream_generation,
+                )
+                return
+            if (
+                session.pause_mode is _SynthesisPauseMode.PARKED
+                and not park_handoff_pending
+            ):
+                session.resume_event.clear()
+                raise OpenAIStreamingSpeechError(
+                    "SYNTHESIS_PARK_PROMOTION_REQUIRED",
+                    "parked synthesis requires exact promotion",
+                )
+            remaining = self._remaining_synthesis_pause(session)
+            _LOGGER.info(
+                "live_voice_synthesis_backpressure stage=resume_requested "
+                "stream_generation=%s",
+                ref.stream_generation,
+            )
+        try:
+            await asyncio.wait_for(
+                session.resume_acknowledged.wait(), timeout=remaining
+            )
+        except TimeoutError as exc:
+            raise self._synthesis_pause_timeout() from exc
+        if session.resume_failed or session.closing:
+            _LOGGER.warning(
+                "live_voice_synthesis_backpressure "
+                "stage=resume_terminal_wakeup stream_generation=%s",
+                ref.stream_generation,
+            )
+            raise OpenAIStreamingSpeechError(
+                "SYNTHESIS_RESUME_NOT_ACKNOWLEDGED",
+                "synthesis stream terminated before acknowledging resume",
+            )
+        _LOGGER.info(
+            "live_voice_synthesis_backpressure stage=resume_acknowledged "
+            "stream_generation=%s",
+            ref.stream_generation,
+        )
+
     async def cancel_synthesis(
         self, ref: SynthesisStreamRef, *, reason: str = "caller_cancel"
     ) -> None:
         session = self._require_synthesis(ref)
-        self._conformance.request_synthesis_cancel(ref, reason=reason)
+        if not session.terminal_event_pending:
+            self._conformance.request_synthesis_cancel(ref, reason=reason)
         session.closing = True
+        session.resume_event.set()
         if session.stream is not None:
             await self._close_stream(session.stream)
         if session.task is not None:
             await self._transport_cleanup_tasks.cancel_task(
                 session.task, kind="synthesis-worker"
             )
+        await self._settle_synthesis_reader_terminal(
+            session,
+            provider_state=_SynthesisProviderState.CANCELLED,
+        )
         self._conformance.provider_closed_synthesis(ref)
         session.terminal = True
         await self._retire_synthesis(session)
@@ -1647,9 +2085,22 @@ class OpenAIStreamingSpeechProvider:
             if session.stream is not None:
                 await self._close_stream(session.stream)
             await self._publish_synthesis(session, SynthesisEventKind.COMPLETED)
+            await self._settle_synthesis_outcome(
+                session,
+                outcome_state=_SynthesisOutcomeState.SUCCEEDED,
+            )
             session.terminal = True
         except BaseException as exc:
             failure = _safe_boundary_exception(exc)
+        if failure is not None:
+            await self._settle_synthesis_reader_terminal(
+                session,
+                provider_state=(
+                    _SynthesisProviderState.CANCELLED
+                    if isinstance(failure, asyncio.CancelledError) or session.closing
+                    else _SynthesisProviderState.FAILED
+                ),
+            )
         tail = None
         if isinstance(failure, asyncio.CancelledError):
             if session.stream is not None:
@@ -1670,6 +2121,13 @@ class OpenAIStreamingSpeechProvider:
             self._conformance.provider_closed_synthesis(session.request.ref)
             session.terminal = True
             await self._retire_synthesis(session)
+            _LOGGER.warning(
+                "live_voice_streaming_synthesis_provider_failure "
+                "operation=synthesis.stream provider_subreason=%s "
+                "stream_generation=%s visible=true",
+                _safe_synthesis_provider_subreason(failure),
+                session.request.ref.stream_generation,
+            )
             await self._emit_failure(
                 operation="synthesis.stream",
                 reason=_reason_for_exception(failure),
@@ -1729,18 +2187,243 @@ class OpenAIStreamingSpeechProvider:
             )
         iterator = session.stream.__aiter__()
         while True:
-            async with asyncio.timeout(session.request.event_timeout_seconds):
-                event = await self._read_synthesis_sse_event(session, iterator)
-            if event is None:
+            await self._await_synthesis_resume(session)
+            try:
+                async with asyncio.timeout(session.request.event_timeout_seconds):
+                    data = await self._read_synthesis_sse_event(session, iterator)
+            except TimeoutError:
+                _LOGGER.warning(
+                    "live_voice_synthesis_sse_timeout "
+                    "phase=network_event_wait stream_generation=%s unit_seq=%s "
+                    "event_queue_size=%s event_queue_capacity=%s "
+                    "pause_requested=%s",
+                    session.request.ref.stream_generation,
+                    session.request.ref.unit_seq,
+                    session.events.qsize(),
+                    session.events.maxsize,
+                    session.pause_requested.is_set(),
+                )
+                raise
+            if data is None:
                 return False
-            if event:
+            # Decoding and publishing an event may legitimately wait on the
+            # bounded Adapter/Gateway backpressure chain. It already has its
+            # own queue and pause deadlines and must not consume the Provider
+            # network-silence budget after the bytes arrived.
+            if await self._consume_sse_event(session, data):
                 return True
+
+    async def _await_synthesis_resume(self, session: _SynthesisSession) -> None:
+        if not session.pause_requested.is_set():
+            return
+        self._acknowledge_synthesis_pause(session)
+        await self._settle_synthesis_resume(session)
+
+    def _acknowledge_synthesis_pause(self, session: _SynthesisSession) -> None:
+        if session.terminal_event_pending:
+            session.conformance_pause_active = False
+        else:
+            self._conformance.pause_synthesis_events(session.request.ref)
+            session.conformance_pause_active = True
+        session.pause_acknowledged.set()
+
+    async def _settle_synthesis_resume(
+        self,
+        session: _SynthesisSession,
+        *,
+        deadline_cap: float | None = None,
+    ) -> None:
+        resumed = False
+        try:
+            while True:
+                async with session.control_lock:
+                    if self._synthesis_reader_is_terminal(session):
+                        resumed = (
+                            session.provider_state is _SynthesisProviderState.DONE
+                            and session.outcome_state
+                            not in {
+                                _SynthesisOutcomeState.FAILED,
+                                _SynthesisOutcomeState.CANCELLED,
+                            }
+                            and not session.closing
+                        )
+                        break
+                    remaining = self._remaining_synthesis_pause(session)
+                    if (
+                        deadline_cap is not None
+                        and session.pause_mode is _SynthesisPauseMode.ORDINARY
+                    ):
+                        remaining = min(remaining, deadline_cap - self._monotonic())
+                        if remaining <= 0:
+                            raise self._synthesis_pause_timeout()
+                    session.pause_mode_changed.clear()
+                resume_waiter = asyncio.create_task(session.resume_event.wait())
+                mode_waiter = asyncio.create_task(session.pause_mode_changed.wait())
+                done, pending = await asyncio.wait(
+                    {resume_waiter, mode_waiter},
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for waiter in pending:
+                    waiter.cancel()
+                if not done:
+                    raise self._synthesis_pause_timeout()
+                if resume_waiter in done and session.resume_event.is_set():
+                    async with session.control_lock:
+                        if (
+                            session.park_handoff_requested.is_set()
+                            or not session.resume_event.is_set()
+                            or (
+                                session.pause_mode is _SynthesisPauseMode.PARKED
+                                and not session.promotion_requested.is_set()
+                            )
+                        ):
+                            session.resume_event.clear()
+                            continue
+                    break
+            if not session.closing and not self._synthesis_reader_is_terminal(session):
+                if session.conformance_pause_active:
+                    self._conformance.resume_synthesis_events(session.request.ref)
+                    session.conformance_pause_active = False
+                resumed = True
+        except TimeoutError as exc:
+            raise self._synthesis_pause_timeout() from exc
+        finally:
+            session.resume_failed = not resumed
+            session.pause_requested.clear()
+            session.pause_acknowledged.clear()
+            session.pause_deadline = None
+            session.pause_mode = None
+            session.park_generation = None
+            session.pause_mode_changed.clear()
+            session.park_handoff_requested.clear()
+            session.promotion_requested.clear()
+            session.pause_failed = False
+            session.resume_acknowledged.set()
+
+    @staticmethod
+    def _synthesis_reader_is_terminal(session: _SynthesisSession) -> bool:
+        return (
+            session.reader_state is _SynthesisReaderState.EXITED
+            or session.provider_state is not _SynthesisProviderState.ACTIVE
+            or session.terminal
+            or session.terminal_event_pending
+        )
+
+    @staticmethod
+    def _require_successful_synthesis_terminal_control(
+        session: _SynthesisSession,
+    ) -> None:
+        if (
+            session.provider_state is _SynthesisProviderState.DONE
+            and session.outcome_state
+            not in {_SynthesisOutcomeState.FAILED, _SynthesisOutcomeState.CANCELLED}
+            and not session.closing
+        ):
+            return
+        raise OpenAIStreamingSpeechError(
+            "SYNTHESIS_STREAM_NOT_ACTIVE",
+            "synthesis control cannot succeed after unsuccessful terminalization",
+        )
+
+    async def _settle_synthesis_reader_terminal(
+        self,
+        session: _SynthesisSession,
+        *,
+        provider_state: _SynthesisProviderState,
+    ) -> None:
+        """Make Provider terminal truth dominate reader-owned flow control."""
+
+        async with session.control_lock:
+            pause_was_pending = session.pause_requested.is_set()
+            session.reader_state = _SynthesisReaderState.EXITED
+            if provider_state is _SynthesisProviderState.CANCELLED:
+                # Accepted cancellation dominates a previously observed DONE
+                # while buffered terminal output is still draining.
+                session.provider_state = provider_state
+            elif session.provider_state is _SynthesisProviderState.ACTIVE:
+                session.provider_state = provider_state
+            if provider_state is _SynthesisProviderState.CANCELLED:
+                session.outcome_state = _SynthesisOutcomeState.CANCELLED
+            elif provider_state is _SynthesisProviderState.FAILED:
+                session.outcome_state = _SynthesisOutcomeState.FAILED
+            failed = session.outcome_state in {
+                _SynthesisOutcomeState.FAILED,
+                _SynthesisOutcomeState.CANCELLED,
+            }
+            session.pause_failed = failed
+            session.resume_failed = failed
+            session.pause_requested.clear()
+            session.pause_acknowledged.set()
+            session.resume_event.set()
+            session.resume_acknowledged.set()
+            session.pause_deadline = None
+            session.pause_mode = None
+            session.pause_mode_changed.set()
+            session.park_handoff_requested.clear()
+            session.promotion_requested.clear()
+            _LOGGER.info(
+                "live_voice_synthesis_backpressure "
+                "stage=reader_terminal_settled stream_generation=%s "
+                "provider_state=%s pause_was_pending=%s",
+                session.request.ref.stream_generation,
+                session.provider_state.value,
+                pause_was_pending,
+            )
+
+    @staticmethod
+    async def _settle_synthesis_outcome(
+        session: _SynthesisSession,
+        *,
+        outcome_state: _SynthesisOutcomeState,
+    ) -> None:
+        async with session.control_lock:
+            if session.outcome_state is _SynthesisOutcomeState.ACTIVE:
+                session.outcome_state = outcome_state
+
+    @staticmethod
+    def _synthesis_lifecycle_snapshot(
+        session: _SynthesisSession,
+    ) -> _SynthesisLifecycleSnapshot:
+        return _SynthesisLifecycleSnapshot(
+            reader_state=session.reader_state,
+            provider_state=session.provider_state,
+            outcome_state=session.outcome_state,
+            pause_requested=session.pause_requested.is_set(),
+            pause_acknowledged=session.pause_acknowledged.is_set(),
+            resume_signal_set=session.resume_event.is_set(),
+            resume_acknowledged=session.resume_acknowledged.is_set(),
+            pause_mode=session.pause_mode,
+            park_generation=session.park_generation,
+            terminal_event_pending=session.terminal_event_pending,
+            closing=session.closing,
+            terminal=session.terminal,
+        )
+
+    def _remaining_synthesis_pause(self, session: _SynthesisSession) -> float:
+        deadline = session.pause_deadline
+        if deadline is None:
+            raise OpenAIStreamingSpeechError(
+                "SPEECH_PROVIDER_PAUSE_STATE_INVALID",
+                "speech Provider pause has no bounded deadline",
+            )
+        remaining = deadline - self._monotonic()
+        if remaining <= 0:
+            raise self._synthesis_pause_timeout()
+        return remaining
+
+    @staticmethod
+    def _synthesis_pause_timeout() -> OpenAIStreamingSpeechError:
+        return OpenAIStreamingSpeechError(
+            "SPEECH_PROVIDER_PAUSE_TIMEOUT",
+            "speech Provider pause exceeded its bounded lifetime",
+        )
 
     async def _read_synthesis_sse_event(
         self,
         session: _SynthesisSession,
         iterator: AsyncIterator[str],
-    ) -> bool | None:
+    ) -> str | None:
         """Read one complete SSE event without letting comments renew its budget."""
 
         data_lines: list[str] = []
@@ -1750,7 +2433,7 @@ class OpenAIStreamingSpeechProvider:
                 line = await anext(iterator)
             except StopAsyncIteration:
                 if data_lines:
-                    return await self._consume_sse_event(session, "\n".join(data_lines))
+                    return "\n".join(data_lines)
                 return None
             if session.closing:
                 return None
@@ -1761,7 +2444,7 @@ class OpenAIStreamingSpeechProvider:
                 )
             if line == "":
                 if data_lines:
-                    return await self._consume_sse_event(session, "\n".join(data_lines))
+                    return "\n".join(data_lines)
                 continue
             if line.startswith(":"):
                 continue
@@ -1803,6 +2486,18 @@ class OpenAIStreamingSpeechProvider:
                     "speech Provider audio is invalid or exceeds the limit",
                 )
             output = _encode_s16le(session.resampler.feed(_decode_s16le(pcm)))
+            _LOGGER.debug(
+                "live_voice_synthesis_sse_progress stage=audio_delta_received "
+                "stream_generation=%s unit_seq=%s provider_event_seq=%s delta_bytes=%s "
+                "output_samples=%s event_queue_size=%s event_queue_capacity=%s",
+                session.request.ref.stream_generation,
+                session.request.ref.unit_seq,
+                session.event_seq,
+                len(pcm),
+                len(output) // 2,
+                session.events.qsize(),
+                session.events.maxsize,
+            )
             frame_bytes = MAX_AUDIO_SAMPLES_PER_FRAME * 2
             for offset in range(0, len(output), frame_bytes):
                 await self._publish_synthesis(
@@ -1810,8 +2505,34 @@ class OpenAIStreamingSpeechProvider:
                     SynthesisEventKind.CHUNK,
                     pcm=output[offset : offset + frame_bytes],
                 )
+            _LOGGER.debug(
+                "live_voice_synthesis_sse_progress stage=audio_delta_published "
+                "stream_generation=%s unit_seq=%s next_provider_event_seq=%s "
+                "wire_audio_bytes=%s event_queue_size=%s event_queue_capacity=%s",
+                session.request.ref.stream_generation,
+                session.request.ref.unit_seq,
+                session.event_seq,
+                session.wire_audio_bytes,
+                session.events.qsize(),
+                session.events.maxsize,
+            )
             return False
         if kind == "speech.audio.done":
+            _LOGGER.info(
+                "live_voice_synthesis_sse_progress stage=audio_done_received "
+                "stream_generation=%s unit_seq=%s next_provider_event_seq=%s "
+                "wire_audio_bytes=%s event_queue_size=%s event_queue_capacity=%s",
+                session.request.ref.stream_generation,
+                session.request.ref.unit_seq,
+                session.event_seq,
+                session.wire_audio_bytes,
+                session.events.qsize(),
+                session.events.maxsize,
+            )
+            await self._settle_synthesis_reader_terminal(
+                session,
+                provider_state=_SynthesisProviderState.DONE,
+            )
             return True
         if kind == "error":
             raise OpenAIStreamingSpeechError(
@@ -1851,12 +2572,28 @@ class OpenAIStreamingSpeechProvider:
             if session.closing:
                 return
             raise
+        if accepted.kind in {
+            SynthesisEventKind.COMPLETED,
+            SynthesisEventKind.CANCELLED,
+        }:
+            # Conformance terminalizes before this event enters the bounded
+            # Adapter queue. Retain that internal lifecycle fact so a late
+            # downstream pause cannot try to pause an already-terminal owner.
+            session.terminal_event_pending = True
         session.event_seq += 1
         session.audio_cursor += sample_count
-        await self._put_bounded(session.events, accepted)
+        await self._put_bounded(
+            session.events,
+            accepted,
+            synthesis_session=session,
+        )
 
     async def _put_bounded(
-        self, queue: asyncio.Queue[_QueueValue], value: _QueueValue
+        self,
+        queue: asyncio.Queue[_QueueValue],
+        value: _QueueValue,
+        *,
+        synthesis_session: _SynthesisSession | None = None,
     ) -> None:
         """Hold the Provider reader on a full queue instead of killing the stream.
 
@@ -1873,15 +2610,91 @@ class OpenAIStreamingSpeechProvider:
             return
         except asyncio.QueueFull:
             pass
+        put_task = asyncio.create_task(queue.put(value))
+        pause_task = (
+            asyncio.create_task(synthesis_session.pause_requested.wait())
+            if synthesis_session is not None
+            else None
+        )
         try:
-            await asyncio.wait_for(
-                queue.put(value), timeout=self._event_queue_wait_seconds
+            waiters = {put_task}
+            if pause_task is not None:
+                waiters.add(pause_task)
+            done, _ = await asyncio.wait(
+                waiters,
+                timeout=self._event_queue_wait_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if put_task in done:
+                await put_task
+                return
+            if synthesis_session is not None and (
+                (pause_task is not None and pause_task in done)
+                or synthesis_session.pause_requested.is_set()
+            ):
+                pause_deadline = synthesis_session.pause_deadline
+                if pause_deadline is None:
+                    raise OpenAIStreamingSpeechError(
+                        "SPEECH_PROVIDER_PAUSE_STATE_INVALID",
+                        "speech Provider pause has no bounded deadline",
+                    )
+                while True:
+                    self._acknowledge_synthesis_pause(synthesis_session)
+                    _LOGGER.info(
+                        "live_voice_synthesis_backpressure "
+                        "stage=event_queue_pause_acknowledged "
+                        "stream_generation=%s queue_size=%s queue_capacity=%s",
+                        synthesis_session.request.ref.stream_generation,
+                        queue.qsize(),
+                        queue.maxsize,
+                    )
+                    await self._settle_synthesis_resume(
+                        synthesis_session,
+                        deadline_cap=pause_deadline,
+                    )
+                    remaining = pause_deadline - self._monotonic()
+                    if remaining <= 0:
+                        raise self._synthesis_pause_timeout()
+                    pause_task = asyncio.create_task(
+                        synthesis_session.pause_requested.wait()
+                    )
+                    done, _ = await asyncio.wait(
+                        {put_task, pause_task},
+                        timeout=remaining,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if put_task in done:
+                        await put_task
+                        return
+                    if pause_task in done or synthesis_session.pause_requested.is_set():
+                        continue
+                    raise self._synthesis_pause_timeout()
+            raise TimeoutError
         except (TimeoutError, asyncio.QueueFull) as exc:
+            _LOGGER.warning(
+                "live_voice_synthesis_backpressure stage=event_queue_timeout "
+                "pause_requested=%s queue_size=%s queue_capacity=%s",
+                bool(
+                    synthesis_session is not None
+                    and synthesis_session.pause_requested.is_set()
+                ),
+                queue.qsize(),
+                queue.maxsize,
+            )
             raise OpenAIStreamingSpeechError(
                 "SPEECH_EVENT_QUEUE_EXHAUSTED",
                 "streaming Speech event queue is exhausted",
             ) from exc
+        finally:
+            pending = tuple(
+                task
+                for task in (put_task, pause_task)
+                if task is not None and not task.done()
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
     @staticmethod
     def _require_committed(session: _RecognitionSession) -> None:
@@ -2396,6 +3209,8 @@ def _reason_for_exception(exc: BaseException) -> SpeechDegradationReason:
     if isinstance(exc, OpenAIStreamingSpeechError):
         if exc.reason == "SPEECH_EVENT_QUEUE_EXHAUSTED":
             return SpeechDegradationReason.BOUNDED_QUEUE_EXHAUSTED
+        if exc.reason == "SPEECH_PROVIDER_PAUSE_TIMEOUT":
+            return SpeechDegradationReason.PROVIDER_TIMEOUT
         if exc.reason in {
             "SPEECH_PROVIDER_REQUEST_REJECTED",
             "SPEECH_PROVIDER_RECOGNITION_FAILED",
@@ -2408,6 +3223,19 @@ def _reason_for_exception(exc: BaseException) -> SpeechDegradationReason:
     ):
         return SpeechDegradationReason.PROVIDER_PROTOCOL
     return SpeechDegradationReason.PROVIDER_UNAVAILABLE
+
+
+def _safe_synthesis_provider_subreason(exc: BaseException) -> str:
+    """Return a bounded diagnostic label without retaining Provider content."""
+
+    if isinstance(exc, OpenAIStreamingSpeechError):
+        if exc.reason in _SAFE_SYNTHESIS_PROVIDER_SUBREASONS:
+            return exc.reason
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException)):
+        return "SPEECH_PROVIDER_TIMEOUT"
+    if isinstance(exc, StreamingSpeechViolation):
+        return "SPEECH_PROVIDER_CONFORMANCE_VIOLATION"
+    return "SPEECH_PROVIDER_UNKNOWN"
 
 
 def _is_process_control(exc: BaseException) -> bool:

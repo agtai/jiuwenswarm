@@ -29,9 +29,11 @@ from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
     StreamingSynthesisRouteOwner,
 )
 from jiuwenswarm.server.live_voice.streaming_speech import SynthesisStreamRequest
+from jiuwenswarm.server.live_voice.streaming_speech import CapabilityProvenance
 
 
 OutcomeObserver = Callable[[StreamingSynthesisOutcome], None]
+PromotionTimeoutObserver = Callable[[], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +141,29 @@ class ProductStreamingSynthesisSource:
                     )
             self._observe(outcome)
 
+    async def park_prefetch(
+        self, *, park_generation: int, timeout_seconds: float = 180.0
+    ) -> None:
+        if self._closed:
+            raise DedicatedMediaDownlinkSourceFailure(
+                MediaDetachReason.STREAMING_TTS_TEXT_OR_RETRY
+            )
+        await self.owner.park_prefetch(
+            self.handle,
+            park_generation=park_generation,
+            timeout_seconds=timeout_seconds,
+        )
+
+    async def promote_prefetch(self, *, park_generation: int) -> None:
+        if self._closed:
+            raise DedicatedMediaDownlinkSourceFailure(
+                MediaDetachReason.STREAMING_TTS_TEXT_OR_RETRY
+            )
+        await self.owner.promote_prefetch(self.handle, park_generation=park_generation)
+
+    async def promote_unparked_prefetch(self) -> None:
+        await self.owner.promote_unparked_prefetch(self.handle)
+
     def _accept_chunk(self, chunk: StreamingSynthesisChunk) -> MediaAudioFrame:
         if (
             chunk.ref != self.handle.ref
@@ -169,12 +194,30 @@ async def start_product_streaming_synthesis(
     *,
     scope_identity: tuple[str, str, str] | None = None,
     on_outcome: OutcomeObserver | None = None,
+    required_parked_pause: bool = False,
+    on_prefetch_promotion_timeout: PromotionTimeoutObserver | None = None,
 ) -> ProductStreamingSynthesisStart:
     """Open and pull first audio before the caller may mint a media ticket."""
 
-    handle, outcome = await owner.begin(request, scope_identity=scope_identity)
+    handle, outcome = await owner.begin(
+        request,
+        scope_identity=scope_identity,
+        require_prefetch_decision=required_parked_pause,
+        on_prefetch_promotion_timeout=on_prefetch_promotion_timeout,
+    )
     if handle is None:
         assert outcome is not None
+        if on_outcome is not None:
+            try:
+                on_outcome(outcome)
+            except BaseException:
+                pass
+        return ProductStreamingSynthesisStart(None, outcome)
+    if (
+        required_parked_pause
+        and handle.capability.parked_pause is CapabilityProvenance.UNAVAILABLE
+    ):
+        outcome = await owner.reject_required_parked_pause(handle)
         if on_outcome is not None:
             try:
                 on_outcome(outcome)
@@ -203,6 +246,7 @@ async def start_product_streaming_synthesis(
 
 __all__ = [
     "OutcomeObserver",
+    "PromotionTimeoutObserver",
     "ProductStreamingSynthesisSource",
     "ProductStreamingSynthesisStart",
     "start_product_streaming_synthesis",

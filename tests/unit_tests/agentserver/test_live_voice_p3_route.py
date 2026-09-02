@@ -45,6 +45,31 @@ from jiuwenswarm.server.live_voice.product_observability_runtime import (
 )
 
 
+def test_pipeline_diagnostic_fields_keep_public_correlation_and_exclude_text():
+    fields = product_module._pipeline_diagnostic_fields(
+        event="unified_submit_received",
+        session_id="session-1",
+        correlation_id="correlation-1",
+        interaction_id="interaction-1",
+        activation_id="activation-1",
+        activation_generation=3,
+        request_id="request-1",
+        detail={"route": "DIALOGUE"},
+    )
+
+    assert fields == {
+        "event": "unified_submit_received",
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 3,
+        "request_id": "request-1",
+        "route": "DIALOGUE",
+    }
+    assert "Please introduce London" not in repr(fields)
+
+
 class _WebSocket:
     def __init__(self) -> None:
         self.sent: list[str] = []

@@ -20,6 +20,10 @@ export const FEATURE_LIVE_VOICE_TASK_DEMO = import.meta.env.VITE_FEATURE_LIVE_VO
 
 export const FEATURE_LIVE_VOICE_INTEGRATED_P1 = import.meta.env.VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1 === 'true';
 
+/** C019 explicit parked-successor transport; negotiated and default-off. */
+export const FEATURE_LIVE_VOICE_PREFETCH_PROMOTION =
+  import.meta.env.VITE_FEATURE_LIVE_VOICE_PREFETCH_PROMOTION === 'true';
+
 const rawLiveVoicePlayoutStartupLeadMs = import.meta.env.VITE_LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS;
 
 /** Candidate WebAudio startup lead. BrowserAudioIOAdapter owns closed bounds. */

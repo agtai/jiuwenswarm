@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   PRODUCT_UNIFIED_COMMITTED_INPUT_METHOD,
   ProductUnifiedCommittedInputOwner,
+  unifiedCommittedInputDiagnosticContext,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/unifiedCommittedInputOwner.js';
 
 const binding = Object.freeze({
@@ -60,6 +61,23 @@ function roundAccepted(requestId, input = finalInput()) {
     error: null,
   };
 }
+
+test('builds a correlation-safe unified-submit diagnostic context without recognized text', () => {
+  const context = unifiedCommittedInputDiagnosticContext(binding, finalInput());
+
+  assert.deepEqual(context, {
+    session_id: 'session-1',
+    correlation_id: 'correlation-1',
+    interaction_id: 'interaction-1',
+    activation_id: 'activation-1',
+    activation_generation: 3,
+    request_id: 'request-final-1',
+    commit_id: 'commit-final-1',
+    turn_id: 'turn-final-1',
+  });
+  assert.equal(JSON.stringify(context).includes('制定三天'), false);
+  assert.equal(Object.isFrozen(context), true);
+});
 
 test('submits only the closed authoritative-final shape', async () => {
   const calls = [];

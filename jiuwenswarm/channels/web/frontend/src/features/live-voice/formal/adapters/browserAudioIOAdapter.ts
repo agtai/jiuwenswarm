@@ -12,6 +12,47 @@ import {
 export type BrowserAudioCaptureState = 'idle' | 'starting' | 'active' | 'stopping' | 'stopped' | 'failed';
 export type BrowserAudioPlayoutState = 'locked' | 'ready' | 'playing' | 'stopped' | 'failed' | 'closed';
 
+const C019_PLAYOUT_DIAGNOSTIC_CAPACITY = 1_024;
+const c019PlayoutDiagnosticRecords: Readonly<Record<string, unknown>>[] = [];
+let c019PlayoutDiagnosticsEnabled = false;
+const c019PlayoutDiagnosticControl = Object.freeze({
+  clear: (): void => {
+    c019PlayoutDiagnosticRecords.length = 0;
+  },
+  snapshot: (): Readonly<{ records: readonly Readonly<Record<string, unknown>>[] }> =>
+    Object.freeze({ records: Object.freeze([...c019PlayoutDiagnosticRecords]) }),
+});
+
+function enableBrowserC019PlayoutDiagnostics(): void {
+  if (c019PlayoutDiagnosticsEnabled) return;
+  c019PlayoutDiagnosticsEnabled = true;
+  if (typeof window === 'undefined') return;
+  Object.defineProperty(globalThis, '__JIUWENSWARM_LIVE_VOICE_C019_PLAYOUT__', {
+    configurable: true,
+    enumerable: false,
+    writable: false,
+    value: c019PlayoutDiagnosticControl,
+  });
+}
+
+export function reportBrowserC019PlayoutDiagnostic(
+  level: 'info' | 'warn',
+  value: Readonly<Record<string, unknown>>,
+): void {
+  if (!c019PlayoutDiagnosticsEnabled) return;
+  const record = Object.freeze({
+    observed_at: new Date().toISOString(),
+    monotonic_ms: typeof performance === 'undefined' ? Date.now() : performance.now(),
+    ...value,
+  });
+  if (c019PlayoutDiagnosticRecords.length >= C019_PLAYOUT_DIAGNOSTIC_CAPACITY) {
+    c019PlayoutDiagnosticRecords.shift();
+  }
+  c019PlayoutDiagnosticRecords.push(record);
+  if (level === 'warn') console.warn('[LiveVoiceC019] playout diagnostic', record);
+  else console.info('[LiveVoiceC019] playout diagnostic', record);
+}
+
 type BrowserEventListener = () => void;
 
 export interface BrowserAudioDocumentLike {
@@ -600,6 +641,7 @@ export interface BrowserAudioIOAdapterOptions {
   readonly captureWorkletModuleUrl?: string;
   readonly monotonicNowMs?: () => number;
   readonly playoutStartupLeadMs?: number;
+  readonly c019DiagnosticsEnabled?: boolean;
 }
 
 export class BrowserAudioIOAdapter {
@@ -638,6 +680,9 @@ export class BrowserAudioIOAdapter {
   #visibilityListening = false;
 
   constructor(options: Readonly<BrowserAudioIOAdapterOptions>) {
+    if (options.c019DiagnosticsEnabled === true) {
+      enableBrowserC019PlayoutDiagnostics();
+    }
     this.#enabled = options.enabled;
     this.#environment = this.#enabled ? (options.environment ?? defaultBrowserAudioEnvironment()) : DISABLED_BROWSER_AUDIO_ENVIRONMENT;
     this.#observer = options.observer ?? {};
@@ -1169,7 +1214,10 @@ export class BrowserAudioIOAdapter {
     }
   }
 
-  beginPlayout(response: Readonly<AudioResponseRef>): void {
+  beginPlayout(
+    response: Readonly<AudioResponseRef>,
+    options: Readonly<{ continuation_unit_id?: string }> = {},
+  ): void {
     if (this.#closed) throw new BrowserAudioIOViolation('ADAPTER_CLOSED', 'browser audio adapter is closed');
     this.#requirePlayoutSourceCleanupHealthy();
     if (this.#environment.document?.visibilityState === 'hidden') {
@@ -1180,6 +1228,10 @@ export class BrowserAudioIOAdapter {
       throw new BrowserAudioIOViolation('PLAYOUT_NOT_UNLOCKED', 'playout must be unlocked by a user action');
     }
     const prior = this.#playback;
+    const continuationUnitId =
+      options.continuation_unit_id === undefined
+        ? null
+        : requiredText(options.continuation_unit_id, 'continuation_unit_id');
     let normalizedResponse: Readonly<AudioResponseRef>;
     try {
       normalizedResponse = Object.freeze({
@@ -1187,14 +1239,22 @@ export class BrowserAudioIOAdapter {
         response_id: response.response_id,
         response_generation: response.response_generation,
       });
-      this.#audioPort.begin(normalizedResponse);
+      if (continuationUnitId === null) {
+        this.#audioPort.begin(normalizedResponse);
+      } else {
+        this.#audioPort.continueResponse(normalizedResponse, continuationUnitId);
+      }
     } catch (error) {
       throw mapBrowserFailure(error, 'PLAYOUT_BEGIN_FAILED');
     }
     const mutationToken = ++this.#playbackMutationToken;
     if (prior !== null) {
-      this.#audioPort.stopLocal(prior.response);
-      const cleanup = this.#stopPlaybackSources(prior, 'response_replaced', false);
+      if (continuationUnitId === null) this.#audioPort.stopLocal(prior.response);
+      const cleanup = this.#stopPlaybackSources(
+        prior,
+        continuationUnitId === null ? 'response_replaced' : 'response_continued',
+        false,
+      );
       if (this.#playbackCleanupUnknown(cleanup)) {
         this.#audioPort.stopLocal(normalizedResponse);
         this.#lastLocallyStoppedResponse = normalizedResponse;
@@ -1212,13 +1272,27 @@ export class BrowserAudioIOAdapter {
       stopped: false,
     };
     this.#playback = playback;
-    if (prior !== null) {
+    reportBrowserC019PlayoutDiagnostic('info', {
+      event: 'audio_playout_began',
+      response_generation: normalizedResponse.response_generation,
+      continuation: continuationUnitId !== null,
+      context_state: context.state,
+      context_time_s: context.currentTime,
+      next_start_time_s: playback.nextStartTime,
+      scheduled_lead_ms: (playback.nextStartTime - context.currentTime) * 1_000,
+      active_sources: playback.sources.size,
+    });
+    if (prior !== null && continuationUnitId === null) {
       this.#emitPlayoutState('stopped', 'response_replaced', prior);
       if (this.#playback !== playback || mutationToken !== this.#playbackMutationToken) {
         throw new BrowserAudioIOViolation('PLAYOUT_REPLACED_DURING_BEGIN', 'playout was replaced by a reentrant observer');
       }
     }
-    this.#emitPlayoutState('ready', 'response_started', playback);
+    this.#emitPlayoutState(
+      'ready',
+      continuationUnitId === null ? 'response_started' : 'response_continued',
+      playback,
+    );
     if (this.#playback !== playback || mutationToken !== this.#playbackMutationToken) {
       throw new BrowserAudioIOViolation('PLAYOUT_CANCELLED', 'playout was fenced or replaced during observer notification');
     }
@@ -1277,6 +1351,8 @@ export class BrowserAudioIOAdapter {
       playback.sources.set(sourceKey, record);
       source.onended = () => this.#handlePlaybackEnded(playback, record);
       const startAt = Math.max(context.currentTime, playback.nextStartTime);
+      const leadBeforeScheduleMs = (playback.nextStartTime - context.currentTime) * 1_000;
+      const schedulingAfterDepletion = chunk.seq > 0 && leadBeforeScheduleMs <= 0;
       if (typeof this.#observer.onPlayoutScheduled === 'function') {
         const startDelayMs = Math.max(0, (startAt - context.currentTime) * 1_000);
         const scheduledFromMonotonic = readMonotonicNow(this.#monotonicNowMs);
@@ -1306,6 +1382,21 @@ export class BrowserAudioIOAdapter {
         source.start(startAt);
       }
       playback.nextStartTime = startAt + chunk.samples.length / chunk.sample_rate_hz;
+      if (chunk.seq === 0 || chunk.seq % 50 === 0 || schedulingAfterDepletion) {
+        reportBrowserC019PlayoutDiagnostic(schedulingAfterDepletion ? 'warn' : 'info', {
+          event: schedulingAfterDepletion ? 'audio_playout_underrun_recovery' : 'audio_frame_scheduled',
+          response_generation: playback.response.response_generation,
+          unit_id: chunk.unit_id,
+          frame_seq: chunk.seq,
+          context_state: context.state,
+          context_time_s: context.currentTime,
+          start_at_s: startAt,
+          next_start_time_s: playback.nextStartTime,
+          lead_before_schedule_ms: leadBeforeScheduleMs,
+          scheduled_lead_ms: (playback.nextStartTime - context.currentTime) * 1_000,
+          active_sources: playback.sources.size,
+        });
+      }
     } catch {
       playback.sources.delete(sourceKey);
       if (source !== null) {
@@ -1700,6 +1791,25 @@ export class BrowserAudioIOAdapter {
       }
       playback.acknowledged.set(record.unitId, through);
       for (let seq = prior + 1; seq <= through; seq += 1) completed.delete(seq);
+      const context = this.#playoutContext;
+      const scheduledLeadMs = context === null
+        ? null
+        : (playback.nextStartTime - context.currentTime) * 1_000;
+      const scheduleDrained = playback.sources.size === 0 && (scheduledLeadMs === null || scheduledLeadMs <= 0);
+      if (record.seq === 0 || record.seq % 50 === 0 || scheduleDrained) {
+        reportBrowserC019PlayoutDiagnostic(scheduleDrained ? 'warn' : 'info', {
+          event: scheduleDrained ? 'audio_playout_schedule_drained' : 'audio_frame_rendered',
+          response_generation: playback.response.response_generation,
+          unit_id: record.unitId,
+          frame_seq: record.seq,
+          contiguous_through_seq: through,
+          context_state: context?.state ?? 'unavailable',
+          context_time_s: context?.currentTime ?? null,
+          next_start_time_s: playback.nextStartTime,
+          scheduled_lead_ms: scheduledLeadMs,
+          active_sources: playback.sources.size,
+        });
+      }
       this.#emitPlayoutState('playing', 'render_completed', playback, record.unitId, through);
     }
   }
