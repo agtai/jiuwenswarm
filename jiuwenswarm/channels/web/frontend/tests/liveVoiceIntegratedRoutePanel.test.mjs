@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
@@ -44,6 +45,8 @@ import {
   productP2NotificationTransportBlockedByP1,
   terminalAnnouncementArbitrationAction,
   terminalTextFallbackCompletesVoiceAnnouncement,
+  terminalTextFallbackNotificationText,
+  terminalTextFallbackMessage,
   webReconnectDelayMs,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
 
@@ -938,6 +941,37 @@ test('only the exact visible terminal TEXT fallback settles a voice announcement
   assert.equal(terminalTextFallbackCompletesVoiceAnnouncement({ ...terminalFallback, delivery_mode: 'text' }, 'task-a'), false);
   assert.equal(terminalTextFallbackCompletesVoiceAnnouncement({ ...terminalFallback, presentation_class: null }, 'task-a'), false);
   assert.equal(terminalTextFallbackCompletesVoiceAnnouncement(terminalFallback, 'task-b'), false);
+  for (const [outcome, text] of [
+    ['completed', 'The background task is complete and its result is ready.'],
+    ['cancelled', 'The background task was cancelled.'],
+    ['failed', 'The background task failed.'],
+    ['interrupted', 'The background task was interrupted.'],
+    ['unknown', 'The background task ended with an unknown outcome.'],
+  ]) {
+    const event = { ...terminalFallback, source_event: { payload: { outcome } } };
+    assert.equal(terminalTextFallbackNotificationText(event, 'task-a'), text);
+    assert.equal(terminalTextFallbackNotificationText(event, 'task-b'), null);
+    assert.equal(terminalTextFallbackNotificationText({ ...event, state: 'running' }, 'task-a'), null);
+    assert.equal(terminalTextFallbackNotificationText({ ...event, presentation_class: null }, 'task-a'), null);
+  }
+  assert.equal(terminalTextFallbackNotificationText({ ...terminalFallback, source_event: { payload: { outcome: 'invented' } } }, 'task-a'), null);
+});
+
+test('terminal fallback chat projection shares the exact backend TEXT history identity', async () => {
+  const event = {
+    task_id: 'task-a', session_id: 'session-a', state: 'terminal', origin_kind: 'voice', requested_origin_kind: 'voice',
+    delivery_mode: 'text_fallback', consumption_mode: 'presentation', presentation_class: 'text',
+    response_ref: { interaction_id: 'interaction-a', response_id: 'response-a', response_generation: 13 },
+    source_event: { payload: { outcome: 'completed' } },
+  };
+  const message = await terminalTextFallbackMessage(event, 'task-a');
+  const digest = createHash('sha256').update(message.message.content, 'utf8').digest('hex');
+  assert.equal(message.session_id, 'session-a');
+  assert.equal(message.message.id, `live-voice:interaction-a:response-a:13:text:0:0:${digest}`);
+  assert.equal(message.message.role, 'assistant');
+  assert.equal((await terminalTextFallbackMessage(event, 'task-a')).message.id, message.message.id);
+  assert.equal(await terminalTextFallbackMessage(event, 'task-b'), null);
+  assert.equal(await terminalTextFallbackMessage({ ...event, response_ref: null }, 'task-a'), null);
 });
 
 test('terminal notification receive transport remains subscribed while an outstanding Task starts idle capture', () => {

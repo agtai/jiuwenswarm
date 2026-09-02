@@ -21,8 +21,12 @@
   bounded source/automation/review Gate. A fresh ACL-private current-source run
   also passes the production-factory/real-Agent/file-Tool/reopen/cleanup
   regression; it is not physical browser/audio-device or complete-P3 proof.
-- **Current product status:** **P3-9 PASS — CONTROLLED PRODUCT-READINESS
-  CANDIDATE PASS; FEATURE-COMPLETE AND LATER BOUNDARIES REMAIN UNPASSED.** P3-G0
+- **Current product status:** **PARTIAL — REOPENED TERMINAL NOTIFICATION
+  BOUNDARY; THE PRIOR EXACT-SOURCE P3-9 CANDIDATE PASS REMAINS HISTORICAL.**
+  The reproduced long-recognition/terminal-notification failure is repaired in
+  source with scoped automation; independent review and physical reacceptance
+  remain pending. See the [current repair](#reopened-terminal-task-notification-presentation-repair).
+  Feature-complete and later boundaries remain unpassed. P3-G0
   passed its scoped
   authoritative-foundation Gate under D-086. P3-2, P3-3, P3-4, P3-5A, P3-5B
   and P3-6 have locally
@@ -130,7 +134,14 @@
   CONTROLLED-CANDIDATE ATTEMPT REMAINS FAIL.** [D-086](decisions/DECISIONS.md)
   accepts the sequencing risk and removes the failed P1/P2 hands-free condition
   as a P3-1 Gate without changing that immutable older-source result.
-- **Current highest priority:** the formal multi-Task root repair below now
+- **Current highest priority:** close the reproduced terminal Task notification
+  presentation boundary below: retain its exact AUDIO through owned recognition
+  settlement/media recovery and visibly project any canonical TEXT fallback.
+  Scoped automation/build pass; the complete Integrated Web diagnostic retains
+  five baseline failures, and independent review plus a fresh physical journey
+  remain open. This does not reopen unrelated frozen lifecycle modules or
+  inherit the historical candidate's acceptance.
+- **Formal multi-Task repair context:** the formal multi-Task root repair below
   includes D-100's bounded authority-generation convergence and definitive
   rejection recovery. The third real journey proved that D-099's stable
   confirmation binding was necessary but not sufficient: the resolver could
@@ -249,9 +260,9 @@ risks, dependencies, acceptance and integration order.
 | Task Control Core and Store | **PARTIAL overall; scheduled P3 code boundary and bounded P3-9 candidate journey closed.** Schema v6 retains canonical multi-Task authority, closed command/disposition/update/successor semantics, durable D0-D2 checkpoint/effect/recovery truth, Task-wide retained replay and class-isolated presentation ACK. Production multi-Task queries/mutations use authenticated reread and exact Task/Attempt/head CAS; D-093 fixes absent primitives as stable zero-effect unsupported | Feature-complete work still requires the declared full Task operations/generalization boundary without adding a second authority | Executor capability/admission/durability facts, Voice–Task Bridge, restart/concurrency matrix, [P3-9 human acceptance](evidence/P3_9_CUMULATIVE_PRODUCT_ACCEPTANCE_20260902.md) and [final review](reviews/P3_9_FINAL_INDEPENDENT_TIER3_REVIEW_2026-09-02.md) |
 | Executor & Durability | **PARTIAL overall; scheduled Direct capability/configuration code boundary and bounded P3-9 D2 journey closed.** The production factory consumes exactly one validated Direct D0 or D2 profile; missing, D1 and unknown profiles fail before Store construction. D0 and D2 declarations match their real candidate operations; no D1 candidate or D1 product claim exists. Admission, checkpoint resume, effect reconciliation, linked recovery and ambiguous-effect settlement remain integrated | Any future additional Executor or D1 candidate requires its own exact capability/profile packet | D-093 Tier-3 review, exact Wave-2/Wave-3 Direct/Store/Core evidence and bounded P3-9 D2 journey; no generic Executor or host-crash claim |
 | Voice–Task Bridge | **PARTIAL overall; scheduled P3 control decision and bounded P3-9 candidate journey closed.** Committed natural text/voice and strict structured input resolve explicit multi-Task targets through the real Registry/classifier/Bridge/Store/Core composition. Five queries and six mutations are supported. `provide_input` is evaluated only at an exact current `decision_required` seam and then returns sanitized unsupported; `pause`/`resume` remain stable unsupported or terminal conflict with zero protected effect | Broader language/policy generalization and positive unsupported operations remain outside the current Direct profile | Exact Store truth, authenticated context/model reread, the 68-case/14-group corpus, D-093 zero-effect decision and accepted P3-9 8+2 journey |
-| Integrated Web product experience | **PARTIAL overall; bounded P3-9 controlled-candidate boundary PASS on `83fde5622`.** The four P1/P2 lifecycle repair module Gates and bounded decoupling review pass `C0/I0/M0`. Same-tab recovery, browser-global capture ownership, retained predecessor ACK settlement, playout/capture decoupling and the P3-9 notification/listening repair overlay are closed at their scoped boundaries. The exact 8+2 real microphone/Agent/Task/TTS journey and final independent review pass, including once-only accepted/running/terminal speech, adjustment/result truth, refresh and Exit/re-enable | Real Provider degradation longer than 15 seconds, generation-time interruption, fixed-corpus latency/generalization and the broader feature-complete boundary remain separate | [P3-9 human acceptance](evidence/P3_9_CUMULATIVE_PRODUCT_ACCEPTANCE_20260902.md), [final review](reviews/P3_9_FINAL_INDEPENDENT_TIER3_REVIEW_2026-09-02.md), [lifecycle closure](#p1p2-lifecycle-repair-closure) and [P2 default-on evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md); no feature-complete or Production credit |
+| Integrated Web product experience | **PARTIAL overall; bounded P3-9 controlled-candidate PASS is historical on `83fde5622`.** The four P1/P2 lifecycle module Gates and bounded decoupling review remain exact-source history. A reproduced terminal-notification/long-recognition and hidden-TEXT-fallback defect reopens only its presentation boundary; the repair passes scoped automation/build | Independent repair review, five baseline Integrated Web failures and fresh physical notification/recovery reacceptance remain open; generation-time interruption, fixed-corpus latency/generalization and feature-complete work remain separate | [Current repair evidence](evidence/P3_TERMINAL_NOTIFICATION_RECOGNITION_REPAIR_20260902.md), [historical human acceptance](evidence/P3_9_CUMULATIVE_PRODUCT_ACCEPTANCE_20260902.md), [final historical review](reviews/P3_9_FINAL_INDEPENDENT_TIER3_REVIEW_2026-09-02.md) and [lifecycle closure](#p1p2-lifecycle-repair-closure); no current candidate or Production credit |
 | Observability, benchmark and latency | **PARTIAL overall; bounded D-095 warm steady-state L0 PASS under D-097.** The exact production timeline, closed corpus, failure precedence, response/run isolation and feature-off zero-hot-path boundary retain source/automated `C0/I0/M0` credit. Ordinary installed Chrome adds one accepted warm run: 20/20 first-audio, 20/20 dedicated barge-in, zero failure/drop and a sanitized 40-round/860-record aggregate. D-096's cold runner remains source-tested but its real warm→cold lifecycle is neither fixed nor accepted; D-097 removes it from this L0 gate. The existing physical collector and ordinary Browser metrics keep separate provenance | Optional later work includes cold/cold-minus-warm, physical-acoustic first-audible/silence, AEC/double-talk, Provider/network and device/room generalization, and any latency SLO. External/persistent telemetry requires separate scope | [warm closure](evidence/L0_WARM_STEADY_STATE_CLOSURE_EVIDENCE_20260825.md), [L0 baseline](evidence/L0_MEASUREMENT_BASELINE_EVIDENCE_20260823.md), [manual report](evidence/L0_ORDINARY_CHROME_MANUAL_ACCEPTANCE_20260824.md), D-097 and D-094 |
-| Automated verification and product acceptance | **PARTIAL overall; bounded P3-9 controlled-candidate boundary PASS on `83fde5622`.** The D-096 L0 source boundary and its accepted warm real-path evidence remain unchanged. P3-9 preserves the migrated Registry/current-projection, presentation-ownership, frozen release-create and source-event-result oracles, adds the bounded notification/listening repair overlay, and passes the exact human 8+2 journey plus final independent Tier-3 review | Feature-complete still requires its broader capability/generalization, full-operation, latency, competitor-gap and independent cross-module boundary | [closed P3-9 packet](#p3-9-cumulative-one-product-acceptance), [human acceptance evidence](evidence/P3_9_CUMULATIVE_PRODUCT_ACCEPTANCE_20260902.md), [final review](reviews/P3_9_FINAL_INDEPENDENT_TIER3_REVIEW_2026-09-02.md), [migration evidence](evidence/P3_9_W3_MIGRATION_EVIDENCE_20260825.md) and [warm closure](evidence/L0_WARM_STEADY_STATE_CLOSURE_EVIDENCE_20260825.md); no feature-complete or later-boundary credit |
+| Automated verification and product acceptance | **PARTIAL overall; bounded P3-9 controlled-candidate boundary PASS on historical source `83fde5622`.** The D-096 L0 source boundary and its accepted warm real-path evidence remain unchanged. P3-9's exact human 8+2 journey and final review remain source-bound; the reopened terminal-notification repair has scoped automated/build evidence only | Current repair still needs independent review and fresh physical acceptance; the full Integrated Web diagnostic retains five baseline failures. Feature-complete also requires its broader capability/generalization, full-operation, latency, competitor-gap and independent cross-module boundary | [Current repair evidence](evidence/P3_TERMINAL_NOTIFICATION_RECOGNITION_REPAIR_20260902.md), [historical P3-9 packet](#p3-9-cumulative-one-product-acceptance), [human acceptance evidence](evidence/P3_9_CUMULATIVE_PRODUCT_ACCEPTANCE_20260902.md), [final historical review](reviews/P3_9_FINAL_INDEPENDENT_TIER3_REVIEW_2026-09-02.md) and [warm closure](evidence/L0_WARM_STEADY_STATE_CLOSURE_EVIDENCE_20260825.md); no current candidate or later-boundary credit |
 | Configuration, code and document cleanup | **PARTIAL overall; scheduled P3 configuration code boundary closed.** Ordinary production remains flag-off and the controlled launcher owns the complete non-secret contract. D-092 keeps its three-item P3 retirement boundary. D-094 separately retires only the two validation-only P2 notification switches: production Web is fixed at `16`, A/B injects `1` or `16`, and omitted server input remains legacy single-pull compatibility. The Exit packet retains only exact fences/barriers/timers/cleanup | Each retained manifest row still requires its own Gate; external telemetry, new Executor candidates, local artifacts and generic non-Live-Voice consumers stay excluded | D-092/D-093 evidence, [D-094](decisions/DECISIONS.md) and the [P2 evidence](evidence/P2_NOTIFICATION_BATCH_DEFAULT_ON_20260821.md) |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
@@ -299,6 +310,73 @@ it cannot upgrade the failed candidate or invalidate the historical
 exact-source Alpha result.
 
 ## Current execution packet
+
+### Reopened terminal Task notification presentation repair
+
+- **Status/source:** **SOURCE REPAIRED / SCOPED AUTOMATION PASS / REVIEW AND
+  HUMAN REACCEPTANCE PENDING.**
+  Session `web_1a062a2eafe_4d7fe704591a` reproduced a voice-created Task whose
+  accepted and running notifications were visible and audible, while its
+  durable completed event/result produced neither an audible terminal notice
+  nor an obvious Live Voice output. Canonical logs bind the completed Task to
+  its exact terminal event and show the terminal AUDIO presentation retained
+  behind a speech-marked capture. That capture then failed through
+  `STREAMING_SPEECH_PROVIDER_UNAVAILABLE` and
+  `STREAMING_SPEECH_PROVIDER_TIMEOUT`; after two 15-second acquisition windows
+  Web reported `task_audio_playout_failed`. Registry correctly emitted the
+  durable TEXT fallback, but Integrated Web treated adoption into the formal
+  P3 technical progress node as sufficient presentation and ACKed it without
+  projecting the terminal sentence into the primary Live Voice output.
+- **Capability/risk/dependencies:** Integrated Web, Conversation Runtime and
+  Audio I/O presentation ownership; Tier 3 under root `TESTING.md` because the
+  repair changes timeout/recovery and presentation-ACK authority across P1,
+  P2 and P3. It preserves the existing canonical Task event/result, P2
+  response identity, class-isolated ACK and Registry fallback contracts.
+- **Intended behaviour and owned surfaces:** a terminal Task AUDIO delivery
+  blocked by a speech-marked capture still gives the possible user utterance
+  its existing bounded recognition/fallback settlement. The notification's
+  second acquisition window starts only after that owned operation settles,
+  rather than racing the Provider's independent timeout. The existing arbiter
+  may then recover a failed P1 owner; before using that successor, Web replays
+  the exact retained P2 observation to restore its media authorization.
+  Successful playout produces exactly one AUDIO ACK and resumes listening.
+  A failed acquisition/playout retains the existing server-owned TEXT fallback. Before that
+  fallback can be ACKed, its terminal outcome is projected into the formal chat
+  plus Live Voice output/terminal notification, not only technical P3 progress.
+  The chat projection derives the same existing SessionFormalHistoryWriter ID
+  from the exact TEXT response, cursor/unit zero and canonical text SHA-256;
+  it adds no history schema or second backend persistence path.
+  Duplicate, stale or wrong-Task events produce no extra UI, TTS or ACK.
+- **Owner files/tests:** the minimal capture-arbitration, terminal replay and
+  fallback projection in
+  `LiveVoiceIntegratedRoutePanel.tsx`, plus focused pure and mounted Integrated
+  Web tests. Backend Registry semantics and shared wire/schema remain unchanged.
+- **Explicit exclusions:** no timeout-value change, Provider/model/voice/device
+  policy, raw audio or transcript logging, Task/Store/Executor mutation,
+  foreground interruption policy, nonterminal notification replay expansion,
+  history-schema invention, deployment, remote update or product/Production
+  acceptance claim. A real microphone/Provider/TTS journey remains required
+  before audible candidate acceptance can be restored.
+- **Acceptance:** the reproduced speech-marked terminal path must settle the
+  possible utterance without a concurrent notification deadline, reauthorize
+  the exact terminal AUDIO after a failed P1 owner is replaced,
+  ACK only after successful browser playout and resume capture. Failed
+  reauthorization/acquisition/playout must retain the exact terminal fallback;
+  its formal chat projection precedes one TEXT ACK.
+  Time/order, duplicate, stale-owner, wrong-Task, disabled/disconnected and
+  Exit paths must retain zero duplicate Agent/Tool/Task/audio/history/store or
+  foreign-scope effects. Focused pure/mounted tests, the complete affected
+  Integrated Web suite, production build, diff/static checks, scoped review and
+  a later clean physical reacceptance are required.
+- **Evidence/remaining Gate:** the deterministic RED oracles reproduced both
+  defects before the source change. Ten focused frontend checks and eight
+  affected Registry checks pass, as does the production TypeScript/Vite build.
+  The full Integrated Web run reports 503 passed, five baseline failures and
+  one skip; it is not a passing cumulative Gate. Complete-diff cold self-review
+  is recorded as a limited substitute because an independent reviewer is
+  unavailable. No deployment or real microphone/Provider/TTS replay was run.
+  Exact source hashes, commands, baseline failures and scoped review are in
+  the [repair evidence](evidence/P3_TERMINAL_NOTIFICATION_RECOGNITION_REPAIR_20260902.md).
 
 ### Formal multi-Task coherent status and managed-baseline repair
 

@@ -801,6 +801,11 @@ type DeferredProductTaskPresentation = Readonly<{
 
 type CapturedProductTaskNotification = Readonly<{
   owner: ProductWebP2ActivationOwner;
+  capture_owner: ProductP1VoiceRouteOwner | null;
+  media_replay: {
+    owner: ProductP1VoiceRouteOwner | null;
+    operation: Promise<void> | null;
+  };
   notification: Readonly<Record<string, unknown>>;
   disposition: Extract<ProductP2NotificationDisposition, { readonly kind: 'presentation' }>;
   admission: ProductP2NotificationAdmission;
@@ -955,6 +960,45 @@ export function terminalTextFallbackCompletesVoiceAnnouncement(
     event.consumption_mode === 'presentation' &&
     event.presentation_class === 'text'
   );
+}
+
+export function terminalTextFallbackNotificationText(
+  event: Readonly<ProductTextProgressEvent>,
+  currentTaskId: string | null,
+): string | null {
+  if (!terminalTextFallbackCompletesVoiceAnnouncement(event, currentTaskId)) return null;
+  // This is a display projection of the reconciled canonical terminal event,
+  // not a new result or a client-authored P2 response/history record.
+  switch (event.source_event.payload.outcome) {
+    case 'completed': return 'The background task is complete and its result is ready.';
+    case 'cancelled': return 'The background task was cancelled.';
+    case 'failed': return 'The background task failed.';
+    case 'interrupted': return 'The background task was interrupted.';
+    case 'unknown': return 'The background task ended with an unknown outcome.';
+    default: return null;
+  }
+}
+
+export async function terminalTextFallbackMessage(
+  event: Readonly<ProductTextProgressEvent>,
+  currentTaskId: string | null,
+): Promise<ProductLiveVoiceMessageEvent | null> {
+  const text = terminalTextFallbackNotificationText(event, currentTaskId);
+  const response = event.response_ref;
+  if (text === null || response === null) return null;
+  const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
+  const hash = Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
+  return Object.freeze({
+    session_id: event.session_id,
+    message: Object.freeze({
+      // Match SessionFormalHistoryWriter's existing TEXT record identity. The
+      // exact P3 ACK persists this same cursor-0/unit-0 sentence on the server.
+      id: `live-voice:${response.interaction_id}:${response.response_id}:${response.response_generation}:text:0:0:${hash}`,
+      role: 'assistant',
+      content: text,
+      timestamp: new Date().toISOString(),
+    }),
+  });
 }
 
 export function productP2NotificationRepollDelayMs(
@@ -2275,6 +2319,32 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         clearCapturedTaskNotification(captured);
         return;
       }
+      const waitForCaptureSettlement = (operation: Promise<void>) => {
+        void operation.catch(() => undefined).then(() => {
+          if (
+            mountedRef.current &&
+            voiceLoopEnabledRef.current &&
+            voiceLoopGenerationRef.current === captured.admission.voice_loop_generation &&
+            capturedTaskNotificationRef.current === captured &&
+            activationOwnerRef.current === captured.owner &&
+            captured.owner.snapshot().binding?.session_id === activeSessionRef.current &&
+            createdProgressRouteRef.current?.task_id === captured.task_id
+          ) {
+            scheduleCapturedTaskNotificationDeadline(captured, true);
+            setTerminalAnnouncementArbitrationEpoch(epoch => epoch + 1);
+          }
+        });
+      };
+      if (
+        p1VoiceOwnerRef.current === captured.capture_owner &&
+        p1VoiceOwnerRef.current?.status().status === 'recognizing' &&
+        pendingP1VoiceStopRef.current !== null
+      ) {
+        // EOT can start recognition before this timer requests settlement.
+        // Join that same owned operation rather than fail its parked AUDIO.
+        waitForCaptureSettlement(pendingP1VoiceStopRef.current);
+        return;
+      }
       const deadlineAction = capturedTaskNotificationDeadlineAction({
         capture_settlement_requested: deadline.capture_settlement_requested,
         p1_status: p1VoiceOwnerRef.current?.status().status ?? null,
@@ -2284,12 +2354,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (deadlineAction === 'settle_capture') {
         // A speech-marked capture may legitimately own a user utterance when a
         // Task AUDIO notification arrives.  Settle that utterance through the
-        // existing recognition/submit path once before abandoning audio.  The
-        // retained pop-on-read Task notification stays exact and gets one more
-        // bounded acquisition window; a second expiry still falls back to
-        // visible text rather than blocking forever.
-        scheduleCapturedTaskNotificationDeadline(captured, true);
-        void stopP1VoiceHandlerRef.current().catch(() => undefined);
+        // existing recognition/submit path once before abandoning audio. Its
+        // Provider final/batch fallback already owns bounded timeouts; starting
+        // another 15-second acquisition clock concurrently misclassifies that
+        // still-owned recognition as a Task playout failure. Start the second
+        // acquisition window only after recognition/submit has settled.
+        waitForCaptureSettlement(stopP1VoiceHandlerRef.current());
         return;
       }
       if (!clearCapturedTaskNotification(captured)) return;
@@ -3244,6 +3314,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               is_current: isCurrent,
             });
             if (!isCurrent()) return;
+            const fallbackMessage = await terminalTextFallbackMessage(
+              parsed,
+              createdProgressRouteRef.current?.task_id ?? null,
+            );
+            if (!isCurrent()) return;
+            if (fallbackMessage !== null) props.onProductVoiceMessage?.(fallbackMessage);
             pendingOwnedProgressRef.current.delete(parsed.delivery_id);
             reconciliationFailures.delete(parsed.delivery_id);
             const adopted = adoptParsedProductTextProgressEvent(progressRef.current, parsed, ownedSessionId);
@@ -3254,16 +3330,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             const terminalStatus = productP3TerminalStatus(record);
             if (terminalStatus !== null) {
               setP3MutationStatus(terminalStatus);
-              if (
-                terminalTextFallbackCompletesVoiceAnnouncement(
-                  parsed,
-                  createdProgressRouteRef.current?.task_id ?? null,
-                )
-              ) {
+              const fallbackText = fallbackMessage?.message.content ?? null;
+              if (fallbackText !== null) {
                 // Registry has already converted this exact failed AUDIO route
                 // into its durable terminal TEXT presentation. Re-queuing it as
                 // a voice announcement recreates a fence that no AUDIO delivery
                 // can settle and blocks the next healthy P1 capture.
+                // The technical progress node alone is not an obvious user
+                // notification. Commit the same authoritative terminal outcome
+                // to the primary Live Voice output before its DOM-gated ACK.
+                setProductOutput(fallbackText);
+                setTerminalNotification(fallbackText);
                 terminalNotificationTaskIdRef.current = parsed.task_id;
                 terminalNotificationCheckRequiredRef.current = false;
                 terminalAnnouncementSpeechOwnerRef.current = null;
@@ -4313,7 +4390,45 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             clearCapturedTaskNotification(capturedTaskNotification);
             return;
           }
-          clearCapturedTaskNotification(capturedTaskNotification);
+          const playoutOwner = p1VoiceOwnerRef.current;
+          if (
+            capturedTaskNotification.disposition.task_notification_terminal &&
+            capturedTaskNotification.capture_owner !== playoutOwner
+          ) {
+            try {
+              // A failed recognition owner is replaced through the existing
+              // arbiter. Refreshing its media authority can retire the earlier
+              // speech authorization, so re-observe the exact pop-on-read P2
+              // delivery (same request/response/unit), never fetch a new one.
+              const replay = capturedTaskNotification.media_replay;
+              // React can replace the polling effect during the same media
+              // transition. Those continuations share one exact replay.
+              if (replay.operation === null || replay.owner !== playoutOwner) {
+                replay.owner = playoutOwner;
+                replay.operation = owner.replayNotificationForMediaAuthorization({
+                  ...capturedTaskNotification.disposition.response,
+                  unit_id: capturedTaskNotification.disposition.unit_id,
+                });
+              }
+              await replay.operation;
+            } catch {
+              if (
+                !cancelled && activationOwnerRef.current === owner &&
+                capturedTaskNotificationRef.current === capturedTaskNotification &&
+                clearCapturedTaskNotification(capturedTaskNotification)
+              ) {
+                retainDeferredTaskPresentation(owner, capturedTaskNotification.disposition);
+                if (!settleDeferredTaskPresentationFailure(owner)) setP2NotificationWakeEpoch(epoch => epoch + 1);
+              }
+              return;
+            }
+            if (
+              cancelled || !voiceLoopEnabledRef.current ||
+              voiceLoopGenerationRef.current !== capturedTaskNotification.admission.voice_loop_generation ||
+              p1VoiceOwnerRef.current !== playoutOwner || activationOwnerRef.current !== owner
+            ) return;
+          }
+          if (!clearCapturedTaskNotification(capturedTaskNotification)) return;
           adoptProductP2Notification(
             owner,
             capturedTaskNotification.notification,
@@ -4443,6 +4558,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             if (retained === null) {
               const captured = Object.freeze<CapturedProductTaskNotification>({
                 owner,
+                capture_owner: p1VoiceOwnerRef.current,
+                media_replay: { owner: null, operation: null },
                 notification: outcome.notification,
                 disposition: previewDisposition,
                 admission: notificationAdmission,
