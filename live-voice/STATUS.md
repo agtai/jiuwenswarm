@@ -294,8 +294,8 @@ exact-source Alpha result.
 
 ### Formal multi-Task coherent status and managed-baseline repair
 
-- **Status/source:** **IMPLEMENTED / CLEAN REDEPLOYMENT PENDING / HUMAN
-  REACCEPTANCE BLOCKED**. The
+- **Status/source:** **DEPLOYED VALIDATION-READY / HUMAN REACCEPTANCE
+  PENDING**. The
   original implementation is commit `7f8673e1`, and
   queued-reconciliation/order repair is commit `a179d02a`. The final running
   source must be a clean descendant containing this record and the repair below.
@@ -485,17 +485,24 @@ exact-source Alpha result.
   never consumed, and Task A later failed
   `EXECUTOR_INITIALIZATION_MUTATED_TARGET`. This deployment is therefore
   failed evidence and must not be reused.
-- **Reserved fresh repair deployment:** validation label `c99a45f0` reserves
+- **Fresh repair deployment:** validation label `c99a45f0` uses
   project `proj_c99a45f0` at
   `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-project-c99a45f0309a4867bcb37aa235204928`
   and data root
   `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-data-c99a45f0309a4867bcb37aa235204928`.
-  It must be created as a fresh, clean, zero-remote Git fixture with
-  repository-local `core.autocrlf=false`, a fresh Store and no retained Task,
-  Attempt, event, result, outbox or Direct rows. Only a successful controlled
-  preflight, Live Voice build, launch, real Speech/receipt probe and HTTP check
-  from the clean commit containing this record make its URL eligible for human
-  reacceptance.
+  The project contains only committed `README.md` revision `ea79486c`, is clean,
+  has zero remotes and pins repository-local `core.autocrlf=false`. The fresh
+  Store reports zero Task, Attempt, command, event, result, outbox, Direct
+  attempt and adjustment rows. Controlled preflight, Live Voice build and
+  launch passed from clean repair source `eabe7847`; the runtime contract binds
+  Formal Web validation, exact Direct D2, the registered project and all four
+  fixed ports. Real Speech TTS→STT, the critical receipt, identity-mismatch and
+  forged-claim rejection passed with zero business side effect, and HTTP
+  returned 200. The first successful launch log is
+  `logs/swarm-20260902-141129.log`; the final restart must run the clean
+  documentation-only descendant containing this record. This environment is
+  validation-ready but receives no product acceptance credit until the user's
+  complete real multi-Task journey passes.
 - **Failed isolated deployment retained:** validation label `aeeb4a70` uses project
   `proj_9a8b984a` at
   `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-project-aeeb4a708abd4161ab31a7791e4aae8e`
