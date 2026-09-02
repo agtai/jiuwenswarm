@@ -69,6 +69,21 @@ def _legacy_workspace(tmp_path: Path, *, cron: str = _CRON_DOC) -> Path:
     return workspace
 
 
+def _served_workspace(tmp_path: Path, *, cron: str = _CRON_DOC) -> Path:
+    """A legacy workspace a running gateway has already opened the store in.
+
+    The difference from ``_legacy_workspace`` is one empty file. Reading the
+    cron store takes a cross-process lock on ``cron_jobs.json.lock`` beside the
+    data, so every deployment that ever started reaches the migration with that
+    file present -- which is to say, every real one.
+    """
+    workspace = _legacy_workspace(tmp_path, cron=cron)
+    (workspace / "agent" / "home" / "cron_jobs.json.lock").write_text(
+        "", encoding="utf-8"
+    )
+    return workspace
+
+
 def test_heartbeat_store_lives_in_the_directory_the_migration_clears() -> None:
     """Pin the coupling this whole file is about, so it cannot drift silently."""
     relative = get_heartbeat_jobs_path().relative_to(get_user_workspace_dir())
@@ -172,3 +187,79 @@ def test_old_home_is_removed_once_nothing_is_left_in_it(tmp_path: Path) -> None:
     _migrate_legacy_workspace(workspace)
 
     assert not old_home.exists()
+
+
+def test_the_cron_store_really_does_keep_a_lock_beside_its_data(
+    tmp_path: Path,
+) -> None:
+    """Pin the coupling the lock handling depends on, as with the store path.
+
+    The cleanup knows the suffix rather than asking the store for it, so this
+    is where a store that renamed its lock -- or stopped keeping one -- has to
+    fail. Asserted by reading through the store rather than by reaching into
+    it, so the pin holds against the file the store actually creates.
+    """
+    import asyncio
+
+    from jiuwenswarm.gateway.cron.store import CronJobStore
+
+    store_path = tmp_path / "cron_jobs.json"
+    store_path.write_text(_CRON_DOC, encoding="utf-8")
+
+    asyncio.run(CronJobStore(path=store_path).list_jobs())
+
+    assert (tmp_path / "cron_jobs.json.lock").exists()
+
+
+def test_the_store_lock_is_retired_with_the_store_it_belongs_to(
+    tmp_path: Path,
+) -> None:
+    """A relocated store leaves no lock behind to keep ``agent/home`` alive.
+
+    The lock is sidecar state, not content: it holds no jobs, and the store at
+    its new path takes a fresh one. Left in place it is counted a survivor, so
+    the directory is kept, the workspace stays classified legacy, and the
+    migration runs and warns again on every single start -- about an empty
+    file.
+    """
+    workspace = _served_workspace(tmp_path)
+    old_home = workspace / "agent" / "home"
+    (old_home / "heartbeat_jobs.json").unlink()
+
+    _migrate_legacy_workspace(workspace)
+
+    assert (workspace / "gateway" / "cron_jobs.json").exists()
+    assert not old_home.exists(), sorted(
+        item.name for item in old_home.iterdir()
+    )
+
+
+def test_a_surviving_store_keeps_its_lock(tmp_path: Path) -> None:
+    """The lock follows its own store, not the run.
+
+    ``heartbeat_jobs.json`` is not relocated, so nothing about it may be
+    deleted -- a lock removed from under a store that stayed put is a
+    cross-process mutex silently dropped while a gateway may be holding it.
+    """
+    workspace = _served_workspace(tmp_path)
+    old_home = workspace / "agent" / "home"
+    heartbeat_lock = old_home / "heartbeat_jobs.json.lock"
+    heartbeat_lock.write_text("", encoding="utf-8")
+
+    _migrate_legacy_workspace(workspace)
+
+    assert heartbeat_lock.exists()
+    assert not (old_home / "cron_jobs.json.lock").exists()
+
+
+def test_a_failed_relocation_keeps_the_lock_with_its_store(
+    tmp_path: Path,
+) -> None:
+    """Fail safe applies to the lock as well: no relocation, no deletion."""
+    workspace = _served_workspace(tmp_path, cron="{not json")
+    old_home = workspace / "agent" / "home"
+
+    _migrate_legacy_workspace(workspace)
+
+    assert (old_home / "cron_jobs.json").exists()
+    assert (old_home / "cron_jobs.json.lock").exists()

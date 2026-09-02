@@ -969,6 +969,11 @@ def _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir: Path) -> None:
         print(f"[migration] Renamed: {old_workspace} -> {new_workspace}")
 
 
+# The suffix every file-backed store here appends to its data file for its
+# cross-process lock. Named once so the cleanup below and the stores agree.
+_STORE_LOCK_SUFFIX = ".lock"
+
+
 def _remove_migrated_legacy_home(
     old_home: Path,
     migrated: set[str],
@@ -991,6 +996,16 @@ def _remove_migrated_legacy_home(
     it, so a workspace whose legacy content has all been migrated still ends up
     without it.
 
+    A store's companion lock file goes with the store. Every file-backed store
+    here takes a cross-process lock on ``<name>.lock`` beside its data -- see
+    ``CronJobStore._call_under_file_lock`` -- so relocating ``cron_jobs.json``
+    leaves ``cron_jobs.json.lock`` behind. Counted as a survivor it would keep
+    ``agent/home`` alive forever: the workspace stays classified legacy, the
+    migration runs again on every start, and it warns each time about a file
+    that holds no data at all. The lock is sidecar state rather than content,
+    and the relocated store takes a fresh one beside its new path, so it is
+    removed rather than moved.
+
     Args:
         old_home: The legacy ``agent/home`` directory.
         migrated: Names the caller has already merged or relocated.
@@ -999,9 +1014,11 @@ def _remove_migrated_legacy_home(
     if not old_home.exists():
         return
 
+    migrated_locks = {f"{name}{_STORE_LOCK_SUFFIX}" for name in migrated}
+
     survivors: list[str] = []
     for item in sorted(old_home.iterdir(), key=lambda p: p.name):
-        if item.name in migrated:
+        if item.name in migrated or item.name in migrated_locks:
             if item.is_dir():
                 shutil.rmtree(item)
             else:
