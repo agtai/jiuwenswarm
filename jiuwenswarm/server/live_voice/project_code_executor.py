@@ -386,10 +386,14 @@ class ProjectExecutionBinding:
                 "runtime model identity or configuration does not match the task",
                 ErrorCode.PERMISSION_DENIED,
             )
-        if for_dispatch and self.execution_agent is None:
+        if (
+            for_dispatch
+            and self.execution_agent is None
+            and not callable(self.attempt_executor_factory)
+        ):
             raise FormalTaskViolation(
                 "EXECUTOR_CAPABILITY_UNAVAILABLE",
-                "project dispatch requires a task-scoped execution Agent",
+                "project dispatch requires a root or attempt-scoped execution Agent",
                 ErrorCode.CAPABILITY_UNAVAILABLE,
             )
         if for_dispatch and not callable(self.dispatch_fence):
@@ -398,8 +402,16 @@ class ProjectExecutionBinding:
                 "project dispatch requires an authoritative handoff fence",
                 ErrorCode.CAPABILITY_UNAVAILABLE,
             )
-        if for_dispatch and not callable(
-            getattr(self.project_executor, "process_background_code_task_stream", None)
+        if (
+            for_dispatch
+            and not callable(self.attempt_executor_factory)
+            and not callable(
+                getattr(
+                    self.project_executor,
+                    "process_background_code_task_stream",
+                    None,
+                )
+            )
         ):
             raise FormalTaskViolation(
                 "EXECUTOR_CAPABILITY_UNAVAILABLE",
@@ -2609,8 +2621,7 @@ class DirectProjectManagedBaselineReader:
                 json.loads(attempt.selection.capability_profile_json)
             )
             if (
-                profile.canonical_bytes()
-                != attempt.selection.capability_profile_json
+                profile.canonical_bytes() != attempt.selection.capability_profile_json
                 or profile.digest_sha256()
                 != attempt.selection.capability_profile_digest
                 or profile.durability_level != "D2"
@@ -6171,6 +6182,18 @@ class ProjectCodeExecutorAdapter:
         carrier_owns_release = False
         try:
             binding.validate(item.spec, for_dispatch=True)
+            if binding.execution_agent is None or not callable(
+                getattr(
+                    binding.project_executor,
+                    "process_background_code_task_stream",
+                    None,
+                )
+            ):
+                raise FormalTaskViolation(
+                    "EXECUTOR_CAPABILITY_UNAVAILABLE",
+                    "legacy project dispatch requires the root execution Agent",
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                )
             if binding.service is None:
                 raise FormalTaskViolation(
                     "LEGACY_EXECUTOR_UNAVAILABLE",

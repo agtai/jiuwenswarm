@@ -9013,10 +9013,19 @@ test('mounted formal product carrier exposes two authoritative Tasks, replay/res
     assert.match(rendered, /Applied.*false/);
     assert.match(rendered, /Terminal outcome.*completed/);
     assert.doesNotMatch(rendered, /Unread delivery: pending/);
+    const control = panel.findByProps({ className: 'live-voice-demo__p3-control' });
+    const exactConfirmationButtons = panel.findAll(
+      node => node.type === 'button' && node.props.children === 'Confirm exact control',
+    );
+    assert.equal(exactConfirmationButtons.length, 1);
+    assert.equal(control.findAllByType('button')[0].props.children, 'Confirm exact control');
+    assert.equal(control.findAllByType('select')[0].props.disabled, true);
+    assert.equal(control.findAllByType('input')[0].props.disabled, true);
+    assert.match(rendered, /Confirmation pending: the current form has not been applied/);
 
     await act(async () => taskNav.findAllByType('button')[1].props.onClick());
     await act(async () => panel.findByProps({ children: 'Refresh Tasks' }).props.onClick());
-    await act(async () => panel.findByProps({ children: 'Confirm exact control' }).props.onClick());
+    await act(async () => exactConfirmationButtons[0].props.onClick());
     assert.deepEqual(selectedTasks, ['task-visible-b']);
     assert.equal(refreshes, 1);
     assert.equal(confirms, 1);
