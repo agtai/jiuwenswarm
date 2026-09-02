@@ -294,8 +294,8 @@ exact-source Alpha result.
 
 ### Formal multi-Task coherent status and managed-baseline repair
 
-- **Status/source:** **CONFIGURED REDEPLOYMENT PENDING**. The original
-  implementation is commit `7f8673e1`, and
+- **Status/source:** **DEPLOYED VALIDATION-READY / HUMAN REACCEPTANCE
+  PENDING**. The original implementation is commit `7f8673e1`, and
   queued-reconciliation/order repair is commit `a179d02a`. The final running
   source must be the clean documentation-only descendant containing this
   record. The earlier documentation-only descendant `f02e3974` failed the
@@ -410,7 +410,7 @@ exact-source Alpha result.
   CRLF in the detached attempt worktree, changing the exact content
   fingerprint. The Store and target are retained as failed evidence and must
   not be reused. Its final launch log is `logs/swarm-20260902-131019.log`.
-- **Configured replacement pending deployment:** validation label `e303b28f`
+- **Fresh isolated redeployment:** validation label `e303b28f`
   uses project `proj_da6bc907` at
   `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-project-e303b28fb4364d4ab3169321754eb9e3`
   and data root
@@ -419,8 +419,17 @@ exact-source Alpha result.
   committed `README.md` revision `e1638939`, is clean and has zero remotes.
   A real detached linked-worktree probe produced the same full project
   fingerprint `9fd37dfb...` as the main checkout and was removed cleanly.
-  The fresh Store has not admitted any business Task. Controlled preflight,
-  launch and zero-state verification remain required before handoff.
+  The fresh Store has zero commands, Tasks, Attempts, Task events/results,
+  outbox rows and Direct attempts/adjustments. Controlled preflight, Live
+  Voice build and launch passed on clean source `649315a5`; the runtime
+  contract binds Formal Web validation, the exact Direct D2 profile, project
+  binding, zero remotes, all four fixed ports, loaded Live Voice bundle/routes
+  and real Speech TTS→STT. The critical receipt passed, identity mismatch
+  and forged claim were rejected with zero business side effect, and HTTP
+  returned 200. The first launch log is
+  `logs/swarm-20260902-133154.log`. A final restart must bind the
+  documentation-only descendant containing this record before handoff; the
+  remaining acceptance is the user's real multi-Task journey.
 - **Failed isolated deployment retained:** validation label `aeeb4a70` uses project
   `proj_9a8b984a` at
   `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-project-aeeb4a708abd4161ab31a7791e4aae8e`
