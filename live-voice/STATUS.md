@@ -294,11 +294,12 @@ exact-source Alpha result.
 
 ### Formal multi-Task coherent status and managed-baseline repair
 
-- **Status/source:** **AUTOMATED REPAIR GATE PASS / FRESH ISOLATED
-  REDEPLOYMENT PENDING**. The original implementation is commit `7f8673e1`,
-  and queued-reconciliation/order repair is commit `a179d02a`. The
-  documentation-only descendant `f02e3974` failed the retained real product
-  attempt and is not validation-ready.
+- **Status/source:** **DEPLOYED VALIDATION-READY / HUMAN REACCEPTANCE
+  PENDING**. The original implementation is commit `7f8673e1`, and
+  queued-reconciliation/order repair is commit `a179d02a`. The final running
+  source must be the clean documentation-only descendant containing this
+  record. The earlier documentation-only descendant `f02e3974` failed the
+  retained real product attempt and is not validation-ready.
   The retained isolated run showed Task A as `accepted/queued` with
   `EXECUTOR_PROJECT_BUSY` while the formal Panel omitted
   `task.reprioritize`. Canonical inspection proved that the background
@@ -393,9 +394,25 @@ exact-source Alpha result.
   an exact unclaimed busy/capacity Attempt controllable, while claimed or
   mismatched ownership remains pending with zero Executor mutation. The real
   Core order test proves Task B settles canonically before Task A consumes the
-  managed baseline and both distinct files survive serial completion. Fresh
-  isolated redeployment and the human JiuwenSwarm Agent/file-Tool journey are
-  still required.
+  managed baseline and both distinct files survive serial completion. The
+  human JiuwenSwarm Agent/file-Tool journey remains required.
+- **Fresh isolated redeployment:** validation label `1bc2535d` uses project
+  `proj_f857a412` at
+  `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-project-1bc2535d4c7b4d06960a83f1dbb80fe1`
+  and data root
+  `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-data-1bc2535d4c7b4d06960a83f1dbb80fe1`.
+  The target contains only committed `README.md` revision `17fcde41`, has a
+  clean Git status and zero remotes. The new Store has zero commands, Tasks,
+  Attempts, Task events/results, outbox rows and Direct attempts/adjustments.
+  Controlled preflight, Live Voice build and launch passed on clean source
+  `ce1ee28d`; the runtime contract binds Formal Web validation, the exact
+  Direct D2 profile, project binding, zero remotes, all four fixed ports,
+  loaded Live Voice bundle/routes and real Speech TTS→STT. The critical
+  receipt passed, identity mismatch and forged claim were rejected with zero
+  business side effect, and HTTP returned 200. The first launch log is
+  `logs/swarm-20260902-130654.log`. A final restart must bind the
+  documentation-only descendant containing this record before handoff; the
+  remaining acceptance is the user's real multi-Task journey.
 - **Failed isolated deployment retained:** validation label `aeeb4a70` uses project
   `proj_9a8b984a` at
   `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-project-aeeb4a708abd4161ab31a7791e4aae8e`
