@@ -1223,3 +1223,65 @@
 - 单响应和激活事务：每个 turn 只允许一个 direct Provider response；合法 delegate successor 必须由 exact pending delegate/result binding 显式创建。缺 socket、Native observer、media observer 或中途 activation failure 均通过既有 `native.close` 的 closed internal `activation_aborted` disposition 补偿关闭 Native route、P2 activation lease/local capability、media authority 和 Provider allocation；重复补偿幂等且不得影响其它 activation。
 - Tier-3 验收：必须以 deterministic 3 s/150-frame 测试证明 one notification/ticket/socket、连续 frame、bounded backpressure、最终 ACK 和零 Cascade STT/TTS；覆盖 speech-start before-first/between/duplicate、missing/zero/last cursor、history 两种顺序与 transient writer failure、delegate >5 s 且 <25 s、never-completing Provider close、unsolicited second response、activation compensation races，并对所有 mutation-capable negatives 断言 zero forbidden effects。修复后冻结新 exact candidate，执行独立 fix-only Tier-3 cold review；只有 `C0/I0` 后才评估真实 Provider/device/human Gate。
 - 排除与重新评估：Cascade 仍为默认且不 silent fallback；不新增 `TurnCommit`/SQLite/P3/media-v1 schema、Browser RPC、notification kind、第四个 internal method、第二 Runtime/history/Task/classifier/session authority、Provider-direct Jiuwen Tool/MCP、public deployment、remote update 或 release credit。若正确性需要任何这些扩张、把完整 response 缓存后才播放、让 per-frame ticket 并发替代 response source、无法从最终 receipt 精确映射 Runtime unit，或无 cursor 时必须改变 Provider conversation，必须重新定 scope、owner 和 Tier-3 acceptance。详细 correction overlay 见 [Native design §5.5](../architecture/OPENAI_REALTIME_NATIVE_INTERACTION_ENGINE_2026-08-25.md#55-d-100-response-scoped-streaming-correction-overlay)。
+
+## D-107 Production semantic retirement and bounded pre-command continuity
+
+- Date: 2026-09-02. Accepted task scope: the user requests implementation and
+  verification of hardcode retirement and explicitly confirms the current
+  branch as baseline. This decision grants no acceptance or release credit.
+- One configured-model, strict-schema semantic implementation replaces all
+  production natural-language keyword/regex classifiers. The model receives
+  verified final input, bounded authorized dialogue, visible authoritative Task
+  facts and valid pre-command context. It never invokes tools, writes Task state,
+  history or audio, or authorizes its own output. Structured controls remain
+  deterministic input, not a second natural-language parser. Model failure has
+  no old-parser fallback.
+- Reuse the formal operation vocabulary, ProductionTaskIntentProposal,
+  deterministic multi-Task resolver and exact confirmation owner. Additional
+  semantic provenance binds model/config identity and the precise context
+  version used to derive a proposal. UI selection and recent/current Task
+  pointers are hints only. Other Tasks' normal progress does not invalidate
+  a confirmation; relevant target/scope/capability changes do.
+- The minimal formal origin extension is an optional closed
+  `semantic_context_binding` on the existing request/origin binding, carrying
+  `context_sha256`, `semantic_config_sha256`, `model_identity` and
+  `model_config_version`. It is immutable and contributes to normal origin and
+  confirmation fingerprints. Structured input cannot supply it. Existing
+  bindings without it retain their byte/digest semantics; the new production
+  natural-input entry must supply the exact model decision provenance.
+- Permit only the minimal bounded recoverable proposal/clarification/confirmation
+  context necessary for multi-turn delegation. Persist it in the existing
+  committed-input journal, with scope, authorized conversation, source, version,
+  expiry and consumption CAS. This is pre-command state, not a second Task or
+  workflow authority. Refresh/reconnect/route switching require authenticated
+  continuity; arbitrary cross-session/project/principal inheritance is rejected.
+  An actual foreground Agent recommendation must precede an elliptical accepted
+  proposal; complete explicit new work can use the normal direct create flow.
+- Pending records retain expired source anchors to prevent source replay from
+  extending expiry or minting new work. The existing 4096 global bound includes
+  anchors; the active per-scope bound is eight. Exhaustion explicitly fails
+  closed, with no automatic anchor eviction. This is a disclosed capacity limit,
+  not an unbounded workflow/retention service. Record SHA detects corruption of
+  scope/source/version/time/consumption as well as content; it is not protection
+  against an actor with arbitrary database write privileges.
+- Running modifications use the existing Direct `task.adjust` intake and real
+  Agent safe completion boundary. Remove fixed-name prompts, artifact checks,
+  artificial waits and bypasses. Do not add running `task.update`, arbitrary
+  pause/resume or an Executor. Version a generic checkpoint profile rather than
+  changing the meaning of an existing immutable profile snapshot.
+- Re-scope the discovered cross-Task adjustment blockage into the Tier-3
+  Core/Store boundary: bounded in-flight deliveries retain exact outbox claim
+  ownership with renewal, preserve per-Task adjustment order, allow unrelated
+  dispatch/cancel/status, and settle only actual applied/rejected evidence.
+  Lease loss, cancellation, shutdown and restart must fence unacknowledged
+  effects and retain truthful unknown/retry outcomes. No new wire outcome or
+  canonical Task state is authorized; renewal uses the existing claim columns.
+- Validation follows root TESTING per changed boundary, with migrated red/green
+  safety oracles, both real voice routes, isolated real execution, actual digital
+  playback evidence and separate operator physical acceptance. Test-only audio,
+  fact inputs and expected answers never become production decisions. Existing
+  partial/failed source-bound evidence remains unchanged.
+- Re-evaluate before a new product policy, Executor capability, major migration,
+  general workflow state machine, Provider/account change, system driver,
+  unauthorized session continuity or remote update. Local implementation and
+  reviewable commits are allowed; no remote refs are updated by this task.

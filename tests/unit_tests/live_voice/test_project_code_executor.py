@@ -1939,6 +1939,128 @@ async def test_demo_itinerary_fixture_constrains_real_direct_executor_and_seals_
     assert _git(project, "status", "--porcelain") == "?? itinerary.md"
 
 
+@pytest.mark.parametrize("lose_settlement", [False, True])
+@pytest.mark.asyncio
+async def test_real_direct_core_adjustment_does_not_block_other_running_cancel(
+    tmp_path: Path, lose_settlement: bool,
+) -> None:
+    """Real Direct/Core/files; controlled Agent streams, not Provider evidence."""
+    from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
+    from tests.unit_tests.live_voice.test_persistent_task_core import (
+        NOW, _adjust, _cancel, _create,
+    )
+
+    class ControlledReportAgent(_DirectProjectExecutor):
+        def __init__(self, project):
+            super().__init__(project)
+            self.release = asyncio.Event()
+            self.adjusted = []
+
+        async def process_background_code_task_stream(self, request):
+            self.requests.append(request)
+            root = Path(request.params["project_dir"])
+            adjustment_id = request.metadata.get("formal_adjustment_id")
+            if adjustment_id is None:
+                self.started.set()
+                await self.release.wait()
+            else:
+                self.adjusted.append(adjustment_id)
+            (root / "measurements.md").write_text(
+                f"verified revision {len(self.adjusted)}\n", encoding="utf-8",
+            )
+            yield AgentResponseChunk(
+                request.request_id, request.channel_id,
+                payload={"event_type": "chat.final", "content": "Saved the verified measurements."},
+                is_complete=True,
+            )
+
+    class SettlementStore(SqliteTaskStore):
+        def complete_adjustment_outbox(self, item, delivery, **kwargs):
+            if lose_settlement:
+                assert self.release_outbox(item, "test-injected-claim-loss")
+            return super().complete_adjustment_outbox(item, delivery, **kwargs)
+
+    project_a, project_b = tmp_path / "a", tmp_path / "b"
+    _git_project(project_a)
+    _git_project(project_b)
+    agent_a, agent_b = ControlledReportAgent(project_a), ControlledReportAgent(project_b)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _MappedResolver({
+            project_a.resolve(): _direct_binding(project_a, agent_a),
+            project_b.resolve(): _direct_binding(project_b, agent_b),
+        }),
+        tmp_path / "direct.sqlite3",
+    )
+    store = SettlementStore(tmp_path / "core.sqlite3")
+    core = PersistentTaskCore(store, adapter)
+    identities = []
+    try:
+        for project, suffix in ((project_a, "-a"), (project_b, "-b")):
+            invocation = _create(project, identity_suffix=suffix)
+            created = core.execute(
+                invocation.envelope, invocation.authorization,
+                context=invocation.context, now=NOW,
+            )
+            assert created.ok and created.result is not None
+            identities.append((str(created.result["task_id"]), str(created.result["attempt_id"])))
+            assert await core.drain_outbox_once()
+        await asyncio.wait_for(agent_a.started.wait(), 5)
+        await asyncio.wait_for(agent_b.started.wait(), 5)
+        (task_a, attempt_a), (task_b, _attempt_b) = identities
+        command_ids = ["measurement-adjust-1"] if lose_settlement else ["measurement-adjust-1", "measurement-adjust-2"]
+        for command_id in command_ids:
+            command, grant = _adjust(
+                task_a, "Verify the measurements without overwriting source data.",
+                command_id=command_id, request_id=f"request-{command_id}",
+            )
+            assert core.execute(command, grant, now=NOW).ok
+        await core.reconcile()
+        checkpoint = adapter._adjustment_checkpoints[attempt_a]
+        await asyncio.wait_for(checkpoint.changed.wait(), 5)
+        cancel = _cancel(task_b)
+        assert core.execute(cancel.envelope, cancel.authorization, now=NOW).ok
+        await asyncio.wait_for(core.reconcile(), 5)
+        assert store.get_task(task_b, _scope()).outcome is TerminalOutcome.CANCELLED
+        assert store.get_task(task_a, _scope()).state is FormalTaskState.RUNNING
+        assert agent_a.adjusted == []
+        assert not (project_b / "measurements.md").exists()
+        agent_a.release.set()
+        if lose_settlement:
+            with pytest.raises(FormalTaskViolation):
+                await core.drain_inflight_adjustments(timeout=5)
+        else:
+            await core.drain_inflight_adjustments(timeout=5)
+            assert agent_a.adjusted == command_ids[:1]
+            await core.reconcile()
+            await core.drain_inflight_adjustments(timeout=5)
+        await _wait_direct_settled(adapter)
+        await core.reconcile_status()
+        task = store.get_task(task_a, _scope())
+        if lose_settlement:
+            assert task.outcome is not TerminalOutcome.COMPLETED
+            assert not (project_a / "measurements.md").exists()
+            assert store.task_result(task_a, _scope())[1] is None
+        else:
+            assert task.outcome is TerminalOutcome.COMPLETED
+            assert agent_a.adjusted == command_ids
+            events = store.events(task_a, _scope(), after_seq=-1)
+            applied = [event for event in events if event.event_type == "task.adjust_applied"]
+            assert [event.causation_id for event in applied] == command_ids
+            assert applied[-1].seq < next(event.seq for event in events if event.event_type == "task.terminal")
+            result = store.task_result(task_a, _scope())[1]
+            assert result is not None
+            content = (project_a / "measurements.md").read_bytes()
+            assert content.decode("utf-8").splitlines() == ["verified revision 2"]
+            assert result.artifacts[0].sha256 == hashlib.sha256(content).hexdigest()
+    finally:
+        agent_a.release.set()
+        agent_b.release.set()
+        await adapter.close(interrupt_running=True)
+        await core.drain_inflight_adjustments()
+    assert adapter._running == {}
+    assert adapter._adjustment_checkpoints == {}
+
+
 @pytest.mark.asyncio
 async def test_demo_itinerary_checkpoint_keeps_task_running_until_real_adjustment(
     tmp_path: Path,
@@ -3449,7 +3571,6 @@ async def test_attempt_deadline_terminalizes_noncooperative_agent_without_target
     before_head = _git(project, "rev-parse", "HEAD")
     before_tree = _git(project, "status", "--porcelain=v2")
     executor = _NonCooperativeExecutor()
-    release_failsafe = asyncio.get_running_loop().call_later(2, executor.release.set)
     resolver = _Resolver(_direct_binding(project, executor))  # type: ignore[arg-type]
     adapter = DirectProjectCodeExecutorAdapter(
         resolver,
@@ -3463,18 +3584,22 @@ async def test_attempt_deadline_terminalizes_noncooperative_agent_without_target
         ),
     )
 
-    delivered = await adapter.dispatch(_item(project))
-    await asyncio.wait_for(executor.started.wait(), timeout=2)
-    timed_out = await _wait_direct_terminal(adapter)
-    for _ in range(100):
-        if executor.cancel_signals:
-            break
-        await asyncio.sleep(0.001)
-    target_head_at_timeout = _git(project, "rev-parse", "HEAD")
-    target_tree_at_timeout = _git(project, "status", "--porcelain=v2")
-    target_effect_at_timeout = (project / "late-effect.txt").exists()
-    executor.release.set()
-    await _wait_direct_settled(adapter)
+    try:
+        delivered = await adapter.dispatch(_item(project))
+        await asyncio.wait_for(executor.started.wait(), timeout=2)
+        timed_out = await _wait_direct_terminal(adapter)
+        for _ in range(100):
+            if executor.cancel_signals:
+                break
+            await asyncio.sleep(0.001)
+        target_head_at_timeout = _git(project, "rev-parse", "HEAD")
+        target_tree_at_timeout = _git(project, "status", "--porcelain=v2")
+        target_effect_at_timeout = (project / "late-effect.txt").exists()
+    finally:
+        # Cleanup must not release the Agent before the cancellation window is
+        # observed. A wall-clock timer racing Git setup invalidated this test.
+        executor.release.set()
+        await _wait_direct_settled(adapter)
 
     assert delivered.executor_ref == "d0-project:attempt-1"
     assert timed_out.outcome is TerminalOutcome.INTERRUPTED
@@ -3515,7 +3640,6 @@ async def test_attempt_deadline_terminalizes_noncooperative_agent_without_target
     assert _git(project, "status", "--porcelain=v2") == before_tree
     assert not (project / "late-effect.txt").exists()
     await adapter.close()
-    release_failsafe.cancel()
 
 
 @pytest.mark.asyncio

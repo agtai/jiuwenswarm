@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sqlite3
@@ -8283,6 +8284,535 @@ async def test_corrupt_retry_dispatch_lineage_fails_before_claim_or_executor(
     assert store.get_task(dispatch_a.task_id, _scope()).attempt_id == attempt_b
     assert executor.dispatches == []
     assert executor.cancels == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_adjustment_does_not_block_other_task_cancel(
+    tmp_path: Path,
+) -> None:
+    """A delivery can await a real checkpoint without owning the whole pump."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowAdjustmentExecutor(_Executor):
+        async def adjust(self, item):
+            entered.set()
+            await release.wait()
+            return await super().adjust(item)
+
+    store = SqliteTaskStore(tmp_path / "concurrent-adjustment.sqlite")
+    executor = SlowAdjustmentExecutor()
+    core = PersistentTaskCore(store, executor)
+    task_ids = []
+    for suffix in ("-a", "-b"):
+        create = _create(tmp_path, identity_suffix=suffix)
+        result = core.execute(
+            create.envelope, create.authorization, context=create.context, now=NOW
+        )
+        assert result.ok and result.result is not None
+        task_ids.append(str(result.result["task_id"]))
+        assert await core.drain_outbox_once()
+    task_a, task_b = task_ids
+    command, grant = _adjust(task_a, "Add an independent verification section.")
+    assert core.execute(command, grant, now=NOW).ok
+    first_reconcile = asyncio.create_task(core.reconcile())
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        done, _ = await asyncio.wait({first_reconcile}, timeout=0.2)
+        assert first_reconcile in done, "A adjustment retained the reconciliation lane"
+        assert (await first_reconcile)["delivery_unavailable"] == 0
+        cancel = _cancel(task_b)
+        assert core.execute(cancel.envelope, cancel.authorization, now=NOW).ok
+        await asyncio.wait_for(core.reconcile(), 2)
+        assert store.get_task(task_b, _scope()).outcome is TerminalOutcome.CANCELLED
+        assert store.get_task(task_a, _scope()).state is FormalTaskState.RUNNING
+        assert not any(
+            event.event_type == "task.adjust_applied"
+            for event in store.events(task_a, _scope(), after_seq=-1)
+        )
+        assert executor.adjustment_settlements == []
+        assert executor.adjustments == []
+        assert executor.cancels == [store.get_task(task_b, _scope()).attempt_id]
+    finally:
+        release.set()
+        await first_reconcile
+        if hasattr(core, "drain_inflight_adjustments"):
+            await core.drain_inflight_adjustments()
+    assert executor.adjustments == [command.command_id]
+    assert executor.adjustment_settlements == [
+        TaskAdjustmentSettlement(TaskAdjustmentState.APPLIED, False)
+    ]
+    assert len(store.list_tasks_page(_scope())[0]) == 2
+
+
+def test_adjustment_claim_renewal_is_exact_and_cannot_revive_a_lost_claim(
+    tmp_path: Path,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "renew-claim.sqlite")
+    core = PersistentTaskCore(store, _Executor())
+    create = _create(tmp_path)
+    created = core.execute(
+        create.envelope, create.authorization, context=create.context, now=NOW
+    )
+    assert created.ok and created.result is not None
+    dispatch = store.claim_outbox("dispatch", observed_at=NOW)
+    assert dispatch is not None
+    store.complete_outbox(
+        dispatch,
+        executor_ref=f"legacy:{dispatch.attempt_id}",
+        observations=_observations(dispatch),
+    )
+    command, grant = _adjust(str(created.result["task_id"]), "Retain the source data.")
+    assert core.execute(command, grant, now=NOW).ok
+    claim = store.claim_outbox("first", observed_at=NOW)
+    assert claim is not None
+    counts = store.counts()
+    store.renew_outbox_claim(claim, observed_at="2026-08-05T12:04:00Z")
+    assert store.reset_expired_outbox_claims(claimed_before="2026-08-05T12:01:00Z") == 0
+    assert store.counts() == counts
+    with pytest.raises(FormalTaskViolation, match="claim"):
+        store.renew_outbox_claim(
+            replace(claim, claim_token="not-the-claim"),
+            observed_at="2026-08-05T12:05:00Z",
+        )
+    assert store.reset_expired_outbox_claims(claimed_before="2026-08-05T12:05:00Z") == 1
+    replacement = store.claim_outbox("second", observed_at="2026-08-05T12:06:00Z")
+    assert replacement is not None and replacement.claim_token != claim.claim_token
+    with pytest.raises(FormalTaskViolation, match="claim"):
+        store.renew_outbox_claim(claim, observed_at="2026-08-05T12:07:00Z")
+    assert store.counts() == counts
+
+
+@pytest.mark.parametrize("mode", ["lease_loss", "cancel", "shutdown"])
+@pytest.mark.asyncio
+async def test_inflight_adjustment_lost_owner_fences_delivery_without_applied_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    from jiuwenswarm.server.live_voice import persistent_task_core as core_module
+
+    monkeypatch.setattr(core_module, "_ADJUSTMENT_CLAIM_RENEW_SECONDS", 0.01)
+    entered = asyncio.Event()
+    settled = asyncio.Event()
+    never = asyncio.Event()
+    claims = []
+
+    class WaitingExecutor(_Executor):
+        async def adjust(self, item):
+            claims.append(item)
+            entered.set()
+            await never.wait()
+            raise AssertionError("an unowned delivery must not execute")
+
+        async def settle_adjustment(self, item, settlement):
+            await super().settle_adjustment(item, settlement)
+            settled.set()
+
+    store = SqliteTaskStore(tmp_path / "fenced-adjustment.sqlite")
+    executor = WaitingExecutor()
+    core = PersistentTaskCore(store, executor)
+    create = _create(tmp_path)
+    created = core.execute(
+        create.envelope,
+        create.authorization,
+        context=create.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    await core.drain_outbox_once()
+    command, grant = _adjust(task_id, "Check the calculation.")
+    assert core.execute(command, grant, now=NOW).ok
+    await core.reconcile()
+    await asyncio.wait_for(entered.wait(), 2)
+    if mode == "lease_loss":
+        assert store.release_outbox(claims[0], "test-owned-lease-loss")
+    elif mode == "cancel":
+        cancel = _cancel(task_id)
+        assert core.execute(cancel.envelope, cancel.authorization, now=NOW).ok
+        await core.reconcile()
+        assert store.get_task(task_id, _scope()).outcome is TerminalOutcome.CANCELLED
+    if mode != "shutdown":
+        await asyncio.wait_for(settled.wait(), 2)
+    with pytest.raises(FormalTaskViolation) as failure:
+        await core.drain_inflight_adjustments(timeout=0.02)
+    assert failure.value.reason == "ADJUSTMENT_DELIVERY_CLEANUP_PENDING"
+    assert core._inflight_adjustments == {}
+    assert executor.adjustment_settlements == [
+        TaskAdjustmentSettlement(TaskAdjustmentState.REJECTED, False),
+    ]
+    assert not any(
+        event.event_type == "task.adjust_applied"
+        for event in store.events(task_id, _scope(), after_seq=-1)
+    )
+    assert store.task_result(task_id, _scope())[1] is None
+    assert executor.adjustments == []
+
+
+@pytest.mark.asyncio
+async def test_inflight_adjustment_renews_lease_and_preserves_same_task_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.live_voice import persistent_task_core as core_module
+
+    monkeypatch.setattr(core_module, "_ADJUSTMENT_CLAIM_RENEW_SECONDS", 0.01)
+    renewed = asyncio.Event()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    class RenewingStore(SqliteTaskStore):
+        def renew_outbox_claim(self, item, **kwargs):
+            super().renew_outbox_claim(item, **kwargs)
+            renewed.set()
+
+    class OrderedExecutor(_Executor):
+        async def adjust(self, item):
+            calls.append(item.command_id)
+            entered.set()
+            if len(calls) == 1:
+                await release.wait()
+            return await super().adjust(item)
+
+    store = RenewingStore(tmp_path / "ordered-adjustment.sqlite")
+    executor = OrderedExecutor()
+    core = PersistentTaskCore(store, executor)
+    create = _create(tmp_path)
+    result = core.execute(
+        create.envelope,
+        create.authorization,
+        context=create.context,
+        now=NOW,
+    )
+    assert result.ok and result.result is not None
+    task_id = str(result.result["task_id"])
+    await core.drain_outbox_once()
+    for index in range(2):
+        command, grant = _adjust(
+            task_id,
+            f"Verify independent section {index}.",
+            command_id=f"ordered-{index}",
+            request_id=f"request-ordered-{index}",
+        )
+        assert core.execute(command, grant, now=NOW).ok
+    await core.reconcile()
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(renewed.wait(), 2)
+        await core.reconcile()
+        assert calls == ["ordered-0"]
+        assert executor.adjustment_settlements == []
+    finally:
+        release.set()
+        await core.drain_inflight_adjustments()
+    assert executor.adjustment_settlements == [
+        TaskAdjustmentSettlement(TaskAdjustmentState.APPLIED, True),
+    ]
+    await core.reconcile()
+    await core.drain_inflight_adjustments()
+    assert calls == ["ordered-0", "ordered-1"]
+    assert executor.adjustment_settlements[-1] == TaskAdjustmentSettlement(
+        TaskAdjustmentState.APPLIED,
+        False,
+    )
+    reopened = SqliteTaskStore(tmp_path / "ordered-adjustment.sqlite")
+    assert reopened.claim_outbox("reopened") is None
+    events = reopened.events(task_id, _scope(), after_seq=-1)
+    assert [
+        e.causation_id for e in events if e.event_type == "task.adjust_applied"
+    ] == calls
+
+
+async def _running_adjustment_core(tmp_path: Path, executor):
+    store = SqliteTaskStore(tmp_path / "owned-adjustment.sqlite")
+    core = PersistentTaskCore(store, executor)
+    create = _create(tmp_path)
+    result = core.execute(
+        create.envelope,
+        create.authorization,
+        context=create.context,
+        now=NOW,
+    )
+    assert result.ok and result.result is not None
+    task_id = str(result.result["task_id"])
+    await core.drain_outbox_once()
+    command, grant = _adjust(task_id, "Verify the generated calculations.")
+    assert core.execute(command, grant, now=NOW).ok
+    await core.reconcile()
+    return core, task_id
+
+
+@pytest.mark.asyncio
+async def test_inflight_noncooperative_child_close_is_bounded_and_retains_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.live_voice import persistent_task_core as core_module
+
+    monkeypatch.setattr(core_module, "_ADJUSTMENT_CLEANUP_SECONDS", 0.02)
+    entered, release, fenced = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class StubbornExecutor(_Executor):
+        async def adjust(self, item):
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+            return await super().adjust(item)
+
+        async def settle_adjustment(self, item, settlement):
+            await super().settle_adjustment(item, settlement)
+            fenced.set()
+
+    executor = StubbornExecutor()
+    core, task_id = await _running_adjustment_core(tmp_path, executor)
+    await asyncio.wait_for(entered.wait(), 2)
+    try:
+        with pytest.raises(FormalTaskViolation) as failure:
+            await asyncio.wait_for(core.drain_inflight_adjustments(timeout=0.01), 1)
+        assert failure.value.reason == "ADJUSTMENT_DELIVERY_CLEANUP_PENDING"
+        assert fenced.is_set()
+        assert len(core._inflight_adjustments) == 1
+        owner = next(iter(core._inflight_adjustments.values()))
+        assert owner.delivery is not None and not owner.delivery.done()
+        assert not any(
+            e.event_type == "task.adjust_applied"
+            for e in core.store.events(task_id, _scope(), after_seq=-1)
+        )
+    finally:
+        release.set()
+        await core.drain_inflight_adjustments()
+    assert core._inflight_adjustments == {}
+    assert executor.adjustment_settlements == [
+        TaskAdjustmentSettlement(TaskAdjustmentState.REJECTED, False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_inflight_reclaimed_outbox_keeps_both_exact_claim_owners(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Queue()
+    release = asyncio.Event()
+
+    class WaitingExecutor(_Executor):
+        async def adjust(self, item):
+            entered.put_nowait(item)
+            await release.wait()
+            return await super().adjust(item)
+
+    core, task_id = await _running_adjustment_core(tmp_path, WaitingExecutor())
+    first = await asyncio.wait_for(entered.get(), 2)
+    assert core.store.release_outbox(first, "test-reclaim")
+    await core.reconcile()
+    second = await asyncio.wait_for(entered.get(), 2)
+    try:
+        assert first.outbox_id == second.outbox_id
+        assert first.claim_token != second.claim_token
+        assert set(core._inflight_adjustments) == {
+            (first.outbox_id, first.claim_token),
+            (second.outbox_id, second.claim_token),
+        }
+    finally:
+        release.set()
+        with pytest.raises(FormalTaskViolation):
+            await core.drain_inflight_adjustments()
+    assert core._inflight_adjustments == {}
+    applied = [
+        e
+        for e in core.store.events(task_id, _scope(), after_seq=-1)
+        if e.event_type == "task.adjust_applied"
+    ]
+    assert len(applied) == 1
+
+
+@pytest.mark.asyncio
+async def test_inflight_child_self_cancelled_still_fences_exact_delivery(
+    tmp_path: Path,
+) -> None:
+    class SelfCancelledExecutor(_Executor):
+        async def adjust(self, item):
+            raise asyncio.CancelledError
+
+    executor = SelfCancelledExecutor()
+    core, task_id = await _running_adjustment_core(tmp_path, executor)
+    with pytest.raises(FormalTaskViolation):
+        await core.drain_inflight_adjustments()
+    assert executor.adjustment_settlements == [
+        TaskAdjustmentSettlement(TaskAdjustmentState.REJECTED, False),
+    ]
+    assert core._inflight_adjustments == {}
+    assert core.store.task_result(task_id, _scope())[1] is None
+
+
+@pytest.mark.asyncio
+async def test_inflight_capacity_keeps_adjustment_pending_but_allows_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.live_voice import persistent_task_core as core_module
+
+    monkeypatch.setattr(core_module, "_MAX_INFLIGHT_ADJUSTMENTS", 1)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class WaitingExecutor(_Executor):
+        async def adjust(self, item):
+            entered.set()
+            await release.wait()
+            return await super().adjust(item)
+
+    executor = WaitingExecutor()
+    core, _task_a = await _running_adjustment_core(tmp_path, executor)
+    await asyncio.wait_for(entered.wait(), 2)
+    task_ids = []
+    try:
+        for suffix in ("-b", "-c"):
+            invocation = _create(tmp_path, identity_suffix=suffix)
+            result = core.execute(
+                invocation.envelope,
+                invocation.authorization,
+                context=invocation.context,
+                now=NOW,
+            )
+            assert result.ok and result.result is not None
+            task_ids.append(str(result.result["task_id"]))
+            assert await core.drain_outbox_once()
+            command, grant = _adjust(
+                task_ids[-1],
+                "Check the saved file.",
+                command_id=f"adjust{suffix}",
+                request_id=f"request{suffix}",
+            )
+            assert core.execute(command, grant, now=NOW).ok
+        await core.reconcile()
+        assert len(core._inflight_adjustments) == 1
+        cancel = _cancel(task_ids[0])
+        assert core.execute(cancel.envelope, cancel.authorization, now=NOW).ok
+        await core.reconcile()
+        assert (
+            core.store.get_task(task_ids[0], _scope()).outcome
+            is TerminalOutcome.CANCELLED
+        )
+        assert executor.adjustments == []
+        with sqlite3.connect(tmp_path / "owned-adjustment.sqlite") as connection:
+            assert connection.execute(
+                "SELECT state FROM outbox WHERE command_id='adjust-c'"
+            ).fetchone() == ("pending",)
+    finally:
+        release.set()
+        await core.drain_inflight_adjustments()
+    await core.reconcile()
+    await core.drain_inflight_adjustments()
+    assert executor.adjustments == ["command-adjust", "adjust-c"]
+
+
+@pytest.mark.asyncio
+async def test_inflight_failed_fence_is_retained_until_exact_cleanup_retry(
+    tmp_path: Path,
+) -> None:
+    class FailingFenceExecutor(_Executor):
+        fail_fence = True
+
+        async def adjust(self, item):
+            raise asyncio.CancelledError
+
+        async def settle_adjustment(self, item, settlement):
+            if self.fail_fence:
+                raise RuntimeError("test-owned temporary fence failure")
+            await super().settle_adjustment(item, settlement)
+
+    executor = FailingFenceExecutor()
+    core, task_id = await _running_adjustment_core(tmp_path, executor)
+    with pytest.raises(FormalTaskViolation):
+        await core.drain_inflight_adjustments()
+    assert len(core._inflight_adjustments) == 1
+    assert executor.adjustment_settlements == []
+    executor.fail_fence = False
+    await core.drain_inflight_adjustments()
+    assert core._inflight_adjustments == {}
+    assert executor.adjustment_settlements == [
+        TaskAdjustmentSettlement(TaskAdjustmentState.REJECTED, False),
+    ]
+    assert core.store.task_result(task_id, _scope())[1] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store_rejects", [False, True])
+@pytest.mark.parametrize("failure", ["raise", "self_cancel", "owner_cancel"])
+async def test_inflight_final_settlement_retains_exact_disposition_on_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store_rejects: bool,
+    failure: str,
+) -> None:
+    from jiuwenswarm.server.live_voice import persistent_task_core as core_module
+
+    monkeypatch.setattr(core_module, "_ADJUSTMENT_CLEANUP_SECONDS", 0.01)
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    class FinalSettlementExecutor(_Executor):
+        async def settle_adjustment(self, item, settlement):
+            calls.append((item.outbox_id, item.claim_token, settlement))
+            entered.set()
+            if not release.is_set():
+                if failure == "raise":
+                    raise RuntimeError("test final settlement unavailable")
+                if failure == "self_cancel":
+                    raise asyncio.CancelledError
+                await release.wait()
+            await super().settle_adjustment(item, settlement)
+
+    executor = FinalSettlementExecutor()
+    core, task_id = await _running_adjustment_core(tmp_path, executor)
+    command, grant = _adjust(
+        task_id,
+        "Verify another section.",
+        command_id="second-adjust",
+        request_id="second-request",
+    )
+    assert core.execute(command, grant, now=NOW).ok
+    complete = core.store.complete_adjustment_outbox
+    if store_rejects:
+
+        def lose_claim(item, delivery):
+            assert core.store.release_outbox(item, "test-lost-final-claim")
+            return complete(item, delivery)
+
+        monkeypatch.setattr(core.store, "complete_adjustment_outbox", lose_claim)
+    await asyncio.wait_for(entered.wait(), 2)
+    owner = next(iter(core._inflight_adjustments.values()))
+    expected = TaskAdjustmentSettlement(
+        TaskAdjustmentState.REJECTED if store_rejects else TaskAdjustmentState.APPLIED,
+        not store_rejects,
+    )
+    if failure == "owner_cancel":
+        owner.task.cancel()
+    try:
+        with pytest.raises(FormalTaskViolation) as failed:
+            await core.drain_inflight_adjustments(timeout=0.01)
+        assert failed.value.reason == "ADJUSTMENT_DELIVERY_CLEANUP_PENDING"
+        assert len(core._inflight_adjustments) == 1
+        assert owner.settlement == expected
+        assert executor.adjustments == ["command-adjust"]
+        assert executor.adjustment_settlements == []
+        events_before = core.store.events(task_id, _scope(), after_seq=-1)
+        attempts_before = len(calls)
+    finally:
+        release.set()
+    await core.drain_inflight_adjustments()
+    assert core._inflight_adjustments == {}
+    assert executor.adjustments == ["command-adjust"]
+    assert executor.adjustment_settlements == [expected]
+    assert all(call == calls[0] for call in calls)
+    assert len(calls) == attempts_before + (0 if failure == "owner_cancel" else 1)
+    assert core.store.events(task_id, _scope(), after_seq=-1) == events_before
+    assert len([e for e in events_before if e.event_type == "task.adjust_applied"]) == (
+        0 if store_rejects else 1
+    )
 
 
 class _Executor:

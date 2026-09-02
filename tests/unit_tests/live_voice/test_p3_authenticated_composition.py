@@ -4531,6 +4531,12 @@ async def test_authenticated_addressed_adjust_can_target_noncurrent_task(
         await _wait_until(
             lambda: harness.executor.adjustments == ["command-adjust-addressed"]
         )
+        await _wait_until(
+            lambda: any(
+                event.event_type == "task.adjust_applied"
+                for event in store.events(noncurrent_task_id, _scope(), after_seq=-1)
+            )
+        )
         noncurrent_events = store.events(noncurrent_task_id, _scope(), after_seq=-1)
         assert [
             event.event_type
@@ -5535,7 +5541,40 @@ async def test_mutation_without_trusted_confirmation_owner_fails_closed(
         await composition.stop()
 
 
-class _ExplodingCore:
+class _NoAdjustmentDeliveries:
+    async def drain_inflight_adjustments(self):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_stop_without_binding_retains_cleanup_pending_until_core_drains() -> None:
+    class Core(_NoAdjustmentDeliveries):
+        def __init__(self):
+            self.calls = 0
+
+        async def drain_inflight_adjustments(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise FormalTaskViolation(
+                    "ADJUSTMENT_DELIVERY_CLEANUP_PENDING", "test-owned pending delivery",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+
+    core = Core()
+    composition = P3AuthenticatedComposition(
+        authenticator=StaticBearerAuthenticator(token=TOKEN, principal=_principal()),
+        authority_resolver=_AuthorityResolver({}), core=core, clock=lambda: NOW,
+    )
+    with pytest.raises(FormalTaskViolation):
+        await composition.stop()
+    assert composition._cleanup_complete is False
+    assert core.calls == 1
+    await composition.stop()
+    assert core.calls == 2
+    assert composition._cleanup_complete is True
+
+
+class _ExplodingCore(_NoAdjustmentDeliveries):
     async def reconcile(self):
         return {}
 
@@ -5555,7 +5594,10 @@ async def test_startup_recovers_carrier_before_core_reconciliation() -> None:
         async def close(self) -> None:
             order.append("close")
 
-    class Core:
+    class Core(_NoAdjustmentDeliveries):
+        async def drain_inflight_adjustments(self):
+            order.append("drain-adjustments")
+
         async def reconcile(self):
             if order == ["carrier"]:
                 order.append("core")
@@ -5577,7 +5619,7 @@ async def test_startup_recovers_carrier_before_core_reconciliation() -> None:
     await composition.stop()
 
     assert summary == {"reconciled": 1}
-    assert order == ["carrier", "core", "shutdown-core", "close"]
+    assert order == ["carrier", "core", "shutdown-core", "drain-adjustments", "close"]
 
 
 @pytest.mark.asyncio
@@ -5601,9 +5643,13 @@ async def test_concurrent_starts_create_one_worker_and_one_startup_reconciliatio
         async def close(self) -> None:
             self.close_calls += 1
 
-    class Core:
+    class Core(_NoAdjustmentDeliveries):
         def __init__(self) -> None:
             self.reconcile_calls = 0
+            self.drain_calls = 0
+
+        async def drain_inflight_adjustments(self):
+            self.drain_calls += 1
 
         async def reconcile(self):
             self.reconcile_calls += 1
@@ -5633,12 +5679,13 @@ async def test_concurrent_starts_create_one_worker_and_one_startup_reconciliatio
     assert binding.prepare_calls == 1
     assert binding.close_calls == 1
     assert core.reconcile_calls == 2  # startup plus the final shutdown drain
+    assert core.drain_calls == 1
     assert worker is not None and worker.done()
 
 
 @pytest.mark.asyncio
 async def test_stop_wakes_periodic_reconciler_without_cancelling_child_waiter() -> None:
-    class Core:
+    class Core(_NoAdjustmentDeliveries):
         def __init__(self) -> None:
             self.reconcile_calls = 0
 
@@ -5680,7 +5727,7 @@ async def test_stop_waits_for_start_and_prevents_post_stop_reactivation() -> Non
         async def close(self) -> None:
             self.close_calls += 1
 
-    class Core:
+    class Core(_NoAdjustmentDeliveries):
         async def reconcile(self):
             return {}
 
@@ -6623,7 +6670,7 @@ async def test_stop_phases_direct_status_settlement_before_binding_release() -> 
         async def close(self) -> None:
             events.append("binding.close")
 
-    class Core:
+    class Core(_NoAdjustmentDeliveries):
         async def reconcile(self):
             events.append("core.reconcile")
             return {}
@@ -6698,7 +6745,7 @@ async def test_stop_retains_direct_owner_until_status_settlement_retries() -> No
             nonlocal binding_close_calls
             binding_close_calls += 1
 
-    class Core:
+    class Core(_NoAdjustmentDeliveries):
         async def reconcile(self):
             return {}
 
@@ -6760,7 +6807,7 @@ async def test_stop_retains_direct_owner_when_executor_cleanup_is_pending() -> N
             nonlocal binding_close_calls
             binding_close_calls += 1
 
-    class Core:
+    class Core(_NoAdjustmentDeliveries):
         async def reconcile(self):
             return {}
 

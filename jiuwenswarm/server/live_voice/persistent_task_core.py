@@ -4,9 +4,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar, Protocol
 
@@ -70,6 +71,24 @@ _PROJECTABLE_TASK_EVENTS = frozenset(
     }
 )
 _OUTBOX_CLAIM_LEASE = timedelta(minutes=5)
+_ADJUSTMENT_CLAIM_RENEW_SECONDS = 60.0
+_MAX_INFLIGHT_ADJUSTMENTS = 64
+_ADJUSTMENT_CLEANUP_SECONDS = 1.0
+
+
+@dataclass(slots=True)
+class _AdjustmentDeliveryOwner:
+    item: PersistentOutboxItem
+    task: asyncio.Task[bool] | None = None
+    delivery: asyncio.Task[TaskAdjustmentDeliveryResult] | None = None
+    fence: asyncio.Task[None] | None = None
+    settlement: TaskAdjustmentSettlement | None = None
+    reported: bool = False
+
+    def children(self) -> set[asyncio.Task]:
+        return {
+            task for task in (self.task, self.delivery, self.fence) if task is not None
+        }
 
 
 class FormalExecutor(Protocol):
@@ -288,6 +307,7 @@ class PersistentTaskCore:
         )
         if not isinstance(self._admission_policy, AdmissionPolicy):
             raise TypeError("admission_policy must be an AdmissionPolicy")
+        self._inflight_adjustments: dict[tuple[str, str], _AdjustmentDeliveryOwner] = {}
 
     def read_consumer_task(
         self,
@@ -1093,18 +1113,190 @@ class PersistentTaskCore:
         *,
         worker_id: str | None = None,
         observed_at: str | None = None,
+        defer_adjustments: bool = False,
     ) -> bool:
         worker = worker_id or f"task-core-{uuid.uuid4().hex}"
-        item = self.store.claim_outbox(worker, observed_at=observed_at)
+        item = self.store.claim_outbox(
+            worker,
+            observed_at=observed_at,
+            include_adjustments=len(self._inflight_adjustments)
+            < _MAX_INFLIGHT_ADJUSTMENTS,
+        )
         if item is None:
             return False
+        if item.kind is OutboxKind.ATTEMPT_ADJUST:
+            # Store serializes same-Attempt adjustments. Each claim retains its
+            # own owner even if another process reclaims this outbox row.
+            assert item.claim_token is not None
+            owner = _AdjustmentDeliveryOwner(item)
+            self._inflight_adjustments[(item.outbox_id, item.claim_token)] = owner
+            owner.task = asyncio.create_task(
+                self._deliver_outbox(
+                    item, observed_at=observed_at, adjustment_owner=owner
+                ),
+                name=f"task-adjustment:{item.outbox_id}",
+            )
+            if defer_adjustments:
+                return True
+            try:
+                return await asyncio.shield(owner.task)
+            except asyncio.CancelledError:
+                owner.task.cancel()
+                raise
+            finally:
+                self._reap_adjustment_deliveries()
+        return await self._deliver_outbox(item, observed_at=observed_at)
+
+    def _own_adjustment_settlement(
+        self,
+        owner: _AdjustmentDeliveryOwner,
+        settlement: TaskAdjustmentSettlement,
+    ) -> asyncio.Task[None]:
+        if owner.settlement is not None and owner.settlement != settlement:
+            raise FormalTaskViolation(
+                "ADJUSTMENT_SETTLEMENT_BINDING_CONFLICT",
+                "an owned adjustment settlement cannot change disposition",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        owner.settlement = settlement
+        if owner.fence is None:
+            owner.fence = asyncio.create_task(
+                self.executor.settle_adjustment(owner.item, settlement)
+            )
+        return owner.fence
+
+    async def _fence_adjustment_delivery(self, owner: _AdjustmentDeliveryOwner) -> None:
+        self._own_adjustment_settlement(
+            owner,
+            TaskAdjustmentSettlement(TaskAdjustmentState.REJECTED, False),
+        )
+        # Fence independently of a potentially non-cooperative delivery. Both
+        # children remain owned if either bounded cleanup wait expires.
+        await asyncio.wait({owner.fence}, timeout=_ADJUSTMENT_CLEANUP_SECONDS)
+        if owner.delivery is not None and not owner.delivery.done():
+            owner.delivery.cancel()
+            await asyncio.wait({owner.delivery}, timeout=_ADJUSTMENT_CLEANUP_SECONDS)
+
+    async def _await_adjustment_delivery(
+        self,
+        owner: _AdjustmentDeliveryOwner,
+    ) -> TaskAdjustmentDeliveryResult:
+        item = owner.item
+        owner.delivery = delivery = asyncio.create_task(self.executor.adjust(item))
+        while True:
+            try:
+                done, _ = await asyncio.wait(
+                    {delivery},
+                    timeout=_ADJUSTMENT_CLAIM_RENEW_SECONDS,
+                )
+                if not done:
+                    self.store.renew_outbox_claim(item)
+            except (Exception, asyncio.CancelledError) as error:
+                await self._fence_adjustment_delivery(owner)
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+                raise FormalTaskViolation(
+                    "ADJUSTMENT_DELIVERY_OWNERSHIP_LOST",
+                    "adjustment delivery lost its exact claim before settlement",
+                    ErrorCode.RESULT_UNKNOWN,
+                ) from error
+            if done:
+                # Normal Executor errors still use Core canonicalization.
+                try:
+                    return delivery.result()
+                except asyncio.CancelledError:
+                    await self._fence_adjustment_delivery(owner)
+                    raise
+
+    def _reap_adjustment_deliveries(self) -> tuple[int, int]:
+        delivered = unavailable = 0
+        for key, owner in tuple(self._inflight_adjustments.items()):
+            task = owner.task
+            if task is not None and task.done() and not owner.reported:
+                owner.reported = True
+                try:
+                    task.result()
+                    delivered += 1
+                except (Exception, asyncio.CancelledError):
+                    unavailable += 1
+            if (
+                owner.fence is not None
+                and owner.fence.done()
+                and (owner.fence.cancelled() or owner.fence.exception() is not None)
+            ):
+                # A failed fence is not quiescence. Retain it for an exact
+                # idempotent settlement retry on the next cleanup attempt.
+                unavailable += 1
+                continue
+            if all(child.done() for child in owner.children()):
+                for child in owner.children():
+                    if not child.cancelled():
+                        child.exception()  # Drain failures; never success evidence.
+                del self._inflight_adjustments[key]
+        return delivered, unavailable
+
+    async def drain_inflight_adjustments(self, *, timeout: float = 10.0) -> None:
+        """After Executor close, before releasing journals/bindings."""
+        for owner in self._inflight_adjustments.values():
+            if (
+                owner.fence is not None
+                and owner.fence.done()
+                and (owner.fence.cancelled() or owner.fence.exception() is not None)
+            ):
+                assert owner.settlement is not None
+                owner.fence = None
+                self._own_adjustment_settlement(owner, owner.settlement)
+        tasks = {
+            task
+            for owner in self._inflight_adjustments.values()
+            for task in owner.children()
+        }
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=timeout)
+            for owner in self._inflight_adjustments.values():
+                if (
+                    owner.task is not None
+                    and not owner.task.done()
+                    and not owner.task.cancelling()
+                ):
+                    owner.task.cancel()
+            if pending:
+                # Let cancellation handlers publish their independent fence.
+                await asyncio.sleep(0)
+                tasks = {
+                    task
+                    for owner in self._inflight_adjustments.values()
+                    for task in owner.children()
+                }
+                await asyncio.wait(tasks, timeout=2 * _ADJUSTMENT_CLEANUP_SECONDS)
+        _, unavailable = self._reap_adjustment_deliveries()
+        if self._inflight_adjustments or unavailable:
+            raise FormalTaskViolation(
+                "ADJUSTMENT_DELIVERY_CLEANUP_PENDING",
+                "adjustment delivery did not settle cleanly before close",
+                ErrorCode.RESULT_UNKNOWN,
+            )
+
+    async def _deliver_outbox(
+        self,
+        item: PersistentOutboxItem,
+        *,
+        observed_at: str | None = None,
+        adjustment_owner: _AdjustmentDeliveryOwner | None = None,
+    ) -> bool:
         try:
             if item.kind is OutboxKind.ATTEMPT_DISPATCH:
                 delivery = await self.executor.dispatch(item)
             elif item.kind is OutboxKind.ATTEMPT_CANCEL:
                 delivery = await self.executor.cancel(item)
             else:
-                adjustment_delivery = await self.executor.adjust(item)
+                assert adjustment_owner is not None
+                adjustment_delivery = await self._await_adjustment_delivery(
+                    adjustment_owner
+                )
+        except asyncio.CancelledError:
+            self.store.release_outbox(item, "ADJUSTMENT_DELIVERY_INTERRUPTED")
+            raise
         except FormalTaskViolation as error:
             if (
                 item.kind is OutboxKind.ATTEMPT_DISPATCH
@@ -1156,7 +1348,10 @@ class PersistentTaskCore:
                     TaskAdjustmentState.REJECTED,
                     False,
                 )
-                await self.executor.settle_adjustment(item, rejected)
+                assert adjustment_owner is not None
+                await asyncio.shield(
+                    self._own_adjustment_settlement(adjustment_owner, rejected)
+                )
                 try:
                     self.store.release_outbox(item, str(error))
                 except FormalTaskViolation:
@@ -1166,7 +1361,10 @@ class PersistentTaskCore:
                     "Executor adjustment exists but Core rejected its evidence",
                     ErrorCode.RESULT_UNKNOWN,
                 ) from error
-            await self.executor.settle_adjustment(item, settlement)
+            assert adjustment_owner is not None
+            await asyncio.shield(
+                self._own_adjustment_settlement(adjustment_owner, settlement)
+            )
             return True
         if item.kind is OutboxKind.ATTEMPT_DISPATCH and not delivery.observations:
             self.store.release_outbox(
@@ -1212,20 +1410,30 @@ class PersistentTaskCore:
         # dispatch.  Direct D2 managed-baseline validation intentionally needs
         # both the completed journal effect and its canonical Task settlement.
         status_summary = await self.reconcile_status()
-        delivered = delivery_unavailable = 0
+        delivered, delivery_unavailable = self._reap_adjustment_deliveries()
+        scheduled = 0
         while True:
             try:
-                changed = await self.drain_outbox_once(worker_id="task-core-restart")
+                before = len(self._inflight_adjustments)
+                changed = await self.drain_outbox_once(
+                    worker_id="task-core-restart",
+                    defer_adjustments=True,
+                )
             except Exception:  # noqa: BLE001 -- one delivery cannot abort restart audit
                 delivery_unavailable += 1
                 break
             if not changed:
                 break
-            delivered += 1
+            if len(self._inflight_adjustments) > before:
+                scheduled += 1
+            else:
+                delivered += 1
         return {
             "reset_claims": reset_claims,
             "delivered": delivered,
             "delivery_unavailable": delivery_unavailable,
+            "adjustment_scheduled": scheduled,
+            "adjustment_inflight": len(self._inflight_adjustments),
             **status_summary,
         }
 

@@ -2079,6 +2079,7 @@ class P3AuthenticatedComposition:
             binding_resolver = self._binding_resolver
             if isinstance(binding_resolver, _DirectP3RuntimeOwner):
                 await binding_resolver.close_executor()
+                await self._core.drain_inflight_adjustments()
                 if self._direct_runtime_prepared:
                     status_summary = await self._core.reconcile_status()
                     if status_summary["unavailable"] or status_summary["superseded"]:
@@ -2090,7 +2091,10 @@ class P3AuthenticatedComposition:
                 await binding_resolver.close_bindings()
                 self._direct_runtime_prepared = False
             elif binding_resolver is not None:
+                await self._core.drain_inflight_adjustments()
                 await binding_resolver.close()
+            else:
+                await self._core.drain_inflight_adjustments()
             self._cleanup_complete = True
 
     async def _enter_operation(self) -> None:

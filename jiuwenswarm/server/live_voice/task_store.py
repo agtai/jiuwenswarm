@@ -11065,7 +11065,11 @@ class SqliteTaskStore:
         return AdmissionDisposition.TIMED_OUT
 
     def claim_outbox(
-        self, worker_id: str, *, observed_at: str | None = None
+        self,
+        worker_id: str,
+        *,
+        observed_at: str | None = None,
+        include_adjustments: bool = True,
     ) -> PersistentOutboxItem | None:
         if not worker_id.strip():
             raise ValueError("worker_id must be non-empty")
@@ -11149,6 +11153,11 @@ class SqliteTaskStore:
             row = None
             for candidate in candidates:
                 if (
+                    not include_adjustments
+                    and candidate["kind"] == OutboxKind.ATTEMPT_ADJUST.value
+                ):
+                    continue
+                if (
                     candidate["canonical_attempt_id"] is None
                     or candidate["canonical_task_id"] is None
                     or candidate["attempt_task_id"] != candidate["task_id"]
@@ -11222,6 +11231,57 @@ class SqliteTaskStore:
                     ErrorCode.INTERNAL,
                 )
             return self._outbox_from_row(connection, claimed)
+
+    def renew_outbox_claim(
+        self,
+        item: PersistentOutboxItem,
+        *,
+        observed_at: str | None = None,
+    ) -> None:
+        """Renew only the exact live delivery; never reacquire or retarget it."""
+        now = observed_at or utc_now()
+        _utc_datetime(now)
+        with self._transaction() as connection:
+            row = connection.execute(
+                _OUTBOX_BINDING_SELECT + " WHERE o.outbox_id=?",
+                (item.outbox_id,),
+            ).fetchone()
+            if (
+                row is None
+                or row["state"] != OutboxState.CLAIMED.value
+                or item.claim_token is None
+                or row["claim_token"] != item.claim_token
+                or row["task_attempt_id"] != item.attempt_id
+                or row["bound_task_state"] == FormalTaskState.TERMINAL.value
+                or row["bound_attempt_state"] == FormalAttemptState.TERMINAL.value
+            ):
+                raise FormalTaskViolation(
+                    "OUTBOX_CLAIM_LOST",
+                    "outbox claim is no longer live",
+                    ErrorCode.CONFLICT,
+                )
+            stored = self._outbox_from_row(connection, row)
+            if (
+                stored.task_id != item.task_id
+                or stored.attempt_id != item.attempt_id
+                or stored.command_id != item.command_id
+                or stored.kind != item.kind
+                or stored.scope != item.scope
+                or stored.selection != item.selection
+                or stored.executor_ref != item.executor_ref
+                or stored.adjustment != item.adjustment
+                or _utc_datetime(row["claimed_at"]) > _utc_datetime(now)
+            ):
+                raise FormalTaskViolation(
+                    "OUTBOX_BINDING_MISMATCH",
+                    "outbox claim binding changed",
+                    ErrorCode.CONFLICT,
+                )
+            connection.execute(
+                "UPDATE outbox SET claimed_at=?, updated_at=? "
+                "WHERE outbox_id=? AND state=? AND claim_token=?",
+                (now, now, item.outbox_id, OutboxState.CLAIMED.value, item.claim_token),
+            )
 
     def defer_admission(
         self,

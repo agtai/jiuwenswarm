@@ -135,7 +135,11 @@
   CONTROLLED-CANDIDATE ATTEMPT REMAINS FAIL.** [D-086](decisions/DECISIONS.md)
   accepts the sequencing risk and removes the failed P1/P2 hands-free condition
   as a P3-1 Gate without changing that immutable older-source result.
-- **Current highest priority:** close the reproduced terminal Task notification
+- **Current highest priority:** implement the user-authorized production semantic
+  hardcode retirement on the confirmed current-branch baseline. The earlier
+  notification and imported-route evidence gaps remain required affected
+  regressions, not inherited PASS. See the [active packet](#production-semantic-hardcode-retirement).
+  The preceding priority was to close the reproduced terminal Task notification
   presentation boundary below: deliver its exact reauthorization response
   through Gateway after recognition/media recovery. Source and real-WebSocket
   regressions pass; controlled redeployment and a fresh physical journey remain
@@ -356,6 +360,68 @@ it cannot upgrade the failed candidate or invalidate the historical
 exact-source Alpha result.
 
 ## Current execution packet
+
+### Production semantic hardcode retirement
+
+- **Authority and baseline:** the user confirmed the current branch after the
+  difference between implementation presence and exact-source acceptance was
+  disclosed. Activation source is `59401beb06ecb78e31dfb9c6ed5486141463768c`.
+  The current external flight-cancellation Demo is business input, not a
+  replacement for root TESTING or proof of this machine's runtime readiness.
+- **Intended behaviour:** one configured-model structured semantic implementation
+  serves authenticated committed Cascade, Native and natural-text input. It
+  proposes only; existing deterministic Bridge/Registry/Core authority performs
+  exact targeting, capability checks, confirmation and execution. Foreground
+  analysis may yield a bounded recoverable work proposal; a later authorized
+  delegation merges constraints. Missing/ambiguous/expired context clarifies or
+  fails closed. No keyword fallback, current-Task targeting, fixture instruction,
+  Demo checkpoint or confirmation bypass remains production-reachable.
+- **Owned boundaries and risk:** semantic/schema/proposal and confirmation
+  continuity, Registry integration, and durable Core/Executor concurrency are
+  individually Tier 3. Main owns shared contracts and all writes. Structured
+  controls retain the same authority. Web presentation/lifecycle changes are
+  Tier 2 unless they change shared authorization or ACK contracts. Test-only
+  audio tooling is Tier 1; documentation is Tier 0. D-107 records the minimal
+  shared-contract additions before implementation.
+- **Dependencies and order:** verify authorized context/model and true entry
+  points; repair bounded adjustment delivery; implement the sole semantic
+  parser and recoverable pre-command context; wire both routes and retire old
+  production decisions; migrate unique safety oracles; run affected regression,
+  real isolated execution and automatic audio; freeze candidate for independent
+  cumulative review and operator-observed physical Demo.
+- **Product/test surfaces:** `production_task_intent.py`, classifier/Bridge,
+  Registry, P3 authenticated composition and existing committed-input journal;
+  Core/Store/Direct adjustment lifecycle and capability snapshots; affected Web,
+  launcher/configuration and current runbook. Tests remain under existing
+  module tests and explicit validation support. Corpus, audio, facts and
+  expected answers never enter production semantic decisions.
+- **Specific discovered defect and scoped repair:** the baseline Core awaited a
+  running adjustment in the sole reconciliation lane, delaying unrelated cancel.
+  Bounded Core-owned delivery, exact renewable claims and owned final settlement
+  now pass the scoped combined suite (645 passed; two host-privilege symlink skips)
+  and fix-only independent review (C0/I0/M0). See the
+  [Core prerequisite evidence](evidence/SEMANTIC_RETIREMENT_CORE_BOUNDARY_20260902.md).
+  This does not acknowledge pending work as applied or close semantic/audio Gates.
+  Generic running changes remain `task.adjust`, not new running `task.update`.
+- **Persistence/compatibility:** pre-command proposal/continuation records use
+  the existing committed-input journal's additive bounded storage, not another
+  Task Store. Bind scope, authorized conversation, origin, version, expiry and
+  model/config identity. Core claim renewal needs no Task schema migration.
+  Generic checkpoint capability must use versioned profiles; existing immutable
+  snapshots cannot be rewritten or re-enable retired fixture behaviour.
+- **Acceptance:** separately report HARDCODE_RETIREMENT,
+  SEMANTIC_AND_EXECUTION, AUDIO_E2E_DIGITAL, HUMAN_PHYSICAL_ACCEPTANCE and
+  REGRESSION_AND_REVIEW. All remain **NOT RUN / IN PROGRESS** for this packet.
+  Root TESTING's applicable P/N/B/S/T/C/R/I/F/K/X matrix applies; F covers
+  supported failures, not restoration of the retired semantic feature flag.
+  Final physical acceptance requires an operator; digital audio is not physical
+  microphone/speaker evidence. Preserve all failed attempts and historical
+  evidence, including the five imported mounted notification regressions.
+- **Exclusions:** no new Executor, native product route, pause/resume capability,
+  general workflow platform, public deployment, Provider/account/billing change,
+  system audio driver/security policy change, source-project business execution,
+  unrelated user-data cleanup, history rewrite or remote update. Real tasks use
+  registered disposable no-remote projects and isolated runtime data only.
 
 ### W3 generation interruption and Native adaptation integration
 
