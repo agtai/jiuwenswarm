@@ -294,14 +294,22 @@ exact-source Alpha result.
 
 ### Formal multi-Task coherent status and managed-baseline repair
 
-- **Status/source:** **DEPLOYED VALIDATION-READY / HUMAN REACCEPTANCE
-  PENDING**. The implementation is commit `7f8673e1`; the final running source
-  must be its clean documentation-only descendant containing this record.
+- **Status/source:** **AUTOMATED REPAIR GATE PASS / FRESH ISOLATED
+  REDEPLOYMENT PENDING**. The original implementation is commit `7f8673e1`,
+  and queued-reconciliation/order repair is commit `a179d02a`. The
+  documentation-only descendant `f02e3974` failed the retained real product
+  attempt and is not validation-ready.
   The retained isolated run showed Task A as `accepted/queued` with
   `EXECUTOR_PROJECT_BUSY` while the formal Panel omitted
-  `task.reprioritize`; after Task B completed and wrote its artifact, A
-  terminated `failed` with `TASK_CONTEXT_WORKTREE_DIRTY`. The failed data root,
-  target project and log are retained outside Git as diagnostic evidence.
+  `task.reprioritize`. Canonical inspection proved that the background
+  reconciliation worker had marked the legitimate unbound queued Attempt
+  `ATTEMPT_NOT_YET_BOUND`, so both the status authority and Store mutation
+  correctly failed closed against an incorrect reconciliation premise. After
+  Task B completed and wrote its artifact, A then terminated `failed` with
+  `TASK_CONTEXT_WORKTREE_DIRTY` even though the retained Store, Direct journal,
+  D2 effect sequence/checkpoint and current tree now prove the exact completed
+  managed baseline. The failed data root, target project and log are retained
+  outside Git as diagnostic evidence.
 - **Capability/risk/dependencies:** Task Control/Store status authority plus
   Direct D2 Executor project-effect admission; Tier 3 under root `TESTING.md`.
   This repair depends on D-087/D-088 queued update/reprioritize rules, D-089
@@ -311,21 +319,30 @@ exact-source Alpha result.
   profile, second authority or positive `provide_input/pause/resume` claim.
 - **Intended behaviour and owned surfaces:** one status response must bind Core
   Task/Attempt/admission and production supported operations to the same
-  authority generation. A fresh unclaimed busy/capacity admission exposes
-  `task.reprioritize` but not `task.update`; a claimed/running generation may
+  authority generation. Canonical reconciliation must distinguish an exact
+  still-pending unclaimed dispatch admission from missing Executor binding:
+  that proven queue has no reconciliation uncertainty, and an obsolete
+  `ATTEMPT_NOT_YET_BOUND` marker may be cleared only while the complete queued
+  ownership predicate remains true. A fresh unclaimed busy/capacity admission
+  exposes `task.reprioritize` but not `task.update`; a claimed/running
+  generation may
   reject the mutation but cannot be presented as the earlier queued
   generation. For one exact authenticated scope/project, Direct may treat the
   current Git tree as an admissible managed baseline only when it is clean or
   exactly equals the latest terminal/completed Direct effect recorded by both
-  canonical Task/Attempt truth and the Direct journal. The next attempt is
-  still isolated, seeded from that exact tree and applied by optimistic
-  fingerprint comparison.
+  canonical Task/Attempt truth and the Direct journal. Each reconciliation
+  round settles existing Executor status before admitting new dispatches, so
+  that the two proofs cannot be observed in the reverse order. The next
+  attempt is still isolated, seeded from that exact tree and applied by
+  optimistic fingerprint comparison.
 - **Owner files/tests:** production authority reader/status composition in
   `p3_production_intent_composition.py` and
   `product_composition_registry.py`; authenticated project resolution and
   Direct managed-baseline verification in `p3_authenticated_composition.py`
-  and `project_code_executor.py`; focused Store/Registry/Executor/formal Web
-  tests plus affected regressions/build/static checks.
+  and `project_code_executor.py`; canonical queued reconciliation in
+  `persistent_task_core.py` and `task_store.py`; focused
+  Store/Registry/Executor/formal Web tests plus affected
+  regressions/build/static checks.
 - **Explicit exclusions:** never accept an arbitrary manual tracked/untracked
   change, changed HEAD, unsafe link, foreign scope/project, nonterminal,
   failed/cancelled/interrupted/unknown or unsettled effect. Do not auto commit,
@@ -335,7 +352,11 @@ exact-source Alpha result.
   remote ref or claim feature-complete/product/Production acceptance.
 - **Acceptance:** deterministic race coverage rejects a mixed status generation
   with zero mutation and a stable refresh converges; fresh busy admission
-  exposes reprioritize only while unclaimed and preserves Task/Attempt identity;
+  exposes reprioritize only while unclaimed, preserves Task/Attempt identity
+  and remains so with the real reconciliation worker running across a reconcile
+  interval; an actual exact-authority `task.reprioritize` reaches `applied`,
+  while missing/claimed/mismatched queue proof remains reconciliation-pending
+  and rejects it;
   two same-project Tasks that write distinct files complete serially from the
   exact verified managed baseline; manual/foreign dirty state, changed HEAD,
   wrong scope, incomplete/failed effect and apply-time drift fail closed with
@@ -363,18 +384,30 @@ exact-source Alpha result.
   current execution environment, and the real JiuwenSwarm Agent/file-Tool seam
   remains the human journey; this packet cannot close before the fresh
   deployment and that journey.
-- **Fresh isolated redeployment:** validation label `aeeb4a70` uses project
+- **Post-reopen repair evidence:** focused RED-to-green reconciliation and
+  status tests pass `5/5`; admission plus real reconciliation-worker/D2 serial
+  execution passes `120/120`; the two complete affected Core/composition
+  suites pass `487/487`. A standard repository pytest/coverage invocation of
+  the eight new or directly affected cases passes `8/8`; changed-file Ruff,
+  compileall and `git diff --check` also pass. The repaired queue proof keeps
+  an exact unclaimed busy/capacity Attempt controllable, while claimed or
+  mismatched ownership remains pending with zero Executor mutation. The real
+  Core order test proves Task B settles canonically before Task A consumes the
+  managed baseline and both distinct files survive serial completion. Fresh
+  isolated redeployment and the human JiuwenSwarm Agent/file-Tool journey are
+  still required.
+- **Failed isolated deployment retained:** validation label `aeeb4a70` uses project
   `proj_9a8b984a` at
   `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-project-aeeb4a708abd4161ab31a7791e4aae8e`
   and data root
   `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-data-aeeb4a708abd4161ab31a7791e4aae8e`.
-  The target begins with only a committed `README.md`, a clean Git status and
-  zero remotes; the fresh Store begins with zero commands, Tasks, Attempts,
-  events and outbox rows. Controlled preflight and launch validate the Formal
-  Web bundle/routes, Direct D2 profile, fixed four ports, scoped project/data
-  binding, real Speech TTS→STT round trip, critical receipt, identity mismatch
-  and forged-claim rejection with zero business side effect. The retained old
-  `a6a9d338` failure project/data/log remain untouched and grant no credit.
+  The target began with only a committed `README.md`, a clean Git status and
+  zero remotes; the fresh Store began with zero commands, Tasks, Attempts,
+  events and outbox rows. Controlled preflight and launch passed, but the human
+  run reproduced both defects above; its log is
+  `logs/swarm-20260902-122128.log`. It grants no acceptance credit and must not
+  be reused for the next validation deployment. The retained older
+  `a6a9d338` failure project/data/log also remain untouched and grant no credit.
 
 ### P3-9 cumulative one-product acceptance
 
