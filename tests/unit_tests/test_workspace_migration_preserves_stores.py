@@ -1,0 +1,174 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""The legacy workspace migration must not delete what it did not relocate.
+
+``_migrate_legacy_workspace`` used to finish with ``shutil.rmtree(agent/home)``
+after relocating exactly one file out of it, ``cron_jobs.json``. ``agent/home``
+is where ``get_heartbeat_jobs_path`` keeps ``heartbeat_jobs.json``, so every
+persisted heartbeat job was destroyed -- no backup, no error, and a log line
+reporting the removal as ordinary housekeeping. The same removal ran a second
+time from ``prepare_workspace`` on the ``overwrite=True`` branch.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+
+import pytest
+
+from jiuwenswarm.common import utils
+from jiuwenswarm.common.utils import (
+    _migrate_legacy_workspace,
+    get_heartbeat_jobs_path,
+    get_user_workspace_dir,
+)
+
+_CRON_DOC = '{"version": 1, "jobs": [{"id": "cron-1"}]}'
+_HEARTBEAT_DOC = '{"version": 1, "jobs": [{"id": "hb-1"}]}'
+
+
+@pytest.fixture
+def migration_log():
+    """Yield the records the migration's own logger emits.
+
+    ``caplog`` alone sees nothing here: the project's loggers do not propagate
+    to the root logger the fixture attaches to, so the handler has to go on the
+    emitting logger directly.
+    """
+    records: list[logging.LogRecord] = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger(utils.__name__)
+    handler = _Collector()
+    logger.addHandler(handler)
+    previous = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+
+def _legacy_workspace(tmp_path: Path, *, cron: str = _CRON_DOC) -> Path:
+    """A pre-DeepAgent workspace holding both job stores in ``agent/home``."""
+    workspace = tmp_path / ".jiuwenswarm"
+    old_home = workspace / "agent" / "home"
+    old_home.mkdir(parents=True)
+    (old_home / "PRINCIPLE.md").write_text("be helpful\n", encoding="utf-8")
+    (old_home / "TONE.md").write_text("be brief\n", encoding="utf-8")
+    (old_home / "cron_jobs.json").write_text(cron, encoding="utf-8")
+    (old_home / "heartbeat_jobs.json").write_text(
+        _HEARTBEAT_DOC, encoding="utf-8"
+    )
+    return workspace
+
+
+def test_heartbeat_store_lives_in_the_directory_the_migration_clears() -> None:
+    """Pin the coupling this whole file is about, so it cannot drift silently."""
+    relative = get_heartbeat_jobs_path().relative_to(get_user_workspace_dir())
+
+    assert relative == Path("agent") / "home" / "heartbeat_jobs.json"
+
+
+def test_migration_keeps_heartbeat_jobs_it_does_not_relocate(
+    tmp_path: Path,
+) -> None:
+    workspace = _legacy_workspace(tmp_path)
+    heartbeat = workspace / "agent" / "home" / "heartbeat_jobs.json"
+
+    _migrate_legacy_workspace(workspace)
+
+    # The contrast the defect turns on: cron_jobs.json is the one file the
+    # migration rescues, and it is relocated as before.
+    assert (workspace / "gateway" / "cron_jobs.json").exists()
+    assert heartbeat.exists()
+    assert json.loads(heartbeat.read_text(encoding="utf-8")) == {
+        "version": 1,
+        "jobs": [{"id": "hb-1"}],
+    }
+
+
+def test_migration_warns_about_what_it_leaves_behind(
+    tmp_path: Path, migration_log: list[logging.LogRecord]
+) -> None:
+    workspace = _legacy_workspace(tmp_path)
+
+    _migrate_legacy_workspace(workspace)
+
+    warnings = [
+        record.getMessage()
+        for record in migration_log
+        if record.levelno >= logging.WARNING
+    ]
+    assert any("heartbeat_jobs.json" in message for message in warnings), warnings
+
+
+def test_migration_still_retires_the_superseded_soul_files(
+    tmp_path: Path,
+) -> None:
+    """Preserving unmigrated data must not turn into preserving everything.
+
+    PRINCIPLE.md and TONE.md are merged into SOUL.md, so they are the
+    migration's to remove -- and removing them is what stops the workspace from
+    being classified legacy again on the next start.
+    """
+    workspace = _legacy_workspace(tmp_path)
+    old_home = workspace / "agent" / "home"
+
+    _migrate_legacy_workspace(workspace)
+
+    assert (workspace / "agent" / "workspace" / "SOUL.md").exists()
+    assert not (old_home / "PRINCIPLE.md").exists()
+    assert not (old_home / "TONE.md").exists()
+
+
+def test_nothing_is_deleted_when_the_relocation_fails(tmp_path: Path) -> None:
+    """Fail safe: a relocation that did not complete authorises no deletion.
+
+    An unreadable ``cron_jobs.json`` makes step 5 log and continue. The cleanup
+    used to run regardless and delete the file it had just failed to copy,
+    along with everything else in the directory.
+    """
+    workspace = _legacy_workspace(tmp_path, cron="{not json")
+    old_home = workspace / "agent" / "home"
+
+    _migrate_legacy_workspace(workspace)
+
+    assert not (workspace / "gateway" / "cron_jobs.json").exists()
+    assert (old_home / "cron_jobs.json").read_text(encoding="utf-8") == "{not json"
+    assert (old_home / "heartbeat_jobs.json").exists()
+
+
+def test_workspace_init_keeps_heartbeat_jobs(tmp_path: Path) -> None:
+    """The ``overwrite=True`` branch removes ``agent/home`` on its own path."""
+    workspace = _legacy_workspace(tmp_path)
+    heartbeat = workspace / "agent" / "home" / "heartbeat_jobs.json"
+
+    utils.prepare_workspace(
+        overwrite=True,
+        preferred_language="en",
+        workspace_dir=workspace,
+    )
+
+    assert heartbeat.exists()
+    assert json.loads(heartbeat.read_text(encoding="utf-8"))["jobs"] == [
+        {"id": "hb-1"}
+    ]
+
+
+def test_old_home_is_removed_once_nothing_is_left_in_it(tmp_path: Path) -> None:
+    """The directory still goes away when it holds only migrated entries."""
+    workspace = tmp_path / ".jiuwenswarm"
+    old_home = workspace / "agent" / "home"
+    old_home.mkdir(parents=True)
+    (old_home / "PRINCIPLE.md").write_text("be helpful\n", encoding="utf-8")
+
+    _migrate_legacy_workspace(workspace)
+
+    assert not old_home.exists()

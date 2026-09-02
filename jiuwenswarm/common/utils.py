@@ -969,6 +969,58 @@ def _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir: Path) -> None:
         print(f"[migration] Renamed: {old_workspace} -> {new_workspace}")
 
 
+def _remove_migrated_legacy_home(
+    old_home: Path,
+    migrated: set[str],
+    *,
+    context: str,
+) -> None:
+    """Retire ``agent/home`` without deleting what the caller did not move.
+
+    A blanket ``shutil.rmtree(old_home)`` used to run here. The directory is not
+    inert: ``get_heartbeat_jobs_path`` keeps ``heartbeat_jobs.json`` in it, and
+    on deployments that never migrated ``get_cron_jobs_path`` keeps
+    ``cron_jobs.json`` there too. Removing the directory wholesale therefore
+    destroyed every persisted heartbeat job, with no backup, no error, and a log
+    line that read as ordinary housekeeping.
+
+    Only entries named in ``migrated`` -- the ones the caller has demonstrably
+    merged or relocated -- are removed. Anything else stays where it is and is
+    named in a warning, which protects the next store to land in ``agent/home``
+    as well as this one. The directory itself is removed once nothing is left in
+    it, so a workspace whose legacy content has all been migrated still ends up
+    without it.
+
+    Args:
+        old_home: The legacy ``agent/home`` directory.
+        migrated: Names the caller has already merged or relocated.
+        context: Caller description, for the log lines.
+    """
+    if not old_home.exists():
+        return
+
+    survivors: list[str] = []
+    for item in sorted(old_home.iterdir(), key=lambda p: p.name):
+        if item.name in migrated:
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+            continue
+        survivors.append(item.name)
+
+    if not survivors:
+        old_home.rmdir()
+        logger.info(f"Removed old home ({context}): {old_home}")
+        return
+
+    logger.warning(
+        f"Kept old home ({context}): {old_home} still holds entries the "
+        f"migration did not move, removing it would lose them: "
+        f"{', '.join(survivors)}"
+    )
+
+
 def _migrate_legacy_workspace(
     workspace_dir: Path,
     preferred_language: Optional[str] = None,
@@ -1005,6 +1057,10 @@ def _migrate_legacy_workspace(
     new_workspace = workspace_dir / "agent" / "workspace"
     new_workspace.mkdir(parents=True, exist_ok=True)
 
+    # Names under old_home this run has merged or relocated. Only these may be
+    # deleted by the cleanup in step 6; see _remove_migrated_legacy_home.
+    migrated_home_entries = set()
+
     # 1. Migrate old home files
     if old_home.exists():
         # Merge PRINCIPLE.md and TONE.md into SOUL.md
@@ -1025,6 +1081,12 @@ def _migrate_legacy_workspace(
                 soul_content.append("\n\n")
             new_soul.write_text("".join(soul_content), encoding="utf-8")
             logger.info("Merged PRINCIPLE.md and TONE.md into SOUL.md")
+
+        if new_soul.exists():
+            # SOUL.md supersedes them, so the cleanup may retire them.
+            migrated_home_entries.update(
+                item.name for item in (old_principle, old_tone) if item.exists()
+            )
 
     new_skills = new_workspace / "skills"
     if old_skills.exists():
@@ -1105,6 +1167,7 @@ def _migrate_legacy_workspace(
                     encoding="utf-8"
                 )
                 logger.info(f"Migrated cron_jobs.json: {old_cron_jobs} -> {new_cron_jobs}")
+                migrated_home_entries.add(old_cron_jobs.name)
             else:
                 # Both exist - backup old, log warning
                 backup_cron = gateway_dir / f"cron_jobs.json.backup.{int(time.time())}"
@@ -1113,14 +1176,17 @@ def _migrate_legacy_workspace(
                     f"Both old and new cron_jobs.json exist. "
                     f"Kept new version, backed up old to {backup_cron}"
                 )
+                migrated_home_entries.add(old_cron_jobs.name)
         except (json.JSONDecodeError, IOError) as e:
+            # The relocation did not complete, so cron_jobs.json stays out of
+            # migrated_home_entries and the cleanup below leaves it alone.
             logger.error(f"Failed to migrate cron_jobs.json: {e}")
 
     # 6. Clean up old directories after successful migration
     try:
-        if old_home.exists():
-            shutil.rmtree(old_home)
-            logger.info(f"Removed old home: {old_home}")
+        _remove_migrated_legacy_home(
+            old_home, migrated_home_entries, context="legacy migration"
+        )
         if old_skills.exists():
             shutil.rmtree(old_skills)
             logger.info(f"Removed old skills: {old_skills}")
@@ -1234,9 +1300,14 @@ def prepare_workspace(
     # If overwrite (init command), clean up old legacy directories first
     elif overwrite:
         try:
-            if old_home.exists():
-                shutil.rmtree(old_home)
-                logger.info(f"Removed old home: {old_home}")
+            # ``init`` rebuilds the workspace from templates, but agent/home is
+            # where live job stores are kept and this branch relocates nothing
+            # out of it. Having moved nothing, it may delete nothing; whatever
+            # legacy content is left is merged by the migration on the next
+            # ``start``, which does relocate.
+            _remove_migrated_legacy_home(
+                old_home, set(), context="workspace init"
+            )
             if old_skills.exists():
                 shutil.rmtree(old_skills)
                 logger.info(f"Removed old skills: {old_skills}")
