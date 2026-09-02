@@ -294,8 +294,9 @@ exact-source Alpha result.
 
 ### Formal multi-Task coherent status and managed-baseline repair
 
-- **Status/source:** **IMPLEMENTED / AUTOMATED CHANGED-BOUNDARY PASS; HUMAN
-  REACCEPTANCE BLOCKED** in the current worktree from source `18272738b1`.
+- **Status/source:** **DEPLOYED VALIDATION-READY / HUMAN REACCEPTANCE
+  PENDING**. The implementation is commit `7f8673e1`; the final running source
+  must be its clean documentation-only descendant containing this record.
   The retained isolated run showed Task A as `accepted/queued` with
   `EXECUTOR_PROJECT_BUSY` while the formal Panel omitted
   `task.reprioritize`; after Task B completed and wrote its artifact, A
@@ -362,6 +363,18 @@ exact-source Alpha result.
   current execution environment, and the real JiuwenSwarm Agent/file-Tool seam
   remains the human journey; this packet cannot close before the fresh
   deployment and that journey.
+- **Fresh isolated redeployment:** validation label `aeeb4a70` uses project
+  `proj_9a8b984a` at
+  `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-project-aeeb4a708abd4161ab31a7791e4aae8e`
+  and data root
+  `C:\Users\admin\AppData\Local\Temp\jiuwenswarm-realtime-p3-data-aeeb4a708abd4161ab31a7791e4aae8e`.
+  The target begins with only a committed `README.md`, a clean Git status and
+  zero remotes; the fresh Store begins with zero commands, Tasks, Attempts,
+  events and outbox rows. Controlled preflight and launch validate the Formal
+  Web bundle/routes, Direct D2 profile, fixed four ports, scoped project/data
+  binding, real Speech TTS→STT round trip, critical receipt, identity mismatch
+  and forged-claim rejection with zero business side effect. The retained old
+  `a6a9d338` failure project/data/log remain untouched and grant no credit.
 
 ### P3-9 cumulative one-product acceptance
 
