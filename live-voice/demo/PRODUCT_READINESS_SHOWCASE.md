@@ -11,6 +11,12 @@ numbered-stage handoff and not a public production demonstration. Historical
 Integrated Web Alpha acceptance remains bound to its historical exact source;
 it cannot be reused to pass later hands-free/background-task changes.
 
+This smaller journey must not be reused as complete-P3 evidence. A future
+complete-P3 candidate uses the prepared
+[complete-P3 minimal acceptance questions](COMPLETE_P3_MINIMAL_ACCEPTANCE_QUESTIONS.md)
+in addition to its exact-source automated, fault/recovery and review Gate; that
+question set is preparation only until it is actually run.
+
 ## 1. Preflight and candidate identity
 
 Record without secrets:

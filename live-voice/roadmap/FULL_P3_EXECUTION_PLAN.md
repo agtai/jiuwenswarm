@@ -792,6 +792,13 @@ map](../reviews/P3_5B_P3_6_ACTIVATION_PREPARATION_2026-08-18.md).
 
 #### Required product journeys
 
+The prepared operator route is the
+[complete-P3 minimal acceptance question set](../demo/COMPLETE_P3_MINIMAL_ACCEPTANCE_QUESTIONS.md).
+It combines one 19-question human journey with the exact-source fault,
+durability, configuration, privacy, feature-off and review questions that a
+human-visible flow cannot prove. The document grants no acceptance credit until
+both Gates actually run on one exact clean candidate.
+
 1. **Multi-Task control:** create Tasks A and B, continue foreground dialogue,
    query each, update A and cancel B without cross-effects.
 2. **Blocking/input:** on a composition that declares a separately accepted real

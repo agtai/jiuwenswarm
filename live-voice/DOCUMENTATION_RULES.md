@@ -15,7 +15,8 @@ review rules. Do not duplicate either here.
 | Accepted choice, rationale and re-evaluation | `decisions/DECISIONS.md` |
 | Stable P1/P2/P3 capability and shared-contract design | `architecture/FULL_SOLUTION_2026-07-30.md` §§2, 4–5, interpreted through current decisions/STATUS |
 | Current controlled-candidate pass/fail | `validation/PRODUCT_READINESS_ACCEPTANCE.md` |
-| Current complete human journey | `demo/PRODUCT_READINESS_SHOWCASE.md` |
+| Current controlled-candidate human journey | `demo/PRODUCT_READINESS_SHOWCASE.md` |
+| Prepared complete-P3 evidence questions and human journey | `demo/COMPLETE_P3_MINIMAL_ACCEPTANCE_QUESTIONS.md` |
 | Environment, start, diagnosis and cleanup commands | `runbooks/E2E_RUNBOOK.md` |
 | Conditional historical/module/forensic routes | `REFERENCE_INDEX.md` |
 | Detailed cleanup findings | `reviews/` |
