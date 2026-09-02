@@ -3546,7 +3546,8 @@ class P3AuthenticatedComposition:
             visible = await self._run_blocking(
                 reader.list_visible_tasks, authority.scope
             )
-            if visible.fingerprint != resolution.task_set_fingerprint:
+            mutation = operation in P3_PRODUCTION_MUTATIONS
+            if not mutation and visible.fingerprint != resolution.task_set_fingerprint:
                 raise FormalTaskViolation(
                     "PRODUCTION_TASK_AUTHORITY_CHANGED",
                     "visible Task set changed after intent resolution",
@@ -3572,8 +3573,19 @@ class P3AuthenticatedComposition:
                     ErrorCode.NOT_FOUND,
                 )
             if target is not None and (
-                resolution.authority_fingerprint != target.fingerprint
-                or operation not in target.supported_operations
+                operation not in target.supported_operations
+                or (
+                    not mutation
+                    and resolution.authority_fingerprint != target.fingerprint
+                )
+                or (
+                    mutation
+                    and (
+                        resolution.confirmation_binding is None
+                        or resolution.confirmation_binding.target_attempt_id
+                        != target.attempt_id
+                    )
+                )
             ):
                 raise FormalTaskViolation(
                     "PRODUCTION_TASK_AUTHORITY_CHANGED",
@@ -3602,7 +3614,7 @@ class P3AuthenticatedComposition:
             final_visible = await self._run_blocking(
                 reader.list_visible_tasks, authority.scope
             )
-            if final_visible.fingerprint != visible.fingerprint:
+            if not mutation and final_visible.fingerprint != visible.fingerprint:
                 raise FormalTaskViolation(
                     "PRODUCTION_TASK_AUTHORITY_CHANGED",
                     "Task authority changed during final invocation preparation",
@@ -3986,7 +3998,8 @@ class P3AuthenticatedComposition:
                 claim = confirmation_consumer.claim_for(resolution)
                 if (
                     type(claim) is not CallLocalProductionConfirmationClaim
-                    or claim.production_binding != resolution.confirmation_binding
+                    or claim.production_binding.fingerprint
+                    != resolution.confirmation_binding.fingerprint
                     or claim.consumption_id != resolution.confirmation_consumption_id
                     or claim.resolution_fingerprint != resolution.fingerprint
                     or claim.p3_binding.intent_fingerprint

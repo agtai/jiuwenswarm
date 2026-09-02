@@ -563,6 +563,7 @@ class ProductionConfirmationBinding:
     origin_binding_fingerprint: str
     operation: str
     target_task_id: str | None
+    target_attempt_id: str | None
     arguments_sha256: str
     task_set_fingerprint: str
     capability_profile_digest: str
@@ -581,8 +582,11 @@ class ProductionConfirmationBinding:
         _require_opaque(self.origin_receipt_id, "confirmation_origin_receipt")
         if self.operation not in _ALL_OPERATIONS:
             raise ValueError("INVALID_CONFIRMATION_OPERATION")
+        if (self.target_task_id is None) != (self.target_attempt_id is None):
+            raise ValueError("CONFIRMATION_TARGET_ATTEMPT_MISMATCH")
         if self.target_task_id is not None:
             _require_opaque(self.target_task_id, "confirmation_target_task_id")
+            _require_opaque(self.target_attempt_id, "confirmation_target_attempt_id")
         for digest in (
             self.origin_binding_fingerprint,
             self.arguments_sha256,
@@ -596,6 +600,8 @@ class ProductionConfirmationBinding:
 
     @property
     def fingerprint(self) -> str:
+        """Seal stable user intent, not the mutable observed Task collection."""
+
         return _sha256(
             {
                 "arguments_sha256": self.arguments_sha256,
@@ -609,8 +615,8 @@ class ProductionConfirmationBinding:
                 "origin_receipt_id": self.origin_receipt_id,
                 "principal_id": self.principal_id,
                 "scope": self.scope.to_dict(),
+                "target_attempt_id": self.target_attempt_id,
                 "target_task_id": self.target_task_id,
-                "task_set_fingerprint": self.task_set_fingerprint,
             }
         )
 
@@ -800,6 +806,8 @@ class ProductionTaskResolution:
             not isinstance(self.confirmation_binding, ProductionConfirmationBinding)
             or self.confirmation_binding.operation != self.operation
             or self.confirmation_binding.target_task_id != self.target_task_id
+            or self.confirmation_binding.task_set_fingerprint
+            != self.task_set_fingerprint
             or self.confirmation_binding.command_id != self.command_id
             or self.confirmation_binding.arguments_sha256
             != _sha256(dict(self.arguments))
@@ -1537,6 +1545,7 @@ class ProductionMultiTaskResolver:
                     origin_binding_fingerprint=origin_binding.fingerprint,
                     operation=operation,
                     target_task_id=None if target is None else target.task_id,
+                    target_attempt_id=None if reread is None else reread.attempt_id,
                     arguments_sha256=_sha256(dict(resolved_arguments)),
                     task_set_fingerprint=visible.fingerprint,
                     capability_profile_digest=self._capability_digest(visible, reread),

@@ -11879,14 +11879,12 @@ class AgentServerProductCompositionRegistry:
                     resolution.operation != pending.resolution.operation
                     or resolution.target_task_id != pending.resolution.target_task_id
                     or dict(resolution.arguments) != dict(pending.resolution.arguments)
-                    or resolution.task_set_fingerprint
-                    != pending.resolution.task_set_fingerprint
-                    or resolution.authority_fingerprint
-                    != pending.resolution.authority_fingerprint
-                    or resolution.confirmation_binding is None
                     or pending.resolution.confirmation_binding is None
-                    or resolution.confirmation_binding.capability_profile_digest
-                    != pending.resolution.confirmation_binding.capability_profile_digest
+                    or (
+                        resolution.confirmation_binding is not None
+                        and resolution.confirmation_binding.fingerprint
+                        != pending.resolution.confirmation_binding.fingerprint
+                    )
                 )
             ):
                 await self._release_production_intent_origins(

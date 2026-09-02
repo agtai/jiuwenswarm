@@ -840,6 +840,7 @@ def test_confirmation_consumer_yields_one_exact_call_local_claim(
         origin_binding_fingerprint="a" * 64,
         operation="task.cancel",
         target_task_id="task-production-confirmed",
+        target_attempt_id="attempt-production-confirmed",
         arguments_sha256=hashlib.sha256(b"{}").hexdigest(),
         task_set_fingerprint="b" * 64,
         capability_profile_digest="c" * 64,
@@ -885,9 +886,14 @@ def test_confirmation_consumer_yields_one_exact_call_local_claim(
         now=NOW,
     )
 
-    consumed = consumer.verify_and_consume(
-        "confirmation-production-confirmed", production
+    current = replace(production, task_set_fingerprint="f" * 64)
+    assert current != production
+    assert current.fingerprint == production.fingerprint
+    assert (
+        replace(current, target_attempt_id="attempt-production-retried").fingerprint
+        != production.fingerprint
     )
+    consumed = consumer.verify_and_consume("confirmation-production-confirmed", current)
     resolution = ProductionTaskResolution(
         classification="task_intent",
         operation=production.operation,
@@ -899,10 +905,10 @@ def test_confirmation_consumer_yields_one_exact_call_local_claim(
         command_id=production.command_id,
         origin_receipt_id=production.origin_receipt_id,
         origin_binding_fingerprint=production.origin_binding_fingerprint,
-        task_set_fingerprint=production.task_set_fingerprint,
+        task_set_fingerprint=current.task_set_fingerprint,
         authority_fingerprint="d" * 64,
         confirmation_consumption_id=consumed.consumption_id,
-        confirmation_binding=production,
+        confirmation_binding=current,
     )
 
     claim = consumer.claim_for(resolution)
