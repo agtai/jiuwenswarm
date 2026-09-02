@@ -2374,6 +2374,134 @@ def test_reconciliation_projection_exposes_bounded_manual_action(
     assert admission.queued is False
 
 
+@pytest.mark.asyncio
+async def test_busy_queue_reconciliation_preserves_exact_reprioritize_authority(
+    tmp_path: Path,
+) -> None:
+    """A deferred dispatch is queued ownership, not a missing Executor binding."""
+
+    database = tmp_path / "busy-queue-reconciliation.sqlite"
+    store = SqliteTaskStore(database)
+    core = PersistentTaskCore(store, _Executor())
+    policy = AdmissionPolicy(
+        deadline_seconds=60,
+        initial_backoff_seconds=1,
+        max_backoff_seconds=2,
+        max_attempts=4,
+    )
+    task_id, attempt_id = _selected_create(
+        store,
+        tmp_path,
+        suffix="-busy-queue-reconciliation",
+        priority=AdmissionPriority.LOW,
+        policy=policy,
+    )
+    item = store.claim_outbox("busy-queue", observed_at=NOW)
+    assert item is not None and item.attempt_id == attempt_id
+    assert (
+        store.defer_admission(
+            item,
+            reason="EXECUTOR_PROJECT_BUSY",
+            policy=policy,
+            observed_at=NOW,
+        )
+        is AdmissionDisposition.DEFERRED
+    )
+    store.mark_reconciliation_pending(
+        task_id,
+        attempt_id,
+        "ATTEMPT_NOT_YET_BOUND",
+    )
+
+    summary = await core.reconcile_status()
+
+    assert summary == {
+        "known": 1,
+        "unavailable": 0,
+        "lost": 0,
+        "superseded": 0,
+    }
+    task = store.get_task(task_id, _scope())
+    admission = store.admission_projection(task_id, _scope())
+    assert task.reconciliation_state is None
+    assert task.reconciliation_reason is None
+    assert admission is not None
+    assert admission.queued is True
+    assert admission.reason == "EXECUTOR_PROJECT_BUSY"
+    command, authorization = _reprioritize(
+        task_id,
+        attempt_id,
+        task.event_head,
+        "urgent",
+        command_id="cmd-busy-queue-reprioritize",
+    )
+
+    applied = core.execute(command, authorization, now="2026-08-05T12:00:01Z")
+
+    assert applied.ok and applied.result is not None
+    assert applied.result["applied"] is True
+    assert applied.result["priority"] == "urgent"
+    current = store.admission_projection(task_id, _scope())
+    assert current is not None
+    assert current.priority is AdmissionPriority.URGENT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("queue_break", ["claimed", "mismatched"])
+async def test_unbound_reconciliation_rejects_unproven_selected_queue(
+    tmp_path: Path,
+    queue_break: str,
+) -> None:
+    """Claimed or inconsistent delivery ownership must remain fail-closed."""
+
+    database = tmp_path / f"unproven-queue-{queue_break}.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    task_id, attempt_id = _selected_create(
+        store,
+        tmp_path,
+        suffix=f"-unproven-queue-{queue_break}",
+    )
+    if queue_break == "claimed":
+        claimed = store.claim_outbox("unproven-owner", observed_at=NOW)
+        assert claimed is not None and claimed.attempt_id == attempt_id
+    else:
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE outbox SET last_error=? WHERE attempt_id=?",
+                ("UNPROVEN_DELIVERY_STATE", attempt_id),
+            )
+            connection.commit()
+
+    summary = await core.reconcile_status()
+
+    assert summary == {
+        "known": 0,
+        "unavailable": 1,
+        "lost": 0,
+        "superseded": 0,
+    }
+    task = store.get_task(task_id, _scope())
+    assert task.reconciliation_state is ReconciliationState.PENDING
+    assert task.reconciliation_reason == "ATTEMPT_NOT_YET_BOUND"
+    command, authorization = _reprioritize(
+        task_id,
+        attempt_id,
+        task.event_head,
+        "urgent",
+        command_id=f"cmd-unproven-queue-{queue_break}",
+    )
+
+    rejected = core.execute(command, authorization, now=NOW)
+
+    assert not rejected.ok and rejected.error is not None
+    assert rejected.error.reason == "TASK_CONTROL_STATE_CONFLICT"
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    assert executor.adjustments == []
+
+
 def test_reprioritize_pending_selected_attempt_is_atomic_replayable_and_reopens(
     tmp_path: Path,
 ) -> None:

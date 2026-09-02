@@ -1208,6 +1208,10 @@ class PersistentTaskCore:
         reset_claims = self.store.reset_expired_outbox_claims(
             claimed_before=claimed_before
         )
+        # Settle existing Executor truth before admitting another same-project
+        # dispatch.  Direct D2 managed-baseline validation intentionally needs
+        # both the completed journal effect and its canonical Task settlement.
+        status_summary = await self.reconcile_status()
         delivered = delivery_unavailable = 0
         while True:
             try:
@@ -1218,7 +1222,6 @@ class PersistentTaskCore:
             if not changed:
                 break
             delivered += 1
-        status_summary = await self.reconcile_status()
         return {
             "reset_claims": reset_claims,
             "delivered": delivered,
@@ -1232,6 +1235,11 @@ class PersistentTaskCore:
         known = unavailable = lost = superseded = 0
         for task, attempt in self.store.nonterminal_attempts():
             if attempt.executor_ref is None:
+                if self.store.settle_unbound_queued_attempt(
+                    task.task_id, attempt.attempt_id
+                ):
+                    known += 1
+                    continue
                 receipt = self.store.mark_reconciliation_pending(
                     task.task_id, attempt.attempt_id, "ATTEMPT_NOT_YET_BOUND"
                 )

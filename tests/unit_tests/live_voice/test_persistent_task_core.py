@@ -9248,10 +9248,10 @@ async def test_lost_reconciliation_suppresses_retrying_cancel_outbox(
 
     summary = await core.reconcile()
 
-    assert summary["delivery_unavailable"] == 1
+    assert summary["delivery_unavailable"] == 0
     assert summary["lost"] == 1
     assert await core.drain_outbox() == 0
-    assert executor.cancels == [created.result["attempt_id"]]
+    assert executor.cancels == []
     assert store.get_task(task_id, _scope()).outcome is TerminalOutcome.INTERRUPTED
 
 
