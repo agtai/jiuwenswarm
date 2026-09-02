@@ -58,6 +58,12 @@ at-least-once presentation。若恰好在播放后、ACK 提交前崩溃，允�
 - D-032 的适用 `P/N/B/S/T/C/R/I/F/K/X` 证据是否覆盖 migration/reopen、
   duplicate/conflicting command、wrong task/scope、并发 terminal、capacity、
   project serialization、lease/outbox fence、deadline 和 exact cancel？
+- 受控 dispatcher fixture 是否证明 `task.update` 只在 dispatch outbox 从未
+  claim/deliver 时同步更新 canonical spec 与 payload；一旦 claim/deliver，是否
+  稳定 conflict 且零业务副作用？该正向路径不交给人工抢时间窗口。
+- `EXECUTOR_PROJECT_BUSY` 的 closed pre-effect defer 是否证明同一 Attempt 回到
+  `PENDING` 后保留 `task.reprioritize`、移除 `task.update`；claimed 窗口是否两者
+  都不展示，fresh status 后不保留过期 capability？
 - accepted/queued、running、command accepted/applied 和 terminal outcome 是否
   始终分离，所有拒绝/冲突/超时/未知路径是否断言禁止副作用为零？
 - `task.retry` 的 cancelled recovery 与非法状态是否已有 exact-source 证据？
@@ -136,13 +142,13 @@ E1～E7 任一必答问题未通过时，不开始或不通过 H Gate。
 
   > 创建 itinerary-a.md，制定一份三天杭州行程。每天包含上午、下午和晚上，每个时段至少三项候选活动，每项给出交通方式、开放时间、费用和注意事项；初始安排中第二天下午去灵隐寺，第二天晚上逛河坊街；完成前检查文件已经保存。
 
-### Task A queued update 完整版本
+### Task A pre-dispatch update oracle（仅用于 E3 受控证据）
 
 > 创建 itinerary-a.md，制定一份三天杭州行程。每天包含上午、下午和晚上，每个时段至少三项候选活动，每项给出交通方式、开放时间、费用和注意事项；第二天下午改为西湖，第二天晚上留作自由活动；完成前检查文件已经保存。
 
 ### Task A running adjustment
 
-> 在 itinerary-a.md 末尾增加“雨天备选”小节，列出三个室内备选并说明分别替换哪个时段；不要改变第二天下午和第二天晚上的已确认安排。
+> 把 itinerary-a.md 中第二天下午改为西湖，第二天晚上改为自由活动；并在文件末尾增加“雨天备选”小节，列出三个室内备选并说明分别替换哪个时段；不要改变其余安排。
 
 ### Task A successor
 
@@ -151,10 +157,11 @@ E1～E7 任一必答问题未通过时，不开始或不通过 H Gate。
 
   > 创建 itinerary-a2.md，以杭州行程甲的最终结果为前版依据，将第三天上午改为中国丝绸博物馆，其余已确认安排和雨天备选保持不变；不要改写 itinerary-a.md。
 
-若 B 在取消前自然完成，或 A 在 queued update 前已被 claim/deliver，或 A 在
-unsupported 检查、running adjustment/Exit 前已终结，本次相应正向场景是
-**夹具时序无效**，不是自动 PASS。清理隔离项目与数据后，用更长的安全任务
-重新开始；不得修改真实状态或把非法状态 conflict 当成通过。
+若 B 在取消前自然完成或将 patch 应用到目标项目，或 A 在 unsupported 检查、
+running adjustment/Exit 前已终结，本次相应正向场景是**夹具时序无效**，不是
+自动 PASS。清理隔离项目与数据后，用更长的安全任务重新开始；不得修改真实
+状态或把非法状态 conflict 当成通过。`task.update` 的人工竞速不属于 H Gate，
+其正向和 claimed-conflict 均由 E3 回答。
 
 ## 4. H Gate — 19 个最小人工验收问题
 
@@ -179,60 +186,65 @@ unsupported 检查、running adjustment/Exit 前已终结，本次相应正向�
    Task，B=`running`，A=`accepted/queued`；切换选择只改变 selection，两个
    Task 的 identity、instruction、state、event head 和 result truth 均不互改？
 
-5. **语音目标解析是否既能澄清又能精确查询？** 在两个 Task 都可见时说：
+### 第二部分：busy queue 控制与无目标副作用取消
 
-   > 请查看当前任务的状态。
+5. **busy defer 后 reprioritize 是否可实际操作？** 精确选择 A，点击 Panel
+   “刷新”，直到 fresh status 同时显示 A=`accepted/queued`、admission reason=
+   `EXECUTOR_PROJECT_BUSY`，且操作列表启用 `task.reprioritize`。若后端已证明
+   outbox=`PENDING`，但 fresh Panel 仍禁用该操作，立即记为 **FAIL** 并停止本轮；
+   这是 P3-7 capability freshness 缺陷，不能用反复点击绕过。
 
-   是否因 current 只是 hint 而要求澄清、且不发 Task mutation？随后说：
+   执行 `task.reprioritize`，Priority=`urgent` 并确认。若确认时恰逢下一次 claim，
+   state conflict 是合法竞态；等待下一次 closed defer、fresh refresh 后用新命令
+   重试。最终是否至少有一次先 accepted 后 applied，A 的 admission priority
+   精确成为 `urgent`，但没有声称 running/completed，且 B 完全不变？
 
-   > 我指的是“杭州行程甲”。
+6. **busy 后 update 边界是否诚实？** A 已有 closed busy delivery 后，Panel
+   是否不再展示 `task.update` 为可用？不要绕过禁用状态。本题只验证 D-087
+   的 claimed/delivered conflict；“Task A pre-dispatch update oracle”的正向
+   applied 结果必须来自 E3 的受控、从未 claim 的 dispatch fixture。
 
-   是否只返回 A 的 canonical status，并与 Panel fresh status 一致；B 和文件
-   指纹不变？
+7. **取消 B 是否发生在目标 patch 之前？** 完成 H5～H6 后立即精确选择 B，
+   执行 `task.cancel` 并确认。是否区分 cancel accepted 与 authoritative terminal，
+   最终 B=`terminal/cancelled`；A 未取消、未回滚、未重建；B 的取消通知在正常
+   ACK 路径至多播报一次并恢复监听？同时重新读取隔离项目：其 Git 指纹是否仍
+   等于初始 clean 指纹，且 `food-b.md` 不存在？若 B 已 completed 或目标项目
+   出现 B 的 patch，本轮时序无效，不能继续用该项目验收 A。
 
-### 第二部分：前台对话不影响后台 Task
+### 第三部分：running 控制与前台对话隔离
 
-6. **前台交互与 barge-in 是否只作用于当前 response？** 在两个 Task 均未终结
-   时说：
+8. **running adjustment 是否在非固定 Demo 输入上真实应用？** B terminal 后等
+   A 明确 `running`，立即执行 `task.adjust`，填入固定 running adjustment 并
+   确认。是否先 accepted 后 applied，绑定 A 当前 Attempt/checkpoint，且最终
+   项目/Result 能验证“雨天备选”；若只是对话确认、返回
+   `ADJUSTMENT_CHECKPOINT_CLOSED` 或 A 已 terminal，均不能记为 PASS？
 
-   > 杭州哪个季节最适合旅行？
+9. **当前 Direct profile 的不支持能力是否诚实且零副作用？** A 仍未终结时，
+   Panel 是否将 `task.provide_input`、`task.pause`、`task.resume` 显示为
+   unavailable/unsupported 且不可执行？不要绕过禁用状态。前后 authoritative
+   snapshot 与项目指纹是否证明除允许的 sanitized decision/command ledger 外，
+   Agent、Tool、Task、Attempt、Event、outbox、Executor、文件、音频、history
+   和其他 scope 副作用均为零？
 
-   必须等回答开始播放后再插话：
+10. **精确语音查询是否只读取 A？** 在 A 未终结且 A/B 都可见时说：
 
-   > 请介绍一下西湖最有代表性的景点。
+    > 请查看名为“杭州行程甲”的任务状态。
 
-   是否只停止旧前台朗读并产生一个新前台回答；A/B 都未取消、未修改、未重建，
-   新回答后恢复监听？这不声称 generation-time interruption。
+    是否只返回 A 的 canonical status，并与 Panel fresh status 一致；B 的
+    identity、terminal outcome 和项目指纹不变？目标澄清的零/多候选、重复名称
+    与 changed-set 证据由 E6 的固定 corpus 回答，不在本题临时制造歧义。
 
-### 第三部分：queued update、优先级、取消与 running adjustment
+11. **前台交互与 barge-in 是否只作用于当前 response？** A 仍未终结时说：
 
-7. **queued update 是否真正应用到 A？** 精确选择 A，执行 `task.update`，填入
-   “Task A queued update 完整版本”并确认。是否先 accepted 后 applied，
-   canonical instruction 与未 claim 的 dispatch payload 同步更新；B 的 identity、
-   instruction、state 和 event head 不变？对话确认不能代替应用证据。
+    > 杭州哪个季节最适合旅行？
 
-8. **reprioritize 是否只改变 admission？** A 仍为 accepted/queued 时执行
-   `task.reprioritize`，Priority=`urgent` 并确认。是否先 accepted 后 applied，
-   A 的 admission priority 精确为 `urgent`，但没有声称已 running/completed；
-   B 完全不变？
+    必须等回答开始播放后再插话：
 
-9. **当前 Direct profile 的不支持能力是否诚实且零副作用？** A 仍为 queued 时，
-    Panel 是否将 `task.provide_input`、`task.pause`、`task.resume` 显示为
-    unavailable/unsupported 且不可执行？不要绕过禁用状态。前后 authoritative
-    snapshot 与项目指纹是否证明除允许的 sanitized decision/command ledger 外，
-    Agent、Tool、Task、Attempt、Event、outbox、Executor、文件、音频、history
-    和其他 scope 副作用均为零？
+    > 请介绍一下西湖最有代表性的景点。
 
-10. **cancel 是否只终结 B？** 精确选择 B，执行 `task.cancel` 并确认。是否区分
-    cancel accepted 与 authoritative terminal，最终 B=`terminal/cancelled`；
-    A 未取消、未回滚、未重建，B 的取消通知在正常 ACK 路径至多播报一次并恢复
-    监听？B 在 cancel 前已完成则本题时序无效。
-
-11. **running adjustment 是否在非固定 Demo 输入上真实应用？** 等 A 明确
-    `running`，立即执行 `task.adjust`，填入固定 running adjustment 并确认。
-    是否先 accepted 后 applied，绑定 A 当前 Attempt/checkpoint，且最终项目/
-    Result 能验证“雨天备选”；若只是对话确认、返回
-    `ADJUSTMENT_CHECKPOINT_CLOSED` 或 A 已 terminal，均不能记为 PASS？
+    是否只停止旧前台朗读并产生一个新前台回答；A 未取消、未修改、未重建，
+    B 仍保持原 cancelled truth，新回答后恢复监听？这不声称
+    generation-time interruption。
 
 ### 第四部分：刷新、D0 断开、unread 与重放
 
@@ -271,19 +283,26 @@ unsupported 检查、running adjustment/Exit 前已终结，本次相应正向�
     - 第二天下午安排为西湖，第二天晚上明确为自由活动；
     - 不再把第二天下午安排为灵隐寺，也不保留第二天晚上逛河坊街的旧版本；
     - 存在“雨天备选”及三个带替换时段的室内选项；
-    - B 的 `food-b.md`（即使取消前留下合法部分效果）没有被当作 A 的 Result；
+    - B 的 `food-b.md` 不存在，也没有被当作 A 的 Result；
     - 语音摘要不虚构缺失或截断内容。
 
     记录 `itinerary-a.md` 的内容 hash，供 successor 后验证不可变性。
 
 ### 第六部分：successor revision 与最终清理
 
-17. **successor 是否创建新身份而不改写 predecessor？** 保持选中 completed A，
-    执行 `task.create_successor`，填入固定 successor Name/Instruction 并确认。
-    是否新建 `杭州行程甲修订版` 及新 Attempt，新旧 `task_id`、`attempt_id`
-    不同；原 A 的 `successor_task_id` 指向新 Task，新 Task 的
-    `predecessor_task_id` 指向原 A，revision 关系与 command accepted/applied
-    分离且一致？
+17. **clean checkpoint 后 successor 是否创建新身份且不改写 predecessor？**
+    保持选中 completed A，先记录 A 的 Task/Attempt/Event/TaskResult、
+    `itinerary-a.md` hash 与当前项目指纹。然后只能由外部验收夹具检查预期 patch，
+    将 `itinerary-a.md` 建立为新的本地 Git checkpoint，记录新 HEAD 并确认项目
+    clean；不得由 Agent/Task 隐式执行 commit/reset/stash/clean/checkout，也不得
+    push。checkpoint 前后 A 的 canonical truth 与 Result hash 是否完全不变？
+
+    重新解析同一稳定项目的新 clean revision 后，执行 `task.create_successor`，
+    填入固定 successor Name/Instruction 并确认。是否新建
+    `杭州行程甲修订版` 及新 Attempt，新旧 `task_id`、`attempt_id` 不同；原 A
+    的 `successor_task_id` 指向新 Task，新 Task 的 `predecessor_task_id` 指向
+    原 A，revision 关系与 command accepted/applied 分离且一致？本题不声明
+    Direct profile 支持在 dirty worktree 上无缝创建 successor。
 
 18. **修订结果是否只写新 artifact？** 等 successor terminal 并完成一次通知。
     `itinerary-a2.md` 是否存在，第三天上午为中国丝绸博物馆，其余已确认安排和
@@ -302,12 +321,12 @@ unsupported 检查、running adjustment/Exit 前已终结，本次相应正向�
 
 | Package | 最小直接问题 | 必须同时引用的 E Gate |
 |---|---|---|
-| `P3-1` | H2–H5、H12、H17–H18 | E3 |
-| `P3-2` | H7–H11、H17–H18 | E3 |
-| `P3-3` | H2–H4、H8–H10 | E3 |
+| `P3-1` | H2–H4、H7、H10、H12、H17–H18 | E3 |
+| `P3-2` | H6–H9、H17–H18 | E3 |
+| `P3-3` | H2–H5、H7–H9 | E3 |
 | `P3-4` | H12–H14、H19 | E4 |
 | `P3-5A/B` | H10、H12–H16、H18 | E5 |
-| `P3-6` | H5、H7、H16–H17 的语音/结构化同权威 | E6 |
+| `P3-6` | H10、H16–H17 的语音/结构化同权威 | E6 |
 | `P3-7` | H2–H19 的正式 Panel、刷新与 presentation | E2、E5 |
 | `P3-8A/B` | H12、H19 的可观察组合与关闭 | E1、E2、E7 |
 
