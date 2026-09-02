@@ -115,7 +115,12 @@ def _create_selected_task(
 @pytest.mark.asyncio
 async def test_direct_d2_serial_tasks_accept_only_exact_settled_managed_baseline(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.task_store.utc_now",
+        lambda: NOW,
+    )
     project = tmp_path / "serial-project"
     _git_project(project)
     database = tmp_path / "serial-tasks.sqlite3"
@@ -140,6 +145,16 @@ async def test_direct_d2_serial_tasks_accept_only_exact_settled_managed_baseline
             )
 
     executor = DistinctFileExecutor()
+    second_release = asyncio.Event()
+    original_stream = executor.process_background_code_task_stream
+
+    async def gated_stream(request):
+        if executor.calls == 1:
+            await second_release.wait()
+        async for chunk in original_stream(request):
+            yield chunk
+
+    executor.process_background_code_task_stream = gated_stream
     baseline = DirectProjectManagedBaselineReader(database, store=store)
     authority = ServerSessionProjectAuthorityResolver(
         session_reader=lambda _session_id: {
@@ -187,13 +202,18 @@ async def test_direct_d2_serial_tasks_accept_only_exact_settled_managed_baseline
     assert await core.drain_outbox_once(worker_id="serial-first", observed_at=NOW)
     await _wait_direct_settled(adapter)
     assert baseline(str(project), _scope()) is False
-    await core.reconcile_status()
+    summary = await core.reconcile()
     first_wave = (
         store.get_task(first.task_id, _scope()).outcome,
         store.get_task(second.task_id, _scope()).outcome,
     )
     assert first_wave.count(TerminalOutcome.COMPLETED) == 1
-    assert first_wave.count(None) == 1
+    assert first_wave.count(None) == 1, first_wave
+    assert summary["known"] == 2
+    assert [
+        store.get_task(task.task_id, _scope()).state.value
+        for task in (first, second)
+    ].count("running") == 1
     before_read = (
         (project / "food-b.md").read_bytes(),
         subprocess.run(
@@ -212,7 +232,7 @@ async def test_direct_d2_serial_tasks_accept_only_exact_settled_managed_baseline
         ).stdout,
     )
 
-    assert await core.drain_outbox_once(worker_id="serial-second", observed_at=NOW)
+    second_release.set()
     await _wait_direct_settled(adapter)
     await core.reconcile_status()
     assert store.get_task(first.task_id, _scope()).outcome is TerminalOutcome.COMPLETED

@@ -12796,6 +12796,104 @@ class SqliteTaskStore:
                 connection, attempt, TaskMutationDisposition.APPLIED
             )
 
+    def settle_unbound_queued_attempt(
+        self,
+        task_id: str,
+        attempt_id: str,
+    ) -> bool:
+        """Prove one selected unbound Attempt is still Store-owned queue work.
+
+        A selected dispatch has no Executor binding until its pending outbox
+        delivery is accepted.  That is ordinary queue ownership, including a
+        closed busy/capacity deferral, rather than status uncertainty.  Clear
+        only the obsolete marker produced for that exact premise; every other
+        reconciliation state remains fail-closed.
+        """
+
+        with self._transaction() as connection:
+            task = self._require_task_row_by_id(connection, task_id)
+            attempt = connection.execute(
+                "SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if attempt is None or attempt["task_id"] != task_id:
+                raise FormalTaskViolation(
+                    "ATTEMPT_SCOPE_MISMATCH",
+                    "queued reconciliation attempt does not belong to task",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if task["attempt_id"] != attempt_id:
+                return False
+            dispatches = connection.execute(
+                """
+                SELECT * FROM outbox
+                WHERE task_id=? AND attempt_id=? AND kind=?
+                ORDER BY created_at, outbox_id
+                """,
+                (task_id, attempt_id, OutboxKind.ATTEMPT_DISPATCH.value),
+            ).fetchall()
+            dispatch = dispatches[0] if len(dispatches) == 1 else None
+            attempt_count = int(attempt["admission_attempt_count"] or 0)
+            exact_queue = bool(
+                task["state"] == FormalTaskState.ACCEPTED.value
+                and not bool(task["cancel_requested"])
+                and not bool(task["dispatch_fenced"])
+                and attempt["state"] == FormalAttemptState.ACCEPTED.value
+                and attempt["outcome"] is None
+                and attempt["executor_ref"] is None
+                and int(attempt["source_seq"]) == -1
+                and _selection_from_attempt_row(attempt) is not None
+                and dispatch is not None
+                and dispatch["state"] == OutboxState.PENDING.value
+                and dispatch["claimed_by"] is None
+                and dispatch["claimed_at"] is None
+                and dispatch["claim_token"] is None
+                and int(dispatch["delivery_count"]) == attempt_count
+                and (
+                    (
+                        attempt_count == 0
+                        and attempt["admission_reason"] is None
+                        and dispatch["last_error"] is None
+                    )
+                    or (
+                        attempt_count > 0
+                        and attempt["admission_reason"]
+                        in {
+                            "EXECUTOR_PROJECT_BUSY",
+                            "EXECUTOR_CAPACITY_EXHAUSTED",
+                        }
+                        and dispatch["last_error"] == attempt["admission_reason"]
+                    )
+                )
+            )
+            if not exact_queue:
+                return False
+            reconciliation_state = task["reconciliation_state"]
+            reconciliation_reason = task["reconciliation_reason"]
+            if reconciliation_state is None:
+                return True
+            if (
+                reconciliation_state != ReconciliationState.PENDING.value
+                or reconciliation_reason != "ATTEMPT_NOT_YET_BOUND"
+            ):
+                return False
+            changed = connection.execute(
+                """
+                UPDATE tasks SET reconciliation_state=NULL,
+                    reconciliation_reason=NULL, updated_at=?
+                WHERE task_id=? AND attempt_id=? AND state=?
+                  AND reconciliation_state=? AND reconciliation_reason=?
+                """,
+                (
+                    utc_now(),
+                    task_id,
+                    attempt_id,
+                    FormalTaskState.ACCEPTED.value,
+                    ReconciliationState.PENDING.value,
+                    "ATTEMPT_NOT_YET_BOUND",
+                ),
+            ).rowcount
+            return changed == 1
+
     def mark_reconciliation_resolved(
         self, task_id: str, attempt_id: str, reason: str
     ) -> TaskMutationResult:

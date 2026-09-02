@@ -1626,6 +1626,13 @@ async def test_product_status_projects_fresh_busy_admission_as_reprioritize_only
             )
             is AdmissionDisposition.DEFERRED
         )
+        reconciliation = await harness.composition._core.reconcile_status()
+        assert reconciliation["known"] == 1
+        assert reconciliation["unavailable"] == 0
+        queued_task = harness.composition._core.store.get_task(
+            task_id, harness.authority.contexts["session-1"].scope
+        )
+        assert queued_task.reconciliation_state is None
 
         status = await harness.composition.handle(
             operation="task.status",
