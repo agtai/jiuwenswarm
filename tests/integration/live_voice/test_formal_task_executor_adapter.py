@@ -47,7 +47,7 @@ def _direct_requirements(*, dispatch_version: str = "v1") -> TaskExecutionRequir
             ("dispatch", dispatch_version),
             ("status", "v1"),
             ("cancel", "v1"),
-            ("adjust.demo-itinerary-checkpoint", "v1"),
+            ("adjust.task-checkpoint", "v1"),
             ("reconcile.d0", "v1"),
         ),
         durability_level="D0",
@@ -64,7 +64,7 @@ def test_real_direct_adapter_profile_selects_exact_current_operations() -> None:
     assert selection.profile is profile
     assert selection.profile_digest == profile.digest_sha256()
     assert selection.requirements.operation_versions == (
-        ("adjust.demo-itinerary-checkpoint", "v1"),
+        ("adjust.task-checkpoint", "v1"),
         ("cancel", "v1"),
         ("dispatch", "v1"),
         ("reconcile.d0", "v1"),

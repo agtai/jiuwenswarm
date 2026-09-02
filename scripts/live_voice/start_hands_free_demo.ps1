@@ -72,7 +72,7 @@ $RuntimeProfileLabel = if ($RuntimeProfile -eq 'formal-web-validation') {
 } else {
     'hands-free orders Demo'
 }
-$ExecutorProfile = 'live-voice.direct-project-code.d2.v1'
+$ExecutorProfile = 'live-voice.direct-project-code.d2.v2'
 $ExpectedPorts = [ordered]@{
     FRONTEND_PORT     = $FrontendPort
     AGENT_SERVER_PORT = $AgentServerPort
@@ -873,7 +873,6 @@ try {
         # Demo-only runtime exceptions. Keep these out of every frontend
         # build profile and make the controlled launcher own them explicitly.
         JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED = '1'
-        JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED = '1'
         JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED            = '1'
         JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED                = '1'
         JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED       = '1'
@@ -933,7 +932,6 @@ try {
         'JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED',
         'JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABLED',
         'JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED',
-        'JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED',
         'JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED',
         'JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED',
         'JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED',
@@ -951,7 +949,7 @@ try {
     if ([Environment]::GetEnvironmentVariable('JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE', 'Process') -ne $ExecutorProfile) {
         Fail '受控运行配置必须选择精确的 Direct D2 Executor profile。'
     }
-    Write-Pass "$RuntimeProfileLabel 的 P1/P2/P3、统一语义、Demo bypass、调整 checkpoint、Dedicated Media/EOT、Origin 与 Task Store 已完整绑定"
+    Write-Pass "$RuntimeProfileLabel 的 P1/P2/P3、统一语义、Demo bypass、通用 checkpoint v2、Dedicated Media/EOT、Origin 与 Task Store 已完整绑定"
 
     if (-not (Test-Path -LiteralPath $ProductionFrontendEnv -PathType Leaf)) {
         Fail "缺少普通 production 前端开关文件：$ProductionFrontendEnv"

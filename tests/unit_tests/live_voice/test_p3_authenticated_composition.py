@@ -5871,14 +5871,17 @@ async def test_stop_without_binding_retains_cleanup_pending_until_core_drains() 
             self.calls += 1
             if self.calls == 1:
                 raise FormalTaskViolation(
-                    "ADJUSTMENT_DELIVERY_CLEANUP_PENDING", "test-owned pending delivery",
+                    "ADJUSTMENT_DELIVERY_CLEANUP_PENDING",
+                    "test-owned pending delivery",
                     ErrorCode.RESULT_UNKNOWN,
                 )
 
     core = Core()
     composition = P3AuthenticatedComposition(
         authenticator=StaticBearerAuthenticator(token=TOKEN, principal=_principal()),
-        authority_resolver=_AuthorityResolver({}), core=core, clock=lambda: NOW,
+        authority_resolver=_AuthorityResolver({}),
+        core=core,
+        clock=lambda: NOW,
     )
     with pytest.raises(FormalTaskViolation):
         await composition.stop()
@@ -6213,7 +6216,7 @@ def _configure_enabled_factory(
     )
     monkeypatch.setenv(
         "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE",
-        "live-voice.direct-project-code.d2.v1",
+        "live-voice.direct-project-code.d2.v2",
     )
     monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_RECONCILE_SECONDS", str(interval))
 
@@ -6365,7 +6368,7 @@ def test_factory_consumes_explicit_direct_d0_profile_without_d2_claim(
     _configure_enabled_factory(monkeypatch, 3600)
     monkeypatch.setenv(
         "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE",
-        "live-voice.direct-project-code.d0.v1",
+        "live-voice.direct-project-code.d0.v2",
     )
     database = tmp_path / "factory-d0.sqlite3"
     monkeypatch.setattr(
@@ -6380,7 +6383,7 @@ def test_factory_consumes_explicit_direct_d0_profile_without_d2_claim(
     assert composition is not None
     assert composition._execution_durability_level == "D0"
     assert composition._executor_profiles is not None
-    assert composition._executor_profiles[0].profile_id.endswith(".d0.v1")
+    assert composition._executor_profiles[0].profile_id.endswith(".d0.v2")
     assert composition._validated_executor_configuration is not None
     assert (
         composition._validated_executor_configuration.durability_level
@@ -6671,7 +6674,7 @@ async def test_product_create_persists_exact_direct_selection_and_admission(
     profile = DirectProjectCodeExecutorAdapter.capability_profile()
     later_profile = replace(
         profile,
-        profile_id="zz-live-voice.direct-project-code.d0.v1",
+        profile_id="zz-live-voice.direct-project-code.d0.v2",
     )
     harness = _harness(
         tmp_path,
@@ -6699,7 +6702,7 @@ async def test_product_create_persists_exact_direct_selection_and_admission(
             "durability_level": "D0",
             "executor_id": FORMAL_PROJECT_EXECUTOR_ID,
             "operation_versions": [
-                ["adjust.demo-itinerary-checkpoint", "v1"],
+                ["adjust.task-checkpoint", "v1"],
                 ["cancel", "v1"],
                 ["dispatch", "v1"],
                 ["reconcile.d0", "v1"],
@@ -6821,7 +6824,7 @@ async def test_product_retry_reuses_persisted_selection_after_profile_drift(
 
         changed_profile = replace(
             profile,
-            profile_id="live-voice.direct-project-code.d0.v2",
+            profile_id="live-voice.direct-project-code.d0.v3",
         )
         harness.composition._executor_profiles = (changed_profile,)
         retried = await _apply_retry(
@@ -6842,14 +6845,11 @@ async def test_product_retry_reuses_persisted_selection_after_profile_drift(
         await harness.composition.stop()
 
 
-@pytest.mark.parametrize(
-    ("demo_policy", "fixture_enabled"), [("0", False), ("1", True)]
-)
-def test_factory_gates_itinerary_fixture_with_trusted_demo_policy(
+@pytest.mark.parametrize("demo_policy", ["0", "1"])
+def test_factory_never_enables_retired_itinerary_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     demo_policy: str,
-    fixture_enabled: bool,
 ) -> None:
     _configure_enabled_factory(monkeypatch, 3600)
     monkeypatch.setenv(
@@ -6868,24 +6868,27 @@ def test_factory_gates_itinerary_fixture_with_trusted_demo_policy(
 
     assert composition is not None
     assert type(composition._core.executor) is DirectProjectCodeExecutorAdapter
-    assert composition._core.executor._demo_itinerary_fixture_enabled is fixture_enabled
+    assert not hasattr(composition._core.executor, "_demo_itinerary_fixture_enabled")
+    assert (
+        "adjust.task-checkpoint",
+        "v1",
+    ) in composition._core.executor.capability_profile().operation_versions
 
 
 @pytest.mark.parametrize(
-    ("demo_policy", "checkpoint_policy", "checkpoint_enabled"),
+    ("demo_policy", "checkpoint_policy"),
     [
-        ("0", "0", False),
-        ("0", "1", False),
-        ("1", "0", False),
-        ("1", "1", True),
+        ("0", "0"),
+        ("0", "1"),
+        ("1", "0"),
+        ("1", "1"),
     ],
 )
-def test_factory_gates_demo_adjustment_checkpoint_behind_both_flags(
+def test_factory_never_enables_retired_demo_adjustment_wait(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     demo_policy: str,
     checkpoint_policy: str,
-    checkpoint_enabled: bool,
 ) -> None:
     _configure_enabled_factory(monkeypatch, 3600)
     monkeypatch.setenv(
@@ -6908,10 +6911,16 @@ def test_factory_gates_demo_adjustment_checkpoint_behind_both_flags(
 
     assert composition is not None
     assert type(composition._core.executor) is DirectProjectCodeExecutorAdapter
-    assert (
-        composition._core.executor._demo_itinerary_adjustment_checkpoint_enabled
-        is checkpoint_enabled
+    assert not hasattr(
+        composition._core.executor, "_demo_itinerary_adjustment_checkpoint_enabled"
     )
+    assert {
+        profile.profile_id
+        for profile in composition._core.executor.capability_profiles()
+    } == {
+        "live-voice.direct-project-code.d0.v2",
+        "live-voice.direct-project-code.d2.v2",
+    }
 
 
 @pytest.mark.asyncio
@@ -7393,7 +7402,7 @@ def test_enabled_gate_rejects_store_artifact_outside_application_workspace(
     )
     monkeypatch.setenv(
         "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE",
-        "live-voice.direct-project-code.d2.v1",
+        "live-voice.direct-project-code.d2.v2",
     )
     monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_DATABASE", str(database))
 

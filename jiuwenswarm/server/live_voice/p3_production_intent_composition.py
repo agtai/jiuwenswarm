@@ -560,7 +560,7 @@ class StoreProductionTaskAuthorityReader:
             operations.add("task.cancel")
         if (
             task.state is FormalTaskState.RUNNING
-            and ("adjust.demo-itinerary-checkpoint", "v1") in operation_versions
+            and ("adjust.task-checkpoint", "v1") in operation_versions
         ):
             operations.add("task.adjust")
         if dispatch_control == "unclaimed":

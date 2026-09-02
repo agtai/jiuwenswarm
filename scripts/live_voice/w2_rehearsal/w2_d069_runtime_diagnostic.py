@@ -40,7 +40,7 @@ def _configure(args: argparse.Namespace) -> str:
         "JIUWENSWARM_DATA_DIR": str(args.data_dir),
         "JIUWENSWARM_LIVE_VOICE_P3_ENABLED": "true",
         "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE": (
-            "live-voice.direct-project-code.d2.v1"
+            "live-voice.direct-project-code.d2.v2"
         ),
         "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED": "true",
         "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED": "true",

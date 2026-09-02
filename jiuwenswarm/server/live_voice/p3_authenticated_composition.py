@@ -127,7 +127,11 @@ from .task_progress_return import (
     TaskProgressOriginKind,
 )
 from .task_store import SqliteTaskStore, TaskDurabilityDiagnosticSnapshot
-from .task_semantics import TaskSemanticContext, TaskSemanticDecision, TaskSemanticResolver
+from .task_semantics import (
+    TaskSemanticContext,
+    TaskSemanticDecision,
+    TaskSemanticResolver,
+)
 from .voice_task_policy import FormalTaskPolicyAdapter, FormalTaskPolicyInput
 
 logger = logging.getLogger(__name__)
@@ -177,19 +181,13 @@ _RECONCILE_ENV = "JIUWENSWARM_LIVE_VOICE_P3_RECONCILE_SECONDS"
 _EXECUTOR_PROFILE_ENV = "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE"
 _PRODUCT_COMPOSITION_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED"
 _PRODUCT_P2_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED"
-_PRODUCT_DEMO_POLICY_BYPASS_ENV = (
-    "JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED"
-)
-_DEMO_ADJUSTMENT_CHECKPOINT_ENV = (
-    "JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED"
-)
 _PRODUCT_P2_OPERATION = "agent.chat"
 
 _PRODUCT_DIRECT_OPERATION_VERSIONS = (
     ("dispatch", "v1"),
     ("status", "v1"),
     ("cancel", "v1"),
-    ("adjust.demo-itinerary-checkpoint", "v1"),
+    ("adjust.task-checkpoint", "v1"),
     ("reconcile.d0", "v1"),
 )
 _PRODUCT_DIRECT_D2_OPERATION_VERSIONS = (
@@ -5213,13 +5211,6 @@ def create_p3_composition_from_environment(
         executor = DirectProjectCodeExecutorAdapter(
             binding_resolver,
             database_path,
-            demo_itinerary_fixture_enabled=_is_enabled(
-                os.getenv(_PRODUCT_DEMO_POLICY_BYPASS_ENV)
-            ),
-            demo_itinerary_adjustment_checkpoint_enabled=(
-                _is_enabled(os.getenv(_PRODUCT_DEMO_POLICY_BYPASS_ENV))
-                and _is_enabled(os.getenv(_DEMO_ADJUSTMENT_CHECKPOINT_ENV))
-            ),
             stream_observer=stream_observer,
             durability_store=store,
         )

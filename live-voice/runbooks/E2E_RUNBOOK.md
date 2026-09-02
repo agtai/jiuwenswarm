@@ -356,7 +356,10 @@ Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 
 本节用于当前受控产品候选的准备和最终验证；它不倒写历史 Alpha 结果，也不取得生产化信用。2026-08-17 的完整 Journey 已作为缺陷发现执行结束，结果是 `COMPLETED — DEFECTS RECORDED`，不是 PASS；当前缺陷、运行环境和下一步只看 [STATUS](../STATUS.md)。修复完成后，只有在干净、不可变的候选源码上按 [产品准备度合同](../validation/PRODUCT_READINESS_ACCEPTANCE.md) 和 [完整人工 Journey](../demo/PRODUCT_READINESS_SHOWCASE.md) 成功执行，才能形成新的受控候选 PASS。
 
-本节取代 7.4 的旧手动命令中心步骤，但不改变 7.4 的目标隔离、项目绑定和真实副作用警告。只使用一个当前后台任务，不测试多任务并行。前端不应出现 Send、Agent/Task、operation 或 Task ID 控件。D119 Journey 必须让真实 Direct Executor 在非终态 adjustment checkpoint 等待权威 adjustment 投递；使用确定性的 fixture/barrier，而不是生产 sleep 或“说得够快”的时间假设。只有 `task.adjust_applied` 已写入且其 seq 早于 terminal/result，才能继续完成步骤。
+本节保留启动、目标隔离和真实副作用规则。旧 D119 单任务脚本及固定 itinerary
+等待已由 D-107 去硬编码包退役，不能作为当前多任务 Demo 的操作依据。运行中修改
+使用正常工作量形成的真实非终态窗口，且只有 `task.adjust_applied` 已写入、seq
+早于 terminal/result 才能认定修改生效；窗口未命中必须记录，不能启用假等待。
 
 当前 Post-Alpha Demo 在前台 Agent 生成回答期间不保持 capture。页面显示
 “Understanding and answering”时不要继续说话；本节的插话验证只在回答已经开始
@@ -395,7 +398,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 项目绑定、正式 Speech 配置、Live Voice bundle 或后端 route，或者探针产生任何
 业务副作用，都必须失败退出。只有该合同记录 `speech_round_trip: passed`、
 `gateway_claim_policy: eligible`、
-`executor_profile: live-voice.direct-project-code.d2.v1`，并把
+`executor_profile: live-voice.direct-project-code.d2.v2`，并把
 `JIUWENSWARM_LIVE_VOICE_P3_ENABLED` 与其余必需项全部记录为 `true` 后，才能
 请求真实设备人工验收。
 
@@ -442,14 +445,13 @@ Session 隔离，但不能制造可靠的 presentation-ACK 网络延迟。延迟
 
 ```powershell
 $env:JIUWENSWARM_LIVE_VOICE_P3_ENABLED = '1'
-$env:JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE = 'live-voice.direct-project-code.d2.v1'
+$env:JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE = 'live-voice.direct-project-code.d2.v2'
 $env:JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED = '1'
 $env:JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED = '1'
 $env:JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED = '1'
 $env:JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED = '1'
 $env:JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABLED = '1'
 $env:JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED = '1'
-$env:JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED = '1'
 # Set this in the Gateway process so server EOT, rather than a hidden manual
 # stop control, commits each authoritative final turn.
 $env:JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED = '1'
@@ -462,14 +464,13 @@ $env:JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED = '1'
 语音 claim 会被拒绝。部署时必须一起更新 Gateway、AgentServer 和本启动探针，
 不能用新 AgentServer 配旧 Gateway 的 bypass claim。
 
-以下两个旧开关的**业务**作用尚待当前去硬编码包退役，不能把语音过度拦截修复
-误报为全部 bypass 已删除：`JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED`
-仍控制旧隔离 Demo 的 create/cancel 策略；
-`JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED` 仍使精确的
-`Three-day itinerary` fixture 在初始 Agent 运行后等待真实 adjustment。它们不是
-用户 confirmation，不得在普通生产会话启用。当前包必须移除这些业务路径后再做
-最终验收，详见 [STATUS](../STATUS.md)。删除开关后，正常 Task 操作确认应保持，
-但普通数字、日期和否定表达不应增加确认：
+Direct 已移除固定任务名、指令包装、固定文件限制和等待首次修改的开关；设置旧
+`JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED` 不能重新启用它们。
+新建任务采用 v2 通用 checkpoint，旧 v1 snapshot 原样保留，仅返回 profile drift，
+不跨升级续跑；部署前应先排空已有运行任务。
+`JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED` 的旧 Registry 业务
+策略仍待后续语义接线退役，不能误报为全部 bypass 已删除，详见
+[STATUS](../STATUS.md)。正常 Task 操作确认保持，普通数字、日期和否定表达不增加确认：
 
 ```powershell
 Remove-Item Env:JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED -ErrorAction SilentlyContinue
@@ -509,9 +510,13 @@ git rev-parse --show-toplevel
 git rev-parse HEAD
 ```
 
-把这个已解析的 `$fixtureRoot` 注册/选择为本次真实 Session 的唯一 Project，保存 Session 后核对页面 project、服务端 authority contract 与 `git rev-parse --show-toplevel` 完全相同。启动 Journey 前 `git status --short` 必须为空。可信 Demo policy 开关同时允许 Direct Executor 对精确的 `Three-day itinerary` 规格启用受控 fixture contract：结果必须有真实 `chat.final`，且补丁只能生成 `itinerary.md`；零补丁或任何额外 artifact 都会 fail closed，不能作为成功 Demo。关闭该后端开关时，这个 fixture contract 和免确认 policy 都不启用。
+把已解析的 `$fixtureRoot` 注册/选择为真实 Session 的 Project，核对页面 project、
+服务端 authority contract 与 `git rev-parse --show-toplevel` 完全相同。启动前
+`git status --short` 必须为空。Direct 保留真实 `chat.final`、补丁隔离和逐产物摘要
+校验，但文件名和产物数量由用户任务决定，不再由固定 itinerary fixture 决定。
 
-进入已经保存的真实 Session 后只点击一次 Live Voice，然后依次说：
+以下旧 D119 语料仅说明历史回归来源，不是当前可运行验收步骤；它依赖的 current
+目标及 fixture 等待正在退役，不能用它替代当前用户提供的完整多任务 Demo：
 
 1. “请帮我介绍杭州。”预期 `dialogue`，走真实 Agent/P2/TTS，Task 副作用为 0。
 2. “帮我在后台制定一份三天杭州行程。”预期 `background.create`，只创建一个 current Task，只播报已开始处理，随后恢复监听。

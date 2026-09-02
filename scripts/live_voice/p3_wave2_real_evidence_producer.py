@@ -1412,7 +1412,7 @@ def _configure_product_environment(scenario: _RegisteredScenario) -> None:
     values = {
         "JIUWENSWARM_LIVE_VOICE_P3_ENABLED": "1",
         "JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE": (
-            "live-voice.direct-project-code.d2.v1"
+            "live-voice.direct-project-code.d2.v2"
         ),
         "JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN": scenario.token,
         "JIUWENSWARM_LIVE_VOICE_P3_PRINCIPAL_ID": scenario.principal_id,
@@ -1423,7 +1423,6 @@ def _configure_product_environment(scenario: _RegisteredScenario) -> None:
         "JIUWENSWARM_LIVE_VOICE_P3_DATABASE": str(scenario.database),
         "JIUWENSWARM_LIVE_VOICE_P3_RECONCILE_SECONDS": "0.25",
         "JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED": "1",
-        "JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED": "1",
     }
     os.environ.update(values)
 

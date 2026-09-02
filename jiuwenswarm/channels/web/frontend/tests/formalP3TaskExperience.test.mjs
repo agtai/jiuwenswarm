@@ -97,7 +97,7 @@ function attempt(task, { number = 1, executorRef = 'executor-ref' } = {}) {
       adapter_id: 'live-voice.direct-project-code',
       capability_profile: {
         operation_versions: [
-          ['adjust.demo-itinerary-checkpoint', 'v1'],
+          ['adjust.task-checkpoint', 'v1'],
           ['cancel', 'v1'],
           ['dispatch', 'v1'],
           ['status', 'v1'],

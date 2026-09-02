@@ -1269,6 +1269,16 @@
   artificial waits and bypasses. Do not add running `task.update`, arbitrary
   pause/resume or an Executor. Version a generic checkpoint profile rather than
   changing the meaning of an existing immutable profile snapshot.
+  The selected compatibility implementation uses D0/D2 profile IDs ending in
+  `.v2`, advertising `adjust.task-checkpoint/v1`. Legacy v1 profile descriptors
+  remain exact immutable read/observation data, not construction candidates or
+  re-enablable fixture behavior. The existing current-profile check rejects new
+  dispatch under those old snapshots. No table rewrite or new Executor is needed.
+  Store Task/Result/history remain readable. Direct status for an old v1
+  snapshot reports `UNAVAILABLE / EXECUTOR_SELECTION_PROFILE_DRIFT` with its
+  original digest; it does not resume old running v1 work across this upgrade
+  or fabricate a terminal outcome. Drain old live work before deployment; new
+  isolated verification uses v2 rather than rewriting existing selections.
 - The existing committed-input execution lease must be admitted before model
   invocation. Its owner may freeze one bounded semantic record into the existing
   semantic-binding column using an exact lease/fingerprint CAS. The new record

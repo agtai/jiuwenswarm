@@ -22,7 +22,6 @@ const controlledRuntimeFlags = [
   "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED",
   "JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABLED",
   "JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED",
-  "JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED",
   "JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED",
   "JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED",
   "JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED",
@@ -132,7 +131,7 @@ test("the controlled launcher builds the explicit profile and owns Demo-only run
     launcher,
     /JIUWENSWARM_LIVE_VOICE_RUNTIME_PROFILE\s*=\s*\$RuntimeProfile/u,
   );
-  assert.match(launcher, /live-voice\.direct-project-code\.d2\.v1/u);
+  assert.match(launcher, /live-voice\.direct-project-code\.d2\.v2/u);
   assert.match(launcher, /executor_profile\s+=\s+\$ExecutorProfile/u);
   assert.match(launcher, /requiredRuntimeFlags/u);
   assert.match(launcher, /live_voice_runtime_contract\.json/u);
@@ -159,7 +158,7 @@ test("the controlled launcher builds the explicit profile and owns Demo-only run
     launcher,
     /JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED\s*=\s*'1'/u,
   );
-  assert.match(
+  assert.doesNotMatch(
     launcher,
     /JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED\s*=\s*'1'/u,
   );

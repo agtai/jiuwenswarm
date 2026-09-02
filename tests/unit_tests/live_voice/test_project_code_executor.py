@@ -588,7 +588,7 @@ def _direct_selection(
             ("dispatch", "v1"),
             ("status", "v1"),
             ("cancel", "v1"),
-            ("adjust.demo-itinerary-checkpoint", "v1"),
+            ("adjust.task-checkpoint", "v1"),
             ("reconcile.d0", "v1"),
         ),
         durability_level="D0",
@@ -712,14 +712,29 @@ def _direct_task_attempt(
 async def _wait_direct_settled(
     adapter: DirectProjectCodeExecutorAdapter,
 ) -> None:
-    # Full Live Voice runs can briefly saturate Windows while many process and
-    # worktree tests overlap; keep the assertion bounded without treating a
-    # healthy worker that needs slightly over two seconds as a product failure.
-    for _ in range(500):
-        if not adapter._running:
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError("direct Executor worker did not settle")
+    # Await actual owned worker completion (including Git apply and cleanup),
+    # not a five-second polling budget that is shorter than the combined
+    # cleanup boundaries. This helper asserts settlement, not product latency.
+    async def settled() -> None:
+        while adapter._running:
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in tuple(adapter._running.values())),
+                return_exceptions=True,
+            )
+            await asyncio.sleep(0)
+
+    try:
+        await asyncio.wait_for(settled(), timeout=30)
+    except TimeoutError as error:
+        stacks = {
+            attempt_id: [
+                (frame.f_code.co_name, frame.f_lineno) for frame in task.get_stack()
+            ]
+            for attempt_id, task in adapter._running.items()
+        }
+        raise AssertionError(
+            f"direct Executor worker did not settle: {stacks}"
+        ) from error
 
 
 async def _wait_direct_terminal(
@@ -1190,8 +1205,6 @@ async def test_direct_capability_profile_is_stable_truthful_and_runtime_free(
         _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
         tmp_path / "second-private.sqlite3",
         attempt_timeout=60,
-        demo_itinerary_fixture_enabled=True,
-        demo_itinerary_adjustment_checkpoint_enabled=True,
     )
 
     try:
@@ -1199,7 +1212,7 @@ async def test_direct_capability_profile_is_stable_truthful_and_runtime_free(
         second_profile = second.capability_profile()
 
         assert first_profile is second_profile
-        assert first_profile.profile_id == "live-voice.direct-project-code.d0.v1"
+        assert first_profile.profile_id == "live-voice.direct-project-code.d0.v2"
         assert first_profile.executor_id == "jiuwenswarm_code_agent.project_code"
         assert first_profile.adapter_id == "live-voice.direct-project-code"
         assert (
@@ -1207,7 +1220,7 @@ async def test_direct_capability_profile_is_stable_truthful_and_runtime_free(
             == "live-voice.direct-project-code.v1"
         )
         assert first_profile.operation_versions == (
-            ("adjust.demo-itinerary-checkpoint", "v1"),
+            ("adjust.task-checkpoint", "v1"),
             ("cancel", "v1"),
             ("dispatch", "v1"),
             ("reconcile.d0", "v1"),
@@ -1273,7 +1286,7 @@ async def test_direct_d2_is_an_explicit_store_backed_candidate_only(
             "D0",
             "D2",
         )
-        assert candidates[1].profile_id == "live-voice.direct-project-code.d2.v1"
+        assert candidates[1].profile_id == "live-voice.direct-project-code.d2.v2"
         with pytest.raises(ValueError, match="same canonical"):
             DirectProjectCodeExecutorAdapter(
                 resolver,
@@ -1296,7 +1309,7 @@ async def test_direct_candidates_derive_d0_from_current_profile_authority(
     resolver = _Resolver(_direct_binding(project, _DirectProjectExecutor(project)))
     changed_legacy = replace(
         DirectProjectCodeExecutorAdapter.capability_profile(),
-        profile_id="live-voice.direct-project-code.d0.v2",
+        profile_id="live-voice.direct-project-code.d0.v3",
     )
     monkeypatch.setattr(
         DirectProjectCodeExecutorAdapter,
@@ -1314,7 +1327,7 @@ async def test_direct_candidates_derive_d0_from_current_profile_authority(
         assert legacy.capability_profiles() == (changed_legacy,)
         candidates = durable.capability_profiles()
         assert candidates[0] is changed_legacy
-        assert candidates[1].profile_id == "live-voice.direct-project-code.d2.v1"
+        assert candidates[1].profile_id == "live-voice.direct-project-code.d2.v2"
     finally:
         await legacy.close()
         await durable.close()
@@ -1662,7 +1675,7 @@ async def test_selected_direct_dispatch_rejects_profile_drift_before_any_effect(
     )
     changed_profile = replace(
         DirectProjectCodeExecutorAdapter.capability_profile(),
-        profile_id="live-voice.direct-project-code.d0.v2",
+        profile_id="live-voice.direct-project-code.d0.v3",
     )
     item = replace(_item(project), selection=_direct_selection(changed_profile))
     before_status = _git(project, "status", "--short")
@@ -1704,7 +1717,7 @@ async def test_selected_direct_status_reports_profile_drift_under_old_binding(
         await _wait_direct_settled(adapter)
         changed_profile = replace(
             DirectProjectCodeExecutorAdapter.capability_profile(),
-            profile_id="live-voice.direct-project-code.d0.v2",
+            profile_id="live-voice.direct-project-code.d0.v3",
         )
         monkeypatch.setattr(
             DirectProjectCodeExecutorAdapter,
@@ -1897,7 +1910,7 @@ async def test_direct_d0_executor_persists_exact_lifecycle_without_schedule_carr
 
 
 @pytest.mark.asyncio
-async def test_demo_itinerary_fixture_constrains_real_direct_executor_and_seals_fact(
+async def test_direct_preserves_user_instruction_and_seals_actual_artifact(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "isolated-itinerary-project"
@@ -1912,7 +1925,6 @@ async def test_demo_itinerary_fixture_constrains_real_direct_executor_and_seals_
     adapter = DirectProjectCodeExecutorAdapter(
         _Resolver(_direct_binding(project, executor)),
         tmp_path / "p3.sqlite3",
-        demo_itinerary_fixture_enabled=True,
     )
 
     await adapter.dispatch(item)
@@ -1932,22 +1944,24 @@ async def test_demo_itinerary_fixture_constrains_real_direct_executor_and_seals_
     assert artifact.sha256 == hashlib.sha256(itinerary).hexdigest()
     assert "08:30 参观博物馆" in itinerary.decode("utf-8")
     query = executor.requests[0].params["query"]
-    assert "exactly one project artifact named itinerary.md" in query
-    assert "do not change any other file" in query
-    assert "<itinerary_requirements>" in query
-    assert spec.instruction in query
+    assert query == spec.instruction
+    assert "<itinerary_requirements>" not in query
     assert _git(project, "status", "--porcelain") == "?? itinerary.md"
 
 
 @pytest.mark.parametrize("lose_settlement", [False, True])
 @pytest.mark.asyncio
 async def test_real_direct_core_adjustment_does_not_block_other_running_cancel(
-    tmp_path: Path, lose_settlement: bool,
+    tmp_path: Path,
+    lose_settlement: bool,
 ) -> None:
     """Real Direct/Core/files; controlled Agent streams, not Provider evidence."""
     from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
     from tests.unit_tests.live_voice.test_persistent_task_core import (
-        NOW, _adjust, _cancel, _create,
+        NOW,
+        _adjust,
+        _cancel,
+        _create,
     )
 
     class ControlledReportAgent(_DirectProjectExecutor):
@@ -1966,11 +1980,16 @@ async def test_real_direct_core_adjustment_does_not_block_other_running_cancel(
             else:
                 self.adjusted.append(adjustment_id)
             (root / "measurements.md").write_text(
-                f"verified revision {len(self.adjusted)}\n", encoding="utf-8",
+                f"verified revision {len(self.adjusted)}\n",
+                encoding="utf-8",
             )
             yield AgentResponseChunk(
-                request.request_id, request.channel_id,
-                payload={"event_type": "chat.final", "content": "Saved the verified measurements."},
+                request.request_id,
+                request.channel_id,
+                payload={
+                    "event_type": "chat.final",
+                    "content": "Saved the verified measurements.",
+                },
                 is_complete=True,
             )
 
@@ -1983,12 +2002,17 @@ async def test_real_direct_core_adjustment_does_not_block_other_running_cancel(
     project_a, project_b = tmp_path / "a", tmp_path / "b"
     _git_project(project_a)
     _git_project(project_b)
-    agent_a, agent_b = ControlledReportAgent(project_a), ControlledReportAgent(project_b)
+    agent_a, agent_b = (
+        ControlledReportAgent(project_a),
+        ControlledReportAgent(project_b),
+    )
     adapter = DirectProjectCodeExecutorAdapter(
-        _MappedResolver({
-            project_a.resolve(): _direct_binding(project_a, agent_a),
-            project_b.resolve(): _direct_binding(project_b, agent_b),
-        }),
+        _MappedResolver(
+            {
+                project_a.resolve(): _direct_binding(project_a, agent_a),
+                project_b.resolve(): _direct_binding(project_b, agent_b),
+            }
+        ),
         tmp_path / "direct.sqlite3",
     )
     store = SettlementStore(tmp_path / "core.sqlite3")
@@ -1998,20 +2022,30 @@ async def test_real_direct_core_adjustment_does_not_block_other_running_cancel(
         for project, suffix in ((project_a, "-a"), (project_b, "-b")):
             invocation = _create(project, identity_suffix=suffix)
             created = core.execute(
-                invocation.envelope, invocation.authorization,
-                context=invocation.context, now=NOW,
+                invocation.envelope,
+                invocation.authorization,
+                context=invocation.context,
+                now=NOW,
             )
             assert created.ok and created.result is not None
-            identities.append((str(created.result["task_id"]), str(created.result["attempt_id"])))
+            identities.append(
+                (str(created.result["task_id"]), str(created.result["attempt_id"]))
+            )
             assert await core.drain_outbox_once()
         await asyncio.wait_for(agent_a.started.wait(), 5)
         await asyncio.wait_for(agent_b.started.wait(), 5)
         (task_a, attempt_a), (task_b, _attempt_b) = identities
-        command_ids = ["measurement-adjust-1"] if lose_settlement else ["measurement-adjust-1", "measurement-adjust-2"]
+        command_ids = (
+            ["measurement-adjust-1"]
+            if lose_settlement
+            else ["measurement-adjust-1", "measurement-adjust-2"]
+        )
         for command_id in command_ids:
             command, grant = _adjust(
-                task_a, "Verify the measurements without overwriting source data.",
-                command_id=command_id, request_id=f"request-{command_id}",
+                task_a,
+                "Verify the measurements without overwriting source data.",
+                command_id=command_id,
+                request_id=f"request-{command_id}",
             )
             assert core.execute(command, grant, now=NOW).ok
         await core.reconcile()
@@ -2044,9 +2078,13 @@ async def test_real_direct_core_adjustment_does_not_block_other_running_cancel(
             assert task.outcome is TerminalOutcome.COMPLETED
             assert agent_a.adjusted == command_ids
             events = store.events(task_a, _scope(), after_seq=-1)
-            applied = [event for event in events if event.event_type == "task.adjust_applied"]
+            applied = [
+                event for event in events if event.event_type == "task.adjust_applied"
+            ]
             assert [event.causation_id for event in applied] == command_ids
-            assert applied[-1].seq < next(event.seq for event in events if event.event_type == "task.terminal")
+            assert applied[-1].seq < next(
+                event.seq for event in events if event.event_type == "task.terminal"
+            )
             result = store.task_result(task_a, _scope())[1]
             assert result is not None
             content = (project_a / "measurements.md").read_bytes()
@@ -2062,7 +2100,7 @@ async def test_real_direct_core_adjustment_does_not_block_other_running_cancel(
 
 
 @pytest.mark.asyncio
-async def test_demo_itinerary_checkpoint_keeps_task_running_until_real_adjustment(
+async def test_generic_checkpoint_keeps_admitted_adjustment_pending_until_settlement(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "adjustable-demo-itinerary"
@@ -2074,15 +2112,21 @@ async def test_demo_itinerary_checkpoint_keeps_task_running_until_real_adjustmen
         instruction="Create a three-day itinerary.",
     )
     item = replace(_item(project), spec=spec)
+    checkpoint_open = asyncio.Event()
+    release_checkpoint = asyncio.Event()
+
+    async def checkpoint_barrier(_attempt_id: str) -> None:
+        checkpoint_open.set()
+        await release_checkpoint.wait()
+
     adapter = DirectProjectCodeExecutorAdapter(
         _Resolver(_direct_binding(project, executor)),
         tmp_path / "p3.sqlite3",
-        demo_itinerary_fixture_enabled=True,
-        demo_itinerary_adjustment_checkpoint_enabled=True,
+        adjustment_checkpoint_barrier=checkpoint_barrier,
     )
 
     await adapter.dispatch(item)
-    await asyncio.wait_for(executor.initial_complete.wait(), timeout=2)
+    await asyncio.wait_for(checkpoint_open.wait(), timeout=5)
     task, attempt = _direct_task_attempt(project)
     before_adjustment = await adapter.status(replace(task, spec=spec), attempt)
 
@@ -2098,7 +2142,12 @@ async def test_demo_itinerary_checkpoint_keeps_task_running_until_real_adjustmen
         ),
         spec=spec,
     )
-    delivery = await asyncio.wait_for(adapter.adjust(adjustment), timeout=2)
+    delivery_task = asyncio.create_task(adapter.adjust(adjustment))
+    await asyncio.wait_for(
+        adapter._adjustment_checkpoints["attempt-1"].changed.wait(), 5
+    )
+    release_checkpoint.set()
+    delivery = await asyncio.wait_for(delivery_task, timeout=5)
 
     assert delivery.state is TaskAdjustmentState.APPLIED
     assert len(executor.requests) == 2
@@ -2117,7 +2166,7 @@ async def test_demo_itinerary_checkpoint_keeps_task_running_until_real_adjustmen
 
 
 @pytest.mark.asyncio
-async def test_demo_itinerary_checkpoint_close_interrupts_wait_without_target_mutation(
+async def test_generic_checkpoint_close_interrupts_without_target_mutation(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "closed-demo-itinerary"
@@ -2128,15 +2177,20 @@ async def test_demo_itinerary_checkpoint_close_interrupts_wait_without_target_mu
         name="Three-day itinerary",
         instruction="Create a three-day itinerary.",
     )
+    checkpoint_open = asyncio.Event()
+
+    async def checkpoint_barrier(_attempt_id: str) -> None:
+        checkpoint_open.set()
+        await asyncio.Future()
+
     adapter = DirectProjectCodeExecutorAdapter(
         _Resolver(_direct_binding(project, executor)),
         tmp_path / "p3.sqlite3",
-        demo_itinerary_fixture_enabled=True,
-        demo_itinerary_adjustment_checkpoint_enabled=True,
+        adjustment_checkpoint_barrier=checkpoint_barrier,
     )
 
     await adapter.dispatch(replace(_item(project), spec=spec))
-    await asyncio.wait_for(executor.initial_complete.wait(), timeout=2)
+    await asyncio.wait_for(checkpoint_open.wait(), timeout=5)
     isolated_root = Path(executor.requests[0].params["project_dir"])
 
     await adapter.close(interrupt_running=True)
@@ -2258,7 +2312,7 @@ async def test_direct_adjustments_are_ordered_durable_and_fence_terminal_result(
 
 
 @pytest.mark.asyncio
-async def test_demo_itinerary_fixture_rejects_extra_artifact_without_applying_patch(
+async def test_generic_task_can_seal_multiple_artifacts_without_a_fixed_filename(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "isolated-itinerary-project"
@@ -2267,12 +2321,11 @@ async def test_demo_itinerary_fixture_rejects_extra_artifact_without_applying_pa
     spec = replace(
         _spec(project),
         name="Three-day itinerary",
-        instruction="帮我根据这些要求制定三天的行程。",
+        instruction="保存 itinerary.md 和 outside-fixture.txt 两份报告。",
     )
     adapter = DirectProjectCodeExecutorAdapter(
         _Resolver(_direct_binding(project, executor)),
         tmp_path / "p3.sqlite3",
-        demo_itinerary_fixture_enabled=True,
     )
 
     await adapter.dispatch(replace(_item(project), spec=spec))
@@ -2281,36 +2334,106 @@ async def test_demo_itinerary_fixture_rejects_extra_artifact_without_applying_pa
     task, attempt = _direct_task_attempt(project)
     terminal = await adapter.status(replace(task, spec=spec), attempt)
 
-    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.FAILED
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
     record = adapter._journal.get("attempt-1")
     assert record is not None
-    assert record.error == "DEMO_ITINERARY_FIXTURE_CONTRACT_VIOLATION"
-    assert not (project / "itinerary.md").exists()
-    assert not (project / "outside-fixture.txt").exists()
-    assert _git(project, "status", "--porcelain") == ""
+    assert record.error is None
+    artifacts = terminal.observations[-1].result_artifacts
+    assert {artifact.relative_path for artifact in artifacts} == {
+        "itinerary.md",
+        "outside-fixture.txt",
+    }
+    for artifact in artifacts:
+        assert (
+            artifact.sha256
+            == hashlib.sha256(
+                (project / artifact.relative_path).read_bytes()
+            ).hexdigest()
+        )
+    assert executor.requests[0].params["query"] == spec.instruction
 
 
-def test_demo_itinerary_fixture_flag_requires_exact_boolean(tmp_path: Path) -> None:
+@pytest.mark.parametrize("flag_value", [False, True, 1])
+def test_retired_fixture_and_wait_flags_cannot_be_reenabled(
+    tmp_path: Path,
+    flag_value: object,
+) -> None:
     project = tmp_path / "project"
     _git_project(project)
-    with pytest.raises(ValueError, match="must be a boolean"):
+    with pytest.raises(TypeError, match="unexpected keyword"):
         DirectProjectCodeExecutorAdapter(
             _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
             tmp_path / "p3.sqlite3",
-            demo_itinerary_fixture_enabled=1,  # type: ignore[arg-type]
+            demo_itinerary_fixture_enabled=flag_value,  # type: ignore[call-arg]
         )
-    with pytest.raises(ValueError, match="must be a boolean"):
+    with pytest.raises(TypeError, match="unexpected keyword"):
         DirectProjectCodeExecutorAdapter(
             _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
             tmp_path / "p3.sqlite3",
-            demo_itinerary_adjustment_checkpoint_enabled=1,  # type: ignore[arg-type]
+            demo_itinerary_adjustment_checkpoint_enabled=flag_value,  # type: ignore[call-arg]
         )
-    with pytest.raises(ValueError, match="requires the itinerary fixture"):
+    with pytest.raises(TypeError, match="unexpected keyword"):
         DirectProjectCodeExecutorAdapter(
             _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
             tmp_path / "p3.sqlite3",
             demo_itinerary_adjustment_checkpoint_enabled=True,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("durability", ["D0", "D2"])
+async def test_legacy_direct_snapshot_is_readable_but_cannot_dispatch(
+    tmp_path: Path,
+    durability: str,
+) -> None:
+    legacy = (
+        project_code_executor._LEGACY_DIRECT_D0_CAPABILITY_PROFILE
+        if durability == "D0"
+        else project_code_executor._LEGACY_DIRECT_D2_CAPABILITY_PROFILE
+    )
+    frozen = legacy.canonical_bytes()
+    requirements = TaskExecutionRequirements(
+        schema_version=TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
+        executor_id=FORMAL_PROJECT_EXECUTOR_ID,
+        operation_versions=legacy.operation_versions,
+        durability_level=durability,
+        side_effect_class="project_mutation",
+        project_serialization="exclusive",
+    )
+    selection = PersistedExecutorSelection(
+        adapter_id=legacy.adapter_id,
+        capability_profile_json=frozen,
+        capability_profile_digest=legacy.digest_sha256(),
+        execution_requirements_json=requirements.canonical_bytes(),
+    )
+    project = tmp_path / "legacy-read-only"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "direct.sqlite3")
+    try:
+        parsed = adapter._parsed_selection(selection)
+        assert parsed is not None and parsed.profile.canonical_bytes() == frozen
+        assert adapter._selection_binding(selection, require_current_profile=False) == (
+            legacy.adapter_id,
+            legacy.digest_sha256(),
+        )
+        with pytest.raises(FormalTaskViolation, match="frozen Direct capability"):
+            await adapter.dispatch(replace(_item(project), selection=selection))
+        task, attempt = _direct_task_attempt(project, selection=selection)
+        observed = await adapter.status(task, attempt)
+        assert isinstance(observed, ExecutorObservation)
+        assert observed.resolution is ExecutorResolution.UNAVAILABLE
+        assert observed.error == "EXECUTOR_SELECTION_PROFILE_DRIFT"
+        assert observed.adapter_id == selection.adapter_id
+        assert observed.capability_profile_digest == selection.capability_profile_digest
+        assert resolver.calls == []
+        assert executor.requests == []
+        assert adapter._journal.get("attempt-1") is None
+        assert _git(project, "status", "--porcelain") == ""
+        assert selection.capability_profile_json == frozen
+    finally:
+        await adapter.close()
 
 
 @pytest.mark.asyncio
@@ -3722,7 +3845,6 @@ async def test_cancel_and_deadline_cannot_interrupt_applying_itinerary_result(
         cancel_timeout=0.01,
         attempt_timeout=1,
         clock=lambda: clock["now"],
-        demo_itinerary_fixture_enabled=True,
     )
     delivered = await adapter.dispatch(dispatch_item)
     assert await asyncio.to_thread(entered.wait, 5)

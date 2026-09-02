@@ -17,6 +17,12 @@ Normative terms `MUST`, `MUST NOT`, `SHOULD`, and `MAY` have their ordinary RFC-
 
 ## 2. Version and compatibility decision
 
+The 2026-09-03 D-107 semantic-retirement overlay versions the Direct D0/D2
+construction profiles as `v2` with `adjust.task-checkpoint/v1`. Stored legacy
+profile bytes and digests are immutable history, not permission to re-enable
+retired fixture behavior. See [D-107](../decisions/DECISIONS.md#d-107-production-semantic-retirement-and-bounded-pre-command-continuity)
+for the exact new-dispatch and legacy-status compatibility boundary.
+
 The repository already contains a strict Foundation subset named `live-voice.contract.v1`. Its `WorkProgressEvent` has only `work_ref`, a string `provenance`, `seq`, `state`, and `outcome`, and its parser rejects unknown fields. Adding the complete Gate fields under that identifier would silently redefine already serialized data.
 
 Therefore:

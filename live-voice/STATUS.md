@@ -368,6 +368,11 @@ exact-source Alpha result.
   disclosed. Activation source is `59401beb06ecb78e31dfb9c6ed5486141463768c`.
   The current external flight-cancellation Demo is business input, not a
   replacement for root TESTING or proof of this machine's runtime readiness.
+  On 2026-09-03 the user activated task-scoped minimum-intervention progression:
+  implement and verify the remaining packet without routine approval stops;
+  recommend and record bounded design choices, requesting intervention only for
+  genuine external/device/authority needs. Root AGENTS remote gates remain and
+  this task still performs no push.
 - **Intended behaviour:** one configured-model structured semantic implementation
   serves authenticated committed Cascade, Native and natural-text input. It
   proposes only; existing deterministic Bridge/Registry/Core authority performs
@@ -432,6 +437,18 @@ exact-source Alpha result.
   model/config identity. Core claim renewal needs no Task schema migration.
   Generic checkpoint capability must use versioned profiles; existing immutable
   snapshots cannot be rewritten or re-enable retired fixture behaviour.
+  Current implementation batch uses Direct D0/D2 `v2` profiles advertising
+  `adjust.task-checkpoint/v1`; legacy v1 snapshots remain readable, but cannot
+  authorize a new dispatch on the v2 adapter.
+  Legacy running status truthfully reports profile drift/unavailable; this is
+  not a promise to resume v1 attempts across upgrade or rewrite their outcome.
+  Existing live work must be drained before deployment. The real Agent completion
+  boundary consumes already admitted adjustments without a fixture-only wait.
+  Own the Direct/factory/launcher surfaces and their existing test oracles;
+  preserve patch isolation, result sealing, cancellation and claim settlement.
+  This Direct boundary passes 690 Python regressions (two existing host-privilege
+  skips), 20 focused Web checks and independent C0/I0/M0 review; see the
+  [Direct retirement evidence](evidence/SEMANTIC_RETIREMENT_DIRECT_BOUNDARY_20260903.md).
 - **Acceptance:** separately report HARDCODE_RETIREMENT,
   SEMANTIC_AND_EXECUTION, AUDIO_E2E_DIGITAL, HUMAN_PHYSICAL_ACCEPTANCE and
   REGRESSION_AND_REVIEW. All remain **NOT RUN / IN PROGRESS** for this packet.

@@ -124,7 +124,7 @@ def test_formal_web_validation_uses_the_controlled_runtime_profile() -> None:
     assert "if ($branch -ne $ExpectedSourceBranch)" in launcher
     assert "JIUWENSWARM_LIVE_VOICE_RUNTIME_PROFILE" in launcher
     assert "requiredRuntimeFlags" in launcher
-    assert "$ExecutorProfile = 'live-voice.direct-project-code.d2.v1'" in launcher
+    assert "$ExecutorProfile = 'live-voice.direct-project-code.d2.v2'" in launcher
     assert "executor_profile          = $ExecutorProfile" in launcher
     assert "必须选择精确的 Direct D2 Executor profile" in launcher
     assert "live_voice_runtime_contract.json" in launcher
