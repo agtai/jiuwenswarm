@@ -1100,3 +1100,13 @@
 - 相邻问题：一次未绑定到 eligible 样本的 Realtime STT `STREAMING_SPEECH_PROVIDER_UNAVAILABLE` 在新连接建立后恢复，不推翻 40 个 exact 样本，也不允许声称整段运行零异常。正式 Task/自然状态查询/恢复问题继续由独立已知问题记录拥有；它们不再作为本次 L0 warm 稳态测量门。
 - 非声明：预录 WebAudio 输入不是逐轮人工或物理声学确认；WebAudio started/fence completion 不是 physical-first-audible/physical-silence；没有 cold 数据、cold-minus-warm、AEC/double-talk、跨设备/房间、release 稳定性或 feature-complete/product-readiness/Production 信用。原 D-095 schema 报告仍会因 cold 缺失显示 `complete=false`，不得修改原始运行产物；当前闭环由本决定和新的 sanitized warm 证据解释。
 - 重新评估条件：cold 启动进入 L0、产品或发布 SLO；需要严格物理声学 p95；改变 warm corpus、端点、样本最低数或成功资格；或把本次 bounded L0 信用升级为 feature-complete、product-readiness 或 Production Gate。
+
+## D-098 同项目串行 Direct Task 只接受精确的受管前序效果，并保持状态能力同代
+
+- 日期：2026-09-02
+- 状态：Accepted repair decision（用户根据正式 Panel 与隔离运行证据明确批准修复并要求成功后重新部署）。
+- 状态能力一致性：正式 `task.status` 必须把 Core Task、Attempt、admission 和 production supported operations 绑定到同一权威代。`accepted/queued` 的 admission fingerprint、queued 标志和 dispatch ownership 任一在组合期间变化，都不得与另一代能力集拼接；读路径有界重读或返回 stable stale，且不得产生 Task、outbox、Executor、文件、通知或音频副作用。D-088 语义不变：从未 claim/deliver 的初始队列可 update；busy/capacity defer 后只可 reprioritize；已经 claim/take-over 或 running 后两者均不可伪造为可用。
+- 受管项目基线：当前 Direct D2 profile 可在一个精确 authenticated scope/project 内，把 clean Git tree 或“最新 terminal/completed Direct attempt 的已结算 journal expected-tree”作为下一次串行 attempt 的 admissible baseline。受管证明必须同时绑定 canonical Task/Attempt completed truth、相同 scope、相同 project root/HEAD、相同 spec/attempt、完整 Direct journal terminal/effect 状态和当前 exact tree/support fingerprint；缺一即按 dirty/changed target fail closed。下一 attempt 仍在隔离 worktree 中从该精确基线执行，并在 apply 前做 optimistic exact compare。
+- 安全边界：该决定不把任意 dirty worktree 变成合法输入，不接受人工 tracked/untracked 改动、changed HEAD、unsafe link、foreign scope/project、nonterminal 或 failed/cancelled/interrupted/unknown attempt、cleanup/effect unknown，也不自动 commit/stash/reset/clean 或回滚用户文件。串行后继以实际 dispatch 时已经验证的前序 completed tree 为输入；并发覆盖或 apply-time 漂移仍冲突且零部分应用。
+- 范围与证据：这是 Task authority + Direct D2 durability 的 Tier-3 修复；允许修改 production projection、authenticated project baseline reader、Direct journal reader及其自动化，不新增 SQLite schema、canonical lifecycle state、Executor profile、第二 authority、D1 或正向 `provide_input/pause/resume`。必须覆盖 P/N/B/S/T/C/R/I/F/K/X 的适用维度、zero forbidden effects、reopen/restart、真实 Direct file-Tool seam、正式 Web 投影和 clean isolated redeployment；完成前不恢复产品候选 PASS。
+- 重新评估条件：需要跨 scope/project 接受效果、接受非 Direct/非 completed/unknown effect、合并任意用户脏改、自动 Git history/worktree mutation、schema migration、新 canonical state/Executor profile/primitive，或无法在现有 Store+journal 双重事实下证明同项目串行安全。

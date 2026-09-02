@@ -130,11 +130,16 @@
   CONTROLLED-CANDIDATE ATTEMPT REMAINS FAIL.** [D-086](decisions/DECISIONS.md)
   accepts the sequencing risk and removes the failed P1/P2 hands-free condition
   as a P3-1 Gate without changing that immutable older-source result.
-- **Current highest priority:** P3-9 and the controlled product-readiness
-  candidate boundary are closed on `83fde5622`. No new implementation or
-  acceptance packet is activated by this closeout. Feature-complete work must
-  begin with a newly scoped packet against the remaining capability matrix,
-  rather than inheriting P3-9 credit.
+- **Current highest priority:** the newly reproduced formal multi-Task defect
+  repair below is active under D-098. A product status read may currently mix
+  an older `accepted/queued + EXECUTOR_PROJECT_BUSY` projection with a newer
+  taken-over capability generation, hiding a truthful queued
+  `task.reprioritize`. A second queued Task can also fail after the preceding
+  same-project Direct Task applies its verified file effect because dispatch
+  revalidation treats that owned effect as an arbitrary dirty worktree. The
+  affected acceptance is blocked until the Tier-3 repair, automated Gate,
+  clean isolated redeployment and repeated human journey pass. The earlier
+  P3-9 result remains exact-source history and grants no credit to this repair.
   The consolidated P1/P2 lifecycle repair packet is closed; do not reopen its
   four frozen production boundaries without a new
   reproduced defect. The older successor-capture/playout-receipt decoupling
@@ -286,6 +291,77 @@ it cannot upgrade the failed candidate or invalidate the historical
 exact-source Alpha result.
 
 ## Current execution packet
+
+### Formal multi-Task coherent status and managed-baseline repair
+
+- **Status/source:** **IMPLEMENTED / AUTOMATED CHANGED-BOUNDARY PASS; HUMAN
+  REACCEPTANCE BLOCKED** in the current worktree from source `18272738b1`.
+  The retained isolated run showed Task A as `accepted/queued` with
+  `EXECUTOR_PROJECT_BUSY` while the formal Panel omitted
+  `task.reprioritize`; after Task B completed and wrote its artifact, A
+  terminated `failed` with `TASK_CONTEXT_WORKTREE_DIRTY`. The failed data root,
+  target project and log are retained outside Git as diagnostic evidence.
+- **Capability/risk/dependencies:** Task Control/Store status authority plus
+  Direct D2 Executor project-effect admission; Tier 3 under root `TESTING.md`.
+  This repair depends on D-087/D-088 queued update/reprioritize rules, D-089
+  D2 effect truth, D-091 formal Web projection and D-093's exact Direct D2
+  profile. It deliberately changes the project-baseline policy described in
+  D-098; it introduces no schema migration, new canonical state, new Executor
+  profile, second authority or positive `provide_input/pause/resume` claim.
+- **Intended behaviour and owned surfaces:** one status response must bind Core
+  Task/Attempt/admission and production supported operations to the same
+  authority generation. A fresh unclaimed busy/capacity admission exposes
+  `task.reprioritize` but not `task.update`; a claimed/running generation may
+  reject the mutation but cannot be presented as the earlier queued
+  generation. For one exact authenticated scope/project, Direct may treat the
+  current Git tree as an admissible managed baseline only when it is clean or
+  exactly equals the latest terminal/completed Direct effect recorded by both
+  canonical Task/Attempt truth and the Direct journal. The next attempt is
+  still isolated, seeded from that exact tree and applied by optimistic
+  fingerprint comparison.
+- **Owner files/tests:** production authority reader/status composition in
+  `p3_production_intent_composition.py` and
+  `product_composition_registry.py`; authenticated project resolution and
+  Direct managed-baseline verification in `p3_authenticated_composition.py`
+  and `project_code_executor.py`; focused Store/Registry/Executor/formal Web
+  tests plus affected regressions/build/static checks.
+- **Explicit exclusions:** never accept an arbitrary manual tracked/untracked
+  change, changed HEAD, unsafe link, foreign scope/project, nonterminal,
+  failed/cancelled/interrupted/unknown or unsettled effect. Do not auto commit,
+  stash, reset, clean or merge user files. Do not make post-claim `task.update`
+  or running reprioritize available, change UI authority ownership, add D1,
+  add a new control primitive, alter notification/audio semantics, update a
+  remote ref or claim feature-complete/product/Production acceptance.
+- **Acceptance:** deterministic race coverage rejects a mixed status generation
+  with zero mutation and a stable refresh converges; fresh busy admission
+  exposes reprioritize only while unclaimed and preserves Task/Attempt identity;
+  two same-project Tasks that write distinct files complete serially from the
+  exact verified managed baseline; manual/foreign dirty state, changed HEAD,
+  wrong scope, incomplete/failed effect and apply-time drift fail closed with
+  zero partial target effect. Restart/reopen and existing D2 recovery oracles,
+  affected Python/TypeScript/Formal Web tests, build/static/diff checks and a
+  clean isolated redeployment must pass before the user resumes the complete
+  human acceptance journey.
+- **Pre-commit automated evidence:** the status-generation RED oracle failed
+  before the projection guard and passes after it; matching busy admission now
+  projects `task.reprioritize` without `task.update`. The actual Git and Direct
+  D2 Store/journal/apply seam with a deterministic Executor proves an unsettled
+  journal effect is rejected, then two
+  same-project Tasks complete with both files retained after exact Store,
+  effect-settlement and checkpoint proof; wrong scope and manual dirty state
+  remain rejected. Focused/affected results are Direct D2 durability `7/7`,
+  production task authority `14/14`, factory/resolver/status selection `37/37`,
+  Direct serialization/recovery `13/13`,
+  formal vertical `3/3`, focused formal P3 Web `64/64`, changed-file
+  Ruff/compile/diff checks and the production Live Voice build. The complete
+  Integrated Web diagnostic printed `493/499` with one skip and five mounted
+  P2 terminal-notification timing failures in unchanged, explicitly excluded
+  audio/notification sources; they are not credited as a passing cumulative
+  Gate and are routed to that existing owner. A cold complete-diff self-review
+  found no repair-scope issue; an independent reviewer is unavailable in the
+  current execution environment, and the real JiuwenSwarm Agent/file-Tool seam
+  remains the human journey; this packet cannot close before the fresh
+  deployment and that journey.
 
 ### P3-9 cumulative one-product acceptance
 

@@ -44,6 +44,7 @@ from jiuwenswarm.common.coding_memory_paths import (
 )
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    Assurance,
     ErrorCode,
     ScopeRef,
     TerminalOutcome,
@@ -1445,6 +1446,29 @@ class _DirectProjectAttemptJournal:
             ).fetchall()
         return tuple(self._from_row(row) for row in rows)
 
+    def latest_completed_project_effect(
+        self, project_root: str | os.PathLike[str]
+    ) -> _DirectAttempt | None:
+        """Read the latest completed effect owner for one exact project root."""
+
+        canonical_root = str(Path(project_root).resolve(strict=True))
+        with self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT * FROM {_DIRECT_EXECUTOR_TABLE}
+                 WHERE project_root=? AND state=? AND outcome=?
+                       AND expected_tree IS NOT NULL
+                 ORDER BY terminal_at DESC, attempt_id DESC
+                 LIMIT 1
+                """,
+                (
+                    canonical_root,
+                    FormalAttemptState.TERMINAL.value,
+                    TerminalOutcome.COMPLETED.value,
+                ),
+            ).fetchone()
+        return None if row is None else self._from_row(row)
+
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
@@ -2500,6 +2524,143 @@ class _DirectProjectAttemptJournal:
             finally:
                 ownership.release()
         return recovered
+
+
+class DirectProjectManagedBaselineReader:
+    """Admit only clean Git state or one exact settled Direct D2 effect.
+
+    This read-only bridge lets authenticated project resolution distinguish a
+    prior formal Task's owned effect from arbitrary user dirt.  It neither
+    advances Task state nor edits the project or Direct journal.
+    """
+
+    def __init__(
+        self,
+        database: str | os.PathLike[str],
+        *,
+        store: SqliteTaskStore,
+    ) -> None:
+        if not isinstance(store, SqliteTaskStore):
+            raise TypeError("managed baseline requires the canonical Task Store")
+        if Path(store.database_path).resolve(strict=False) != Path(database).resolve(
+            strict=False
+        ):
+            raise ValueError(
+                "managed baseline Store and Direct journal must share one database"
+            )
+        self._store = store
+        self._journal = _DirectProjectAttemptJournal(database)
+
+    def __call__(self, project_dir: str, scope: ScopeRef) -> bool:
+        if (
+            type(project_dir) is not str
+            or not project_dir.strip()
+            or not isinstance(scope, ScopeRef)
+            or scope.assurance is not Assurance.AUTHENTICATED
+        ):
+            return False
+        try:
+            root = Path(project_dir).resolve(strict=True)
+            if not root.is_dir() or _path_key(root) != _path_key(_git_root(root)):
+                return False
+            if not _git_output(
+                root,
+                "status",
+                "--porcelain=v2",
+                "-z",
+                "--untracked-files=all",
+            ):
+                return True
+            record = self._journal.latest_completed_project_effect(root)
+            if (
+                record is None
+                or record.error is not None
+                or record.expected_tree is None
+                or record.raw_status.endswith("cleanup_pending")
+                or _path_key(record.project_root) != _path_key(root)
+                or record.before_head != _git_head(root)
+                or json.loads(record.protected_support_json)
+                != _target_support_fingerprints(root)
+                or not _expected_project_state_matches(root, record.expected_tree)
+            ):
+                return False
+
+            task, attempt, _admission = self._store.task_read_snapshot(
+                record.task_id, scope
+            )
+            if (
+                task.task_id != record.task_id
+                or task.attempt_id != record.attempt_id
+                or task.state is not FormalTaskState.TERMINAL
+                or task.outcome is not TerminalOutcome.COMPLETED
+                or task.reconciliation_state is not None
+                or attempt.attempt_id != record.attempt_id
+                or attempt.task_id != record.task_id
+                or attempt.state is not FormalAttemptState.TERMINAL
+                or attempt.outcome is not TerminalOutcome.COMPLETED
+                or attempt.executor_ref != record.executor_ref
+                or attempt.source_seq != record.source_seq
+                or task.spec.fingerprint_bytes() != record.spec_fingerprint
+                or _path_key(task.spec.context.file_path or "") != _path_key(root)
+                or attempt.selection is None
+            ):
+                return False
+            profile = ExecutorCapabilityProfile.from_dict(
+                json.loads(attempt.selection.capability_profile_json)
+            )
+            if (
+                profile.canonical_bytes()
+                != attempt.selection.capability_profile_json
+                or profile.digest_sha256()
+                != attempt.selection.capability_profile_digest
+                or profile.durability_level != "D2"
+                or ("effect.d2", "v1") not in profile.operation_versions
+            ):
+                return False
+            binding = self._store.read_durability_binding(
+                scope=scope,
+                task_id=record.task_id,
+                origin_attempt_id=record.attempt_id,
+            )
+            effects = self._store.read_durability_effects(binding)
+            checkpoints = self._store.read_durability_checkpoints(binding)
+            if not effects.records or not checkpoints.records:
+                return False
+            settlement = effects.records[-1]
+            checkpoint = checkpoints.records[-1]
+            applied = next(
+                (
+                    effect
+                    for effect in reversed(effects.records)
+                    if type(effect) is ExternalEffectObservation
+                ),
+                None,
+            )
+            proof_complete = bool(
+                type(settlement) is ExternalEffectSettlement
+                and settlement.kind is EffectSettlementKind.RESOLVED
+                and settlement.actor_attempt_id == record.attempt_id
+                and settlement.binding.task_id == record.task_id
+                and settlement.binding.origin_attempt_id == record.attempt_id
+                and type(applied) is ExternalEffectObservation
+                and applied.kind is EffectObservationKind.APPLIED
+                and applied.actor_attempt_id == record.attempt_id
+                and applied.evidence_digest
+                == hashlib.sha256(record.expected_tree.encode("utf-8")).hexdigest()
+                and checkpoint.complete
+                and checkpoint.producer_attempt_id == record.attempt_id
+                and checkpoint.effect_head == effects.head
+                and checkpoint.effect_prefix_digest == effects.prefix_digest
+            )
+            return bool(
+                proof_complete
+                and record.before_head == _git_head(root)
+                and json.loads(record.protected_support_json)
+                == _target_support_fingerprints(root)
+                and _expected_project_state_matches(root, record.expected_tree)
+            )
+        except Exception:  # noqa: BLE001 -- any incomplete proof is not admissible
+            return False
 
 
 def _text(payload: Mapping[str, Any], *keys: str) -> str | None:
@@ -6475,6 +6636,7 @@ class ProjectCodeExecutorAdapter:
 
 __all__ = [
     "DirectProjectCodeExecutorAdapter",
+    "DirectProjectManagedBaselineReader",
     "DirectStreamObservation",
     "DirectStreamObserver",
     "DIRECT_PROJECT_EXECUTOR_REF_PREFIX",
