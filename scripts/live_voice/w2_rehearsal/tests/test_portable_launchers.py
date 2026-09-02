@@ -94,7 +94,9 @@ def test_wav_speech_preflight_emits_ascii_safe_json(monkeypatch) -> None:
         newline="\n",
     )
     monkeypatch.setenv("LIVE_VOICE_SPEECH_API_KEY", "test-only")
-    monkeypatch.setattr(batch_speech, "OpenAICompatibleBatchSpeechProvider", FakeProvider)
+    monkeypatch.setattr(
+        batch_speech, "OpenAICompatibleBatchSpeechProvider", FakeProvider
+    )
     monkeypatch.setattr(sys, "stdout", strict_cp1252)
 
     assert asyncio.run(w2_wav_speech_preflight._run(wav_path)) == 0
@@ -128,6 +130,9 @@ def test_formal_web_validation_uses_the_controlled_runtime_profile() -> None:
     assert "live_voice_runtime_contract.json" in launcher
     assert "Formal Web 验证要求干净源码" in launcher
     assert "Wait-HttpResponse" in launcher
+    assert "$probeResult.gateway_claim_policy -ne 'eligible'" in launcher
+    assert "$gatewayClaimPolicy = 'eligible'" in launcher
+    assert "trusted_demo_bypass" not in launcher
     assert "external_channels" in launcher
     assert 'bundleUrl = "http://127.0.0.1:$FrontendPort${assetPath}' in launcher
     assert "-RuntimeProfile formal-web-validation -RestartExisting" in wrapper
@@ -236,7 +241,9 @@ def test_formal_web_runtime_probe_binds_critical_receipt_and_rejects_forgery(
         ) -> batch_speech.ProviderSynthesisResult:
             self.synthesize_calls += 1
             assert request.spoken_text == formal_web_runtime_probe.PROBE_TEXT
-            return batch_speech.ProviderSynthesisResult(b"probe-wav", "tts-test", "voice-test")
+            return batch_speech.ProviderSynthesisResult(
+                b"probe-wav", "tts-test", "voice-test"
+            )
 
         async def recognize(
             self, request: batch_speech.ProviderRecognitionRequest
@@ -249,15 +256,13 @@ def test_formal_web_runtime_probe_binds_critical_receipt_and_rejects_forgery(
                 "stt-test",
             )
 
-    monkeypatch.setenv(
-        "JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED", "1"
-    )
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED", "1")
     provider = FakeProvider()
     result = asyncio.run(formal_web_runtime_probe.run_probe(provider))
 
     assert result["provider_round_trip"] == "passed"
     assert result["critical_token_count"] >= 1
-    assert result["gateway_claim_policy"] == "trusted_demo_bypass"
+    assert result["gateway_claim_policy"] == "eligible"
     assert result["identity_mismatch"] == "rejected"
     assert result["forged_claim"] == "rejected"
     assert result["business_effects"] == 0

@@ -6913,7 +6913,6 @@ class AgentServerProductCompositionRegistry:
         if critical_policy not in {
             "eligible",
             "confirmed",
-            "trusted_demo_bypass",
         }:
             raise FormalTaskViolation(
                 "CRITICAL_TOKEN_POLICY_REQUIRED",
@@ -6990,28 +6989,17 @@ class AgentServerProductCompositionRegistry:
         route: ProtectedRoute,
         effect: Callable[[], Any],
     ) -> Any:
-        # A Gateway ``confirmed`` claim means the user performed the explicit
-        # in-page confirmation action over the displayed final transcript.
-        # ``trusted_demo_bypass`` is deliberately different: both Gateway and
-        # AgentServer must have the isolated Demo policy enabled, and neither
-        # side represents it as user confirmation.  Those two backend-owned
-        # policies may evaluate the exact final transcript as explicit text;
-        # an ordinary Speech claim keeps unknown Provider confidence and cannot
-        # pass a newly discovered critical token.
-        if (
-            critical_policy == "trusted_demo_bypass"
-            and not self._settings.demo_policy_bypass_enabled
-        ):
+        # Receipt validation authenticates final speech, not action approval.
+        # A legacy UI confirmation cannot turn it into explicit text. Operation
+        # confirmation is independently bound by the formal Task policy.
+        if critical_policy == "trusted_demo_bypass":
             raise FormalTaskViolation(
                 "CRITICAL_TOKEN_POLICY_REQUIRED",
-                "trusted Demo critical-token bypass is not enabled by AgentServer",
+                "the speech policy bypass has been retired",
                 ErrorCode.PERMISSION_DENIED,
             )
         evidence_source = (
-            EvidenceSource.EXPLICIT_TEXT
-            if source == "text"
-            or critical_policy in {"confirmed", "trusted_demo_bypass"}
-            else EvidenceSource.SPEECH
+            EvidenceSource.EXPLICIT_TEXT if source == "text" else EvidenceSource.SPEECH
         )
         candidate = CommittedSpeechCandidate(
             commit=commit,
@@ -7705,16 +7693,12 @@ class AgentServerProductCompositionRegistry:
                 except OSError:
                     break
             if is_symlink:
-                snapshots.append(
-                    {"relative_path": relative_path, "status": "symlink"}
-                )
+                snapshots.append({"relative_path": relative_path, "status": "symlink"})
                 continue
             try:
                 resolved_path = lexical_path.resolve(strict=True)
             except (FileNotFoundError, NotADirectoryError):
-                snapshots.append(
-                    {"relative_path": relative_path, "status": "missing"}
-                )
+                snapshots.append({"relative_path": relative_path, "status": "missing"})
                 continue
             except (OSError, RuntimeError):
                 snapshots.append(
@@ -7793,17 +7777,13 @@ class AgentServerProductCompositionRegistry:
             try:
                 content = artifact_bytes.decode("utf-8", errors="strict")
             except UnicodeDecodeError:
-                snapshots.append(
-                    {"relative_path": relative_path, "status": "not_text"}
-                )
+                snapshots.append({"relative_path": relative_path, "status": "not_text"})
                 continue
             if "\x00" in content or any(
                 ord(character) < 32 and character not in "\n\r\t"
                 for character in content
             ):
-                snapshots.append(
-                    {"relative_path": relative_path, "status": "not_text"}
-                )
+                snapshots.append({"relative_path": relative_path, "status": "not_text"})
                 continue
             retained_content_bytes += len(artifact_bytes)
             snapshots.append(
@@ -10392,9 +10372,11 @@ class AgentServerProductCompositionRegistry:
                         )
 
                     marked_delivery: _ProgressDelivery | None = None
-                    ack_reservation_id = retained.activation_lease.reserve_presentation_ack(
-                        retained.binding,
-                        ack,
+                    ack_reservation_id = (
+                        retained.activation_lease.reserve_presentation_ack(
+                            retained.binding,
+                            ack,
+                        )
                     )
                     try:
                         with self._task_presentation_state_lock:

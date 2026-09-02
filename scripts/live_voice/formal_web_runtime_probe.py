@@ -83,8 +83,10 @@ async def run_probe(provider: BatchSpeechProvider) -> dict[str, object]:
         raise RuntimeError("Gateway did not produce a formal speech claim")
     if claim.get("kind") != "formal_speech_recognition":
         raise RuntimeError("Gateway speech claim is not formal")
-    if claim.get("critical_policy") != "trusted_demo_bypass":
-        raise RuntimeError("critical Speech receipt did not use the Demo policy")
+    if claim.get("critical_policy") != "eligible":
+        raise RuntimeError(
+            "formal Speech receipt incorrectly required a special policy"
+        )
     if "voice_commit_receipt" in message.params:
         raise RuntimeError("Gateway forwarded a private speech receipt")
 
@@ -140,7 +142,7 @@ async def run_probe(provider: BatchSpeechProvider) -> dict[str, object]:
         "provider_round_trip": "passed",
         "recognized_character_count": len(recognized.text),
         "critical_token_count": len(critical_tokens),
-        "gateway_claim_policy": "trusted_demo_bypass",
+        "gateway_claim_policy": "eligible",
         "identity_mismatch": "rejected",
         "forged_claim": "rejected",
         "business_effects": 0,

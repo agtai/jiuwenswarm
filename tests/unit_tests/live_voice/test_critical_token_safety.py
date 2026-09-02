@@ -173,6 +173,40 @@ def test_low_risk_natural_language_with_unknown_confidence_is_not_blocked() -> N
     assert decision.critical_tokens == ()
 
 
+@pytest.mark.parametrize(
+    "text",
+    (
+        "预算不超过1500元。",
+        "2026-09-04 上午10:00开会。",
+        "不要取消乙，也不要租车。",
+        "Do not send the draft. Keep the budget below 1500.",
+        "Le budget est de 1500 euros, sans location de voiture.",
+        "比較表は comparison.md に保存してください。",
+    ),
+)
+def test_missing_confidence_never_imposes_lexical_confirmation(text: str) -> None:
+    gate = CriticalTokenSafetyGate()
+    source = candidate(text, 1, confidence=None)
+    result = gate.evaluate(source)
+    assert result.decision.status is CriticalTokenDecisionStatus.ELIGIBLE
+    assert result.decision.reasons == ()
+    assert result.clarification is None
+    assert result.authorization is not None
+    assert result.authorization.safety_bypassed is False
+    assert source.source is EvidenceSource.SPEECH
+    effects: list[TurnCommit] = []
+    assert (
+        gate.dispatch(result.authorization, ProtectedRoute.AGENT, effects.append).status
+        is GuardDispatchStatus.DISPATCHED
+    )
+    assert effects == [source.commit]
+    assert (
+        gate.dispatch(result.authorization, ProtectedRoute.AGENT, effects.append).status
+        is GuardDispatchStatus.DUPLICATE
+    )
+    assert effects == [source.commit]
+
+
 def test_explicit_critical_uncertainty_fails_closed_when_token_kind_is_unknown() -> (
     None
 ):
@@ -220,14 +254,12 @@ def test_raw_display_critical_token_change_requires_clarification() -> None:
     assert CriticalTokenReason.CRITICAL_ALTERNATIVES_DISAGREE in decision.reasons
 
 
-def test_letter_only_hex_sha_is_critical_and_unknown_speech_requires_clarification() -> (
-    None
-):
+def test_letter_only_hex_sha_without_confidence_needs_no_extra_confirmation() -> None:
     decision = CriticalTokenPolicy().evaluate(
         candidate("checkout deadbeef", 1, confidence=None)
     )
-    assert decision.status is CriticalTokenDecisionStatus.CLARIFICATION_REQUIRED
-    assert CriticalTokenReason.CRITICAL_CONFIDENCE_UNKNOWN in decision.reasons
+    assert decision.status is CriticalTokenDecisionStatus.ELIGIBLE
+    assert decision.reasons == ()
     assert any(
         token.kind is CriticalTokenKind.SHA and token.text == "deadbeef"
         for token in decision.critical_tokens
@@ -277,10 +309,12 @@ def test_quoted_path_with_spaces_is_one_complete_critical_observation() -> None:
     "text",
     ("checkout main", "checkout feature-safe", "切换到main分支"),
 )
-def test_contextual_simple_branch_name_is_critical(text: str) -> None:
+def test_contextual_branch_name_does_not_require_lexical_confirmation(
+    text: str,
+) -> None:
     decision = CriticalTokenPolicy().evaluate(candidate(text, 1, confidence=None))
-    assert decision.status is CriticalTokenDecisionStatus.CLARIFICATION_REQUIRED
-    assert CriticalTokenReason.CRITICAL_CONFIDENCE_UNKNOWN in decision.reasons
+    assert decision.status is CriticalTokenDecisionStatus.ELIGIBLE
+    assert decision.reasons == ()
     assert CriticalTokenKind.PATH_OR_BRANCH in {
         token.kind for token in decision.critical_tokens
     }
@@ -313,11 +347,6 @@ def test_clear_critical_input_passes_without_replacing_action_confirmation() -> 
         (
             "deploy build_task 42 to feature/safe",
             None,
-            CriticalTokenReason.CRITICAL_CONFIDENCE_UNKNOWN,
-        ),
-        (
-            "deploy build_task 42 to feature/safe",
-            None,
             CriticalTokenReason.CRITICAL_LOW_CONFIDENCE,
         ),
         (
@@ -335,11 +364,7 @@ def test_uncertain_critical_input_requires_explainable_clarification_and_zero_ef
     alternatives: tuple[tuple[str, float | None], ...] | None,
     expected_reason: CriticalTokenReason,
 ) -> None:
-    confidence = (
-        None
-        if expected_reason is CriticalTokenReason.CRITICAL_CONFIDENCE_UNKNOWN
-        else 0.2
-    )
+    confidence = 0.2
     if alternatives is not None:
         confidence = 0.99
     gate = CriticalTokenSafetyGate()
@@ -434,7 +459,7 @@ def test_corrected_confirmation_dispatches_whole_protected_route_exactly_once() 
 
 def test_confirmation_must_be_explicit_and_correction_must_be_new_bound_turn() -> None:
     gate = CriticalTokenSafetyGate()
-    initial = gate.evaluate(candidate("delete app.py", 1, confidence=None))
+    initial = gate.evaluate(candidate("delete app.py", 1, confidence=0.2))
     assert initial.clarification is not None
     correction = candidate(
         "delete app.py",
@@ -478,7 +503,7 @@ def test_confirmation_must_be_explicit_and_correction_must_be_new_bound_turn() -
 def test_cancelled_clarification_rejects_late_confirmation_with_zero_effects() -> None:
     gate = CriticalTokenSafetyGate()
     effects = protected_effects()
-    initial = gate.evaluate(candidate("delete app.py", 1, confidence=None))
+    initial = gate.evaluate(candidate("delete app.py", 1, confidence=0.2))
     assert initial.clarification is not None
     clarification_id = initial.clarification.clarification_id
     assert gate.cancel_clarification(clarification_id) is ClarificationState.CANCELLED
@@ -501,7 +526,7 @@ def test_cancelled_clarification_rejects_late_confirmation_with_zero_effects() -
 
 def test_replacement_fences_old_clarification_and_old_authorization() -> None:
     gate = CriticalTokenSafetyGate()
-    old_pending = gate.evaluate(candidate("run build_task 41", 1, confidence=None))
+    old_pending = gate.evaluate(candidate("run build_task 41", 1, confidence=0.2))
     assert old_pending.clarification is not None
     replacement = gate.evaluate(candidate("请解释这个概念", 2))
     assert replacement.authorization is not None
@@ -648,7 +673,7 @@ def test_boolean_input_generation_provenance_never_authorizes_or_mutates(
 
 def test_unprovenanced_correction_cannot_fence_pending_clarification() -> None:
     gate = CriticalTokenSafetyGate()
-    pending = gate.evaluate(candidate("run build_task 42", 1, confidence=None))
+    pending = gate.evaluate(candidate("run build_task 42", 1, confidence=0.2))
     assert pending.clarification is not None
     correction = candidate(
         "run build_task 43",
@@ -692,7 +717,7 @@ def test_boolean_clarification_generation_never_resolves_or_mutates(
         candidate(
             "run build_task 42",
             1,
-            confidence=None,
+            confidence=0.2,
             input_generation=0,
         )
     )
@@ -730,7 +755,7 @@ def test_boolean_clarification_generation_never_resolves_or_mutates(
 
 def test_wrong_interaction_scope_or_superseded_commit_cannot_resolve() -> None:
     gate = CriticalTokenSafetyGate()
-    initial = gate.evaluate(candidate("push feature/safe", 1, confidence=None))
+    initial = gate.evaluate(candidate("push feature/safe", 1, confidence=0.2))
     assert initial.clarification is not None
     clarification_id = initial.clarification.clarification_id
 
@@ -779,14 +804,14 @@ def test_wrong_interaction_scope_or_superseded_commit_cannot_resolve() -> None:
 
 def test_still_uncertain_spoken_correction_replaces_but_does_not_dispatch() -> None:
     gate = CriticalTokenSafetyGate()
-    first = gate.evaluate(candidate("run build_task 41", 1, confidence=None))
+    first = gate.evaluate(candidate("run build_task 41", 1, confidence=0.2))
     assert first.clarification is not None
     second = gate.resolve(
         first.clarification.clarification_id,
         candidate(
             "run build_task 42",
             2,
-            confidence=None,
+            confidence=0.2,
             supersedes="commit-1",
             clarification_id=first.clarification.clarification_id,
         ),
@@ -906,7 +931,7 @@ def test_cancelled_authorization_and_forged_authorization_never_dispatch() -> No
 
 def test_interaction_close_fences_pending_clarification_and_ready_route() -> None:
     gate = CriticalTokenSafetyGate()
-    pending = gate.evaluate(candidate("run build_task 42", 1, confidence=None))
+    pending = gate.evaluate(candidate("run build_task 42", 1, confidence=0.2))
     assert pending.clarification is not None
     closed_pending = gate.close_interaction("interaction-1")
     assert closed_pending.clarification_state is ClarificationState.CANCELLED
@@ -989,7 +1014,7 @@ def test_bounded_gate_releases_terminal_commit_and_interaction_state() -> None:
 
 def test_bounded_gate_rejects_correction_before_growing_commit_state() -> None:
     gate = CriticalTokenSafetyGate(capacity=1)
-    pending = gate.evaluate(candidate("run build_task 42", 1, confidence=None))
+    pending = gate.evaluate(candidate("run build_task 42", 1, confidence=0.2))
     assert pending.clarification is not None
     corrected = candidate(
         "run build_task 42",
@@ -1010,7 +1035,7 @@ def test_bounded_gate_rejects_correction_before_growing_commit_state() -> None:
 
 
 def test_feature_off_is_explicit_bypass_and_fallback_does_not_relax_flag_on() -> None:
-    uncertain = candidate("git push feature/safe 42", 1, confidence=None)
+    uncertain = candidate("git push feature/safe 42", 1, confidence=0.2)
     enabled = CriticalTokenSafetyGate().evaluate(uncertain)
     disabled_gate = CriticalTokenSafetyGate(enabled=False)
     disabled = disabled_gate.evaluate(uncertain)
@@ -1066,10 +1091,10 @@ def test_feature_off_does_not_apply_clarification_policy_limits() -> None:
 def test_interactions_keep_independent_clarification_state() -> None:
     gate = CriticalTokenSafetyGate()
     first = gate.evaluate(
-        candidate("run build_task 41", 1, confidence=None, interaction="interaction-1")
+        candidate("run build_task 41", 1, confidence=0.2, interaction="interaction-1")
     )
     second = gate.evaluate(
-        candidate("run build_task 42", 2, confidence=None, interaction="interaction-2")
+        candidate("run build_task 42", 2, confidence=0.2, interaction="interaction-2")
     )
     assert first.clarification is not None
     assert second.clarification is not None

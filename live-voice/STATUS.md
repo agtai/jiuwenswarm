@@ -412,13 +412,20 @@ exact-source Alpha result.
   [model/context prerequisite evidence](evidence/SEMANTIC_RETIREMENT_MODEL_BOUNDARY_20260903.md).
   The Registry still calls old semantic paths; no retirement or audio credit is
   implied by these helpers.
-- **Decision needed before all-voice cutover:** without Demo bypass, existing
-  Gateway critical-token handling requires explicit UI transcript confirmation.
-  Pure-voice readback confirmation is not currently implemented. A minimal
-  Tier-3 binding of actual readback presentation, original input and a later
-  authenticated speech confirmation was proposed to the user; do not implement
-  a replacement bypass or relabel ordinary speech as explicit text. Other
-  unaffected work may continue while this scope decision is pending.
+- **Accepted correction to excessive speech blocking (D-108):** the user
+  rejects per-sentence/readback confirmation and authorizes removing the
+  lexical Gateway gate and the inference that absent Provider confidence means
+  uncertainty. Ordinary amounts, dates and negative constraints proceed as
+  speech. Actual recognition uncertainty and normal exact Task confirmation
+  remain separate boundaries. No replacement bypass or speech-to-explicit-text
+  relabelling is allowed. This Tier-3 repair owns receipt admission, the input
+  guard and their Gateway/Registry regressions; production semantic cutover and
+  the five final acceptance Gates remain required.
+  The scoped repair passes 595 regressions, independent review C0/I0/M0 and a
+  real TTS-to-STT/Gateway-receipt component probe. See the
+  [speech-guard evidence](evidence/SEMANTIC_RETIREMENT_SPEECH_GUARD_20260903.md).
+  This is not browser-audio or human acceptance; business Demo bypass and the
+  old semantic Registry routes still require the subsequent production cutover.
 - **Persistence/compatibility:** pre-command proposal/continuation records use
   the existing committed-input journal's additive bounded storage, not another
   Task Store. Bind scope, authorized conversation, origin, version, expiry and

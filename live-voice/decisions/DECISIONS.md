@@ -1296,3 +1296,39 @@
   general workflow state machine, Provider/account change, system driver,
   unauthorized session continuity or remote update. Local implementation and
   reviewable commits are allowed; no remote refs are updated by this task.
+
+## D-108 Speech evidence is not lexical action authorization
+
+- Date: 2026-09-03. The user explicitly authorizes correcting excessive speech
+  blocking and rejects an extra readback/confirmation for every amount, date or
+  negative constraint. This supersedes the proposed readback dependency, not
+  the historical evidence recorded before that decision.
+- A formal STT receipt authenticates the exact recognized final and its issuing
+  session, correlation, capture, interaction and one commit binding. Redeeming
+  it must not scan words to grant/refuse semantic admission. Remove the speech
+  Demo bypass; a client confirmation boolean cannot turn speech into text or
+  authorize a Task operation. Retain exact replay, expiry and rebinding fences.
+- Missing Provider confidence is absence of evidence, not evidence of an
+  ambiguous transcript. A clear final containing a number, date, path, action
+  word or negation proceeds through the same normal semantic/authority chain.
+  Supplied conflicting hypotheses, genuinely low confidence and explicit
+  uncertainty retain the existing bounded clarification treatment. Presence of
+  a word alone never requires clarification or an additional confirmation.
+- The committed-input guard still enforces finality, exact selected hypothesis,
+  scope/generation, replacement, once-only dispatch and cleanup. Speech remains
+  speech, including legacy Gateway `confirmed` claims; retired bypass claims
+  fail closed even if an old environment flag remains set elsewhere.
+- Formal Task confirmation is distinct: the deterministic operation policy
+  still binds the exact authorized target and specification. The correction
+  neither grants blanket execution nor makes a negated command affirmative.
+- This is a Tier-3 receipt/guard/Registry security-policy correction within the
+  active semantic-retirement packet. Owned tests cover positive natural inputs,
+  real uncertainty, invalid receipts, stale/partial/replayed commits, target and
+  operation confirmation, with zero forbidden effects. Existing clarification
+  lifecycle tests use actual uncertain evidence rather than missing confidence.
+  The dependent launcher/probe policy assertion changes to normal `eligible`
+  admission (Tier 1 tooling); its real-provider, forgery and mismatch assertions
+  stay. Gateway and AgentServer must be deployed together; an old speech bypass
+  claim is intentionally incompatible. No service is restarted by this decision.
+  No new transcript-confirmation workflow, schema migration, provider/device
+  configuration, Executor capability or remote update is authorized.

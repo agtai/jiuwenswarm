@@ -1117,7 +1117,7 @@ try {
         $probeResult = $probeLine[0].Substring('FORMAL_WEB_RUNTIME_PROBE_RESULT '.Length) | ConvertFrom-Json
         if (
             $probeResult.provider_round_trip -ne 'passed' -or
-            $probeResult.gateway_claim_policy -ne 'trusted_demo_bypass' -or
+            $probeResult.gateway_claim_policy -ne 'eligible' -or
             $probeResult.identity_mismatch -ne 'rejected' -or
             $probeResult.forged_claim -ne 'rejected' -or
             $probeResult.business_effects -ne 0 -or
@@ -1127,8 +1127,8 @@ try {
             Fail 'Formal Web 运行探针结果不满足安全合同。'
         }
         $speechRoundTrip = 'passed'
-        $gatewayClaimPolicy = 'trusted_demo_bypass'
-        Write-Pass '真实 Speech TTS→STT、critical receipt、身份错配拒绝和伪造 claim 拒绝均通过；业务副作用为 0'
+        $gatewayClaimPolicy = 'eligible'
+        Write-Pass '真实 Speech TTS→STT、无词法确认的正式 receipt、身份错配拒绝和伪造 claim 拒绝均通过；业务副作用为 0'
     }
 
     $runtimeContractPath = Join-Path $RepoRoot 'logs\live_voice_runtime_contract.json'

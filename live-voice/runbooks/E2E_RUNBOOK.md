@@ -394,7 +394,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 最后才写入不含密钥的 `logs/live_voice_runtime_contract.json`。缺少任一开关、
 项目绑定、正式 Speech 配置、Live Voice bundle 或后端 route，或者探针产生任何
 业务副作用，都必须失败退出。只有该合同记录 `speech_round_trip: passed`、
-`gateway_claim_policy: trusted_demo_bypass`、
+`gateway_claim_policy: eligible`、
 `executor_profile: live-voice.direct-project-code.d2.v1`，并把
 `JIUWENSWARM_LIVE_VOICE_P3_ENABLED` 与其余必需项全部记录为 `true` 后，才能
 请求真实设备人工验收。
@@ -456,7 +456,20 @@ $env:JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED = '1'
 $env:JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED = '1'
 ```
 
-`JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED` 是后端可信的、仅供隔离 Demo 使用的显式策略。它一方面允许 create/cancel 跳过二次确认，另一方面允许 Gateway 为包含数字等 critical token 的权威 ASR final 签发独立的 `trusted_demo_bypass`，使“三天”“第二天”等本 Demo 话术不进入生产 clarification。`JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED` 只有与该 Demo policy 同时开启时才生效，并且只让精确的 `Three-day itinerary` fixture 在初始 Agent 运行后以事件方式等待一次真实 adjustment；flag-off 路径不会等待。两者都不是用户 confirmation，不伪造或声称用户完成了 confirmation，也不绕过 scope、幂等、目标绑定或 mutation authority。不得在普通生产会话中启用这些变量；生产/默认验收必须删除它们，并验证 create/cancel 仍要求原有确认、critical speech 仍走默认安全策略。该精确 fixture、可信 Demo bypass 及相关场景 hardcode 的隔离/移除已记录在 [STATUS](../STATUS.md) 的后续待办中，不能把“默认关闭”误写成 Full-P3/生产泛化已经完成：
+截至 D-108 修复，Gateway 不再使用 Demo bypass 或数字、日期、否定词来决定是否接受
+正式 ASR final；正常回执的策略为 `eligible`，缺少 Provider confidence 也不再要求
+额外转写确认。客户端确认布尔值不授予 Task 操作权限，旧 `trusted_demo_bypass`
+语音 claim 会被拒绝。部署时必须一起更新 Gateway、AgentServer 和本启动探针，
+不能用新 AgentServer 配旧 Gateway 的 bypass claim。
+
+以下两个旧开关的**业务**作用尚待当前去硬编码包退役，不能把语音过度拦截修复
+误报为全部 bypass 已删除：`JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED`
+仍控制旧隔离 Demo 的 create/cancel 策略；
+`JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED` 仍使精确的
+`Three-day itinerary` fixture 在初始 Agent 运行后等待真实 adjustment。它们不是
+用户 confirmation，不得在普通生产会话启用。当前包必须移除这些业务路径后再做
+最终验收，详见 [STATUS](../STATUS.md)。删除开关后，正常 Task 操作确认应保持，
+但普通数字、日期和否定表达不应增加确认：
 
 ```powershell
 Remove-Item Env:JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED -ErrorAction SilentlyContinue

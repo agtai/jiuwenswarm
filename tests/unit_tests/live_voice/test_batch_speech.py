@@ -398,9 +398,7 @@ def _continued_recognize_request(
         "format": "wav_pcm16_mono",
         "sample_rate_hz": 16_000,
         "channel_count": 1,
-        "data_base64": base64.b64encode(_wav_samples([2000, 3000])).decode(
-            "ascii"
-        ),
+        "data_base64": base64.b64encode(_wav_samples([2000, 3000])).decode("ascii"),
     }
     request["predecessor"] = {
         "subject_id": "subject-predecessor",
@@ -508,7 +506,9 @@ async def test_formal_recognition_and_synthesis_return_exact_provenance() -> Non
 
 
 @pytest.mark.asyncio
-async def test_cross_capture_recognition_authorizes_and_combines_exact_segments() -> None:
+async def test_cross_capture_recognition_authorizes_and_combines_exact_segments() -> (
+    None
+):
     class SegmentRecordingProvider(ControlledProvider):
         samples: list[int] | None = None
 
@@ -527,9 +527,10 @@ async def test_cross_capture_recognition_authorizes_and_combines_exact_segments(
     recognized = await service.recognize(request, CONTEXT)
 
     assert recognized["ok"] is True
-    assert recognized["result"]["event"]["hypothesis"]["alternatives"][0][
-        "display_text"
-    ] == "prefix tail"
+    assert (
+        recognized["result"]["event"]["hypothesis"]["alternatives"][0]["display_text"]
+        == "prefix tail"
+    )
     assert provider.samples == [-3000, -2000, 2000, 3000]
     assert len(resolver.calls) == 1
     assert [
@@ -607,17 +608,18 @@ async def test_cross_capture_tombstones_survive_configured_minimum_window() -> N
     predecessor_only["audio"] = dict(combined["predecessor"]["audio"])
     replay = await service.recognize(
         predecessor_only,
-        SpeechRpcContext(
-            "subject-predecessor", "session-1", Assurance.AUTHENTICATED
-        ),
+        SpeechRpcContext("subject-predecessor", "session-1", Assurance.AUTHENTICATED),
     )
 
     assert first["ok"] is True
     assert replay["error"]["reason"] == "STALE_RECOGNITION_SESSION"
     assert provider.recognize_calls == 1
-    assert service.capability_payload()["capability"]["declared_limits"][
-        "identity_tombstone_window"
-    ] == 2
+    assert (
+        service.capability_payload()["capability"]["declared_limits"][
+            "identity_tombstone_window"
+        ]
+        == 2
+    )
 
 
 @pytest.mark.asyncio
@@ -689,7 +691,48 @@ async def test_streaming_voice_receipt_binds_exact_issuing_interaction() -> None
 
 
 @pytest.mark.asyncio
-async def test_critical_voice_receipt_requires_confirmation_and_expires() -> None:
+@pytest.mark.parametrize("client_confirmation", (None, False, True))
+async def test_receipt_admission_is_not_lexical_or_client_action_authority(
+    client_confirmation: object,
+) -> None:
+    service = _service(ControlledProvider())
+    text = "不要取消乙，预算1500元，9月4日10:00出发。"
+    receipt = await service.issue_streaming_voice_commit_receipt(
+        operation_id="operation-natural",
+        capture_id="capture-natural",
+        capture_generation=0,
+        session_id="session-1",
+        correlation_id="correlation-1",
+        interaction_id="interaction-1",
+        text=text,
+    )
+    binding = dict(
+        receipt=receipt,
+        session_id="session-1",
+        correlation_id="correlation-1",
+        interaction_id="interaction-1",
+        turn_id="turn-natural",
+        commit_id="commit-natural",
+        text=text,
+        critical_confirmation=client_confirmation,
+    )
+    first = await service.claim_voice_commit_receipt(**binding)
+    assert first["critical_policy"] == "eligible"
+    assert await service.claim_voice_commit_receipt(**binding) == first
+    for field, value in (
+        ("text", text.replace("不要", "请")),
+        ("session_id", "another-session"),
+        ("interaction_id", "another-interaction"),
+        ("correlation_id", "another-correlation"),
+        ("turn_id", "another-turn"),
+        ("commit_id", "another-commit"),
+    ):
+        with pytest.raises(ValueError):
+            await service.claim_voice_commit_receipt(**{**binding, field: value})
+
+
+@pytest.mark.asyncio
+async def test_action_word_receipt_needs_no_extra_confirmation_and_expires() -> None:
     now = [10.0]
     service = FormalBatchSpeechService(
         CriticalTextProvider(),
@@ -708,12 +751,10 @@ async def test_critical_voice_receipt_requires_confirmation_and_expires() -> Non
         "text": "delete 3 files",
     }
 
-    with pytest.raises(ValueError, match="explicit confirmation"):
-        await service.claim_voice_commit_receipt(**binding, critical_confirmation=None)
     claim = await service.claim_voice_commit_receipt(
-        **binding, critical_confirmation=True
+        **binding, critical_confirmation=None
     )
-    assert claim["critical_policy"] == "confirmed"
+    assert claim["critical_policy"] == "eligible"
 
     second = await service.recognize(
         _recognize_request(
@@ -733,11 +774,13 @@ async def test_critical_voice_receipt_requires_confirmation_and_expires() -> Non
 
 
 @pytest.mark.asyncio
-async def test_trusted_demo_receipt_bypasses_critical_confirmation_without_forging_it() -> None:
+async def test_retired_demo_flag_cannot_grant_speech_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED", "1")
     service = FormalBatchSpeechService(
         CriticalTextProvider(),
         authorization_resolver=ExactAuthorizationResolver(),
-        trusted_demo_critical_bypass=True,
     )
     recognized = await service.recognize(_recognize_request(), CONTEXT)
     receipt = recognized["result"]["voice_commit_receipt"]
@@ -752,7 +795,7 @@ async def test_trusted_demo_receipt_bypasses_critical_confirmation_without_forgi
         critical_confirmation=None,
     )
 
-    assert claim["critical_policy"] == "trusted_demo_bypass"
+    assert claim["critical_policy"] == "eligible"
     assert "confirmation" not in claim
 
 

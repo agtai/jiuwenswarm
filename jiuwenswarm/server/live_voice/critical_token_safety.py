@@ -638,9 +638,13 @@ class CriticalTokenPolicy:
         if candidate.uncertainty_reasons:
             reasons.append(CriticalTokenReason.EXPLICIT_CRITICAL_UNCERTAINTY)
         if EvidenceSource(candidate.source) is EvidenceSource.SPEECH:
-            if candidate.selected.confidence is None:
-                reasons.append(CriticalTokenReason.CRITICAL_CONFIDENCE_UNKNOWN)
-            elif candidate.selected.confidence < self._minimum_confidence:
+            # Providers need not expose confidence. Its absence is not a
+            # recognition disagreement and must not turn ordinary amounts,
+            # dates or negative constraints into per-sentence confirmations.
+            if (
+                candidate.selected.confidence is not None
+                and candidate.selected.confidence < self._minimum_confidence
+            ):
                 reasons.append(CriticalTokenReason.CRITICAL_LOW_CONFIDENCE)
 
         status = (

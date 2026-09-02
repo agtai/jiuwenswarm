@@ -237,6 +237,13 @@ Command ACK and lifecycle completion are separate. An accepted cancel ACK permit
 
 Partial/interim/uncommitted input has exactly zero Agent, Tool, Task, command-journal, or destructive-context side effects. `TurnCommit` contains immutable text/hypothesis provenance, scope, context refs, commit ID, and time. Critical-token uncertainty and destructive actions remain subject to D-039 clarification/confirmation even after speech finalization.
 
+D-108 clarifies that word presence (including amounts, dates and negation) and
+missing Provider confidence are not uncertainty. A verified final proceeds as
+speech, without a lexical Gateway gate or an extra transcript confirmation.
+Actual recognition ambiguity and exact operation-bound Task confirmation remain
+distinct checks; neither a receipt nor a client confirmation boolean authorizes
+the business effect.
+
 Conversation Runtime stores a surface-specific presented ledger:
 
 ```text

@@ -64,6 +64,7 @@ from jiuwenswarm.server.live_voice.conversation_runtime import (
     CancelState,
     ResponseState,
 )
+from jiuwenswarm.server.live_voice.critical_token_safety import EvidenceSource
 from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
     LIVE_VOICE_CONFIGURATION_CONTRACT_VERSION,
     AuthenticationMode,
@@ -230,9 +231,7 @@ ITINERARY_TEXT = """# 三天行程
 ## 第三天
 - 09:00 城市步行
 """
-ITINERARY_RESULT_TEXT = (
-    "三天行程已完成，itinerary.md 已按要求更新。"
-)
+ITINERARY_RESULT_TEXT = "三天行程已完成，itinerary.md 已按要求更新。"
 ITINERARY_DAY_TWO_ANSWER = "第二天最早的固定安排是 08:30 参观博物馆。"
 ITINERARY_DAY_TWO_FACT = "08:30 参观博物馆"
 
@@ -4877,6 +4876,7 @@ async def test_cancelled_unified_pre_admission_context_releases_identity_with_ze
 @pytest.mark.asyncio
 async def test_unified_post_admission_rejection_is_durably_replayed(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry, composition, manager = _unified_registry(
         tmp_path,
@@ -4894,6 +4894,19 @@ async def test_unified_post_admission_rejection_is_durably_replayed(
         stem="unified-critical",
         text="后台帮我 create task 42 on feature/safe。",
     )
+    # This test owns durable rejection/replay, not the retired assumption that
+    # absent confidence means uncertainty. Inject actual uncertain evidence at
+    # the test-owned guard seam; the production receipt still carries a final.
+    evaluate = registry._critical_token_gate.evaluate
+    evaluations = []
+
+    def uncertain_evidence(candidate):
+        evaluations.append(candidate.commit.commit_id)
+        return evaluate(
+            replace(candidate, uncertainty_reasons=("conflicting recognition",))
+        )
+
+    monkeypatch.setattr(registry._critical_token_gate, "evaluate", uncertain_evidence)
 
     first = await registry.handle_unified_submit(
         params=params,
@@ -4919,6 +4932,7 @@ async def test_unified_post_admission_rejection_is_durably_replayed(
     )
     assert composition.handle_calls == []
     assert manager.agent.calls == 0
+    assert evaluations == ["commit-unified-critical"]
     with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
         assert (
             connection.execute(
@@ -6326,7 +6340,7 @@ async def test_unified_create_rejects_noncanonical_receipt_shapes(
 
 
 @pytest.mark.asyncio
-async def test_trusted_demo_gateway_receipt_reaches_unified_itinerary_without_confirmation(
+async def test_gateway_receipt_reaches_unified_without_lexical_confirmation(
     tmp_path: Path,
 ) -> None:
     registry, composition, manager = _unified_registry(
@@ -6345,7 +6359,6 @@ async def test_trusted_demo_gateway_receipt_reaches_unified_itinerary_without_co
     _install_unified_history_writer(registry)
     speech = FormalBatchSpeechService(
         UnavailableBatchSpeechProvider(),
-        trusted_demo_critical_bypass=True,
     )
 
     async def gateway_owned_params(*, stem: str, text: str) -> dict[str, object]:
@@ -6374,7 +6387,7 @@ async def test_trusted_demo_gateway_receipt_reaches_unified_itinerary_without_co
         )
         await _inject_live_voice_gateway_voice_claim(message, speech)
         claim = cast(dict[str, object], message.params["gateway_voice_claim"])
-        assert claim["critical_policy"] == "trusted_demo_bypass"
+        assert claim["critical_policy"] == "eligible"
         assert "critical_confirmation" not in message.params
         assert "voice_commit_receipt" not in message.params
         return cast(dict[str, object], message.params)
@@ -7080,9 +7093,7 @@ async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_repla
     )
     in_flight_result = await waiting_poll
     assert in_flight_result.ok
-    in_flight_notification = cast(
-        dict[str, object], in_flight_result.payload["result"]
-    )
+    in_flight_notification = cast(dict[str, object], in_flight_result.payload["result"])
     in_flight_response = cast(dict[str, object], in_flight_notification["response"])
     in_flight_agent_event = cast(
         dict[str, object], in_flight_notification["agent_event"]
@@ -7690,9 +7701,7 @@ async def test_terminal_after_voice_playout_failure_replays_on_successor_p2(
         assert completed.event_type == "task.terminal"
         return completed
 
-    terminal_event = (
-        complete_task() if terminal_timing.startswith("before") else None
-    )
+    terminal_event = complete_task() if terminal_timing.startswith("before") else None
 
     composition = _P3Composition(project, presentation_store=store)
     composition.subscription_events = (source_events[0],)
@@ -7796,9 +7805,7 @@ async def test_terminal_after_voice_playout_failure_replays_on_successor_p2(
         TaskProgressNotificationIntent,
     ]:
         completed = complete_task()
-        projection = project_task_progress_event(
-            completed, retained_progress.binding
-        )
+        projection = project_task_progress_event(completed, retained_progress.binding)
         terminal_intent = TaskProgressNotificationIntent(
             origin=retained_progress.binding,
             task_event=completed,
@@ -7872,14 +7879,12 @@ async def test_terminal_after_voice_playout_failure_replays_on_successor_p2(
         assert (SCOPE.session_id, "interaction-1") in registry._p2_routes
         assert task_id in registry._voice_task_origins
         assert (
-            registry._p2_routes[
-                (SCOPE.session_id, "interaction-1")
-            ].activation_lease.snapshot().state
+            registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+            .activation_lease.snapshot()
+            .state
             is P2LeaseState.OPEN
         )
-        assert tuple(registry._pending_terminal_notifications) == (
-            "capacity-filler",
-        )
+        assert tuple(registry._pending_terminal_notifications) == ("capacity-filler",)
         registry._pending_terminal_notifications.pop("capacity-filler")
         closed = await registry.handle_p2_close(
             params=_p2_params(),
@@ -7943,9 +7948,12 @@ async def test_terminal_after_voice_playout_failure_replays_on_successor_p2(
                 timeout=1.0,
             )
             assert not blocked_progress_close.ok
-            assert cast(
-                dict[str, object], blocked_progress_close.payload["error"]
-            )["reason"] == "PRODUCT_P3_PROGRESS_CLEANUP_PENDING"
+            assert (
+                cast(dict[str, object], blocked_progress_close.payload["error"])[
+                    "reason"
+                ]
+                == "PRODUCT_P3_PROGRESS_CLEANUP_PENDING"
+            )
             assert retained_progress.progress_lease.snapshot().state is (
                 TaskProgressReturnState.ACTIVE
             )
@@ -8844,10 +8852,12 @@ def test_task_result_artifact_snapshots_fail_closed_on_identity_hash_and_size(
         ],
     }
 
-    verified = AgentServerProductCompositionRegistry._verified_result_artifact_snapshots(
-        scope=SCOPE,
-        task=task,
-        task_result=result,
+    verified = (
+        AgentServerProductCompositionRegistry._verified_result_artifact_snapshots(
+            scope=SCOPE,
+            task=task,
+            task_result=result,
+        )
     )
     assert verified == (
         {
@@ -9038,8 +9048,11 @@ async def test_real_itinerary_fixture_matches_store_agent_answer_and_applied_art
 
 
 @pytest.mark.asyncio
-async def test_enabled_critical_gate_blocks_unconfirmed_voice_before_task_authority(
+@pytest.mark.parametrize("claim_policy", ("eligible", "confirmed"))
+async def test_enabled_guard_preserves_speech_without_lexical_confirmation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    claim_policy: str,
 ) -> None:
     ledger = TurnCommitLedger()
     registry, _p3, manager, _pushed = _registry(
@@ -9054,51 +9067,106 @@ async def test_enabled_critical_gate_blocks_unconfirmed_voice_before_task_author
         channel_id="web",
     )
     assert activated.ok is True
-    text = "create task 42 on feature/safe"
-    blocked_params = _p2_task_origin_params(stem="critical-blocked", text=text)
-    blocked = await registry.handle_p2_submit(
-        params=blocked_params,
-        request_id="request-critical-blocked",
+    text = "不要取消乙，预算1500元，2026-09-04上午10:00开会。"
+    params = _p2_task_origin_params(stem="critical-natural", text=text)
+    cast(dict[str, object], params["gateway_voice_claim"])["critical_policy"] = (
+        claim_policy
+    )
+    sources: list[EvidenceSource] = []
+    evaluate = registry._critical_token_gate.evaluate
+
+    def observe_evidence(candidate):
+        sources.append(candidate.source)
+        return evaluate(candidate)
+
+    monkeypatch.setattr(registry._critical_token_gate, "evaluate", observe_evidence)
+    accepted = await registry.handle_p2_submit(
+        params=params,
+        request_id="request-critical-natural",
         session_id="session-product",
         channel_id="web",
     )
-
-    assert blocked.ok is False
-    assert cast(dict, blocked.payload["error"])["reason"] == (
-        "CRITICAL_TOKEN_CLARIFICATION_REQUIRED"
+    assert accepted.ok is True, accepted.payload
+    assert sources == [EvidenceSource.SPEECH]
+    assert "commit-critical-natural" in registry._accepted_turn_commits_by_commit
+    assert registry._unknown_turn_commits_by_commit == {}
+    ledger.require_origin(
+        OriginRef("committed_turn", "turn-critical-natural", "commit-critical-natural"),
+        SCOPE,
     )
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claim_policy", ("eligible", "confirmed"))
+async def test_p2_actual_uncertainty_cannot_acquire_task_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    claim_policy: str,
+) -> None:
+    ledger = TurnCommitLedger()
+    registry, composition, manager, _pushed = _registry(
+        tmp_path, commit_ledger=ledger, critical_input=True
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-uncertain-activate",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok
+    params = _p2_task_origin_params(
+        stem="actual-uncertainty", text="不要取消乙，预算1500元。"
+    )
+    cast(dict[str, object], params["gateway_voice_claim"])["critical_policy"] = (
+        claim_policy
+    )
+    evaluate = registry._critical_token_gate.evaluate
+    sources = []
+
+    def uncertain_evidence(candidate):
+        sources.append(candidate.source)
+        return evaluate(
+            replace(candidate, uncertainty_reasons=("conflicting recognition",))
+        )
+
+    monkeypatch.setattr(registry._critical_token_gate, "evaluate", uncertain_evidence)
+    rejected = await registry.handle_p2_submit(
+        params=params,
+        request_id="request-actual-uncertainty",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert not rejected.ok
+    assert (
+        rejected.payload["error"]["reason"] == "CRITICAL_TOKEN_CLARIFICATION_REQUIRED"
+    )
+    assert sources == [EvidenceSource.SPEECH]
     assert manager.agent.calls == 0
+    assert composition.query_calls == []
+    assert composition.production_authority_calls == []
+    assert composition.production_reader_calls == []
     assert registry._pending_turn_commits_by_commit == {}
     assert registry._accepted_turn_commits_by_commit == {}
     assert registry._unknown_turn_commits_by_commit == {}
     assert registry._critical_input_commit_generations == {}
+    assert registry._critical_input_guarded_commits == set()
     with pytest.raises(ContractViolation, match="accepted commit"):
         ledger.require_origin(
             OriginRef(
-                "committed_turn",
-                "turn-critical-blocked",
-                "commit-critical-blocked",
+                "committed_turn", "turn-actual-uncertainty", "commit-actual-uncertainty"
             ),
             SCOPE,
         )
-
-    confirmed_params = _p2_task_origin_params(
-        stem="critical-confirmed",
-        text=text,
-    )
-    cast(dict[str, object], confirmed_params["gateway_voice_claim"])[
-        "critical_policy"
-    ] = "confirmed"
-    confirmed = await registry.handle_p2_submit(
-        params=confirmed_params,
-        request_id="request-critical-confirmed",
-        session_id="session-product",
-        channel_id="web",
-    )
-    assert confirmed.ok is True
-    assert "commit-critical-confirmed" in registry._accepted_turn_commits_by_commit
     await registry.stop()
 
+
+@pytest.mark.asyncio
+async def test_retired_speech_bypass_claim_is_rejected_regardless_of_old_flag(
+    tmp_path: Path,
+) -> None:
+    text = "不要取消乙，预算1500元。"
     bypass_without_local_authority, _p3, bypass_manager, _pushed = _registry(
         tmp_path / "bypass-off",
         critical_input=True,
@@ -9131,7 +9199,7 @@ async def test_enabled_critical_gate_blocks_unconfirmed_voice_before_task_author
     assert bypass_manager.agent.calls == 0
     await bypass_without_local_authority.stop()
 
-    bypass_enabled, _p3, _manager = _unified_registry(
+    bypass_enabled, composition, manager = _unified_registry(
         tmp_path / "bypass-on",
         demo_policy_bypass=True,
         critical_input=True,
@@ -9157,11 +9225,16 @@ async def test_enabled_critical_gate_blocks_unconfirmed_voice_before_task_author
         session_id="session-product",
         channel_id="web",
     )
-    assert bypass_accepted.ok
-    assert (
-        "commit-critical-demo-bypass-on"
-        in bypass_enabled._accepted_turn_commits_by_commit
+    assert not bypass_accepted.ok
+    assert cast(dict, bypass_accepted.payload["error"])["reason"] == (
+        "CRITICAL_TOKEN_POLICY_REQUIRED"
     )
+    assert bypass_enabled._accepted_turn_commits_by_commit == {}
+    assert bypass_enabled._pending_turn_commits_by_commit == {}
+    assert bypass_enabled._unknown_turn_commits_by_commit == {}
+    assert manager.agent.calls == 0
+    assert composition.handle_calls == []
+    assert bypass_enabled._voice_task_origins == {}
     await bypass_enabled.stop()
 
 
@@ -13142,8 +13215,7 @@ async def test_p2_close_settles_shared_task_presentation_before_progress_close(
         )
         with registry._task_presentation_state_lock:
             assert (
-                presentation.response_ref
-                in registry._task_presentation_runtime_routes
+                presentation.response_ref in registry._task_presentation_runtime_routes
             )
             assert presentation.response_ref in registry._task_presentation_deliveries
             filler_ref, (filler, _consumed) = next(
@@ -13185,7 +13257,9 @@ async def test_p2_close_settles_shared_task_presentation_before_progress_close(
         "PRODUCT_P2_ROUTE_NOT_FOUND"
     )
     with registry._task_presentation_state_lock:
-        assert presentation.response_ref not in registry._task_presentation_runtime_routes
+        assert (
+            presentation.response_ref not in registry._task_presentation_runtime_routes
+        )
         assert presentation.response_ref not in registry._task_presentation_deliveries
     assert store.get_task(task_id, SCOPE) == task_before
     assert (
@@ -13971,9 +14045,7 @@ async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
     replayed_prefix = cast(Mapping[str, object], pushed[0]["payload"])
     replayed_source = cast(Mapping[str, object], replayed_prefix["source_event"])
     assert replayed_prefix["presentation_class"] == "text"
-    assert replayed_prefix["fallback_reason"] == (
-        "TASK_PROGRESS_AUDIO_PLAYOUT_FAILED"
-    )
+    assert replayed_prefix["fallback_reason"] == ("TASK_PROGRESS_AUDIO_PLAYOUT_FAILED")
     assert replayed_source["seq"] == 0
     assert replayed_source["event_id"] == source_events[0].event_id
     assert (
@@ -15519,9 +15591,7 @@ async def test_p2_close_waits_for_an_ack_admitted_before_close(
         assert polled.ok is True
         notification = cast(dict[str, object], polled.payload["result"])
         if isinstance(notification["presentation_unit"], dict):
-            presentation = cast(
-                dict[str, object], notification["presentation_unit"]
-            )
+            presentation = cast(dict[str, object], notification["presentation_unit"])
             response = cast(dict[str, object], notification["response"])
             break
     assert presentation is not None
@@ -18439,9 +18509,7 @@ async def test_notification_polls_require_exact_serial_sequence(
 
     assert gap.ok is False
     gap_error = cast(dict[str, object], gap.payload["error"])
-    assert gap_error["reason"] == (
-        "PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH"
-    )
+    assert gap_error["reason"] == ("PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH")
     assert gap_error["details"] == {"expected_sequence": 1}
     assert concurrent.ok is False
     assert cast(dict, concurrent.payload["error"])["reason"] == (
@@ -18449,9 +18517,7 @@ async def test_notification_polls_require_exact_serial_sequence(
     )
     assert reordered.ok is False
     reordered_error = cast(dict[str, object], reordered.payload["error"])
-    assert reordered_error["reason"] == (
-        "PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH"
-    )
+    assert reordered_error["reason"] == ("PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH")
     assert reordered_error["details"] == {"expected_sequence": 2}
     assert len(registry._p2_notification_operations) == 1
     assert (
