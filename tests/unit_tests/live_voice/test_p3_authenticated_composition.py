@@ -33,6 +33,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 from jiuwenswarm.server.live_voice.formal_task_models import (
+    AdmissionDisposition,
     AdmissionPolicy,
     ExecutorDeliveryResult,
     ExecutorObservation,
@@ -123,6 +124,7 @@ from jiuwenswarm.server.live_voice.p3_model_resolution import (
 from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
 from jiuwenswarm.server.live_voice.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
+    DirectProjectManagedBaselineReader,
     FORMAL_PROJECT_EXECUTOR_ID,
     ProjectExecutionBinding,
 )
@@ -1560,12 +1562,111 @@ async def test_product_status_projects_only_exact_existing_authority_operations(
             assert rejected.value.reason == (
                 "PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH"
             )
+
+        stale_admission = json.loads(json.dumps(raw))
+        assert isinstance(stale_admission["admission"], dict)
+        stale_admission["admission"]["attempt_count"] += 1
+        stale_admission["admission"]["reason"] = "EXECUTOR_PROJECT_BUSY"
+        stale_admission["task"]["admission"] = dict(
+            stale_admission["admission"]
+        )
+        with pytest.raises(FormalTaskViolation) as changed_generation:
+            _project_production_status_authority(
+                stale_admission,
+                production_authority=authority,
+                authority_fact=fact,
+                retry_admission=retry_admission,
+                authorized_operations=frozenset(expected_operations),
+            )
+        assert changed_generation.value.reason == (
+            "PRODUCTION_TASK_AUTHORITY_CHANGED"
+        )
+        assert changed_generation.value.code is ErrorCode.STALE
         assert harness.composition._core.store.counts() == before_counts
         assert (
             harness.executor.dispatches,
             harness.executor.cancels,
             harness.executor.adjustments,
         ) == before_effects
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_product_status_projects_fresh_busy_admission_as_reprioritize_only(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(
+        tmp_path,
+        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
+        allowed_operations=P3_PRODUCT_AUTHORITY_OPERATIONS,
+    )
+    await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
+    try:
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=_issued_create_params(harness, "command-status-busy"),
+            request_id="request-status-busy-create",
+            session_id="session-1",
+        )
+        assert created.ok is True, created.payload
+        task_id = str(created.payload["result"]["task_id"])
+        claimed = harness.composition._core.store.claim_outbox(
+            "worker-status-busy",
+            observed_at=NOW,
+        )
+        assert claimed is not None and claimed.task_id == task_id
+        assert (
+            harness.composition._core.store.defer_admission(
+                claimed,
+                reason="EXECUTOR_PROJECT_BUSY",
+                policy=AdmissionPolicy(),
+                observed_at=NOW,
+            )
+            is AdmissionDisposition.DEFERRED
+        )
+
+        status = await harness.composition.handle(
+            operation="task.status",
+            params={**_base(), "task_id": task_id},
+            request_id="request-status-busy",
+            session_id="session-1",
+        )
+        assert status.ok is True, status.payload
+        raw = status.payload["result"]
+        authority = harness.composition.prepare_production_intent_authority(
+            bearer_token=TOKEN,
+            operation="task.status",
+            session_id="session-1",
+        )
+        fact = authority.reader.task_status(authority.scope, task_id)
+        assert fact is not None
+        before = harness.composition._core.store.counts()
+
+        projected = _project_production_status_authority(
+            raw,
+            production_authority=authority,
+            authority_fact=fact,
+            retry_admission=raw["retry_admission"],
+            authorized_operations=fact.supported_operations,
+        )
+
+        assert raw["admission"]["reason"] == "EXECUTOR_PROJECT_BUSY"
+        assert raw["admission"]["queued"] is True
+        assert projected["supported_operations"] == [
+            "task.cancel",
+            "task.events",
+            "task.get",
+            "task.list",
+            "task.reprioritize",
+            "task.result",
+            "task.status",
+        ]
+        assert harness.composition._core.store.counts() == before
+        assert harness.executor.dispatches == []
+        assert harness.executor.cancels == []
+        assert harness.executor.adjustments == []
     finally:
         await harness.composition.stop()
 
@@ -5507,6 +5608,12 @@ def test_product_factory_selects_exact_same_store_backed_d2_candidate(
     assert type(store) is SqliteTaskStore
     assert type(direct) is DirectProjectCodeExecutorAdapter
     assert direct._durability_store is store
+    assert type(
+        composition._authority_resolver._managed_worktree_reader
+    ) is DirectProjectManagedBaselineReader
+    assert (
+        composition._authority_resolver._managed_worktree_reader._store is store
+    )
     candidates = direct.capability_profiles()
     assert tuple(profile.durability_level for profile in candidates) == ("D0", "D2")
     assert composition._executor_profiles == (candidates[-1],)
@@ -6724,6 +6831,39 @@ def test_server_resolver_rejects_false_clean_reader_result(tmp_path: Path) -> No
         )
 
     assert raised.value.reason == "TASK_CONTEXT_WORKTREE_DIRTY"
+
+
+def test_server_resolver_accepts_only_exact_scope_managed_worktree(
+    tmp_path: Path,
+) -> None:
+    observed: list[tuple[str, ScopeRef]] = []
+
+    def managed(project_dir: str, scope: ScopeRef) -> bool:
+        observed.append((project_dir, scope))
+        return scope == _scope()
+
+    resolver = ServerSessionProjectAuthorityResolver(
+        session_reader=lambda _session_id: {
+            "project_id": "project-1",
+            "project_dir": str(tmp_path),
+        },
+        project_reader=lambda project_id: SimpleNamespace(
+            project_id=project_id,
+            project_dir=str(tmp_path),
+            hidden=False,
+            work_mode="code",
+        ),
+        revision_reader=lambda project_dir: (project_dir, "a77516a0"),
+        worktree_clean_reader=lambda _project_dir: False,
+        managed_worktree_reader=managed,
+    )
+
+    resolved = resolver.resolve(
+        _principal(), session_id="session-1", now=NOW, require_clean=True
+    )
+
+    assert resolved.scope == _scope()
+    assert observed == [(str(tmp_path), _scope())]
 
 
 def test_persisted_context_revalidation_uses_current_grant_expiry_and_redaction(

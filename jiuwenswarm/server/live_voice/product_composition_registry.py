@@ -723,6 +723,46 @@ def _project_production_status_authority(
             "raw Task status does not bind the production authority fact",
             ErrorCode.PROTOCOL_VIOLATION,
         )
+    raw_admission = result_payload.get("admission")
+    task_admission = raw_task.get("admission")
+    expected_admission_fingerprint = fact.get("admission_fingerprint")
+    dispatch_control = fact.get("dispatch_control")
+    try:
+        raw_admission_fingerprint = (
+            None
+            if raw_admission is None
+            else hashlib.sha256(canonical_json_bytes(raw_admission)).hexdigest()
+        )
+    except (TypeError, ValueError) as error:
+        raise FormalTaskViolation(
+            "PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH",
+            "raw Task admission projection is not canonical",
+            ErrorCode.PROTOCOL_VIOLATION,
+        ) from error
+    raw_queued = raw_task.get("queued")
+    admission_queued = (
+        raw_admission.get("queued") if isinstance(raw_admission, Mapping) else False
+    )
+    if (
+        raw_admission != task_admission
+        or raw_admission_fingerprint != expected_admission_fingerprint
+        or (raw_admission is None and raw_queued not in (False, None))
+        or (
+            raw_admission is not None
+            and (
+                type(raw_queued) is not bool
+                or type(admission_queued) is not bool
+                or raw_queued is not admission_queued
+            )
+        )
+        or (dispatch_control == "none") != (raw_admission is None)
+        or (dispatch_control == "unclaimed" and raw_queued is not True)
+    ):
+        raise FormalTaskViolation(
+            "PRODUCTION_TASK_AUTHORITY_CHANGED",
+            "Task admission authority changed during status composition",
+            ErrorCode.STALE,
+        )
     supported = fact.get("supported_operations")
     if (
         not isinstance(supported, list)

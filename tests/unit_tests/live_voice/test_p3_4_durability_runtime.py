@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
+from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    Assurance,
+    ScopeRef,
     TerminalOutcome,
     canonical_json_bytes,
 )
@@ -38,12 +43,18 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     PersistedExecutorSelection,
 )
 from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
+from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
+    AuthenticatedPrincipal,
+    ServerSessionProjectAuthorityResolver,
+)
 from jiuwenswarm.server.live_voice.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
+    DirectProjectManagedBaselineReader,
     _AttemptOwnershipLock,
 )
 from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_persistent_task_core import (
+    EXPIRY,
     NOW,
     _create,
     _scope,
@@ -68,8 +79,10 @@ def _create_selected_task(
     core: PersistentTaskCore,
     project: Path,
     adapter: DirectProjectCodeExecutorAdapter,
+    *,
+    identity_suffix: str = "",
 ):
-    invocation = _create(project)
+    invocation = _create(project, identity_suffix=identity_suffix)
     candidates = adapter.capability_profiles()
     assert tuple(profile.durability_level for profile in candidates) == ("D0", "D2")
     profile = candidates[-1]
@@ -97,6 +110,134 @@ def _create_selected_task(
     assert created.ok and created.result is not None
     task_id = str(created.result["task_id"])
     return selection, store.get_task(task_id, _scope())
+
+
+@pytest.mark.asyncio
+async def test_direct_d2_serial_tasks_accept_only_exact_settled_managed_baseline(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "serial-project"
+    _git_project(project)
+    database = tmp_path / "serial-tasks.sqlite3"
+    store = SqliteTaskStore(database)
+
+    class DistinctFileExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def process_background_code_task_stream(self, request):
+            self.calls += 1
+            target = Path(request.params["project_dir"])
+            relative = "food-b.md" if self.calls == 1 else "itinerary-a.md"
+            (target / relative).write_text(
+                f"managed effect {self.calls}\n", encoding="utf-8"
+            )
+            yield AgentResponseChunk(
+                request.request_id,
+                request.channel_id,
+                payload={"event_type": "chat.final", "content": relative},
+                is_complete=True,
+            )
+
+    executor = DistinctFileExecutor()
+    baseline = DirectProjectManagedBaselineReader(database, store=store)
+    authority = ServerSessionProjectAuthorityResolver(
+        session_reader=lambda _session_id: {
+            "project_id": "project-1",
+            "project_dir": str(project),
+        },
+        project_reader=lambda project_id: SimpleNamespace(
+            project_id=project_id,
+            project_dir=str(project),
+            hidden=False,
+            work_mode="code",
+        ),
+        revision_reader=lambda project_dir: (project_dir, "a77516a0"),
+        managed_worktree_reader=baseline,
+    )
+    principal = AuthenticatedPrincipal(
+        principal_id="user-1",
+        allowed_project_ids=frozenset({"project-1"}),
+        allowed_operations=frozenset({"task.create"}),
+        expires_at=EXPIRY,
+    )
+
+    class RevalidatingResolver:
+        async def resolve(self, spec, *, for_dispatch: bool):
+            authority.revalidate(
+                spec.context,
+                principal=principal,
+                now=NOW,
+                for_dispatch=for_dispatch,
+            )
+            return _direct_binding(project, executor)
+
+    adapter = DirectProjectCodeExecutorAdapter(
+        RevalidatingResolver(),
+        database,
+        durability_store=store,
+    )
+    core = PersistentTaskCore(store, adapter)
+    _first_selection, first = _create_selected_task(
+        store, core, project, adapter, identity_suffix="-first"
+    )
+    _second_selection, second = _create_selected_task(
+        store, core, project, adapter, identity_suffix="-second"
+    )
+    assert await core.drain_outbox_once(worker_id="serial-first", observed_at=NOW)
+    await _wait_direct_settled(adapter)
+    assert baseline(str(project), _scope()) is False
+    await core.reconcile_status()
+    first_wave = (
+        store.get_task(first.task_id, _scope()).outcome,
+        store.get_task(second.task_id, _scope()).outcome,
+    )
+    assert first_wave.count(TerminalOutcome.COMPLETED) == 1
+    assert first_wave.count(None) == 1
+    before_read = (
+        (project / "food-b.md").read_bytes(),
+        subprocess.run(
+            ["git", "-C", str(project), "status", "--porcelain=v2", "-z"],
+            check=True,
+            capture_output=True,
+        ).stdout,
+    )
+    assert baseline(str(project), _scope()) is True
+    assert before_read == (
+        (project / "food-b.md").read_bytes(),
+        subprocess.run(
+            ["git", "-C", str(project), "status", "--porcelain=v2", "-z"],
+            check=True,
+            capture_output=True,
+        ).stdout,
+    )
+
+    assert await core.drain_outbox_once(worker_id="serial-second", observed_at=NOW)
+    await _wait_direct_settled(adapter)
+    await core.reconcile_status()
+    assert store.get_task(first.task_id, _scope()).outcome is TerminalOutcome.COMPLETED
+    assert store.get_task(second.task_id, _scope()).outcome is TerminalOutcome.COMPLETED
+    assert (project / "food-b.md").read_text(encoding="utf-8") == (
+        "managed effect 1\n"
+    )
+    assert (project / "itinerary-a.md").read_text(encoding="utf-8") == (
+        "managed effect 2\n"
+    )
+    assert baseline(str(project), _scope()) is True
+    foreign_scope = ScopeRef(
+        "foreign-user",
+        "project-1",
+        "session-1",
+        Assurance.AUTHENTICATED,
+    )
+    assert baseline(str(project), foreign_scope) is False
+
+    (project / "foreign.txt").write_text("manual\n", encoding="utf-8")
+    foreign_before = (project / "foreign.txt").read_bytes()
+    assert baseline(str(project), _scope()) is False
+    assert baseline(str(project), foreign_scope) is False
+    assert (project / "foreign.txt").read_bytes() == foreign_before
+    await adapter.close()
 
 
 @pytest.mark.asyncio

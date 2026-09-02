@@ -106,6 +106,7 @@ from .product_p3_text_adapter import ProductP3AuthorizedQuery
 from .project_code_executor import (
     AttemptProjectExecutorLease,
     DirectProjectCodeExecutorAdapter,
+    DirectProjectManagedBaselineReader,
     DirectStreamObserver,
     FORMAL_PROJECT_EXECUTOR_ID,
     ProjectExecutionBinding,
@@ -497,6 +498,7 @@ class ServerSessionProjectAuthorityResolver:
         project_reader: Callable[[str], Any | None] | None = None,
         revision_reader: Callable[[str], tuple[str, str]] | None = None,
         worktree_clean_reader: Callable[[str], bool] | None = None,
+        managed_worktree_reader: Callable[[str, ScopeRef], bool] | None = None,
         redaction_reader: Callable[
             [Mapping[str, Any], Any], tuple[bool, tuple[str, ...]]
         ]
@@ -506,9 +508,18 @@ class ServerSessionProjectAuthorityResolver:
         self._project_reader = project_reader or self._read_project
         self._revision_reader = revision_reader or self._read_revision
         self._worktree_clean_reader = worktree_clean_reader or self._is_worktree_clean
+        self._managed_worktree_reader = managed_worktree_reader
         self._redaction_reader = redaction_reader or (
             lambda _session, _project: (False, ())
         )
+
+    def _bind_managed_worktree_reader(
+        self,
+        reader: Callable[[str, ScopeRef], bool],
+    ) -> None:
+        if not callable(reader) or self._managed_worktree_reader is not None:
+            raise RuntimeError("MANAGED_WORKTREE_READER_ALREADY_BOUND")
+        self._managed_worktree_reader = reader
 
     @staticmethod
     def _read_session(session_id: str) -> Mapping[str, Any] | None:
@@ -593,10 +604,37 @@ class ServerSessionProjectAuthorityResolver:
             ErrorCode.PERMISSION_DENIED,
         )
 
+    def _require_admissible_worktree(
+        self,
+        project_dir: str,
+        scope: ScopeRef,
+    ) -> None:
+        dirty: FormalTaskViolation | None = None
+        try:
+            clean = self._worktree_clean_reader(project_dir)
+        except FormalTaskViolation as error:
+            if error.reason != "TASK_CONTEXT_WORKTREE_DIRTY":
+                raise
+            clean = False
+            dirty = error
+        if clean:
+            return
+        managed = self._managed_worktree_reader
+        if managed is not None and managed(project_dir, scope):
+            return
+        if dirty is not None:
+            raise dirty
+        raise FormalTaskViolation(
+            "TASK_CONTEXT_WORKTREE_DIRTY",
+            "formal task project must have a clean or exact managed worktree",
+            ErrorCode.PERMISSION_DENIED,
+        )
+
     def _snapshot(
         self,
         *,
         session_id: str,
+        subject_id: str,
         allowed_project_ids: frozenset[str] | None,
         require_clean: bool,
     ) -> tuple[_ProjectSnapshot, Mapping[str, Any], Any]:
@@ -629,11 +667,15 @@ class ServerSessionProjectAuthorityResolver:
             session_key = _path_key(session_dir)
             root, revision = self._revision_reader(project_dir)
             root_key = _path_key(root)
-            if require_clean and not self._worktree_clean_reader(project_dir):
-                raise FormalTaskViolation(
-                    "TASK_CONTEXT_WORKTREE_DIRTY",
-                    "formal task project must have a clean worktree",
-                    ErrorCode.PERMISSION_DENIED,
+            if require_clean:
+                self._require_admissible_worktree(
+                    project_dir,
+                    ScopeRef(
+                        subject_id,
+                        project_id,
+                        session_id,
+                        Assurance.AUTHENTICATED,
+                    ),
                 )
         except FormalTaskViolation:
             # The authenticated caller already passed the exact project
@@ -665,6 +707,7 @@ class ServerSessionProjectAuthorityResolver:
     ) -> ResolvedAuthority:
         snapshot, session, project = self._snapshot(
             session_id=session_id,
+            subject_id=principal.principal_id,
             allowed_project_ids=principal.allowed_project_ids,
             require_clean=require_clean,
         )
@@ -714,6 +757,7 @@ class ServerSessionProjectAuthorityResolver:
             raise self._deny_scope()
         snapshot, session, project = self._snapshot(
             session_id=context.scope.session_id or "",
+            subject_id=principal.principal_id,
             allowed_project_ids=principal.allowed_project_ids,
             require_clean=for_dispatch,
         )
@@ -4815,6 +4859,11 @@ def create_p3_composition_from_environment(
             principal=principal,
         )
         store = SqliteTaskStore(database_path)
+        managed_baselines = DirectProjectManagedBaselineReader(
+            database_path,
+            store=store,
+        )
+        authority_resolver._bind_managed_worktree_reader(managed_baselines)
         executor = DirectProjectCodeExecutorAdapter(
             binding_resolver,
             database_path,
