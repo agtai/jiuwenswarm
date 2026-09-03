@@ -289,7 +289,15 @@ async def one_round(client: Client, session_id: str, scenario: str, frames: list
         return r
     r["eot_detector"] = eot_frame.get("detector")
 
-    ok, rec = _ok(await client.request("live_voice.speech.recognize_streaming_result", {"session_id": session_id, "subject_id": subject_id, "correlation_id": correlation_id, "interaction_id": interaction_id, "capture_id": capture_id, "capture_generation": 1, "track_id": track_id}, timeout=90))
+    recognize_params = {"session_id": session_id, "subject_id": subject_id, "correlation_id": correlation_id, "interaction_id": interaction_id, "capture_id": capture_id, "capture_generation": 1, "track_id": track_id}
+    ok, rec = _ok(await client.request("live_voice.speech.recognize_streaming_result", recognize_params, timeout=90))
+    if not ok and "absent or stale" in json.dumps(rec, ensure_ascii=False):
+        # The Gateway registers the Provider final a beat after the uplink
+        # settles; one bounded retry keeps a real round instead of dropping it
+        # to this known ordering race (1/27 baseline rounds, 3/25 under load).
+        await asyncio.sleep(0.3)
+        r["recognition_retried"] = True
+        ok, rec = _ok(await client.request("live_voice.speech.recognize_streaming_result", recognize_params, timeout=90))
     t["recognized"] = _now_ms()
     final_text = str(rec.get("final_text") or "")
     receipt = rec.get("voice_commit_receipt")
