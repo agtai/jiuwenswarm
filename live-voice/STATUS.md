@@ -102,9 +102,12 @@ foreground analysis; broader business/audio gates remain open.
   review. One valid semantic result proceeds through existing Registry authority;
   bounded structural retry and the separate adjustment check remain. Scoped
   Store/replay checks and real-model positive cases support this removal. Negative
-  probes still exposed dialogue/adjustment misroutes, so language generalization,
-  the new spoken Task A and independent review remain open. See the
-  [single-pass evidence](evidence/SINGLE_PASS_DELEGATION_20260903.md).
+  probes still exposed dialogue/adjustment misroutes. The subsequent
+  [real Demo audit](evidence/DEMO_SESSION_AUDIT_20260903.md) observed two created
+  Tasks, but overlapping scope, unconsumed modifications/cancellation narrated
+  as applied, wrong-target status, and an A2 request misrouted to terminal adjust.
+  Language generalization, truthful control and independent review remain open.
+  The bounded removal evidence is [here](evidence/SINGLE_PASS_DELEGATION_20260903.md).
   This Tier-2 scope excludes artifact calculations/Agent quality and broader Demo
   acceptance; it introduces no keyword classifier or public schema change.
 - **Current limits:** focused latency fixes have been authorized; performance
