@@ -3494,7 +3494,8 @@
       "opShare": "共享给",
       "opTrash": "移入回收站",
       "opRestore": "从回收站恢复",
-      "opUnshare": "取消共享"
+      "opUnshare": "取消共享",
+      "revertConfirm": "回读不符——再点一次确认回退"
     },
     "usage": {
       "open": "使用审计",

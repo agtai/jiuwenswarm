@@ -105,9 +105,14 @@ async def test_reference_chip_jumps_to_the_documents_history(page):
     if await strip.count() == 0:
         pytest.skip("no session with clouddoc turns; run the campaign first")
     await page.locator('[data-testid^="doc-ref-chip-"]').first.click()
-    await page.wait_for_selector('[data-testid="docs-panel-history"]', timeout=30000)
-    assert await page.locator('[data-testid="docs-panel-history"]').count() == 1, (
-        "the chip must land on the document's receipts dialog"
+    # The chip lands in the document workbench (release §14.5a): the document's
+    # tab plus the receipts rail, not the old panel history dialog.
+    await page.wait_for_selector('[data-testid="doc-workbench"]', timeout=30000)
+    assert await page.locator('[data-testid="doc-workbench-tab"]').count() >= 1, (
+        "the chip must open the document's workbench tab"
+    )
+    assert await page.locator('[data-testid="doc-workbench-rail"]').count() == 1, (
+        "the receipts rail must be beside the document"
     )
 
 

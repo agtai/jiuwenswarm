@@ -99,7 +99,7 @@ export function DocWorkbench({ composer }: { composer: ComposerProps }) {
     setMdHighlight(null);
     // A sheet or deck receipt carries the platform's own URL fragment; the frame
     // reloads on it. A document receipt carries none and the frame just reloads.
-    wb.requestLocate(r.doc_id, r.receipt_id, (r.edits || []).map((e) => e.region || '').filter(Boolean), receiptAnchor(r));
+    wb.requestLocate(r.doc_id, r.receipt_id, receiptAnchor(r));
   }, [wb]);
 
   const locateById = useCallback((docId: string, receiptId: string) => {

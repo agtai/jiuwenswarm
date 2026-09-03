@@ -16,6 +16,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { webRequest } from '../../services/webClient';
 import { requestOpenDoc } from '../../features/clouddoc/openDocSignal';
+import { RECEIPT_OP_KEY, RECEIPT_STATUS_KEY, type ReceiptRow } from '../../features/clouddoc/receipts';
 import ConfirmDialog from '../CronPanel/ConfirmDialog';
 import SimpleSelect from '../CronPanel/SimpleSelect';
 
@@ -197,54 +198,7 @@ function EmptyIllustration() {
   );
 }
 
-// Every status a receipt can carry, and how it reads to a person. Written as one map
-// rather than a conditional per status: the first version translated only the status it
-// had just introduced and left "applied", "aborted", "reverted" and "pending" showing as
-// bare English words, which is the same drift a list copied in several places produces.
-// A status missing here falls back to its raw name rather than to an empty label.
-const RECEIPT_STATUS_KEY: Record<string, string> = {
-  pending: 'docs.history.statusPending',
-  applied: 'docs.history.statusApplied',
-  // D19 tier 3b: the write committed but the read-back differs from the request.
-  applied_unverified: 'docs.history.statusAppliedUnverified',
-  aborted: 'docs.history.statusAborted',
-  reverted: 'docs.history.statusReverted',
-  unknown: 'docs.history.statusUnknown',
-};
 
-type ReceiptRow = {
-  receipt_id: string;
-  ts: number;
-  doc_id: string;
-  status: string;
-  // Why an outcome is unknown. The startup sweep settles a receipt whose process died
-  // mid-write, and the whole point of that status is that a person has to go and check
-  // the document -- so the reason has to reach them, not just the JSON on disk.
-  abort_reason?: string;
-  // Which receipt undid this one. D8 wants a revert to leave a link back to what it
-  // reverted; the field was written and asserted in tests and shown to nobody, so the
-  // chain existed only for whoever opened the JSON.
-  reverted_by?: string;
-  highlight?: boolean;
-  executor?: string;
-  source?: string;
-  edits?: { old?: string; new?: string }[];
-  // What kind of act this receipt records. Absent on receipts written before the
-  // lifecycle increment, which are all edits.
-  op?: 'edit' | 'create' | 'share' | 'trash' | 'restore' | 'unshare';
-  subject?: { title?: string; email?: string; role?: string };
-};
-
-// A lifecycle receipt has no edits to show; its one line names the act and its
-// subject. The keys exist for every act the ledger can write, so an act added to the
-// backend without a label here shows its raw name rather than nothing.
-const RECEIPT_OP_KEY: Record<string, string> = {
-  create: 'docs.history.opCreate',
-  share: 'docs.history.opShare',
-  trash: 'docs.history.opTrash',
-  restore: 'docs.history.opRestore',
-  unshare: 'docs.history.opUnshare',
-};
 
 export function DocsPanel({ isConnected }: { isConnected: boolean }) {
   const { t } = useTranslation();
@@ -272,6 +226,8 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyNote, setHistoryNote] = useState('');
   const [actingOn, setActingOn] = useState<string | null>(null);
+  // applied_unverified is the one revert that asks (first click arms, second runs).
+  const [armedRevertId, setArmedRevertId] = useState<string | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<string>('');
   const [removeTarget, setRemoveTarget] = useState<DocRow | null>(null);
   const [removing, setRemoving] = useState(false);
@@ -293,7 +249,7 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
   // `revoked` is the registry's tombstone (E1): the entry stays after 只读 or
   // 移出纳管 so the adoption policy cannot re-issue silently. Dropped here, a revoked
   // row kept its 操作权/建议权 label on the next load (measured 2026-09-03).
-  type WatchRow = { mode: string; suspended: boolean; expires_at?: number | null; expired?: boolean; revoked?: boolean };
+  type WatchRow = { mode: string; suspended: boolean; expires_at?: number | null; expired?: boolean; revoked?: boolean };  // revoked rows are skipped, never stored
   const [watches, setWatches] = useState<Record<string, WatchRow>>({});
   const [globalSuspended, setGlobalSuspended] = useState(false);
   const [backlogCount, setBacklogCount] = useState(0);
@@ -341,7 +297,7 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
           // the row does not read "剩 0 天" between the deadline and the next poll.
           if (it.revoked) continue;
           const lapsed = !!it.expired || (it.expires_at != null && it.expires_at * 1000 <= Date.now());
-          map[it.doc_id] = { mode: it.mode, suspended: !!it.suspended, expires_at: it.expires_at ?? null, expired: lapsed, revoked: false };
+          map[it.doc_id] = { mode: it.mode, suspended: !!it.suspended, expires_at: it.expires_at ?? null, expired: lapsed };
         }
         setWatches(map);
         setGlobalSuspended(!!w.global_suspended);
@@ -1265,11 +1221,19 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
                         {(r.status === 'applied' || r.status === 'applied_unverified') && (
                           <button
                             data-testid="docs-panel-history-revert"
+                            data-armed={armedRevertId === r.receipt_id || undefined}
                             disabled={actingOn === r.receipt_id}
-                            onClick={() => void actOnReceipt('clouddoc.revert', r.receipt_id)}
+                            onClick={() => {
+                              if (r.status === 'applied_unverified' && armedRevertId !== r.receipt_id) {
+                                setArmedRevertId(r.receipt_id);
+                                return;
+                              }
+                              setArmedRevertId(null);
+                              void actOnReceipt('clouddoc.revert', r.receipt_id);
+                            }}
                             className="rounded-md border border-border px-2 py-0.5 text-xs hover:bg-bg-hover disabled:opacity-50"
                           >
-                            {t('docs.history.revert')}
+                            {armedRevertId === r.receipt_id ? t('docs.history.revertConfirm') : t('docs.history.revert')}
                           </button>
                         )}
                         {r.status === 'applied' && r.highlight && (

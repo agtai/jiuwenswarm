@@ -27,9 +27,6 @@ from jiuwenswarm.gateway.clouddoc.conventions import (
     select_conventions,
 )
 from jiuwenswarm.gateway.clouddoc.cursor_store import CloudDocStore
-from jiuwenswarm.agents.harness.common.tools.clouddoc.range_rail import (
-    RangeRailConfig,
-)
 from jiuwenswarm.gateway.clouddoc.triggers import (
     OrphanClass,
     TriggerClass,
@@ -100,7 +97,6 @@ class WatcherConfig:
     # The deployment-level working-style file (§4.8 / D4). Empty means the default
     # location under the workspace config dir; the file is re-read on every dispatch.
     workmode_file: str = ""
-    rail: RangeRailConfig = field(default_factory=RangeRailConfig)
 
     def clamped_turn_timeout(self) -> float:
         return min(self.turn_timeout_seconds, TRANSPORT_TIMEOUT_CEILING * 0.9)
@@ -178,8 +174,6 @@ class CloudDocCommentWatcher:
         # provider measured instead of a configured guess. One entry per admitted
         # document; admission already pays for the call.
         self._caps_cache: dict[str, Any] = {}
-        if cfg.rail.text_domain != self._domain_default:
-            cfg.rail = replace(cfg.rail, text_domain=self._domain_default)
         self._sleep = sleep_fn or asyncio.sleep
         self._task: asyncio.Task | None = None
         self._docs: list[str] = []

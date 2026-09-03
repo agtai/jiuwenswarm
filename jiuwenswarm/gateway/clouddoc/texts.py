@@ -8,11 +8,11 @@ The language policy has three layers, each with a different reader:
   and English collaborators share a thread.
 * **Structural labels in a proposal block** -- same rule. The parser does not
   depend on them; it keys off the block marker and the fences.
-* **The words ``approve`` and ``keep``** -- **always English**, see turn_prompt
-  and render_proposal. These are not prose but **command tokens the reader is
-  asked to type back**: one spelling, so a Chinese thread does not leave anyone
-  guessing between 同意 and approve. Matching still accepts both word lists, so
-  typing 同意 keeps working.
+* **The words ``approve`` and ``keep``** -- **always English**, see turn_prompt.
+  These are not prose but **command tokens the reader is asked to type back**:
+  one spelling, so a Chinese thread does not leave anyone guessing between 同意
+  and approve. Matching still accepts both word lists, so typing 同意 keeps
+  working.
 """
 
 from __future__ import annotations
@@ -29,8 +29,6 @@ _TEXTS: dict[str, tuple[str, str]] = {
     **_TOOL_TEXTS,
     # key: (Chinese, English)
     "placeholder":        ("⏳ 正在处理…", "⏳ Working on it…"),
-    "rail_refused":       ("这条提议未通过范围检查：{detail}",
-                           "This proposal did not pass the range check: {detail}"),
     # "Reply in this thread", not "@ me again": an interrupted thread continues on
     # A bare reply no longer continues a thread: participation needs a mention, so
     # that a discussion between other collaborators does not wake the agent. Every
@@ -38,15 +36,6 @@ _TEXTS: dict[str, tuple[str, str]] = {
     "turn_incomplete":    ("这一轮没有完成。在本线程 @ 我一句（如「@我 继续」）即可让我重试。（编号 {ref}）",
                            "This turn didn't complete. @-mention me in this thread "
                            "(e.g. \"@me continue\") and I'll retry. (ref {ref})"),
-    "apply_failed_status": ("未能应用（{status}），请重新触发。",
-                            "Could not apply ({status}) — please trigger again."),
-    "apply_refused":      ("未能应用：{detail}", "Could not apply: {detail}"),
-    "kept":               ("已保留原文。", "Kept the original."),
-    "no_pending":         ("这条线程没有待批的提议——之前那条已经失效了。"
-                           "重新**指派**（或重新 @ 我），我会基于当前正文重新提议。",
-                           "There is no pending proposal in this thread -- the earlier "
-                           "one is no longer valid. **Assign** it to me again (or @ me again) "
-                           "and I'll propose against the current text."),
     # D2②: never-authorized wording -- asserts the authority gap truthfully.
     "watch_unauthorized": ("已记录。我尚未获得处理此文档的授权，暂不能安排这条批注。"
                            "授权由部署主人在 Jiuwen 的「Docs」面板为这篇文档签发值守；"

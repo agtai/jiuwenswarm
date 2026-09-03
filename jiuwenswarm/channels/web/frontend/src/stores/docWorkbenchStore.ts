@@ -35,7 +35,7 @@ interface DocWorkbenchState {
   /** 主界面 iframe 的重载计数（按文档），新回执到达时 +1。 */
   reloadNonce: Record<string, number>;
   /** 定位请求：切到该文档并把回执的区域交给主界面。 */
-  locate: { docId: string; receiptId: string; regions: string[]; anchor: string; nonce: number } | null;
+  locate: { docId: string; receiptId: string; anchor: string; nonce: number } | null;
 
   openDoc: (meta: Omit<WorkbenchTab, 'unread' | 'seenReceiptIds'>) => void;
   activate: (docId: string) => void;
@@ -47,8 +47,7 @@ interface DocWorkbenchState {
   setAlwaysNewTab: (provider: string, value: boolean) => void;
   /** 记录一份文档最新的回执 id 列表；返回本次新增的数量。 */
   noteReceipts: (docId: string, receiptIds: string[]) => number;
-  requestLocate: (docId: string, receiptId: string, regions: string[], anchor?: string) => void;
-  clearLocate: () => void;
+  requestLocate: (docId: string, receiptId: string, anchor?: string) => void;
 }
 
 const PREFS_KEY = 'jiuwenswarm.docWorkbench.prefs.v1';
@@ -140,9 +139,8 @@ export const useDocWorkbenchStore = create<DocWorkbenchState>((set, get) => ({
     });
     return added;
   },
-  requestLocate: (docId, receiptId, regions, anchor = '') => set((s) => ({
+  requestLocate: (docId, receiptId, anchor = '') => set((s) => ({
     activeDocId: docId,
-    locate: { docId, receiptId, regions, anchor, nonce: (s.locate?.nonce ?? 0) + 1 },
+    locate: { docId, receiptId, anchor, nonce: (s.locate?.nonce ?? 0) + 1 },
   })),
-  clearLocate: () => set({ locate: null }),
 }));

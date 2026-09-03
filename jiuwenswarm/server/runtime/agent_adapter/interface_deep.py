@@ -9122,9 +9122,8 @@ class JiuWenSwarmDeepAdapter:
                 # checkpoint holds the registry to it, so a tier changed mid-turn
                 # intercepts the write instead of draining.
                 turn_mode=lambda: self._clouddoc_turn.get("mode"),
-                # The proposal block must name the same words the watcher matches.
-                approve_word=clouddoc_cfg.get("approve_word"),
-                keep_word=clouddoc_cfg.get("keep_word"),
+                # Deployment caps for the range rail (config ``clouddoc.rail``).
+                rail_overrides=clouddoc_cfg.get("rail"),
                 # The tools need to know which account they are, to tell a task assigned
                 # to them from one assigned to another agent in the same document.
                 turn_address=lambda: _clouddoc_self_address(credentials_file),

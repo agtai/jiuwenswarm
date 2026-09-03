@@ -380,3 +380,35 @@ def test_receipt_begin_records_the_anchor_beside_the_region(tmp_path):
     )
     e = s.get(rid)["edits"][0]
     assert e["region"] == "'评分表'!B3:D7" and e["anchor"] == "#gid=1&range=B3:D7"
+
+
+@pytest.mark.asyncio
+async def test_reverting_a_restore_receipt_trashes_again(tmp_path):
+    s = ReceiptStore(tmp_path / "r.json")
+    prov = _Prov(s)
+    rid = s.begin(DOC, [], highlight=False, op="restore", subject={})
+    s.commit(rid, revision_after=None)
+    out = await execute_revert(prov, s, rid)
+    assert out.ok and prov.log == [("trash", DOC)]
+    assert s.get(s.get(rid)["reverted_by"])["op"] == "trash"
+
+
+@pytest.mark.asyncio
+async def test_deployment_rail_overrides_reach_the_chat_write_caps(tmp_path):
+    """config clouddoc.rail.* must do something: the caps the chat path enforces
+    come from the deployment's overrides, not only the built-in defaults."""
+    s = ReceiptStore(tmp_path / "r.json")
+    prov = _Prov(s)
+
+    async def read(doc_ref):
+        return _NS(text="第一句。第二句。第三句。", revision_id="r1", cells=None,
+                   kind="document", formula_cells=())
+
+    prov.read = read
+    kit = CloudDocToolkit(prov, turn_address=lambda: "bot", turn_doc_id=lambda: None,
+                          watched_docs=lambda: [DOC], rail_overrides={"max_edits": 2})
+    kit._ask_channel_override = True
+    kit._read_docs.add(DOC)
+    edits = [{"old_string": f"第{w}句。", "new_string": f"改{w}。"} for w in ("一", "二", "三")]
+    out = await kit.batch_edit(doc_id=DOC, edits=edits)
+    assert not out["ok"] and "max_edits" in out["detail"] and "2" in out["detail"]

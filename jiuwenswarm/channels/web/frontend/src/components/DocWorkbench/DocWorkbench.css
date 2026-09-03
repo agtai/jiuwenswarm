@@ -36,7 +36,6 @@
 .doc-workbench__chip--ok { background: var(--color-feedback-success-toast); color: var(--color-feedback-success-text); }
 .doc-workbench__chip--warn { background: #fff4e0; color: #b45309; }
 .doc-workbench__chip--muted { background: var(--color-tag-neutral-surface); color: var(--color-chat-supporting-text); }
-.doc-workbench__chip--info { background: var(--color-tag-info-surface); color: var(--color-tag-info-text); }
 .doc-workbench__elsewhere { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--color-tag-info-surface); font-size: 12px; color: var(--color-tag-info-text); }
 .doc-workbench__md { display: flex; flex: 1; min-height: 0; }
 .doc-workbench__md-editor { flex: 1; min-width: 0; resize: none; border: 0; border-right: 1px solid var(--color-border-default); padding: 12px 14px; font: 12.5px/1.75 var(--font-mono); color: var(--color-text-primary); background: var(--color-surface-elevated); outline: none; }

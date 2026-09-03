@@ -379,8 +379,7 @@ class CloudDocToolkit:
         turn_doc_id: Callable[[], str | None] | None = None,
         turn_comment_id: Callable[[], str | None] | None = None,
         turn_mode: Callable[[], str | None] | None = None,
-        approve_word: str | list | tuple | None = None,
-        keep_word: str | list | tuple | None = None,
+        rail_overrides: dict | None = None,
         turn_address: Callable[[], str] | None = None,
         watched_docs: Callable[[], list] | None = None,
         connection_count: Callable[[], int] | None = None,
@@ -434,14 +433,11 @@ class CloudDocToolkit:
         # a tier changed mid-turn intercepts the write rather than draining; None
         # (the chat path, or a surface without the snapshot) checks liveness only.
         self._turn_mode = turn_mode or (lambda: None)
-        # The words the proposal block tells the reader to type **must be the ones the
-        # watcher matches**. They used to be render_proposal's hard-coded defaults,
-        # which agree with the shipped config and with nothing else: a deployment that
-        # configures its own words gets a block saying "reply approve" while only the
-        # configured word is accepted. Observed live -- the block said approve, the
-        # matcher took only 同意, and the model's own prose said a third thing.
-        self._approve_word = approve_word
-        self._keep_word = keep_word
+        # Deployment overrides for the range rail's caps (config ``clouddoc.rail``).
+        # The gateway used to build these into the watcher's config, whose reader
+        # retired with the proposal machinery -- leaving config keys that silently
+        # did nothing. The rail runs here now, so the overrides land here.
+        self._rail_overrides = dict(rail_overrides or {})
         self._turn_address = turn_address or (lambda: "")
         # Which documents this connection watches. **The chat path has no doc_id
         # injected**, so without this the agent cannot name a single document it is
@@ -493,7 +489,11 @@ class CloudDocToolkit:
         """
         from jiuwenswarm.agents.harness.common.tools.clouddoc.range_rail import RangeRailConfig
 
-        cfg = RangeRailConfig(text_domain=await self._text_domain(doc_id), **over)
+        allowed = {"adjacent_budget", "max_quote_chars", "max_insert_chars", "max_edits"}
+        conf = {k: int(v) for k, v in self._rail_overrides.items()
+                if k in allowed and v is not None}
+        cfg = RangeRailConfig(text_domain=await self._text_domain(doc_id),
+                              **{**conf, **over})
         try:
             caps = await self._provider.capabilities(doc_id)
         except Exception:  # noqa: BLE001 - a rail that cannot ask still has a default

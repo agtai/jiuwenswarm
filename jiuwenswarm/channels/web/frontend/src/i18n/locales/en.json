@@ -3494,7 +3494,8 @@
       "opShare": "shared with",
       "opTrash": "moved to trash",
       "opRestore": "restored from trash",
-      "opUnshare": "unshared from"
+      "opUnshare": "unshared from",
+      "revertConfirm": "Read-back differed — click again to confirm"
     },
     "usage": {
       "open": "Usage audit",

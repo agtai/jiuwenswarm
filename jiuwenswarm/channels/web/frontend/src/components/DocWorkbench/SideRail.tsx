@@ -40,6 +40,10 @@ export function SideRail({
   const executions = useChatStore((s) => s.runtimes[sid]?.toolExecutions);
   const mode = useSessionStore((s) => s.runtimes[sid]?.mode ?? 'agent');
   const [acting, setActing] = useState<string | null>(null);
+  // The one revert that asks: a receipt whose read-back disagreed (applied_unverified)
+  // arms on the first click and runs on the second. Everything else is reversible
+  // and reverts straight away, leaving its own receipt.
+  const [armedRevert, setArmedRevert] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
   const act = useCallback(async (method: 'clouddoc.revert' | 'clouddoc.unhighlight', receiptId: string) => {
@@ -56,7 +60,7 @@ export function SideRail({
     }
   }, [onRefresh, t]);
 
-  useEffect(() => { setNote(null); }, [tab?.docId]);
+  useEffect(() => { setNote(null); setArmedRevert(null); }, [tab?.docId]);
 
   const elsewhere = tabs.filter((x) => x.docId !== tab?.docId && x.unread > 0);
   const tierLabel = !watch ? t('docs.watch.watchOff')
@@ -122,7 +126,23 @@ export function SideRail({
                     <a className="text-xs text-text-link hover:underline" onClick={() => onLocate(r)} data-testid="doc-workbench-receipt-locate">{t('docs.workbench.locate')}</a>
                   )}
                   {(r.status === 'applied' || r.status === 'applied_unverified') && (
-                    <button type="button" className="text-xs text-text-link hover:underline disabled:opacity-50" disabled={acting === r.receipt_id} onClick={() => void act('clouddoc.revert', r.receipt_id)} data-testid="doc-workbench-receipt-revert">{t('docs.workbench.revert')}</button>
+                    <button
+                      type="button"
+                      className="text-xs text-text-link hover:underline disabled:opacity-50"
+                      disabled={acting === r.receipt_id}
+                      data-testid="doc-workbench-receipt-revert"
+                      data-armed={armedRevert === r.receipt_id || undefined}
+                      onClick={() => {
+                        if (r.status === 'applied_unverified' && armedRevert !== r.receipt_id) {
+                          setArmedRevert(r.receipt_id);
+                          return;
+                        }
+                        setArmedRevert(null);
+                        void act('clouddoc.revert', r.receipt_id);
+                      }}
+                    >
+                      {armedRevert === r.receipt_id ? t('docs.history.revertConfirm') : t('docs.workbench.revert')}
+                    </button>
                   )}
                   {r.status === 'applied' && r.highlight && (
                     <button type="button" className="text-xs text-text-link hover:underline disabled:opacity-50" disabled={acting === r.receipt_id} onClick={() => void act('clouddoc.unhighlight', r.receipt_id)}>{t('docs.history.unhighlight')}</button>

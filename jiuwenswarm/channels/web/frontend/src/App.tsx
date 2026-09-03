@@ -20,7 +20,7 @@ import { UpdatePanel } from './components/UpdatePanel';
 import { DocsPanel } from './components/DocsPanel';
 import { DocWorkbench } from './components/DocWorkbench';
 import { useDocWorkbenchStore } from './stores/docWorkbenchStore';
-import { consumePendingOpenDoc } from './features/clouddoc/openDocSignal';
+import { OPEN_DOC_EVENT, consumePendingOpenDoc } from './features/clouddoc/openDocSignal';
 import { ExternalCliInstallDialog, type ExternalCliInstallStatuses } from './components/ExternalCliInstallDialog';
 import { SettingsPage } from './features/settings/SettingsPage';
 import type { SettingsPageDefinition } from './features/settings/registry/types';
@@ -1548,8 +1548,8 @@ function AppContent({
           setActiveNav('chat');
         });
     };
-    window.addEventListener('jiuwen:clouddoc-open-doc', onOpenDoc);
-    return () => window.removeEventListener('jiuwen:clouddoc-open-doc', onOpenDoc);
+    window.addEventListener(OPEN_DOC_EVENT, onOpenDoc);
+    return () => window.removeEventListener(OPEN_DOC_EVENT, onOpenDoc);
   }, []);
 
   useEffect(() => {

@@ -13,7 +13,7 @@ pre-write checkpoint reads revocation, suspension and expiry live, and holds the
 entry to the tier the turn was dispatched under, so a downgrade intercepts an
 in-flight write rather than draining. Budget and ``from`` still drain.
 
-Every lifecycle event — grant / modify / suspend / resume / revoke / lapse —
+Every lifecycle event — grant / modify / suspend / resume / revoke / expire —
 appends one line to the audit journal (D3: one event, one audit line).
 """
 

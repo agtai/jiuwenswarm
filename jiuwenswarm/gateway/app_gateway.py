@@ -1710,7 +1710,6 @@ async def _build_clouddoc_watcher(*, agent_client):
         )
         from jiuwenswarm.gateway.clouddoc.cursor_store import CloudDocStore
         from jiuwenswarm.gateway.clouddoc.dispatch import CloudDocDispatcher
-        from jiuwenswarm.agents.harness.common.tools.clouddoc.range_rail import RangeRailConfig
         from jiuwenswarm.gateway.clouddoc.triggers import (
             TriggerConfig,
             validate_prefixes,
@@ -1720,19 +1719,12 @@ async def _build_clouddoc_watcher(*, agent_client):
         logger.warning("[App] clouddoc extras 未安装（%s），跳过；pip install 'jiuwenswarm[clouddoc]'", exc)
         return None
 
-    rail_cfg = cfg.get("rail") or {}
     watcher_cfg = WatcherConfig(
         poll_interval_seconds=float(cfg.get("poll_interval_seconds", 30)),
         turn_timeout_seconds=float(cfg.get("turn_timeout_seconds", 540)),
         approve_word=word_list(cfg.get("approve_word"), ("同意", "approve")),
         keep_word=word_list(cfg.get("keep_word"), ("原文", "keep")),
         workmode_file=str(cfg.get("workmode_file") or ""),
-        rail=RangeRailConfig(
-            adjacent_budget=int(rail_cfg.get("adjacent_budget", 200)),
-            max_quote_chars=int(rail_cfg.get("max_quote_chars", 400)),
-            max_insert_chars=int(rail_cfg.get("max_insert_chars", 2000)),
-            max_edits=int(rail_cfg.get("max_edits", 10)),
-        ),
     )
     base_trigger = TriggerConfig(
         sa_address="",   # differs per connection; registry.add derives it from the key

@@ -418,8 +418,7 @@ def build_clouddoc_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list
         toolkit = CloudDocToolkit(
             provider,
             harness_mode=harness_mode,
-            approve_word=cfg.get("approve_word"),
-            keep_word=cfg.get("keep_word"),
+            rail_overrides=cfg.get("rail"),
             # No turn document and no turn comment: this path is only ever a person
             # talking, which is the chat shape. The tools ask the user which document
             # they mean, using the watched list below.
