@@ -27,12 +27,14 @@ Every operation that updates a remote ref still requires separate explicit user 
 ## Live Voice bootstrap
 
 For every Live Voice task, first read `live-voice/README.md` and
-`live-voice/STATUS.md`, then follow exactly one README route. Documentation
-structure/update work also reads `live-voice/DOCUMENTATION_RULES.md`. Do not
+the concise `live-voice/STATUS.md`, then follow exactly one README route. Links
+are conditional routes, not instructions to recursively read their targets.
+Historical snapshots, closed packets and past run evidence are not default reads.
+Documentation structure/update work also reads `live-voice/DOCUMENTATION_RULES.md`. Do not
 load complete acceptance, runbooks, architecture or history unless the selected
 route requires them; numbered delivery plans are not the current queue.
 
-At resume, verify Git before trusting prose: run `git status --short --branch`, `git rev-parse HEAD`, and compare the checked-out branch with its upstream. If Git and `STATUS.md` disagree, Git is the implementation fact; report and repair the documentation rather than silently following stale text.
+At resume, verify Git before trusting prose: run `git status --short --branch`, `git rev-parse HEAD`, and `git rev-list --left-right --count 'HEAD...@{upstream}'` (report an absent upstream instead of inventing one). If Git and `STATUS.md` disagree, Git is the implementation fact; report and repair the documentation rather than silently following stale text.
 
 The Demo must submit committed final speech text to the real JiuwenSwarm Agent and tools. It is not an ASR/TTS-only showcase, and shortcuts must never be described as production-complete capabilities. Credentials, model/provider configuration, project registration, browser permissions, audio-device selection, runtime data, and network availability are machine-private and are not restored by Git.
 

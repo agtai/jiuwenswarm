@@ -48,6 +48,22 @@ exact-source records. They cannot override the current authorities above.
 9. Safety text may repeat only at the point of action and must link or clearly
    identify its authority.
 
+## Keep default reading small
+
+- STATUS is a current decision aid: one judgement, capability matrix, active
+  scope, remaining gates and dependency order. Replace superseded statements;
+  do not prepend another “latest” checkpoint while leaving the old one active.
+- Keep test counts, per-run timelines, closed module packets, old integration
+  assignments and expired time windows in evidence or conditional history.
+  STATUS keeps only their current consequence and a task-specific link.
+- Preserve failed evidence and still-open requirements when shortening text.
+  Moving a report never closes its missing review, regression or physical Gate.
+- A frozen status snapshot may preserve otherwise uncommitted historical facts
+  and disputed handoffs. Mark it historical and route it only from
+  `REFERENCE_INDEX.md`; never add it to mandatory bootstrap.
+- Before adding a new STATUS paragraph, check whether it replaces an existing
+  one. Avoid multiple backlog/handoff files and recurring cleanup reports.
+
 ## Synchronization rules
 
 - Product/source progress: update the affected STATUS capability row, current

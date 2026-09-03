@@ -9,6 +9,7 @@
 
 | Need | Read |
 |---|---|
+| Disputed pre-cleanup state, closed batch, old acceptance count or superseded 2026-09-03 handoff | Only the implicated section of the [frozen status snapshot](STATUS_HISTORY_20260903.md); its instructions and priorities are historical, and current conclusions remain in STATUS |
 | V0 reproduction/regression | [V0 acceptance](validation/V0_ACCEPTANCE.md), [V0 showcase](demo/DEMO_SHOWCASE.md), relevant [runbook](runbooks/E2E_RUNBOOK.md) sections and immutable [V0 evidence](evidence/V0_20260802_ee2896a4.md) |
 | W2 implementation/acceptance regression | D-071/D-072, [W2 acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md), [W2 showcase](demo/INTEGRATED_SHOWCASE.md), [D105 product acceptance](D105_W2_PRODUCT_ACCEPTANCE_2026-08-11.md), then only the implicated review below |
 | W3 develop rebaseline/deletion intent | [D107 migration review](D107_W3_DEVELOP_REBASELINE_MIGRATION_2026-08-12.md), D-073, actual source/tests |
