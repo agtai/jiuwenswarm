@@ -13,6 +13,18 @@ platform and not permission to merge or push. Root `TESTING.md` remains the
 risk/evidence authority and `runbooks/E2E_RUNBOOK.md` remains the environment
 and launcher authority.
 
+## Pilot execution update — 2026-09-03
+
+The one-sample A1/B/A2 pilot is complete enough to reject population expansion:
+**PILOT FAIL / TASK 1 OPEN**. B/medium showed a directional 689–1,300-ms TTFA
+improvement and no operator-observed audible gap, but B/long failed during its
+fifth streaming-TTS unit after a backpressure pause/resume. Short was
+inconclusive because unchanged-source A1/A2 drift exceeded the apparent gain.
+A2/long was not executed after the exact-source A1 long path proved
+structurally unable to pass its single-request TTS text limit. The lifecycle
+matrix remains open and Task 2 remains blocked. See the
+[consolidated physical pilot evidence](../evidence/C019_TASK1_ABA_PHYSICAL_PILOT_20260903.md).
+
 ## Hongxing Task assessment
 
 ### Task 1 — Complete C019 physical validation
