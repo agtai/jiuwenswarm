@@ -375,8 +375,27 @@ const CAPTURE_PROCESSOR_NAME = 'jiuwenswarm-live-voice-capture-v1';
 // OpenAI streaming TTS can emit a short seed chunk and then pause before the
 // first sustained burst.  Schedule the browser graph slightly ahead so that
 // ordered 20 ms sources remain contiguous instead of exposing that Provider
-// interarrival gap as a click or a short dropout.
-const PLAYOUT_STARTUP_LEAD_SECONDS = 1.0;
+// interarrival gap as a click or a short dropout.  The lead sits directly on
+// the speech-end-to-first-audible path (680 ms observed p50 at the former
+// fixed 1.0 s), so the build may tune it within closed bounds while the
+// Gateway keeps more frames in flight to cover the shorter buffer.
+export const PLAYOUT_STARTUP_LEAD_DEFAULT_MS = 250;
+export const PLAYOUT_STARTUP_LEAD_MIN_MS = 160;
+export const PLAYOUT_STARTUP_LEAD_MAX_MS = 1000;
+
+function resolvePlayoutStartupLeadMs(): number {
+  const env = (import.meta as { env?: Record<string, string | undefined> }).env;
+  const raw = env?.VITE_LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS;
+  if (raw === undefined || raw.trim() === '') return PLAYOUT_STARTUP_LEAD_DEFAULT_MS;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < PLAYOUT_STARTUP_LEAD_MIN_MS || value > PLAYOUT_STARTUP_LEAD_MAX_MS) {
+    return PLAYOUT_STARTUP_LEAD_DEFAULT_MS;
+  }
+  return value;
+}
+
+export const PLAYOUT_STARTUP_LEAD_MS = resolvePlayoutStartupLeadMs();
+const PLAYOUT_STARTUP_LEAD_SECONDS = PLAYOUT_STARTUP_LEAD_MS / 1000;
 
 const DISABLED_BROWSER_AUDIO_ENVIRONMENT: BrowserAudioEnvironment = Object.freeze({
   isSecureContext: false,

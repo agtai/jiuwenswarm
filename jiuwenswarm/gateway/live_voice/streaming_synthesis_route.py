@@ -58,7 +58,9 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
 
 _LOGGER = logging.getLogger(__name__)
 _DEFAULT_MAX_ACTIVE_STREAMS = 8
-_DEFAULT_MAX_PENDING_FRAMES = 8
+# 16 frames is 320 ms in flight: enough to cover the Browser's 250 ms startup
+# lead without the multi-second stale backlog a large queue would create.
+_DEFAULT_MAX_PENDING_FRAMES = 16
 _DEFAULT_OPEN_TIMEOUT_SECONDS = 15.0
 _DEFAULT_EVENT_TIMEOUT_SECONDS = 20.0
 _DEFAULT_QUEUE_WAIT_SECONDS = 2.0
