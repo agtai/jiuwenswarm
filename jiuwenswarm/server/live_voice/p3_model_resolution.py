@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode
@@ -20,6 +20,7 @@ class ResolvedP3Model:
     model: Any | None
     identity: str
     config_version: str
+    semantic_request_options: Mapping[str, Any] = field(default_factory=dict)
 
 
 class P3ModelResolver(Protocol):
@@ -202,7 +203,16 @@ class ServerModelCatalogResolver:
                 "formal task model is unavailable",
                 ErrorCode.CAPABILITY_UNAVAILABLE,
             )
-        return ResolvedP3Model(model, selected.identity, config_version)
+        from jiuwenswarm.common.reasoning_injector import (
+            bounded_semantic_request_options,
+        )
+
+        return ResolvedP3Model(
+            model,
+            selected.identity,
+            config_version,
+            bounded_semantic_request_options(selected.client_config),
+        )
 
 
 __all__ = [

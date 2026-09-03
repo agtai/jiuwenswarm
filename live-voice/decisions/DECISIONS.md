@@ -1290,6 +1290,32 @@
   deserialize a permission/confirmation grant. Current ingress provenance and
   final deterministic authorization are still mandatory. Crash before a record
   is frozen may retry parsing; no protected effect may precede the freeze.
+- Registry cutover detail: the existing speech guard uses its `OTHER` route to
+  admit read-only semantic work, before any Agent or Task effect. The same owned
+  input operation renews its journal lease during parsing and execution. The
+  formal operation/origin/confirmation owners still authorize every Task effect.
+  A generic `task` route replaces the six business-specific unified route values
+  for new semantic decisions; this is an internal route, not a new Task operation.
+- Presented proposal source: a bounded `PresentedAgentAnalysis` read value binds
+  the genuine input TurnCommit, exact response, complete Agent answer and actual
+  presentation time. Cascade supplies it only after complete acknowledged TEXT;
+  Native supplies it only for an acknowledged completed Agent delegate answer.
+  Neither Task notices nor interrupted/unpresented answers supply proposals.
+  The existing pre-command journal adds the data-only `analysis` kind, under the
+  same scope, source uniqueness, TTL and capacity bounds. It retains a source
+  anchor before model extraction, then a structured proposal (if any), and marks
+  the source consumed. Owned bounded work is drained or cancelled on shutdown;
+  a subsequent authorized turn can finish retained analysis after reconnect.
+  No audio, credential, permission grant or second Task authority is persisted.
+  Structured controls expose their valid confirmation/clarification data through
+  this same bounded context too, allowing a normal authenticated voice response;
+  they do not acquire a natural-language parser or a second permission owner.
+  The model sees the existing opaque continuation token as its source reference
+  alias, so an explicit old UI reference can be understood without phrase parsing.
+  That alias never substitutes for scope, source provenance or normal confirmation.
+  SQLite's existing kind CHECK is widened using one transactional private-table
+  rebuild that copies all prior bytes/digests unchanged; test reopen, concurrent
+  initialization and rollback. No Task Store or confirmation-owner migration occurs.
 - Re-scope the discovered cross-Task adjustment blockage into the Tier-3
   Core/Store boundary: bounded in-flight deliveries retain exact outbox claim
   ownership with renewal, preserve per-Task adjustment order, allow unrelated
@@ -1306,6 +1332,332 @@
   general workflow state machine, Provider/account change, system driver,
   unauthorized session continuity or remote update. Local implementation and
   reviewable commits are allowed; no remote refs are updated by this task.
+
+- The first real configured-model probe exposed protocol-only mistakes (wrong
+  extraction field, spurious continuation action, invalid/empty output) and
+  a 20-second Provider timeout. Keep every failed attempt. The recommended
+  implementation uses the existing model's per-call JSON-object mode and zero
+  temperature for this structured parser only, with these options included in
+  semantic configuration identity; no saved model/account settings change.
+  Input carries deterministic whole-utterance span bounds, checked against the
+  independently verified commit during frozen replay. This is generic provenance
+  metadata, not business examples or a second parser. Old frozen v1 input records
+  without bounds remain readable; new records bind bounds in the context digest.
+  Malformed/timeout outputs still fail closed without keyword fallback or effects.
+  An unchanged English positive input also exceeded 20 seconds after protocol
+  tuning; use a 45-second total deadline (also passed to the existing client),
+  not an artificial execution delay. Record observed latency separately from
+  correctness; this does not promise interactive latency acceptance.
+
+- Cutover review found outer deadlines that predate model interpretation:
+  Cascade used the generic 15-second Web timeout and Native delegate used 30
+  seconds. The bounded recommendation is a 100-second total read-only semantic
+  stage, including at most 50 seconds for pending analysis recovery and the
+  existing 45-second current model call. Native then retains its existing
+  28-second maximum Agent stage. Only semantic-submit/Native-delegate transports
+  receive a 150-second deadline, below the existing 600-second upstream bound;
+  ordinary audio/control/ACK RPC deadlines remain unchanged. These are failure
+  ceilings, not artificial delays or acceptable normal response-latency targets.
+  Timeout never proves a mutation failed or authorizes a fresh task: preserve
+  exact-ID journal recovery, response fences and normal confirmation. Own the
+  Registry/Gateway/Web deadline seam as Tier 3 with scaled timeout/cancellation,
+  exact replay and successful slower-model regression. No wire/schema or
+  Provider/account setting changes are introduced by this budget repair.
+- The sole semantic route presents Task receipts through the normal Agent, so
+  its existing `round_accepted` response may carry the same optional exact
+  `task_id` as `authoritative_presentation_accepted`. Only a successful formal
+  Task receipt supplies it. Persist it in the foreground acceptance checkpoint
+  and validate it in Web before the existing authenticated status/events
+  bootstrap; it is a discovery association, not Task authority. Old responses
+  without it remain valid. This minimal additive protocol change owns backend,
+  journal replay and mounted Web progress regression; it does not add a second
+  task list, fabricate a notification, or ACK unplayed output.
+- Native carries the same optional exact Task association in its existing
+  delegate result, then projects `native.task_association` through the existing
+  activation-bound notification queue. Its closed payload binds Task ID,
+  delegate commit/call and response to that activation; it contains no permission
+  or command. Web serializes/deduplicates discovery and performs the existing
+  fresh status/events/progress bootstrap. A late activation has zero discovery
+  effects. Native Task notification playback must preserve the existing Native
+  session/capture authority, not close it while releasing a Cascade listening
+  window. This is integration of the existing Task/TTS presentation, not a new
+  Provider-native route or Executor capability. Test both exact association and
+  actual notification/playout/listening recovery separately before credit.
+  The narrow media repair distinguishes Provider Native audio from a continuous
+  Native capture. Existing Task TTS keeps that capture/session/generation, sends
+  sequence-preserving silence during its exact notification lease (no buffered
+  microphone echo), and releases suppression only after exact P2 ACK or definite
+  failure settlement. Exit fences the lease. Ordinary TTS uses its existing
+  downlink/render receipt, never Native Provider presentation ACK. Gateway admits
+  open-uplink synthesis only for a live exact Native owner and an authenticated
+  Task-notification response/unit/content transfer; recognition and arbitrary
+  text remain disallowed. This Tier-3 seam requires lifecycle, negative authority,
+  capture continuity and real output-audio regression, not just TTS text tests.
+  Retire the Web notification prefix test too: reuse the existing notification
+  `source_event` field with its exact authoritative Task EventEnvelope. Derive
+  terminal display/arbitration from its validated lifecycle state, never English
+  wording. Registry projects only the response-bound retained Task source;
+  older notifications without that optional source cannot claim terminal truth.
+  No new lifecycle schema or task authority is introduced.
+
+- Multi-Task notification ownership repair: the selected Web control leaf is
+  not the lifetime owner of voice-origin progress. Keep a bounded independent
+  Task-to-progress-owner/inspection-leaf set for the exact P2 activation. Each
+  entry obtains fresh authenticated status/events; selection cannot disconnect
+  another entry or discard its pending delivery. A shared serial presentation
+  drain reconciles against the delivery's exact owner and ACKs only committed
+  visible DOM. Exit, disconnect, scope or activation replacement fence and close
+  all owned routes; late discovery cannot reopen them. Text and voice consumers
+  use distinct generation IDs. This is a Tier-3 presentation/identity repair,
+  not a second Task authority. Verify A/B independent completion, stale events,
+  in-flight close/retry, fallback and refresh recovery before audio credit.
+  Recovery reuses the immutable Task creation origin joined to a digest-checked
+  frozen input in the existing unified journal. Add only a read-only bounded
+  origin lookup; no association table or Task schema is needed. The Task Store
+  proves creation even if the originating foreground response never completed.
+  The frozen commit proves speech provenance, not a revived commit/permission.
+  An authenticated P2 activation can expose up to 128 exact discovery IDs from
+  this join; each subsequent progress activation still reauthorizes the Task.
+  Restored associations have no invented foreground response; actual retained
+  Task events allocate their normal presentation responses and durable cursors.
+
+- Isolated verification configuration boundary (Tier 2): honor the existing
+  `JIUWENSWARM_CONFIG_DIR` selection consistently for the configuration file and
+  dotenv file only. Runtime state, projects, Task databases, logs and workspace
+  remain under `JIUWENSWARM_DATA_DIR`; do not redirect `get_config_dir()` or copy
+  credentials. The launcher accepts an explicit existing configuration directory
+  and propagates it to child processes. Test default compatibility, invalid
+  explicit paths, stable runtime ownership and unchanged source configuration.
+  This is configuration-path consistency, not a new semantic route or Provider.
+  Validation never invokes configuration editing APIs against the shared source.
+  Frontend reachability review also found the D-031 BrowserSpeech Task bridge
+  still selectable by an old build flag. Retire its hook dispatch/monitor,
+  schedule-client props, compatibility registration and re-enabling flag; keep
+  foreground speech lifecycle and formal P3 controls/notification presentation.
+  Shared task DOM view data moves to a dependency-free display type, not a new
+  Task owner. Migrate session/generation/duplicate/unknown-effect safety oracles
+  before retiring old test entry points; no old keyword parser remains callable
+  from product composition. This is the Tier-3 frontend semantic cutover boundary.
+  The first isolated preflight found a stale origin-check value in the source
+  dotenv overriding the explicit process launch setting. Re-tier the dotenv/
+  launcher seam to Tier 3: with an explicit `JIUWENSWARM_CONFIG_DIR`, process
+  environment takes precedence and dotenv supplies missing values only; legacy
+  callers without that selection keep their existing override behaviour. This
+  preserves the formal launch policy, not a new security-policy exception.
+  Verify conflicting environment/ports and real startup flags; never edit or
+  relocate the private dotenv to obtain a passing test.
+  Review found two inherited write paths: unresolved fresh runtime paths could
+  fall back to package resources, and normal/fallback default startup persisted
+  ports into the selected source dotenv. Explicit-source mode now fixes mutable
+  paths to DataDir before initialization and passes actual ports to children via
+  the existing CLI environment without writing shared configuration. Unselected
+  legacy startup retains its existing port persistence. Test real path resolution,
+  both startup port branches, child dotenv loading and unchanged source bytes.
+  Real digital audio exposed a Tier-3 media scheduling defect: a continuously
+  ready uplink could indefinitely win over an already-ready trusted speech
+  start/EOT. Preserve exact same-loop terminal peer priority and the first
+  frame ACK, then service ready boundaries before another non-terminal frame
+  burst. Test continuous backlog, repeated Native boundaries, mismatch/error,
+  cleanup/cancellation and real Cascade audio. No synthetic EOT, authority
+  bypass, new Provider or semantic fallback is authorized by this repair.
+  The same preflight exposed inconsistent transport bounds: the existing Web
+  capture can contain up to 61.5 seconds (30 seconds pre-utterance, 30 seconds
+  of speech and 1.5 seconds rotation grace), but a 48 kHz retained WAV exceeded
+  the Gateway's 4 MiB limit after 43.69 seconds. Keep the Web utterance and
+  absolute limits unchanged; align Gateway/Batch to one bounded 6 MiB input
+  cap and permit 65 seconds of precommit Provider lifetime. Retain the shorter
+  postcommit deadline, exact audio digest, maximum-frame and excess-size
+  rejection. Own this compatibility/memory-bound seam as Tier 3; test the full
+  legal 48 kHz capture, over-limit rejection, timeouts and real audio. This is
+  not an unbounded capture, resampling or a new finality/authorization rule.
+  Normal spoken Agent answers use a generic concise presentation instruction:
+  conclusion and essential evidence first, no unsolicited full-table/file
+  recital, and expansion when the user requests it. Complete Task artifacts
+  are not shortened. This Tier-3 foreground presentation/context change does
+  not classify language/business intent, grant actions or bypass confirmation.
+  Preserve exact receipts/result grounding and verify both voice routes and
+  proposal formation with the unchanged natural Demo input. Existing output
+  audio bounds stay; failure must remain truthful, never a truncated success.
+
+- Final reachability audit found the older public `p2.submit` can select Agent
+  or synthetic Task-origin dispatch without semantic interpretation. Retire that
+  RPC with a stable explicit rejection (never fall through to ordinary Agent
+  handling), and retain only the internal post-semantic Agent dispatch helper.
+  The official typed-input surface uses the same `unified.submit` implementation
+  with an explicit `input_kind=text`; omitted kind remains receipt-backed speech.
+  Text requires the same authenticated activation/finality/idempotency checks,
+  cannot carry a speech claim or replacement-response grant, and is recorded as
+  text, never forged speech. Existing speech fingerprints remain unchanged.
+  This minimal additive Tier-3 ingress change has no new parser, Task authority,
+  provider or database migration. Verify exact replay, negative mixed provenance,
+  no caller-selected dispatch, normal confirmation and both production surfaces.
+  Old unresolved P2-submit recovery must remain visibly retired/unknown, not be
+  replayed as a new unified command. Remove its synthetic-origin UI and tests
+  only after migrating their still-applicable lifecycle and forbidden-effect
+  assertions to the unified or structured owner.
+
+- The real second-turn audio failure exposed a P1 loop-listener lifetime gap:
+  silently releasing generation-time capture removed its automatic EOT handler,
+  while subsequent playout/idle capture reused the owner without registering
+  another handler. Preserve the loop listener across that silent transition,
+  not the old capture's pending boundary. Exact route/operation generation and
+  capturing-state checks remain mandatory; explicit start/close/failure retire
+  the listener. This Tier-2 lifecycle repair owns first/rotated successor EOT,
+  duplicate/stale boundary, Exit and actual second-turn audio regressions. It
+  does not change VAD, semantic authorization or input duration limits.
+
+- The unchanged analysis audio failed twice because the Agent still narrated a
+  long written report despite the initial soft brevity guidance, exceeding the
+  existing bounded speech output. Strengthen the generic spoken presentation
+  instruction to at most six short sentences / 400 Unicode characters unless
+  detailed spoken narration was explicitly requested. Reading/analysis alone
+  does not imply full recital. Useful follow-up proposals should state their
+  complete objective without executing it. Keep full Task artifacts and all
+  authority checks; do not truncate an already-produced answer or mark failed
+  playback successful. This refines the already-scoped Tier-3 presentation
+  boundary; the two failed original-audio attempts remain evidence and require
+  an unchanged-input real rerun. Longer explicitly requested narration remains
+  subject to existing truthful bounded-output failure, not an unbounded buffer.
+
+- Independent retirement review found a lost L0 association in the new
+  Task-to-Agent presentation seam. Repair this Tier-2 measurement regression
+  by carrying the original journal admission clock and only a formally
+  successful receipt's exact Task/Attempt into the existing L0 binding. Do not
+  infer an attempt from UI/current Task state; malformed/failed results yield
+  no measurement identity. Measurement rejection must not affect execution.
+  Migrate status/adjust/cancel and admission-order oracles to the real semantic
+  Registry/Store seam. No telemetry schema, Task authority or business policy
+  changes are introduced.
+
+- The original positive audio exposed an overly narrow assistant-analysis
+  instruction: concrete offered work was not retained when the Agent had not
+  already named a Task or used a background-work label. The sole semantic model
+  now distinguishes offered work from permission to execute, derives a neutral
+  name from its actual described objective and retains only concrete follow-up
+  work. A generic offer of help still yields no proposal. No invented objective,
+  path, constraints or execution is allowed. The audio driver separately waits
+  for exact-source asynchronous extraction; listening alone is not that proof.
+  This is within D-107's Tier-3 proposal boundary and requires the original
+  input rerun plus concrete/generic proposal regressions.
+
+- Actual original-audio attempt 10 exposed a pre-command lifetime coupling:
+  analysis presentation, playout and model extraction can exhaust the formal
+  confirmation's 120-second TTL before the user can accept an offered objective.
+  Give only analysis/proposal data a separately bounded 600-second lifetime,
+  anchored to the original presentation. Confirmation and clarification keep
+  their existing 120-second bounds. Reopen, replay and extraction never extend
+  the source lifetime. This Tier-3 continuity-policy refinement changes no grant,
+  database shape or Task owner. Verify expiry boundaries, scope, same-source
+  replay, extraction across the former limit, normal confirmation and audio.
+  Also align the model-visible schema with the existing strict decoder: create
+  and list have no existing-task target; a new name belongs in create arguments.
+  Invalid model output remains a failure, never repaired by guessing a target.
+
+- Agent prompt inspection identified why user-envelope brevity instructions
+  were unreliable: the shared system output section requires the complete
+  deliverable inline. In the validated, isolated formal Live Voice adapter only,
+  install a generic system presentation section clarifying spoken summaries
+  versus complete requested artifacts, then remove it on every exit. Reuse one
+  instruction constant, never promote arbitrary query/context into system text.
+  This extends the existing Tier-3 presentation repair into its owning adapter;
+  it does not change ordinary Agent output, tools, parsing or confirmation.
+  Test actual prompt-builder installation, rejection before installation,
+  cancellation/error cleanup, task-result tool denial and real audio regression.
+
+- Independent frontend review found that an unknown structured confirmation
+  disabled the button but did not block a second direct issue() call, and network
+  reconnect destroyed the owner. Repair the Tier-3 existing formal Task owner:
+  serialize one operation before its first await; retain immutable RPC identity
+  for exact unknown-outcome recovery; fence old connection callbacks; preserve
+  the owner within the same Session. Known effects with failed detail queries
+  recover queries only. Normal event-head progression is not a target change;
+  first confirmation still checks exact Attempt/revision and backend authority.
+  No new parser, execution primitive or confirmation bypass. Verify loss before
+  and after effect, concurrent issue/confirm, exact replay, late responses and
+  the mounted reconnect/controls path. Browser refresh of unresolved structured
+  operations remains a separate persistence concern, never assumed successful.
+
+- Actual audio attempt 11 reached real STT but received empty final model content;
+  the Provider's separate reasoning field contained text. Never consume reasoning
+  as a final decision. The non-thinking invocation trial was rejected: retained
+  probes v4/v5 each misrouted two missing-authority requests as dialogue. Do not
+  persist that trial or change user model configuration. Preserve the configured
+  model and reasoning behaviour. An empty final, with no tool request, permits
+  one exact Provider retry within the original 45-second total deadline; nonempty
+  malformed decisions do not get repaired or retried. Recheck authority before
+  both calls, bind the retry policy into the semantic configuration digest and
+  retain all Provider attempts. This Tier-3 Provider failure treatment neither
+  creates a second semantic path nor consumes reasoning content. Verify same
+  input/config, bounded lifetime, zero forbidden effects and original audio.
+  Provider references include its documented occasional empty JSON final:
+  [JSON output](https://api-docs.deepseek.com/guides/json_mode/) and
+  [DeepSeek thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/).
+
+- The confirmed production-intent wrapper must preserve the formal Core error
+  code instead of converting every failure to CONFLICT. Core RESULT_UNKNOWN
+  remains unknown; an absent/invalid code becomes UNAVAILABLE. This completes
+  the Tier-3 exact-RPC recovery boundary above, with no new error enum or grant.
+  Test real Core effect followed by a lost result, exact replay without another
+  effect, true conflict with zero effect, and Web retention of the same request.
+
+- The migrated two-turn mounted text journey exposed a stale audio-lane marker:
+  a text-only presentation received its real ACK but retained activeVoiceResponse,
+  blocking the next notification. On exact presentation ACK settlement release
+  only the matching interaction/response/generation marker, never a successor.
+  This is a Tier-2 presentation lifecycle repair within the cutover. Keep pending
+  and failed ACK fenced; verify two typed turns, late ACK and voice regressions.
+
+- Original-audio attempts 12/13 retained real recognition, reading and output
+  playback but failed the configured high-effort semantic deadline. A read-only
+  same-model low-effort probe passed all eight frozen cases, including the two
+  negative cases that failed the discarded non-thinking trial. Use the existing
+  Provider-capability adapter to expose a per-call low-effort semantic option
+  only where verified supported; unknown providers keep configured behaviour.
+  The selected model/catalog identity is unchanged, and the exact invocation
+  options contribute to the semantic configuration digest. Ordinary Agent/Task
+  calls and saved configuration are not changed. This deliberately extends the
+  Tier-3 bounded-model boundary into reasoning_injector and catalog metadata;
+  no new semantic fallback, Provider, output repair or authorization is added.
+  Test support/no-support, untouched source dictionaries, exact retry/config
+  binding and rerun original digital audio. The 41.6-second proposal probe is
+  still slow and grants no latency acceptance. The official capability is
+  documented in [Thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/).
+
+- Migrating the caller-disconnect oracle exposed a cutover recovery gap: the
+  unified operation is durably settled after caller cancellation, but recovery
+  rejects before reading that result because its presentation route is closed.
+  Preserve authenticated exact tombstone recovery as a read-only journal lookup:
+  revalidate the original binding and current authority before and after the
+  bounded read, return only the durably sealed result, and never re-admit or
+  execute against a closed route. Pending settlement stays unavailable. This
+  Tier-3 recovery repair changes no schema or execution grant. Test caller
+  cancellation, pending sealing, exact replay, content/binding mismatch and
+  authorization revocation with zero extra model/Agent/Task/history effects.
+
+- Digital attempt 14 passed actual analysis/proposal extraction, but the model
+  treated a detailed acceptance as an independent create and lost its proposal
+  reference. Clarify the existing generic semantic distinction: detail does not
+  negate conversational acceptance; continue the unique applicable offer and
+  merge its goal/constraints, while genuinely independent new work must not
+  inherit it. Add frozen cross-domain positive and unrelated-new-work negatives;
+  keep the failed original audio and rerun it. No wording detector, forced
+  proposal selection or confirmation bypass is introduced.
+  The full v8 real-model regression then exposed a schema/decoder mismatch:
+  the shown schema allowed route=proposal for committed input although the
+  decoder correctly rejected it. Generate the closed schema for the actual
+  phase and align structural extraction/message/reference conditions. Keep
+  deterministic context/authority validation; never repair the model's output.
+  Revalidate both phases and retain the v8 failure before the next audio run.
+
+- Oracle migration distinguishes unsolicited authoritative Task notices from
+  real user/control dialogue. The old bypass emitted a synthetic server receipt;
+  its empty-dialogue expectation cannot erase the new authenticated user turn
+  and tool-free Agent reply. Retain those acknowledged pairs as normal bounded
+  conversation, but never treat control replies or unsolicited notices as new
+  Agent work proposals. Server notices remain excluded from dialogue context.
+  This preserves the user's required context/reference semantics without a
+  latest-Task pointer; migrate both positive context and no-notice/no-proposal
+  assertions, rather than preserving the bypass's empty-context assumption.
 
 ## D-108 Speech evidence is not lexical action authorization
 

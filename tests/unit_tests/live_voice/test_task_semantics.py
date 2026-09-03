@@ -26,7 +26,32 @@ from jiuwenswarm.server.live_voice.task_semantics import (
     TaskSemanticContext,
     TaskSemanticDecision,
     TaskSemanticResolver,
+    task_semantic_output_schema,
 )
+
+
+@pytest.mark.parametrize("operation", ["task.create", "task.list"])
+def test_shown_schema_does_not_allow_new_task_name_as_existing_target(operation):
+    from jsonschema import Draft202012Validator
+
+    output = _output(
+        _commit(),
+        operation=operation,
+        **(
+            {"arguments": {"query_kind": "list", "limit": 20}}
+            if operation == "task.list"
+            else {}
+        ),
+    )
+    validator = Draft202012Validator(task_semantic_output_schema())
+    assert not list(validator.iter_errors(output))
+    output.update(target="A newly named work item", target_kind="name")
+    assert list(validator.iter_errors(output))
+    output.update(target=None, target_kind=None)
+    output["extractions"] = [
+        item for item in output["extractions"] if item["field_name"] != "operation"
+    ]
+    assert list(validator.iter_errors(output))
 
 
 @pytest.mark.asyncio
@@ -46,6 +71,78 @@ async def test_frozen_semantics_replay_exact_input_without_model_or_new_task_fac
     record["body"]["output"]["arguments"]["name"] = "changed outside"
     assert restored.proposal.arguments["name"] == "Laboratory review"
     assert decision.frozen_record() == restored.frozen_record()
+
+
+def test_shown_schema_requires_target_provenance_for_targeted_operation():
+    from jsonschema import Draft202012Validator
+
+    validator = Draft202012Validator(task_semantic_output_schema())
+    value = _output(
+        _commit(),
+        operation="task.cancel",
+        target="Equipment work",
+        target_kind="name",
+        arguments={},
+    )
+    assert not list(validator.iter_errors(value))
+    value["extractions"] = [
+        entry for entry in value["extractions"] if entry["field_name"] != "target"
+    ]
+    assert list(validator.iter_errors(value))
+
+
+@pytest.mark.parametrize(
+    "phase,route,allowed",
+    [
+        ("committed_input", "task", True),
+        ("committed_input", "proposal", False),
+        ("assistant_analysis", "proposal", True),
+        ("assistant_analysis", "task", False),
+    ],
+)
+def test_shown_schema_separates_acceptance_from_analysis(phase, route, allowed):
+    from jsonschema import Draft202012Validator
+
+    value = _output(_commit(), route=route)
+    assert (
+        bool(
+            list(
+                Draft202012Validator(
+                    task_semantic_output_schema(phase=phase)
+                ).iter_errors(value)
+            )
+        )
+        is not allowed
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"message": "not a clarification"},
+        {"reference_version": 1},
+        {"continuation_action": "accept_proposal"},
+        {"reference_id": "proposal-but-no-version"},
+        {"target_kind": "name"},
+    ],
+)
+def test_shown_schema_rejects_inconsistent_structure_before_model_attempt(change):
+    from jsonschema import Draft202012Validator
+
+    value = _output(_commit(), **change)
+    assert list(Draft202012Validator(task_semantic_output_schema()).iter_errors(value))
+
+
+def test_shown_schema_rejects_extra_and_duplicate_extraction_fields():
+    from jsonschema import Draft202012Validator
+
+    validator = Draft202012Validator(task_semantic_output_schema())
+    for field in ("dialogue", "target", "operation", "arguments.unknown"):
+        value = _output(_commit())
+        value["extractions"].append(
+            {"field_name": field, "source_start": 0, "source_end": len(_commit().text)}
+        )
+        assert list(validator.iter_errors(value))
 
 
 @pytest.mark.asyncio
@@ -92,6 +189,107 @@ async def test_frozen_semantics_cannot_supply_its_own_commit_authority(change):
         )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty", [None, "", "  "])
+async def test_empty_provider_final_retries_exactly_once_without_using_reasoning(empty):
+    commit = _commit()
+    calls = []
+    checks = []
+
+    class EmptyThenFinal:
+        async def invoke(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                content=empty if len(calls) == 1 else json.dumps(_output(commit)),
+                reasoning_content="Not an authoritative model answer",
+                tool_calls=None,
+            )
+
+    async def check():
+        checks.append(True)
+
+    result = await TaskSemanticResolver(
+        _Catalog(EmptyThenFinal()), before_invoke=check
+    ).resolve(commit, _context(commit))
+    assert result.route == "task" and len(calls) == len(checks) == 2
+    assert calls[0] == calls[1] and calls[0]["tools"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body,tools,expected_calls",
+    [("", None, 2), ("not JSON", None, 1), ("", ["forbidden"], 1)],
+)
+async def test_no_fallback_from_empty_malformed_or_tool_model_output(
+    body, tools, expected_calls
+):
+    model = _Model(body, tool_calls=tools)
+    commit = _commit()
+    with pytest.raises(FormalTaskViolation):
+        await TaskSemanticResolver(_Catalog(model)).resolve(commit, _context(commit))
+    assert len(model.calls) == expected_calls
+
+
+@pytest.mark.asyncio
+async def test_empty_final_retry_shares_one_overall_deadline(monkeypatch):
+    from jiuwenswarm.server.live_voice import task_semantics
+
+    # Capture the real timeout context: both Provider calls must be children of
+    # this single deadline, not independent full-length retry budgets.
+    contexts = []
+    original_timeout = asyncio.timeout
+
+    def bounded_timeout(delay):
+        context = original_timeout(0.15)
+        contexts.append(context)
+        return context
+
+    monkeypatch.setattr(task_semantics.asyncio, "timeout", bounded_timeout)
+    commit = _commit()
+    calls = []
+
+    class Model:
+        async def invoke(self, **kwargs):
+            calls.append(kwargs)
+            assert len(contexts) == 1 and not contexts[0].expired()
+            if len(calls) == 1:
+                return SimpleNamespace(content="", tool_calls=[])
+            await asyncio.Event().wait()
+
+    with pytest.raises(FormalTaskViolation) as failure:
+        await TaskSemanticResolver(_Catalog(Model())).resolve(commit, _context(commit))
+    assert failure.value.reason == "SEMANTIC_PROVIDER_TIMEOUT"
+    assert len(calls) == 2 and len(contexts) == 1 and contexts[0].expired()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_empty_final_retry_rechecks_authority_and_propagates_cancel(cancel):
+    from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode
+
+    checks = []
+    model = _Model("")
+    commit = _commit()
+
+    async def check():
+        checks.append(True)
+        if len(checks) == 2:
+            if cancel:
+                raise asyncio.CancelledError
+            raise FormalTaskViolation(
+                "SEMANTIC_AUTHORITY_CHANGED",
+                "test authority revoked",
+                code=ErrorCode.CONFLICT,
+            )
+
+    with pytest.raises(asyncio.CancelledError if cancel else FormalTaskViolation):
+        await TaskSemanticResolver(_Catalog(model), before_invoke=check).resolve(
+            commit, _context(commit)
+        )
+    assert len(checks) == 2 and len(model.calls) == 1
+    assert model.calls[0]["tools"] == []
+
+
 def _commit(text="Please create a background report called laboratory review."):
     return TurnCommit.from_dict(
         {
@@ -107,6 +305,30 @@ def _commit(text="Please create a background report called laboratory review."):
             "context_refs": [],
             "committed_at": "2026-09-02T12:00:00Z",
         }
+    )
+
+
+@pytest.mark.asyncio
+async def test_semantic_invocation_capability_is_applied_and_configuration_bound():
+    commit = _commit()
+    model = _Model(json.dumps(_output(commit)))
+
+    class Catalog(_Catalog):
+        def resolve(self, *args, **kwargs):
+            return replace(
+                super().resolve(*args, **kwargs),
+                semantic_request_options={"reasoning_effort": "low"},
+            )
+
+    configured = await TaskSemanticResolver(_Catalog(model)).resolve(
+        commit, _context(commit)
+    )
+    low = await TaskSemanticResolver(Catalog(model)).resolve(commit, _context(commit))
+    assert "reasoning_effort" not in model.calls[0]
+    assert model.calls[1]["reasoning_effort"] == "low" and model.calls[1]["tools"] == []
+    assert (
+        configured.origin_context_binding["semantic_config_sha256"]
+        != low.origin_context_binding["semantic_config_sha256"]
     )
 
 
@@ -215,6 +437,7 @@ async def test_semantic_model_has_no_tools_and_binds_exact_commit_context_config
     "mutation",
     [
         lambda p: p.update(authorization="granted"),
+        lambda p: p.update({"$schema": "https://json-schema.org/draft/2020-12/schema"}),
         lambda p: p.update(operation="task.execute_anything"),
         lambda p: p["arguments"].update(path="hidden-output"),
         lambda p: p.update(message="Task completed."),

@@ -415,8 +415,17 @@ exact-source Alpha result.
   context checks now run before and after model preparation, with both bearer
   and Native negative/normal-revision tests. Fix-only review passes C0/I0/M0. See the
   [model/context prerequisite evidence](evidence/SEMANTIC_RETIREMENT_MODEL_BOUNDARY_20260903.md).
-  The Registry still calls old semantic paths; no retirement or audio credit is
-  implied by these helpers.
+  The production cutover now wires the sole semantic implementation, but its
+  legacy-oracle migration, full regression and digital journey are not closed.
+  Additional model hardening aligns the shown schema with the actual phase,
+  preserves detailed proposal acceptance and bounds empty-final retry. The
+  scoped module has 83 passing regressions, a retained 10/10 real-model probe
+  and independent C0/I0/M0 review; see the
+  [phase/model evidence](evidence/SEMANTIC_PHASE_MODEL_BOUNDARY_20260903.md).
+  The previous v8 9/10 failure remains recorded. Original-audio attempt 14
+  passed analysis/presentation/proposal extraction but failed proposal
+  continuation; its complete replay remains required. No full audio or
+  hardcode-retirement completion follows from this scoped module result.
 - **Accepted correction to excessive speech blocking (D-108):** the user
   rejects per-sentence/readback confirmation and authorizes removing the
   lexical Gateway gate and the inference that absent Provider confidence means

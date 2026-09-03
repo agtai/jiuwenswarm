@@ -28,7 +28,9 @@ def _resolve_model_name(model_name: str, model_config_obj: Any) -> str:
     if model_name:
         return str(model_name).strip()
     if isinstance(model_config_obj, Mapping):
-        configured_name = model_config_obj.get("model") or model_config_obj.get("model_name")
+        configured_name = model_config_obj.get("model") or model_config_obj.get(
+            "model_name"
+        )
         return str(configured_name or "").strip()
     return ""
 
@@ -90,8 +92,7 @@ def inject_reasoning_params(
     target = resolve_reasoning_target(
         client_provider=model_client_config.get("client_provider"),
         api_base=(
-            model_client_config.get("api_base")
-            or model_client_config.get("base_url")
+            model_client_config.get("api_base") or model_client_config.get("base_url")
         ),
         model_name=model_client_config.get("model_name"),
     )
@@ -142,7 +143,29 @@ def build_reasoning_model_request_kwargs(
     )
 
 
+def bounded_semantic_request_options(
+    model_client_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Use verified low-effort capability for bounded structured interpretation.
+
+    This is a per-invocation option, not a saved model or ordinary Agent policy.
+    Providers without this verified capability retain their configured behaviour.
+    """
+    target = resolve_reasoning_target(
+        client_provider=model_client_config.get("client_provider"),
+        api_base=model_client_config.get("api_base")
+        or model_client_config.get("base_url"),
+        model_name=model_client_config.get("model_name"),
+    )
+    return (
+        {"reasoning_effort": "low"}
+        if target is not None and target[0] == "deepseek_official"
+        else {}
+    )
+
+
 __all__ = [
+    "bounded_semantic_request_options",
     "build_reasoning_model_request_kwargs",
     "inject_dashscope_bailian_payload",
     "inject_deepseek_official_payload",
