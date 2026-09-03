@@ -39,6 +39,14 @@ silence in the physical observation. One PASS after one FAIL is not stability
 or causal-fix evidence. Task 1 remains open and Task 2 remains blocked. See the
 [B/long recovery smoke](../evidence/C019_B_LONG_RECOVERY_SMOKE_20260903.md).
 
+Subsequent Stop, Exit, immediate re-enable and spoken-barge checks established
+fast local fencing and zero observed late audio/unpresented-tail ACK, but also
+exposed visible expected-close misclassification. A capacity-eight deterministic
+reproduction then confirmed the intermittent post-PARK deadline defect that the
+older capacity-one test could not reach. The cumulative source, timing,
+lifecycle, artifact and non-claim summary is in the
+[Task-1 physical validation update](../evidence/C019_TASK1_PHYSICAL_VALIDATION_UPDATE_20260903.md).
+
 ## Hongxing Task assessment
 
 ### Task 1 — Complete C019 physical validation
