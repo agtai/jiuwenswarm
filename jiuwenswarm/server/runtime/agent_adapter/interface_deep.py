@@ -9361,6 +9361,9 @@ class JiuWenSwarmDeepAdapter:
             cancelled = False
             stream_exhausted = False
             has_streamed_content = False
+            terminal_output_observed = False
+            raw_event_count = 0
+            emitted_event_count = 0
             allowed_events = {
                 "chat.delta",
                 "chat.reasoning",
@@ -9415,10 +9418,20 @@ class JiuWenSwarmDeepAdapter:
                 await self._instance.send_input(
                     SendInputRequest(request_id=rid, inputs=dict(inputs), mode=None)
                 )
+                logger.info(
+                    "live_voice_agent_output_trace %s",
+                    {
+                        "stage": "formal_agent_input_sent",
+                        "request_id": rid,
+                        "session_id": session_id,
+                    },
+                )
                 async for raw_chunk in interaction_stream:
+                    raw_event_count += 1
                     if tool_capture is None:
                         raise RuntimeError("FORMAL_TOOL_EVENT_AUTHORITY_UNAVAILABLE")
                     for captured_event in tool_capture.drain():
+                        emitted_event_count += 1
                         yield captured_response(captured_event)
                     raw_event_type = getattr(raw_chunk, "type", None)
                     raw_event_type = getattr(raw_event_type, "value", raw_event_type)
@@ -9457,6 +9470,15 @@ class JiuWenSwarmDeepAdapter:
                     )
                     if parsed is None:
                         if controller_event_type == "task_completion":
+                            logger.info(
+                                "live_voice_agent_output_trace %s",
+                                {
+                                    "stage": "formal_completion_without_payload",
+                                    "request_id": rid,
+                                    "session_id": session_id,
+                                    "raw_event_count": raw_event_count,
+                                },
+                            )
                             continue
                         raise RuntimeError(
                             "FORMAL_EXECUTION_EVENT_UNSUPPORTED: "
@@ -9478,6 +9500,26 @@ class JiuWenSwarmDeepAdapter:
                         tool_capture.has_pending_results
                     ):
                         raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_INCOMPLETE")
+                    terminal_output_observed = terminal_output_observed or event_type in {
+                        "chat.final",
+                        "chat.error",
+                    }
+                    emitted_event_count += 1
+                    if emitted_event_count == 1 or event_type in {
+                        "chat.final",
+                        "chat.error",
+                    }:
+                        logger.info(
+                            "live_voice_agent_output_trace %s",
+                            {
+                                "stage": "formal_agent_event_emitted",
+                                "request_id": rid,
+                                "session_id": session_id,
+                                "raw_event_type": raw_event_type,
+                                "event_type": event_type,
+                                "emitted_event_count": emitted_event_count,
+                            },
+                        )
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
@@ -9497,7 +9539,21 @@ class JiuWenSwarmDeepAdapter:
                 finally:
                     tool_capture_released = True
                 for captured_event in remaining_tool_events:
+                    emitted_event_count += 1
                     yield captured_response(captured_event)
+                logger.info(
+                    "live_voice_agent_output_trace %s",
+                    {
+                        "stage": "formal_agent_stream_exhausted",
+                        "request_id": rid,
+                        "session_id": session_id,
+                        "raw_event_count": raw_event_count,
+                        "emitted_event_count": emitted_event_count,
+                        "terminal_output_observed": terminal_output_observed,
+                    },
+                )
+                if not terminal_output_observed:
+                    raise RuntimeError("FORMAL_EXECUTION_OUTPUT_INCOMPLETE")
                 stream_exhausted = True
             except asyncio.CancelledError:
                 cancelled = True

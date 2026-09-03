@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import time
 from collections import deque
@@ -41,6 +42,9 @@ from .latency_measurement import (
     emit_runtime_l0_milestone,
     resolve_runtime_l0_binding,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class AgentBridgeRuntimeViolation(ValueError):
@@ -904,6 +908,23 @@ class AgentBridgeRuntime:
                     )
                     expected_agent_seq += 1
                     agent_event_count += 1
+                    if agent_event_count == 1 or item.event_type in {
+                        "chat.final",
+                        "chat.error",
+                    }:
+                        logger.info(
+                            "live_voice_agent_output_trace %s",
+                            {
+                                "stage": "bridge_agent_event_received",
+                                "request_id": request.request_id,
+                                "response_id": request.response_ref.response_id,
+                                "response_generation": (
+                                    request.response_ref.response_generation
+                                ),
+                                "event_seq": item.seq,
+                                "event_type": item.event_type,
+                            },
+                        )
                     if (
                         measurement_binding is not None
                         and not first_delta_observed
@@ -1087,10 +1108,34 @@ class AgentBridgeRuntime:
                         terminal_outcome=terminal_outcome,
                     )
                 )
+            logger.info(
+                "live_voice_agent_output_trace %s",
+                {
+                    "stage": "bridge_stream_exhausted",
+                    "request_id": request.request_id,
+                    "response_id": request.response_ref.response_id,
+                    "response_generation": request.response_ref.response_generation,
+                    "agent_event_count": agent_event_count,
+                    "source_event_count": source_event_count,
+                    "progress_event_count": progress_event_count,
+                },
+            )
             closing_stream = stream
             stream = None
             await self._best_effort_close_adapter_stream(closing_stream)
         except Exception as error:
+            logger.error(
+                "live_voice_agent_output_trace %s",
+                {
+                    "stage": "bridge_stream_failed",
+                    "request_id": request.request_id,
+                    "response_id": request.response_ref.response_id,
+                    "response_generation": request.response_ref.response_generation,
+                    "agent_event_count": agent_event_count,
+                    "error_type": type(error).__name__,
+                    "error_reason": getattr(error, "reason", None),
+                },
+            )
             emit_measurement_failure()
             if not submission.completion.done():
                 submission.completion._set_exception(error)

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import math
 import threading
 from collections import deque
@@ -100,6 +101,9 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextEntry,
     FormalContextSnapshot,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 _MAX_NOTIFICATION_CONSUMER_ID_CHARS = 256
@@ -3189,6 +3193,19 @@ class AgentConversationRuntime:
         request = delivery.request
         event = delivery.event
         state = self._outputs.get(request.response_ref)
+        if event.seq == 0 or event.event_type in {"chat.final", "chat.error"}:
+            logger.info(
+                "live_voice_agent_output_trace %s",
+                {
+                    "stage": "conversation_agent_event_received",
+                    "request_id": request.request_id,
+                    "response_id": request.response_ref.response_id,
+                    "response_generation": request.response_ref.response_generation,
+                    "event_seq": event.seq,
+                    "event_type": event.event_type,
+                    "response_state_found": state is not None,
+                },
+            )
         if state is None:
             return
         presentations: list[
@@ -3429,9 +3446,29 @@ class AgentConversationRuntime:
                     error_reason=error_reason,
                 )
             )
+            if event.seq == 0 or event.event_type in {"chat.final", "chat.error"}:
+                logger.info(
+                    "live_voice_agent_output_trace %s",
+                    {
+                        "stage": "conversation_notification_published",
+                        "request_id": request.request_id,
+                        "response_id": request.response_ref.response_id,
+                        "response_generation": (
+                            request.response_ref.response_generation
+                        ),
+                        "event_seq": event.seq,
+                        "event_type": event.event_type,
+                        "presentation_unit_id": None,
+                        "error_reason": error_reason,
+                    },
+                )
             return
 
-        for presentation, presentation_text, delivery_mode in presentations:
+        for presentation_index, (
+            presentation,
+            presentation_text,
+            delivery_mode,
+        ) in enumerate(presentations):
             self._publish(
                 AgentConversationNotification(
                     kind="agent.output",
@@ -3445,6 +3482,25 @@ class AgentConversationRuntime:
                 ),
                 critical_key=("presentation", presentation.unit_id),
             )
+            if presentation_index in {0, len(presentations) - 1}:
+                logger.info(
+                    "live_voice_agent_output_trace %s",
+                    {
+                        "stage": "conversation_notification_published",
+                        "request_id": request.request_id,
+                        "response_id": request.response_ref.response_id,
+                        "response_generation": (
+                            request.response_ref.response_generation
+                        ),
+                        "event_seq": event.seq,
+                        "event_type": event.event_type,
+                        "presentation_count": len(presentations),
+                        "presentation_index": presentation_index,
+                        "presentation_unit_id": presentation.unit_id,
+                        "presentation_unit_seq": presentation.seq,
+                        "presentation_surface": presentation.surface.value,
+                    },
+                )
 
     async def _consume_progress(self, delivery: WorkProgressDelivery) -> None:
         request = delivery.request
@@ -3486,6 +3542,10 @@ class AgentConversationRuntime:
                 ConversationRuntimeViolation,
             ) as error:
                 error_reason = error.reason
+            if response_outcome is not TerminalOutcome.COMPLETED:
+                self._discarded_invalidated_presentations += (
+                    self._notifications.discard_presentation(request.response_ref)
+                )
             if request.response_ref.interaction_id in self._closing_interactions:
                 await self._close_interaction_after_terminal(
                     request.response_ref.interaction_id

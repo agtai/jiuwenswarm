@@ -481,6 +481,107 @@ async def test_formal_deep_seam_still_fails_closed_for_active_unsupported_event(
 
 
 @pytest.mark.asyncio
+async def test_formal_deep_seam_rejects_completion_without_terminal_output() -> None:
+    lease = OutputLease(
+        [
+            RawChunk(
+                "controller_output",
+                ControllerPayload(ControllerType("task_completion"), []),
+            )
+        ]
+    )
+    adapter = adapter_with(FormalInstance(lease))
+    request, inputs = formal_request()
+
+    with pytest.raises(
+        RuntimeError,
+        match="FORMAL_EXECUTION_OUTPUT_INCOMPLETE",
+    ):
+        async for _chunk in adapter.process_formal_live_voice_stream_impl(
+            request, inputs
+        ):
+            pass
+
+    assert lease.closed_with == [True]
+
+
+@pytest.mark.asyncio
+async def test_formal_deep_seam_keeps_short_answer_before_completion() -> None:
+    lease = OutputLease(
+        [
+            RawChunk("answer", {"output": {"output": "Paris."}}),
+            RawChunk(
+                "controller_output",
+                ControllerPayload(ControllerType("task_completion"), []),
+            ),
+        ]
+    )
+    adapter = adapter_with(FormalInstance(lease))
+    request, inputs = formal_request()
+
+    chunks = [
+        chunk
+        async for chunk in adapter.process_formal_live_voice_stream_impl(
+            request, inputs
+        )
+    ]
+
+    assert [chunk.payload for chunk in chunks] == [
+        {"event_type": "chat.final", "content": "Paris."}
+    ]
+    assert lease.closed_with == [False]
+
+
+@pytest.mark.asyncio
+async def test_formal_deep_seam_rejects_stream_truncated_after_delta() -> None:
+    lease = OutputLease(
+        [
+            RawChunk("delta", {"content": "Committed prefix. "}),
+            RawChunk(
+                "controller_output",
+                ControllerPayload(ControllerType("task_completion"), []),
+            ),
+        ]
+    )
+    adapter = adapter_with(FormalInstance(lease))
+    request, inputs = formal_request()
+    chunks = []
+
+    with pytest.raises(
+        RuntimeError,
+        match="FORMAL_EXECUTION_OUTPUT_INCOMPLETE",
+    ):
+        async for chunk in adapter.process_formal_live_voice_stream_impl(
+            request, inputs
+        ):
+            chunks.append(chunk)
+
+    assert [chunk.payload for chunk in chunks] == [
+        {"event_type": "chat.delta", "content": "Committed prefix. "}
+    ]
+    assert lease.closed_with == [True]
+
+
+@pytest.mark.asyncio
+async def test_formal_deep_seam_accepts_chat_error_as_terminal_output() -> None:
+    lease = OutputLease([RawChunk("error", {"error": "provider unavailable"})])
+    adapter = adapter_with(FormalInstance(lease))
+    request, inputs = formal_request()
+
+    chunks = [
+        chunk
+        async for chunk in adapter.process_formal_live_voice_stream_impl(
+            request, inputs
+        )
+    ]
+
+    assert [chunk.payload for chunk in chunks] == [
+        {"event_type": "chat.error", "error": "provider unavailable"}
+    ]
+    assert lease.closed_with == [False]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("raw_chunk", "expected_event_type"),
     [

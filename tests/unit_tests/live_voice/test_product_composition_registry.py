@@ -176,6 +176,9 @@ from jiuwenswarm.server.live_voice.task_core import AttemptState, TaskState
 from jiuwenswarm.server.live_voice.unified_committed_input import (
     SqliteUnifiedCommittedInputJournal,
 )
+from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+    FORMAL_APPEND_ONLY_DELTA_CAPABILITY,
+)
 from jiuwenswarm.server.live_voice.voice_task_bridge import (
     VoiceTaskBridgeViolation,
 )
@@ -363,6 +366,48 @@ class _BlockingFacade(_Facade):
             payload={"event_type": "chat.final", "content": "formal result"},
             is_complete=True,
         )
+
+
+class _FailingFacade(_Facade):
+    async def process_formal_live_voice_stream(self, execution):
+        async with self._calls_changed:
+            self.calls += 1
+            self.executions.append(execution)
+            self._calls_changed.notify_all()
+        raise RuntimeError("FORMAL_EXECUTION_OUTPUT_INCOMPLETE")
+        yield  # pragma: no cover - keep this an async generator
+
+
+class _TruncatedAppendOnlyFacade(_Facade):
+    def formal_live_voice_text_capabilities(self) -> tuple[str, ...]:
+        return (FORMAL_APPEND_ONLY_DELTA_CAPABILITY,)
+
+    async def process_formal_live_voice_stream(self, execution):
+        async with self._calls_changed:
+            self.calls += 1
+            self.executions.append(execution)
+            self._calls_changed.notify_all()
+        yield AgentResponseChunk(
+            request_id=execution.request_id,
+            channel_id=execution.channel_id,
+            payload={
+                "event_type": "chat.delta",
+                "content": "Committed prefix. ",
+                "text_stream_capability": FORMAL_APPEND_ONLY_DELTA_CAPABILITY,
+            },
+            is_complete=False,
+        )
+        yield AgentResponseChunk(
+            request_id=execution.request_id,
+            channel_id=execution.channel_id,
+            payload={
+                "event_type": "chat.delta",
+                "content": "Unfinished continuation",
+                "text_stream_capability": FORMAL_APPEND_ONLY_DELTA_CAPABILITY,
+            },
+            is_complete=False,
+        )
+        raise RuntimeError("FORMAL_EXECUTION_OUTPUT_INCOMPLETE")
 
 
 class _HistoryWriter:
@@ -12956,6 +13001,144 @@ async def test_p2_notification_batch_bounds_and_legacy_single_pull(
     )
     await legacy_registry.close_active_routes()
     await bounded_registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_publishes_failed_progress_when_agent_output_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    manager.agent = _FailingFacade()
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-p2-failed-output-activate",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    history = _HistoryWriter()
+    route.activation_lease._runtime._history_writer = history
+
+    submitted = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-failed-output",
+            turn_id="turn-failed-output",
+            response_id="response-failed-output",
+            committed_at=NOW,
+            text="valid committed input",
+        ),
+        request_id="request-p2-failed-output-submit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+    await _wait_for_p2_notifications(route, 3)
+
+    notifications = []
+    for sequence in range(1, 4):
+        polled = await registry.handle_p2_notification_next(
+            params=_p2_params(notification_sequence=sequence),
+            request_id=f"request-p2-failed-output-next-{sequence}",
+            session_id="session-product",
+        )
+        assert polled.ok is True
+        notifications.append(cast(dict[str, object], polled.payload["result"]))
+
+    terminal = next(
+        notification
+        for notification in notifications
+        if isinstance(notification["progress_event"], dict)
+        and cast(
+            dict[str, object],
+            cast(dict[str, object], notification["progress_event"])["payload"],
+        ).get("state")
+        == "terminal"
+    )
+    terminal_progress = cast(
+        dict[str, object],
+        cast(dict[str, object], terminal["progress_event"])["payload"],
+    )
+    assert terminal_progress["outcome"] == "failed"
+    assert terminal["kind"] == "work.progress"
+    assert terminal["agent_event"] is None
+    assert terminal["presentation_unit"] is None
+    assert route.activation_lease._runtime.snapshot().conversation.presentation.records == ()
+    assert history.assistants == []
+    assert manager.agent.calls == 1
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_fences_truncated_stream_after_authorized_prefix(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    manager.agent = _TruncatedAppendOnlyFacade()
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-p2-truncated-activate",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    history = _HistoryWriter()
+    route.activation_lease._runtime._history_writer = history
+
+    submitted = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-truncated",
+            turn_id="turn-truncated",
+            response_id="response-truncated",
+            committed_at=NOW,
+            text="valid committed input",
+        ),
+        request_id="request-p2-truncated-submit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+    await _wait_for_p2_notifications(route, 4)
+
+    notifications = []
+    for sequence in range(1, 5):
+        polled = await registry.handle_p2_notification_next(
+            params=_p2_params(notification_sequence=sequence),
+            request_id=f"request-p2-truncated-next-{sequence}",
+            session_id="session-product",
+        )
+        assert polled.ok is True
+        notifications.append(cast(dict[str, object], polled.payload["result"]))
+
+    assert not any(
+        isinstance(notification["presentation_unit"], dict)
+        for notification in notifications
+    )
+    terminal_progress = next(
+        cast(
+            dict[str, object],
+            cast(dict[str, object], notification["progress_event"])["payload"],
+        )
+        for notification in notifications
+        if isinstance(notification["progress_event"], dict)
+        and cast(
+            dict[str, object],
+            cast(dict[str, object], notification["progress_event"])["payload"],
+        ).get("state")
+        == "terminal"
+    )
+    assert terminal_progress["outcome"] == "failed"
+    presentation_records = (
+        route.activation_lease._runtime.snapshot().conversation.presentation.records
+    )
+    assert len(presentation_records) == 1
+    assert presentation_records[0].state.value == "invalidated"
+    assert history.assistants == []
+    assert manager.agent.calls == 1
+    await registry.close_active_routes()
 
 
 @pytest.mark.asyncio

@@ -8371,6 +8371,16 @@ class AgentServerProductCompositionRegistry:
                         "notification_kinds": ",".join(
                             str(item["kind"]) for item in serialized
                         ),
+                        "notification_request_ids": ",".join(
+                            str(item["request_id"]) for item in serialized
+                        ),
+                        "agent_event_types": ",".join(
+                            str(agent_event["event_type"])
+                            for item in serialized
+                            if isinstance(
+                                agent_event := item.get("agent_event"), dict
+                            )
+                        ),
                     },
                 ),
             )
