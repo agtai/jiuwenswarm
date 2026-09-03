@@ -575,31 +575,20 @@ async def test_non_task_semantics_remain_non_task_without_a_second_verdict(route
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("extra_target", [False, True])
-async def test_adjustment_review_can_resolve_constraint_but_cannot_change_target(extra_target):
-    commit = _commit("Apply the earlier requirement to task-alpha; leave the other task alone.")
+async def test_adjustment_keeps_resolved_requirement_without_replacing_it_with_chat():
+    commit = _commit("Do not include self-driving in the itinerary; depart tonight. Leave the customer draft unchanged.")
+    adjustment = "Exclude self-driving from the itinerary and prefer departure tonight; preserve all other requirements."
     initial = _output(commit, operation="task.adjust", target="task-alpha", target_kind="name",
-        arguments={"adjustment": "Apply the earlier requirement."})
-    calls = []
-    class Model:
-        async def invoke(self, **kwargs):
-            calls.append(kwargs)
-            value = initial if len(calls) == 1 else {"source_id": "prior", "adjustment": "Keep other requirements."}
-            if len(calls) == 2 and extra_target:
-                value["target"] = "task-beta"
-            return SimpleNamespace(content=json.dumps(value), tool_calls=[])
-    resolver = TaskSemanticResolver(_Catalog(Model()))
-    context = _context(commit, history=({"role": "user", "text": "Exclude rented vehicles.", "source_id": "prior"},))
-    if extra_target:
-        with pytest.raises(FormalTaskViolation) as caught:
-            await resolver.resolve(commit, context)
-        assert caught.value.reason == "SEMANTIC_OUTPUT_INVALID"
-    else:
-        decision = await resolver.resolve(commit, context)
-        assert decision.proposal.target == "task-alpha"
-        assert "rented vehicles" in decision.proposal.arguments["adjustment"]
-        assert TaskSemanticDecision.from_frozen_record(decision.frozen_record(), commit=commit).proposal == decision.proposal
-    assert len(calls) == 2 and all(call["tools"] == [] for call in calls)
+                      arguments={"adjustment": adjustment})
+    model = _Model(json.dumps(initial))
+    context = _context(commit, history=(
+        {"role": "user", "text": "Stop discussing driving; compare the other options.", "source_id": "prior"},
+    ))
+    decision = await TaskSemanticResolver(_Catalog(model)).resolve(commit, context)
+    assert decision.proposal.target == "task-alpha"
+    assert decision.proposal.arguments["adjustment"] == adjustment
+    assert TaskSemanticDecision.from_frozen_record(decision.frozen_record(), commit=commit).proposal == decision.proposal
+    assert len(model.calls) == 1 and model.calls[0]["tools"] == []
 
 
 class _Catalog:

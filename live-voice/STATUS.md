@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-03. This is the current judgement, capability/dependency model
+> Updated: 2026-09-04. This is the current judgement, capability/dependency model
 > and product work scope. Verify Git and the actual runtime before resuming.
 > Links are conditional evidence routes; they are not additional default reads.
 
@@ -61,10 +61,10 @@ repeat the old whole-project audit solely to resume a bounded task.
 | Realtime Media | Dedicated transport, registration, rotation and bounded P2 notification pull | Backpressure/load, loss/reordering/corruption/reconnect and truthful recovery diagnostics |
 | Conversation Runtime | Committed-input/generation fencing, Stop/Exit, playback/generation interruption, unanswered-input continuity, presentation/ACK ownership | Combined listening/notification/Task races on current source; no old audio revival or accidental detached-Task control |
 | Interaction Intelligence | Model-based semantic route; opt-in Native engine source imported; Cascade remains the default route | Native through the current semantic business path, endpoint/false-interruption evaluation, broader language/device support |
-| Agent Bridge and dialogue truth | Real Agent/file tools; current-turn/requirement context; grounded receipt/result narration | Correct calculations, feasibility, literal filenames, usable result paths and concise spoken answers; Task-truth isolation |
+| Agent Bridge and dialogue truth | Real Agent/file tools; current-turn/requirement context; canonical control/status presentation and scoped dialogue Task facts | Real-model/physical verification of current truth repair; correct calculations, feasibility, literal filenames, result paths and concise speech |
 | Task Control Core and Store | Canonical multi-Task authority, durable commands/replay, exact targets/CAS, bounded running-adjustment delivery | Current multi-Task/concurrency/restart integration and feature-complete operation coverage |
 | Executor & Durability | Direct D0/D2 v2 profiles, admission, reconciliation, sealed results and generic adjustment checkpoints; dedicated no-memory rail repair; retained v1 records cannot authorize new v2 dispatch | Required independent review and real result/control acceptance; scope broader file-tool access outside checkout separately. Additional Executor/D1 capability needs its own packet; no D1 or generic host-crash claim |
-| Voice–Task Bridge | Unified committed semantics, exact scoped targets, queries/mutations and requirement sources | Full language/domain generalization and retirement audit; pause/resume/provide-input retain truthful unsupported behavior until a real primitive is accepted |
+| Voice–Task Bridge | Unified committed semantics, direct exact local creation/modification consent, scoped targets and requirement sources | Current modification/query real-model acceptance; full generalization and retirement audit; pause/resume/provide-input remain unsupported until a real primitive is accepted |
 | Integrated Web product experience | Scoped Registry Tasks in the right panel, no bottom manual form; project-home Session allocation through microphone transcription; recovery/notification repairs | Stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh journey; projectless startup requires backend authority design |
 | Observability, benchmark and latency | Correlated stage timings and historical bounded warm L0 evidence; several avoidable waits repaired | Current speech-end → first-audible baseline; causal optimization, cold/device/network coverage and declared SLO. Historical percentiles are not current gains |
 | Automated verification and product acceptance | Focused module/regression checks and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative independent review and final human acceptance |
@@ -77,12 +77,12 @@ repeat the old whole-project audit solely to resume a bounded task.
 
 The product objective remains: final committed speech reaches the real
 JiuwenSwarm Agent/tools and authoritative Task results through one semantic
-implementation. The current bounded repair addresses contextual delegation after
-foreground analysis; broader business/audio gates remain open.
+implementation. The current bounded repair addresses direct modification and
+truthful application/status queries; broader business/audio gates remain open.
 
 - **Intended behavior:** model semantics propose; Bridge/Registry/Core validate
   exact scope, targets, capabilities, replay and effects. Clear authorized local
-  delegation creates one Task without another confirmation round. Analysis-only
+  delegation creates or modifies its exact Task without another confirmation round. Analysis-only
   input has zero Task effects. Internal semantic correction is not a user prompt.
 - **Continuity:** preserve unmodified user requirements and interrupted unanswered
   input. Do not infer Task identity from recency, convert old delegation into new
@@ -98,18 +98,24 @@ foreground analysis; broader business/audio gates remain open.
   one recorded real-path check when needed for the changed seam. Do not repeatedly
   run the full Demo or full suites to chase a PASS. Candidate-level requirements
   stay open until actually performed; self-review is not independent review.
-- **Contextual delegation repair:** D-111 removes the repeated local-create model
-  review. One valid semantic result proceeds through existing Registry authority;
-  bounded structural retry and the separate adjustment check remain. Scoped
-  Store/replay checks and real-model positive cases support this removal. Negative
-  probes still exposed dialogue/adjustment misroutes. The subsequent
+- **Single semantic decision:** D-111 removes the repeated local-create model
+  review; D-112 also removes the adjustment rewrite that replaced an explicit
+  Task instruction with an earlier foreground correction. Bounded structural
+  retry and existing Registry/Core authority remain. The earlier
   [real Demo audit](evidence/DEMO_SESSION_AUDIT_20260903.md) observed two created
   Tasks, but overlapping scope, unconsumed modifications/cancellation narrated
   as applied, wrong-target status, and an A2 request misrouted to terminal adjust.
-  Language generalization, truthful control and independent review remain open.
-  The bounded removal evidence is [here](evidence/SINGLE_PASS_DELEGATION_20260903.md).
-  This Tier-2 scope excludes artifact calculations/Agent quality and broader Demo
-  acceptance; it introduces no keyword classifier or public schema change.
+  Later A2 creation succeeded with the user's wording and is excluded from this
+  repair; this does not prove the complete A2 preservation journey.
+- **Direct modification and truth repair:** current exact local modifications
+  use existing durable consent and final authority reread without another user
+  confirmation. Queries distinguish pending/applied/rejected from canonical
+  Task/Attempt events; dialogue receives fresh scoped Task facts. Focused tests
+  and bounded configured-model probes pass, including ambiguous-target checks.
+  Full real execution/audio acceptance remains open. This source change is not
+  deployed, per the user's instruction.
+  See [bounded repair evidence](evidence/TASK_ADJUSTMENT_TRUTH_REPAIR_20260904.md).
+  Cancellation policy, capture capacity and artifact arithmetic are excluded.
 - **Current limits:** focused latency fixes have been authorized; performance
   redesign and optional buffer/Native experiments are not prerequisites for this
   repair packet. No new classifier/policy/schema, Executor/positive unsupported

@@ -2596,6 +2596,20 @@ class P3AuthenticatedComposition:
                 ErrorCode.PERMISSION_DENIED,
             )
 
+    def require_local_task_adjustment_capability(self, resolution: ProductionTaskResolution) -> None:
+        """Restrict direct modification consent to the existing project Executor."""
+        binding = resolution.confirmation_binding
+        if (resolution.operation != "task.adjust" or binding is None
+                or resolution.confirmation != "required"
+                or binding.capability_profile_digest not in {
+                    profile.digest_sha256()
+                    for profile in DirectProjectCodeExecutorAdapter.construction_capability_profiles(store_backed=True)
+                }):
+            raise FormalTaskViolation(
+                "LOCAL_TASK_ADJUSTMENT_CAPABILITY_REQUIRED",
+                "direct modification requires the exact project Executor", ErrorCode.PERMISSION_DENIED,
+            )
+
     def _resolve_retry_snapshot(
         self,
         *,
@@ -2967,6 +2981,58 @@ class P3AuthenticatedComposition:
                 for task in tasks:
                     self._require_exact_task_context(authority=authority, operation="task.list", task_id=task.task_id, now=now)
                 return authority.scope, tuple(tasks)
+            return await self._run_blocking(read)
+        finally:
+            await self._leave_operation()
+
+    async def read_task_control_snapshot(
+        self, *, bearer_token: object, session_id: str, task_id: str,
+        native_authority: NativeP3ActivationAuthority | None = None,
+        adjustment_id: str | None = None,
+    ) -> dict[str, object]:
+        """Authenticated presentation facts; never infer an adjustment from chat."""
+        await self._enter_operation()
+        try:
+            def read():
+                now = self._clock()
+                _principal, authority = self._resolve_production_input_authority(
+                    bearer_token=bearer_token, operation="task.status",
+                    session_id=session_id, now=now, require_clean=False,
+                    native_authority=native_authority,
+                )
+                task, attempt, _admission = self._core.store.task_read_snapshot(task_id, authority.scope)
+                self._require_exact_task_context(
+                    authority=authority, operation="task.status", task_id=task_id, now=now,
+                )
+                after_seq = max(-1, task.event_head - 64)
+                events = self._core.store.events(task_id, authority.scope, after_seq=after_seq,
+                                                attempt_id=task.attempt_id)
+                adjustments: dict[str, tuple[int, str]] = {}
+                requested_state = "unknown"
+                states = {"task.adjust_requested": "pending", "task.adjust_applied": "applied",
+                          "task.adjust_rejected": "rejected"}
+                for event in events:
+                    if event.seq > task.event_head or event.event_type not in states:
+                        continue
+                    command_id = event.details.get("command_id")
+                    if not isinstance(command_id, str):
+                        continue
+                    if adjustment_id is not None and command_id == adjustment_id:
+                        requested_state = states[event.event_type]
+                    if event.event_type == "task.adjust_requested":
+                        adjustments[command_id] = (event.seq, "pending")
+                    elif command_id in adjustments:
+                        adjustments[command_id] = (adjustments[command_id][0], states[event.event_type])
+                latest = max(adjustments.values(), default=None, key=lambda item: item[0])
+                return {
+                    "task_id": task.task_id, "attempt_id": task.attempt_id,
+                    "name": task.spec.name, "state": task.state.value,
+                    "outcome": None if task.outcome is None else task.outcome.value,
+                    "attempt_state": None if attempt is None else attempt.state.value,
+                    "event_head": task.event_head,
+                    "adjustment_state": latest[1] if latest else ("none" if after_seq == -1 else "unknown"),
+                    **({"requested_adjustment_state": requested_state} if adjustment_id is not None else {}),
+                }
             return await self._run_blocking(read)
         finally:
             await self._leave_operation()

@@ -182,6 +182,10 @@ async def control_with_confirmation(s, stem, operation, arguments=None, target=N
     proposed = await s.text(
         stem, f"Execute {operation} for the stated exact task and specification."
     )
+    if operation == "task.adjust":
+        assert proposed.ok and proposed.payload["result"]["status"] == "dispatched", proposed.payload
+        assert not await s.registry._semantic_continuity.pending(_scope())
+        return proposed.payload["result"]
     assert (
         proposed.ok
         and proposed.payload["result"]["reason"] == "TASK_CONFIRMATION_REQUIRED"
@@ -319,15 +323,11 @@ async def test_spoken_presentation_is_generic_and_does_not_remove_task_authority
     execution = s.manager.agent.executions[-1]
     prompt = json.loads(execution.prompt_content())
     assert prompt["presentation_contract"]["medium"] == "spoken_conversation"
-    assert (
-        "unless the user explicitly requests a detailed spoken"
-        in prompt["presentation_contract"]["required_behavior"]
-    )
-    assert "400" in prompt["presentation_contract"]["required_behavior"]
-    assert (
-        "Requested saved artifacts remain complete"
-        in prompt["presentation_contract"]["required_behavior"]
-    )
+    from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import FORMAL_VOICE_PRESENTATION_INSTRUCTIONS
+    assert prompt["presentation_contract"]["required_behavior"] == "Follow the formal spoken-conversation system instructions."
+    assert "unless the user explicitly requests a detailed spoken" in FORMAL_VOICE_PRESENTATION_INSTRUCTIONS
+    assert "200 Unicode characters" in FORMAL_VOICE_PRESENTATION_INSTRUCTIONS
+    assert "Requested saved artifacts remain complete" in FORMAL_VOICE_PRESENTATION_INSTRUCTIONS
     assert (
         prompt["committed_turn"]["text"]
         == "Analyse the project material and explain the essential findings."
@@ -799,6 +799,183 @@ async def present_next(s, sequence):
     raise AssertionError("No actual presentation unit")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settled_before_receipt", ["pending", "applied", "rejected"])
+async def test_direct_adjustment_and_queries_report_real_application_without_agent_claims(semantic_runtime, monkeypatch, settled_before_receipt):
+    s = semantic_runtime
+    a = (await control_with_confirmation(s, "truth-a", "task.create", {
+        "name": "设备核查", "instruction": "整理设备核查报告，不采购。",
+    }))["task_id"]
+    b = (await control_with_confirmation(s, "truth-b", "task.create", {
+        "name": "维护说明", "instruction": "整理维护说明，不发送。",
+    }))["task_id"]
+    core = s.harness.composition._core
+    await core.drain_outbox()
+    b_before = core.store.get_task(b, _scope())
+    spoken = []
+    original = s.registry._present_unified_text
+    async def present(**kwargs):
+        spoken.append(kwargs["text"])
+        return await original(**kwargs)
+    monkeypatch.setattr(s.registry, "_present_unified_text", present)
+    if settled_before_receipt != "pending":
+        if settled_before_receipt == "rejected":
+            from jiuwenswarm.server.live_voice.formal_task_models import TaskAdjustmentState
+            adjust = s.harness.executor.adjust
+            async def reject(item):
+                result = await adjust(item)
+                return replace(result, state=TaskAdjustmentState.REJECTED, reason="CONTROLLED_REJECTION")
+            monkeypatch.setattr(s.harness.executor, "adjust", reject)
+        read = s.harness.composition.read_task_control_snapshot
+        async def settle_then_read(**kwargs):
+            if kwargs.get("adjustment_id") is not None:
+                await core.drain_outbox()
+                await core.drain_inflight_adjustments()
+            return await read(**kwargs)
+        monkeypatch.setattr(s.harness.composition, "read_task_control_snapshot", settle_then_read)
+    assert (await s.registry.handle_p2_activate(params=p2_params(), request_id="truth-active", session_id="session-1", channel_id="web")).ok
+    adjustment = "检查方案不要安排更换设备，今晚先检查；维护说明不变。"
+    s.program = lambda data: model_output(data, operation="task.adjust", target=a, arguments={"adjustment": adjustment})
+    params = voice_final("truth-adjust", adjustment)
+    done = await s.registry.handle_unified_submit(params=params, request_id="truth-adjust", session_id="session-1", channel_id="web")
+    assert done.ok, done.payload
+    state_text = {"applied": "最近一次修改已应用。", "rejected": "最近一次修改未能应用。",
+                  "pending": "修改要求已提交，尚未确认应用。"}[settled_before_receipt]
+    assert spoken == ["“设备核查”：" + state_text]
+    assert not await s.registry._semantic_continuity.pending(_scope())
+    replay = await s.registry.handle_unified_submit(params=params, request_id="truth-adjust", session_id="session-1", channel_id="web")
+    assert replay.payload == done.payload and len(spoken) == 1
+    seq = await present_next(s, 0)
+    snapshot = await s.harness.composition.read_task_control_snapshot(bearer_token=TOKEN, session_id="session-1", task_id=a)
+    assert snapshot["adjustment_state"] == settled_before_receipt
+    s.program = lambda data: model_output(data, operation="task.status", target=a, arguments={"query_kind": "status"})
+    pending = await s.registry.handle_unified_submit(params=voice_final("truth-pending", "设备核查已经按要求改了吗？"), request_id="truth-pending", session_id="session-1", channel_id="web")
+    assert pending.ok, pending.payload
+    assert spoken[-1] == "“设备核查”正在执行。" + state_text
+    seq = await present_next(s, seq)
+    await core.drain_outbox()
+    await core.drain_inflight_adjustments()
+    assert len(s.harness.executor.adjustments) == 1
+    applied = await s.registry.handle_unified_submit(params=voice_final("truth-applied", "刚才的修改现在生效了吗？"), request_id="truth-applied", session_id="session-1", channel_id="web")
+    assert applied.ok, applied.payload
+    assert spoken[-1] == "“设备核查”正在执行。" + ("最近一次修改未能应用。" if settled_before_receipt == "rejected" else "最近一次修改已应用。")
+    assert core.store.get_task(b, _scope()) == b_before
+    assert s.manager.agent.calls == 0
+    assert not s.harness.executor.cancels
+    assert len([e for e in core.store.events(a, _scope()) if e.event_type == "task.adjust_requested"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", ["CONFLICT", "TIMEOUT", "INTERNAL"])
+async def test_failed_adjustment_presentation_distinguishes_rejection_from_unknown(semantic_runtime, monkeypatch, cause):
+    from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode
+    from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
+    from jiuwenswarm.server.live_voice.persistent_task_core import _failure
+    s = semantic_runtime
+    task_id = (await control_with_confirmation(s, "failure-create", "task.create", {
+        "name": "设备核查", "instruction": "核查设备，不采购。",
+    }))["task_id"]
+    core = s.harness.composition._core
+    await core.drain_outbox()
+    execute = core.execute
+    def fail(command, authorization, *, now, **kwargs):
+        if cause != "CONFLICT":
+            assert execute(command, authorization, now=now, **kwargs).ok
+        return _failure(command, FormalTaskViolation("CONTROLLED_FAILURE", "controlled failure", ErrorCode(cause)), observed_at=now)
+    monkeypatch.setattr(core, "execute", fail)
+    spoken = []
+    present = s.registry._present_unified_text
+    async def capture(**kwargs):
+        spoken.append(kwargs["text"])
+        return await present(**kwargs)
+    monkeypatch.setattr(s.registry, "_present_unified_text", capture)
+    assert (await s.registry.handle_p2_activate(params=p2_params(), request_id="failure-active", session_id="session-1", channel_id="web")).ok
+    s.program = lambda data: model_output(data, operation="task.adjust", target=task_id, arguments={"adjustment": "今晚仅检查。"})
+    params = voice_final("failure-adjust", "设备核查今晚只做检查。")
+    result = await s.registry.handle_unified_submit(params=params, request_id="failure-adjust", session_id="session-1", channel_id="web")
+    assert result.ok, result.payload
+    expected = "服务器已拒绝这次操作，没有执行该请求。" if cause == "CONFLICT" else "服务器尚未确认这次操作的结果，不能确定是否生效。"
+    assert spoken == [expected]
+    events = core.store.events(task_id, _scope())
+    assert len([event for event in events if event.event_type == "task.adjust_requested"]) == (0 if cause == "CONFLICT" else 1)
+    replay = await s.registry.handle_unified_submit(params=params, request_id="failure-adjust", session_id="session-1", channel_id="web")
+    assert replay.payload == result.payload and spoken == [expected]
+    assert core.store.events(task_id, _scope()) == events
+    assert not s.harness.executor.adjustments and not s.harness.executor.cancels
+    assert s.manager.agent.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("denial", ["capability", "feature-off", "terminal", "authority-drift"])
+async def test_direct_adjustment_retains_authority_and_state_fences(semantic_runtime, monkeypatch, denial):
+    s = semantic_runtime
+    task_id = (await control_with_confirmation(s, "guard-create", "task.create", {
+        "name": "Equipment", "instruction": "Check the equipment; do not purchase.",
+    }))["task_id"]
+    core = s.harness.composition._core
+    await core.drain_outbox()
+    if denial == "terminal":
+        await control_with_confirmation(s, "guard-cancel", "task.cancel", target=task_id)
+        await core.drain_outbox()
+        assert core.store.get_task(task_id, _scope()).state.value == "terminal"
+    elif denial == "capability":
+        monkeypatch.setattr(DirectProjectCodeExecutorAdapter, "construction_capability_profiles", lambda **kwargs: ())
+    elif denial == "feature-off":
+        s.registry._settings = replace(s.registry._settings, p3_mutation_enabled=False)
+    else:
+        issue = s.registry._issue_production_confirmation_continuation
+        async def drift(**kwargs):
+            token = await issue(**kwargs)
+            context = s.harness.authority.contexts["session-1"]
+            s.harness.authority.contexts["session-1"] = replace(context, revision_value="changed-before-consume")
+            return token
+        monkeypatch.setattr(s.registry, "_issue_production_confirmation_continuation", drift)
+    before = core.store.get_task(task_id, _scope())
+    events = core.store.events(task_id, _scope())
+    effects = (len(s.harness.executor.dispatches), len(s.harness.executor.cancels))
+    s.program = lambda data: model_output(data, operation="task.adjust", target=task_id,
+                                        arguments={"adjustment": "Only inspect tonight; no replacements."})
+    result = await s.text("guard-adjust", "Modify the equipment check to inspection only tonight.")
+    assert not result.ok or result.payload["result"]["status"] != "dispatched", result.payload
+    await core.drain_outbox()
+    assert core.store.get_task(task_id, _scope()) == before
+    assert core.store.events(task_id, _scope()) == events
+    assert effects == (len(s.harness.executor.dispatches), len(s.harness.executor.cancels))
+    assert s.harness.executor.adjustments == []
+    assert s.manager.agent.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_dialogue_receives_fresh_task_truth_instead_of_unproven_chat_acknowledgement(semantic_runtime):
+    s = semantic_runtime
+    a = (await control_with_confirmation(s, "dialogue-truth-a", "task.create", {
+        "name": "设备核查", "instruction": "核查设备，不采购。",
+    }))["task_id"]
+    await s.harness.composition._core.drain_outbox()
+    before = s.harness.composition._core.store.counts()
+    s.program = lambda data: model_output(data)
+    assert (await s.registry.handle_p2_activate(params=p2_params(), request_id="dialogue-truth-active", session_id="session-1", channel_id="web")).ok
+    result = await s.registry.handle_unified_submit(params=voice_final("dialogue-truth", "刚才的修改生效了吗？"), request_id="dialogue-truth", session_id="session-1", channel_id="web")
+    assert result.ok, result.payload
+    for _ in range(20):
+        if s.manager.agent.executions:
+            break
+        await asyncio.sleep(0)
+    execution = s.manager.agent.executions[-1]
+    truth = [json.loads(entry.content) for entry in execution.context.entries if entry.ref.source == "live_voice.task_truth"]
+    assert len(truth) == 1 and len(truth[0]["tasks"]) == 1
+    assert truth[0]["tasks"][0]["task_id"] == a
+    assert truth[0]["tasks"][0]["adjustment_state"] == "none"
+    assert s.harness.composition._core.store.counts() == before
+    assert s.harness.executor.adjustments == s.harness.executor.cancels == []
+    key = hashlib.sha256(execution.commit.canonical_bytes()).hexdigest()
+    assert key in s.registry._semantic_dialogue_commits
+    await present_next(s, 0)
+    history = await s.registry._semantic_continuity.history(_scope())
+    assert any(entry["role"] == "assistant" and entry["text"] == "formal result" for entry in history)
+    assert key not in s.registry._semantic_dialogue_commits
+
+
 def typed_final(stem, text):
     params = voice_final(stem, text)
     params.pop("gateway_voice_claim")
@@ -837,7 +1014,7 @@ async def test_unified_task_measurement_keeps_exact_receipt_and_admission_clock(
         target=task_id,
         reference=next(iter(data["context"]["pending"]), None),
     )
-    if operation != "task.status":
+    if operation == "task.cancel":
         proposed = await s.text(
             "l0-proposal", "Please perform the exact proposed control."
         )
@@ -1102,12 +1279,15 @@ async def test_task_notice_is_not_dialogue_and_control_ack_is_not_work_proposal(
     assert result.ok, result.payload
     execution = s.manager.agent.executions[-1]
     assert execution.allow_tools
-    assert [entry.content for entry in execution.context.entries] == [
+    assert [entry.content for entry in execution.context.entries if entry.ref.source != "live_voice.task_truth"] == [
         "Prepare the inventory audit in the background.",
         "formal result",
         "Confirm this exact task.",
         "formal result",
     ], "server notices contaminated the authorized conversation"
+    facts = [json.loads(entry.content) for entry in execution.context.entries if entry.ref.source == "live_voice.task_truth"]
+    assert len(facts) == 1 and len(facts[0]["tasks"]) == 1
+    assert facts[0]["tasks"][0]["adjustment_state"] == "none"
     assert s.harness.composition._core.store.counts()["tasks"] == 1
     assert not [
         entry
@@ -1523,6 +1703,7 @@ async def test_native_two_voice_turns_create_once_and_bind_real_origin(
     [
         ("task.status", {"query_kind": "status"}, "running"),
         ("task.status", {"query_kind": "status"}, "terminal"),
+        ("task.get", {"query_kind": "get"}, "running"),
         (
             "task.events",
             {"query_kind": "events", "after_seq": -1, "limit": 100},
@@ -1618,6 +1799,16 @@ async def test_native_exact_task_reads_use_authoritative_receipt_without_busines
         session_id="session-1",
     )
     assert result.ok and result.payload["result"]["route"] == "task", result.payload
+    if operation == "task.status":
+        assert s.manager.agent.calls == 0
+        snapshot = await s.harness.composition.read_task_control_snapshot(
+            bearer_token=TOKEN, session_id="session-1", task_id=a,
+        )
+        assert snapshot["state"] == state
+        assert snapshot["adjustment_state"] == ("applied" if state == "running" else "none")
+        assert core.store.counts() == counts and core.store.get_task(b, _scope()) == before
+        assert (s.harness.executor.dispatches, s.harness.executor.adjustments, s.harness.executor.cancels) == effects
+        return
     assert s.manager.agent.calls == 1
     execution = s.manager.agent.executions[-1]
     assert not execution.allow_tools
@@ -1647,6 +1838,8 @@ async def test_native_exact_task_reads_use_authoritative_receipt_without_busines
         assert payload["task"]["task_id"] == a and payload["task"]["state"] == state, (
             payload
         )
+        if operation == "task.get":
+            assert payload["task"]["spec"]["instruction"] == "核查设备，保存 equipment.md。"
         assert payload["task"]["outcome"] == (
             "completed" if state == "terminal" else None
         )

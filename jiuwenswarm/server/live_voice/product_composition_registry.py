@@ -8235,6 +8235,55 @@ class AgentServerProductCompositionRegistry:
                 l0_task_id, l0_attempt_id = self._formal_receipt_measurement_identity(
                     decision.proposal.operation, business_task_id, task_result_payload,
                 )
+            if decision.proposal.operation in {"task.adjust", "task.status"}:
+                from .task_control_presentation import adjustment_status_text, task_status_text, task_subject
+
+                chinese = self._is_chinese_voice_text(commit.text)
+                if not formal.ok:
+                    unknown = payload.get("code") not in {
+                        ErrorCode.INVALID_ARGUMENT.value, ErrorCode.UNSUPPORTED.value,
+                        ErrorCode.UNAUTHENTICATED.value, ErrorCode.PERMISSION_DENIED.value,
+                        ErrorCode.NOT_FOUND.value, ErrorCode.CONFLICT.value, ErrorCode.STALE.value,
+                        ErrorCode.CAPABILITY_UNAVAILABLE.value, ErrorCode.PROTOCOL_VIOLATION.value,
+                    }
+                    return await finish_text(
+                        ("服务器尚未确认这次操作的结果，不能确定是否生效。" if unknown else "服务器已拒绝这次操作，没有执行该请求。") if chinese
+                        else ("The server has not confirmed this operation's outcome; its effects are unknown." if unknown
+                              else "The server rejected this operation; the request was not executed.")
+                    )
+                if business_task_id is None:
+                    return await finish_text("服务器没有返回完整的任务回执，目前无法确认操作结果。" if chinese else "The server returned an incomplete Task receipt; the outcome is unconfirmed.")
+                adjustment_id = None
+                if decision.proposal.operation == "task.adjust" and payload.get("status") == TaskIntentDisposition.DISPATCHED.value:
+                    if (not isinstance(task_result_payload, Mapping)
+                            or task_result_payload.get("task_id") != business_task_id
+                            or not isinstance(task_result_payload.get("adjustment_id"), str)
+                            or task_result_payload.get("adjustment_state") not in {"pending", "applied", "rejected"}):
+                        raise FormalTaskViolation("SEMANTIC_CONTROL_RESULT_INVALID", "adjustment receipt is not exact", ErrorCode.RESULT_UNKNOWN)
+                    adjustment_id = task_result_payload["adjustment_id"]
+                facts = await self._p3_composition.read_task_control_snapshot(
+                    bearer_token=auth_token, session_id=retained.binding.session_id,
+                    task_id=business_task_id, native_authority=native_p3_authority,
+                    adjustment_id=adjustment_id,
+                )
+                subject = task_subject(facts, chinese=chinese)
+                if receipt["confirmation_required"]:
+                    return await finish_text(
+                        f"尚未修改{subject}。请确认是否按刚才的要求执行修改？" if chinese
+                        else f"{subject} has not been modified. Confirm the proposed adjustment?"
+                    )
+                if payload.get("status") != TaskIntentDisposition.DISPATCHED.value:
+                    return await finish_text(
+                        f"{subject}的这次操作没有成功回执，目前不能确认是否生效。" if chinese
+                        else f"There is no successful receipt for this operation on {subject}; its effects are unconfirmed."
+                    )
+                if decision.proposal.operation == "task.adjust":
+                    if task_result_payload.get("attempt_id") != facts["attempt_id"]:
+                        raise FormalTaskViolation("SEMANTIC_CONTROL_RESULT_INVALID", "adjustment receipt is not exact", ErrorCode.RESULT_UNKNOWN)
+                    return await finish_text(subject + ("：" if chinese else ": ") + adjustment_status_text(
+                        facts["requested_adjustment_state"], chinese=chinese,
+                    ))
+                return await finish_text(task_status_text(facts, chinese=chinese))
             if (
                 formal.ok
                 and decision.proposal.operation == "task.result"
@@ -8309,15 +8358,36 @@ class AgentServerProductCompositionRegistry:
                 }
             )
         else:
+            # Fresh exact Task facts supersede historical acknowledgements even
+            # when the semantic model routes a Task question to dialogue.
+            task_ids = [task["task_id"] for task in json.loads(decision._payload_json)["context"]["tasks"]]
+            if task_ids:
+                facts = [await self._p3_composition.read_task_control_snapshot(
+                    bearer_token=auth_token, session_id=retained.binding.session_id,
+                    task_id=task_id, native_authority=native_p3_authority,
+                ) for task_id in task_ids]
+                content = canonical_json_bytes({"tasks": facts}).decode("utf-8")
+                if len(content.encode("utf-8")) > _TASK_RESULT_CONTEXT_MAX_BYTES:
+                    raise FormalTaskViolation("TASK_TRUTH_CONTEXT_TOO_LARGE", "bounded Task truth context exceeded", ErrorCode.UNAVAILABLE)
+                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                ref = ContextRef.from_dict({
+                    "source": "live_voice.task_truth", "stable_id": f"task-truth:{digest}",
+                    "uri": f"live-voice-control://truth/{digest}",
+                    "revision": {"kind": "snapshot", "value": f"sha256:{digest}"},
+                    "scope": commit.scope.to_dict(), "permissions": ["agent.context.read"],
+                    "expires_at": None, "redaction": {"policy_id": "live_voice.task_truth.v1", "redacted": False, "fields": []},
+                    "extensions": {},
+                })
+                agent_context = FormalContextSnapshot(commit.scope, (*self._reserve_task_result_context_slot(context), FormalContextEntry(ref, content)))
+                agent_commit = TurnCommit.from_dict({**commit.to_dict(), "context_refs": [entry.ref.to_dict() for entry in agent_context.entries]})
             if len(self._semantic_dialogue_commits) >= self._PRODUCT_OPERATION_CAPACITY:
                 raise FormalTaskViolation(
                     "SEMANTIC_ANALYSIS_CAPACITY_EXCEEDED",
-                    "bounded analysis origins full",
-                    ErrorCode.UNAVAILABLE,
+                    "bounded analysis origins full", ErrorCode.UNAVAILABLE,
                 )
             self._semantic_dialogue_commits[
-                hashlib.sha256(commit.canonical_bytes()).hexdigest()
-            ] = commit
+                hashlib.sha256(agent_commit.canonical_bytes()).hexdigest()
+            ] = agent_commit
         if native_result_only:
             text = await retained.activation_lease.execute_native_delegate(
                 retained.binding,
@@ -13098,13 +13168,14 @@ class AgentServerProductCompositionRegistry:
             if (
                 pending is None
                 and semantic_decision is not None
-                and semantic_decision.requests_local_artifacts
+                and (semantic_decision.requests_local_artifacts
+                     or semantic_decision.proposal.operation == "task.adjust")
                 and commit is not None
                 and source in {"voice", "text"}
                 and resolution.outcome is ProductionTaskPolicyOutcome.PROPOSED
             ):
-                # D-109: explicit local delegation is consent for this exact
-                # create, not a made-up second utterance or a policy bypass.
+                # Current explicit local creation/modification supplies consent
+                # for this exact operation, not a fabricated second utterance.
                 # Retain/consume the normal durable, origin-bound claim, then
                 # use the same final authority reread as a two-turn confirmation.
                 if (
@@ -13113,7 +13184,8 @@ class AgentServerProductCompositionRegistry:
                     or resolution.origin_binding is None
                     or resolution.origin_binding.semantic_context_binding
                     != semantic_decision.origin_context_binding
-                    or resolution.operation != "task.create"
+                    or resolution.operation not in {"task.create", "task.adjust"}
+                    or resolution.operation != semantic_decision.proposal.operation
                     or dict(resolution.arguments) != dict(semantic_decision.proposal.arguments)
                 ):
                     raise FormalTaskViolation(
@@ -13121,7 +13193,10 @@ class AgentServerProductCompositionRegistry:
                         "local delegation lost its exact committed specification",
                         ErrorCode.PERMISSION_DENIED,
                     )
-                self._p3_composition.require_local_artifact_delegation_capability(resolution)
+                if resolution.operation == "task.create":
+                    self._p3_composition.require_local_artifact_delegation_capability(resolution)
+                else:
+                    self._p3_composition.require_local_task_adjustment_capability(resolution)
                 token = await self._issue_production_confirmation_continuation(
                     clean=clean, request_id=request_id, proposal=proposal,
                     resolution=resolution, commit=commit, authority=authority,

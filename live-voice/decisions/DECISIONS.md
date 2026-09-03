@@ -1767,3 +1767,35 @@
   response now needs one model call; end-to-end latency and general language
   accuracy require their own evidence. Observed unrelated dialogue/adjustment
   misroutes remain recorded defects, not reasons to restore a default second vote.
+
+## D-112 Direct local Task adjustment and authoritative application status
+
+- Date: 2026-09-04. The user rejects an extra confirmation for an explicit Task
+  modification and authorizes repairing lost requirements and false application
+  claims. An unambiguous current local modification supplies consent for the
+  exact task.adjust. This extends D-109 only for the existing project Executor;
+  Registry still binds the current commit, scoped target, specification and
+  capability, consumes the durable confirmation once, and rereads authority.
+  Ambiguity, stale authority, unsupported capability and terminal immutability
+  remain enforced. Cancellation and other mutation policies are unchanged.
+- The first semantic decision owns the complete modification. Remove D-111's
+  retained adjustment rewrite: observed rewriting selected a prior foreground
+  discussion correction instead of the current deliverable instruction. Preserve
+  bounded structural retry, frozen replay and ordinary authority validation.
+  No new lexical classifier, target-name heuristic or business answer is added.
+- Prompt field order follows the decision dependency: route and target precede
+  operation arguments. Alphabetized output guidance encouraged constructing an
+  edit before choosing clarification. Schema field sets and validation remain
+  unchanged. Task capability/state cannot resolve an unspecified user target.
+- Read-only progress/application questions use existing Task queries. Integrated
+  control/status wording is derived from exact receipts and authenticated
+  Task/Attempt/events, distinguishing pending, applied, rejected and unknown.
+  A bounded snapshot whose older request is unavailable must report unknown.
+  Fresh scoped Task facts also ground ordinary dialogue; old assistant claims
+  are not execution evidence. This adds no public schema or Store migration.
+- Direct consent is Tier 3; semantic continuity and presentation are Tier 2.
+  A2 is excluded following the user's successful creation report, as are capture
+  capacity, artifact arithmetic, Provider configuration and remote updates.
+  The user's latest instruction explicitly excludes restarting or redeploying
+  services for this repair. Source verification is separate from real-model,
+  microphone/speaker and full Demo acceptance.
