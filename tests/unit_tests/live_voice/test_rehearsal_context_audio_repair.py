@@ -9,6 +9,7 @@ from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
 from jiuwenswarm.server.live_voice.product_composition_registry import AgentServerProductCompositionRegistry
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextEntry, FormalContextSnapshot, finalize_spoken_answer,
+    spoken_revision_reason, spoken_revision_request_options,
 )
 
 
@@ -60,8 +61,35 @@ async def test_short_dialogue_skips_revision_and_bad_revision_does_not_lose_answ
     model = SimpleNamespace(invoke=invoke)
     assert await finalize_spoken_answer(model, envelope="q", candidate="answer", tool_results=[]) == "answer"
     assert not calls
+    # A short answer with tool results but nothing to recompute is already speakable.
     assert await finalize_spoken_answer(model, envelope="q", candidate="answer", tool_results=[{}]) == "answer"
+    assert not calls
+    # Numbers backed by tool results still go through the bounded verification.
+    assert await finalize_spoken_answer(model, envelope="q", candidate="共 3 天", tool_results=[{}]) == "共 3 天"
     assert len(calls) == 1
+
+
+def test_spoken_revision_reason_only_for_length_or_tool_backed_arithmetic():
+    assert spoken_revision_reason("x" * 200, []) is None
+    assert spoken_revision_reason("x" * 201, []) == "length"
+    assert spoken_revision_reason("工作区干净", [{"content": "## master"}]) is None
+    assert spoken_revision_reason("耗时 12 分钟", [{"content": "log"}]) == "arithmetic"
+    assert spoken_revision_reason("x" * 201, [{"content": "log"}]) == "length"
+
+
+def test_spoken_revision_reasoning_only_on_arithmetic_path(monkeypatch):
+    from jiuwenswarm.common import reasoning_injector
+
+    monkeypatch.setattr(
+        reasoning_injector, "bounded_semantic_request_options",
+        lambda client, config: {"extra_body": {"thinking": {"type": "disabled"}}},
+    )
+    model = SimpleNamespace(model_client_config=SimpleNamespace(model_dump=lambda: {}), model_config=None)
+    assert spoken_revision_request_options(model, "length") == {"extra_body": {"thinking": {"type": "disabled"}}}
+    arithmetic = spoken_revision_request_options(model, "arithmetic")
+    assert arithmetic["extra_body"]["thinking"] == {"type": "enabled"}
+    assert arithmetic["reasoning_effort"] == "low"
+    assert spoken_revision_request_options(SimpleNamespace(), "length") == {}
 
 
 def test_observability_uses_installed_setup_exports(monkeypatch):
