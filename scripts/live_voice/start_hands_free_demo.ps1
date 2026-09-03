@@ -5,7 +5,8 @@ param(
     [ValidateSet(
         'codex/live-voice-generation-interruption-realtime-adaptation',
         'hx/0812_live_voice_w3',
-        'hx/0823_generation_interruption'
+        'hx/0823_generation_interruption',
+        'hx/0903_live_voice_latency'
     )]
     [string]$ExpectedSourceBranch = 'hx/0812_live_voice_w3',
     [switch]$GenerationInterruption,
