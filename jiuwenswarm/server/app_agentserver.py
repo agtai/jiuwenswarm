@@ -38,6 +38,7 @@ from jiuwenswarm.common.media_capability_config import (
     migrate_media_capability_switches,
 )
 from jiuwenswarm.common.utils import (
+    mcp_builtins_seed_outdated,
     apply_free_search_runtime_defaults,
     ensure_config_migrated_from_template,
     ensure_default_builtin_skills,
@@ -62,8 +63,9 @@ _mcp_builtins_dir = _new_workspace / "mcp" / "mcp_builtins"
 config_missing = not _config_file.exists()
 workspace_migration_needed = _old_workspace.exists() and not _new_workspace.exists()
 mcp_builtins_missing = not _mcp_builtins_dir.is_dir()
+mcp_builtins_outdated = mcp_builtins_seed_outdated(_mcp_builtins_dir)
 
-if config_missing or workspace_migration_needed or mcp_builtins_missing:
+if config_missing or workspace_migration_needed or mcp_builtins_missing or mcp_builtins_outdated:
     prepare_workspace(overwrite=False)
 
 # 每次启动合并模板新增配置项（保留用户已有值）

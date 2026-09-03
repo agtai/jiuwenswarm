@@ -103,6 +103,12 @@ harmony = [
 ]
 a2a = ["a2a-sdk[http-server]==1.0.0"]
 ssh = ["asyncssh>=2.14.0,<2.24"]
+# 云文档协同（co-scribe）。可选：不装这两个包时 clouddoc.enabled 会在启动期
+# 被判为不可用并跳过,不影响其余功能。
+clouddoc = [
+    "google-api-python-client>=2.190.0",
+    "google-auth>=2.40.0",
+]
 desktop = ["pywebview>=5.4,<7"]
 dev = ["pyinstaller>=6.0.0", "pywebview>=5.4,<7"]
 tui = ["workswarm-tui==0.2.5.beta1"]  # build-config: tui-dependency
@@ -124,6 +130,7 @@ test = [
 ]
 
 [project.scripts]
+co-scribe-mcp = "jiuwenswarm.mcp_export.co_scribe_server:main"
 jiuwenswarm = "jiuwenswarm.channels.cli.main:main"
 jiuwenswarm-process = "jiuwenswarm.channels.process_cli.main:main"
 jiuwenswarm-app = "jiuwenswarm.app:main"

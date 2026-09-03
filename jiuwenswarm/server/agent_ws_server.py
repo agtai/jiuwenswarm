@@ -2805,7 +2805,22 @@ class AgentWebSocketServer:
         heartbeat_task: asyncio.Task | None = None
 
         async def _heartbeat_loop() -> None:
-            """后台心跳任务：在空闲期间定期发送 keepalive chunk."""
+            """后台心跳任务：在空闲期间定期发送 keepalive chunk.
+
+            The loop is also the idle watchdog. The adapter-side wall-clock ceiling
+            only bounds a stream that is already yielding chunks; a stream stuck
+            *before* its first chunk never reaches that loop, the ``async for`` below
+            never exits, and this heartbeat would carry a dead request forever -- the
+            longest measured instance kept a gateway warning firing every ten seconds
+            for nine hours. The heartbeat already counts idle time, so the cap lives
+            here: idle past the same configured ceiling cancels the host task, whose
+            ``finally`` runs the ordinary cleanup path that a user cancel exercises.
+            """
+            from jiuwenswarm.server.runtime.agent_adapter.interface import (
+                _stream_turn_ceiling,
+            )
+
+            idle_seconds = 0.0
             try:
                 while True:
                     # 等待心跳间隔，如果期间有真实 chunk 发送则 heartbeat_event 被设置，重置等待
@@ -2816,7 +2831,21 @@ class AgentWebSocketServer:
                         )
                         # 有真实 chunk 发送，重置 event 继续等待
                         heartbeat_event.clear()
+                        idle_seconds = 0.0
                     except asyncio.TimeoutError:
+                        idle_seconds += _STREAM_HEARTBEAT_INTERVAL_SECONDS
+                        ceiling = _stream_turn_ceiling()
+                        if idle_seconds >= ceiling:
+                            logger.error(
+                                "[AgentWebSocketServer] 流式请求空闲超过上限 %.0fs，"
+                                "终止宿主任务: request_id=%s",
+                                ceiling,
+                                request.request_id,
+                            )
+                            stream_stop_event.set()
+                            if current_task is not None and not current_task.done():
+                                current_task.cancel()
+                            return
                         # 超时：空闲超过心跳间隔，发送 keepalive chunk
                         heartbeat_chunk = AgentResponseChunk(
                             request_id=request.request_id,

@@ -20,3 +20,5 @@ export { useSubagentStore } from './subagentStore';
 export type { SubagentRuntime } from './subagentStore';
 export type { SidebarCronJob } from './cronStore';
 export type { HarnessStageInfo, HarnessStageStatus } from './harnessStore';
+export { useDocWorkbenchStore } from './docWorkbenchStore';
+export type { WorkbenchTab, RailTab } from './docWorkbenchStore';

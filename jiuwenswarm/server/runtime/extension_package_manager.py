@@ -173,6 +173,19 @@ def _read_readme_details(pkg_dir: Path) -> str:
         return ""
 
 
+def _read_readme_details_en(pkg_dir: Path) -> str:
+    """Return README_EN.md text, or empty string. The zh/en README pair follows
+    the *_EN.md convention the workspace templates already use; a package with
+    only README.md shows that text in every UI language, as before."""
+    readme = pkg_dir / "README_EN.md"
+    if not readme.is_file():
+        return ""
+    try:
+        return readme.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
 def _parse_skill_frontmatter(skill_md: Path) -> dict[str, Any]:
     """Parse SKILL.md YAML frontmatter for name/description (best-effort)."""
     try:
@@ -503,6 +516,7 @@ def _build_show_card(
         "avatar": _resolve_package_avatar(pkg_dir, manifest),
         "version": version if isinstance(version, str) else "",
         "details": details,
+        "details_en": _read_readme_details_en(pkg_dir),
         "tags": tags if isinstance(tags, list) else [],
         "skills": _map_skills(pkg_dir, manifest),
         "tools": _map_class_entries(manifest, "tools"),
@@ -1648,6 +1662,11 @@ def uninstall_equipment_with_notice(kind: str, params: dict) -> dict[str, Any]:
     package_id = _lifecycle_package_id(params, kind_label)
     connectors = manifest_connector_names(kind, package_id)
     uninstall_fn(params)
+    if kind_label == "plugin" and package_id == "co-scribe":
+        return {"notice": (
+            "Co-Scribe 已停用：云文档界面与工具随之隐藏，watch 授权停止生效、"
+            "无人值守停止处理。连接配置与回执历史保留在本机，重新安装即恢复。"
+        )}
     if connectors:
         return {"notice": _CONNECTOR_UNINSTALL_NOTICE}
     return {}
@@ -1691,6 +1710,29 @@ def read_agent_group_file(name: str, rel_path: str) -> dict:
     if resolved is None:
         raise ValueError(f"agent_group not found: {name!r}")
     pkg_dir, _ = resolved
+    rel = str(rel_path or "").strip().replace("\\", "/")
+    if not _is_previewable_file(rel):
+        raise ValueError(f"file not previewable: {rel}")
+    full_path = _reject_preview_path_symlink(pkg_dir, rel)
+    size = full_path.stat().st_size
+    if size > _MAX_PREVIEW_FILE_BYTES:
+        raise ValueError(f"file too large: {rel} ({size} bytes)")
+    try:
+        content = full_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        content = f"[二进制文件，大小 {size} bytes]"
+    return {"path": rel, "content": content}
+
+
+def list_plugin_package_files(name: str) -> list[dict]:
+    """Return the previewable file tree for one plugin package."""
+    pkg_dir = resolve_plugin_dir(name)
+    return _build_file_tree(pkg_dir, pkg_dir)
+
+
+def read_plugin_package_file(name: str, rel_path: str) -> dict:
+    """Read one previewable file from a plugin package."""
+    pkg_dir = resolve_plugin_dir(name)
     rel = str(rel_path or "").strip().replace("\\", "/")
     if not _is_previewable_file(rel):
         raise ValueError(f"file not previewable: {rel}")
@@ -2271,6 +2313,29 @@ def install_agent_group(params: dict) -> None:
     )
 
 
+def _co_scribe_lifecycle(installed: bool) -> None:
+    """The co-scribe plugin's install state drives the deployment's cloud-doc
+    feature (the 乙 plan): install turns it on in mandate mode, uninstall turns
+    it off. Connections, watches and the receipt ledger stay on disk either
+    way -- reinstalling finds them where they were. The UI reads the same flag
+    and reveals or hides the Settings module and the Docs panel accordingly."""
+    from jiuwenswarm.common.config import update_config
+
+    def mutate(data: dict) -> dict:
+        section = data.setdefault("clouddoc", {})
+        section["enabled"] = installed
+        if installed and str(section.get("mode") or "").strip().lower() not in (
+            "mandate", "recorded", "direct"
+        ):
+            section["mode"] = "mandate"
+        return data
+
+    try:
+        update_config(mutate)
+    except Exception:
+        logger.exception("[co-scribe] feature flag update failed")
+
+
 def install_plugin_package(params: dict) -> None:
     """Install a plugin package."""
     package_id = _lifecycle_package_id(params, "plugin")
@@ -2281,11 +2346,13 @@ def install_plugin_package(params: dict) -> None:
         package_type="plugin",
         is_plugin=True,
     )
+    if package_id == "co-scribe":
+        _co_scribe_lifecycle(True)
 
 
 def _locate_user_package_dir(
-    package_id: str, *, kind: str, kind_label: str
-) -> Path:
+    package_id: str, *, kind: str, kind_label: str, allow_missing: bool = False
+) -> Path | None:
     local_dir = _local_root(kind) / package_id
     built_in_dir = _built_in_root(kind) / package_id
     local_exists = local_dir.is_dir()
@@ -2298,6 +2365,8 @@ def _locate_user_package_dir(
         return local_dir
     if built_in_exists:
         return built_in_dir
+    if allow_missing:
+        return None
     raise ValueError(f"{kind_label} package not found: {package_id}")
 
 
@@ -2315,12 +2384,20 @@ def _rmtree(path: Path, *, retries: int = 6, delay: float = 0.5) -> None:
 
 
 def uninstall_agent_template(params: dict) -> None:
-    """Uninstall an expert package."""
+    """Uninstall an expert package.
+
+    Uninstall converges: when the marketplace record points at a workspace
+    directory that no longer exists (drift, manual removal), the record alone
+    is cleared -- "not installed" is the state the caller asked for, and it
+    must be reachable from a broken one. The local/built_in conflict still
+    raises: that one needs a human decision, not a silent pick."""
     package_id = _lifecycle_package_id(params, "agent_template")
     pkg_dir = _locate_user_package_dir(
-        package_id, kind=_AGENT_TEMPLATE_KIND, kind_label="agent_template"
+        package_id, kind=_AGENT_TEMPLATE_KIND, kind_label="agent_template",
+        allow_missing=True,
     )
-    _rmtree(pkg_dir)
+    if pkg_dir is not None:
+        _rmtree(pkg_dir)
     remove_agent_template_marketplace_entry(package_id)
 
 
@@ -2331,8 +2408,10 @@ def uninstall_agent_group(params: dict) -> None:
         package_id,
         kind=_AGENT_GROUP_KIND,
         kind_label="agent_group",
+        allow_missing=True,
     )
-    _rmtree(pkg_dir)
+    if pkg_dir is not None:
+        _rmtree(pkg_dir)
     remove_agent_group_marketplace_entry(package_id)
 
 
@@ -2340,10 +2419,16 @@ def uninstall_plugin_package(params: dict) -> None:
     """Uninstall a plugin package."""
     package_id = _lifecycle_package_id(params, "plugin")
     pkg_dir = _locate_user_package_dir(
-        package_id, kind=_PLUGIN_PACKAGE_KIND, kind_label="plugin"
+        package_id, kind=_PLUGIN_PACKAGE_KIND, kind_label="plugin",
+        allow_missing=True,
     )
-    _rmtree(pkg_dir)
-    remove_plugin_marketplace_entry(package_id)
+    if pkg_dir is None:
+        remove_plugin_marketplace_entry(package_id)
+    else:
+        _rmtree(pkg_dir)
+        remove_plugin_marketplace_entry(package_id)
+    if package_id == "co-scribe":
+        _co_scribe_lifecycle(False)
 
 
 def is_agent_template_installed(package_id: str) -> bool:

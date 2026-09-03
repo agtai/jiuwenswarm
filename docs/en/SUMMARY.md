@@ -37,6 +37,7 @@
   - [Agent & workspace](Agent.md)
   - [Session management](Session.md)
   - [Browser tools](Browser.md)
+  - [Cloud-document co-editing](CloudDoc.md)
   - [MCP Configuration](MCPConfiguration.md)
   - [Packaging desktop executables](PackExeGuide.md)
   - [ACP Plugin Usage](ACP_Client_Config.md)
