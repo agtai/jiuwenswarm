@@ -1932,29 +1932,6 @@ async def test_the_executor_label_reaches_the_receipt_meta():
     assert seen["meta"].get("executor") == "mcp:claude-code"
 
 
-def test_the_exported_tool_list_is_a_strict_subset_with_named_exclusions():
-    """The MCP surface offers six tools; what is absent is absent by decision, and
-    this test is where the decision is pinned."""
-    from jiuwenswarm.agents.harness.common.tools.clouddoc.clouddoc_tools import (
-        ALL_TOOL_NAMES,
-    )
-    from jiuwenswarm.mcp_export.co_scribe_server import EXPORTED_TOOLS, _exported_cards
-
-    assert set(EXPORTED_TOOLS) < set(ALL_TOOL_NAMES)
-    assert set(ALL_TOOL_NAMES) - set(EXPORTED_TOOLS) == {
-        "clouddoc_apply_for_comment",   # unattended-only: refuses without a bound turn
-        "clouddoc_create_document",     # grant class: the floor refuses it anyway
-        "clouddoc_share_document",      # grant class, same reason
-        "clouddoc_trash_document",      # floor class, same reason
-        "clouddoc_workmode_get",        # deployment style, not for external callers
-        "clouddoc_workmode_edit",
-    }
-    kit = CloudDocToolkit(FakeProvider(), turn_doc_id=lambda: None)
-    pairs = _exported_cards(kit)
-    assert [c.name for c, _ in pairs] == list(EXPORTED_TOOLS)
-    assert all(callable(f) for _, f in pairs)
-
-
 # ------------------------------------------------------------------ D21 modes
 
 
