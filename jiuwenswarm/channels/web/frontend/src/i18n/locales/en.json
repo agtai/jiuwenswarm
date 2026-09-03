@@ -2131,6 +2131,9 @@
     "errorPrefix": "Error: {{message}}"
   },
   "liveVoice": {
+    "startingSession": "Starting voice…",
+    "sessionStartFailed": "Could not start the voice session. Please try again.",
+    "sessionProjectRequired": "Live Voice currently requires a project. Switch to Code and select an authorized project, then start voice.",
     "label": "Live Voice",
     "experimental": "Experimental",
     "enable": "Enable Live Voice",
@@ -2142,9 +2145,24 @@
     "transcriptPlaceholder": "Your speech will appear here",
     "retryListening": "Listen again",
     "formal": {
+      "recentTasks": {
+        "refresh": "Refresh",
+        "unavailable": "Background tasks cannot be refreshed right now",
+        "result": "Task result",
+        "resultPending": "The result is not ready yet",
+        "steps": "Current conversation steps",
+        "states": {
+          "waiting": "Waiting", "running": "Running", "completed": "Completed", "cancelled": "Cancelled", "failed": "Failed",
+          "accepted": "Accepted", "queued": "Queued", "blocked": "Waiting for input", "decision_required": "Decision required",
+          "interrupted": "Interrupted", "unknown": "Unknown", "pending": "Waiting", "in_progress": "Running"
+        }
+      },
       "routeLabel": "P1 · Gateway Speech · formal",
       "editorLabel": "Recognized speech",
       "recoveryFailed": "Voice connection recovery failed",
+      "replacementRecognitionFailed": "The previous answer was interrupted, but the new question could not be recognized. Please say it again.",
+      "processingListening": "Processing — you can interrupt",
+      "preparingAudio": "Preparing audio playback",
       "recoveryFailedWithReason": "Voice recovery failed (phase: {{phase}}, reason: {{reason}})",
       "interruptionDegraded": "Interruption is unavailable for this response; audio is preserved and listening will restart (reason: {{reason}})",
       "recoveryRetryingWithContext": "Recovering ({{seam}}; correlation: {{correlationId}}; generation: {{generation}}; reason: {{reason}})",
@@ -2210,6 +2228,7 @@
         "priority": "Admission priority",
         "issue": "Issue control",
         "confirm": "Confirm exact control",
+        "recover": "Recover original operation",
         "confirmationPending": "Confirmation pending: the current form has not been applied. Select “Confirm exact control” and rely on Applied plus the authoritative Task state above.",
         "command": "Command",
         "request": "Request",
@@ -2241,7 +2260,7 @@
     },
     "integrated": {
       "title": "Live Voice diagnostics",
-      "shellOnly": "Hands-free Live Voice submits authoritative final speech once, routes dialogue and the current background task on the server, and resumes listening after presentation.",
+      "shellOnly": "Hands-free Live Voice submits authoritative final speech once, interprets dialogue and exact Task references through one server-side semantic route, and resumes listening after presentation.",
       "routes": "P1 / P2 / P3alpha route selection",
       "platform": "Chrome and Web diagnostics",
       "refresh": "Refresh Web diagnostics",
@@ -2377,7 +2396,7 @@
         }
       },
       "safetyTitle": "Real side effects:",
-      "safetyDisclosure": "Executor JiuwenSwarm Code Agent; fixed project-bound project_code_pipeline; the saved project is the only execution root, and all shell, test, Git, and remote commands are blocked. Live Voice interrupt/exit only stops voice feedback and does not cancel the current background task. Production cancellation keeps its confirmation policy; an explicitly authorized Demo policy may bypass that confirmation without bypassing scope, idempotency, target binding, or mutation authority. Refresh restores the current task only from the authoritative Task Store.",
+      "safetyDisclosure": "Executor JiuwenSwarm Code Agent; the registered project is the execution root. Voice interruption and Exit do not cancel background Tasks. Task operations require normal scope, capability, exact-target, idempotency and confirmation checks. Refresh reads authoritative Task Store state; no Demo confirmation bypass is available.",
       "contextIsolatedTitle": "Task command isolated",
       "contextIsolated": "Command {{commandId}} still has an unverified request or result, but the session or project context changed. To prevent duplicate side effects, other contexts will not retry it. Return to the original session and project to continue reconciliation.",
       "isolatedResult": "This result belongs to the isolated original context and was not merged into the current context: {{detail}}",

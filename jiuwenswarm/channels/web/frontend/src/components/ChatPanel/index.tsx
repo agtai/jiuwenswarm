@@ -17,9 +17,9 @@ import { ContextCompressionLines } from './MessageItem';
 import { InputArea, type InputAreaHandle } from './InputArea';
 import {
   FormalProductLiveVoiceDemoBar,
+  formalProductVoiceActivity,
   LiveVoiceDemoBar,
   type LiveVoiceDemoBarProps,
-  type LiveVoiceVisualState,
 } from './LiveVoiceDemoBar';
 import {
   LiveVoiceIntegratedRoutePanel,
@@ -65,9 +65,9 @@ import {
 import { useDesktopLocalFilePickerReady } from '../../hooks';
 import { FEATURE_LIVE_VOICE_DEMO, FEATURE_LIVE_VOICE_INTEGRATED_P1, FEATURE_LIVE_VOICE_INTEGRATED_WEB } from '../../featureFlags';
 import { useLiveVoiceDemo } from '../../features/live-voice/useLiveVoiceDemo';
-import type { LiveVoiceTaskExecutionContext, LiveVoiceTaskRequest } from '../../features/live-voice/liveVoiceTaskClient';
 import type { BrowserAudioCaptureStreamFactory } from '../../features/live-voice/formal/adapters/browserAudioIOAdapter';
 import { useProductVoiceBrowserOwnership } from './useProductVoiceBrowserOwnership';
+import { useProductVoiceSessionStart, type PrepareProductVoiceSession } from './useProductVoiceSessionStart';
 import { L0OrdinaryChromeBatchPanel } from './L0OrdinaryChromeBatchPanel';
 
 export interface ChatHistoryPagerProps {
@@ -80,6 +80,7 @@ export interface ChatHistoryPagerProps {
 }
 
 interface ChatPanelProps {
+  onPrepareLiveVoiceSession?: PrepareProductVoiceSession;
   onSendMessage: (content: string, mediaItems?: MediaItem[]) => void;
   onPersistMedia: (content: string, mediaItems: MediaItem[]) => Promise<{
     content?: string;
@@ -94,8 +95,6 @@ interface ChatPanelProps {
     files?: Record<string, unknown>;
   }>;
   onInterrupt: (newInput?: string) => void;
-  liveVoiceTaskRequest?: LiveVoiceTaskRequest;
-  liveVoiceTaskExecutionContext?: LiveVoiceTaskExecutionContext | null;
   isConnected: boolean;
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
@@ -741,11 +740,10 @@ function scrollToBottom(el: HTMLDivElement): void {
 
 export function ChatPanel({
   onSendMessage,
+  onPrepareLiveVoiceSession,
   onPersistMedia,
   onPersistDocuments,
   onInterrupt,
-  liveVoiceTaskRequest,
-  liveVoiceTaskExecutionContext = null,
   isConnected,
   onCancel,
   onSwitchMode,
@@ -1250,8 +1248,6 @@ export function ChatPanel({
     newSessionPromotion,
     onSendMessage: handleSendMessage,
     onInterrupt,
-    taskRequest: liveVoiceTaskRequest,
-    taskExecutionContext: liveVoiceTaskExecutionContext,
   });
   const formalProductVoiceEnabled = FEATURE_LIVE_VOICE_INTEGRATED_WEB && FEATURE_LIVE_VOICE_INTEGRATED_P1;
   const productVoiceControlRef = useRef<ProductLiveVoiceSurfaceControl | null>(null);
@@ -1269,16 +1265,9 @@ export function ChatPanel({
         previous.output === next.output &&
         previous.text_status === next.text_status &&
         previous.text_reason === next.text_reason &&
+        previous.replacement_recognition_failed === next.replacement_recognition_failed &&
         previous.confirmation_phase === next.confirmation_phase &&
         previous.operation_retained === next.operation_retained &&
-        previous.command_route === next.command_route &&
-        previous.task_available === next.task_available &&
-        previous.task_operation === next.task_operation &&
-        previous.task_id === next.task_id &&
-        previous.task_status === next.task_status &&
-        previous.task_reason === next.task_reason &&
-        previous.task_confirmation_form === next.task_confirmation_form &&
-        previous.task_result === next.task_result &&
         previous.task_progress_task_id === next.task_progress_task_id &&
         previous.task_progress_state === next.task_progress_state &&
         previous.task_progress_delivery_mode === next.task_progress_delivery_mode &&
@@ -1289,7 +1278,6 @@ export function ChatPanel({
         previous.recovery_diagnostic === next.recovery_diagnostic &&
         previous.terminal_notification === next.terminal_notification &&
         previous.adjustment_notification === next.adjustment_notification &&
-        previous.task_controls_locked === next.task_controls_locked &&
         previous.task_experience === next.task_experience
       ) {
         return previous;
@@ -1309,6 +1297,15 @@ export function ChatPanel({
     activeSessionId,
     controlRef: productVoiceControlRef,
     getActiveSessionId: getActiveProductVoiceSessionId,
+  });
+  const canPrepareVoiceSession =
+    formalProductVoiceEnabled && isConnected && mode === 'agent' && !liveVoiceInteractionBlocked && Boolean(onPrepareLiveVoiceSession);
+  const voiceSessionStart = useProductVoiceSessionStart({
+    sessionId: activeSessionId,
+    available: Boolean(productVoiceState?.available),
+    canPrepare: canPrepareVoiceSession,
+    prepare: onPrepareLiveVoiceSession,
+    start: startProductVoiceWithBrowserOwnership,
   });
   const l0OrdinaryChromeVoiceControl = useMemo(
     () => formalProductVoiceEnabled
@@ -1332,38 +1329,12 @@ export function ChatPanel({
     setProductVoiceState(null);
   }, [activeSessionId]);
 
-  let formalVoiceVisualState: LiveVoiceVisualState = 'idle';
-  if (productVoiceState?.recovery_diagnostic !== null && productVoiceState?.recovery_diagnostic !== undefined) {
-    formalVoiceVisualState = productVoiceState.recovery_diagnostic.disposition === 'retrying' ? 'recovering' : 'error';
-  } else if (productVoiceState?.text_status === 'submitting' || productVoiceState?.text_status === 'waiting') {
-    formalVoiceVisualState = 'thinking';
-  } else if (productVoiceState?.text_status === 'failed') {
-    formalVoiceVisualState = 'error';
-  } else {
-    switch (productVoiceState?.p1_status) {
-      case 'starting':
-      case 'recognizing':
-        formalVoiceVisualState = 'thinking';
-        break;
-      case 'capturing':
-        formalVoiceVisualState = 'listening';
-        break;
-      case 'playing':
-        formalVoiceVisualState = 'speaking';
-        break;
-      case 'failed':
-        formalVoiceVisualState = 'error';
-        break;
-      case 'cleanup_pending':
-        formalVoiceVisualState = 'recovering';
-        break;
-      default:
-        formalVoiceVisualState = 'idle';
-    }
-  }
+  const { status: formalVoiceVisualState, label_key: formalActivityLabel } = formalProductVoiceActivity(productVoiceState);
   const recoveryDiagnostic = productVoiceState?.recovery_diagnostic ?? null;
   const recoveryGeneration = recoveryDiagnostic?.response_generation ?? recoveryDiagnostic?.activation_generation ?? '-';
-  const formalStatusLabel = recoveryDiagnostic
+  const formalStatusLabel = productVoiceState?.replacement_recognition_failed
+    ? t('liveVoice.formal.replacementRecognitionFailed')
+    : recoveryDiagnostic
     ? t(
         recoveryDiagnostic.disposition === 'retrying'
           ? 'liveVoice.formal.recoveryRetryingWithContext'
@@ -1379,7 +1350,7 @@ export function ChatPanel({
       ? t('liveVoice.formal.interruptionDegraded', {
           reason: productVoiceState.interruption_degraded_reason,
         })
-    : t(`liveVoice.status.${formalVoiceVisualState}`);
+    : t(formalActivityLabel);
   const formalVoiceErrorReason =
     recoveryDiagnostic?.disposition === 'terminal'
       ? recoveryDiagnostic.reason
@@ -1394,7 +1365,9 @@ export function ChatPanel({
         : productVoiceState?.p1_status;
   const formalLiveVoiceDemoProps: LiveVoiceDemoBarProps = {
     active: productVoiceActive,
-    available: Boolean(productVoiceState?.available),
+    available: !voiceSessionStart.pending && (Boolean(productVoiceState?.available) || (activeSessionId === 'new' && canPrepareVoiceSession)),
+    launchPending: voiceSessionStart.pending,
+    launchError: voiceSessionStart.failed ? t(voiceSessionStart.projectRequired ? 'liveVoice.sessionProjectRequired' : 'liveVoice.sessionStartFailed') : '',
     status: formalVoiceVisualState,
     interimTranscript: '',
     committedTranscript: productVoiceState?.input || '',
@@ -1410,9 +1383,10 @@ export function ChatPanel({
     statusLabel: formalStatusLabel,
     handsFree: true,
     onEnable: () => {
-      void startProductVoiceWithBrowserOwnership();
+      void voiceSessionStart.start();
     },
     onExit: () => {
+      voiceSessionStart.cancel();
       void stopProductVoiceAndReleaseBrowserOwnership();
     },
     onPrimaryAction: () => {
@@ -1437,10 +1411,6 @@ export function ChatPanel({
     <FormalProductLiveVoiceDemoBar
       {...formalLiveVoiceDemoProps}
       surfaceState={productVoiceState}
-      onTaskRefresh={async () => { await productVoiceControlRef.current?.refreshTasks(); }}
-      onTaskSelect={async taskId => { await productVoiceControlRef.current?.selectTask(taskId); }}
-      onTaskMutation={async input => { await productVoiceControlRef.current?.issueTaskMutation(input); }}
-      onTaskConfirm={async () => { await productVoiceControlRef.current?.confirmTaskMutation(); }}
     />
   ) : (
     <LiveVoiceDemoBar {...legacyLiveVoiceDemoProps} />
@@ -1618,7 +1588,6 @@ export function ChatPanel({
           activeSessionId={activeSessionId}
           isConnected={isConnected}
           agentRouteAvailable={mode === 'agent' && !liveVoiceInteractionBlocked}
-          taskCompatibilityAvailable={Boolean(liveVoiceTaskRequest && liveVoiceTaskExecutionContext)}
           productVoiceControlRef={formalProductVoiceEnabled ? productVoiceControlRef : undefined}
           onProductVoiceStateChange={formalProductVoiceEnabled ? adoptProductVoiceState : undefined}
           onProductVoiceMessage={

@@ -9336,6 +9336,9 @@ class JiuWenSwarmDeepAdapter:
         tool_capture_released = False
         register_formal_no_history_session(session_id)
         history_release_safe = True
+        voice_prompt_builder = None
+        voice_original_output = None
+        voice_original_model = None
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -9347,6 +9350,78 @@ class JiuWenSwarmDeepAdapter:
                     supports_user_interaction=False,
                 )
             )
+            # This validated formal adapter is isolated from ordinary chat and
+            # background execution. Keep spoken analysis and receipts responsive,
+            # including the model calls that select and consume real file tools.
+            # Clone request options, never mutate the saved/cached model config.
+            original_model = getattr(self, "_model", None)
+            if original_model is not None:
+                from jiuwenswarm.common.reasoning_injector import bounded_semantic_request_options
+
+                options = bounded_semantic_request_options(
+                    original_model.model_client_config.model_dump(), original_model.model_config,
+                )
+                if options:
+                    voice_model = Model(
+                        model_client_config=original_model.model_client_config,
+                        model_config=original_model.model_config.model_copy(update=options),
+                    )
+                    voice_original_model = original_model
+                    self._apply_model_to_react_agent(voice_model)
+            # This seam has already validated the complete formal request and
+            # runs in its own isolated adapter. Never derive system instructions
+            # from a query, tool result or caller-supplied metadata string.
+            from openjiuwen.harness.prompts import PromptSection
+            from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+                FORMAL_VOICE_PRESENTATION_INSTRUCTIONS,
+                finalize_spoken_answer,
+            )
+
+            voice_prompt_builder = getattr(self._instance, "system_prompt_builder", None)
+            if voice_prompt_builder is None:
+                raise RuntimeError("FORMAL_PRESENTATION_PROMPT_UNAVAILABLE")
+            voice_original_output = voice_prompt_builder.get_section("output")
+            voice_prompt_builder.add_section(PromptSection(
+                name="output",
+                content={
+                    "cn": (
+                        "# 语音回复\n本次仅输出用户会听到的简短回答。用用户的语言，直接说结论和必要依据。"
+                        "除非明确要求详细解释，否则只说三个短句、合计尽量不超过200字；任务回执最多两句。"
+                        "优先给一个最有用的结论，不逐一复述备选方案和资料背景。"
+                        "不要输出分析草稿、逐项推演、标题、表格或重复结论。"
+                        "有任务回执时只陈述服务器已经确认的事实；已受理不等于已完成，"
+                        "accepted/queued表示已受理、等待执行，不能说正在生成或处理中；"
+                        "只有running才表示执行中，terminal/completed才表示已完成。"
+                        "已创建的任务由后台继续，不要再次询问是否开始或索要创建信息。"
+                        "只在回执明确要求确认时请求确认。资料规定的场景时间优先于机器时间。"
+                        "核对资料给出的时刻、耗时和缓冲再判断可行性，不虚构当前位置或额外前置条件。"
+                        "用户询问模型时，依据 runtime.setting 中的当前模型或可用模型列表回答。"
+                    ),
+                    "en": (
+                        "# Spoken response\nReturn only the concise answer the user will hear, in their language. "
+                        "Lead with the conclusion and essential evidence. Unless detail is requested, use at most "
+                        "three short sentences, aiming for 200 characters, or two sentences for a Task receipt. "
+                        "Prioritize the most useful conclusion; omit a catalogue of alternatives and background. No draft "
+                        "analysis, step-by-step working, headings, tables or repeated conclusions. With a Task "
+                        "receipt, state only server-confirmed facts: accepted is not completed. Created work "
+                        "continues in the background; never ask again whether to start or for creation details. "
+                        "Request confirmation only when the receipt requires it. Material-defined scenario "
+                        "time takes precedence over machine time."
+                        " Check the documented times, durations and buffers before judging feasibility; "
+                        "do not invent the current location or extra prerequisites."
+                        " Answer model identity/availability questions from runtime.setting."
+                    ),
+                },
+                # Keep the actual spoken-output contract after dynamic runtime
+                # and workspace guidance, including on subsequent Tool rounds.
+                priority=1_000,
+            ))
+            voice_prompt_builder.add_section(PromptSection(
+                name="formal_live_voice_presentation",
+                content={"cn": FORMAL_VOICE_PRESENTATION_INSTRUCTIONS,
+                         "en": FORMAL_VOICE_PRESENTATION_INSTRUCTIONS},
+                priority=66,  # After the ordinary output section (65).
+            ))
             token_cid = TOOL_PERMISSION_CHANNEL_ID.set((cid or "").strip())
             token_perm = setup_permission_context(request)
             interaction_stream = None
@@ -9363,7 +9438,11 @@ class JiuWenSwarmDeepAdapter:
                 "chat.error",
             }
 
+            spoken_tool_results: list[dict] = []
+            spoken_tool_result_chars = 0
+
             def captured_response(raw_event: Any) -> AgentResponseChunk:
+                nonlocal spoken_tool_result_chars
                 parsed_capture = self._parse_stream_chunk(raw_event)
                 event_type = (
                     parsed_capture.get("event_type")
@@ -9376,6 +9455,11 @@ class JiuWenSwarmDeepAdapter:
                     "chat.tool_result",
                 }:
                     raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_INVALID")
+                if event_type == "chat.tool_result":
+                    size = len(json.dumps(parsed_capture, ensure_ascii=False))
+                    if spoken_tool_result_chars + size <= 32_000:
+                        spoken_tool_results.append(parsed_capture)
+                        spoken_tool_result_chars += size
                 return AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
@@ -9470,6 +9554,11 @@ class JiuWenSwarmDeepAdapter:
                         tool_capture.has_pending_results
                     ):
                         raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_INCOMPLETE")
+                    if event_type == "chat.final" and isinstance(parsed.get("content"), str):
+                        parsed = {**parsed, "content": await finalize_spoken_answer(
+                            getattr(self, "_model", None), envelope=str(inputs.get("query", "")),
+                            candidate=parsed["content"], tool_results=spoken_tool_results,
+                        )}
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
@@ -9541,6 +9630,13 @@ class JiuWenSwarmDeepAdapter:
                     TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
                     cleanup_permission_context(token_perm)
         finally:
+            if voice_original_model is not None and history_release_safe:
+                self._apply_model_to_react_agent(voice_original_model)
+            if voice_prompt_builder is not None:
+                voice_prompt_builder.remove_section("formal_live_voice_presentation")
+                voice_prompt_builder.remove_section("output")
+                if voice_original_output is not None:
+                    voice_prompt_builder.add_section(voice_original_output)
             if history_release_safe:
                 unregister_formal_no_history_session(session_id)
             else:

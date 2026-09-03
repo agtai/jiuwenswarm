@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Awaitable, Callable, TypeVar
 
+from jiuwenswarm.common.live_voice_capture_limits import MAX_CAPTURE_DURATION_SECONDS
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAudioFrame,
     MediaAuthorityBinding,
@@ -58,11 +59,10 @@ _PROVIDER_CANCEL_TIMEOUT_SECONDS = 1.0
 _PROVIDER_CLOSE_TIMEOUT_SECONDS = 5.0
 _PUMP_DRAIN_TIMEOUT_SECONDS = 5.0
 _FINAL_TIMEOUT_SECONDS = 20.0
-# The browser product route permits a 30 second capture.  Provider partials
-# are optional during that window, so an event wait that starts at begin()
-# must not expire before the user can legally commit the capture.  finish()
-# still applies the shorter final deadline after commit.
-_PRECOMMIT_EVENT_TIMEOUT_SECONDS = 35.0
+# A late utterance may use the full existing 61.5 s absolute capture window.
+# Provider partials are optional. Do not expire before a legal final; finish()
+# still uses the shorter postcommit deadline. The extra 3.5 s is transport grace.
+_PRECOMMIT_EVENT_TIMEOUT_SECONDS = MAX_CAPTURE_DURATION_SECONDS + 3.5
 # Native recognition Providers own an absolute session deadline, not just a
 # connection deadline.  Keep the outer open call bounded by
 # ``_OPEN_TIMEOUT_SECONDS`` below, while granting the Provider enough lifetime

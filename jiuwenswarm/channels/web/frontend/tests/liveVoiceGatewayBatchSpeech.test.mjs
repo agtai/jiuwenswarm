@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
@@ -108,7 +110,7 @@ function capabilityDescriptor(
 ) {
   const { declared_limits: declaredLimitOverrides = {}, ...descriptorOverrides } = overrides;
   const declaredLimits = {
-    max_input_audio_bytes: 4 * 1024 * 1024,
+    max_input_audio_bytes: 6 * 1024 * 1024,
     max_output_audio_bytes: 8 * 1024 * 1024,
     max_recognition_text_chars: 16_000,
     max_text_chars: 4_000,
@@ -139,6 +141,39 @@ function capabilityDescriptor(
     declared_limits: declaredLimits,
   };
 }
+
+test('current Python capability and full legal 48 kHz capture cross the Web contract', async () => {
+  const repository = fileURLToPath(new URL('../../../../../', import.meta.url));
+  const venv = fileURLToPath(new URL(process.platform === 'win32'
+    ? '../../../../../.venv/Scripts/python.exe' : '../../../../../.venv/bin/python', import.meta.url));
+  const generated = spawnSync(process.env.PYTHON ?? (existsSync(venv) ? venv : 'python'), ['-c',
+    'import json; from types import SimpleNamespace; from jiuwenswarm.server.live_voice.batch_speech import FormalBatchSpeechService, ProviderCapability; print(json.dumps(FormalBatchSpeechService(SimpleNamespace(capability=lambda:ProviderCapability("cross-language-test",True,True,True)),authorization_resolver=lambda binding:None).capability_payload()))',
+  ], { cwd: repository, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(generated.status, 0, generated.stderr);
+  const payload = JSON.parse(generated.stdout.trim());
+  const client = new GatewayBatchSpeechClient({ enabled: true, scope, createId: ids(), transport: {
+    async request(method) { assert.equal(method, SPEECH_CAPABILITIES_METHOD); return payload; },
+  } });
+  assert.equal((await client.capabilities()).formal_available, true);
+  const frames = Array.from({ length: 3075 }, (_, seq) => ({ ...frame(1, seq),
+    sample_cursor: seq * 960,
+    format: { ...frame().format, sample_rate_hz: 48_000, samples_per_channel: 960 },
+    samples: new Float32Array(960).fill(0.25),
+  }));
+  const wav = capturedFramesToPcm16Wav(frames);
+  assert.equal(wav.byteLength, 5_904_044);
+  assert.equal(new DataView(wav.buffer).getUint32(24, true), 48_000);
+  let calls = 0;
+  const blocked = new GatewayBatchSpeechClient({ enabled: true, scope, createId: ids(), transport: {
+    async request() { calls += 1; throw new Error('oversized audio must not reach transport'); },
+  } });
+  const oversized = Array.from({ length: 3277 }, (_, seq) => ({ ...frames[0], seq,
+    sample_cursor: seq * 960, context_time_s: seq * 0.02,
+  }));
+  await assert.rejects(blocked.recognizeFinal({ frames: oversized, locale: 'en-US', correlationId: 'cap-limit' }),
+    error => error.reason === 'AUDIO_LIMIT_EXCEEDED');
+  assert.equal(calls, 0);
+});
 
 function recognitionEnvelope(params, generation = params.capture.capture_generation) {
   return {

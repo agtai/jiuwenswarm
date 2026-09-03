@@ -51,6 +51,9 @@ from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
 from jiuwenswarm.server.live_voice.voice_task_bridge import (
     UnifiedCommittedInputRoute,
 )
+from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+    PresentedAgentAnalysis,
+)
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     HistorySurfacePolicy,
     PresentationAck,
@@ -1093,6 +1096,35 @@ class NativeInteractionRuntimeOwner:
             and provider_call_id in self._delegate_results
             for provider_call_id, admission in self._delegates_by_call.items()
         )
+
+    async def presented_agent_analysis(
+        self, response: ResponseRef
+    ) -> PresentedAgentAnalysis | None:
+        async with self._lock:
+            self._require_open()
+            retained = self._responses_by_ref.get(response)
+            if (
+                retained is None
+                or retained.cancelled
+                or retained.history is None
+                or self._delegate_successor_fenced_source_locked(response)
+            ):
+                return None
+            matches = [
+                result
+                for result in self._delegate_results.values()
+                if result.response == response
+                and result.route is UnifiedCommittedInputRoute.DIALOGUE
+            ]
+            if len(matches) != 1:
+                return None
+            result = matches[0]
+            return PresentedAgentAnalysis(
+                result.turn_commit,
+                response,
+                retained.history.transcript,
+                retained.history.presented_at,
+            )
 
     async def history_admission(
         self, response: ResponseRef

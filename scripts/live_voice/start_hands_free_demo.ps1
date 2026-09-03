@@ -12,6 +12,7 @@ param(
     [string]$ProjectPath,
     [string]$ProjectId,
     [string]$DataDir,
+    [string]$ConfigurationDirectory,
     [switch]$SaveConfiguration,
     [switch]$PreflightOnly,
     [switch]$RestartExisting,
@@ -686,8 +687,12 @@ try {
         $DataDir = Join-Path $env:USERPROFILE '.jiuwenswarm'
     }
     $DataDir = Get-CanonicalPath $DataDir
-    $PrivateEnvPath = Join-Path $DataDir 'config\.env'
-    $ConfigYamlPath = Join-Path $DataDir 'config\config.yaml'
+    if ([string]::IsNullOrWhiteSpace($ConfigurationDirectory)) {
+        $ConfigurationDirectory = Join-Path $DataDir 'config'
+    }
+    $ConfigurationDirectory = Get-CanonicalPath $ConfigurationDirectory
+    $PrivateEnvPath = Join-Path $ConfigurationDirectory '.env'
+    $ConfigYamlPath = Join-Path $ConfigurationDirectory 'config.yaml'
     $ProjectsPath = Join-Path $DataDir 'agent\projects.json'
     foreach ($requiredPath in @($PrivateEnvPath, $ConfigYamlPath, $ProjectsPath)) {
         if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
@@ -856,6 +861,7 @@ try {
     $featureEnvironment = [ordered]@{
         JIUWENSWARM_LIVE_VOICE_RUNTIME_PROFILE                    = $RuntimeProfile
         JIUWENSWARM_DATA_DIR                                      = $DataDir
+        JIUWENSWARM_CONFIG_DIR                                    = $ConfigurationDirectory
         JIUWENSWARM_ENABLE_ORIGIN_CHECK                           = '1'
         JIUWENSWARM_WS_ALLOWED_ORIGIN_HOSTS                       = 'localhost,127.0.0.1'
         JIUWENSWARM_LIVE_VOICE_P3_ENABLED                         = '1'
@@ -870,9 +876,6 @@ try {
         JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED            = '1'
         JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED        = '1'
         JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABLED             = '1'
-        # Demo-only runtime exceptions. Keep these out of every frontend
-        # build profile and make the controlled launcher own them explicitly.
-        JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED = '1'
         JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED            = '1'
         JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED                = '1'
         JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED       = '1'
@@ -931,7 +934,6 @@ try {
         'JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED',
         'JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED',
         'JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABLED',
-        'JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED',
         'JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED',
         'JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED',
         'JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED',
@@ -949,7 +951,7 @@ try {
     if ([Environment]::GetEnvironmentVariable('JIUWENSWARM_LIVE_VOICE_P3_EXECUTOR_PROFILE', 'Process') -ne $ExecutorProfile) {
         Fail '受控运行配置必须选择精确的 Direct D2 Executor profile。'
     }
-    Write-Pass "$RuntimeProfileLabel 的 P1/P2/P3、统一语义、Demo bypass、通用 checkpoint v2、Dedicated Media/EOT、Origin 与 Task Store 已完整绑定"
+    Write-Pass "$RuntimeProfileLabel 的 P1/P2/P3、统一语义、正式确认、通用 checkpoint v2、Dedicated Media/EOT、Origin 与 Task Store 已完整绑定"
 
     if (-not (Test-Path -LiteralPath $ProductionFrontendEnv -PathType Leaf)) {
         Fail "缺少普通 production 前端开关文件：$ProductionFrontendEnv"

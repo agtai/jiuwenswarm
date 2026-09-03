@@ -11,6 +11,7 @@ import {
   PRODUCT_P1_MEDIA_CLOSE_METHOD,
   PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD,
   parseProductP1NativeChatProjection,
+  productCaptureTerminalFailureReason,
   ProductP1VoiceRouteOwner,
   parseProductP1NativeInteractionActivation,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productP1VoiceRoute.js';
@@ -4000,6 +4001,7 @@ async function runConcurrentCaptureJourney(options = {}) {
         // before this queued fake open runs. That is a valid cancelled route,
         // not a missing authority on an active route.
         if (binding === null) return;
+        if (binding.direction === 'downlink' && options.neverAttachDownlink === true) return;
         socket.onmessage?.({
           data: serializeMediaControl({ type: 'media.attach', binding }),
         });
@@ -4249,10 +4251,13 @@ async function runConcurrentCaptureJourney(options = {}) {
     activation_id: 'activation-1',
     activation_generation: 7,
     locale: 'zh-CN',
-  }, options.pauseForNotificationBeforePlayout === true
+  }, options.pauseForNotificationBeforePlayout === true || options.releaseSilentGenerationBeforePlayout === true
     ? { samples: new Float32Array(960) }
     : {});
-  if (options.pauseForNotificationBeforePlayout === true) {
+  if (options.releaseSilentGenerationBeforePlayout === true) {
+    owner.armEndOfTurn(() => options.onAutomaticEndOfTurn(owner));
+    assert.equal(await owner.abandonCapture('formal_generation_listening_released'), true);
+  } else if (options.pauseForNotificationBeforePlayout === true) {
     notificationPausedFrameHandler = environment.worklet.port.onmessage;
     notificationPauseOutcome = await owner.pauseIdleCaptureForNotification();
   } else {
@@ -5536,6 +5541,65 @@ test('formal P1 rotates a lease with sustained unconfirmed energy at the bounded
   await owner.close();
 });
 
+for (const rotate of [false, true]) {
+  test(`silent generation release keeps automatic successor EOT, rotated=${rotate}`, async () => {
+    let automatic = null;
+    let submissions = 0;
+    const journey = await runConcurrentCaptureJourney({
+      negotiatedEot: true, silentSuccessorCapture: true,
+      releaseSilentGenerationBeforePlayout: true,
+      onAutomaticEndOfTurn(owner) { submissions += 1; automatic = owner.stopAndRecognize(); void automatic.catch(() => undefined); },
+    });
+    const { owner, sockets, environment, calls } = journey;
+    const first = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-1');
+    const emit = (socket, type) => socket.onmessage?.({ data: serializeMediaControl({
+      type, capability_version: 'media.end_of_turn.v1', lease_id: socket.serverBinding.lease_id,
+      generation: socket.serverBinding.generation.value, detector: 'server_vad', provider_start_ms: 100,
+      ...(type === 'media.end_of_turn' ? { speech_started_observed: true, provider_end_ms: 700 } : {}),
+      timing_basis: 'provider_time', timing_provenance: 'adapter_derived', create_response: false,
+      interrupt_response: false, business_cancel_count_delta: 0,
+    }) });
+    try {
+      if (rotate) {
+        const prior = environment.worklet;
+        environment.nextWorkletFirstFrameSamples = new Float32Array(960);
+        for (let seq = 1; seq < PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20; seq += 1) {
+          prior.port.onmessage({ data: { kind: 'frame', capture_generation: prior.captureGeneration, seq,
+            sample_rate_hz: 48000, sample_cursor: seq * 960, context_time_s: seq * 0.02,
+            samples: new Float32Array(960) } });
+          if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
+        }
+        for (let turn = 0; turn < 500 && environment.worklet === prior; turn += 1) await new Promise(resolve => setTimeout(resolve, 5));
+        assert.notEqual(environment.worklet, prior);
+        for (let turn = 0; turn < 700; turn += 1) {
+          const successor = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-3');
+          if (successor?.sent.some(value => typeof value !== 'string') &&
+              calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2')) break;
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        assert.ok(sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-3')?.sent.some(value => typeof value !== 'string'));
+      }
+      emit(first, 'media.speech_start'); emit(first, 'media.end_of_turn');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(submissions, 0, 'retired capture has zero recognition or submit');
+      const current = sockets.filter(socket => socket.serverBinding?.direction === 'uplink').at(-1);
+      emit(current, 'media.speech_start'); emit(current, 'media.end_of_turn');
+      for (let turn = 0; turn < 50 && automatic === null; turn += 1) await new Promise(resolve => setImmediate(resolve));
+      assert.equal(submissions, 1, 'next real EOT must submit without manual rearm');
+      assert.equal((await automatic).text, 'duplex text');
+      emit(current, 'media.end_of_turn');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(submissions, 1, 'a settled duplicate does not submit again');
+      assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
+      await owner.close();
+      emit(current, 'media.end_of_turn');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(submissions, 1, 'Exit cannot revive the retained callback');
+      assert.equal(calls.some(([method]) => /agent|task|history/.test(method)), false);
+    } finally { await owner.close(); }
+  });
+}
+
 test('formal P1 keeps an authoritative utterance alive past the lease bound and recognizes it', async () => {
   const journey = await runConcurrentCaptureJourney({ negotiatedEot: true });
   const { owner, calls, environment, sockets } = journey;
@@ -6422,6 +6486,103 @@ test('formal P1 duration expiry releases local capture before an exact authority
   assert.deepEqual(retriedCloses[1][1], retriedCloses[0][1]);
 });
 
+test('Native Task TTS keeps capture and suppresses echo until the exact presentation settles', async () => {
+  const environment = audioEnvironment();
+  const socket = new FakeSocket();
+  const binding = serverBinding();
+  const calls = [];
+  let releaseSynthesis;
+  const synthesisReady = new Promise(resolve => { releaseSynthesis = resolve; });
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true, expected_origin: 'https://voice.example.test', audio_environment: environment,
+    socket_factory: () => { queueMicrotask(() => socket.open(binding)); return socket; },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) return nativeMediaActivation(binding);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      if (method === 'live_voice.speech.synthesize_batch') {
+        await synthesisReady;
+        return { contract_version: 'live-voice.contract.v2', request_id: params.request_id,
+          operation_id: params.operation_id, ok: true, error: null,
+          result: { operation: 'speech.synthesize.batch', response: params.response, unit_id: params.unit_id,
+            audio: { format: 'wav_pcm16_mono', sample_rate_hz: 48_000, channel_count: 1, data_base64: wavBase64(48_000, 960 * 3) },
+            provider: { provider_id: 'provider-test', implementation_class: 'formal', fallback_from: null, model: 'tts-test', voice: 'voice-test' },
+            presented: false } };
+      }
+      if (method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD) return { status: 'media_playout_acknowledged',
+        reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED', receipt_id: 'task-media-receipt', duplex_media_observed: true, ...params };
+      throw new Error(`forbidden Native Task method ${method}`);
+    },
+  });
+  await startCaptureWithFirstFrame(owner, environment, { session_id: 'session-1', interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1', activation_id: 'activation-1', activation_generation: 7, locale: 'zh-CN' },
+    { samples: new Float32Array(960) });
+  const worklet = environment.worklet;
+  const response = { interaction_id: 'interaction-1', response_id: 'task-response', response_generation: 2 };
+  assert.throws(() => owner.prepareNativeTaskNotification({ ...response, interaction_id: 'foreign' }), /another Native interaction/);
+  const lease = owner.prepareNativeTaskNotification(response);
+  assert.equal(lease.status, 'ready');
+  const played = owner.playAgentText({ response, unit_id: 'task-unit', text: '设备核查完成。', capture_during_playout: false });
+  for (let seq = 1; seq <= 1600; seq += 1) {
+    sendNextFrameFromCurrentWorklet(environment, seq);
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  const frames = () => socket.sent.filter(value => typeof value !== 'string').map(value => decodeAudioFrame(binding, value));
+  assert.equal(frames().length, 1601);
+  assert.ok(frames().every((frame, index) => frame.seq === index && frame.sample_cursor === index * 960 && frame.samples.every(sample => sample === 0)));
+  releaseSynthesis();
+  assert.equal(await played, null); // Ordinary Task receipt cannot invent Native chat.
+  assert.equal(environment.contexts[0].sourceEndCount, 3);
+  assert.equal(owner.status().status, 'capturing');
+  assert.equal(environment.worklet, worklet);
+  assert.equal(socket.readyState, 1);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length, 1);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD).length, 0);
+  assert.equal(calls.find(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD)[1].capture_frames_acked, 1601);
+  sendNextFrameFromCurrentWorklet(environment, 1601);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(frames().at(-1).samples.every(sample => sample === 0), 'playout return is not P2 presentation settlement');
+  lease.release();
+  const nextLease = owner.prepareNativeTaskNotification({ ...response, response_id: 'task-next' });
+  assert.equal(nextLease.status, 'ready');
+  lease.release(); // An old late ACK cannot open the newer gate.
+  sendNextFrameFromCurrentWorklet(environment, 1602);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(frames().at(-1).samples.every(sample => sample === 0));
+  nextLease.release();
+  sendNextFrameFromCurrentWorklet(environment, 1603);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(frames().at(-1).samples.some(sample => sample !== 0), 'new user audio resumes on the same uplink');
+  assert.equal(owner.prepareNativeTaskNotification(response).status, 'speaker_active');
+  const count = frames().length;
+  await owner.close();
+  nextLease.release();
+  assert.equal(frames().length, count);
+  assert.equal(calls.some(([method]) => method.includes('recognize') || method.includes('cancel')), false);
+});
+
+test('formal P1 exposes recognition-stream failure only for negotiated uplink capture', () => {
+  const base = {
+    type: 'terminal',
+    route_id: 'route-1',
+    reason_id: 'MEDIA_CONSUMER_FAILED',
+    source: 'internal_failure',
+    consumer_reason_id: undefined,
+  };
+  assert.equal(
+    productCaptureTerminalFailureReason({ ...base, direction: 'uplink' }, true),
+    'SPEECH_RECOGNITION_STREAM_FAILED',
+  );
+  assert.equal(
+    productCaptureTerminalFailureReason({ ...base, direction: 'uplink' }, false),
+    'ADAPTER_UPLINK_INTERNAL_FAILURE_MEDIA_CONSUMER_FAILED',
+  );
+  assert.equal(
+    productCaptureTerminalFailureReason({ ...base, direction: 'downlink' }, true),
+    'ADAPTER_DOWNLINK_INTERNAL_FAILURE_MEDIA_CONSUMER_FAILED',
+  );
+});
+
 test('formal P1 Native activation plays Provider audio while preserving the continuous uplink', async () => {
   const calls = [];
   const sockets = [];
@@ -6953,6 +7114,22 @@ test('formal P1 concurrent capture cannot publish readiness without a real frame
   assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
   await owner.close();
 });
+
+for (const failure of ['attach', 'first-frame']) {
+  test(`formal P1 bounds missing downlink ${failure} and releases its exact socket without a render receipt`, async () => {
+    const journey = await runConcurrentCaptureJourney({
+      ...(failure === 'attach' ? { neverAttachDownlink: true } : { downlinkFramesToSend: 0 }),
+    });
+    assert.equal(journey.playError?.reason, failure === 'attach'
+      ? 'AUDIO_PLAYOUT_MEDIA_ROUTE_NOT_ATTACHED' : 'AUDIO_PLAYOUT_FIRST_FRAME_TIMEOUT');
+    assert.equal(journey.owner.status().status, 'failed');
+    assert.equal(journey.environment.contexts[0].sourceStartCount, 0);
+    assert.equal(journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 0);
+    assert.equal(journey.calls.some(([method]) => method.includes('task.') || method.includes('tool.')), false);
+    assert.ok(journey.sockets.every(socket => socket.readyState === 3));
+    await journey.owner.close();
+  });
+}
 
 test('formal P1 concurrent capture without a Gateway ACK degrades barge-in without discarding TTS', async () => {
   const journey = await runConcurrentCaptureJourney({ ackSecondCapture: false });

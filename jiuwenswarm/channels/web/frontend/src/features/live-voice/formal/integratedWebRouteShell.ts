@@ -483,8 +483,6 @@ export class IntegratedWebRouteShell {
 export interface CurrentIntegratedWebRouteFacts {
   readonly p1_browser_speech_available: boolean;
   readonly p2_text_chat_available: boolean;
-  readonly p3_task_compatibility_enabled: boolean;
-  readonly p3_task_compatibility_available: boolean;
   readonly p1_formal_enabled?: boolean;
   readonly p1_formal_available?: boolean;
   readonly p2_formal_enabled?: boolean;
@@ -576,21 +574,6 @@ export function createCurrentIntegratedWebRouteSelection(facts: Readonly<Current
     });
   }
 
-  if (!p3FormalEnabled && facts.p3_task_compatibility_enabled) {
-    registry.register({
-      segment_id: 'p3alpha.task_control',
-      adapter_id: 'compat.d031-task-bridge',
-      implementation_class: 'demo_substitute',
-      owner_module: 'P3alpha.D031CompatibilityAdapter',
-      capability_provider: facts.p3_task_compatibility_available ? 'schedule-compatibility-adapter' : null,
-      contract_version: null,
-      safe_reason: 'D031_COMPATIBILITY_ADAPTER_ONLY',
-      available: facts.p3_task_compatibility_available,
-      unavailable_reason: facts.p3_task_compatibility_available ? null : 'TASK_COMPATIBILITY_CONTEXT_UNAVAILABLE',
-      capabilities: ['bounded_single_task_command', 'same_page_polling'],
-    });
-  }
-
   return Object.freeze({
     registry,
     policy: Object.freeze({
@@ -598,7 +581,7 @@ export function createCurrentIntegratedWebRouteSelection(facts: Readonly<Current
       'p2.realtime_conversation': p2FormalEnabled ? 'formal' : 'fallback',
       'p3alpha.task_control': p3FormalEnabled
         ? 'formal'
-        : facts.p3_task_compatibility_enabled ? 'demo_substitute' : 'unsupported',
+        : 'unsupported',
     }),
   });
 }

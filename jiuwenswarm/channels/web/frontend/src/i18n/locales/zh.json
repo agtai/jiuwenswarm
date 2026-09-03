@@ -2129,6 +2129,9 @@
     "errorPrefix": "错误: {{message}}"
   },
   "liveVoice": {
+    "startingSession": "正在开启语音…",
+    "sessionStartFailed": "语音会话未能开启，请重试。",
+    "sessionProjectRequired": "当前 Live Voice 需要项目上下文。请切换到 Code 并选择已授权的项目，再开启语音。",
     "label": "Live Voice",
     "experimental": "实验功能",
     "enable": "开启 Live Voice",
@@ -2140,9 +2143,24 @@
     "transcriptPlaceholder": "说话内容会显示在这里",
     "retryListening": "重新监听",
     "formal": {
+      "recentTasks": {
+        "refresh": "刷新",
+        "unavailable": "后台任务暂时无法刷新",
+        "result": "任务结果",
+        "resultPending": "结果尚未生成",
+        "steps": "当前对话步骤",
+        "states": {
+          "waiting": "等待中", "running": "进行中", "completed": "已完成", "cancelled": "已取消", "failed": "失败",
+          "accepted": "已接受", "queued": "排队中", "blocked": "等待输入", "decision_required": "需要决定",
+          "interrupted": "已中断", "unknown": "状态未知", "pending": "等待中", "in_progress": "进行中"
+        }
+      },
       "routeLabel": "P1 · Gateway Speech · 正式路线",
       "editorLabel": "语音识别文本",
       "recoveryFailed": "语音连接恢复失败",
+      "replacementRecognitionFailed": "刚才的回答已被打断，但没有成功识别新的问题。请再说一次。",
+      "processingListening": "正在处理，可随时打断",
+      "preparingAudio": "正在准备语音播放",
       "recoveryFailedWithReason": "语音恢复失败（阶段：{{phase}}，原因：{{reason}}）",
       "interruptionDegraded": "本轮暂不支持插话；语音回答会继续，播放后将恢复监听（原因：{{reason}}）",
       "recoveryRetryingWithContext": "正在恢复（{{seam}}；关联：{{correlationId}}；代：{{generation}}；原因：{{reason}}）",
@@ -2208,6 +2226,7 @@
         "priority": "准入优先级",
         "issue": "签发控制",
         "confirm": "确认精确控制",
+        "recover": "恢复原操作结果",
         "confirmationPending": "待确认：当前表单内容尚未应用。请点击“确认精确控制”，并以命令的“已应用”和上方权威 Task 状态为准。",
         "command": "命令",
         "request": "请求",
@@ -2239,7 +2258,7 @@
     },
     "integrated": {
       "title": "Live Voice 诊断信息",
-      "shellOnly": "免手操作 Live Voice 仅提交一次权威最终语音，由服务端统一路由普通对话和当前后台任务，并在播报完成后恢复监听。",
+      "shellOnly": "免手操作 Live Voice 仅提交一次权威最终语音，由服务端唯一语义链路理解对话和精确任务引用，并在播报完成后恢复监听。",
       "routes": "P1 / P2 / P3alpha 路由选择",
       "platform": "Chrome 与 Web 诊断",
       "refresh": "刷新 Web 诊断",
@@ -2375,7 +2394,7 @@
         }
       },
       "safetyTitle": "真实副作用：",
-      "safetyDisclosure": "执行器 JiuwenSwarm Code Agent；固定项目绑定流水线 project_code_pipeline；只允许以当前已保存项目为执行根，所有 shell、测试、Git 和远端命令均被硬阻止。Live Voice 的插话或退出只停止语音反馈，不会取消当前后台任务。生产环境继续执行原确认策略；只有后端明确授权的 Demo 策略可以免确认，且仍须通过作用域、幂等、目标绑定和变更权限校验。刷新后仅从权威 Task Store 恢复当前任务。",
+      "safetyDisclosure": "执行器 JiuwenSwarm Code Agent，以已注册项目为执行根。语音插话和退出不会取消后台任务。任务操作仍须通过正常的作用域、能力、精确目标、幂等和确认校验；刷新读取权威 Task Store 状态，不提供 Demo 免确认通道。",
       "contextIsolatedTitle": "任务命令已隔离",
       "contextIsolated": "任务命令 {{commandId}} 的请求或结果仍未核对，但会话或项目上下文已经改变。为防止重复副作用，其他上下文不会重试；请返回原会话和项目继续核对。",
       "isolatedResult": "该结果属于已隔离的原上下文，不会合入当前上下文：{{detail}}",

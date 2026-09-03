@@ -405,6 +405,7 @@ test('definitive confirmation rejection is exact and unlocks later Task controls
     if (intentCalls === 2) {
       throw Object.assign(new Error('production Task intent failed closed'), {
         requestId: id,
+        code: 'CONFLICT',
         retriable: false,
         reason: 'TASK_AUTHORITY_CHANGED',
         payload: { error: { reason: 'TASK_AUTHORITY_CHANGED' } },
@@ -454,7 +455,263 @@ test('transport-unknown confirmation outcome remains locked for safe recovery', 
 
   await assert.rejects(owner.confirm(), /request timed out/);
   assert.equal(owner.snapshot().command.phase, 'unknown');
+  const count = fixture.calls.length;
+  await assert.rejects(owner.issue({ operation: 'task.cancel', task_id: 'task-b' }), /unavailable/);
+  assert.equal(fixture.calls.length, count);
 });
+
+for (const lostStage of ['issue', 'confirm']) {
+  test(`structured ${lostStage} response loss recovers the identical RPC with one effect`, async () => {
+    const fixture = authoritativeFixture({ selectedHint: 'task-b' });
+    const wire = [];
+    const replies = new Map();
+    let lost = false;
+    const request = async (method, params, id) => {
+      wire.push({ method, params: structuredClone(params), id });
+      if (replies.has(id)) return replies.get(id);
+      const reply = await fixture.request(method, params, id);
+      if (method === FORMAL_P3_TASK_METHODS.intent) {
+        replies.set(id, reply);
+        if (!lost && Boolean(params.continuation_id) === (lostStage === 'confirm')) {
+          lost = true;
+          throw new Error('response lost after server effect');
+        }
+      }
+      return reply;
+    };
+    const owner = new FormalP3TaskExperienceOwner({ enabled: true, request, store: fixture.store });
+    await owner.refresh(sessionId);
+    const issue = () => owner.issue({ operation: 'task.adjust', task_id: 'task-b', adjustment: 'advance checkpoint' });
+    if (lostStage === 'issue') await assert.rejects(issue(), /response lost/);
+    else { await issue(); await assert.rejects(owner.confirm(), /response lost/); }
+    assert.equal(owner.snapshot().command.phase, 'unknown');
+    const before = wire.length;
+    await assert.rejects(owner.issue({ operation: 'task.cancel', task_id: 'task-b' }), /unavailable/);
+    assert.equal(wire.length, before);
+    owner.disconnect();
+    await owner.refresh(sessionId);
+    const replay = await owner.confirm();
+    assert.equal(replay.command.phase, lostStage === 'issue' ? 'confirmation_required' : 'applied');
+    const intents = wire.filter(item => item.method === FORMAL_P3_TASK_METHODS.intent);
+    assert.deepEqual(intents.at(-1), intents.at(-2));
+    if (lostStage === 'issue') await owner.confirm();
+    assert.equal(fixture.calls.filter(item => item.method === FORMAL_P3_TASK_METHODS.intent).length, 2);
+  });
+}
+
+for (const malformedReason of [false, true]) {
+test(`malformed mutation receipt remains unknown and cannot unlock another issue (reason=${malformedReason})`, async () => {
+  const fixture = authoritativeFixture({ selectedHint: 'task-b' });
+  let original;
+  const wire = [];
+  const request = async (method, params, id) => {
+    wire.push({ method, params, id });
+    if (method === FORMAL_P3_TASK_METHODS.intent && params.continuation_id) {
+      if (original) { assert.equal(id, original.request_id); return original; }
+      original = await fixture.request(method, params, id);
+      return malformedReason
+        ? { ...original, result: { ...original.result, formal_task_result: { ...original.result.formal_task_result, reason: {} } } }
+        : envelope(id, { status: 'dispatched', operation: 'task.adjust', task_id: 'task-b' });
+    }
+    return fixture.request(method, params, id);
+  };
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, request, store: fixture.store });
+  await owner.refresh(sessionId);
+  await owner.issue({ operation: 'task.adjust', task_id: 'task-b', adjustment: 'advance checkpoint' });
+  await assert.rejects(owner.confirm(), malformedReason ? /invalid/ : /missing/);
+  const count = wire.length;
+  await assert.rejects(owner.issue({ operation: 'task.cancel', task_id: 'task-b' }), /unavailable/);
+  assert.equal(wire.length, count);
+  assert.equal((await owner.confirm()).command.phase, 'applied');
+});
+}
+
+test('late same-session selection preserves a newly issued confirmation', async () => {
+  const fixture = authoritativeFixture({ selectedHint: 'task-b' });
+  let releaseIssue, enteredIssue, releaseSelection, enteredSelection;
+  const issueGate = new Promise(resolve => { releaseIssue = resolve; });
+  const issueStarted = new Promise(resolve => { enteredIssue = resolve; });
+  const selectionGate = new Promise(resolve => { releaseSelection = resolve; });
+  const selectionStarted = new Promise(resolve => { enteredSelection = resolve; });
+  let holdSelection = false;
+  const request = async (method, params, id) => {
+    const reply = await fixture.request(method, params, id);
+    if (method === FORMAL_P3_TASK_METHODS.intent && !params.continuation_id) {
+      holdSelection = true; enteredIssue(); await issueGate;
+    }
+    if (method === FORMAL_P3_TASK_METHODS.result && holdSelection) {
+      holdSelection = false; enteredSelection(); await selectionGate;
+    }
+    return reply;
+  };
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, request, store: fixture.store });
+  await owner.refresh(sessionId);
+  const issue = owner.issue({ operation: 'task.adjust', task_id: 'task-b', adjustment: 'advance checkpoint' });
+  await issueStarted;
+  const select = owner.select('task-b');
+  await selectionStarted;
+  releaseIssue(); await issue;
+  assert.equal(owner.snapshot().command.phase, 'confirmation_required');
+  releaseSelection(); await select;
+  assert.equal(owner.snapshot().command.phase, 'confirmation_required');
+  await owner.confirm();
+  assert.equal(owner.snapshot().command.phase, 'applied');
+  assert.equal(fixture.calls.filter(item => item.method === FORMAL_P3_TASK_METHODS.intent).length, 2);
+});
+
+test('unknown retry recovers original RPC even after the real Attempt has advanced', async () => {
+  const fixture = authoritativeFixture();
+  const mutations = [];
+  let reply;
+  const request = async (method, params, id) => {
+    if (method === FORMAL_P3_TASK_METHODS.confirmation) return envelope(id, {
+      status: 'confirmation_issued', confirmation_id: 'retry-bound-confirmation',
+      operation: 'task.retry', command_id: params.command_id, target_task_id: 'task-a',
+    });
+    if (method === FORMAL_P3_TASK_METHODS.mutate) {
+      mutations.push({ params: structuredClone(params), id });
+      if (reply) return reply;
+      fixture.taskA.attempt_id = 'attempt-a-new';
+      reply = envelope(id, { status: 'mutation_processed', operation: 'task.retry',
+        command_id: params.command_id, target_task_id: 'task-a', formal_task_result: {
+          task_id: 'task-a', attempt_id: 'attempt-a-new', state: 'accepted',
+        } });
+      throw new Error('retry response lost');
+    }
+    return fixture.request(method, params, id);
+  };
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, request, store: fixture.store });
+  await owner.refresh(sessionId);
+  await owner.issue({ operation: 'task.retry', task_id: 'task-a' });
+  await assert.rejects(owner.confirm(), /response lost/);
+  owner.disconnect(); await owner.refresh(sessionId);
+  await owner.confirm();
+  assert.deepEqual(mutations[1], mutations[0]);
+  assert.equal(owner.snapshot().command.accepted, true);
+  assert.equal(owner.snapshot().tasks.find(task => task.task_id === 'task-a').attempt_id, 'attempt-a-new');
+});
+
+test('RESULT_UNKNOWN error envelope is not a definitive rejection even with retriable false', async () => {
+  const fixture = authoritativeFixture({ selectedHint: 'task-b' });
+  const request = async (method, params, id) => {
+    if (method === FORMAL_P3_TASK_METHODS.intent && params.continuation_id) {
+      return { request_id: id, ok: false, result: null,
+        error: { code: 'RESULT_UNKNOWN', reason: 'TASK_RESULT_UNKNOWN', retriable: false } };
+    }
+    return fixture.request(method, params, id);
+  };
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, request, store: fixture.store });
+  await owner.refresh(sessionId);
+  await owner.issue({ operation: 'task.adjust', task_id: 'task-b', adjustment: 'advance checkpoint' });
+  await assert.rejects(owner.confirm(), /TASK_RESULT_UNKNOWN/);
+  assert.equal(owner.snapshot().command.phase, 'unknown');
+  const count = fixture.calls.length;
+  await assert.rejects(owner.issue({ operation: 'task.cancel', task_id: 'task-b' }), /unavailable/);
+  assert.equal(fixture.calls.length, count);
+});
+
+test('late disconnected confirmation never projects a result or queries until exact recovery', async () => {
+  const fixture = authoritativeFixture({ selectedHint: 'task-b' });
+  let release, entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  let saved;
+  const request = async (method, params, id) => {
+    if (method === FORMAL_P3_TASK_METHODS.intent && params.continuation_id) {
+      if (saved) { assert.equal(saved.request_id, id); return saved; }
+      saved = await fixture.request(method, params, id);
+      entered();
+      await gate;
+      return saved;
+    }
+    return fixture.request(method, params, id);
+  };
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, request, store: fixture.store });
+  await owner.refresh(sessionId);
+  await owner.issue({ operation: 'task.adjust', task_id: 'task-b', adjustment: 'advance checkpoint' });
+  const pending = owner.confirm();
+  await started;
+  owner.disconnect();
+  await owner.refresh(sessionId);
+  const before = fixture.calls.length;
+  release();
+  await assert.rejects(pending, /stale/);
+  assert.equal(fixture.calls.length, before);
+  assert.equal(owner.snapshot().command.phase, 'unknown');
+  assert.equal((await owner.confirm()).command.phase, 'applied');
+});
+
+for (const definitive of [false, true]) {
+test(`known mutation followed by failed detail query recovers reads only (definitive=${definitive})`, async () => {
+  const fixture = authoritativeFixture({ selectedHint: 'task-b' });
+  let effect = false, failed = false;
+  const request = async (method, params, id) => {
+    if (method === FORMAL_P3_TASK_METHODS.list && effect && !failed) {
+      failed = true;
+      if (definitive) return envelope(id, { reason: 'TASK_READ_PERMISSION_CHANGED' }, false);
+      throw new Error('detail unavailable');
+    }
+    const reply = await fixture.request(method, params, id);
+    if (method === FORMAL_P3_TASK_METHODS.intent && params.continuation_id) effect = true;
+    return reply;
+  };
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, request, store: fixture.store });
+  await owner.refresh(sessionId);
+  await owner.issue({ operation: 'task.adjust', task_id: 'task-b', adjustment: 'advance checkpoint' });
+  await assert.rejects(owner.confirm(), definitive ? /TASK_READ_PERMISSION_CHANGED/ : /detail unavailable/);
+  assert.equal(owner.snapshot().command.accepted, true);
+  assert.equal(owner.snapshot().command.phase, 'applied');
+  await owner.confirm();
+  assert.equal(owner.snapshot().status, 'ready');
+  assert.equal(fixture.calls.filter(item => item.method === FORMAL_P3_TASK_METHODS.intent).length, 2);
+});
+}
+
+test('concurrent issue is fenced before any query and duplicate confirm joins one RPC', async () => {
+  const fixture = authoritativeFixture({ selectedHint: 'task-b' });
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, request: fixture.request, store: fixture.store });
+  await owner.refresh(sessionId);
+  const first = owner.issue({ operation: 'task.adjust', task_id: 'task-b', adjustment: 'advance checkpoint' });
+  await assert.rejects(owner.issue({ operation: 'task.cancel', task_id: 'task-b' }), /unavailable/);
+  await first;
+  const confirm = owner.confirm();
+  assert.equal(owner.confirm(), confirm);
+  await confirm;
+  assert.equal(fixture.calls.filter(item => item.method === FORMAL_P3_TASK_METHODS.intent).length, 2);
+});
+
+test('ordinary event advancement does not invalidate exact confirmation', async () => {
+  const fixture = authoritativeFixture({ selectedHint: 'task-b' });
+  const request = async (method, params, id) => {
+    const reply = await fixture.request(method, params, id);
+    if (method === FORMAL_P3_TASK_METHODS.events && params.task_id === 'task-b' && fixture.taskB.event_head === 2) {
+      reply.result.events.push(event(fixture.taskB, 2, 'task.progress', 'running', null, { progress: 'next checkpoint' }));
+    }
+    return reply;
+  };
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, request, store: fixture.store });
+  await owner.refresh(sessionId);
+  await owner.issue({ operation: 'task.adjust', task_id: 'task-b', adjustment: 'advance checkpoint' });
+  fixture.taskB.event_head = 2;
+  assert.equal((await owner.confirm()).command.phase, 'applied');
+});
+
+for (const field of ['attempt_id', 'revision']) {
+  test(`first confirmation rejects changed ${field} before mutation`, async () => {
+    const fixture = authoritativeFixture({ selectedHint: 'task-b' });
+    const owner = new FormalP3TaskExperienceOwner({ enabled: true, request: fixture.request, store: fixture.store });
+    await owner.refresh(sessionId);
+    await owner.issue({ operation: 'task.adjust', task_id: 'task-b', adjustment: 'advance checkpoint' });
+    if (field === 'attempt_id') {
+      fixture.taskB.attempt_id = 'attempt-successor';
+      fixture.taskB.admission.attempt_id = 'attempt-successor';
+    }
+    else fixture.taskB.revision.number += 1;
+    await assert.rejects(owner.confirm(), /CONFIRMATION_STALE/);
+    assert.equal(owner.snapshot().command.phase, 'rejected');
+    assert.equal(fixture.calls.filter(item => item.method === FORMAL_P3_TASK_METHODS.intent).length, 1);
+  });
+}
 
 test('five production structured controls preserve their exact closed operation target and arguments', async () => {
   const cases = [

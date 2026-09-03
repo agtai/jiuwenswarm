@@ -145,6 +145,7 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
 )
 from jiuwenswarm.server.live_voice.voice_task_bridge import VoiceTaskBridge
 from jiuwenswarm.server.live_voice.voice_task_policy import FormalTaskPolicyAdapter
+from tests.support.live_voice.semantic_model import AuthorityCorpusModel
 
 NOW = "2026-08-05T12:00:00Z"
 EXPIRY = "2026-08-05T13:00:00Z"
@@ -360,7 +361,7 @@ class _ModelResolver:
                 ErrorCode.PERMISSION_DENIED,
             )
         return ResolvedP3Model(
-            object() if instantiate else None,
+            AuthorityCorpusModel() if instantiate else None,
             self.identity,
             self.config_version,
         )
@@ -2413,132 +2414,78 @@ async def test_registry_status_controls_intersect_principal_and_existing_retry_a
 
 @pytest.mark.asyncio
 async def test_registry_inflight_production_replay_reauthorizes_resolved_mutation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commits = TurnCommitLedger()
-    harness = _harness(
-        tmp_path,
-        commit_ledger=commits,
-        executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),),
-    )
+    harness = _harness(tmp_path, commit_ledger=commits,
+                       executor_profiles=(DirectProjectCodeExecutorAdapter.capability_profile(),))
     await harness.composition.start()
     await _stop_test_reconciliation_worker(harness.composition)
     owner = BoundedP3ConfirmationOwner(harness.database, enabled=True)
-    forwarder = ProductP3ConfirmationForwarder(owner)
 
-    async def push(_message: dict[str, object]) -> bool:
+    async def push(_message):
         return True
 
     registry = AgentServerProductCompositionRegistry(
-        settings=ProductCompositionSettings(
-            p2_enabled=False,
-            p3_text_enabled=True,
-            p3_mutation_enabled=True,
-        ),
-        p3_composition=harness.composition,
-        agent_manager=object(),
-        push_text_event=push,
-        p3_confirmation_owner=owner,
-        p3_confirmation_forwarder=forwarder,
+        settings=ProductCompositionSettings(p2_enabled=False, p3_text_enabled=True, p3_mutation_enabled=True),
+        p3_composition=harness.composition, agent_manager=object(), push_text_event=push,
+        p3_confirmation_owner=owner, p3_confirmation_forwarder=ProductP3ConfirmationForwarder(owner),
         commit_ledger=commits,
     )
-    pending = await registry.handle_p3_intent(
-        params=_production_registry_text_params(
-            stem="inflight-create",
-            text="新建一个任务，基于合成依赖起草发布说明。",
-        ),
-        request_id="production-inflight-create",
-        session_id="session-1",
-    )
-    assert pending.ok is True, pending.payload
-    pending_result = pending.payload["result"]
-    assert isinstance(pending_result, dict)
-    token = pending_result["confirmation_token"]
-    assert isinstance(token, str)
+    settled = asyncio.Event()
+    release = asyncio.Event()
+    original_task = None
+    try:
+        pending = await registry.handle_p3_intent(
+            params=_production_registry_text_params(stem="inflight-create",
+                text="新建一个任务，基于合成依赖起草发布说明。"),
+            request_id="production-inflight-create", session_id="session-1")
+        assert pending.ok, pending.payload
+        token = pending.payload["result"]["confirmation_token"]
+        original_invoke = registry._invoke_production_resolution
 
-    base_authenticator = harness.composition._authenticator
-    observed_operations: list[str] = []
+        async def retain_after_real_effect(**kwargs):
+            result = await original_invoke(**kwargs)
+            assert result.ok, result.payload
+            settled.set()
+            await release.wait()
+            return result
 
-    class _MutationRevokedAfterOriginalInvocation:
-        create_authentications = 0
+        monkeypatch.setattr(registry, "_invoke_production_resolution", retain_after_real_effect)
+        params = _production_registry_text_params(stem="inflight-create-confirm",
+            text=f"confirm task request {token}", continuation_id=token)
+        original_task = asyncio.create_task(registry.handle_p3_intent(
+            params=params, request_id="production-inflight-create-confirm", session_id="session-1"))
+        await asyncio.wait_for(settled.wait(), 5)
+        assert harness.composition._core.store.counts()["tasks"] == 1
+        base_authenticator = harness.composition._authenticator
+        observed = []
 
-        def authenticate(
-            self, bearer_token: object, *, operation: str, now: str
-        ) -> AuthenticatedPrincipal:
-            observed_operations.append(operation)
-            if operation == "task.create":
-                self.create_authentications += 1
-                if self.create_authentications > 4:
-                    raise FormalTaskViolation(
-                        "PRODUCTION_MUTATION_AUTHORITY_REVOKED",
-                        "retained mutation authority was revoked",
-                        ErrorCode.PERMISSION_DENIED,
-                    )
-            return base_authenticator.authenticate(
-                bearer_token,
-                operation=operation,
-                now=now,
-            )
+        class Revoked:
+            def authenticate(self, bearer_token, *, operation, now):
+                observed.append(operation)
+                if operation == "task.create":
+                    raise FormalTaskViolation("PRODUCTION_MUTATION_AUTHORITY_REVOKED",
+                                              "revoked after original effect", ErrorCode.PERMISSION_DENIED)
+                return base_authenticator.authenticate(bearer_token, operation=operation, now=now)
 
-    harness.composition._authenticator = _MutationRevokedAfterOriginalInvocation()
-    original_prepare = harness.composition.prepare_production_intent_authority
-    preparation_entered = threading.Event()
-    release_preparation = threading.Event()
-    prepare_calls = 0
-
-    def blocked_prepare(**kwargs: object) -> PreparedProductionIntentAuthority:
-        nonlocal prepare_calls
-        prepared = original_prepare(**kwargs)
-        if kwargs.get("operation") == "task.create":
-            prepare_calls += 1
-        if prepare_calls == 2:
-            preparation_entered.set()
-            if not release_preparation.wait(5):
-                raise AssertionError(
-                    "timed out waiting to release production preparation"
-                )
-        return prepared
-
-    monkeypatch.setattr(
-        harness.composition,
-        "prepare_production_intent_authority",
-        blocked_prepare,
-    )
-    confirmation_params = _production_registry_text_params(
-        stem="inflight-create-confirm",
-        text=f"confirm task request {token}",
-        continuation_id=token,
-    )
-    original = asyncio.create_task(
-        registry.handle_p3_intent(
-            params=confirmation_params,
-            request_id="production-inflight-create-confirm",
-            session_id="session-1",
-        )
-    )
-    assert await asyncio.to_thread(preparation_entered.wait, 5)
-    replay = asyncio.create_task(
-        registry.handle_p3_intent(
-            params=confirmation_params,
-            request_id="production-inflight-create-confirm",
-            session_id="session-1",
-        )
-    )
-    release_preparation.set()
-    original_result, replay_result = await asyncio.gather(original, replay)
-
-    assert original_result.ok is True, original_result.payload
-    assert replay_result.ok is False
-    assert replay_result.payload["error"]["reason"] == (
-        "PRODUCTION_MUTATION_AUTHORITY_REVOKED"
-    )
-    assert observed_operations.count("task.create") == 5
-    assert "task.list" not in observed_operations
-    assert harness.composition._core.store.counts()["tasks"] == 1
-
-    await registry.stop()
-    await harness.composition.stop()
+        harness.composition._authenticator = Revoked()
+        replay = await registry.handle_p3_intent(
+            params=params, request_id="production-inflight-create-confirm", session_id="session-1")
+        assert not replay.ok
+        assert replay.payload["error"]["reason"] == "PRODUCTION_MUTATION_AUTHORITY_REVOKED"
+        assert observed == ["task.create"]  # Exact retained operation, not default query authority.
+        harness.composition._authenticator = base_authenticator
+        release.set()
+        original_result = await asyncio.wait_for(original_task, 3)
+        assert original_result.ok, original_result.payload
+        assert harness.composition._core.store.counts()["tasks"] == 1
+    finally:
+        release.set()
+        if original_task is not None:
+            await asyncio.gather(original_task, return_exceptions=True)
+        await registry.stop()
+        await harness.composition.stop()
 
 
 @pytest.mark.asyncio
@@ -2714,7 +2661,11 @@ async def test_registry_preflights_production_authority_before_replay_capacity(
     )
     assert disabled.ok is False
     assert disabled.payload["error"]["reason"] == "PRODUCT_P3_TEXT_DISABLED"
-    assert feature_off._p3_intent_operations == {}
+    # Without a phrase classifier the operation is known only after the model.
+    # Its bounded rejected-request receipt is allowed; protected effects are not.
+    assert feature_off._pending_production_task_intents == {}
+    assert harness.composition._core.store.counts()["tasks"] == 0
+    assert harness.executor.dispatches == harness.executor.cancels == []
 
     await feature_off.stop()
     await registry.stop()
@@ -3045,10 +2996,11 @@ async def test_registry_production_clarification_is_owner_bound_and_single_use(
         request_id="duplicate-status-restart-answer",
         session_id="session-1",
     )
-    assert after_restart.ok is False
-    assert after_restart.payload["error"]["reason"] == (
-        "TASK_INTENT_CONTINUATION_UNAVAILABLE"
-    )
+    # Authorized proposal data now survives restart. A precise read may resume;
+    # this does not restore a mutation permission or a confirmation grant.
+    assert after_restart.ok is True, after_restart.payload
+    assert after_restart.payload["result"]["task_id"] == first_task
+    assert after_restart.payload["result"]["operation"] == "task.status"
     assert harness.composition._core.store.counts() == before
     assert restarted._pending_production_task_intents == {}
     await restarted.stop()
@@ -4654,148 +4606,61 @@ async def test_voice_task_create_requires_exact_accepted_commit_and_text(
 
 
 @pytest.mark.asyncio
-async def test_trusted_demo_bypass_requires_unified_voice_current_binding(
-    tmp_path: Path,
-) -> None:
-    ledger = TurnCommitLedger()
-    harness = _harness(tmp_path, commit_ledger=ledger)
+async def test_retired_demo_bypass_cannot_replace_exact_confirmation(tmp_path: Path) -> None:
+    """Retire the shortcut, retain its origin/target/no-side-effects oracles."""
+    harness = _harness(tmp_path)
     await harness.composition.start()
+    await _stop_test_reconciliation_worker(harness.composition)
     try:
-        structured = _create_params("command-structured-bypass")
-        structured.pop("confirmation_id")
-        forbidden = await harness.composition.handle(
-            operation="task.create",
-            params=structured,
-            request_id="request-structured-bypass",
+        params = _create_params("command-without-confirmation")
+        params.pop("confirmation_id")
+        before = harness.composition._core.store.counts()
+        with pytest.raises(TypeError, match="trusted_demo_policy_bypass"):
+            await harness.composition.handle(
+                operation="task.create", params=params, request_id="retired-bypass",
+                session_id="session-1", trusted_demo_policy_bypass=True,
+            )
+        rejected = await harness.composition.handle(
+            operation="task.create", params=params, request_id="no-confirmation",
             session_id="session-1",
-            trusted_demo_policy_bypass=True,
-            current_background_session_id="session-1",
         )
-        assert forbidden.ok is False
-        assert forbidden.payload["error"]["reason"] == (
-            "TRUSTED_DEMO_POLICY_BYPASS_FORBIDDEN"
-        )
-        assert _store_counts(harness.database) == (0, 0, 0, 0, 0)
+        assert not rejected.ok
+        assert harness.composition._core.store.counts() == before
+        assert harness.executor.dispatches == harness.executor.cancels == []
 
-        create_commit = TurnCommit.from_dict(
-            {
-                "contract_version": CONTRACT_VERSION,
-                "commit_id": "commit-demo-create",
-                "turn_id": "turn-demo-create",
-                "interaction_id": "interaction-demo",
-                "text": "Create one bounded project change.",
-                "hypothesis_provenance": {
-                    "provider": "product.web.voice",
-                    "kind": "committed_text",
-                },
-                "scope": _scope().to_dict(),
-                "context_refs": [],
-                "committed_at": NOW,
-            }
-        )
-        assert ledger.accept(create_commit) is True
-        create_params = _create_params("command-demo-create")
-        create_params.pop("confirmation_id")
-        create_params.update(
-            source="voice",
-            interaction_id=create_commit.interaction_id,
-            turn_id=create_commit.turn_id,
-            commit_id=create_commit.commit_id,
-            origin_commit_sha256=hashlib.sha256(
-                create_commit.canonical_bytes()
-            ).hexdigest(),
-            source_start=0,
-            source_end=len(create_commit.text),
-        )
-        created = await harness.composition.handle(
-            operation="task.create",
-            params=create_params,
-            request_id="request-demo-create",
-            session_id="session-1",
-            trusted_demo_policy_bypass=True,
-            current_background_session_id="session-1",
-        )
-        assert created.ok is True
-        task_id = created.payload["result"]["task_id"]
+        task_ids = []
+        for suffix in ("a", "b"):
+            created = await harness.composition.handle(
+                operation="task.create",
+                params=_issued_create_params(harness, f"normal-create-{suffix}"),
+                request_id=f"normal-create-{suffix}", session_id="session-1",
+                current_background_session_id="session-1",
+            )
+            assert created.ok, created.payload
+            task_ids.append(created.payload["result"]["task_id"])
+        a, b = task_ids
         current = await harness.composition.read_current_background_task(
-            bearer_token=TOKEN,
-            session_id="session-1",
-        )
-        assert current is not None and current.task_id == task_id
-        current_result = await harness.composition.handle(
-            operation="task.result",
-            params={**_base(), "task_id": task_id},
-            request_id="request-demo-current-result",
-            session_id="session-1",
-        )
-        assert current_result.ok is True
-        assert current_result.payload["result"] == {
-            "task_id": task_id,
-            "availability": "not_ready",
-            "reason": "TASK_RESULT_NOT_READY",
-            "task_result": None,
-        }
-
-        cancel_commit = TurnCommit.from_dict(
-            {
-                "contract_version": CONTRACT_VERSION,
-                "commit_id": "commit-demo-cancel",
-                "turn_id": "turn-demo-cancel",
-                "interaction_id": "interaction-demo",
-                "text": "停止刚才的后台任务。",
-                "hypothesis_provenance": {
-                    "provider": "product.web.voice",
-                    "kind": "committed_text",
-                },
-                "scope": _scope().to_dict(),
-                "context_refs": [],
-                "committed_at": NOW,
-            }
-        )
-        assert ledger.accept(cancel_commit) is True
-        cancel_params = _mutation_params(task_id)
-        cancel_params.pop("confirmation_id")
-        cancel_params.update(
-            source="voice",
-            interaction_id=cancel_commit.interaction_id,
-            turn_id=cancel_commit.turn_id,
-            commit_id=cancel_commit.commit_id,
-            origin_commit_sha256=hashlib.sha256(
-                cancel_commit.canonical_bytes()
-            ).hexdigest(),
-            source_start=0,
-            source_end=len(cancel_commit.text),
-        )
-        wrong_binding = await harness.composition.handle(
-            operation="task.cancel",
-            params=cancel_params,
-            request_id="request-demo-cancel-wrong-target",
-            session_id="session-1",
-            trusted_demo_policy_bypass=True,
-            trusted_current_task_id="task-wrong-current",
-        )
-        assert wrong_binding.ok is False
-        assert wrong_binding.payload["error"]["reason"] == (
-            "CURRENT_BACKGROUND_TASK_MISMATCH"
-        )
-        assert (
-            harness.composition._core.store.get_task(task_id, _scope()).cancel_requested
-            is False
-        )
-
+            bearer_token=TOKEN, session_id="session-1")
+        assert current.task_id == b  # UI hint remains; it grants no authority.
+        result = await harness.composition.handle(
+            operation="task.result", params={**_base(), "task_id": a},
+            request_id="result-not-current", session_id="session-1")
+        assert result.ok and result.payload["result"]["task_id"] == a
+        assert result.payload["result"]["availability"] == "not_ready"
+        cancel = _issue_confirmation(harness, _mutation_params(a), operation="task.cancel")
+        before = harness.composition._core.store.counts()
+        wrong = await harness.composition.handle(
+            operation="task.cancel", params={**cancel, "task_id": b},
+            request_id="wrong-target", session_id="session-1")
+        assert not wrong.ok
+        assert harness.composition._core.store.counts() == before
+        assert not any(harness.composition._core.store.get_task(t, _scope()).cancel_requested for t in task_ids)
         cancelled = await harness.composition.handle(
-            operation="task.cancel",
-            params=cancel_params,
-            request_id="request-demo-cancel",
-            session_id="session-1",
-            trusted_demo_policy_bypass=True,
-            trusted_current_task_id=task_id,
-        )
-        assert cancelled.ok is True
-        assert (
-            harness.composition._core.store.get_task(task_id, _scope()).cancel_requested
-            is True
-        )
+            operation="task.cancel", params=cancel,
+            request_id="exact-noncurrent-target", session_id="session-1")
+        assert cancelled.ok, cancelled.payload
+        assert harness.composition._core.store.get_task(a, _scope()).cancel_requested
+        assert not harness.composition._core.store.get_task(b, _scope()).cancel_requested
     finally:
         await harness.composition.stop()
 
@@ -4872,7 +4737,7 @@ async def test_authenticated_addressed_adjust_can_target_noncurrent_task(
 
 
 @pytest.mark.asyncio
-async def test_task_adjust_requires_exact_current_binding_and_reaches_core(
+async def test_task_adjust_requires_exact_origin_and_confirmation_and_reaches_core(
     tmp_path: Path,
 ) -> None:
     ledger = TurnCommitLedger()
@@ -4899,7 +4764,6 @@ async def test_task_adjust_requires_exact_current_binding_and_reaches_core(
             request_id="request-adjust-oversized",
             session_id="session-1",
             current_background_session_id="session-1",
-            trusted_current_task_id=task_id,
         )
         assert oversized_result.ok is False
         assert oversized_result.payload["error"]["reason"] == (
@@ -4940,32 +4804,31 @@ async def test_task_adjust_requires_exact_current_binding_and_reaches_core(
             return _issue_confirmation(harness, params, operation="task.adjust")
 
         wrong_session_params = voice_adjust("command-adjust-wrong-session")
+        wrong_session_params["session_id"] = "session-2"
         wrong_session = await harness.composition.handle(
             operation="task.adjust",
             params=wrong_session_params,
             request_id="request-adjust-wrong-session",
             session_id="session-1",
-            current_background_session_id="session-2",
-            trusted_current_task_id=task_id,
         )
         assert wrong_session.ok is False
         assert wrong_session.payload["error"]["reason"] == (
-            "CURRENT_BACKGROUND_TASK_BINDING_REQUIRED"
+            "FORMAL_TASK_SESSION_MISMATCH"
         )
         assert _store_counts(harness.database) == before_rejection
 
         wrong_task_params = voice_adjust("command-adjust-wrong-task")
+        wrong_task_params["task_id"] = "task-not-authorized"
         wrong_task = await harness.composition.handle(
             operation="task.adjust",
             params=wrong_task_params,
             request_id="request-adjust-wrong-task",
             session_id="session-1",
             current_background_session_id="session-1",
-            trusted_current_task_id="task-not-current",
         )
         assert wrong_task.ok is False
         assert wrong_task.payload["error"]["reason"] == (
-            "CURRENT_BACKGROUND_TASK_MISMATCH"
+            "TASK_NOT_FOUND"
         )
         assert _store_counts(harness.database) == before_rejection
 
@@ -4976,7 +4839,6 @@ async def test_task_adjust_requires_exact_current_binding_and_reaches_core(
             request_id="request-adjust-exact",
             session_id="session-1",
             current_background_session_id="session-1",
-            trusted_current_task_id=task_id,
         )
         assert exact.ok is True
         assert exact.payload["result"]["adjustment_state"] == "pending"

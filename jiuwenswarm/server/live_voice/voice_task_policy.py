@@ -87,7 +87,6 @@ class FormalTaskPolicyInput:
     confirmed: bool = False
     confirmation_id: str | None = None
     policy_bypass: str | None = None
-    current_task_binding: bool = False
     after_seq: int = -1
     cursor: str | None = None
     limit: int | None = None
@@ -256,22 +255,12 @@ class FormalTaskPolicyAdapter:
                     ErrorCode.PERMISSION_DENIED,
                 )
         elif intent.source_start is not None or intent.source_end is not None:
-            current_binding_matches = (
-                intent.operation == "task.cancel"
-                and intent.current_task_binding
-                and intent.source_start == 0
-                and intent.source_end == len(commit.text)
-            )
             if (
                 type(intent.source_start) is not int
                 or type(intent.source_end) is not int
                 or not 0 <= intent.source_start < intent.source_end <= len(commit.text)
                 or intent.task_id is None
-                or (
-                    not current_binding_matches
-                    and commit.text[intent.source_start : intent.source_end]
-                    != intent.task_id
-                )
+                or commit.text[intent.source_start : intent.source_end] != intent.task_id
             ):
                 raise FormalTaskViolation(
                     "TASK_INTENT_SOURCE_SPAN_MISMATCH",
@@ -394,18 +383,6 @@ class FormalTaskPolicyAdapter:
                 "only task.retry may carry server-derived retry lineage",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        if type(intent.current_task_binding) is not bool or (
-            intent.current_task_binding
-            and not (
-                intent.source == "voice"
-                and intent.operation in {"task.adjust", "task.cancel"}
-            )
-        ):
-            raise FormalTaskViolation(
-                "INVALID_CURRENT_TASK_BINDING",
-                "current-task binding is valid only for a voice current-task mutation",
-                ErrorCode.INVALID_ARGUMENT,
-            )
         if intent.source in {"voice", "text"}:
             if not intent.interaction_id or not intent.turn_id or not intent.commit_id:
                 raise FormalTaskViolation(
@@ -454,15 +431,10 @@ class FormalTaskPolicyAdapter:
                 ErrorCode.INVALID_ARGUMENT,
             )
         confirmed_boundary = intent.confirmed and bool(intent.confirmation_id)
-        bypass_boundary = (
-            not intent.confirmed
-            and intent.confirmation_id is None
-            and intent.policy_bypass == "trusted_demo_live_voice_v1"
-        )
-        if not intent.destructive or not (confirmed_boundary or bypass_boundary):
+        if not intent.destructive or not confirmed_boundary:
             raise FormalTaskViolation(
                 "TASK_CONFIRMATION_REQUIRED",
-                "formal project mutation requires confirmation or trusted policy",
+                "formal project mutation requires confirmation",
                 ErrorCode.PERMISSION_DENIED,
             )
         assert intent.authorization is not None

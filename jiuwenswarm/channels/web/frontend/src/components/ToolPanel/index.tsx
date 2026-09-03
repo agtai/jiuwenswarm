@@ -6,6 +6,8 @@
 
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
+import { selectScopedLiveVoiceTasks, useLiveVoiceTaskStore } from '../../stores/liveVoiceTaskStore';
+import { RecentTasksPanel } from './RecentTasksPanel';
 import { useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { FileCheck2, FileText, Minimize2 } from 'lucide-react';
 import { webRequest } from '../../services/webClient';
@@ -98,6 +100,7 @@ function ExpandedSingleAgentArea({
   onTabChange,
   onCollapse,
   reviewPanel,
+  recentTasks,
   selectedArtifactId,
   onArtifactSelect,
 }: {
@@ -109,6 +112,7 @@ function ExpandedSingleAgentArea({
   onTabChange: (tab: TabType) => void;
   onCollapse: () => void;
   reviewPanel?: ReactNode;
+  recentTasks?: ReactNode;
   selectedArtifactId?: string;
   onArtifactSelect: (artifactId: string) => void;
 }) {
@@ -175,7 +179,7 @@ function ExpandedSingleAgentArea({
         ) : resolvedTab === 'review' && reviewPanel ? (
           <div className="flex min-w-0 flex-1 overflow-hidden">{reviewPanel}</div>
         ) : (
-          <TaskPlanningPanel
+          recentTasks ?? <TaskPlanningPanel
             variant="expanded"
             tasks={tasks}
             members={members}
@@ -226,6 +230,14 @@ export function ToolPanel({
   const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
   // 规划/性能模式下复用 TaskPlanningPanel 紧凑态：把 TodoItem 降级为 TeamTask
   const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
+  const backgroundEntry = useLiveVoiceTaskStore(s => s.entries[activeSessionId ?? '']);
+  const backgroundTasks = backgroundEntry && activeSessionId
+    ? selectScopedLiveVoiceTasks(backgroundEntry.snapshot, activeSessionId, project?.project_id)
+    : [];
+  const recentTasks = backgroundEntry && activeSessionId &&
+    (backgroundTasks.length > 0 || backgroundEntry.snapshot.status === 'failed')
+    ? <RecentTasksPanel entry={backgroundEntry} todos={todos} sessionId={activeSessionId} projectId={project?.project_id} />
+    : undefined;
   const codeProject = project?.work_mode === 'code' && !project.is_default ? project : null;
   const canReviewCode = Boolean(codeProject && sessionId && sessionId !== 'new');
   const codeGitDiffWatch = useCodeGitDiffWatch({
@@ -241,6 +253,8 @@ export function ToolPanel({
     () => todos.filter((t) => t.status === 'completed').length,
     [todos],
   );
+  const recentTotalTasks = todos.length + backgroundTasks.length;
+  const recentCompletedTasks = todoCompletedTasks + backgroundTasks.filter(task => task.display_state === 'completed').length;
   const hydratedTeamHistorySessionRef = useRef<string | null>(null);
   const loadingTeamHistorySessionRef = useRef<string | null>(null);
 
@@ -443,11 +457,12 @@ export function ToolPanel({
               activeTab={teamAreaActiveTab}
               tasks={todoTeamTasks}
               members={teamMembers}
-              totalTasks={todos.length}
-              completedTasks={todoCompletedTasks}
+              totalTasks={recentTotalTasks}
+              completedTasks={recentCompletedTasks}
               onTabChange={setTeamAreaActiveTab}
               onCollapse={() => setTeamAreaExpanded(false)}
               reviewPanel={codeReviewPanel}
+              recentTasks={recentTasks}
               selectedArtifactId={teamAreaSelectedArtifactId}
               onArtifactSelect={setTeamAreaSelectedArtifactId}
             />
@@ -521,7 +536,7 @@ export function ToolPanel({
         ) : (
           /* 任务概述（复用集群模式紧凑态样式，数据来自 TodoItem） */
           <div className="flex-1 overflow-hidden mb-3">
-            <TaskPlanningPanel
+            {recentTasks ?? <TaskPlanningPanel
               variant="compact"
               tasks={todoTeamTasks}
               members={teamMembers}
@@ -534,7 +549,7 @@ export function ToolPanel({
               }}
               hideAssignee
               title={t('chat.recentTasks')}
-            />
+            />}
           </div>
         )}
 

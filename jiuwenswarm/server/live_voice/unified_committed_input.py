@@ -16,6 +16,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Mapping
 
@@ -28,6 +29,9 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 
 from .formal_task_models import FormalTaskViolation
 from .p3_confirmation import P3_CONFIRMATION_MAX_CAPACITY, P3_CONFIRMATION_MAX_TTL
+
+# Unaccepted work descriptions are data, not short-lived confirmation grants.
+SEMANTIC_PROPOSAL_TTL_SECONDS = 600
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +173,7 @@ class SqliteUnifiedCommittedInputJournal:
                 CREATE TABLE IF NOT EXISTS semantic_pending_contexts (
                     context_id TEXT PRIMARY KEY,
                     scope_sha256 TEXT NOT NULL,
-                    kind TEXT NOT NULL CHECK(kind IN ('proposal', 'clarification', 'confirmation')),
+                    kind TEXT NOT NULL CHECK(kind IN ('analysis', 'proposal', 'clarification', 'confirmation')),
                     source_id TEXT NOT NULL,
                     version INTEGER NOT NULL CHECK(version > 0),
                     payload_json TEXT NOT NULL,
@@ -181,6 +185,93 @@ class SqliteUnifiedCommittedInputJournal:
                     UNIQUE(scope_sha256, kind, source_id)
                 )
             """)
+            # SQLite cannot widen a CHECK in place. Rebuild this private
+            # pre-command table transactionally; every old byte/digest survives.
+            # No Task Store or confirmation-owner schema is changed.
+            connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            schema = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='semantic_pending_contexts'"
+            ).fetchone()[0]
+            if "'analysis'" not in schema:
+                replacement = schema.replace(
+                    "semantic_pending_contexts", "semantic_pending_contexts_v2", 1
+                ).replace(
+                    "'proposal', 'clarification', 'confirmation'",
+                    "'analysis', 'proposal', 'clarification', 'confirmation'",
+                )
+                if "'analysis'" not in replacement:
+                    raise FormalTaskViolation(
+                        "SEMANTIC_CONTEXT_SCHEMA_UNKNOWN",
+                        "unsupported pre-command schema",
+                        ErrorCode.INTERNAL,
+                    )
+                connection.execute(replacement)
+                connection.execute(
+                    "INSERT INTO semantic_pending_contexts_v2 SELECT * FROM semantic_pending_contexts"
+                )
+                connection.execute("DROP TABLE semantic_pending_contexts")
+                connection.execute(
+                    "ALTER TABLE semantic_pending_contexts_v2 RENAME TO semantic_pending_contexts"
+                )
+            connection.commit()
+            # Derived lookup only: the frozen record remains the source of
+            # truth. Invalid legacy JSON cannot turn into a restored origin.
+            connection.execute("""
+                CREATE INDEX IF NOT EXISTS unified_creation_origin_lookup ON
+                unified_committed_inputs (
+                    json_extract(CASE WHEN json_valid(semantic_binding_json)
+                        THEN semantic_binding_json ELSE '{}' END,
+                        '$.body.input.commit.commit_id'),
+                    json_extract(CASE WHEN json_valid(semantic_binding_json)
+                        THEN semantic_binding_json ELSE '{}' END,
+                        '$.body.input.commit.turn_id')
+                )
+            """)
+
+    def read_creation_origin(self, *, scope: ScopeRef, turn_id: str, commit_id: str):
+        """Read frozen provenance data; never admit/replay an old TurnCommit.
+
+        The caller supplies an authenticated Task Store creation origin, not a
+        UI hint. A Task can already exist while its foreground journal row is
+        still pending, so completion/result JSON is intentionally not required.
+        """
+        from jiuwenswarm.common.schema.live_voice_contract_v2 import TurnCommit
+        from .task_semantics import TaskSemanticDecision
+
+        self._semantic_scope_key(scope)
+        for value in (turn_id, commit_id):
+            if type(value) is not str or not value.strip() or len(value.encode("utf-8")) > 256:
+                raise FormalTaskViolation("SEMANTIC_ORIGIN_INVALID", "invalid creation origin", ErrorCode.INVALID_ARGUMENT)
+        with self._connect() as connection:
+            rows = connection.execute("""
+                SELECT semantic_binding_json FROM unified_committed_inputs
+                WHERE json_extract(CASE WHEN json_valid(semantic_binding_json)
+                    THEN semantic_binding_json ELSE '{}' END,
+                    '$.body.input.commit.commit_id')=?
+                AND json_extract(CASE WHEN json_valid(semantic_binding_json)
+                    THEN semantic_binding_json ELSE '{}' END,
+                    '$.body.input.commit.turn_id')=?
+                AND json_extract(semantic_binding_json, '$.body.input.commit.scope.subject_id')=?
+                AND json_extract(semantic_binding_json, '$.body.input.commit.scope.project_id') IS ?
+                AND json_extract(semantic_binding_json, '$.body.input.commit.scope.session_id')=?
+                LIMIT 2
+            """, (commit_id, turn_id, scope.subject_id, scope.project_id, scope.session_id)).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise FormalTaskViolation("SEMANTIC_ORIGIN_AMBIGUOUS", "creation origin is not unique", ErrorCode.CONFLICT)
+        try:
+            record = self._decode_semantic_binding(rows[0])
+            assert record is not None
+            body = record["body"]
+            commit = TurnCommit.from_dict(body["input"]["commit"])
+            TaskSemanticDecision.from_frozen_record(record, commit=commit)
+            if commit.scope != scope or commit.turn_id != turn_id or commit.commit_id != commit_id or body["input"]["phase"] != "committed_input":
+                raise ValueError("creation origin mismatch")
+            return commit
+        except Exception as error:
+            raise FormalTaskViolation("SEMANTIC_ORIGIN_CORRUPT", "creation origin record is invalid", ErrorCode.INTERNAL) from error
 
     @staticmethod
     def _semantic_scope_key(scope: ScopeRef) -> str:
@@ -297,10 +388,17 @@ class SqliteUnifiedCommittedInputJournal:
             self._semantic_time(issued_at),
             self._semantic_time(expires_at),
         )
-        observed = self._semantic_time(time.time() if now is None else now)
-        if kind not in {"proposal", "clarification", "confirmation"} or not isinstance(
-            payload, Mapping
-        ):
+        # Origin/confirmation timestamps use datetime microseconds. Mixing a
+        # sub-microsecond time.time() value can falsely observe an already issued
+        # origin in the future on Windows. Use the same representation, without
+        # accepting future or expired data or widening the TTL.
+        observed = self._semantic_time(datetime.now(UTC).timestamp() if now is None else now)
+        if kind not in {
+            "analysis",
+            "proposal",
+            "clarification",
+            "confirmation",
+        } or not isinstance(payload, Mapping):
             raise FormalTaskViolation(
                 "SEMANTIC_CONTEXT_INVALID",
                 "invalid pre-command context",
@@ -310,11 +408,17 @@ class SqliteUnifiedCommittedInputJournal:
         if (
             len(encoded) > 32_768
             or not issued <= observed < expires
-            or expires - issued > P3_CONFIRMATION_MAX_TTL.total_seconds()
+            or expires - issued > (
+                SEMANTIC_PROPOSAL_TTL_SECONDS
+                if kind in {"analysis", "proposal"}
+                else P3_CONFIRMATION_MAX_TTL.total_seconds()
+            )
         ):
             raise FormalTaskViolation(
                 "SEMANTIC_CONTEXT_BOUND_EXCEEDED",
-                "context bounds or expiry rejected",
+                f"context bounds or expiry rejected (bytes={len(encoded)}, "
+                f"issue_to_observation={observed - issued:.9f}, "
+                f"remaining={expires - observed:.9f}, ttl={expires - issued:.9f})",
                 ErrorCode.INVALID_ARGUMENT,
             )
         digest = hashlib.sha256(encoded).hexdigest()
@@ -387,6 +491,71 @@ class SqliteUnifiedCommittedInputJournal:
             ).fetchone()
             assert row is not None
             return self._pending_context(row)
+
+    def find_semantic_context(
+        self, *, scope: ScopeRef, kind: str, source_id: str
+    ) -> PendingSemanticContext | None:
+        """Read the exact immutable source anchor, including consumed/expired data."""
+        scope_key = self._semantic_scope_key(scope)
+        source_id = self._semantic_text(source_id)
+        if kind not in {"analysis", "proposal", "clarification", "confirmation"}:
+            raise FormalTaskViolation(
+                "SEMANTIC_CONTEXT_INVALID",
+                "invalid context kind",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM semantic_pending_contexts WHERE scope_sha256=? AND kind=? AND source_id=?",
+                (scope_key, kind, source_id),
+            ).fetchone()
+        return None if row is None else self._pending_context(row)
+
+    def read_semantic_reference(
+        self,
+        *,
+        scope: ScopeRef,
+        context_id: str,
+        version: int,
+        commit_sha256: str,
+        now: float | None = None,
+    ) -> PendingSemanticContext:
+        """Recover a frozen input's own source, never another input's claim."""
+        observed = self._semantic_time(time.time() if now is None else now)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM semantic_pending_contexts WHERE scope_sha256=? AND context_id=? AND version=?",
+                (
+                    self._semantic_scope_key(scope),
+                    self._semantic_text(context_id),
+                    version,
+                ),
+            ).fetchone()
+        record = None if row is None else self._pending_context(row)
+        if (
+            record is None
+            or not record.issued_at <= observed < record.expires_at
+            or record.consumed_by not in {None, commit_sha256}
+        ):
+            raise FormalTaskViolation(
+                "SEMANTIC_CONTEXT_UNAVAILABLE",
+                "exact pending context unavailable",
+                ErrorCode.CONFLICT,
+            )
+        return record
+
+    def read_semantic_analysis_history(
+        self, *, scope: ScopeRef
+    ) -> tuple[PendingSemanticContext, ...]:
+        """Bounded authorized source history; expiry still gates proposal use."""
+        scope_key = self._semantic_scope_key(scope)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM semantic_pending_contexts WHERE scope_sha256=? AND kind='analysis' "
+                "ORDER BY issued_at DESC, context_id DESC LIMIT 16",
+                (scope_key,),
+            ).fetchall()
+        return tuple(self._pending_context(row) for row in reversed(rows))
 
     def read_semantic_contexts(
         self,
@@ -836,12 +1005,33 @@ class SqliteUnifiedCommittedInputJournal:
         voice_identity_sha256: str,
         fingerprint: bytes,
         timeout_seconds: float = 30.0,
+        request_id: str | None = None,
     ) -> dict[str, object] | None:
         """Wait boundedly for another owner and return only its durable result."""
 
+        if request_id is not None:
+            self._validate_identity(request_id, voice_identity_sha256, fingerprint)
         deadline = time.monotonic() + max(0.0, min(timeout_seconds, 30.0))
         while True:
             with self._connect() as connection:
+                if request_id is not None:
+                    binding = connection.execute(
+                        "SELECT voice_identity_sha256,fingerprint FROM unified_request_bindings WHERE request_id=?",
+                        (request_id,),
+                    ).fetchone()
+                    if binding is None:
+                        raise FormalTaskViolation(
+                            "UNIFIED_INPUT_ADMISSION_MISSING",
+                            "closed replay requires its original admitted request",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                    if (binding["voice_identity_sha256"] != voice_identity_sha256
+                            or bytes(binding["fingerprint"]) != fingerprint):
+                        raise FormalTaskViolation(
+                            "UNIFIED_INPUT_ID_CONFLICT",
+                            "request identity cannot change its original admitted input",
+                            ErrorCode.CONFLICT,
+                        )
                 row = connection.execute(
                     """
                     SELECT * FROM unified_committed_inputs

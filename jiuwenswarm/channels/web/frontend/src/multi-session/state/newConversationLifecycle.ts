@@ -59,9 +59,10 @@ export function registerCreatedConversation(
   createdAt = Date.now(),
   initialContent = '',
   workContext: Partial<Pick<Session, 'project_id' | 'project_dir' | 'work_mode'>> = {},
+  processing = true,
 ): Session {
   applyRuntimeSettings(sessionId, settings);
-  useChatStore.getState().setProcessing(sessionId, true);
+  useChatStore.getState().setProcessing(sessionId, processing);
 
   const timestamp = new Date(createdAt).toISOString();
   const session: Session = {
@@ -77,7 +78,7 @@ export function registerCreatedConversation(
     updated_at: timestamp,
     last_message_at: createdAt,
     last_user_message_at: createdAt,
-    is_processing: true,
+    is_processing: processing,
   };
   locallyCreatedConversations.set(sessionId, session);
   useSessionStore.getState().addSession(session);

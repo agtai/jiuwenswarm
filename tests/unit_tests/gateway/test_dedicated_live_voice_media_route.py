@@ -1211,6 +1211,76 @@ async def test_same_ready_peer_detach_wins_and_suppresses_eot() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_start", [False, True])
+async def test_ready_boundaries_cannot_starve_behind_continuously_ready_audio(with_start):
+    binding = _binding()
+    received = []
+    frames = [encode_audio_frame(binding, _frame(seq=i, cursor=i*160)) for i in range(20)]
+    detach = MediaDetach(binding.lease_id, binding.generation.value, MediaDetachReason.PEER_CLOSE)
+    socket = _FakeDedicatedSocket([*frames, serialize_media_control(detach)])
+
+    async def start():
+        return MediaSpeechStart(binding.lease_id, binding.generation.value, provider_start_ms=100)
+
+    async def end():
+        return MediaEndOfTurn(binding.lease_id, binding.generation.value,
+                              provider_start_ms=100, provider_end_ms=700)
+
+    result = await run_dedicated_media_socket_leaf(
+        _request(binding), socket=socket, on_audio_frame=received.append,
+        next_speech_start=start if with_start else None, next_end_of_turn=end,
+        cleanup_owner=DedicatedMediaLeafCleanupOwner())
+    controls = [deserialize_media_control(item) for item in socket.sent]
+    boundaries = [item for item in controls if isinstance(item, (MediaSpeechStart, MediaEndOfTurn))]
+    assert len(boundaries) == (2 if with_start else 1)
+    assert isinstance(boundaries[-1], MediaEndOfTurn)
+    # Preserve the first same-loop frame ACK, then service the trusted boundary
+    # before admitting an unbounded ready queue. No frame loss or sequence drift.
+    assert sum(isinstance(c, MediaAck) for c in controls[:controls.index(boundaries[-1])]) <= 2
+    assert [frame.seq for frame in received] == list(range(20))
+    assert result.reason_id is MediaDetachReason.PEER_CLOSE
+    assert result.business_cancel_count_delta == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["malformed", "sequence", "cursor", "consumer", "detach"])
+async def test_ready_terminal_after_ack_wins_over_new_ready_boundary(failure):
+    binding = _binding()
+    end = asyncio.get_running_loop().create_future()
+    detach = serialize_media_control(MediaDetach(binding.lease_id, binding.generation.value, MediaDetachReason.PEER_CLOSE))
+    bad = {
+        "malformed": b"bad", "sequence": encode_audio_frame(binding, _frame(seq=2, cursor=320)),
+        "cursor": encode_audio_frame(binding, _frame(seq=1, cursor=999)),
+        "consumer": encode_audio_frame(binding, _frame(seq=1, cursor=160)), "detach": detach,
+    }[failure]
+
+    class ReadyAfterFirstAck(_FakeDedicatedSocket):
+        async def recv(self):
+            message = await super().recv()
+            if message == bad and not end.done():
+                end.set_result(MediaEndOfTurn(binding.lease_id, binding.generation.value,
+                                             provider_start_ms=100, provider_end_ms=700))
+            return message
+
+    consumed = []
+    def consume(frame):
+        if frame.seq == 1 and failure == "consumer":
+            raise RuntimeError("consumer failure")
+        consumed.append(frame.seq)
+
+    socket = ReadyAfterFirstAck([encode_audio_frame(binding, _frame()), bad])
+    result = await run_dedicated_media_socket_leaf(
+        _request(binding), socket=socket, on_audio_frame=consume,
+        next_end_of_turn=lambda: end, cleanup_owner=DedicatedMediaLeafCleanupOwner(),
+    )
+    assert not any(isinstance(deserialize_media_control(c), MediaEndOfTurn) for c in socket.sent)
+    assert consumed == [0]
+    assert result.accepted_frames == 1
+    assert result.business_cancel_count_delta == 0
+    assert result.cleanup_complete
+
+
+@pytest.mark.asyncio
 async def test_socket_leaf_accepts_future_receive_and_end_of_turn_sources() -> None:
     binding = _binding()
     receive_future: asyncio.Future[str | bytes] = (
@@ -1532,6 +1602,28 @@ async def test_speech_start_failure_keeps_hostile_eot_owned_until_retry(
 
     hostile_eot.release.set()
     assert await owner.retry_cleanup(timeout_seconds=1) is True
+
+
+@pytest.mark.asyncio
+async def test_product_speech_boundary_failure_terminates_uplink_instead_of_waiting_for_duration_limit() -> None:
+    binding = _binding()
+    owner = DedicatedMediaLeafCleanupOwner(capacity=3)
+    boundary_started = asyncio.Event()
+
+    async def failed_start() -> MediaSpeechStart:
+        boundary_started.set()
+        raise RuntimeError("content-free provider failure")
+
+    socket = _BlockingDedicatedSocket()
+    result = await asyncio.wait_for(run_dedicated_media_socket_leaf(
+        _request(binding), socket=socket, on_audio_frame=lambda _frame: None,
+        next_speech_start=failed_start, cleanup_owner=owner,
+        fail_on_speech_boundary_error=True,
+    ), timeout=1)
+    assert boundary_started.is_set()
+    assert result.reason_id is MediaDetachReason.CONSUMER_FAILED
+    assert result.accepted_frames == 0
+    assert owner.snapshot.retained_tasks == 0
     assert owner.snapshot.cleanup_complete is True
 
 

@@ -308,6 +308,32 @@ async def test_delegate_converts_to_standard_commit_then_admits_new_response() -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("route", [UnifiedCommittedInputRoute.DIALOGUE, UnifiedCommittedInputRoute.TASK])
+async def test_analysis_requires_actual_full_presentation_and_never_credits_unsaid_text(route):
+    owner, runtime = await active_owner()
+    source = await owner.accept_provider_response("provider-source", "source")
+    _, admission = await owner.admit_delegate(delegate_proposal(source.response), committed_at="2026-09-03T00:00:00Z")
+    result = await owner.accept_delegate_result(admission, canonical_text="I can prepare an equipment report in the background.", route=route)
+    provider_id = "provider-result"
+    await owner.bind_delegate_provider_response(provider_id, result.response)
+    assert await owner.presented_agent_analysis(result.response) is None
+    await owner.accept_audio(audio(result.response, provider_id, 0))
+    await owner.accept_audio(audio(result.response, provider_id, 1))
+    await owner.accept_provider_done(done(result.response, provider_id, transcript="I read the equipment information."))
+    await owner.acknowledge_audio(ack_for(runtime, result.response, 0))
+    assert await owner.presented_agent_analysis(result.response) is None
+    await owner.acknowledge_audio(ack_for(runtime, result.response, 1))
+    analysis = await owner.presented_agent_analysis(result.response)
+    if route is UnifiedCommittedInputRoute.TASK:
+        assert analysis is None
+    else:
+        assert analysis.commit == admission.turn_commit
+        assert analysis.text == "I read the equipment information."
+        assert "background" not in analysis.text
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_stale_or_changed_delegate_has_zero_runtime_effect() -> None:
     owner, runtime = await active_owner()
     source = await owner.accept_provider_response(

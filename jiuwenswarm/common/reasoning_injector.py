@@ -145,8 +145,9 @@ def build_reasoning_model_request_kwargs(
 
 def bounded_semantic_request_options(
     model_client_config: Mapping[str, Any],
+    model_config_obj: Any = None,
 ) -> dict[str, Any]:
-    """Use verified low-effort capability for bounded structured interpretation.
+    """Use verified non-thinking capability for formal spoken interaction.
 
     This is a per-invocation option, not a saved model or ordinary Agent policy.
     Providers without this verified capability retain their configured behaviour.
@@ -155,13 +156,17 @@ def bounded_semantic_request_options(
         client_provider=model_client_config.get("client_provider"),
         api_base=model_client_config.get("api_base")
         or model_client_config.get("base_url"),
-        model_name=model_client_config.get("model_name"),
+        # The constructed SDK model keeps its name in the request config, while
+        # catalog entries keep it beside provider credentials in client config.
+        model_name=_resolve_model_name(
+            model_client_config.get("model_name") or "", _model_config_to_dict(model_config_obj)
+        ),
     )
-    return (
-        {"reasoning_effort": "low"}
-        if target is not None and target[0] == "deepseek_official"
-        else {}
-    )
+    if target is None or target[0] != "deepseek_official":
+        return {}
+    extra_body = _copy_extra_body(_model_config_to_dict(model_config_obj).get("extra_body"))
+    extra_body["thinking"] = {"type": "disabled"}
+    return {"extra_body": extra_body}
 
 
 __all__ = [

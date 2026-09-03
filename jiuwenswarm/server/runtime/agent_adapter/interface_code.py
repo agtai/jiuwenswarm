@@ -86,6 +86,46 @@ from jiuwenswarm.common.utils import (
 logger = logging.getLogger(__name__)
 
 
+BACKGROUND_PROJECT_RESULT_INSTRUCTIONS = (
+    "For this bounded background project task, validate the saved result against "
+    "the original requirements before reporting completion. Preserve every "
+    "unrevised requirement and distinguish mandatory constraints from preferences. "
+    "Resolve the planning time and timezone from the task and its source materials "
+    "before comparing options. When they explicitly specify a scenario/reference "
+    "time or say not to use the machine clock, use that reference; runtime and "
+    "message timestamps do not replace it. Distinguish a data snapshot from a "
+    "planning reference when the materials do not equate them. "
+    "For every recommended option, check all applicable deadlines, resource "
+    "availability and dependencies using the full durations and mandatory buffers "
+    "in the source materials. A small violation is still a violation. Do not "
+    "classify an option as feasible by dropping a buffer or assuming an exception, "
+    "extension, approval or change to an arrangement the user asked to preserve. "
+    "Meeting the highest-priority goal does not waive other unchanged requirements. "
+    "An option violating any such requirement is not a fully feasible solution: "
+    "label it conditional or infeasible consistently in the comparison table, "
+    "summary and recommendation. Do not recommend it as feasible and relegate "
+    "the violation to a risk note, or assume an unavailable dependency has no "
+    "effect on subsequent steps. "
+    "Unknown prerequisites are unverified, and alternatives depending on them must "
+    "be clearly conditional, separate from options that satisfy the requirements. "
+    "If no option meets all mandatory constraints, save that conclusion and the "
+    "specific conflicts; identify which decision or new evidence would be needed "
+    "without making it or claiming success for an infeasible plan. "
+    "Use an authorized calculation tool for time offsets and cost totals when "
+    "provided; otherwise cross-check the arithmetic in reverse. Verify the saved "
+    "values against the source durations, units and deadlines. A proposed or "
+    "recommended action has not been performed: even inside a client-facing draft, "
+    "do not claim a booking, rebooking, payment, refund or sent message happened "
+    "unless the materials or an authorized execution receipt establish it. Write "
+    "planned or conditional wording when the action is only proposed. "
+    "Use the exact requested output paths. In prose, quotation marks, backticks "
+    "and book-title marks normally delimit a path and are not filename characters; "
+    "retain them only when the user explicitly requests them as literal characters "
+    "in the filename. Check the actual filenames and contents before finishing. "
+    "This guidance grants no additional tool, file or external-action authority."
+)
+
+
 class CodingMemoryRail(_BaseCodingMemoryRail):
     """Keep Coding Memory cold-start indexing out of the request path."""
 
@@ -1451,6 +1491,23 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         if getattr(self, "_is_dedicated_background_project_adapter", False):
             _restrict_background_project_abilities(self._instance)
+            self._configure_background_project_result_prompt()
+
+    def _configure_background_project_result_prompt(self) -> None:
+        """Add result guidance only after the dedicated task boundary is known."""
+        if not getattr(self, "_is_dedicated_background_project_adapter", False):
+            return
+        from openjiuwen.harness.prompts import PromptSection
+
+        builder = getattr(self._instance, "system_prompt_builder", None)
+        if builder is None:
+            raise RuntimeError("BACKGROUND_PROJECT_RESULT_PROMPT_UNAVAILABLE")
+        builder.add_section(PromptSection(
+            name="background_project_result_requirements",
+            content={"cn": BACKGROUND_PROJECT_RESULT_INSTRUCTIONS,
+                     "en": BACKGROUND_PROJECT_RESULT_INSTRUCTIONS},
+            priority=66,
+        ))
 
     def _seed_code_runtime_cwd(
         self,

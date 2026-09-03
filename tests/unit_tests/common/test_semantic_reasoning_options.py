@@ -14,13 +14,13 @@ from jiuwenswarm.common.reasoning_injector import bounded_semantic_request_optio
             "https://api.deepseek.com",
             "DeepSeek",
             "deepseek-v4-flash",
-            {"reasoning_effort": "low"},
+            {"extra_body": {"thinking": {"type": "disabled"}}},
         ),
         (
             "https://api.deepseek.com/v1",
             "OpenAI",
             "deepseek-v4-pro",
-            {"reasoning_effort": "low"},
+            {"extra_body": {"thinking": {"type": "disabled"}}},
         ),
         ("https://other.invalid", "DeepSeek", "deepseek-v4-flash", {}),
         ("https://api.deepseek.com", "DeepSeek", "future-unverified-model", {}),
@@ -48,3 +48,12 @@ def test_semantic_reasoning_is_capability_bound_and_does_not_change_configuratio
     assert "private-canary" not in str(actual)
     actual["untrusted"] = True
     assert bounded_semantic_request_options(config) == expected
+
+
+def test_bounded_options_preserve_unrelated_provider_options_without_mutating_them():
+    client = {"api_base": "https://api.deepseek.com", "client_provider": "DeepSeek", "model_name": "deepseek-v4-flash"}
+    request = {"extra_body": {"thinking": {"type": "enabled"}, "provider_option": "keep"}}
+    original = deepcopy(request)
+    options = bounded_semantic_request_options(client, request)
+    assert options == {"extra_body": {"thinking": {"type": "disabled"}, "provider_option": "keep"}}
+    assert request == original

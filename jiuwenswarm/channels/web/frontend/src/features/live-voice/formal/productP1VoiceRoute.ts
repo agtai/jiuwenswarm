@@ -72,6 +72,7 @@ export const PRODUCT_P1_PLAYOUT_QUEUE_CAPACITY = 256;
 export const PRODUCT_P1_STREAMING_PLAYOUT_MAX_DURATION_MS = 180_000;
 const MAX_STREAMING_PLAYOUT_FRAMES = PRODUCT_P1_STREAMING_PLAYOUT_MAX_DURATION_MS / LIVE_VOICE_AUDIO_FRAME_DURATION_MS;
 const ROUTE_READY_TIMEOUT_MS = 3_000;
+const PLAYOUT_FIRST_FRAME_TIMEOUT_MS = 8_000;
 const ROUTE_DRAIN_TIMEOUT_MS = 3_000;
 const ROUTE_COMPLETION_TIMEOUT_MS = 3_000;
 const CAPTURE_FIRST_FRAME_TIMEOUT_MS = 1_000;
@@ -346,6 +347,18 @@ function mediaTerminalFailureReason(event: Readonly<DedicatedMediaTerminalEvent>
   return `ADAPTER_${direction}_${source}_MEDIA_CONSUMER_FAILED`;
 }
 
+export function productCaptureTerminalFailureReason(
+  event: Readonly<DedicatedMediaTerminalEvent>,
+  endOfTurnNegotiated: boolean,
+): string {
+  if (
+    event.direction === 'uplink'
+    && endOfTurnNegotiated
+    && event.reason_id === 'MEDIA_CONSUMER_FAILED'
+  ) return 'SPEECH_RECOGNITION_STREAM_FAILED';
+  return mediaTerminalFailureReason(event);
+}
+
 function stableCaptureStopReason(reason: string): string {
   switch (reason) {
     case 'audio_context_not_running':
@@ -490,6 +503,7 @@ export class ProductP1VoiceRouteOwner {
   readonly #socketFactory: DedicatedMediaSocketFactory;
   readonly #onStatus?: (status: ProductP1VoiceStatus, reason: string | null) => void;
   readonly #onConcurrentCaptureStarted?: () => void;
+  readonly #onCaptureActivitySettled?: () => void;
   readonly #onGenerationSpeechStart?: (event: Readonly<MediaSpeechStart>) => void;
   readonly #onBargeInSpeechStart?: (event: Readonly<MediaSpeechStart>) => void;
   readonly #onBargeInEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void;
@@ -545,6 +559,7 @@ export class ProductP1VoiceRouteOwner {
   #pendingNativeAudio: Readonly<FormalBatchSynthesisResult> | null = null;
   #nativePlayoutFailureReason: string | null = null;
   #nativeCaptureSendPaused = false;
+  #nativeTaskNotification: Readonly<{ response: Readonly<AudioResponseRef> }> | null = null;
   #pendingMediaActivation: Promise<unknown> | null = null;
   #endOfTurnNegotiated = false;
   #pendingSpeechStart: Readonly<MediaSpeechStart> | null = null;
@@ -585,6 +600,7 @@ export class ProductP1VoiceRouteOwner {
       capture_stream_factory?: BrowserAudioCaptureStreamFactory;
       on_status?: (status: ProductP1VoiceStatus, reason: string | null) => void;
       on_concurrent_capture_started?: () => void;
+      on_capture_activity_settled?: () => void;
       on_barge_in_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
       on_barge_in_end_of_turn?: (event: Readonly<MediaEndOfTurn>) => void;
       /**
@@ -601,6 +617,7 @@ export class ProductP1VoiceRouteOwner {
     this.#socketFactory = input.socket_factory ?? defaultSocketFactory;
     this.#onStatus = input.on_status;
     this.#onConcurrentCaptureStarted = input.on_concurrent_capture_started;
+    this.#onCaptureActivitySettled = input.on_capture_activity_settled;
     this.#onBargeInSpeechStart = input.on_barge_in_speech_start;
     this.#onBargeInEndOfTurn = input.on_barge_in_end_of_turn;
     this.#l0Available = browserL0Available();
@@ -776,6 +793,7 @@ export class ProductP1VoiceRouteOwner {
     this.#streamingFallbackReason = null;
     this.#streamingFallbackTier = null;
     this.#nativeInteraction = null;
+    this.#nativeTaskNotification = null;
     this.#pendingNativeAudio = null;
     this.#nativePlayoutFailureReason = null;
     this.#nativeCaptureSendPaused = false;
@@ -1140,7 +1158,10 @@ export class ProductP1VoiceRouteOwner {
       this.#endOfTurnNegotiated = false;
       this.#pendingSpeechStart = null;
       this.#pendingEndOfTurn = null;
-      this.#endOfTurnHandler = null;
+      // Keep the current P1 loop listener through a silent release. The next
+      // overlap capture has its own exact route/generation and negotiates EOT
+      // again; clearing the listener here silently disables all later turns.
+      // Explicit start, close and failure still retire it.
       this.#endOfTurnDelivered = false;
       this.#bargeInSpeechStartDelivered = false;
       this.#bargeInEndOfTurnDelivered = false;
@@ -1408,6 +1429,27 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
+  prepareNativeTaskNotification(response: Readonly<AudioResponseRef>):
+    | Readonly<{ status: 'not_native' | 'speaker_active' }>
+    | Readonly<{ status: 'ready'; release: () => void }> {
+    if (this.#nativeInteraction === null) return { status: 'not_native' };
+    if (this.#closed || this.#closeRequested || this.#failureCleanupPromise !== null ||
+        this.#status !== 'capturing' || this.#route === null || this.#route.leaf.closed ||
+        this.#captureSpeechObserved || this.#captureProviderSpeechStartObserved || this.#nativeTaskNotification !== null) {
+      return { status: 'speaker_active' };
+    }
+    if (response.interaction_id !== this.#interactionId) {
+      throw new Error('Task notification belongs to another Native interaction');
+    }
+    const lease = Object.freeze({ response: Object.freeze({ ...response }) });
+    this.#nativeTaskNotification = lease;
+    return Object.freeze({ status: 'ready', release: () => {
+      // A late ACK/finally cannot release a newer notification's input gate.
+      if (this.#nativeTaskNotification !== lease) return;
+      this.#nativeTaskNotification = null;
+    } });
+  }
+
   async playAgentText(
     input: Readonly<{
       response: Readonly<AudioResponseRef>;
@@ -1418,13 +1460,17 @@ export class ProductP1VoiceRouteOwner {
   ): Promise<ProductP1NativeChatMessage | null> {
     const nativeDelivery = this.#pendingNativeAudio;
     const native = nativeDelivery !== null;
+    const continuousNative = this.#nativeInteraction !== null;
+    const taskNotification = continuousNative && !native && this.#nativeTaskNotification !== null &&
+      l0ResponseKey(this.#nativeTaskNotification.response) === l0ResponseKey(input.response);
     if (this.#speech === null || this.#playout === null || this.#closed || this.#closeRequested) {
       throw new Error('formal P1 synthesis authority is unavailable');
     }
-    if ((!native && ['starting', 'capturing', 'recognizing'].includes(this.#status)) || (native && this.#status !== 'capturing')) {
+    if ((!native && !taskNotification && ['starting', 'capturing', 'recognizing'].includes(this.#status)) ||
+        (continuousNative && this.#status !== 'capturing') || (continuousNative && !native && !taskNotification)) {
       throw new Error('formal P1 capture must settle before Agent playout');
     }
-    const operationGeneration = native ? this.#operationGeneration : ++this.#operationGeneration;
+    const operationGeneration = continuousNative ? this.#operationGeneration : ++this.#operationGeneration;
     const speech = this.#speech;
     let playoutResponse: Readonly<AudioResponseRef> | null = null;
     let capturePreparation: Promise<Readonly<{ ready: boolean; reason: string | null }>> | null = null;
@@ -1449,7 +1495,7 @@ export class ProductP1VoiceRouteOwner {
       }
       const receiptAuthority = this.#mediaCloseBinding;
       const captureFramesAcked = this.#captureFramesAcked;
-      if (receiptAuthority === null || (!native && captureFramesAcked <= 0)) {
+      if (receiptAuthority === null || (!continuousNative && captureFramesAcked <= 0)) {
         throw new Error('formal synthesis lost its capture authority');
       }
       let downlinkRoute: ActiveBrowserDedicatedMediaRoute | null = null;
@@ -1464,7 +1510,7 @@ export class ProductP1VoiceRouteOwner {
       // batch and reject its first media frame as stale.
       const frameCount = result.downlink === null ? chunks.length : result.downlink.frame_count;
       const captureDuringPlayout =
-        result.downlink !== null && !native && input.capture_during_playout !== false;
+        result.downlink !== null && !continuousNative && input.capture_during_playout !== false;
       if (result.downlink !== null) {
         const downlink = result.downlink;
         if (captureDuringPlayout) {
@@ -1573,7 +1619,35 @@ export class ProductP1VoiceRouteOwner {
       this.#fillPlayoutQueue(pendingPlayout);
       this.#deliverBargeInSpeechStart(operationGeneration, this.#route);
       this.#deliverBargeInEndOfTurn(operationGeneration, this.#route);
-      await rendered;
+      // A connected control channel is not proof that the dedicated audio
+      // route attached or delivered a frame. Bound both waits, even when the
+      // socket never emits an error/close event. Rendering still owns success.
+      let readinessCancelled = false;
+      const readiness = async () => {
+        if (downlinkRoute === null) return;
+        const started = Date.now();
+        const waitFor = async (ready: () => boolean, timeout: number, reason: string) => {
+          const deadline = Date.now() + timeout;
+          while (!readinessCancelled && this.#pendingPlayout === pendingPlayout && !ready()) {
+            if (Date.now() >= deadline) throw Object.assign(new Error(reason), { reason });
+            await waitTurn();
+          }
+        };
+        await waitFor(() => downlinkRoute!.leaf.attached, ROUTE_READY_TIMEOUT_MS,
+          'AUDIO_PLAYOUT_MEDIA_ROUTE_NOT_ATTACHED');
+        if (readinessCancelled || this.#pendingPlayout !== pendingPlayout) return;
+        console.info(`live_voice_playout_stage stage=attached response_id=${result.response.response_id} generation=${result.response.response_generation} elapsed_ms=${Date.now() - started}`);
+        await waitFor(() => pendingPlayout.nextChunkIndex > 0, PLAYOUT_FIRST_FRAME_TIMEOUT_MS,
+          'AUDIO_PLAYOUT_FIRST_FRAME_TIMEOUT');
+        if (!readinessCancelled && pendingPlayout.nextChunkIndex > 0) {
+          console.info(`live_voice_playout_stage stage=first_frame response_id=${result.response.response_id} generation=${result.response.response_generation} elapsed_ms=${Date.now() - started}`);
+        }
+      };
+      try {
+        await Promise.race([rendered, readiness().then(() => rendered)]);
+      } finally {
+        readinessCancelled = true;
+      }
       this.#requireCurrent(operationGeneration);
       if (downlinkRoute !== null) {
         const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
@@ -1592,10 +1666,10 @@ export class ProductP1VoiceRouteOwner {
       // a render receipt in both the overlapping and deferred cases.
       this.#requireCurrent(operationGeneration);
       let chatProjection: ProductP1NativeChatMessage | null = null;
-      if (native) {
+      if (continuousNative) {
         await this.#freezeNativeCaptureReceipt(pendingPlayout, operationGeneration);
         try {
-          chatProjection = await this.#acknowledgePlayout(pendingPlayout, true);
+          chatProjection = await this.#acknowledgePlayout(pendingPlayout, native);
         } finally {
           this.#nativeCaptureSendPaused = false;
           this.#drainCaptureFrames();
@@ -1620,7 +1694,7 @@ export class ProductP1VoiceRouteOwner {
       }
       if (downlinkRoute !== null) {
         if (this.#settlingPlayout === pendingPlayout) this.#settlingPlayout = null;
-        if (native) {
+        if (continuousNative) {
           this.#pendingSpeechStart = null;
           this.#bargeInSpeechStartDelivered = false;
           this.#setStatus('capturing', null);
@@ -1641,12 +1715,12 @@ export class ProductP1VoiceRouteOwner {
         }
       } else {
         if (this.#settlingPlayout === pendingPlayout) this.#settlingPlayout = null;
-        this.#setStatus('recognized', null);
+        this.#setStatus(continuousNative ? 'capturing' : 'recognized', null);
       }
       return chatProjection;
     } catch (error) {
       this.#nativeCaptureSendPaused = false;
-      if (native) this.#drainCaptureFrames();
+      if (continuousNative) this.#drainCaptureFrames();
       if (error !== null && typeof error === 'object' && (error as Record<string, unknown>).reason === 'FORMAL_PLAYOUT_BARGED') {
         this.#setStatus(this.#route === null ? 'recognized' : 'capturing', null);
         this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
@@ -1679,11 +1753,8 @@ export class ProductP1VoiceRouteOwner {
                 reason: this.#failureCleanupReason,
               })
             : error;
-      const pending = this.#pendingPlayout;
-      if (pending !== null && playoutResponse !== null) {
-        this.#pendingPlayout = null;
-        this.#audio.stopPlayout(playoutResponse, 'formal_playout_failed');
-      }
+      // Leave the exact pending route with #fail: clearing it here leaks the
+      // downlink socket and discards the response identity needed for cleanup.
       await this.#fail(failure);
       throw failure;
     }
@@ -1752,6 +1823,7 @@ export class ProductP1VoiceRouteOwner {
   }
 
   async close(): Promise<void> {
+    this.#nativeTaskNotification = null;
     if (this.#closed) return;
     if (this.#closePromise !== null) return this.#closePromise;
     this.#closeRequested = true;
@@ -2914,7 +2986,7 @@ export class ProductP1VoiceRouteOwner {
     }
     void this.#fail(
       Object.assign(new Error('formal dedicated media route terminated unexpectedly'), {
-        reason: mediaTerminalFailureReason(event),
+        reason: productCaptureTerminalFailureReason(event, this.#endOfTurnNegotiated),
       })
     );
   }
@@ -2962,6 +3034,11 @@ export class ProductP1VoiceRouteOwner {
 
   #acceptCaptureFrame(frame: Readonly<CapturedAudioFrame>): void {
     if (this.#closed || this.#closeRequested || this.#failureCleanupPromise !== null || ['cleanup_pending', 'failed', 'closed'].includes(this.#status)) return;
+    if (this.#nativeTaskNotification !== null) {
+      // Keep capture seq/cursor continuous, but never retain or replay speech
+      // or loudspeaker echo received during this exact Task announcement.
+      frame = Object.freeze({ ...frame, samples: new Float32Array(frame.samples.length) });
+    }
     if (this.#nativeInteraction !== null) {
       this.#compactNativeCaptureFrames();
       if (this.#frames.length >= MAX_CAPTURE_FRAMES) {
@@ -3083,6 +3160,7 @@ export class ProductP1VoiceRouteOwner {
       // utterance exceeding its own budget remains an exact Product P1
       // failure instead of leaking a trusted capacity decision through the
       // Adapter's generic consumer-error channel.
+      console.warn(`live_voice_capture_expired frames=${this.#frames.length} utterance_start_frame=${utteranceStartFrameIndex} provider_speech_start=${utteranceActive} end_of_turn_pending=${this.#pendingEndOfTurn !== null} end_of_turn_delivered=${this.#endOfTurnDelivered} status=${this.#status} generation=${this.#operationGeneration}`);
       void this.#fail(
         Object.assign(new Error('formal capture duration exceeded'), {
           reason: PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
@@ -3659,10 +3737,13 @@ export class ProductP1VoiceRouteOwner {
     this.#pendingSpeechStart = null;
     this.#pendingEndOfTurn = null;
     this.#captureProviderSpeechStartObserved = false;
+    this.#captureSpeechObserved = false;
+    this.#captureLocalActivityRecencyFrames = 0;
     this.#captureUtteranceStartFrameIndex = null;
     this.#bargeInSpeechStartDelivered = false;
     this.#bargeInEndOfTurnDelivered = false;
     this.#compactNativeCaptureFrames();
+    this.#onCaptureActivitySettled?.();
   }
 
   #publish(): void {

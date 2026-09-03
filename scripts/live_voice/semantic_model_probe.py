@@ -24,6 +24,7 @@ async def probe(
     output_dir: Path,
     reasoning_effort: str | None = None,
     selected_cases=None,
+    recorded_case: Path | None = None,
 ) -> int:
     from dotenv import load_dotenv
 
@@ -38,7 +39,10 @@ async def probe(
     from jiuwenswarm.server.live_voice.p3_model_resolution import (
         ServerModelCatalogResolver,
     )
-    from jiuwenswarm.server.live_voice.production_task_intent import TaskAuthorityRead
+    from jiuwenswarm.server.live_voice.production_task_intent import (
+        AuthenticatedTaskFact, AttemptState, TaskAuthorityRead, TaskState,
+        TerminalOutcome,
+    )
     from jiuwenswarm.server.live_voice.task_semantics import (
         TaskSemanticContext,
         TaskSemanticResolver,
@@ -49,6 +53,12 @@ async def probe(
 
     logging.disable(logging.CRITICAL)  # Test report owns the non-secret evidence.
     observed_responses = []
+    from tests.support.live_voice.semantic_constraint_oracles import (
+        CONTRARY_EFFECTS,
+        EQUIPMENT_CONSTRAINTS,
+        FLIGHT_CONSTRAINTS,
+        assert_constraint_patterns,
+    )
 
     class ObservedModel:
         def __init__(self, model):
@@ -128,6 +138,12 @@ async def probe(
             "task",
             "task.create",
         ),
+        (
+            "same-problem-independent-work",
+            "在同一设备项目里另外新建一个独立的后台任务，叫设备培训材料。只整理使用培训说明，保存为培训说明.md；不要承接设备更换比较，也不要修改先前提案。",
+            "task",
+            "task.create",
+        ),
     ]
     pending_offer = {
         "id": "probe-offered-audit",
@@ -142,6 +158,22 @@ async def probe(
         },
         "source_id": "probe-analysis-offer",
     }
+    recorded_bytes = recorded_case.read_bytes() if recorded_case else None
+    recorded = json.loads(recorded_bytes) if recorded_bytes is not None else None
+    recorded_sha256 = (
+        hashlib.sha256(recorded_bytes).hexdigest()
+        if recorded_bytes is not None
+        else None
+    )
+    if recorded:
+        cases.append(
+            (
+                recorded["case"],
+                recorded["input"]["commit"]["text"],
+                recorded["expected"]["route"],
+                recorded["expected"]["operation"],
+            )
+        )
     if selected_cases:
         if set(selected_cases) - {case[0] for case in cases}:
             raise ValueError("unknown probe case")
@@ -175,6 +207,14 @@ async def probe(
             "expected_operation": operation,
             "status": "FAIL",
         }
+        if recorded and case_id == recorded["case"]:
+            entry["recorded_expected"] = recorded["expected"]
+            entry["recorded_case_sha256"] = recorded_sha256
+            entry["required_constraint_patterns"] = dict(FLIGHT_CONSTRAINTS)
+            entry["forbidden_constraint_patterns"] = dict(CONTRARY_EFFECTS)
+        elif case_id == "detailed-proposal-acceptance":
+            entry["required_constraint_patterns"] = dict(EQUIPMENT_CONSTRAINTS)
+            entry["forbidden_constraint_patterns"] = dict(CONTRARY_EFFECTS)
         started = time.monotonic()
         response_start = len(observed_responses)
         try:
@@ -183,9 +223,34 @@ async def probe(
                 scope.session_id,
                 pending=(pending_offer,)
                 if case_id
-                in {"detailed-proposal-acceptance", "independent-new-objective"}
+                in {
+                    "detailed-proposal-acceptance",
+                    "independent-new-objective",
+                    "same-problem-independent-work",
+                }
                 else (),
             )
+            if recorded and case_id == recorded["case"]:
+                commit = TurnCommit.from_dict(recorded["input"]["commit"])
+                captured = recorded["input"]["context"]
+                context = TaskSemanticContext(
+                    TaskAuthorityRead(
+                        commit.scope, captured["authority_fingerprint"], tuple(
+                            AuthenticatedTaskFact(**{
+                                **fact,
+                                "state": TaskState(fact["state"]),
+                                "outcome": TerminalOutcome(fact["outcome"]) if fact["outcome"] else None,
+                                "attempt_state": AttemptState(fact["attempt_state"]),
+                                "attempt_outcome": TerminalOutcome(fact["attempt_outcome"]) if fact["attempt_outcome"] else None,
+                                "supported_operations": frozenset(fact["supported_operations"]),
+                            }) for fact in captured["tasks"]
+                        ),
+                    ),
+                    captured["conversation_id"],
+                    tuple(captured["history"]),
+                    tuple(captured["pending"]),
+                )
+                entry["recorded_input"] = recorded["input"]
             decision = await TaskSemanticResolver(catalog).resolve(
                 commit, context, analysis=analysis
             )
@@ -195,6 +260,9 @@ async def probe(
                 operation=decision.proposal.operation,
                 arguments=dict(decision.proposal.arguments),
                 provenance=decision.origin_context_binding,
+                reference_id=decision.reference_id,
+                continuation_action=decision.continuation_action,
+                requirement_source_ids=decision.frozen_record()["body"]["output"].get("requirement_source_ids", []),
             )
             assert decision.route == route and decision.proposal.operation == operation
             if case_id == "direct-zh":
@@ -212,12 +280,38 @@ async def probe(
                     "1500" in instruction or "一千五" in instruction
                 )
                 assert "设备建议.md" in instruction
+                entry["constraint_checks"] = assert_constraint_patterns(
+                    instruction, EQUIPMENT_CONSTRAINTS
+                )
             if case_id == "independent-new-objective":
                 assert (
                     decision.reference_id is None
                     and decision.continuation_action is None
                 )
                 assert "garden-review.md" in decision.proposal.arguments["instruction"]
+                assert not entry["requirement_source_ids"]
+            if case_id == "same-problem-independent-work":
+                assert (
+                    decision.reference_id is None
+                    and decision.continuation_action is None
+                )
+                assert decision.proposal.arguments["name"] == "设备培训材料"
+                assert not entry["requirement_source_ids"]
+                assert "培训说明.md" in decision.proposal.arguments["instruction"]
+            if recorded and case_id == recorded["case"]:
+                expected = recorded["expected"]
+                inherited_source = expected.get("requirement_source_id")
+                if not (inherited_source and inherited_source in entry["requirement_source_ids"]):
+                    assert decision.reference_id == expected["reference_id"]
+                    assert decision.continuation_action == expected["continuation_action"]
+                assert decision.proposal.arguments["name"] == expected["name"]
+                assert all(
+                    value in decision.proposal.arguments["instruction"]
+                    for value in expected["instruction_contains"]
+                )
+                entry["constraint_checks"] = assert_constraint_patterns(
+                    decision.proposal.arguments["instruction"], FLIGHT_CONSTRAINTS
+                )
             entry["status"] = "PASS"
         except Exception as error:
             entry.update(
@@ -253,6 +347,7 @@ async def probe(
             "jiuwenswarm/server/live_voice/p3_model_resolution.py",
             "jiuwenswarm/common/reasoning_injector.py",
             "jiuwenswarm/common/live_voice_operation_budgets.py",
+            "tests/support/live_voice/semantic_constraint_oracles.py",
         )
     }
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -280,6 +375,11 @@ if __name__ == "__main__":
         nargs="+",
         help="Run selected fixed cases; report never claims unexecuted cases",
     )
+    parser.add_argument(
+        "--recorded-case",
+        type=Path,
+        help="Test-only recorded semantic input with read-only task facts and predeclared expectations; no executor",
+    )
     args = parser.parse_args()
     raise SystemExit(
         asyncio.run(
@@ -288,6 +388,7 @@ if __name__ == "__main__":
                 args.output_dir.resolve(),
                 args.reasoning_effort,
                 args.cases,
+                args.recorded_case,
             )
         )
     )

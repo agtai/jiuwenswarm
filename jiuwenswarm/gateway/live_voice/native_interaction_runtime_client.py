@@ -50,6 +50,8 @@ NATIVE_INTERNAL_REQ_METHODS = frozenset(
         ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_CLOSE.value,
     }
 )
+from jiuwenswarm.common.live_voice_operation_budgets import SEMANTIC_TRANSPORT_TIMEOUT_SECONDS
+
 _MAX_REQUEST_SECONDS = 30.0
 _MAX_REQUEST_ID_CHARS = 256
 _MAX_REQUEST_ID_BYTES = 1_024
@@ -432,6 +434,7 @@ def _validate_method_result(
                         "turn_commit_id",
                         "canonical_text",
                         "response",
+                        *({"task_id"} if "task_id" in result else set()),
                     }
                 ),
             )
@@ -444,6 +447,10 @@ def _validate_method_result(
                 and _canonical_result_identity(result.get("turn_commit_id"))
                 and _canonical_delegate_result(result.get("canonical_text"))
                 and _canonical_response_ref(result.get("response"))
+                and ("task_id" not in result or (
+                    result.get("route") == UnifiedCommittedInputRoute.TASK.value
+                    and _canonical_result_identity(result["task_id"])
+                ))
             )
         else:
             valid = False
@@ -695,7 +702,7 @@ class GatewayNativeInteractionRuntimeClient:
             request_id=request_id,
             extra={"proposal": proposal.to_dict()},
             timeout_seconds=(
-                _MAX_REQUEST_SECONDS
+                SEMANTIC_TRANSPORT_TIMEOUT_SECONDS
                 if event.delegate is not None
                 else self._timeout_seconds
             ),

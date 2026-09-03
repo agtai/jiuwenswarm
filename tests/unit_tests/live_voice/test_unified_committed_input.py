@@ -20,6 +20,29 @@ def fingerprint(value: str) -> bytes:
     return hashlib.sha256(value.encode("utf-8")).digest()
 
 
+def test_closed_result_lookup_preserves_original_rpc_binding_without_writes(tmp_path):
+    journal = SqliteUnifiedCommittedInputJournal(tmp_path / "request-bound-read.sqlite3")
+    for name in ("a", "b"):
+        args = {"voice_identity_sha256":digest(name), "fingerprint":fingerprint(name)}
+        journal.admit(request_id=f"request-{name}", created_at="2030-01-01T00:00:00Z", **args)
+        journal.complete(**args, result={"ok":True, "result":{"value":name}}, completed_at="2030-01-01T00:00:01Z")
+    with journal._connect() as connection:
+        before = tuple(connection.iterdump())
+    assert journal.wait_for_completion(request_id="request-a", voice_identity_sha256=digest("a"),
+        fingerprint=fingerprint("a"), timeout_seconds=0)["result"] == {"value":"a"}
+    for request_id, voice, binding, reason in (
+        ("request-a", "b", "b", "UNIFIED_INPUT_ID_CONFLICT"),
+        ("request-a", "a", "changed", "UNIFIED_INPUT_ID_CONFLICT"),
+        ("never-admitted", "a", "a", "UNIFIED_INPUT_ADMISSION_MISSING"),
+    ):
+        with pytest.raises(FormalTaskViolation) as rejected:
+            journal.wait_for_completion(request_id=request_id, voice_identity_sha256=digest(voice),
+                fingerprint=fingerprint(binding), timeout_seconds=0)
+        assert rejected.value.reason == reason
+    with journal._connect() as connection:
+        assert tuple(connection.iterdump()) == before
+
+
 def test_semantic_freeze_is_after_admission_and_exact_immutable_replay(tmp_path):
     journal = SqliteUnifiedCommittedInputJournal(tmp_path / "freeze.sqlite3")
     voice, binding = digest("voice"), fingerprint("input")

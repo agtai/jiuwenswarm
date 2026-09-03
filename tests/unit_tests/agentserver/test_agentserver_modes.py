@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -817,6 +818,39 @@ def test_code_adapter_prepares_only_a_fresh_dedicated_background_child():
 
     assert child._is_dedicated_background_project_adapter is True
     assert child.non_file_rails_disabled is True
+
+
+def test_background_result_prompt_is_scoped_and_idempotent():
+    from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        BACKGROUND_PROJECT_RESULT_INSTRUCTIONS,
+        JiuwenSwarmCodeAdapter,
+    )
+
+    builder = SystemPromptBuilder(language="en")
+    builder.add_section(PromptSection(name="existing", content={"en": "Keep existing guidance."}))
+    adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
+    adapter._instance = SimpleNamespace(system_prompt_builder=builder)
+    adapter._is_dedicated_background_project_adapter = False
+    before = builder.build()
+    adapter._configure_background_project_result_prompt()
+    assert builder.build() == before
+    adapter._is_dedicated_background_project_adapter = True
+    adapter._configure_background_project_result_prompt()
+    adapter._configure_background_project_result_prompt()
+    prompt = builder.build()
+    assert before in prompt
+    assert prompt.count(BACKGROUND_PROJECT_RESULT_INSTRUCTIONS) == 1
+
+
+def test_background_result_prompt_fails_before_execution_if_builder_is_missing():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
+
+    adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
+    adapter._instance = SimpleNamespace()
+    adapter._is_dedicated_background_project_adapter = True
+    with pytest.raises(RuntimeError, match="BACKGROUND_PROJECT_RESULT_PROMPT_UNAVAILABLE"):
+        adapter._configure_background_project_result_prompt()
 
 
 def test_code_adapter_background_prepare_has_one_concurrent_owner():

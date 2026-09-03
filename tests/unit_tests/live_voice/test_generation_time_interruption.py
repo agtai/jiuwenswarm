@@ -303,6 +303,11 @@ async def test_generation_fence_blocks_final_tts_ack_and_history() -> None:
     assert history.assistant_intents == []
     # The committed turn the speaker already produced stays durable truth.
     assert [entry[0].commit_id for entry in history.users] == ["commit-1"]
+    context = current.select_formal_context(handle.response_ref.interaction_id)
+    assert len(context.entries) == 1
+    assert context.entries[0].ref.source == "live_voice.cr_committed_user"
+    assert context.entries[0].content == history.users[0][0].text
+    assert all(entry.content not in lower.finals + lower.deltas for entry in context.entries)
     await shutdown(current)
 
 

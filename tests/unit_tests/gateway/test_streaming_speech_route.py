@@ -1059,6 +1059,19 @@ async def test_provider_session_budget_covers_precommit_and_final_windows(
     await owner.close()
 
 
+def test_precommit_budget_covers_existing_absolute_capture_without_partials() -> None:
+    from jiuwenswarm.common.live_voice_capture_limits import MAX_CAPTURE_DURATION_SECONDS
+
+    assert MAX_CAPTURE_DURATION_SECONDS == 30 + 30 + 1.5
+    assert streaming_speech_route._PRECOMMIT_EVENT_TIMEOUT_SECONDS > MAX_CAPTURE_DURATION_SECONDS
+    assert streaming_speech_route._RECOGNITION_SESSION_TIMEOUT_SECONDS >= (
+        streaming_speech_route._OPEN_TIMEOUT_SECONDS
+        + streaming_speech_route._PRECOMMIT_EVENT_TIMEOUT_SECONDS
+        + streaming_speech_route._FINAL_TIMEOUT_SECONDS
+    )
+    assert streaming_speech_route._FINAL_TIMEOUT_SECONDS == 20
+
+
 @pytest.mark.asyncio
 async def test_streaming_owner_capacity_rejects_before_second_provider_allocation(
     monkeypatch: pytest.MonkeyPatch,

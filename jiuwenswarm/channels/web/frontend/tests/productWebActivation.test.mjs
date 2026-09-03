@@ -163,6 +163,26 @@ test('closed P2 notification settles definitively so reconnect can reactivate', 
   assert.equal(owner.hasPendingNotification(), false);
 });
 
+test('P2 close retains its exact request and origin across cleanup retry', async () => {
+  const calls = [];
+  const owner = new ProductWebP2ActivationOwner({ enabled: true, request: async (method, params, id) => {
+    calls.push({ method, params, id });
+    if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active', params);
+    assert.equal(method, PRODUCT_P2_CLOSE_METHOD, 'cleanup must issue no other effect');
+    if (calls.filter(call => call.method === PRODUCT_P2_CLOSE_METHOD).length === 1) throw new Error('close response lost');
+    return response('closed', params);
+  } });
+  await owner.start(binding);
+  await assert.rejects(owner.close('user_exit'), /close response lost/);
+  await owner.close('active_recovery');
+  const closes = calls.filter(call => call.method === PRODUCT_P2_CLOSE_METHOD);
+  assert.equal(closes.length, 2);
+  assert.match(closes[0].id, /^live-voice-p2-close-user_exit-/);
+  assert.equal(closes[1].id, closes[0].id);
+  assert.deepEqual(closes[1].params, closes[0].params);
+  assert.equal(owner.snapshot().status, 'closed');
+});
+
 test('panel recovery coordinator closes an idle poll before activating the next generation', async () => {
   const calls = [];
   const request = async (method, params, requestId) => {
@@ -443,6 +463,35 @@ test('stock Web exposes authoritative activation replay truth for refresh recove
   assert.equal(owner.activationWasReplayed(), true);
   await owner.close();
 });
+
+test('voice Task discovery is bounded data and cannot itself start progress or control tasks', async () => {
+  const calls = [];
+  const ids = ['task-a', 'task-b'];
+  const owner = new ProductWebP2ActivationOwner({ enabled: true, request: async (method, params) => {
+    calls.push(method);
+    return response(method === PRODUCT_P2_ACTIVATE_METHOD ? 'active' : 'closed', { ...params, voice_task_ids: ids });
+  } });
+  await owner.start(binding);
+  ids.push('not-in-the-returned-snapshot');
+  assert.deepEqual(owner.voiceTaskDiscovery(), { task_ids: ['task-a', 'task-b'], reason: null });
+  assert.deepEqual(calls, [PRODUCT_P2_ACTIVATE_METHOD]);
+  await owner.close();
+  assert.deepEqual(calls, [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]);
+});
+
+for (const ids of [['task-a', 'task-a'], [' '], [' task-a'], ['bad\u0000id'], ['x'.repeat(257)], Array.from({ length: 129 }, (_, i) => `t-${i}`), { task_id: 'task-a' }]) {
+  test(`invalid voice Task discovery fails closed (${JSON.stringify(ids).slice(0, 65)})`, async () => {
+    const calls = [];
+    const owner = new ProductWebP2ActivationOwner({ enabled: true, request: async method => {
+      calls.push(method);
+      return response(method === PRODUCT_P2_ACTIVATE_METHOD ? 'active' : 'closed', { voice_task_ids: ids });
+    } });
+    await assert.rejects(owner.start(binding), /voice Task discovery is invalid/);
+    assert.deepEqual(owner.voiceTaskDiscovery().task_ids, []);
+    await owner.close();
+    assert.ok(calls.every(method => [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD].includes(method)));
+  });
+}
 
 test('explicit media start refreshes one exact active P2 authority with singleflight', async () => {
   const calls = [];

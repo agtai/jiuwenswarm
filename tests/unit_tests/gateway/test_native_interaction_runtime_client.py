@@ -512,7 +512,7 @@ async def test_gateway_native_timeout_has_one_request_and_no_local_replay_record
 
 
 @pytest.mark.asyncio
-async def test_gateway_delegate_uses_method_specific_thirty_second_deadline(
+async def test_gateway_delegate_uses_composed_semantic_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, agent, _sanitized = observed_client(timeout_seconds=0.01)
@@ -546,7 +546,8 @@ async def test_gateway_delegate_uses_method_specific_thirty_second_deadline(
     )
 
     assert result == agent.result_override
-    assert observed_deadlines == [30.0]
+    assert observed_deadlines == [client_module.SEMANTIC_TRANSPORT_TIMEOUT_SECONDS]
+    assert observed_deadlines[0] == 150.0
 
 
 @pytest.mark.asyncio

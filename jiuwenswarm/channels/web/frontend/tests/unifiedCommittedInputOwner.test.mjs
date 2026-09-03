@@ -123,6 +123,53 @@ test('accepts the closed round_accepted union for dialogue and result-backed que
   assert.equal(result.result.commit_id, input.commit_id);
 });
 
+test('explicit typed input uses the sole semantic transport without a speech receipt or dispatch hint', async () => {
+  const calls = [];
+  const owner = new ProductUnifiedCommittedInputOwner(async (method, params, requestId) => {
+    calls.push({ method, params, requestId });
+    return accepted(requestId);
+  });
+  const { voice_commit_receipt, ...base } = finalInput();
+  const input = { ...base, input_kind: 'text' };
+  await owner.submit(binding, input);
+  await owner.submit(binding, input);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, PRODUCT_UNIFIED_COMMITTED_INPUT_METHOD);
+  assert.equal(calls[0].params.input_kind, 'text');
+  assert.equal('voice_commit_receipt' in calls[0].params, false);
+  assert.equal('dispatch_target' in calls[0].params, false);
+  await assert.rejects(owner.submit(binding, { ...input, voice_commit_receipt }), /typed input cannot/);
+  await assert.rejects(owner.submit(binding, input, { response_id: 'old', response_generation: 1 }), /typed input cannot/);
+  assert.equal(calls.length, 1);
+});
+
+test('Task receipt through Agent retains its exact task association across replay', async () => {
+  let calls = 0;
+  const input = finalInput();
+  const owner = new ProductUnifiedCommittedInputOwner(async (_method, _params, requestId) => {
+    calls += 1;
+    const result = roundAccepted(requestId, input);
+    result.result.task_id = 'task-observed-at-runtime';
+    return result;
+  });
+  const first = await owner.submit(binding, input);
+  const replay = await owner.submit(binding, input);
+  assert.equal(first.result.task_id, 'task-observed-at-runtime');
+  assert.deepEqual(replay, first);
+  assert.equal(calls, 1);
+});
+
+for (const taskId of [null, '', '  ', 12, 'x'.repeat(257)]) {
+  test(`rejects invalid round task association ${String(taskId).slice(0, 16)}`, async () => {
+    const owner = new ProductUnifiedCommittedInputOwner(async (_m, _p, id) => {
+      const result = roundAccepted(id);
+      result.result.task_id = taskId;
+      return result;
+    });
+    await assert.rejects(owner.submit(binding, finalInput()), /task_id is invalid/);
+  });
+}
+
 test('a rebuilt owner accepts durable same-voice replay rebound to its outer request', async () => {
   let businessEffects = 0;
   let completed = false;
@@ -232,6 +279,30 @@ test('enforces the backend Unicode scalar, character, and UTF-8 bounds', async (
   assert.equal(calls, 1);
 });
 
+for (const [code, reason] of [
+  ['RESULT_UNKNOWN', 'UNIFIED_FOREGROUND_EFFECT_RESULT_UNKNOWN'],
+  ['UNAVAILABLE', 'UNIFIED_INPUT_IN_PROGRESS'],
+]) {
+  test(`retains exact typed final after ${reason} until a proven replay`, async () => {
+    let calls = 0;
+    const { voice_commit_receipt, ...base } = finalInput();
+    const input = { ...base, input_kind: 'text' };
+    const owner = new ProductUnifiedCommittedInputOwner(async (_method, _params, requestId) => {
+      calls += 1;
+      if (calls === 1) return { request_id: requestId, ok: false, result: null,
+        error: { code, reason, message: 'bounded stable failure' } };
+      return accepted(requestId);
+    });
+    await assert.rejects(owner.submit(binding, input), error => error.code === code && error.reason === reason);
+    assert.equal(owner.hasPending(), true);
+    await assert.rejects(owner.submit(binding, { ...input, commit_id: 'another', turn_id: 'another' }), /different authoritative final/);
+    assert.equal(calls, 1);
+    await owner.submit(binding, input);
+    assert.equal(calls, 2);
+    assert.equal(owner.hasPending(), false);
+  });
+}
+
 test('rejects malformed or open unified success envelopes before caching', async () => {
   const malformed = [
     accepted('request-final-1', { extra: true }),
@@ -271,6 +342,8 @@ test('rejects malformed or open unified success envelopes before caching', async
     });
     await assert.rejects(owner.submit(binding, finalInput()), /unified committed-input/);
     assert.equal(calls, 1);
-    assert.equal(owner.hasPending(), false);
+    assert.equal(owner.hasPending(), true);
+    await assert.rejects(owner.submit(binding, finalInput({ commit_id: 'another', turn_id: 'another' })), /different authoritative final/);
+    assert.equal(calls, 1);
   }
 });

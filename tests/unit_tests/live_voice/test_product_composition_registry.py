@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import sqlite3
 import subprocess
@@ -141,7 +142,6 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry,
     PRODUCT_COMPOSITION_ENABLE_ENV,
     PRODUCT_CRITICAL_INPUT_ENABLE_ENV,
-    PRODUCT_DEMO_POLICY_BYPASS_ENV,
     PRODUCT_P2_ENABLE_ENV,
     PRODUCT_P3_TEXT_ENABLE_ENV,
     ProductCompositionSettings,
@@ -598,6 +598,8 @@ class _P3Composition(P3AuthenticatedComposition):
         presentation_expires_at: str = EXPIRY,
     ) -> None:
         self.project_dir = project_dir
+        self.semantic_calls = []
+        self.semantic_program = None
         self.authority_calls: list[dict[str, object]] = []
         self.query_calls: list[ProductP3AuthorizedQuery] = []
         self.production_authority_calls: list[dict[str, object]] = []
@@ -702,6 +704,46 @@ class _P3Composition(P3AuthenticatedComposition):
     def product_presentation_consumption_available(self) -> bool:
         return self._presentation_delegate is not None
 
+    async def resolve_production_semantics(
+        self, *, commit, bearer_token, session_id, history=(), pending=(),
+        native_authority=None, analysis=None,
+    ):
+        """Model-port double for lifecycle tests; real strict parser, no NLP claim.
+
+        Business/Store semantics are owned by test_semantic_registry. These
+        isolated lifecycle fixtures explicitly default to a dialogue model.
+        """
+        from jiuwenswarm.server.live_voice.task_semantics import TaskSemanticContext, TaskSemanticResolver
+        from jiuwenswarm.server.live_voice.p3_model_resolution import ResolvedP3Model
+        from tests.support.live_voice.semantic_model import decision
+
+        if self.fail_authority is not None:
+            raise self.fail_authority
+        if session_id != SCOPE.session_id or commit.scope != SCOPE or (
+            bearer_token != "trusted-token" and not isinstance(native_authority, NativeP3ActivationAuthority)
+        ):
+            raise FormalTaskViolation("FORMAL_TASK_AUTHENTICATION_REQUIRED", "test authority mismatch", ErrorCode.UNAUTHENTICATED)
+        composition = self
+
+        class Model:
+            async def invoke(self, **kwargs):
+                assert kwargs["tools"] == []
+                data = json.loads(kwargs["messages"][1].content)
+                composition.semantic_calls.append(data)
+                result = decision(data) if composition.semantic_program is None else composition.semantic_program(data)
+                if inspect.isawaitable(result):
+                    result = await result
+                return SimpleNamespace(content=json.dumps(result), tool_calls=[])
+
+        class Models:
+            def resolve(self, *_args, **_kwargs):
+                return ResolvedP3Model(Model(), "test-lifecycle-model", "test-config")
+
+        return await TaskSemanticResolver(Models()).resolve(
+            commit, TaskSemanticContext(TaskAuthorityRead(SCOPE, "test-lifecycle-empty", ()),
+                                        session_id, history, pending), analysis=analysis,
+        )
+
     @property
     def task_database_path(self) -> Path | None:
         return (
@@ -721,6 +763,13 @@ class _P3Composition(P3AuthenticatedComposition):
         return self._presentation_delegate._read_product_task_result(
             authority, **kwargs
         )
+
+    async def read_task_notification_facts(self, *, task_id, attempt_id, scope):
+        assert self._presentation_store is not None
+        task = self._presentation_store.get_task(task_id, scope)
+        assert task.attempt_id == attempt_id
+        availability, result, reason = self._presentation_store.task_result(task_id, scope)
+        return task, availability, result, reason
 
     def prepare_product_presentation_ack(self, authority, delivery, **kwargs):
         assert self._presentation_delegate is not None
@@ -1778,7 +1827,6 @@ def _unified_registry(
             p2_enabled=True,
             p3_text_enabled=p3_enabled,
             p3_mutation_enabled=mutation_enabled,
-            demo_policy_bypass_enabled=demo_policy_bypass,
             critical_input_enabled=critical_input,
             interaction_engine=interaction_engine,
         ),
@@ -1790,6 +1838,17 @@ def _unified_registry(
         ),
     )
     return registry, composition, manager
+
+
+async def _submit_typed_unified(registry, *, params, **kwargs):
+    """Migrate lifecycle oracles, not the retired synthetic origin mechanism."""
+    clean = dict(params)
+    assert clean.pop("dispatch_target", "agent") == "agent"
+    clean.pop("response_id", None)  # Response identity is server-allocated now.
+    assert "gateway_voice_claim" not in clean
+    return await registry.handle_unified_submit(
+        params={**clean, "input_state": "final", "input_kind": "text"}, **kwargs
+    )
 
 
 def _p2_params(**changes: object) -> dict[str, object]:
@@ -2415,18 +2474,17 @@ def test_critical_input_product_composition_flag_is_default_off(
     assert ProductCompositionSettings.from_environment().critical_input_enabled is True
 
 
-def test_demo_policy_bypass_is_backend_configured_and_default_off(
+def test_retired_demo_policy_flag_cannot_reenable_a_production_bypass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv(PRODUCT_DEMO_POLICY_BYPASS_ENV, raising=False)
-    assert (
-        ProductCompositionSettings.from_environment().demo_policy_bypass_enabled
-        is False
-    )
-    monkeypatch.setenv(PRODUCT_DEMO_POLICY_BYPASS_ENV, "1")
-    assert (
-        ProductCompositionSettings.from_environment().demo_policy_bypass_enabled is True
-    )
+    retired = "JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED"
+    monkeypatch.delenv(retired, raising=False)
+    ordinary = ProductCompositionSettings.from_environment()
+    monkeypatch.setenv(retired, "1")
+    assert ProductCompositionSettings.from_environment() == ordinary
+    assert not hasattr(ordinary, "demo_policy_bypass_enabled")
+    with pytest.raises(TypeError):
+        ProductCompositionSettings(demo_policy_bypass_enabled=True)
 
 
 @pytest.mark.asyncio
@@ -2730,15 +2788,15 @@ async def test_native_dialogue_delegate_is_drained_before_registry_close(
     route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
     bridge = registry._task_intent_bridge
     assert bridge is not None
-    original_resolve_unified = bridge.resolve_unified
+    original_resolve_unified = _composition.resolve_production_semantics
     resolve_calls = 0
 
-    def counted_resolve_unified(*args, **kwargs):
+    async def counted_resolve_unified(*args, **kwargs):
         nonlocal resolve_calls
         resolve_calls += 1
-        return original_resolve_unified(*args, **kwargs)
+        return await original_resolve_unified(*args, **kwargs)
 
-    monkeypatch.setattr(bridge, "resolve_unified", counted_resolve_unified)
+    monkeypatch.setattr(_composition, "resolve_production_semantics", counted_resolve_unified)
     delegate_params = _native_propose_params(
         binding,
         capability,
@@ -2812,113 +2870,6 @@ async def test_native_dialogue_delegate_is_drained_before_registry_close(
     assert snapshot.conversation.presentation.records == ()
 
 
-@pytest.mark.asyncio
-async def test_native_background_delegate_uses_only_voice_task_p3(
-    tmp_path: Path,
-) -> None:
-    registry, composition, manager = _unified_registry(
-        tmp_path,
-        demo_policy_bypass=True,
-        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
-    )
-    composition.create_state = FormalTaskState.ACCEPTED
-    activated = await registry.handle_p2_activate(
-        params=_p2_params(interaction_engine="openai-realtime-native"),
-        request_id="request-native-task-activate",
-        session_id=SCOPE.session_id,
-        channel_id="web",
-    )
-    descriptor = cast(
-        dict[str, object],
-        cast(dict[str, object], activated.payload["result"])["_native_gateway"],
-    )
-    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
-    capability = cast(str, descriptor["capability"])
-    assert (
-        await registry.handle_native_propose(
-            params=_native_propose_params(
-                binding, capability, _native_turn_proposal(binding)
-            ),
-            request_id="request-native-task-turn",
-            session_id=SCOPE.session_id,
-        )
-    ).ok
-    source = await registry.handle_native_propose(
-        params=_native_propose_params(
-            binding, capability, _native_speak_proposal(binding)
-        ),
-        request_id="request-native-task-source-response",
-        session_id=SCOPE.session_id,
-    )
-    source_payload = cast(dict[str, object], source.payload["result"])
-    source_response_payload = cast(dict[str, object], source_payload["response"])
-    source_response = ResponseRef(
-        interaction_id=cast(str, source_response_payload["interaction_id"]),
-        response_id=cast(str, source_response_payload["response_id"]),
-        response_generation=cast(int, source_response_payload["response_generation"]),
-    )
-
-    delegate_params = _native_propose_params(
-        binding,
-        capability,
-        _native_delegate_proposal(
-            binding,
-            source_response,
-            request_text="后台帮我检查这些资料并整理报告。",
-        ),
-    )
-    delegated = await registry.handle_native_propose(
-        params=delegate_params,
-        request_id="request-native-task-delegate",
-        session_id=SCOPE.session_id,
-    )
-
-    assert delegated.ok is True
-    result = cast(dict[str, object], delegated.payload["result"])
-    assert result["kind"] == "delegate"
-    assert result["route"] == "background.create"
-    assert result["canonical_text"] == (
-        "后台任务已受理，正在等待执行。开始执行后会显示正在执行。"
-    )
-    assert manager.agent.calls == 0
-    assert [call[0] for call in composition.handle_calls] == ["task.create"]
-    assert composition.create_effects == 1
-    assert composition.current is not None
-    origin = registry._voice_task_origins[composition.current.task_id]
-    result_response = cast(dict[str, object], result["response"])
-    assert origin.response_ref == ResponseRef(
-        binding.interaction_id,
-        cast(str, result_response["response_id"]),
-        cast(int, result_response["response_generation"]),
-    )
-    route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
-    runtime_snapshot = route.activation_lease._runtime.snapshot()
-    assert runtime_snapshot.queued_notifications == 0
-    assert runtime_snapshot.conversation.presentation.records == ()
-    replay = await registry.handle_native_propose(
-        params=delegate_params,
-        request_id="request-native-task-delegate",
-        session_id=SCOPE.session_id,
-    )
-    assert replay.payload == delegated.payload
-    changed = await registry.handle_native_propose(
-        params=_native_propose_params(
-            binding,
-            capability,
-            _native_delegate_proposal(
-                binding,
-                source_response,
-                request_text="后台帮我执行另一项工作。",
-            ),
-        ),
-        request_id="request-native-task-delegate-changed",
-        session_id=SCOPE.session_id,
-    )
-    assert changed.ok is False
-    assert changed.payload["error"]["reason"] == "NATIVE_DELEGATE_CALL_CONFLICT"
-    assert composition.create_effects == 1
-    await registry.stop()
-
 
 @pytest.mark.asyncio
 async def test_native_dialogue_delegate_flattens_agent_line_endings_only(
@@ -2960,158 +2911,7 @@ async def test_native_dialogue_delegate_flattens_agent_line_endings_only(
     await registry.stop()
 
 
-@pytest.mark.asyncio
-async def test_native_current_task_status_uses_authoritative_native_route(
-    tmp_path: Path,
-) -> None:
-    registry, composition, manager = _unified_registry(
-        tmp_path,
-        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
-    )
-    composition.current = _background_task(
-        tmp_path,
-        state=FormalTaskState.TERMINAL,
-        outcome=TerminalOutcome.COMPLETED,
-    )
-    composition.known_tasks[composition.current.task_id] = composition.current
-    (
-        status_binding,
-        status_capability,
-        status_source,
-    ) = await _activate_native_delegate_source(registry, stem="native-current-status")
-    status = await registry.handle_native_propose(
-        params=_native_propose_params(
-            status_binding,
-            status_capability,
-            _native_delegate_proposal(
-                status_binding,
-                status_source,
-                request_text="当前后台任务怎么样了？",
-            ),
-        ),
-        request_id="request-native-current-status",
-        session_id=SCOPE.session_id,
-    )
 
-    assert status.ok is True
-    status_result = cast(dict[str, object], status.payload["result"])
-    assert status_result["route"] == "background.status"
-    assert status_result["canonical_text"] == "后台任务已完成。"
-    assert manager.agent.calls == 0
-    assert [call[0] for call in composition.handle_calls] == ["task.status"]
-    await registry.stop()
-
-
-@pytest.mark.asyncio
-async def test_native_reproduced_status_asr_uses_authoritative_native_route(
-    tmp_path: Path,
-) -> None:
-    registry, composition, manager = _unified_registry(
-        tmp_path,
-        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
-    )
-    composition.current = _background_task(tmp_path)
-    composition.known_tasks[composition.current.task_id] = composition.current
-    (
-        status_binding,
-        status_capability,
-        status_source,
-    ) = await _activate_native_delegate_source(
-        registry, stem="native-reproduced-current-status"
-    )
-    status = await registry.handle_native_propose(
-        params=_native_propose_params(
-            status_binding,
-            status_capability,
-            _native_delegate_proposal(
-                status_binding,
-                status_source,
-                request_text="当前后台任务怎么样吗",
-            ),
-        ),
-        request_id="request-native-reproduced-current-status",
-        session_id=SCOPE.session_id,
-    )
-
-    assert status.ok is True
-    status_result = cast(dict[str, object], status.payload["result"])
-    assert status_result["route"] == "background.status"
-    assert status_result["canonical_text"] == (
-        "后台任务正在运行，已记录 4 条状态更新。"
-    )
-    assert manager.agent.calls == 0
-    assert [call[0] for call in composition.handle_calls] == ["task.status"]
-    await registry.stop()
-
-
-@pytest.mark.asyncio
-async def test_native_reproduced_adjustment_status_asr_uses_authoritative_events(
-    tmp_path: Path,
-) -> None:
-    registry, composition, manager = _unified_registry(
-        tmp_path,
-        interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
-    )
-    composition.current = _background_task(tmp_path)
-    composition.known_tasks[composition.current.task_id] = composition.current
-    command_id = "command-native-reproduced-adjustment-status"
-    shared_event = {
-        "task_id": composition.current.task_id,
-        "attempt_id": composition.current.attempt_id,
-        "scope": SCOPE.to_dict(),
-        "state": composition.current.state.value,
-        "outcome": None,
-        "producer": "task_core.control",
-        "source_event_id": None,
-        "causation_id": command_id,
-        "correlation_id": composition.current.correlation_id,
-        "occurred_at": NOW,
-        "details": {"command_id": command_id},
-    }
-    composition.adjustment_events.extend(
-        (
-            {
-                **shared_event,
-                "event_id": "event-native-adjust-requested",
-                "seq": 4,
-                "event_type": "task.adjust_requested",
-            },
-            {
-                **shared_event,
-                "event_id": "event-native-adjust-applied",
-                "seq": 5,
-                "event_type": "task.adjust_applied",
-            },
-        )
-    )
-    (
-        status_binding,
-        status_capability,
-        status_source,
-    ) = await _activate_native_delegate_source(
-        registry, stem="native-reproduced-adjustment-status"
-    )
-    status = await registry.handle_native_propose(
-        params=_native_propose_params(
-            status_binding,
-            status_capability,
-            _native_delegate_proposal(
-                status_binding,
-                status_source,
-                request_text="请确认刚才的任务修改是否已经应用",
-            ),
-        ),
-        request_id="request-native-reproduced-adjustment-status",
-        session_id=SCOPE.session_id,
-    )
-
-    assert status.ok is True
-    status_result = cast(dict[str, object], status.payload["result"])
-    assert status_result["route"] == "background.status"
-    assert status_result["canonical_text"] == "刚才的修改已经由任务执行器应用。"
-    assert manager.agent.calls == 0
-    assert [call[0] for call in composition.handle_calls] == ["task.events"]
-    await registry.stop()
 
 
 @pytest.mark.asyncio
@@ -3225,9 +3025,6 @@ async def test_unified_submit_rejects_unilateral_native_delegate_authority_witho
             fingerprint=b"native-authority-incomplete",
             commit=cast(TurnCommit, object()),
             context=cast(FormalContextSnapshot, object()),
-            resolution=object(),
-            current=None,
-            background_authority_unavailable=False,
             auth_token=object(),
             channel_id="web",
             l0_commit_admission=object(),
@@ -4453,90 +4250,6 @@ async def test_exit_during_agent_generation_retires_predecessor_and_opens_succes
     assert manager.unpins == 2
 
 
-@pytest.mark.asyncio
-async def test_unified_task_ack_never_contaminates_next_dialogue_context(
-    tmp_path: Path,
-) -> None:
-    registry, composition, manager = _unified_registry(
-        tmp_path,
-        demo_policy_bypass=True,
-    )
-    assert (
-        await registry.handle_p2_activate(
-            params=_p2_params(),
-            request_id="request-task-context-isolation-activate",
-            session_id=SCOPE.session_id,
-            channel_id="web",
-        )
-    ).ok
-    _install_unified_history_writer(registry)
-
-    created = await registry.handle_unified_submit(
-        params=_unified_final_params(
-            stem="task-context-isolation-create",
-            text="帮我在后台创建巴黎一日行程.md。",
-        ),
-        request_id="request-task-context-isolation-create",
-        session_id=SCOPE.session_id,
-        channel_id="web",
-    )
-    assert created.ok
-    sequence = await _ack_unified_presentation(
-        registry,
-        sequence=0,
-        stem="task-context-isolation-create",
-    )
-    assert manager.agent.calls == 0
-    assert composition.create_effects == 1
-
-    weather = await registry.handle_unified_submit(
-        params=_unified_final_params(
-            stem="task-context-isolation-weather",
-            text="今天天气怎么样？",
-        ),
-        request_id="request-task-context-isolation-weather",
-        session_id=SCOPE.session_id,
-        channel_id="web",
-    )
-    assert weather.ok
-    await asyncio.wait_for(manager.agent.wait_for_calls(1), timeout=1)
-    execution = manager.agent.executions[0]
-    assert execution.commit.text == "今天天气怎么样？"
-    assert execution.context.entries == ()
-    assert json.loads(execution.prompt_content())["selected_context"] == []
-    assert composition.create_effects == 1
-    assert composition.adjust_effects == 0
-    assert [call[0] for call in composition.handle_calls] == ["task.create"]
-
-    sequence = await _ack_unified_presentation(
-        registry,
-        sequence=sequence,
-        stem="task-context-isolation-weather",
-    )
-    followup = await registry.handle_unified_submit(
-        params=_unified_final_params(
-            stem="task-context-isolation-followup",
-            text="请继续回答。",
-        ),
-        request_id="request-task-context-isolation-followup",
-        session_id=SCOPE.session_id,
-        channel_id="web",
-    )
-    assert followup.ok
-    await asyncio.wait_for(manager.agent.wait_for_calls(2), timeout=1)
-    assert [entry.content for entry in manager.agent.executions[1].context.entries] == [
-        "今天天气怎么样？",
-        "formal result",
-    ]
-    assert composition.create_effects == 1
-    assert composition.adjust_effects == 0
-    assert [call[0] for call in composition.handle_calls] == ["task.create"]
-    await _ack_unified_presentation(
-        registry,
-        sequence=sequence,
-        stem="task-context-isolation-followup",
-    )
-    await _close_unified_route(registry, stem="task-context-isolation")
 
 
 @pytest.mark.asyncio
@@ -6207,136 +5920,8 @@ async def test_unified_frozen_release_voice_create_never_falls_through_to_agent(
     await _close_unified_route(registry, stem="unified-release-create")
 
 
-@pytest.mark.parametrize(
-    ("state", "expected_speech"),
-    [
-        (
-            FormalTaskState.ACCEPTED,
-            "后台任务已受理，正在等待执行。开始执行后会显示正在执行。",
-        ),
-        (
-            FormalTaskState.RUNNING,
-            "后台任务创建回执不完整，当前状态尚未确认。",
-        ),
-    ],
-)
-@pytest.mark.asyncio
-async def test_unified_create_accepts_only_the_canonical_accepted_receipt(
-    tmp_path: Path,
-    state: FormalTaskState,
-    expected_speech: str,
-) -> None:
-    registry, composition, manager = _unified_registry(
-        tmp_path,
-        demo_policy_bypass=True,
-    )
-    composition.create_state = state
-    assert (
-        await registry.handle_p2_activate(
-            params=_p2_params(),
-            request_id=f"request-create-{state.value}-activate",
-            session_id=SCOPE.session_id,
-            channel_id="web",
-        )
-    ).ok
-    history = _install_unified_history_writer(registry)
-    created = await registry.handle_unified_submit(
-        params=_unified_final_params(
-            stem=f"create-{state.value}",
-            text="帮我根据这些要求制定三天的行程。",
-        ),
-        request_id=f"request-create-{state.value}",
-        session_id=SCOPE.session_id,
-        channel_id="web",
-    )
-
-    assert created.ok
-    assert composition.current is not None
-    assert composition.current.state is state
-    assert manager.agent.calls == 0
-    presented_result = cast(dict[str, object], created.payload["result"])
-    if state is FormalTaskState.ACCEPTED:
-        assert presented_result["task_id"] == composition.current.task_id
-    else:
-        assert "task_id" not in presented_result
-    await _ack_unified_presentation(
-        registry,
-        sequence=0,
-        stem=f"create-{state.value}",
-    )
-    spoken = b"".join(
-        content.content_utf8 for content in history.assistants[-1][0].contents
-    ).decode("utf-8")
-    assert spoken == expected_speech
-    assert "后台任务正在执行" not in spoken
-    await _close_unified_route(registry, stem=f"create-{state.value}")
 
 
-@pytest.mark.parametrize(
-    ("case", "extra", "omit", "override"),
-    [
-        ("missing-outbox", {}, {"outbox_id"}, None),
-        ("empty-outbox", {"outbox_id": ""}, set(), None),
-        ("whitespace-task", {"task_id": "   "}, set(), None),
-        ("whitespace-attempt", {"attempt_id": "   "}, set(), None),
-        ("whitespace-outbox", {"outbox_id": "   "}, set(), None),
-        ("missing-state", {}, {"state"}, None),
-        ("legacy-accepted-flag", {"accepted": True}, set(), None),
-        ("unexpected-field", {"debug": "not-canonical"}, set(), None),
-        ("non-mapping", {}, set(), "not-a-mapping"),
-    ],
-)
-@pytest.mark.asyncio
-async def test_unified_create_rejects_noncanonical_receipt_shapes(
-    tmp_path: Path,
-    case: str,
-    extra: dict[str, object],
-    omit: set[str],
-    override: object | None,
-) -> None:
-    registry, composition, manager = _unified_registry(
-        tmp_path,
-        demo_policy_bypass=True,
-    )
-    composition.create_state = FormalTaskState.ACCEPTED
-    composition.create_receipt_extra = extra
-    composition.create_receipt_omit = omit
-    composition.create_receipt_override = override
-    assert (
-        await registry.handle_p2_activate(
-            params=_p2_params(),
-            request_id=f"request-create-{case}-activate",
-            session_id=SCOPE.session_id,
-            channel_id="web",
-        )
-    ).ok
-    history = _install_unified_history_writer(registry)
-    created = await registry.handle_unified_submit(
-        params=_unified_final_params(
-            stem=f"create-{case}",
-            text="帮我根据这些要求制定三天的行程。",
-        ),
-        request_id=f"request-create-{case}",
-        session_id=SCOPE.session_id,
-        channel_id="web",
-    )
-
-    assert created.ok
-    assert manager.agent.calls == 0
-    assert composition.create_effects == 1
-    assert [call[0] for call in composition.handle_calls] == ["task.create"]
-    assert registry._voice_task_origins == {}
-    assert "task_id" not in cast(dict[str, object], created.payload["result"])
-    await _ack_unified_presentation(
-        registry,
-        sequence=0,
-        stem=f"create-{case}",
-    )
-    spoken = b"".join(
-        content.content_utf8 for content in history.assistants[-1][0].contents
-    ).decode("utf-8")
-    assert spoken == "后台任务创建回执不完整，当前状态尚未确认。"
-    await _close_unified_route(registry, stem=f"create-{case}")
 
 
 @pytest.mark.asyncio
@@ -9059,6 +8644,7 @@ async def test_enabled_guard_preserves_speech_without_lexical_confirmation(
         tmp_path,
         commit_ledger=ledger,
         critical_input=True,
+        unified=True,
     )
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
@@ -9068,7 +8654,7 @@ async def test_enabled_guard_preserves_speech_without_lexical_confirmation(
     )
     assert activated.ok is True
     text = "不要取消乙，预算1500元，2026-09-04上午10:00开会。"
-    params = _p2_task_origin_params(stem="critical-natural", text=text)
+    params = _unified_final_params(stem="critical-natural", text=text)
     cast(dict[str, object], params["gateway_voice_claim"])["critical_policy"] = (
         claim_policy
     )
@@ -9080,20 +8666,23 @@ async def test_enabled_guard_preserves_speech_without_lexical_confirmation(
         return evaluate(candidate)
 
     monkeypatch.setattr(registry._critical_token_gate, "evaluate", observe_evidence)
-    accepted = await registry.handle_p2_submit(
+    accepted = await registry.handle_unified_submit(
         params=params,
         request_id="request-critical-natural",
         session_id="session-product",
         channel_id="web",
     )
     assert accepted.ok is True, accepted.payload
-    assert sources == [EvidenceSource.SPEECH]
-    assert "commit-critical-natural" in registry._accepted_turn_commits_by_commit
+    assert sources and set(sources) == {EvidenceSource.SPEECH}
     assert registry._unknown_turn_commits_by_commit == {}
-    ledger.require_origin(
-        OriginRef("committed_turn", "turn-critical-natural", "commit-critical-natural"),
-        SCOPE,
-    )
+    # There is no synthetic Task-origin grant: this is real foreground speech.
+    # Task-origin authorization is separately proved by normal confirmed create.
+    assert manager.agent.calls == 1
+    assert manager.agent.executions[0].commit.text == text
+    assert manager.agent.executions[0].commit.hypothesis_provenance["kind"] == "committed_speech"
+    assert not registry._voice_task_origins
+    assert registry._critical_input_commit_generations == {}
+    assert registry._critical_input_guarded_commits == set()
     await registry.stop()
 
 
@@ -9106,7 +8695,7 @@ async def test_p2_actual_uncertainty_cannot_acquire_task_origin(
 ) -> None:
     ledger = TurnCommitLedger()
     registry, composition, manager, _pushed = _registry(
-        tmp_path, commit_ledger=ledger, critical_input=True
+        tmp_path, commit_ledger=ledger, critical_input=True, unified=True
     )
     assert (
         await registry.handle_p2_activate(
@@ -9116,7 +8705,7 @@ async def test_p2_actual_uncertainty_cannot_acquire_task_origin(
             channel_id="web",
         )
     ).ok
-    params = _p2_task_origin_params(
+    params = _unified_final_params(
         stem="actual-uncertainty", text="不要取消乙，预算1500元。"
     )
     cast(dict[str, object], params["gateway_voice_claim"])["critical_policy"] = (
@@ -9132,7 +8721,7 @@ async def test_p2_actual_uncertainty_cannot_acquire_task_origin(
         )
 
     monkeypatch.setattr(registry._critical_token_gate, "evaluate", uncertain_evidence)
-    rejected = await registry.handle_p2_submit(
+    rejected = await registry.handle_unified_submit(
         params=params,
         request_id="request-actual-uncertainty",
         session_id="session-product",
@@ -9170,6 +8759,7 @@ async def test_retired_speech_bypass_claim_is_rejected_regardless_of_old_flag(
     bypass_without_local_authority, _p3, bypass_manager, _pushed = _registry(
         tmp_path / "bypass-off",
         critical_input=True,
+        unified=True,
     )
     assert (
         await bypass_without_local_authority.handle_p2_activate(
@@ -9179,14 +8769,14 @@ async def test_retired_speech_bypass_claim_is_rejected_regardless_of_old_flag(
             channel_id="web",
         )
     ).ok
-    bypass_params = _p2_task_origin_params(
+    bypass_params = _unified_final_params(
         stem="critical-demo-bypass-off",
         text=text,
     )
     cast(dict[str, object], bypass_params["gateway_voice_claim"])["critical_policy"] = (
         "trusted_demo_bypass"
     )
-    bypass_rejected = await bypass_without_local_authority.handle_p2_submit(
+    bypass_rejected = await bypass_without_local_authority.handle_unified_submit(
         params=bypass_params,
         request_id="request-critical-demo-bypass-off",
         session_id="session-product",
@@ -9212,14 +8802,14 @@ async def test_retired_speech_bypass_claim_is_rejected_regardless_of_old_flag(
             channel_id="web",
         )
     ).ok
-    accepted_params = _p2_task_origin_params(
+    accepted_params = _unified_final_params(
         stem="critical-demo-bypass-on",
         text=text,
     )
     cast(dict[str, object], accepted_params["gateway_voice_claim"])[
         "critical_policy"
     ] = "trusted_demo_bypass"
-    bypass_accepted = await bypass_enabled.handle_p2_submit(
+    bypass_accepted = await bypass_enabled.handle_unified_submit(
         params=accepted_params,
         request_id="request-critical-demo-bypass-on",
         session_id="session-product",
@@ -13294,6 +12884,7 @@ async def test_agent_ack_drains_deferred_voice_task_presentation(
         p3_composition=composition,
         agent_manager=manager,
         push_text_event=push,
+        unified_journal=SqliteUnifiedCommittedInputJournal(tmp_path / "unified.sqlite3"),
     )
     assert (
         await registry.handle_p2_activate(
@@ -13304,7 +12895,7 @@ async def test_agent_ack_drains_deferred_voice_task_presentation(
         )
     ).ok
     assert (
-        await registry.handle_p2_submit(
+        await _submit_typed_unified(registry,
             params=_p2_params(
                 commit_id="commit-foreground-agent",
                 turn_id="turn-foreground-agent",
@@ -13527,6 +13118,7 @@ async def test_audio_playout_failure_falls_back_to_text_without_voice_consumptio
         p3_composition=composition,
         agent_manager=manager,
         push_text_event=push,
+        unified_journal=SqliteUnifiedCommittedInputJournal(tmp_path / "unified.sqlite3"),
     )
     assert (
         await registry.handle_p2_activate(
@@ -13600,7 +13192,7 @@ async def test_audio_playout_failure_falls_back_to_text_without_voice_consumptio
     task_reader_call_count = len(composition.production_reader_calls)
     subscription_count = len(composition.subscription_calls)
     if foreground_busy:
-        submitted = await registry.handle_p2_submit(
+        submitted = await _submit_typed_unified(registry,
             params=_p2_params(
                 commit_id="commit-audio-fallback-foreground",
                 turn_id="turn-audio-fallback-foreground",
@@ -13628,7 +13220,7 @@ async def test_audio_playout_failure_falls_back_to_text_without_voice_consumptio
                 isinstance(candidate_response, Mapping)
                 and isinstance(candidate.get("presentation_unit"), Mapping)
                 and candidate_response.get("response_id")
-                == "response-audio-fallback-foreground"
+                == submitted.payload["result"]["response"]["response_id"]
             ):
                 foreground_notification = candidate
                 break
@@ -14927,6 +14519,43 @@ async def test_segment_flags_fail_before_authority_or_downstream(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("foreground_safe", [False, True])
+async def test_notification_only_retries_task_presentations_when_foreground_is_free(tmp_path, monkeypatch, foreground_safe):
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    assert (await registry.handle_p2_activate(
+        params=_p2_params(), request_id="activate-priority", session_id="session-product", channel_id="web",
+    )).ok
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    runtime = route.activation_lease._runtime
+    monkeypatch.setattr(runtime, "task_notification_foreground_safe", lambda: foreground_safe)
+    drains = []
+
+    async def drain(binding, *, drain_return_lease):
+        drains.append(binding)
+        assert drain_return_lease is False
+
+    monkeypatch.setattr(registry, "_drain_voice_progress_for_p2_binding", drain)
+    runtime._publish(AgentConversationNotification(
+        kind="agent.output", request_id="queued-answer", round_id="round-priority",
+        response_ref=ResponseRef("interaction-1", "response-priority", 0),
+        agent_event=AgentEvent(request_id="queued-answer", interaction_id="interaction-1",
+            turn_id="turn-priority", commit_id="commit-priority", seq=0,
+            event_type="chat.delta", source_provenance="formal", text="ready"),
+    ))
+    params = _p2_params(notification_sequence=1, max_notifications=16)
+    result = await registry.handle_p2_notification_next(
+        params=params, request_id="priority-next", session_id="session-product",
+    )
+    assert result.ok and len(drains) == int(foreground_safe)
+    replay = await registry.handle_p2_notification_next(
+        params=params, request_id="priority-next", session_id="session-product",
+    )
+    assert replay.payload == result.payload and len(drains) == int(foreground_safe)
+    assert runtime.snapshot().harness.cancel_effects == 0
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
 async def test_p2_notification_batch_drains_observers_through_first_authoritative_barrier_and_replays(
     tmp_path: Path,
 ) -> None:
@@ -15076,7 +14705,7 @@ async def test_p2_notification_batch_drains_observers_through_first_authoritativ
 async def test_p2_notification_batch_bounds_and_legacy_single_pull(
     tmp_path: Path,
 ) -> None:
-    legacy_registry, _p3, legacy_manager, _pushed = _registry(tmp_path / "legacy")
+    legacy_registry, _p3, legacy_manager, _pushed = _registry(tmp_path / "legacy", unified=True)
     assert (
         await legacy_registry.handle_p2_activate(
             params=_p2_params(),
@@ -15086,7 +14715,7 @@ async def test_p2_notification_batch_bounds_and_legacy_single_pull(
         )
     ).ok is True
     assert (
-        await legacy_registry.handle_p2_submit(
+        await _submit_typed_unified(legacy_registry,
             params=_p2_params(
                 commit_id="commit-legacy-1",
                 turn_id="turn-legacy-1",
@@ -15103,7 +14732,7 @@ async def test_p2_notification_batch_bounds_and_legacy_single_pull(
     await legacy_manager.agent.wait_for_calls(1)
     await _wait_for_p2_notifications(legacy_route, 4)
 
-    bounded_registry, _p3, bounded_manager, _pushed = _registry(tmp_path / "bounded")
+    bounded_registry, _p3, bounded_manager, _pushed = _registry(tmp_path / "bounded", unified=True)
     assert (
         await bounded_registry.handle_p2_activate(
             params=_p2_params(),
@@ -15113,7 +14742,7 @@ async def test_p2_notification_batch_bounds_and_legacy_single_pull(
         )
     ).ok is True
     assert (
-        await bounded_registry.handle_p2_submit(
+        await _submit_typed_unified(bounded_registry,
             params=_p2_params(
                 commit_id="commit-bounded-1",
                 turn_id="turn-bounded-1",
@@ -15173,7 +14802,7 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry, _p3, manager, _pushed = _registry(tmp_path)
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-p2-activate",
@@ -15192,19 +14821,19 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
         text="hello product agent",
     )
 
-    wrong_generation = await registry.handle_p2_submit(
+    wrong_generation = await _submit_typed_unified(registry,
         params={**submit_params, "activation_generation": 2},
         request_id="request-submit-wrong-generation",
         session_id="session-product",
         channel_id="web",
     )
-    submitted = await registry.handle_p2_submit(
+    submitted = await _submit_typed_unified(registry,
         params=submit_params,
         request_id="request-submit-1",
         session_id="session-product",
         channel_id="web",
     )
-    replayed = await registry.handle_p2_submit(
+    replayed = await _submit_typed_unified(registry,
         params=submit_params,
         request_id="request-submit-1",
         session_id="session-product",
@@ -15293,7 +14922,7 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
     assert ack_replay.payload == acknowledged.payload
     assert cast(dict, acknowledged.payload["result"])["accepted"] is True
     assert len(history.assistants) == 1
-    second_submit = await registry.handle_p2_submit(
+    second_submit = await _submit_typed_unified(registry,
         params=_p2_params(
             commit_id="commit-2",
             turn_id="turn-2",
@@ -15318,28 +14947,16 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
     )
     assert json.loads(second_execution.prompt_content())["selected_context"] == [
         {
+            "usage": "context_only_not_current_instructions",
             "context_ref": entry.ref.to_dict(),
             "content": entry.content,
         }
         for entry in second_execution.context.entries
     ]
-    task_origin = await registry.handle_p2_submit(
-        params=_p2_task_origin_params(
-            stem="task-with-acknowledged-agent-context",
-            text="create a task without Agent context",
-        ),
-        request_id="request-task-with-acknowledged-agent-context",
-        session_id="session-product",
-        channel_id="web",
-    )
-    assert task_origin.ok is True
-    assert manager.agent.calls == 2
-    task_commit = registry._accepted_turn_commits_by_commit[
-        "commit-task-with-acknowledged-agent-context"
-    ]
-    assert task_commit.context_refs == ()
+    # Synthetic Task-origin acceptance is retired; real confirmed creation and
+    # Task/context separation are covered in test_semantic_registry.py.
     await registry.close_active_routes()
-    submit_after_disconnect = await registry.handle_p2_submit(
+    submit_after_disconnect = await _submit_typed_unified(registry,
         params=submit_params,
         request_id="request-submit-1",
         session_id="session-product",
@@ -15360,13 +14977,13 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
         request_id="request-ack-1",
         session_id="session-product",
     )
-    submit_conflict_after_disconnect = await registry.handle_p2_submit(
+    submit_conflict_after_disconnect = await _submit_typed_unified(registry,
         params={**submit_params, "commit_id": "commit-conflict"},
         request_id="request-submit-1",
         session_id="session-product",
         channel_id="web",
     )
-    new_submit_after_disconnect = await registry.handle_p2_submit(
+    new_submit_after_disconnect = await _submit_typed_unified(registry,
         params={**submit_params, "commit_id": "commit-new"},
         request_id="request-submit-new",
         session_id="session-product",
@@ -15379,11 +14996,11 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
     assert submit_conflict_after_disconnect.ok is False
     assert (
         cast(dict, submit_conflict_after_disconnect.payload["error"])["reason"]
-        == "PRODUCT_REQUEST_ID_CONFLICT"
+        == "UNIFIED_INPUT_ID_CONFLICT"
     )
     assert new_submit_after_disconnect.ok is False
     assert cast(dict, new_submit_after_disconnect.payload["error"])["reason"] == (
-        "PRODUCT_P2_ROUTE_NOT_FOUND"
+        "UNIFIED_INPUT_ADMISSION_MISSING"
     )
     assert manager.agent.calls == 2
     assert len(history.assistants) == 1
@@ -15391,7 +15008,7 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
 
 @pytest.mark.asyncio
 async def test_p2_context_excludes_unacknowledged_agent_output(tmp_path: Path) -> None:
-    registry, _p3, manager, _pushed = _registry(tmp_path)
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-p2-activate-unacked-context",
@@ -15403,7 +15020,7 @@ async def test_p2_context_excludes_unacknowledged_agent_output(tmp_path: Path) -
     history = _HistoryWriter()
     route.activation_lease._runtime._history_writer = history
 
-    first = await registry.handle_p2_submit(
+    first = await _submit_typed_unified(registry,
         params=_p2_params(
             commit_id="commit-unacked-1",
             turn_id="turn-unacked-1",
@@ -15435,7 +15052,7 @@ async def test_p2_context_excludes_unacknowledged_agent_output(tmp_path: Path) -
     assert manager.agent.calls == 1
     assert history.assistants == []
 
-    second = await registry.handle_p2_submit(
+    second = await _submit_typed_unified(registry,
         params=_p2_params(
             commit_id="commit-unacked-2",
             turn_id="turn-unacked-2",
@@ -15459,7 +15076,7 @@ async def test_p2_context_excludes_unacknowledged_agent_output(tmp_path: Path) -
 async def test_p2_ack_and_next_submit_linearize_one_complete_context_snapshot(
     tmp_path: Path,
 ) -> None:
-    registry, _p3, manager, _pushed = _registry(tmp_path)
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-p2-activate-ack-submit-race",
@@ -15470,7 +15087,7 @@ async def test_p2_ack_and_next_submit_linearize_one_complete_context_snapshot(
     route = registry._p2_routes[("session-product", "interaction-1")]
     history = _BlockingHistoryWriter()
     route.activation_lease._runtime._history_writer = history
-    first = await registry.handle_p2_submit(
+    first = await _submit_typed_unified(registry,
         params=_p2_params(
             commit_id="commit-ack-submit-race-1",
             turn_id="turn-ack-submit-race-1",
@@ -15519,7 +15136,7 @@ async def test_p2_ack_and_next_submit_linearize_one_complete_context_snapshot(
     )
     await asyncio.wait_for(history.assistant_started.wait(), timeout=1)
     submit_task = asyncio.create_task(
-        registry.handle_p2_submit(
+        _submit_typed_unified(registry,
             params=_p2_params(
                 commit_id="commit-ack-submit-race-2",
                 turn_id="turn-ack-submit-race-2",
@@ -15552,7 +15169,7 @@ async def test_p2_ack_and_next_submit_linearize_one_complete_context_snapshot(
 async def test_p2_close_waits_for_an_ack_admitted_before_close(
     tmp_path: Path,
 ) -> None:
-    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    registry, _p3, _manager, _pushed = _registry(tmp_path, unified=True)
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-p2-activate-ack-close-race",
@@ -15563,7 +15180,7 @@ async def test_p2_close_waits_for_an_ack_admitted_before_close(
     route = registry._p2_routes[("session-product", "interaction-1")]
     history = _HistoryWriter()
     route.activation_lease._runtime._history_writer = history
-    submitted = await registry.handle_p2_submit(
+    submitted = await _submit_typed_unified(registry,
         params=_p2_params(
             commit_id="commit-ack-close-race",
             turn_id="turn-ack-close-race",
@@ -15653,7 +15270,7 @@ async def test_p2_close_waits_for_an_ack_admitted_before_close(
 async def test_p2_close_fences_a_concurrent_next_submit_before_agent_effect(
     tmp_path: Path,
 ) -> None:
-    registry, _p3, manager, _pushed = _registry(tmp_path)
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-p2-activate-close-submit-race",
@@ -15672,7 +15289,7 @@ async def test_p2_close_fences_a_concurrent_next_submit_before_agent_effect(
         await asyncio.sleep(0)
     assert route.activation_lease.snapshot().state.value == "closing"
     submit_task = asyncio.create_task(
-        registry.handle_p2_submit(
+        _submit_typed_unified(registry,
             params=_p2_params(
                 commit_id="commit-close-submit-race",
                 turn_id="turn-close-submit-race",
@@ -15704,7 +15321,7 @@ async def test_p2_close_fences_a_concurrent_next_submit_before_agent_effect(
 async def test_p2_context_keeps_only_four_latest_acknowledged_pairs(
     tmp_path: Path,
 ) -> None:
-    registry, _p3, manager, _pushed = _registry(tmp_path)
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-p2-activate-context-bound",
@@ -15715,7 +15332,7 @@ async def test_p2_context_keeps_only_four_latest_acknowledged_pairs(
     notification_sequence = 0
 
     for index in range(5):
-        submitted = await registry.handle_p2_submit(
+        submitted = await _submit_typed_unified(registry,
             params=_p2_params(
                 commit_id=f"commit-context-{index}",
                 turn_id=f"turn-context-{index}",
@@ -15763,7 +15380,7 @@ async def test_p2_context_keeps_only_four_latest_acknowledged_pairs(
         )
         assert acknowledged.ok is True
 
-    final = await registry.handle_p2_submit(
+    final = await _submit_typed_unified(registry,
         params=_p2_params(
             commit_id="commit-context-final",
             turn_id="turn-context-final",
@@ -15913,7 +15530,7 @@ async def test_p2_accepts_voice_origin_only_after_exact_success(tmp_path: Path) 
 async def test_p2_response_generation_continues_across_activation_successor(
     tmp_path: Path,
 ) -> None:
-    registry, _p3, manager, _pushed = _registry(tmp_path)
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
     first_binding = _p2_params()
     first_activation = await registry.handle_p2_activate(
         params=first_binding,
@@ -15922,7 +15539,7 @@ async def test_p2_response_generation_continues_across_activation_successor(
         channel_id="web",
     )
     assert first_activation.ok is True
-    first_submit = await registry.handle_p2_submit(
+    first_submit = await _submit_typed_unified(registry,
         params=_p2_params(
             commit_id="commit-response-generation-1",
             turn_id="turn-response-generation-1",
@@ -15966,7 +15583,7 @@ async def test_p2_response_generation_continues_across_activation_successor(
         "text": "successor activation response",
         "dispatch_target": "agent",
     }
-    successor_submit = await registry.handle_p2_submit(
+    successor_submit = await _submit_typed_unified(registry,
         params=successor_submit_params,
         request_id="request-response-generation-submit-2",
         session_id="session-product",
@@ -15976,7 +15593,7 @@ async def test_p2_response_generation_continues_across_activation_successor(
     successor_response = cast(dict, successor_submit.payload["result"])["response"]
     assert successor_response["response_generation"] == 1
 
-    replayed = await registry.handle_p2_submit(
+    replayed = await _submit_typed_unified(registry,
         params=successor_submit_params,
         request_id="request-response-generation-submit-2",
         session_id="session-product",
@@ -15993,7 +15610,7 @@ async def test_p2_response_generation_continues_across_registry_restart(
     tmp_path: Path,
 ) -> None:
     generation_database = tmp_path / "durable-response-generations.sqlite3"
-    first, first_p3, _manager, _pushed = _registry(tmp_path)
+    first, first_p3, _manager, _pushed = _registry(tmp_path, unified=True)
     first_p3._p2_response_generation_owner = SqliteP2ResponseGenerationOwner(
         generation_database
     )
@@ -16006,7 +15623,7 @@ async def test_p2_response_generation_continues_across_registry_restart(
             channel_id="web",
         )
     ).ok is True
-    first_submit = await first.handle_p2_submit(
+    first_submit = await _submit_typed_unified(first,
         params=_p2_params(
             commit_id="commit-restart-generation-1",
             turn_id="turn-restart-generation-1",
@@ -16026,7 +15643,7 @@ async def test_p2_response_generation_continues_across_registry_restart(
     )
     await first.close_active_routes()
 
-    restarted, restarted_p3, _manager, _pushed = _registry(tmp_path)
+    restarted, restarted_p3, _manager, _pushed = _registry(tmp_path, unified=True)
     restarted_p3._p2_response_generation_owner = SqliteP2ResponseGenerationOwner(
         generation_database
     )
@@ -16042,7 +15659,7 @@ async def test_p2_response_generation_continues_across_registry_restart(
             channel_id="web",
         )
     ).ok is True
-    successor = await restarted.handle_p2_submit(
+    successor = await _submit_typed_unified(restarted,
         params={
             **successor_binding,
             "commit_id": "commit-restart-generation-2",
@@ -16066,7 +15683,7 @@ async def test_p2_response_generation_continues_across_registry_restart(
 def test_durable_p2_response_generation_owner_keeps_memory_exact_set_bounded(
     tmp_path: Path,
 ) -> None:
-    registry, p3, _manager, _pushed = _registry(tmp_path)
+    registry, p3, _manager, _pushed = _registry(tmp_path, unified=True)
     p3._p2_response_generation_owner = SqliteP2ResponseGenerationOwner(
         tmp_path / "bounded-durable-response-generations.sqlite3"
     )
@@ -16088,7 +15705,7 @@ def test_durable_p2_response_generation_owner_keeps_memory_exact_set_bounded(
 def test_p2_response_generation_fence_survives_exact_high_water_eviction(
     tmp_path: Path,
 ) -> None:
-    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    registry, _p3, _manager, _pushed = _registry(tmp_path, unified=True)
     first_key = ("session-product", "interaction-generation-0")
     assert registry._next_p2_response_generation(first_key, -1) == 0
     for index in range(1, registry._P2_RESPONSE_GENERATION_CAPACITY + 1):
@@ -16106,7 +15723,7 @@ def test_p2_response_generation_fence_survives_exact_high_water_eviction(
 def test_p2_response_generation_owner_serializes_concurrent_allocations(
     tmp_path: Path,
 ) -> None:
-    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    registry, _p3, _manager, _pushed = _registry(tmp_path, unified=True)
     key = ("session-product", "interaction-concurrent-generation")
     worker_count = 32
     barrier = threading.Barrier(worker_count)
@@ -16125,7 +15742,7 @@ def test_p2_response_generation_owner_serializes_concurrent_allocations(
 def test_p2_response_generation_exhaustion_preserves_owner_state(
     tmp_path: Path,
 ) -> None:
-    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    registry, _p3, _manager, _pushed = _registry(tmp_path, unified=True)
     key = ("session-product", "interaction-exhausted-generation")
     registry._p2_response_generations[key] = MAX_SAFE_INTEGER
     exact_before = dict(registry._p2_response_generations)
@@ -16851,7 +16468,7 @@ async def test_p2_task_origin_rejects_client_declared_canonical_response_id(
 async def test_product_p2_barge_in_is_exact_replayable_and_playback_scoped(
     tmp_path: Path,
 ) -> None:
-    registry, _p3, manager, _pushed = _registry(tmp_path)
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
     blocking = _BlockingFacade()
     manager.agent = blocking
     activated = await registry.handle_p2_activate(
@@ -16861,7 +16478,7 @@ async def test_product_p2_barge_in_is_exact_replayable_and_playback_scoped(
         channel_id="web",
     )
     assert activated.ok is True
-    submitted = await registry.handle_p2_submit(
+    submitted = await _submit_typed_unified(registry,
         params=_p2_params(
             commit_id="commit-barge",
             turn_id="turn-barge",
@@ -16879,8 +16496,8 @@ async def test_product_p2_barge_in_is_exact_replayable_and_playback_scoped(
 
     params = _p2_params(
         action_id="barge-action-1",
-        response_id="response-barge",
-        response_generation=0,
+        response_id=submitted.payload["result"]["response"]["response_id"],
+        response_generation=submitted.payload["result"]["response"]["response_generation"],
         cancel_response=False,
     )
     interrupted = await registry.handle_p2_barge_in(
@@ -16923,7 +16540,7 @@ async def test_product_p2_barge_in_is_exact_replayable_and_playback_scoped(
 async def test_product_p2_terminal_barge_after_text_ack_is_playback_only(
     tmp_path: Path,
 ) -> None:
-    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    registry, _p3, _manager, _pushed = _registry(tmp_path, unified=True)
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-activate-terminal-barge",
@@ -16931,7 +16548,7 @@ async def test_product_p2_terminal_barge_after_text_ack_is_playback_only(
         channel_id="web",
     )
     assert activated.ok is True
-    submitted = await registry.handle_p2_submit(
+    submitted = await _submit_typed_unified(registry,
         params=_p2_params(
             commit_id="commit-terminal-barge",
             turn_id="turn-terminal-barge",
@@ -17032,7 +16649,7 @@ async def test_product_p2_generation_interrupt_reaches_the_runtime_round(
     produced.
     """
 
-    registry, _p3, manager, _pushed = _registry(tmp_path)
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
     blocking = _BlockingFacade()
     manager.agent = blocking
     activated = await registry.handle_p2_activate(
@@ -17042,7 +16659,7 @@ async def test_product_p2_generation_interrupt_reaches_the_runtime_round(
         channel_id="web",
     )
     assert activated.ok is True
-    submitted = await registry.handle_p2_submit(
+    submitted = await _submit_typed_unified(registry,
         params=_p2_params(
             commit_id="commit-generation-interrupt",
             turn_id="turn-generation-interrupt",
@@ -17060,8 +16677,8 @@ async def test_product_p2_generation_interrupt_reaches_the_runtime_round(
 
     params = _p2_params(
         action_id="generation-interrupt-action-1",
-        response_id="response-generation-interrupt",
-        response_generation=0,
+        response_id=submitted.payload["result"]["response"]["response_id"],
+        response_generation=submitted.payload["result"]["response"]["response_generation"],
     )
     interrupted = await registry.handle_p2_interrupt_generation(
         params=params,
@@ -17097,7 +16714,7 @@ async def test_product_p2_generation_interrupt_reaches_the_runtime_round(
     assert result["applied"] is True
     assert result["cancel_scope"] == "round.cancel"
     assert result["round_cancel_accepted"] is True
-    assert result["response_id"] == "response-generation-interrupt"
+    assert result["response_id"] == submitted.payload["result"]["response"]["response_id"]
     assert "cancel_response" not in result
     assert replayed.payload == interrupted.payload
     assert conflict.ok is False
@@ -17125,7 +16742,7 @@ async def test_p2_submit_caller_cancellation_retains_exact_disconnect_replay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry, _p3, manager, _pushed = _registry(tmp_path)
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
     blocking = _BlockingFacade()
     manager.agent = blocking
     activated = await registry.handle_p2_activate(
@@ -17144,7 +16761,7 @@ async def test_p2_submit_caller_cancellation_retains_exact_disconnect_replay(
     )
 
     caller = asyncio.create_task(
-        registry.handle_p2_submit(
+        _submit_typed_unified(registry,
             params=submit_params,
             request_id="request-submit-cancel",
             session_id="session-product",
@@ -17156,7 +16773,8 @@ async def test_p2_submit_caller_cancellation_retains_exact_disconnect_replay(
     with pytest.raises(asyncio.CancelledError):
         await caller
     blocking.release.set()
-    retained = registry._p2_submit_operations["request-submit-cancel"]
+    assert len(registry._unified_operations) == 1
+    retained = next(iter(registry._unified_operations.values()))
     first = await asyncio.wait_for(asyncio.shield(retained.task), timeout=1)
     try:
         await registry.close_active_routes()
@@ -17165,7 +16783,7 @@ async def test_p2_submit_caller_cancellation_retains_exact_disconnect_replay(
         # exact operation replay must remain available in either state.
         pass
 
-    replay = await registry.handle_p2_submit(
+    replay = await _submit_typed_unified(registry,
         params=submit_params,
         request_id="request-submit-cancel",
         session_id="session-product",
@@ -17173,7 +16791,29 @@ async def test_p2_submit_caller_cancellation_retains_exact_disconnect_replay(
     )
 
     assert first.ok is True
-    assert replay.payload == first.payload
+    assert replay.payload == {**first.payload, "request_id": "request-submit-cancel"}
+    assert blocking.calls == 1
+    semantic_calls = len(_p3.semantic_calls)
+    for changes in (
+        {"text": "changed after disconnect"},
+        {"activation_generation": 2},
+        {"activation_id": "another-activation"},
+        {"commit_id": "never-admitted"},
+    ):
+        rejected = await _submit_typed_unified(
+            registry, params={**submit_params, **changes},
+            request_id="request-submit-cancel", session_id="session-product", channel_id="web",
+        )
+        assert not rejected.ok
+    _p3.fail_authority = FormalTaskViolation(
+        "TEST_AUTHORITY_REVOKED", "test authority revoked", ErrorCode.PERMISSION_DENIED,
+    )
+    revoked = await _submit_typed_unified(
+        registry, params=submit_params, request_id="request-submit-cancel",
+        session_id="session-product", channel_id="web",
+    )
+    assert not revoked.ok
+    assert len(_p3.semantic_calls) == semantic_calls
     assert blocking.calls == 1
     for _ in range(3):
         try:
@@ -17181,6 +16821,89 @@ async def test_p2_submit_caller_cancellation_retains_exact_disconnect_replay(
             break
         except RuntimeError:
             await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read_outcome", ["pending", "revoked-after-read"])
+async def test_closed_unified_replay_is_read_only_and_rechecks_authority(tmp_path, monkeypatch, read_outcome):
+    registry, composition, manager, _pushed = _registry(tmp_path, unified=True)
+    assert (await registry.handle_p2_activate(params=_p2_params(), request_id="activate-readonly",
+        session_id="session-product", channel_id="web")).ok
+    params = _p2_params(commit_id="commit-readonly", turn_id="turn-readonly", committed_at=NOW, text="Explain inventory.")
+    submitted = await _submit_typed_unified(registry, params=params, request_id="readonly",
+        session_id="session-product", channel_id="web")
+    assert submitted.ok
+    await registry.close_active_routes()
+    journal = registry._unified_journal
+    original = journal.wait_for_completion
+    reads = []
+
+    def read(**kwargs):
+        reads.append(kwargs)
+        if read_outcome == "pending":
+            return None
+        result = original(**kwargs)
+        composition.fail_authority = FormalTaskViolation("TEST_AUTHORITY_REVOKED", "test authority revoked", ErrorCode.PERMISSION_DENIED)
+        return result
+
+    def forbidden_admit(**kwargs):
+        raise AssertionError("closed route tried to acquire execution")
+
+    monkeypatch.setattr(journal, "wait_for_completion", read)
+    monkeypatch.setattr(journal, "admit", forbidden_admit)
+    semantic_calls = len(composition.semantic_calls)
+    replay = await _submit_typed_unified(registry, params=params, request_id="readonly",
+        session_id="session-product", channel_id="web")
+    assert not replay.ok and replay.payload["result"] is None
+    assert replay.payload["error"]["reason"] == (
+        "UNIFIED_INPUT_IN_PROGRESS" if read_outcome == "pending" else "TEST_AUTHORITY_REVOKED")
+    assert len(reads) == 1 and len(composition.semantic_calls) == semantic_calls
+    assert manager.agent.calls == 1 and not registry._voice_task_origins
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_closed_unified_replay_cannot_cross_a_new_activation(tmp_path, monkeypatch):
+    import threading
+
+    registry, composition, manager, _pushed = _registry(tmp_path, unified=True)
+    assert (await registry.handle_p2_activate(params=_p2_params(), request_id="activate-before",
+        session_id="session-product", channel_id="web")).ok
+    params = _p2_params(commit_id="commit-closed-race", turn_id="turn-closed-race", committed_at=NOW, text="Explain inventory.")
+    submitted = await _submit_typed_unified(registry, params=params, request_id="closed-race",
+        session_id="session-product", channel_id="web")
+    assert submitted.ok
+    await registry.close_active_routes()
+    entered, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    original = registry._unified_journal.wait_for_completion
+
+    def wait(**kwargs):
+        result = original(**kwargs)
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5), "test release missing"
+        return result
+
+    monkeypatch.setattr(registry._unified_journal, "wait_for_completion", wait)
+    replaying = asyncio.create_task(_submit_typed_unified(registry, params=params, request_id="closed-race",
+        session_id="session-product", channel_id="web"))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        activated = await registry.handle_p2_activate(
+            params=_p2_params(activation_id="activation-successor", activation_generation=2),
+            request_id="activate-successor", session_id="session-product", channel_id="web")
+        assert activated.ok, activated.payload
+    finally:
+        release.set()
+    result = await asyncio.wait_for(replaying, 2)
+    assert not result.ok and result.payload["result"] is None
+    assert result.payload["error"]["reason"] == "PRODUCT_P2_REPLAY_BINDING_RETIRED"
+    assert manager.agent.calls == 1 and len(composition.semantic_calls) == 1
+    assert not registry._voice_task_origins
+    successor = registry._p2_routes[("session-product", "interaction-1")]
+    assert successor.binding.activation_generation == 2
+    assert successor.activation_lease._runtime.snapshot().queued_notifications == 0
+    await registry.stop()
 
 
 def _mutation_params(**changes: object) -> dict[str, object]:

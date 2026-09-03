@@ -1234,6 +1234,8 @@ async def test_audio_transport_failure_fences_and_emits_safe_fallback() -> None:
     )
     ref = recognition_ref()
     await provider.open_recognition(ref, timeout_seconds=2)
+    waiting_event = asyncio.create_task(provider.next_recognition_event(ref, timeout_seconds=30))
+    await asyncio.sleep(0)
     with pytest.raises(OpenAIStreamingSpeechError) as failed:
         await provider.send_recognition_audio(recognition_frame(ref))
     assert failed.value.reason == "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE"
@@ -1245,6 +1247,9 @@ async def test_audio_transport_failure_fences_and_emits_safe_fallback() -> None:
     assert facts[-1].to_tier is SpeechRouteTier.TEXT
     assert provider.degradation_facts[-1] == facts[-1]
     assert provider.conformance.snapshot().active_recognition == 0
+    with pytest.raises(OpenAIStreamingSpeechError) as waiting_failed:
+        await asyncio.wait_for(waiting_event, timeout=1)
+    assert waiting_failed.value.reason == "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE"
     assert_zero_business_effects(provider)
     await provider.close()
 

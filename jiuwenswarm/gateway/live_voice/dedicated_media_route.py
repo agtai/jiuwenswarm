@@ -705,6 +705,7 @@ async def run_dedicated_media_socket_leaf(
     repeat_speech_start: bool = False,
     next_end_of_turn: Callable[[], Awaitable[MediaEndOfTurn]] | None = None,
     repeat_speech_boundaries: bool = False,
+    fail_on_speech_boundary_error: bool = False,
     cleanup_owner: DedicatedMediaLeafCleanupOwner | None = None,
 ) -> DedicatedMediaSocketLeafResult:
     """Run one injected uplink WebSocket after the central handshake.
@@ -919,6 +920,11 @@ async def run_dedicated_media_socket_leaf(
             cleanup_complete=cleanup_pending_tasks == 0,
             cleanup_pending_tasks=cleanup_pending_tasks,
         )
+    if type(fail_on_speech_boundary_error) is not bool:
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER",
+            "speech-boundary failure policy must be boolean",
+        )
 
     async def terminate(
         closed: MediaCloseResult,
@@ -1034,6 +1040,59 @@ async def run_dedicated_media_socket_leaf(
                 pass
             raise
 
+    async def consume_message(message: object) -> DedicatedMediaSocketLeafResult | None:
+        if isinstance(message, str):
+            try:
+                control = deserialize_media_control(message)
+            except MediaTransportViolation:
+                closed = session.close(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+                await send_close_detach(closed)
+                return await terminate(closed)
+            if not isinstance(control, MediaDetach):
+                closed = session.close(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+                await send_close_detach(closed)
+                return await terminate(closed)
+            closed = session.accept_detach(control)
+            return await terminate(closed, acknowledge_peer_detach=True)
+
+        if not isinstance(message, (bytes, bytearray, memoryview)):
+            closed = session.close(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+            await send_close_detach(closed)
+            return await terminate(closed)
+
+        control = session.accept_binary(message)
+        first_frame_accepted_at = (
+            asyncio.get_running_loop().time()
+            if isinstance(control, MediaAck) and control.through_seq == 0
+            else None
+        )
+        control_sent = await send_control(control)
+        if (
+            first_frame_accepted_at is not None
+            and on_uplink_frame_accepted is not None
+        ):
+            try:
+                on_uplink_frame_accepted(control, first_frame_accepted_at)
+            except BaseException:
+                # Observation runs only after the ACK send attempt and cannot
+                # alter media authority or the already-completed send.
+                pass
+        if not control_sent:
+            closed = session.close(MediaDetachReason.TRANSPORT_SEND_FAILED)
+            return await terminate(closed)
+        if isinstance(control, MediaAck) and on_uplink_ack_sent is not None:
+            try:
+                on_uplink_ack_sent(control)
+            except BaseException:
+                # This optional diagnostic cannot alter media authority or
+                # turn a successfully-sent ACK into a transport failure.
+                pass
+        if isinstance(control, MediaDetach):
+            closed = session.close(control.reason_id)
+            return await terminate(closed)
+
+        return None
+
     while True:
         try:
             recv = socket.recv
@@ -1085,14 +1144,25 @@ async def run_dedicated_media_socket_leaf(
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if receive_task in done:
-                        # Peer input wins an exact same-loop race. Its ACK/detach
-                        # is serialized before the already-ready server control.
+                        # Validate the ready peer first, including binary failures.
+                        # After a successful ACK, service this tick's boundaries
+                        # before another receive: continuous PCM cannot starve EOT.
                         message = receive_task.result()
-                    else:
+                        receive_task = None
+                        consumed = await consume_message(message)
+                        if consumed is not None:
+                            return consumed
+                        if not any(task in done for task in awaited_boundaries):
+                            continue
+                    if awaited_boundaries:
                         if speech_start_task is not None and speech_start_task in done:
                             try:
                                 speech_start = speech_start_task.result()
                             except Exception:
+                                if fail_on_speech_boundary_error:
+                                    closed = session.close(MediaDetachReason.CONSUMER_FAILED)
+                                    await send_close_detach(closed)
+                                    return await terminate(closed)
                                 # Without a trusted start, EOT remains manual.
                                 speech_start_task = None
                                 speech_boundaries_disabled = True
@@ -1132,6 +1202,10 @@ async def run_dedicated_media_socket_leaf(
                             try:
                                 end_of_turn = end_of_turn_task.result()
                             except Exception:
+                                if fail_on_speech_boundary_error:
+                                    closed = session.close(MediaDetachReason.CONSUMER_FAILED)
+                                    await send_close_detach(closed)
+                                    return await terminate(closed)
                                 # The product owner logs/XOBS the typed failure. Keep
                                 # manual stop usable without claiming automatic EOT.
                                 end_of_turn_task = None
@@ -1171,9 +1245,17 @@ async def run_dedicated_media_socket_leaf(
                                     )
                                 else:
                                     end_of_turn_sent = True
+                        if receive_task is None:
+                            continue
                         message = await asyncio.shield(receive_task)
                 receive_task = None
+            consumed = await consume_message(message)
+            if consumed is not None:
+                return consumed
         except asyncio.CancelledError:
+            if cleanup_settled:
+                # terminate() already handed off children and closed the socket.
+                raise
             session.close(MediaDetachReason.TRANSPORT_CLOSED)
             try:
                 await close_socket()
@@ -1187,6 +1269,8 @@ async def run_dedicated_media_socket_leaf(
                 pass
             raise
         except _PROCESS_CONTROL:
+            if cleanup_settled:
+                raise
             session.close(MediaDetachReason.TRANSPORT_CLOSED)
             try:
                 await close_socket()
@@ -1199,58 +1283,11 @@ async def run_dedicated_media_socket_leaf(
                 pass
             raise
         except Exception:
+            if cleanup_settled:
+                raise
             closed = session.close(MediaDetachReason.TRANSPORT_CLOSED)
             return await terminate(closed)
 
-        if isinstance(message, str):
-            try:
-                control = deserialize_media_control(message)
-            except MediaTransportViolation:
-                closed = session.close(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
-                await send_close_detach(closed)
-                return await terminate(closed)
-            if not isinstance(control, MediaDetach):
-                closed = session.close(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
-                await send_close_detach(closed)
-                return await terminate(closed)
-            closed = session.accept_detach(control)
-            return await terminate(closed, acknowledge_peer_detach=True)
-
-        if not isinstance(message, (bytes, bytearray, memoryview)):
-            closed = session.close(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
-            await send_close_detach(closed)
-            return await terminate(closed)
-
-        control = session.accept_binary(message)
-        first_frame_accepted_at = (
-            asyncio.get_running_loop().time()
-            if isinstance(control, MediaAck) and control.through_seq == 0
-            else None
-        )
-        control_sent = await send_control(control)
-        if (
-            first_frame_accepted_at is not None
-            and on_uplink_frame_accepted is not None
-        ):
-            try:
-                on_uplink_frame_accepted(control, first_frame_accepted_at)
-            except BaseException:
-                # Observation runs only after the ACK send attempt and cannot
-                # alter media authority or the already-completed send.
-                pass
-        if not control_sent:
-            closed = session.close(MediaDetachReason.TRANSPORT_SEND_FAILED)
-            return await terminate(closed)
-        if isinstance(control, MediaAck) and on_uplink_ack_sent is not None:
-            try:
-                on_uplink_ack_sent(control)
-            except BaseException:
-                # This optional diagnostic cannot alter media authority or
-                # turn a successfully-sent ACK into a transport failure.
-                pass
-        if isinstance(control, MediaDetach):
-            closed = session.close(control.reason_id)
-            return await terminate(closed)
 
 
 async def run_dedicated_media_downlink_socket_leaf(

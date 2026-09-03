@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { taskNotificationSource } from './taskNotificationSource.mjs';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
@@ -24,7 +25,6 @@ import {
   classifyProductP2Notification,
   createProductP2ActivationOwner,
   extractWebErrorReason,
-  formalTaskIntentResultSummary,
   inspectProductP3RetryCandidate,
   isCurrentProgressOwner,
   reconcileProductP3ProgressEvent,
@@ -360,10 +360,11 @@ async function renderPanel({ sessionId = 'persisted-session', platform = null, p
 test('route panel renders three truthful predecessor classes and the non-success disclosure', async () => {
   const html = await renderPanel();
 
-  assert.equal(html.includes('data-composition="shell_only"'), true);
+  assert.equal(html.includes('data-composition="unsupported"'), true);
   assert.equal((html.match(/data-testid="live-voice-integrated-p/g) ?? []).length, 3);
   assert.equal(html.includes('data-implementation-class="fallback"'), true);
-  assert.equal(html.includes('data-implementation-class="demo_substitute"'), true);
+  assert.equal(html.includes('data-implementation-class="demo_substitute"'), false);
+  assert.equal(html.includes('data-implementation-class="unsupported"'), true);
   assert.equal(html.includes('BROWSER_SPEECH_COMPATIBILITY_FALLBACK'), true);
   assert.equal(html.includes('persisted-session'), true);
   assert.equal(html.includes('ui-route-test'), true);
@@ -372,7 +373,7 @@ test('route panel renders three truthful predecessor classes and the non-success
   assert.equal(html.includes('aria-hidden="true"'), true);
   assert.equal(html.includes('hidden=""'), true);
   assert.equal(html.includes('Hands-free Live Voice submits authoritative final speech once'), true);
-  assert.equal(html.includes('routes dialogue and the current background task on the server'), true);
+  assert.equal(html.includes('interprets dialogue and exact Task references through one server-side semantic route'), true);
   assert.equal(html.includes('resumes listening after presentation'), true);
 });
 
@@ -608,27 +609,14 @@ test('recognized Speech confirmation keeps correction editable while locking dis
   assert.doesNotMatch(source, /window\.confirm\('Confirm that the recognized speech/);
 });
 
-test('natural-language task status projects the authoritative terminal result', () => {
-  assert.equal(
-    formalTaskIntentResultSummary({
-      disposition: 'dispatched',
-      reason: 'TASK_INTENT_DISPATCHED',
-      source: 'text',
-      operation: 'task.status',
-      task_id: 'task-status-1',
-      resolver_provider: 'local.closed_schema',
-      resolver_implementation_class: 'bounded_deterministic_alpha_v1',
-      resolution_id: 'a'.repeat(64),
-      commit_sha256: 'b'.repeat(64),
-      confirmation_token: null,
-      confirmation_form: null,
-      origin_id: 'intent-origin-1',
-      formal_task_result: {
-        task: { task_id: 'task-status-1', state: 'terminal', outcome: 'completed' },
-      },
-    }),
-    'task-status-1 | terminal/completed',
-  );
+test('retired natural Task hint UI cannot supply operation, target or a second parser', async () => {
+  // Terminal truth remains covered by formal Task control/progress and mounted
+  // A/B terminal tests. This obsolete formatter was never a status authority.
+  assert.equal(integratedPanelModule.formalTaskIntentResultSummary, undefined);
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /ProductFormalTaskIntentOwner|setCommandRoute|setTaskOperation|setTaskId|pendingNaturalCreateHandoff/);
+  assert.match(source, /submitProductText/);
+  assert.match(source, /FormalTaskControlLeaf/);
 });
 
 test('accepted and running task progress use distinct localized presentation truth', async () => {
@@ -802,6 +790,8 @@ test('P2 notification classification surfaces failures and treats transport keep
   assert.equal(dialogueTaskClaim.adjustment_notification, false);
   const terminalPresentation = classifyProductP2Notification({
     kind: 'agent.output',
+    session_id: 'session-1',
+    source_event: taskNotificationSource('session-1', 'task-terminal'),
     response: {
       interaction_id: 'interaction-1',
       response_id: 'response-terminal',
@@ -817,9 +807,12 @@ test('P2 notification classification surfaces failures and treats transport keep
   assert.equal(terminalPresentation.kind, 'presentation');
   assert.equal(terminalPresentation.task_notification, true);
   assert.equal(terminalPresentation.task_notification_terminal, true);
+  assert.equal(terminalPresentation.task_id, 'task-terminal');
   assert.equal(terminalPresentation.adjustment_notification, false);
   const audioTaskPresentation = classifyProductP2Notification({
     kind: 'agent.output',
+    session_id: 'session-1',
+    source_event: taskNotificationSource('session-1', 'task-running', 'running'),
     response: {
       interaction_id: 'interaction-1',
       response_id: 'response-task-audio',
@@ -1012,6 +1005,7 @@ test('speech-marked capture gets one bounded settlement before Task AUDIO falls 
     capture_binding_available: true,
   };
   assert.equal(capturedTaskNotificationDeadlineAction(input), 'settle_capture');
+  assert.equal(capturedTaskNotificationDeadlineAction({ ...input, foreground_pending: true }), 'fallback_text');
   assert.equal(
     capturedTaskNotificationDeadlineAction({ ...input, capture_settlement_requested: true }),
     'fallback_text',
@@ -1074,6 +1068,11 @@ test('terminal fallback chat projection shares the exact backend TEXT history id
   assert.equal((await terminalTextFallbackMessage(event, 'task-a')).message.id, message.message.id);
   assert.equal(await terminalTextFallbackMessage(event, 'task-b'), null);
   assert.equal(await terminalTextFallbackMessage({ ...event, response_ref: null }, 'task-a'), null);
+  const chinese = await terminalTextFallbackMessage(event, 'task-a', true);
+  assert.equal(chinese.message.content, '后台任务已完成，结果已经生成。');
+  const chineseDigest = createHash('sha256').update(chinese.message.content, 'utf8').digest('hex');
+  assert.equal(chinese.message.id, `live-voice:interaction-a:response-a:13:text:0:0:${chineseDigest}`);
+  assert.equal(await terminalTextFallbackMessage(event, 'task-b', true), null);
 });
 
 test('terminal notification receive transport remains subscribed while an outstanding Task starts idle capture', () => {
@@ -1096,10 +1095,15 @@ test('terminal notification receive transport remains subscribed while an outsta
       disposition: { kind: 'continue' },
       terminal_notification_check_required: true,
       foreground_response_waiting: true,
+      notification: { kind: 'transport.keepalive' },
     }),
     PRODUCT_P2_NOTIFICATION_PENDING_BACKOFF_MS,
   );
   assert.equal(PRODUCT_P2_NOTIFICATION_PENDING_BACKOFF_MS >= 500, true);
+  assert.equal(productP2NotificationRepollDelayMs({
+    disposition: { kind: 'continue' }, terminal_notification_check_required: true,
+    foreground_response_waiting: true, notification: { kind: 'round.progress' },
+  }), 0, 'a real progress event must not delay the already queued answer');
   assert.equal(
     productP2NotificationRepollDelayMs({
       disposition: { kind: 'continue' },
@@ -1272,6 +1276,10 @@ test('P2 notification polling outlives the retained Gateway unary owner', () => 
   assert.equal(PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS > 600_000, true);
   assert.deepEqual(productP2WebRequestOptions(PRODUCT_P2_SUBMIT_METHOD, 'submit-request-1'), { requestId: 'submit-request-1' });
   assert.deepEqual(productP2WebRequestOptions(PRODUCT_P2_SUBMIT_METHOD), {});
+  assert.deepEqual(productP2WebRequestOptions('live_voice.composition.unified.submit', 'semantic-1'), {
+    requestId: 'semantic-1', timeoutMs: 150_000,
+  });
+  assert.deepEqual(productP2WebRequestOptions('live_voice.composition.p2.presentation.ack'), {});
 });
 
 test('presented response ownership stays bounded and evicts conservatively', () => {
@@ -2318,5 +2326,18 @@ test('route panel discloses permission, origin, device, activation, lifecycle, n
     'MICROPHONE_PERMISSION_QUERY_FAILED',
   ]) {
     assert.equal(html.includes(fact), true, fact);
+  }
+});
+test('Native task discovery is closed, activation-bound data without command authority', () => {
+  const value = { status: 'notification', kind: 'native.task_association', request_id: 'discovery-1', sequence_effect: 'neutral',
+    session_id: 'session-1', correlation_id: 'correlation-1', interaction_id: 'interaction-1', activation_id: 'activation-1', activation_generation: 1,
+    response: { interaction_id: 'interaction-1', response_id: 'response-1', response_generation: 2 },
+    task_association: { task_id: 'task-1', turn_commit_id: 'commit-1', provider_call_id: 'call-1' },
+    round_id: null, agent_event: null, source_event: null, progress_event: null, presentation_unit: null, audio: null, error_reason: null, publish_seq: null };
+  assert.equal(classifyProductP2Notification(value).kind, 'native_task_association');
+  for (const change of [ { operation: 'task.cancel' }, { activation_generation: 0 }, { sequence_effect: 'advance' },
+    { task_association: { ...value.task_association, task_id: ' ' } }, { task_association: { ...value.task_association, permission: true } },
+    { response: { ...value.response, interaction_id: 'foreign' } }, { audio: {} } ]) {
+    assert.deepEqual(classifyProductP2Notification({ ...value, ...change }), { kind: 'failed', reason: 'PRODUCT_NATIVE_TASK_ASSOCIATION_INVALID' });
   }
 });

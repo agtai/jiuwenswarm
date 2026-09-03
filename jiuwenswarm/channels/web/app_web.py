@@ -529,6 +529,30 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         finally:
             conn.close()
 
+    def _connect_websocket_upstream(self, host: str, port: int) -> socket.socket:
+        # A local media attach has a 3s browser deadline. Waiting 10s for its
+        # first TCP connection guarantees failure and leaves an orphaned proxy
+        # request. Retry only before sending the HTTP upgrade or any capability.
+        local_media = (
+            urlparse(self.path).path == "/ws/live-voice/media"
+            # Numeric loopback avoids DNS/multiple-address attempts exceeding
+            # this budget. Hostname and remote connections retain their policy.
+            and host in {"127.0.0.1", "::1"}
+        )
+        attempts = 2 if local_media else 1
+        for attempt in range(attempts):
+            try:
+                upstream = socket.create_connection(
+                    (host, port), timeout=1.0 if local_media else self._WS_CONNECT_TIMEOUT,
+                )
+                upstream.settimeout(self._WS_CONNECT_TIMEOUT)
+                return upstream
+            except (TimeoutError, ConnectionRefusedError):
+                if attempt + 1 == attempts:
+                    raise
+                self.logger.warning("live_voice_media_proxy_connect_retry attempt=%s", attempt + 1)
+        raise AssertionError("WebSocket connection attempts exhausted")
+
     def _proxy_websocket_tunnel(self) -> None:
         parsed = urlparse(self.ws_target)
         if parsed.scheme not in ("ws", "wss", "http", "https"):
@@ -541,7 +565,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         )
 
         try:
-            upstream = socket.create_connection((upstream_host, upstream_port), timeout=self._WS_CONNECT_TIMEOUT)
+            upstream = self._connect_websocket_upstream(upstream_host, upstream_port)
             if parsed.scheme in ("wss", "https"):
                 ctx = ssl.create_default_context() if get_ssl_verify() else get_insecure_ssl_context()
                 upstream = ctx.wrap_socket(upstream, server_hostname=upstream_host)
@@ -558,7 +582,12 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                     describe_ws_exception(exc),
                 ),
             )
-            self.send_error(502, "proxy ws connect failed")
+            try:
+                self.send_error(502, "proxy ws connect failed")
+            except (ConnectionError, OSError):
+                # The browser can close its timed-out attach before the proxy
+                # finishes; no handshake or media payload has been forwarded.
+                pass
             return
 
         try:

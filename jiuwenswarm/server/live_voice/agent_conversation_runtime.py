@@ -96,6 +96,7 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextEntry,
     FormalContextSnapshot,
+    PresentedAgentAnalysis,
 )
 
 
@@ -1152,6 +1153,54 @@ class AgentConversationRuntime:
         self._require_admission()
         await self._cr.open_interaction(interaction_id)
 
+    def presented_agent_analysis(
+        self, response: ResponseRef
+    ) -> PresentedAgentAnalysis | None:
+        """No prefixes, Task notices, cancelled output or unpresented content."""
+        self._require_admission()
+        state = self._outputs.get(response)
+        if (
+            state is None
+            or state.commit.scope != self._scope
+            or state.handle is None
+            or state.source_provenance != "server.agent"
+            or state.terminal_outcome is not TerminalOutcome.COMPLETED
+        ):
+            return None
+        records = sorted(
+            (
+                record
+                for record in self._cr.snapshot().presentation.records
+                if record.unit.ref == response
+                and record.unit.surface is PresentationSurface.TEXT
+            ),
+            key=lambda record: record.unit.seq,
+        )
+        if not records or any(
+            record.state is not PresentationState.PRESENTED for record in records
+        ):
+            return None
+        parts = []
+        for record in records:
+            content = state.unit_contents.get(record.unit.unit_id)
+            if (
+                content is None
+                or f"sha256:{hashlib.sha256(content).hexdigest()}"
+                != record.unit.content_ref
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "FORMAL_CONTEXT_CONTENT_MISMATCH",
+                    "presented analysis lost exact content",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+            parts.append(content)
+        text = b"".join(parts).decode("utf-8")
+        if not text.strip() or len(text.encode("utf-8")) > 16_384:
+            return None
+        return PresentedAgentAnalysis(
+            state.commit, response, text, records[-1].presented_at
+        )
+
     def select_formal_context(self, interaction_id: str) -> FormalContextSnapshot:
         """Select bounded, acknowledged CR text facts for the next formal turn.
 
@@ -1195,7 +1244,11 @@ class AgentConversationRuntime:
             ):
                 presented_by_ref.setdefault(unit.ref, []).append(unit)
 
-        selected_reversed: list[tuple[FormalContextEntry, FormalContextEntry]] = []
+        interrupted_refs = {
+            outcome.response_ref for outcome in self._generation_interruptions.values()
+            if outcome.fence is not None
+        }
+        selected_reversed: list[tuple[FormalContextEntry, ...]] = []
         selected_bytes = 0
         for response_ref, state in sorted(
             self._outputs.items(),
@@ -1218,7 +1271,7 @@ class AgentConversationRuntime:
             units = sorted(
                 presented_by_ref.get(response_ref, ()), key=lambda unit: unit.seq
             )
-            if not units:
+            if not units and response_ref not in interrupted_refs:
                 continue
             assistant_parts: list[bytes] = []
             for unit in units:
@@ -1259,6 +1312,10 @@ class AgentConversationRuntime:
                 ),
                 content=state.commit.text,
             )
+            if not units:
+                selected_reversed.append((user_entry,))
+                selected_bytes += pair_bytes
+                continue
             assistant_entry = FormalContextEntry(
                 ref=self._formal_context_ref(
                     source="live_voice.cr_presented_assistant",
@@ -1272,6 +1329,8 @@ class AgentConversationRuntime:
                 ),
                 content=assistant_text,
             )
+            # The committed question remains valid after generation is fenced.
+            # Unpresented assistant output has no context/history authority.
             selected_reversed.append((user_entry, assistant_entry))
             selected_bytes += pair_bytes
         entries = tuple(entry for pair in reversed(selected_reversed) for entry in pair)

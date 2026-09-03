@@ -16,7 +16,6 @@ export const FEATURE_LIVE_VOICE_STREAMING_SPEECH = import.meta.env.VITE_FEATURE_
  * Post-V0 restricted AutoHarness task bridge. Disabled by default because its
  * confirmed commands can create side-effecting background work.
  */
-export const FEATURE_LIVE_VOICE_TASK_DEMO = import.meta.env.VITE_FEATURE_LIVE_VOICE_TASK_DEMO === 'true';
 
 export const FEATURE_LIVE_VOICE_INTEGRATED_P1 = import.meta.env.VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1 === 'true';
 

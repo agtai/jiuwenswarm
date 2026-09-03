@@ -2129,9 +2129,19 @@ async def test_native_unconsumed_downlink_saturation_closes_before_later_control
 
 
 @pytest.mark.asyncio
-async def test_native_delegate_result_is_returned_to_provider_once() -> None:
+@pytest.mark.parametrize("task_id", [None, "task-real-discovery"])
+async def test_native_delegate_result_is_returned_to_provider_once(task_id) -> None:
     activation_handle = _native_activation()
     client = _FakeNativeRuntimeClient(activation_handle)
+    original_propose = client.propose
+
+    async def propose_with_association(**kwargs):
+        result = await original_propose(**kwargs)
+        if task_id is not None and result.get("kind") == "delegate":
+            result.update(route="task", task_id=task_id)
+        return result
+
+    client.propose = propose_with_association
     engine = _FakeNativeEngine()
     registry = DedicatedMediaProductRegistry(
         enabled=True,
@@ -2173,6 +2183,13 @@ async def test_native_delegate_result_is_returned_to_provider_once() -> None:
     )
 
     await asyncio.wait_for(engine.delegate_result_sent.wait(), timeout=1.0)
+
+    if task_id is not None:
+        notification = registry.take_native_notification(session_id="session-1", interaction_id="interaction-1", connection_id="connection-1")
+        assert notification["kind"] == "native.task_association"
+        assert notification["task_association"] == {"task_id": task_id, "turn_commit_id": "native-delegate-commit-1", "provider_call_id": "provider-call-1"}
+        assert notification["activation_id"] == "activation-1"
+        assert registry.take_native_notification(session_id="session-1", interaction_id="interaction-1", connection_id="connection-1") is None
 
     assert engine.delegate_results == [
         (
@@ -4039,6 +4056,48 @@ def test_partial_capture_never_authorizes_speech() -> None:
     assert registry.authorize(binding) is None
 
 
+def test_full_legal_48khz_capture_retains_exact_batch_bytes_and_rejects_excess() -> None:
+    from jiuwenswarm.common.live_voice_capture_limits import (
+        MAX_CAPTURE_DURATION_SECONDS, MAX_CAPTURE_WAV_BYTES,
+    )
+    from jiuwenswarm.server.live_voice.batch_speech import _parse_recognition_segment
+
+    registry = _active_registry()
+    activation = _activate(
+        registry, params=_params(sample_rate_hz=48_000),
+        request_origin=ORIGIN, connection_id="connection-1",
+    )
+    record = registry.consume_ticket(_media_ticket(activation), request_origin=ORIGIN)
+    assert record is not None
+    count = int(MAX_CAPTURE_DURATION_SECONDS / 0.02)
+    for sequence in range(count):
+        registry.accept_frame(record, MediaAudioFrame(
+            seq=sequence, sample_cursor=sequence * 960, samples=(0.25,) * 960,
+        ))
+    assert record.accepted_frames == 3075
+    wav = dedicated_media_registration._wav_bytes(bytes(record.pcm), 48_000)
+    assert len(wav) == 5_904_044
+    segment = _parse_recognition_segment(
+        subject_id=str(activation["subject_id"]),
+        capture_value={"capture_id":"capture-1", "capture_generation":0,
+                       "track_id":"track-1", "final":True},
+        audio_value={"format":"wav_pcm16_mono", "sample_rate_hz":48_000,
+                     "channel_count":1, "data_base64":base64.b64encode(wav).decode()},
+        field="capture",
+    )
+    assert segment.audio_wav == wav  # no resampling/truncation or digest change
+    remaining = (MAX_CAPTURE_WAV_BYTES - 44 - len(record.pcm)) // 2
+    before = bytes(record.pcm)
+    with pytest.raises(MediaTransportViolation) as exceeded:
+        registry.accept_frame(record, MediaAudioFrame(
+            seq=count, sample_cursor=count * 960, samples=(0.25,) * (remaining + 1),
+        ))
+    assert exceeded.value.reason_id == "MEDIA_CAPTURE_LIMIT_EXCEEDED"
+    assert bytes(record.pcm) == before
+    assert record.accepted_frames == count
+    assert record.recognition_content_sha256 is None  # retention alone grants nothing
+
+
 def test_expired_unconsumed_ticket_releases_capacity_before_authority_ttl() -> None:
     now = 0.0
     registry = DedicatedMediaProductRegistry(
@@ -5604,6 +5663,49 @@ def _task_synthesis_request(
         "voice": None,
         "required_sample_rate_hz": sample_rate_hz,
     }
+
+
+@pytest.mark.asyncio
+async def test_live_native_only_authorizes_exact_task_notification_tts():
+    client = _FakeNativeRuntimeClient(_native_activation())
+    engine = _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=client, native_engine_factory=lambda _binding: engine)
+    activated = _activate(registry, params=_params(sample_rate_hz=24_000), request_origin=ORIGIN, connection_id="connection-1")
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    await registry.begin_native_interaction(uplink)
+    provider = _CountingBatchSpeechProvider()
+    service = FormalBatchSpeechService(provider, authorization_resolver=registry)
+    ws = SimpleNamespace(_jiuwen_ws_id="connection-1")
+    try:
+        # A normal foreground TEXT response does not grant open-uplink TTS.
+        ordinary = _observe_task_notification(registry, response_id="ordinary")
+        request = _task_synthesis_request(subject_id=uplink.subject_id, response=ordinary, sample_rate_hz=24_000)
+        assert registry.context_for(ws, request, "session-1", "user-1").assurance is Assurance.REQUEST_ASSERTED
+        rejected = await service.synthesize(request, SpeechRpcContext(uplink.subject_id, "session-1", Assurance.AUTHENTICATED))
+        assert not rejected["ok"] and provider.synthesize_calls == 0
+        exact = _observe_task_notification(registry, surface="audio", source_provenance="server.task_notification")
+        request = _task_synthesis_request(subject_id=uplink.subject_id, response=exact, sample_rate_hz=24_000)
+        context = registry.context_for(ws, request, "session-1", "user-1")
+        assert context.assurance is Assurance.AUTHENTICATED
+        for changes in [ {"unit_id": "wrong"}, {"response": {**request["response"], "response_generation": 99}},
+                         {"render_plan": {**request["render_plan"], "spoken_text": "forged"}}, {"operation": RECOGNIZE_OPERATION} ]:
+            malformed = {**request, **changes}
+            assert registry.context_for(ws, malformed, "session-1", "user-1").assurance is Assurance.REQUEST_ASSERTED
+            assert not (await service.synthesize(malformed, context))["ok"]
+        assert provider.synthesize_calls == 0
+        assert registry.context_for(SimpleNamespace(_jiuwen_ws_id="foreign"), request, "session-1", "user-1").assurance is Assurance.REQUEST_ASSERTED
+        assert (await service.synthesize(request, context))["ok"]
+        assert (await service.synthesize(request, context))["ok"]
+        assert provider.synthesize_calls == 1
+        another = {**request, "request_id": "other", "operation_id": "other"}
+        assert not (await service.synthesize(another, context))["ok"]
+        assert provider.synthesize_calls == 1
+        assert not uplink.route_completed and not engine.closed and client.close_calls == 0
+        assert client.playback_actions == []  # Ordinary TTS cannot ACK Provider audio.
+        await registry.close_native_interaction(uplink)
+        assert registry.context_for(ws, request, "session-1", "user-1").assurance is Assurance.REQUEST_ASSERTED
+    finally:
+        await registry.close_native_interaction(uplink)
 
 
 def test_task_notification_speech_authority_hands_off_to_rotated_media_owner() -> None:

@@ -1374,7 +1374,9 @@ def _resolve_paths() -> None:
     # 保证源码运行与安装包运行后的读写路径完全一致。
     user_config_dir = workspace_dir / "config"
     user_workspace_dir = workspace_dir / "agent" / "workspace"
-    if user_config_dir.exists():
+    # An explicit read-only configuration source must never redirect mutable
+    # runtime data into package resources before workspace initialization.
+    if user_config_dir.exists() or os.getenv("JIUWENSWARM_CONFIG_DIR", "").strip():
         _root_dir = workspace_dir
         _config_dir = user_config_dir
         _workspace_dir = user_workspace_dir
@@ -1683,7 +1685,18 @@ def get_xy_tmp_dir() -> Path:
 
 
 def get_env_file() -> Path:
-    return get_config_dir() / ".env"
+    return _selected_configuration_directory() / ".env"
+
+
+def _selected_configuration_directory() -> Path:
+    """Select explicit configuration without moving any runtime-owned paths."""
+    selected = os.getenv("JIUWENSWARM_CONFIG_DIR", "").strip()
+    if not selected:
+        return get_config_dir()
+    directory = Path(selected)
+    if not directory.is_absolute() or not directory.is_dir():
+        raise ValueError("JIUWENSWARM_CONFIG_DIR must be an existing absolute directory")
+    return directory.resolve()
 
 
 def env_url(name: str, default: str) -> str:
@@ -1713,7 +1726,7 @@ def reset_free_search_runtime_flags() -> None:
 
 def get_config_file() -> Path:
     """Get the config.yaml file path."""
-    return get_config_dir() / "config.yaml"
+    return _selected_configuration_directory() / "config.yaml"
 
 
 def is_package_installation() -> bool:

@@ -1,5 +1,7 @@
 export const PRODUCT_P2_ACTIVATE_METHOD = 'live_voice.composition.p2.activate' as const;
 export const PRODUCT_P2_CLOSE_METHOD = 'live_voice.composition.p2.close' as const;
+export type ProductP2CloseCause = 'user_exit' | 'session_change' | 'task_redelivery' |
+  'native_closed' | 'active_recovery' | 'route_unavailable' | 'media_authority_failure' | 'owner_cleanup';
 export const PRODUCT_P2_SUBMIT_METHOD = 'live_voice.composition.p2.submit' as const;
 export const PRODUCT_P2_NOTIFICATION_NEXT_METHOD = 'live_voice.composition.p2.notification.next' as const;
 export const PRODUCT_P2_PRESENTATION_ACK_METHOD = 'live_voice.composition.p2.presentation.ack' as const;
@@ -944,6 +946,24 @@ function closeWithBoundedRetry<TSnapshot>(input: {
  * an authoritative rejection remains unavailable without fake ownership.
  */
 export class ProductWebP2ActivationOwner {
+  private restoredVoiceTaskIds: readonly string[] = Object.freeze([]);
+  private voiceDiscoveryReason: string | null = null;
+
+  voiceTaskDiscovery(): Readonly<{ task_ids: readonly string[]; reason: string | null }> {
+    return { task_ids: this.restoredVoiceTaskIds, reason: this.voiceDiscoveryReason };
+  }
+
+  private adoptVoiceTaskDiscovery(result: JsonObject): void {
+    const ids = result.voice_task_ids ?? [];
+    const reason = result.voice_task_discovery_reason ?? null;
+    if (!Array.isArray(ids) || ids.length > 128 || new Set(ids).size !== ids.length
+      || ids.some(id => typeof id !== 'string' || !id.trim() || id !== id.trim() || /[\u0000-\u001f]/.test(id) || new TextEncoder().encode(id).length > 256)
+      || (reason !== null && (typeof reason !== 'string' || reason.length > 256))) {
+      throw new Error('product voice Task discovery is invalid');
+    }
+    this.restoredVoiceTaskIds = Object.freeze([...ids] as string[]);
+    this.voiceDiscoveryReason = reason as string | null;
+  }
   private readonly enabled: boolean;
   private readonly request: ProductWebRequest;
   private readonly durableOperationJournal?: ProductP2DurableOperationJournal;
@@ -960,6 +980,7 @@ export class ProductWebP2ActivationOwner {
   private mediaAuthorityRefreshPromise: Promise<ProductWebP2ActivationSnapshot> | null = null;
   private mediaStartReservation: Readonly<{ cancel: () => Promise<void> }> | null = null;
   private closePromise: Promise<ProductWebP2ActivationSnapshot> | null = null;
+  private closeRequestId: string | null = null;
   private closeRetryPromise: Promise<ProductWebP2ActivationSnapshot> | null = null;
   private readonly closeRetryObservers = new Set<ProductWebCloseRetryObserver<ProductWebP2ActivationSnapshot>>();
   private readonly submissions = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
@@ -1041,6 +1062,7 @@ export class ProductWebP2ActivationOwner {
       .then(value => {
         try {
           const result = requireResult(value, 'active', binding);
+          this.adoptVoiceTaskDiscovery(result);
           this.activationReplayed = result.replayed === true ? true : result.replayed === false ? false : null;
         } catch (error) {
           throw ambiguousActivationResponse(error);
@@ -1093,6 +1115,7 @@ export class ProductWebP2ActivationOwner {
         if (result.replayed !== true) {
           throw new Error('product P2 media authority refresh did not replay the active binding');
         }
+        this.adoptVoiceTaskDiscovery(result);
         if (this.closing || this.binding === null || !sameBinding(this.binding, binding)) {
           throw new Error('product P2 activation changed during media authority refresh');
         }
@@ -1643,7 +1666,7 @@ export class ProductWebP2ActivationOwner {
     return promise;
   }
 
-  close(): Promise<ProductWebP2ActivationSnapshot> {
+  close(cause: ProductP2CloseCause = 'owner_cleanup'): Promise<ProductWebP2ActivationSnapshot> {
     if (!this.enabled) {
       this.notificationQueue = [];
       this.lastNotificationPublishSeq = null;
@@ -1682,7 +1705,10 @@ export class ProductWebP2ActivationOwner {
           this.cleanupRequired = false;
           return this.publish();
         }
-        const value = await this.request(PRODUCT_P2_CLOSE_METHOD, { ...binding });
+        // Existing opaque request IDs carry a bounded origin label into server
+        // logs. Retried cleanup retains this ID and never changes its cause.
+        this.closeRequestId ??= allocateProductRequestId(`live-voice-p2-close-${cause}`);
+        const value = await this.request(PRODUCT_P2_CLOSE_METHOD, { ...binding }, this.closeRequestId);
         requireResult(value, 'closed', binding);
         this.status = 'closed';
         this.reason = null;
@@ -1703,7 +1729,7 @@ export class ProductWebP2ActivationOwner {
     return this.closePromise;
   }
 
-  closeWithRetry(options: ProductWebCloseRetryOptions<ProductWebP2ActivationSnapshot> = {}): Promise<ProductWebP2ActivationSnapshot> {
+  closeWithRetry(options: ProductWebCloseRetryOptions<ProductWebP2ActivationSnapshot> & { cause?: ProductP2CloseCause } = {}): Promise<ProductWebP2ActivationSnapshot> {
     if (options.on_retry) {
       this.closeRetryObservers.add(options.on_retry);
       if (this.closeRetryPromise && this.status === 'cleanup_pending') {
@@ -1717,7 +1743,7 @@ export class ProductWebP2ActivationOwner {
     if (this.closeRetryPromise) return this.closeRetryPromise;
     let retained: Promise<ProductWebP2ActivationSnapshot>;
     retained = closeWithBoundedRetry({
-      close: () => this.close(),
+      close: () => this.close(options.cause),
       snapshot: () => this.snapshot(),
       options: {
         ...options,

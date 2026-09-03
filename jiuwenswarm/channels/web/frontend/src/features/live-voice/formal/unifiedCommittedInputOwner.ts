@@ -1,6 +1,23 @@
 export const PRODUCT_UNIFIED_COMMITTED_INPUT_METHOD = 'live_voice.composition.unified.submit' as const;
+// Mirrors common/live_voice_operation_budgets.py; a failure ceiling, not a delay.
+export const PRODUCT_SEMANTIC_CLIENT_TIMEOUT_MS = 150_000;
 
 type JsonObject = Readonly<Record<string, unknown>>;
+
+class UnifiedInputRejection extends Error {
+  readonly code: string;
+  readonly reason: string;
+  readonly definitive: boolean;
+  readonly retriable: boolean;
+  constructor(code: string, reason: string) {
+    super('unified committed-input request was rejected');
+    this.code = code;
+    this.reason = reason;
+    this.definitive = ['INVALID_ARGUMENT', 'UNAUTHENTICATED', 'PERMISSION_DENIED',
+      'NOT_FOUND', 'CONFLICT', 'STALE', 'UNSUPPORTED', 'CAPABILITY_UNAVAILABLE'].includes(code);
+    this.retriable = ['UNAVAILABLE', 'RESULT_UNKNOWN'].includes(code);
+  }
+}
 
 export type UnifiedCommittedInputRequest = (
   method: typeof PRODUCT_UNIFIED_COMMITTED_INPUT_METHOD,
@@ -34,6 +51,8 @@ export type UnifiedAuthoritativeFinal = Readonly<{
   text: string;
   voice_commit_receipt: string;
 }>;
+
+export type UnifiedCommittedText = Readonly<Omit<UnifiedAuthoritativeFinal, 'voice_commit_receipt'> & { input_kind: 'text' }>;
 
 function requiredText(value: unknown, name: string, maximum = 100_000): string {
   if (typeof value !== 'string' || !value.trim() || new TextEncoder().encode(value).length > maximum) {
@@ -73,7 +92,7 @@ function exactControlResult(
   value: unknown,
   requestId: string,
   binding: UnifiedCommittedInputBinding,
-  input: UnifiedAuthoritativeFinal,
+  input: UnifiedAuthoritativeFinal | UnifiedCommittedText,
 ): JsonObject {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('unified committed-input response is invalid');
   const envelope = value as Record<string, unknown>;
@@ -110,9 +129,7 @@ function exactControlResult(
       || typeof errorObject.reason !== 'string'
       || typeof errorObject.message !== 'string'
     ) throw new Error('unified committed-input rejection is invalid');
-    throw Object.assign(new Error('unified committed-input request was rejected'), {
-      reason: errorObject.reason,
-    });
+    throw new UnifiedInputRejection(errorObject.code, errorObject.reason);
   }
   const result = payload.result;
   if (
@@ -140,7 +157,7 @@ function exactControlResult(
       'request_id',
       'round_id',
       'response',
-    ]))
+    ], ['task_id']))
     || resultObject.response === null
     || typeof resultObject.response !== 'object'
     || Array.isArray(resultObject.response)
@@ -174,9 +191,9 @@ function exactControlResult(
     || Number(response.response_generation) < 0
   ) throw new Error('unified committed-input presentation binding is invalid');
   if (
-    authoritativePresentation
-    && Object.prototype.hasOwnProperty.call(resultObject, 'task_id')
-    && (typeof resultObject.task_id !== 'string' || !resultObject.task_id.trim())
+    Object.prototype.hasOwnProperty.call(resultObject, 'task_id')
+    && (typeof resultObject.task_id !== 'string' || !resultObject.task_id.trim()
+      || new TextEncoder().encode(resultObject.task_id).length > 256)
   ) throw new Error('unified committed-input task_id is invalid');
   return Object.freeze({ ...payload });
 }
@@ -198,6 +215,7 @@ function bindCachedResult(business: JsonObject, requestId: string): JsonObject {
 export class ProductUnifiedCommittedInputOwner {
   readonly #request: UnifiedCommittedInputRequest;
   #pending: Readonly<{ fingerprint: string; promise: Promise<JsonObject> }> | null = null;
+  #unresolvedFingerprint: string | null = null;
   readonly #completed = new Map<string, JsonObject>();
 
   constructor(request: UnifiedCommittedInputRequest) {
@@ -206,17 +224,21 @@ export class ProductUnifiedCommittedInputOwner {
   }
 
   hasPending(): boolean {
-    return this.#pending !== null;
+    return this.#unresolvedFingerprint !== null;
   }
 
   submit(
     binding: UnifiedCommittedInputBinding,
-    input: UnifiedAuthoritativeFinal,
+    input: UnifiedAuthoritativeFinal | UnifiedCommittedText,
     supersedes: UnifiedSupersededResponse | null = null,
   ): Promise<JsonObject> {
     const requestId = requiredText(input.request_id, 'request_id', 256);
     if (supersedes !== null && !Number.isSafeInteger(supersedes.response_generation)) {
       return Promise.reject(new Error('supersedes_response generation is invalid'));
+    }
+    const typed = 'input_kind' in input && input.input_kind === 'text';
+    if (typed && (supersedes !== null || 'voice_commit_receipt' in input)) {
+      return Promise.reject(new Error('typed input cannot carry speech or replacement authority'));
     }
     const params = {
       session_id: requiredText(binding.session_id, 'session_id', 256),
@@ -229,7 +251,9 @@ export class ProductUnifiedCommittedInputOwner {
       committed_at: requiredText(input.committed_at, 'committed_at', 64),
       text: requiredContent(input.text, 'text'),
       input_state: 'final' as const,
-      voice_commit_receipt: requiredText(input.voice_commit_receipt, 'voice_commit_receipt', 16_384),
+      ...(typed ? { input_kind: 'text' as const } : {
+        voice_commit_receipt: requiredText((input as UnifiedAuthoritativeFinal).voice_commit_receipt, 'voice_commit_receipt', 16_384),
+      }),
       // Only a replacement turn carries this key, so an ordinary turn keeps
       // the exact request fingerprint the durable journal already retains.
       ...(supersedes === null
@@ -244,18 +268,27 @@ export class ProductUnifiedCommittedInputOwner {
     const fingerprint = JSON.stringify(params);
     const replay = this.#completed.get(fingerprint);
     if (replay !== undefined) return Promise.resolve(bindCachedResult(replay, requestId));
+    if (this.#unresolvedFingerprint !== null && this.#unresolvedFingerprint !== fingerprint) {
+      return Promise.reject(new Error('a different authoritative final is still unresolved'));
+    }
     if (this.#pending !== null) {
       if (this.#pending.fingerprint !== fingerprint) {
         return Promise.reject(new Error('a different authoritative final is still unresolved'));
       }
       return this.#pending.promise.then(result => bindCachedResult(cacheBusinessResult(result), requestId));
     }
+    this.#unresolvedFingerprint = fingerprint;
     const promise = this.#request(PRODUCT_UNIFIED_COMMITTED_INPUT_METHOD, params, requestId)
       .then(value => {
         const result = exactControlResult(value, requestId, binding, input);
         if (this.#completed.size >= 128) this.#completed.delete(this.#completed.keys().next().value as string);
         this.#completed.set(fingerprint, cacheBusinessResult(result));
+        this.#unresolvedFingerprint = null;
         return result;
+      })
+      .catch(error => {
+        if (error instanceof UnifiedInputRejection && error.definitive) this.#unresolvedFingerprint = null;
+        throw error;
       })
       .finally(() => {
         if (this.#pending?.promise === promise) this.#pending = null;

@@ -1165,6 +1165,10 @@ class JiuWenSwarm:
             raise RuntimeError(
                 "FORMAL_EXECUTION_MEMORY_ENABLED: formal execution forbids memory"
             )
+        # The committed envelope already owns its context and current request.
+        # Ordinary chat rendering double-encodes it and prepends a machine clock
+        # that can be mistaken for a document's business/scenario reference time.
+        inputs["query"] = execution.prompt_content()
         formal_stream = getattr(
             adapter, "process_formal_live_voice_stream_impl", None
         )

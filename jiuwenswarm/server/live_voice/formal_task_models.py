@@ -742,7 +742,6 @@ class TaskAuthorizationGrant:
             )
         if self.policy_bypass not in {
             None,
-            "trusted_demo_live_voice_v1",
             "server_task_presentation_v1",
         }:
             raise FormalTaskViolation(
@@ -829,13 +828,8 @@ class TaskAuthorizationGrant:
         bypass_boundary = (
             not self.confirmed
             and self.confirmation_id is None
-            and (
-                self.policy_bypass == "trusted_demo_live_voice_v1"
-                or (
-                    self.policy_bypass == "server_task_presentation_v1"
-                    and operation == "task.ack_events"
-                )
-            )
+            and self.policy_bypass == "server_task_presentation_v1"
+            and operation == "task.ack_events"
         )
         if destructive and not (confirmed_boundary or bypass_boundary):
             raise FormalTaskViolation(

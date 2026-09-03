@@ -2568,6 +2568,34 @@ class P3AuthenticatedComposition:
             select_executor(self._executor_profiles, requirements)
         )
 
+    def require_local_artifact_delegation_capability(
+        self, resolution: ProductionTaskResolution,
+    ) -> None:
+        """Check the existing file-only Direct boundary before one-turn consent.
+
+        This is not a grant. The normal confirmation consumer and final Core
+        composition still revalidate the exact principal, origin, spec and model.
+        """
+        selection = self._select_production_create_candidate()
+        if (
+            resolution.operation != "task.create"
+            or resolution.confirmation != "required"
+            or resolution.confirmation_binding is None
+            or resolution.confirmation_binding.capability_profile_digest
+            != selection.capability_profile_digest
+            or not any(
+                profile.canonical_bytes() == selection.capability_profile_json
+                for profile in DirectProjectCodeExecutorAdapter.construction_capability_profiles(
+                    store_backed=True
+                )
+            )
+        ):
+            raise FormalTaskViolation(
+                "LOCAL_ARTIFACT_DELEGATION_CAPABILITY_REQUIRED",
+                "one-turn delegation requires the exact project-file Executor",
+                ErrorCode.PERMISSION_DENIED,
+            )
+
     def _resolve_retry_snapshot(
         self,
         *,
@@ -2881,6 +2909,7 @@ class P3AuthenticatedComposition:
         bearer_token: object,
         session_id: str,
         task_id: str,
+        native_authority: NativeP3ActivationAuthority | None = None,
     ) -> PersistentTaskRecord:
         """Read one immutable semantic target under its authenticated scope."""
 
@@ -2889,17 +2918,14 @@ class P3AuthenticatedComposition:
             await self._enter_operation()
             entered = True
             now = self._clock()
-            principal = self._authenticator.authenticate(
-                bearer_token,
+            _principal, authority = await self._run_blocking(
+                self._resolve_production_input_authority,
+                bearer_token=bearer_token,
                 operation="task.status",
-                now=now,
-            )
-            authority = await self._run_blocking(
-                self._authority_resolver.resolve,
-                principal,
                 session_id=session_id,
                 now=now,
                 require_clean=False,
+                native_authority=native_authority,
             )
             task = await self._run_blocking(
                 self._core.store.get_task,
@@ -2917,6 +2943,33 @@ class P3AuthenticatedComposition:
         finally:
             if entered:
                 await self._leave_operation()
+
+    async def read_task_creation_origins(
+        self, *, bearer_token: object, session_id: str,
+        native_authority: NativeP3ActivationAuthority | None = None,
+    ) -> tuple[ScopeRef, tuple[PersistentTaskRecord, ...]]:
+        """Bounded authenticated discovery for presentation, never targeting."""
+        await self._enter_operation()
+        try:
+            def read():
+                now = self._clock()
+                _principal, authority = self._resolve_production_input_authority(
+                    bearer_token=bearer_token, operation="task.list",
+                    session_id=session_id, now=now, require_clean=False,
+                    native_authority=native_authority,
+                )
+                tasks, cursor, has_more = self._core.store.list_tasks_page(authority.scope, limit=100)
+                if has_more:
+                    tail, _cursor, has_more = self._core.store.list_tasks_page(authority.scope, cursor=cursor, limit=28)
+                    tasks = (*tasks, *tail)
+                if has_more:
+                    raise FormalTaskViolation("VOICE_TASK_DISCOVERY_CAPACITY", "voice task discovery exceeds its bound", ErrorCode.UNAVAILABLE)
+                for task in tasks:
+                    self._require_exact_task_context(authority=authority, operation="task.list", task_id=task.task_id, now=now)
+                return authority.scope, tuple(tasks)
+            return await self._run_blocking(read)
+        finally:
+            await self._leave_operation()
 
     async def read_task_notification_facts(
         self,
@@ -4378,9 +4431,7 @@ class P3AuthenticatedComposition:
         params: Mapping[str, object],
         request_id: str,
         session_id: str | None,
-        trusted_demo_policy_bypass: bool = False,
         current_background_session_id: str | None = None,
-        trusted_current_task_id: str | None = None,
     ) -> P3RouteResult:
         """Invoke the existing P3 owner with a server-retained principal."""
 
@@ -4391,9 +4442,7 @@ class P3AuthenticatedComposition:
             params=internal_params,
             request_id=request_id,
             session_id=session_id,
-            trusted_demo_policy_bypass=trusted_demo_policy_bypass,
             current_background_session_id=current_background_session_id,
-            trusted_current_task_id=trusted_current_task_id,
             _native_authority=authority,
         )
 
@@ -4404,9 +4453,7 @@ class P3AuthenticatedComposition:
         params: Mapping[str, object],
         request_id: str,
         session_id: str | None,
-        trusted_demo_policy_bypass: bool = False,
         current_background_session_id: str | None = None,
-        trusted_current_task_id: str | None = None,
         _native_authority: NativeP3ActivationAuthority | None = None,
     ) -> P3RouteResult:
         started = time.monotonic()
@@ -4443,33 +4490,6 @@ class P3AuthenticatedComposition:
                 params,
                 session_id=session_id,
                 now=now,
-                trusted_demo_policy_bypass=trusted_demo_policy_bypass,
-            )
-            if trusted_demo_policy_bypass and (
-                clean.get("source") != "voice"
-                or (
-                    operation == "task.create"
-                    and current_background_session_id != clean.get("session_id")
-                )
-                or (
-                    operation in {"task.adjust", "task.cancel"}
-                    and trusted_current_task_id is None
-                )
-            ):
-                raise FormalTaskViolation(
-                    "TRUSTED_DEMO_POLICY_BYPASS_FORBIDDEN",
-                    "trusted Demo policy requires the unified voice current-task route",
-                    ErrorCode.PERMISSION_DENIED,
-                )
-            if (
-                operation == "task.adjust"
-                and trusted_current_task_id is not None
-                and current_background_session_id != clean.get("session_id")
-            ):
-                raise FormalTaskViolation(
-                    "CURRENT_BACKGROUND_TASK_BINDING_REQUIRED",
-                    "voice current-task adjustment requires its exact background Session",
-                    ErrorCode.PERMISSION_DENIED,
                 )
             authority = native_resolved or await self._run_blocking(
                 self._authority_resolver.resolve,
@@ -4555,24 +4575,9 @@ class P3AuthenticatedComposition:
                     now=now,
                     retry=(None if retry_snapshot is None else retry_snapshot.facts),
                 )
-                if destructive and not trusted_demo_policy_bypass
+                if destructive
                 else None
             )
-            policy_bypass = (
-                "trusted_demo_live_voice_v1"
-                if destructive and trusted_demo_policy_bypass
-                else None
-            )
-            current_task_binding = trusted_current_task_id is not None
-            if current_task_binding and (
-                operation not in {"task.adjust", "task.cancel"}
-                or clean.get("task_id") != trusted_current_task_id
-            ):
-                raise FormalTaskViolation(
-                    "CURRENT_BACKGROUND_TASK_MISMATCH",
-                    "trusted current-task binding changed its exact target",
-                    ErrorCode.PERMISSION_DENIED,
-                )
             grant = TaskAuthorizationGrant(
                 principal_id=principal.principal_id,
                 scope=authority.scope,
@@ -4597,7 +4602,6 @@ class P3AuthenticatedComposition:
                     if verified_confirmation is not None
                     else principal.expires_at
                 ),
-                policy_bypass=policy_bypass,
             )
             intent = FormalTaskPolicyInput(
                 state=InputCommitState.COMMITTED,
@@ -4641,8 +4645,6 @@ class P3AuthenticatedComposition:
                     if verified_confirmation is not None
                     else None
                 ),
-                policy_bypass=policy_bypass,
-                current_task_binding=current_task_binding,
                 after_seq=int(clean.get("after_seq", -1)),
                 cursor=clean.get("cursor"),
                 limit=clean.get("limit"),
@@ -4779,7 +4781,6 @@ class P3AuthenticatedComposition:
         *,
         session_id: str | None,
         now: str,
-        trusted_demo_policy_bypass: bool = False,
     ) -> dict[str, Any]:
         fields: dict[str, tuple[frozenset[str], frozenset[str]]] = {
             "task.create": (
@@ -4896,14 +4897,6 @@ class P3AuthenticatedComposition:
             ),
         }
         required, optional = fields[operation]
-        if trusted_demo_policy_bypass:
-            if operation not in {"task.create", "task.adjust", "task.cancel"}:
-                raise FormalTaskViolation(
-                    "TRUSTED_DEMO_POLICY_BYPASS_FORBIDDEN",
-                    "trusted Demo policy applies only to unified current-task mutations",
-                    ErrorCode.PERMISSION_DENIED,
-                )
-            required = required - {"confirmation_id"}
         keys = set(params)
         if required - keys or keys - required - optional:
             raise FormalTaskViolation(

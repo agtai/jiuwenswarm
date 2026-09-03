@@ -30,6 +30,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
+from jiuwenswarm.common.live_voice_capture_limits import MAX_CAPTURE_WAV_BYTES
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     ResponseRef,
@@ -157,7 +158,7 @@ MEDIA_END_OF_TURN_FEATURE_ENV = "JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED"
 MEDIA_AUTH_CONTRACT_VERSION = "live-voice.media-auth.v1"
 
 _MAX_RECORDS = 128
-_MAX_CAPTURE_WAV_BYTES = 4 * 1024 * 1024
+_MAX_CAPTURE_WAV_BYTES = MAX_CAPTURE_WAV_BYTES
 _MAX_DOWNLINK_WAV_BYTES = 8 * 1024 * 1024
 # 20 ms media frames.  Keep streaming playout bounded while allowing a complete
 # long-form response instead of truncating every route at the former 30 seconds.
@@ -914,6 +915,7 @@ class _SynthesisAuthorityTransfer:
     expires_at: float
     claimed_subject_id: str | None = None
     claimed_operation_id: str | None = None
+    task_notification: bool = False
 
 
 @dataclass(slots=True)
@@ -974,6 +976,7 @@ class _NativeMediaSession:
         default_factory=OrderedDict, repr=False
     )
     projected_input_transcript_items: set[str] = field(default_factory=set, repr=False)
+    projected_task_associations: set[str] = field(default_factory=set, repr=False)
     runtime_close_request_id: str | None = field(default=None, repr=False)
     runtime_close_complete: bool = False
     provider_close_complete: bool = False
@@ -2404,6 +2407,13 @@ class DedicatedMediaProductRegistry:
                 "MEDIA_NATIVE_DELEGATE_RESULT_INVALID",
                 "Native delegate result response is not a newer exact generation",
             )
+        task_id = None
+        task_commit_id = None
+        if "task_id" in result:
+            task_id = _required_id(result["task_id"], "task_id")
+            task_commit_id = _required_id(result.get("turn_commit_id"), "turn_commit_id")
+            if result.get("route") != "task":
+                raise MediaTransportViolation("MEDIA_NATIVE_TASK_ASSOCIATION_INVALID", "task association requires formal Task route")
         event_ids = await session.engine.send_delegate_result(
             delegate.provider_call_id,
             response,
@@ -2418,6 +2428,31 @@ class DedicatedMediaProductRegistry:
                 "MEDIA_NATIVE_DELEGATE_PROVIDER_SEND_INVALID",
                 "Native Engine returned no exact Provider delegate receipts",
             )
+        if task_id is not None:
+            if delegate.provider_call_id in session.projected_task_associations:
+                return
+            parent = self._records.get(session.record_id)
+            key = (session.activation.binding.scope.session_id or "",
+                   session.activation.binding.interaction_id, session.activation.connection_id)
+            notifications = self._native_notifications.get(key)
+            if (session.closed or parent is None or parent.route_completed
+                or parent.native_activation != session.activation or notifications is None
+                or notifications.full() or len(session.projected_task_associations) >= 128):
+                raise MediaTransportViolation("MEDIA_NATIVE_NOTIFICATION_BACKPRESSURE", "Task discovery notification unavailable")
+            notifications.put_nowait({
+                "status": "notification", "kind": "native.task_association",
+                "request_id": self._native_request_id(session, "task-association"),
+                "round_id": None, "response": dict(response_payload),
+                "task_association": {"task_id": task_id,
+                    "turn_commit_id": task_commit_id,
+                    "provider_call_id": delegate.provider_call_id},
+                "agent_event": None, "source_event": None, "progress_event": None,
+                "presentation_unit": None, "audio": None, "error_reason": None, "publish_seq": None,
+                "session_id": parent.binding.session_id, "correlation_id": parent.binding.correlation_id,
+                "interaction_id": parent.binding.interaction_id, "activation_id": parent.product_activation_id,
+                "activation_generation": parent.product_activation_generation,
+            })
+            session.projected_task_associations.add(delegate.provider_call_id)
 
     def _retain_native_speech_start(
         self,
@@ -5119,6 +5154,7 @@ class DedicatedMediaProductRegistry:
                     content_sha256=content_sha256,
                     now=now,
                     expires_at=now + self._authority_ttl,
+                    task_notification=trusted_task_audio,
                 )
                 if transfer is not None:
                     record.synthesis_content_sha256[(ref, unit_id)] = (
@@ -5133,7 +5169,8 @@ class DedicatedMediaProductRegistry:
                     # unclaimed transfer rather than inheriting its claim.
                     retained_synthesis_content[transfer_key] = (
                         _SynthesisAuthorityTransfer(
-                            content_sha256, now + self._authority_ttl
+                            content_sha256, now + self._authority_ttl,
+                            task_notification=trusted_task_audio,
                         )
                     )
                     record.synthesis_content_sha256[(ref, unit_id)] = content_sha256
@@ -5161,11 +5198,12 @@ class DedicatedMediaProductRegistry:
         content_sha256: str,
         now: float,
         expires_at: float,
+        task_notification: bool = False,
     ) -> _SynthesisAuthorityTransfer | None:
         DedicatedMediaProductRegistry._prune_synthesis_transfers(transfers, now)
         existing = transfers.get(key)
         if existing is not None:
-            if existing.content_sha256 != content_sha256:
+            if existing.content_sha256 != content_sha256 or existing.task_notification != task_notification:
                 return None
             transfers.move_to_end(key)
             return existing
@@ -5181,7 +5219,7 @@ class DedicatedMediaProductRegistry:
             if evicted_key is None:
                 return None
             transfers.pop(evicted_key)
-        transfer = _SynthesisAuthorityTransfer(content_sha256, expires_at)
+        transfer = _SynthesisAuthorityTransfer(content_sha256, expires_at, task_notification=task_notification)
         transfers[key] = transfer
         return transfer
 
@@ -5195,6 +5233,25 @@ class DedicatedMediaProductRegistry:
         for key, transfer in tuple(transfers.items()):
             if now > transfer.expires_at:
                 transfers.pop(key, None)
+
+    def _live_native_task_synthesis(
+        self, record: _MediaAuthority, binding: SpeechAuthorizationBinding, now: float,
+    ) -> bool:
+        """Open capture grants no batch speech authority by itself."""
+        key = self._native_session_keys_by_record.get(record.record_id)
+        session = self._native_sessions.get(key) if key is not None else None
+        activation = self._product_activations.get((record.binding.session_id,
+            record.binding.connection_id, record.binding.interaction_id))
+        if (record.route_completed or session is None or session.closed or
+            session.record_id != record.record_id or session.activation != record.native_activation or
+            activation is None or binding.operation != SYNTHESIZE_OPERATION or
+            binding.response is None or binding.response.interaction_id != record.binding.interaction_id or
+            binding.unit_id is None):
+            return False
+        transfer = activation.synthesis_content_sha256.get((binding.response, binding.unit_id,
+            record.locale, record.binding.frame_format.sample_rate_hz))
+        return bool(transfer is not None and transfer.task_notification and now <= transfer.expires_at and
+                    transfer.content_sha256 == binding.content_sha256)
 
     def context_for(
         self,
@@ -5216,10 +5273,19 @@ class DedicatedMediaProductRegistry:
             self._prune(now)
             record_id = self._subjects.get((session_id, subject or ""))
             record = self._records.get(record_id or "")
+            native_task_synthesis = False
+            if record is not None and not record.route_completed:
+                try:
+                    request = parse_synthesis_batch_request(params, SpeechRpcContext(
+                        record.subject_id, session_id, Assurance.AUTHENTICATED))
+                    native_task_synthesis = self._live_native_task_synthesis(
+                        record, _synthesis_authorization_binding(request), now)
+                except Exception:
+                    pass  # Recognition/arbitrary open-capture requests stay asserted.
             if (
                 record is not None
                 and record.ticket_consumed
-                and record.route_completed
+                and ((record.route_completed and record.native_activation is None) or native_task_synthesis)
                 and record.binding.connection_id == connection_id
                 and now <= record.authority_expires_at
                 and self._has_retained_product_activation(record, now)
@@ -5242,7 +5308,8 @@ class DedicatedMediaProductRegistry:
             if (
                 record is None
                 or not record.ticket_consumed
-                or not record.route_completed
+                or (not (record.route_completed and record.native_activation is None)
+                    and not self._live_native_task_synthesis(record, binding, now))
                 or now > record.authority_expires_at
                 or binding.correlation_id != record.binding.correlation_id
                 or not self._has_retained_product_activation(record, now)
@@ -6939,6 +7006,7 @@ async def handle_registered_media_socket(
                     )
                 ),
                 repeat_speech_boundaries=native_media,
+                fail_on_speech_boundary_error=not native_media,
                 cleanup_owner=(
                     registry._media_leaf_cleanup_owner
                     if native_media

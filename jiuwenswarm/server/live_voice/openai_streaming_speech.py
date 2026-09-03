@@ -653,6 +653,8 @@ class _RecognitionSession:
     commit_owner: _RecognitionCommitOwner = _RecognitionCommitOwner.NONE
     closing: bool = False
     terminal: bool = False
+    failure: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    failure_reason: str = "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE"
 
     @property
     def ref(self) -> RecognitionStreamRef:
@@ -1147,7 +1149,25 @@ class OpenAIStreamingSpeechProvider:
         self, ref: RecognitionStreamRef, *, timeout_seconds: float
     ) -> StreamingRecognitionOutput:
         session = self._require_recognition(ref)
-        event = await asyncio.wait_for(session.events.get(), timeout=timeout_seconds)
+        event_reader = asyncio.create_task(session.events.get())
+        failure_reader = asyncio.create_task(session.failure.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {event_reader, failure_reader}, timeout=timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if session.failure.is_set():
+                if session.failure_reason == "SPEECH_PROVIDER_TIMEOUT":
+                    raise TimeoutError("recognition stream timed out")
+                raise OpenAIStreamingSpeechError(session.failure_reason, "recognition stream failed")
+            if event_reader not in done:
+                raise TimeoutError("recognition event timed out")
+            event = event_reader.result()
+        finally:
+            for reader in (event_reader, failure_reader):
+                if not reader.done():
+                    reader.cancel()
+            await asyncio.gather(event_reader, failure_reader, return_exceptions=True)
         if event.kind in {RecognitionEventKind.FINAL, RecognitionEventKind.CANCELLED}:
             await self._retire_recognition(session)
         return event
@@ -1383,6 +1403,11 @@ class OpenAIStreamingSpeechProvider:
             await self._retire_recognition(session)
             raise failure
         if failure is not None:
+            session.failure_reason = (
+                "SPEECH_PROVIDER_TIMEOUT" if isinstance(failure, TimeoutError)
+                else "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE"
+            )
+            session.failure.set()
             ready_before_failure = session.ready.done()
             if not ready_before_failure:
                 session.ready.set_exception(failure)
@@ -1975,6 +2000,11 @@ class OpenAIStreamingSpeechProvider:
     ) -> None:
         if session.terminal or session.closing:
             return
+        session.failure_reason = (
+            "SPEECH_PROVIDER_TIMEOUT" if isinstance(exc, (TimeoutError, asyncio.TimeoutError))
+            else "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE"
+        )
+        session.failure.set()
         session.closing = True
         await self._close_socket(session.socket)
         if session.receive_task is not None:

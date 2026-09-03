@@ -128,7 +128,7 @@ test('a formal request never silently selects an available fallback', async () =
   assert.equal(effects.opens, 0);
 });
 
-test('the current compatibility selection is manifest-only and keeps every predecessor truthful', async () => {
+test('retired compatibility flags cannot re-enable a Demo Task route', async () => {
   const selection = createCurrentIntegratedWebRouteSelection({
     p1_browser_speech_available: true,
     p2_text_chat_available: true,
@@ -137,18 +137,18 @@ test('the current compatibility selection is manifest-only and keeps every prede
   });
   const route = shell({ registry: selection.registry, policy: selection.policy });
   const preview = route.preview();
-  assert.equal(preview.composition_state, 'shell_only');
+  assert.equal(preview.composition_state, 'unsupported');
   assert.deepEqual(
     preview.segments.map(segment => segment.implementation_class),
-    ['fallback', 'fallback', 'demo_substitute']
+    ['fallback', 'fallback', 'unsupported']
   );
   assert.equal(
-    preview.segments.every(segment => segment.wiring_state === 'manifest_only'),
-    true
+    preview.segments.map(segment => segment.wiring_state).join(','),
+    'manifest_only,manifest_only,unavailable'
   );
-  assert.equal(
-    preview.segments.every(segment => segment.contract_version === null),
-    true
+  assert.deepEqual(
+    preview.segments.map(segment => segment.contract_version),
+    [null, null, 'live-voice.contract.v2']
   );
   await assert.rejects(route.activate(), error => error instanceof IntegratedWebRouteViolation && error.reason === 'ROUTE_NOT_ACTIVATABLE');
 });

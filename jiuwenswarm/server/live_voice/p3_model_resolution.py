@@ -211,7 +211,7 @@ class ServerModelCatalogResolver:
             model,
             selected.identity,
             config_version,
-            bounded_semantic_request_options(selected.client_config),
+            bounded_semantic_request_options(selected.client_config, selected.model_config),
         )
 
 

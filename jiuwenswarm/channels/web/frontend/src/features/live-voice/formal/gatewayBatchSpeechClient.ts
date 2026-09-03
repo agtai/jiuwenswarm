@@ -50,7 +50,8 @@ export function normalizeStreamingXObs(
   return Object.freeze({ event: null, metric: null });
 }
 
-const MAX_BATCH_AUDIO_BYTES = 4 * 1024 * 1024;
+// Matches common/live_voice_capture_limits.py: full legal 61.5 s at 48 kHz.
+const MAX_BATCH_AUDIO_BYTES = 6 * 1024 * 1024;
 const MAX_SYNTHESIS_AUDIO_BYTES = 8 * 1024 * 1024;
 const MAX_DEDICATED_MEDIA_FRAMES = 9_000;
 const MAX_RECOGNITION_TEXT_CHARS = 16_000;

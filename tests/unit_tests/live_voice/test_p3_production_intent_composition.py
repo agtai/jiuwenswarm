@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -60,12 +61,16 @@ from jiuwenswarm.server.live_voice.project_code_executor import (
 from jiuwenswarm.server.live_voice.production_task_classifier import (
     ProductionTaskIntentClassifier,
 )
+from jiuwenswarm.server.live_voice.task_semantics import TaskSemanticResolver, TaskSemanticContext
+from tests.unit_tests.live_voice.test_task_semantics import _Model, _Catalog, _output
+from tests.unit_tests.live_voice.test_production_multi_task_resolver import _fact
 from jiuwenswarm.server.live_voice.production_task_intent import (
     ProductionConfirmationBinding,
     ProductionIntentOrigin,
     ProductionTaskPolicyOutcome,
     ProductionTaskResolution,
     ProductionTaskIntentRequest,
+    TaskAuthorityRead,
     build_production_origin_binding,
 )
 from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
@@ -83,6 +88,10 @@ SCOPE = ScopeRef(
 )
 NOW = "2026-08-21T10:00:00Z"
 EXPIRY = "2026-08-21T11:00:00Z"
+
+
+def semantic_context(commit):
+    return TaskSemanticContext(TaskAuthorityRead(commit.scope, "test-origin-read", (_fact("tsk_task_a"),)), commit.scope.session_id)
 
 
 class _SeedExecutor:
@@ -282,17 +291,15 @@ def _complete_selected_task(
     )
 
 
-def test_call_local_natural_origin_requires_exact_accepted_commit_and_semantics() -> (
+@pytest.mark.asyncio
+async def test_call_local_natural_origin_requires_exact_accepted_commit_and_semantics() -> (
     None
 ):
-    classifier = ProductionTaskIntentClassifier()
     commit = _commit("Cancel task tsk_task_a.")
-    proposal = classifier.classify_natural(
-        commit.text,
-        origin=ProductionIntentOrigin.NATURAL_TEXT,
-        committed=True,
-        source_confidence=0.99,
-    )
+    decision = await TaskSemanticResolver(_Catalog(_Model(json.dumps(_output(
+        commit, operation="task.cancel", target="tsk_task_a", target_kind="task_id", arguments={},
+    ))))).resolve(commit, semantic_context(commit))
+    proposal = decision.proposal
     request = ProductionTaskIntentRequest(
         origin=ProductionIntentOrigin.NATURAL_TEXT,
         scope=SCOPE,
@@ -354,14 +361,13 @@ def test_call_local_structured_origin_is_exact_and_never_uses_turn_ledger() -> N
         authority.verify_origin(replace(expected, structured_semantic_sha256="0" * 64))
 
 
-def test_natural_origin_rejects_when_call_local_commit_authority_lost() -> None:
+@pytest.mark.asyncio
+async def test_natural_origin_rejects_when_call_local_commit_authority_lost() -> None:
     commit = _commit("Cancel task tsk_task_a.")
-    proposal = ProductionTaskIntentClassifier().classify_natural(
-        commit.text,
-        origin=ProductionIntentOrigin.VOICE,
-        committed=True,
-        source_confidence=0.99,
-    )
+    decision = await TaskSemanticResolver(_Catalog(_Model(json.dumps(_output(
+        commit, operation="task.cancel", target="tsk_task_a", target_kind="task_id", arguments={},
+    ))))).resolve(commit, semantic_context(commit))
+    proposal = decision.proposal
     request = ProductionTaskIntentRequest(
         origin=ProductionIntentOrigin.VOICE,
         scope=SCOPE,

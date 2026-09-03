@@ -564,10 +564,12 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
     ``None`` when observability is not initialized (in which case closing is
     a no-op).
     """
+    if not _agent_observability_active:
+        return None
     try:
         from opentelemetry.trace import SpanKind
 
-        from openjiuwen.agent_teams.observability import (
+        from openjiuwen.agent_teams.observability.setup import (
             get_tracer,
             is_initialized,
         )
@@ -576,9 +578,6 @@ def open_agent_run_span(*, session_id: str = "", mode: str = "") -> Any:
 
         if not is_initialized():
             return None
-        if not _agent_observability_active:
-            return None
-
         tracer = get_tracer("jiuwenswarm.agent")
         name = _build_run_span_name(mode=mode, session_id=session_id)
         span = tracer.start_span(name=name, kind=SpanKind.SERVER)

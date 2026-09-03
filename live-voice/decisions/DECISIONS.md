@@ -1633,6 +1633,10 @@
   Tier-3 recovery repair changes no schema or execution grant. Test caller
   cancellation, pending sealing, exact replay, content/binding mismatch and
   authorization revocation with zero extra model/Agent/Task/history effects.
+  The read-only journal lookup also validates the original admitted request ID,
+  not just its voice fingerprint; it must not return another operation's
+  result under a reused RPC ID. This uses the existing request-binding table
+  and errors, with no schema/storage migration or new execution admission.
 
 - Digital attempt 14 passed actual analysis/proposal extraction, but the model
   treated a detailed acceptance as an independent create and lost its proposal
@@ -1694,3 +1698,54 @@
   claim is intentionally incompatible. No service is restarted by this decision.
   No new transcript-confirmation workflow, schema migration, provider/device
   configuration, Executor capability or remote update is authorized.
+
+## D-109 Explicit local delegation and authoritative continuation state
+
+- Date: 2026-09-03. The user authorizes functional repair with minimal focused
+  verification and defers latency optimization and exhaustive regression.
+- An authenticated committed final that explicitly delegates complete local
+  project analysis/artifact work may authorize that exact creation without a
+  second spoken confirmation. The sole semantic model reports requested work
+  scope, not permission. Registry checks the exact current commit, operation,
+  origin/context binding and project-only Executor capability, then uses the
+  existing durable confirmation issue/consume and final authority reread. No
+  fabricated confirmation utterance, unconditional confirmed flag, new bypass,
+  lexical policy or externally supplied grant is allowed. Other mutations and
+  external-effect requests retain normal explicit confirmation requirements;
+  creating a local Task grants no booking/refund/message/network effect.
+- Server pending kind/id/version constrain the model's legal continuation
+  responses. Agreement with an offer cannot be rewritten into confirmation of a
+  different authorization stage. Existing immutable confirmation arguments are
+  retained exactly; changed requirements require a fresh exact proposal.
+- Preserve unrevised user requirements in the actual executable specification,
+  including those established before the current turn. Analysis suggestions do
+  not override user restrictions or grant additional effects. Business-specific
+  constraints remain test inputs, never production policy.
+- Tier-3 ownership: task_semantics, Registry's bounded delegation composition and
+  their existing semantic/authority tests. Tier-2 ownership: Integrated Web
+  generation interruption and failed replacement recognition feedback with the
+  existing capture/response/generation fences. Verify sources before changing
+  fences; do not assume the observed interruption was user intent or noise.
+- Exclude model/Agent latency tuning, broad regression migration, new Executors,
+  arbitrary pause/resume, other Sessions/projects, Provider/device changes and
+  remote updates. Reuse the existing isolated audio tools and project. Scoped
+  passing evidence does not close the five whole-candidate acceptance layers.
+
+## D-110 Requirement provenance independent of accepting an offer
+
+- Date: 2026-09-03. Within the authorized functional continuity repair, a real
+  delegation changed a narrow offered checklist into a report. The model treated
+  it as a new create and omitted an earlier meeting requirement. Prompt-only
+  correction did not resolve the recorded input.
+- The same semantic model may report bounded requirement_source_ids separately
+  from proposal/confirmation continuation. The server accepts only exact user
+  entries in the authenticated semantic history, preserves their chronological
+  original text in the executable instruction, and rejects unknown, assistant,
+  duplicate or inapplicable claims before mutation. It does not infer sources
+  from recency or a sole pending offer. Unrelated independent work selects none.
+- This is a Tier-3 semantic-output extension, not another classifier or a grant.
+  Existing operation, capability, scope, continuation and Core authority still
+  apply. Legacy frozen outputs without this optional field remain readable and
+  retain their previous exact replay. Tier-1 recorded probes and assertions
+  verify the source identity plus actual retained constraints, not one mandatory
+  wording of proposal acceptance. No performance or Executor expansion.

@@ -72,11 +72,15 @@ class FormalInstance:
         self.lease = lease
         self.sent = []
         self.registered_rails = []
+        from openjiuwen.harness.prompts import SystemPromptBuilder
+        self.system_prompt_builder = SystemPromptBuilder(language="en")
+        self.observed_prompt = None
 
     async def attach_output(self):
         return self.lease
 
     async def send_input(self, request) -> None:
+        self.observed_prompt = self.system_prompt_builder.build()
         self.sent.append(request)
 
     def is_registered_rail(self, rail) -> bool:
@@ -230,6 +234,12 @@ async def test_formal_deep_seam_uses_narrow_dispatch_and_non_aborting_detach() -
     assert lease.closed_with == [False]
     assert adapter.formal_runtime_configs[0].mode == "agent"
     assert adapter.formal_runtime_configs[0].supports_user_interaction is False
+    from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+        FORMAL_VOICE_PRESENTATION_INSTRUCTIONS,
+    )
+    assert FORMAL_VOICE_PRESENTATION_INSTRUCTIONS in instance.observed_prompt
+    assert FORMAL_VOICE_PRESENTATION_INSTRUCTIONS not in instance.system_prompt_builder.build()
+    assert "/goal must remain plain committed text" not in instance.observed_prompt
 
 
 @pytest.mark.asyncio
@@ -344,6 +354,8 @@ async def test_formal_deep_seam_rejects_terminal_with_unfinished_tool_callback()
     assert emitted == ["chat.tool_call", "chat.tool_update"]
     assert rail._formal_tool_event_captures == {}
     assert lease.closed_with == [True]
+
+    assert not adapter._instance.system_prompt_builder.has_section("formal_live_voice_presentation")
 
 
 @pytest.mark.asyncio
@@ -528,6 +540,8 @@ async def test_formal_deep_seam_rejects_legacy_controls_before_agent_effect() ->
             pass
     assert instance.sent == []
     assert lease.closed_with == []
+    assert instance.observed_prompt is None
+    assert not instance.system_prompt_builder.has_section("formal_live_voice_presentation")
 
 
 @pytest.mark.asyncio
@@ -557,12 +571,14 @@ async def test_formal_output_cleanup_retains_ownership_across_bounded_waits(
         await asyncio.sleep(0)
     await asyncio.sleep(0.03)
     assert consumer.done() is False
+    assert instance.system_prompt_builder.has_section("formal_live_voice_presentation")
     close_release.set()
     chunks = await asyncio.wait_for(consumer, timeout=1)
     assert [chunk.payload for chunk in chunks] == [
         {"event_type": "chat.final", "content": "formal result"}
     ]
     assert lease.closed_with == [False]
+    assert not instance.system_prompt_builder.has_section("formal_live_voice_presentation")
 
 
 @pytest.mark.asyncio
@@ -583,6 +599,7 @@ async def test_formal_consumer_close_after_yield_aborts_active_round() -> None:
     await stream.aclose()
 
     assert lease.closed_with == [True]
+    assert not instance.system_prompt_builder.has_section("formal_live_voice_presentation")
 
 
 @pytest.mark.asyncio
@@ -700,3 +717,97 @@ async def test_failed_agent_cleanup_retains_no_history_guard(
         assert not (tmp_path / request.session_id).exists()
     finally:
         session_history.unregister_formal_no_history_session(request.session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools_allowed", [False, True])
+async def test_formal_voice_model_options_are_isolated_and_restored(monkeypatch, tools_allowed):
+    from copy import deepcopy
+
+    request_config = interface_deep.ModelRequestConfig(
+        model="deepseek-v4-flash", extra_body={"thinking": {"type": "enabled"}, "provider_option": "keep"},
+    )
+    client_config = interface_deep.ModelClientConfig(
+        client_provider="DeepSeek", api_base="https://api.deepseek.com", api_key="test-only",
+    )
+    original = SimpleNamespace(model_config=request_config, model_client_config=client_config)
+    before = deepcopy(request_config.model_dump())
+    applied = []
+    instance = FormalInstance(OutputLease([RawChunk("answer", {"output": {"output": "Completed."}})]))
+    from openjiuwen.harness.prompts import PromptSection
+    original_output = PromptSection("output", {"en": "Original written deliverable instructions"}, priority=65)
+    instance.system_prompt_builder.add_section(original_output)
+    instance._react_agent = SimpleNamespace(set_llm=applied.append, _config=SimpleNamespace())
+    adapter = adapter_with(instance)
+    adapter._model = original
+    monkeypatch.setattr(interface_deep, "Model", lambda **values: SimpleNamespace(**values))
+    request, inputs = formal_request(tools_allowed=tools_allowed)
+    chunks = [chunk async for chunk in adapter.process_formal_live_voice_stream_impl(request, inputs)]
+    assert chunks[-1].payload["content"] == "Completed."
+    assert "Original written deliverable instructions" not in instance.observed_prompt
+    assert "Spoken response" in instance.observed_prompt
+    assert instance.system_prompt_builder.get_section("output") is original_output
+    assert original.model_config.model_dump() == before and adapter._model is original
+    assert len(applied) == 2 and applied[-1] is original
+    assert applied[0] is not original
+    assert applied[0].model_config.extra_body == {"thinking": {"type": "disabled"}, "provider_option": "keep"}
+    assert applied[0].model_client_config is client_config
+
+
+@pytest.mark.asyncio
+async def test_formal_facade_passes_committed_envelope_without_chat_clock_wrapper():
+    from datetime import UTC, datetime
+    from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef, TurnCommit
+    from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import FormalAgentExecution, FormalContextSnapshot
+    from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+
+    scope = ScopeRef("subject", "project", "session", Assurance.AUTHENTICATED)
+    commit = TurnCommit.from_dict({
+        "contract_version": "live-voice.contract.v2", "commit_id": "commit", "turn_id": "turn",
+        "interaction_id": "interaction", "text": "Analyze the project using its scenario clock.",
+        "hypothesis_provenance": {"provider": "test"}, "scope": scope.to_dict(), "context_refs": [],
+        "committed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    })
+    execution = FormalAgentExecution("request", "web", "lv-formal-envelope", commit, FormalContextSnapshot(scope))
+    observed = []
+
+    async def stream(request, inputs):
+        observed.append((request, inputs))
+        if False:
+            yield None
+
+    facade = JiuWenSwarm()
+    facade._adapter = SimpleNamespace(process_formal_live_voice_stream_impl=stream)
+    facade._ensure_adapter = lambda **kwargs: facade._adapter
+    facade._build_inputs = lambda request: ({
+        "conversation_id": request.session_id, "enable_memory": False, "skip_a2ui": True,
+        "query": "ordinary chat wrapper with machine timestamp",
+    }, None, None)
+    assert [chunk async for chunk in facade.process_formal_live_voice_stream(execution)] == []
+    request, inputs = observed[0]
+    assert inputs["query"] == execution.prompt_content()
+    assert request.metadata["formal_live_voice"] is True
+    assert inputs["enable_memory"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["cn", "en"])
+async def test_response_rail_preserves_formal_spoken_output_then_resumes_ordinary_rules(monkeypatch, language):
+    from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
+    from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
+
+    builder = SystemPromptBuilder(language=language)
+    voice = PromptSection("output", {language: "spoken output owned by validated adapter"}, priority=65)
+    builder.add_section(voice)
+    builder.add_section(PromptSection("formal_live_voice_presentation", {language: "formal policy"}))
+    rail = ResponsePromptRail()
+    rail.system_prompt_builder = builder
+    monkeypatch.setattr(rail, "_sync_a2ui_prompt_section", lambda *args, **kwargs: None)
+    ctx = SimpleNamespace(inputs={}, extra={})
+    for _ in range(2):
+        await rail.before_model_call(ctx)
+        assert builder.get_section("output") is voice
+    builder.remove_section("formal_live_voice_presentation")
+    await rail.before_model_call(ctx)
+    assert builder.get_section("output") is not voice
+    assert "spoken output owned by validated adapter" not in builder.build()

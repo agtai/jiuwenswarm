@@ -113,7 +113,12 @@ def load_dotenv_runtime(dotenv_path: str | Path | None, *, override: bool = True
         if preserve
         else {}
     )
-    loaded = load_dotenv(dotenv_path=dotenv_path, override=override)
+    # An explicit configuration source may be shared by isolated instances.
+    # Their process-level launch settings (scope, features, origin policy, data
+    # directory) must not be overwritten by stale values in that source file.
+    # Unselected legacy callers retain the historical override behaviour.
+    explicit_source = bool(os.environ.get("JIUWENSWARM_CONFIG_DIR", "").strip())
+    loaded = load_dotenv(dotenv_path=dotenv_path, override=override and not explicit_source)
     if saved:
         os.environ.update(saved)
     if preserve:

@@ -127,6 +127,13 @@ let requestSequence = 0;
 type JsonObject = Record<string, unknown>;
 
 class FormalP3DefinitiveRejection extends Error {}
+const DEFINITIVE_CODES = new Set(['INVALID_ARGUMENT', 'UNAUTHENTICATED', 'PERMISSION_DENIED',
+  'NOT_FOUND', 'CONFLICT', 'STALE', 'UNSUPPORTED', 'CAPABILITY_UNAVAILABLE']);
+
+function stableRejectionReason(value: unknown): string {
+  return typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(value)
+    ? value : 'FORMAL_P3_REQUEST_REJECTED';
+}
 
 function objectValue(value: unknown): JsonObject | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : null;
@@ -155,7 +162,11 @@ function envelope(value: unknown, requestId: string): JsonObject {
   }
   if (raw.ok === false) {
     const error = objectValue(raw?.error);
-    throw new FormalP3DefinitiveRejection(optionalText(error?.reason, 'formal P3 error reason') ?? 'FORMAL_P3_REQUEST_REJECTED');
+    const rejected = stableRejectionReason(error?.reason);
+    if (typeof error?.code === 'string' && DEFINITIVE_CODES.has(error.code) && error.retriable !== true) {
+      throw new FormalP3DefinitiveRejection(rejected);
+    }
+    throw new Error(rejected);
   }
   if (raw.ok !== true || raw.error !== null) {
     const error = objectValue(raw.error);
@@ -169,8 +180,10 @@ function envelope(value: unknown, requestId: string): JsonObject {
 function serverRejectionReason(error: unknown, requestId: string): string | null {
   const raw = objectValue(error);
   if (raw === null || raw.requestId !== requestId || raw.retriable !== false || objectValue(raw.payload) === null) return null;
-  const exact = typeof raw.reason === 'string' && raw.reason.trim() ? raw.reason.trim() : null;
-  return exact ?? reason(error);
+  const payloadError = objectValue(objectValue(raw.payload)?.error);
+  const code = raw.code ?? payloadError?.code;
+  if (typeof code !== 'string' || !DEFINITIVE_CODES.has(code)) return null;
+  return stableRejectionReason(raw.reason ?? payloadError?.reason);
 }
 
 function scope(value: unknown, expectedSessionId: string): Readonly<{ subject_id: string; session_id: string; project_id: string }> {
@@ -478,6 +491,18 @@ type PendingMutation = Readonly<{
   correlation_id: string;
 }>;
 
+type RetainedMutationRpc = Readonly<{
+  stage: 'issue' | 'confirm';
+  session_id: string;
+  method: string;
+  params: Record<string, unknown>;
+  request_id: string;
+  input: FormalP3TaskMutationInput;
+  command: FormalP3TaskCommand;
+  structured_intent: Readonly<Record<string, unknown>> | null;
+  correlation_id: string;
+}>;
+
 export class FormalP3TaskExperienceOwner {
   readonly #enabled: boolean;
   readonly #request: FormalP3TaskRequest;
@@ -486,6 +511,9 @@ export class FormalP3TaskExperienceOwner {
   #state: FormalP3TaskExperienceSnapshot;
   #generation = 0;
   #pending: PendingMutation | null = null;
+  #rpc: RetainedMutationRpc | null = null;
+  #mutationFlight: Promise<FormalP3TaskExperienceSnapshot> | null = null;
+  #epoch = 0;
 
   constructor(input: Readonly<{
     enabled: boolean;
@@ -505,6 +533,13 @@ export class FormalP3TaskExperienceOwner {
   async refresh(sessionIdInput: string): Promise<FormalP3TaskExperienceSnapshot> {
     if (!this.#enabled) throw new Error('formal P3 Task experience is disabled');
     const sessionId = text(sessionIdInput, 'session_id');
+    if (this.#state.status === 'closed') throw new Error('formal P3 Task experience is closed');
+    if (this.#state.session_id !== null && this.#state.session_id !== sessionId) {
+      this.#epoch += 1;
+      this.#pending = null;
+      this.#rpc = null;
+      this.#mutationFlight = null;
+    }
     const generation = ++this.#generation;
     const retainedCommand = this.#state.session_id === sessionId ? this.#state.command : null;
     this.#publish({ status: 'loading', session_id: sessionId, tasks: this.#state.session_id === sessionId ? this.#state.tasks : Object.freeze([]), selected_task_id: this.#state.session_id === sessionId ? this.#state.selected_task_id : null, collection_operations: Object.freeze([]), command: retainedCommand, reason: null });
@@ -534,7 +569,7 @@ export class FormalP3TaskExperienceOwner {
       const selected = [prior, hint].find(candidate => candidate !== null && linked.some(task => task.task_id === candidate))
         ?? linked[0]?.task_id
         ?? null;
-      this.#publish({ status: 'loading', session_id: sessionId, tasks: Object.freeze([...linked].sort((left, right) => left.task_id.localeCompare(right.task_id))), selected_task_id: null, collection_operations: collectionOperations ?? Object.freeze([]), command: retainedCommand, reason: null });
+      this.#publish({ status: 'loading', session_id: sessionId, tasks: Object.freeze([...linked].sort((left, right) => left.task_id.localeCompare(right.task_id))), selected_task_id: null, collection_operations: collectionOperations ?? Object.freeze([]), command: this.#state.command, reason: null });
       if (selected !== null) {
         await this.select(selected);
       } else {
@@ -543,7 +578,7 @@ export class FormalP3TaskExperienceOwner {
       writeHint(this.#store, sessionId, this.#state.selected_task_id);
       return this.#state;
     } catch (error) {
-      if (generation === this.#generation) this.#publish({ status: 'failed', session_id: sessionId, tasks: Object.freeze([]), selected_task_id: null, collection_operations: Object.freeze([]), command: retainedCommand, reason: reason(error) });
+      if (generation === this.#generation) this.#publish({ status: 'failed', session_id: sessionId, tasks: Object.freeze([]), selected_task_id: null, collection_operations: Object.freeze([]), command: this.#state.command, reason: reason(error) });
       throw error;
     }
   }
@@ -602,9 +637,10 @@ export class FormalP3TaskExperienceOwner {
       : text(events[events.length - 1].source_event_id, 'TaskEvent source_event_id');
     const enriched = enrichResult(enrichEvents(selected, events), resultResponse, resultId, terminalSourceEventId);
     const tasks = listedTasks.map(task => task.task_id === taskId ? enriched : task);
-    const command = retainedCommand?.task_id === taskId
-      ? Object.freeze({ ...retainedCommand, terminal_outcome: enriched.outcome })
-      : retainedCommand;
+    const currentCommand = this.#state.command;
+    const command = currentCommand?.task_id === taskId
+      ? Object.freeze({ ...currentCommand, terminal_outcome: enriched.outcome })
+      : currentCommand;
     this.#publish({ status: 'ready', session_id: sessionId, tasks: Object.freeze(tasks), selected_task_id: taskId, collection_operations: collectionOperations, command, reason: null });
     writeHint(this.#store, sessionId, taskId);
     return this.#state;
@@ -616,10 +652,18 @@ export class FormalP3TaskExperienceOwner {
     }
   }
 
-  async issue(input: FormalP3TaskMutationInput): Promise<FormalP3TaskExperienceSnapshot> {
-    if (!this.#enabled || this.#state.session_id === null || this.#state.status !== 'ready' || this.#pending !== null) {
-      throw new Error('formal P3 Task mutation owner is unavailable');
+  issue(input: FormalP3TaskMutationInput): Promise<FormalP3TaskExperienceSnapshot> {
+    if (!this.#enabled || this.#state.session_id === null || this.#state.status !== 'ready'
+        || this.#pending !== null || this.#rpc !== null || this.#mutationFlight !== null) {
+      return Promise.reject(new Error('formal P3 Task mutation owner is unavailable'));
     }
+    const epoch = this.#epoch;
+    const sessionId = this.#state.session_id;
+    return this.#startMutation(() => this.#issue(Object.freeze({ ...input }), epoch, sessionId));
+  }
+
+  async #issue(input: FormalP3TaskMutationInput, epoch: number, sessionId: string): Promise<FormalP3TaskExperienceSnapshot> {
+    this.#requireEpoch(epoch, sessionId);
     if (!OPERATIONS.has(input.operation)) throw new Error('formal P3 Task operation is invalid');
     if (['task.provide_input', 'task.pause', 'task.resume'].includes(input.operation)) {
       const command = this.#command(input, 'rejected', 'TASK_CONTROL_UNSUPPORTED');
@@ -629,7 +673,8 @@ export class FormalP3TaskExperienceOwner {
     const targeted = input.operation !== 'task.create';
     const taskId = targeted ? text(input.task_id ?? this.#state.selected_task_id, 'task_id') : null;
     if (taskId !== null) await this.select(taskId);
-    else await this.refresh(this.#state.session_id);
+    else await this.refresh(sessionId);
+    this.#requireEpoch(epoch, sessionId);
     const record = taskId === null ? null : this.#state.tasks.find(task => task.task_id === taskId) ?? null;
     if (input.operation === 'task.create' && !this.#state.collection_operations.includes('task.create')) {
       const command = this.#command(input, 'rejected', 'TASK_CONTROL_UNSUPPORTED');
@@ -641,123 +686,80 @@ export class FormalP3TaskExperienceOwner {
       this.#publish({ ...this.#state, command });
       return this.#state;
     }
+    const structured = input.operation === 'task.retry' ? null : this.#structuredIntent({ ...input, task_id: taskId });
     const command = this.#command({ ...input, task_id: taskId }, 'issuing', null);
     this.#publish({ ...this.#state, command });
     const correlationId = record?.correlation_id ?? command.command_id;
-    try {
-      if (input.operation === 'task.retry') {
-        const id = requestId('formal-p3-retry-confirmation');
-        const response = await this.#request(FORMAL_P3_TASK_METHODS.confirmation, {
-          session_id: this.#state.session_id,
-          operation: input.operation,
-          command_id: command.command_id,
-          issued_at: new Date().toISOString(),
-          correlation_id: correlationId,
-          task_id: taskId,
-        }, id);
-        const result = envelope(response, id);
-        if (
-          result.status !== 'confirmation_issued'
-          || result.operation !== input.operation
-          || result.command_id !== command.command_id
-          || result.target_task_id !== taskId
-        ) throw new Error('formal P3 retry confirmation binding mismatch');
-        const continuation = text(result.confirmation_id, 'confirmation_id');
-        const next = Object.freeze({ ...command, request_id: id, phase: 'confirmation_required' as const });
-        this.#pending = Object.freeze({ input: { ...input, task_id: taskId }, command: next, continuation_id: continuation, structured_intent: null, correlation_id: correlationId });
-        this.#publish({ ...this.#state, command: next });
-        return this.#state;
-      }
-      const structured = this.#structuredIntent({ ...input, task_id: taskId });
-      const response = await this.#sendStructured(structured, command, correlationId, null);
-      const result = envelope(response.value, response.request_id);
-      if (result.status === 'clarification' && typeof result.confirmation_token === 'string') {
-        if (
-          result.operation !== input.operation
-          || (result.task_id ?? null) !== taskId
-          || result.confirmation_form !== `confirm task request ${result.confirmation_token}`
-        ) throw new Error('formal P3 confirmation target mismatch');
-        const next = Object.freeze({ ...command, request_id: response.request_id, phase: 'confirmation_required' as const });
-        this.#pending = Object.freeze({ input: { ...input, task_id: taskId }, command: next, continuation_id: text(result.confirmation_token, 'confirmation token'), structured_intent: structured, correlation_id: correlationId });
-        this.#publish({ ...this.#state, command: next });
-        return this.#state;
-      }
-      await this.#settle(result, Object.freeze({ ...command, request_id: response.request_id }), taskId);
-      return this.#state;
-    } catch (error) {
-      this.#pending = null;
-      this.#publish({ ...this.#state, command: Object.freeze({ ...command, phase: 'rejected', reason: reason(error) }) });
-      throw error;
-    }
+    this.#rpc = this.#prepareRpc('issue', sessionId, { ...input, task_id: taskId }, command,
+      correlationId, structured, null);
+    return this.#dispatchRetained(epoch, sessionId);
   }
 
-  async confirm(): Promise<FormalP3TaskExperienceSnapshot> {
-    let pending = this.#pending;
-    if (pending === null || this.#state.session_id === null) throw new Error('formal P3 Task confirmation is unavailable');
-    this.#pending = null;
+  confirm(): Promise<FormalP3TaskExperienceSnapshot> {
+    if (this.#mutationFlight !== null) return this.#mutationFlight;
+    const sessionId = this.#state.session_id;
+    if (sessionId === null || ['disconnected', 'closed', 'disabled'].includes(this.#state.status)) {
+      return Promise.reject(new Error('formal P3 Task confirmation is unavailable'));
+    }
+    const epoch = this.#epoch;
+    return this.#startMutation(() => this.#confirm(epoch, sessionId));
+  }
+
+  async #confirm(epoch: number, sessionId: string): Promise<FormalP3TaskExperienceSnapshot> {
+    this.#requireEpoch(epoch, sessionId);
+    // An unknown request may already have changed the Attempt. Replay its exact
+    // identity, not first-confirmation preflight against now obsolete facts.
+    if (this.#rpc !== null) return this.#dispatchRetained(epoch, sessionId);
+    const pending = this.#pending;
+    if (pending === null) {
+      if (this.#state.command?.accepted) return this.refresh(sessionId);
+      throw new Error('formal P3 Task confirmation is unavailable');
+    }
     try {
       if (pending.command.task_id !== null) {
         const targetTaskId = pending.command.task_id;
+        await this.refresh(sessionId);
+        this.#requireEpoch(epoch, sessionId);
         await this.select(targetTaskId);
+        this.#requireEpoch(epoch, sessionId);
         const current = this.#state.tasks.find(task => task.task_id === targetTaskId);
         if (
           current === undefined
           || current.attempt_id !== pending.command.attempt_id
-          || current.event_head !== pending.command.event_head
           || current.revision_number !== pending.command.revision_number
         ) {
           throw new FormalP3DefinitiveRejection('FORMAL_P3_TASK_CONFIRMATION_STALE');
         }
       }
-      let result: JsonObject;
-      if (pending.input.operation === 'task.retry') {
-        const id = requestId('formal-p3-retry-mutate');
-        const response = await this.#requestRecognizingRejection(FORMAL_P3_TASK_METHODS.mutate, {
-          session_id: this.#state.session_id,
-          operation: pending.input.operation,
-          command_id: pending.command.command_id,
-          issued_at: new Date().toISOString(),
-          correlation_id: pending.correlation_id,
-          task_id: pending.input.task_id,
-          confirmation_id: pending.continuation_id,
-        }, id);
-        result = envelope(response, id);
-        if (
-          result.status !== 'mutation_processed'
-          || result.operation !== pending.input.operation
-          || result.command_id !== pending.command.command_id
-          || result.target_task_id !== pending.input.task_id
-        ) throw new Error('formal P3 retry mutation binding mismatch');
-        pending = Object.freeze({ ...pending, command: Object.freeze({ ...pending.command, request_id: id }) });
-      } else {
-        const response = await this.#sendStructured(pending.structured_intent!, pending.command, pending.correlation_id, pending.continuation_id);
-        result = envelope(response.value, response.request_id);
-        pending = Object.freeze({ ...pending, command: Object.freeze({ ...pending.command, request_id: response.request_id }) });
-      }
-      await this.#settle(result, pending.command, pending.input.task_id ?? null);
-      return this.#state;
+      this.#requireEpoch(epoch, sessionId);
+      this.#rpc = this.#prepareRpc('confirm', sessionId, pending.input, pending.command,
+        pending.correlation_id, pending.structured_intent, pending.continuation_id);
+      return await this.#dispatchRetained(epoch, sessionId);
     } catch (error) {
-      const retained = this.#state.command?.command_id === pending.command.command_id ? this.#state.command : pending.command;
-      const definitive = error instanceof FormalP3DefinitiveRejection;
-      this.#publish({
-        ...this.#state,
-        command: retained.accepted
-          ? Object.freeze({ ...retained, reason: reason(error) })
-          : Object.freeze({ ...retained, phase: definitive ? 'rejected' : 'unknown', reason: reason(error) }),
-      });
+      if (epoch === this.#epoch && this.#pending === pending && !this.#state.command?.accepted
+          && error instanceof FormalP3DefinitiveRejection) {
+        this.#pending = null;
+        this.#publish({ ...this.#state, command: Object.freeze({ ...pending.command, phase: 'rejected', reason: reason(error) }) });
+      }
       throw error;
     }
   }
 
   disconnect(): FormalP3TaskExperienceSnapshot {
     this.#generation += 1;
-    this.#pending = null;
-    return this.#publish({ ...this.#state, status: this.#enabled ? 'disconnected' : 'disabled', command: null, reason: this.#enabled ? 'FORMAL_P3_TASK_RECONNECT_REQUIRED' : this.#state.reason });
+    this.#epoch += 1;
+    this.#mutationFlight = null;
+    const command = this.#rpc === null ? this.#state.command
+      : Object.freeze({ ...this.#rpc.command, phase: 'unknown' as const, reason: 'FORMAL_P3_RESULT_RECOVERY_REQUIRED' });
+    return this.#publish({ ...this.#state, status: this.#enabled ? 'disconnected' : 'disabled', command, reason: this.#enabled ? 'FORMAL_P3_TASK_RECONNECT_REQUIRED' : this.#state.reason });
   }
 
   close(): FormalP3TaskExperienceSnapshot {
     this.#generation += 1;
+    this.#epoch += 1;
     this.#pending = null;
+    this.#rpc = null;
+    this.#mutationFlight = null;
     return this.#publish({ status: 'closed', session_id: null, tasks: Object.freeze([]), selected_task_id: null, collection_operations: Object.freeze([]), command: null, reason: 'OWNER_CLOSED' });
   }
 
@@ -801,21 +803,90 @@ export class FormalP3TaskExperienceOwner {
     return Object.freeze({ operation, target, arguments: Object.freeze(args) });
   }
 
-  async #sendStructured(structured: Readonly<Record<string, unknown>>, command: FormalP3TaskCommand, correlationId: string, continuationId: string | null): Promise<Readonly<{ value: unknown; request_id: string }>> {
-    const id = requestId('formal-p3-structured-intent');
-    const value = await this.#requestRecognizingRejection(FORMAL_P3_TASK_METHODS.intent, {
-      session_id: this.#state.session_id,
-      correlation_id: correlationId,
-      source: 'structured',
+  #startMutation(work: () => Promise<FormalP3TaskExperienceSnapshot>): Promise<FormalP3TaskExperienceSnapshot> {
+    // Acquire before the first await or snapshot callback can re-enter issue.
+    const flight = Promise.resolve().then(work);
+    this.#mutationFlight = flight;
+    const release = () => { if (this.#mutationFlight === flight) this.#mutationFlight = null; };
+    void flight.then(release, release);
+    return flight;
+  }
+
+  #requireEpoch(epoch: number, sessionId: string): void {
+    if (epoch !== this.#epoch || this.#state.session_id !== sessionId
+        || ['closed', 'disconnected'].includes(this.#state.status)) {
+      throw new Error('formal P3 Task operation became stale');
+    }
+  }
+
+  #prepareRpc(stage: 'issue' | 'confirm', sessionId: string, input: FormalP3TaskMutationInput,
+    command: FormalP3TaskCommand, correlationId: string,
+    structured: Readonly<Record<string, unknown>> | null, continuationId: string | null): RetainedMutationRpc {
+    const retry = input.operation === 'task.retry';
+    const id = requestId(retry ? `formal-p3-retry-${stage}` : 'formal-p3-structured-intent');
+    const params = retry ? {
+      session_id: sessionId, operation: input.operation, command_id: command.command_id,
+      issued_at: new Date().toISOString(), correlation_id: correlationId, task_id: input.task_id,
+      ...(continuationId === null ? {} : { confirmation_id: continuationId }),
+    } : {
+      session_id: sessionId, correlation_id: correlationId, source: 'structured',
       operation_hint: command.operation,
       ...(command.task_id === null ? {} : { task_id_hint: command.task_id }),
-      source_id: command.command_id,
-      source_confidence: 1,
-      committed: true,
+      source_id: command.command_id, source_confidence: 1, committed: true,
       structured_intent: structured,
       ...(continuationId === null ? {} : { continuation_id: continuationId }),
-    }, id);
-    return Object.freeze({ value, request_id: id });
+    };
+    return Object.freeze({ stage, session_id: sessionId,
+      method: retry ? (stage === 'issue' ? FORMAL_P3_TASK_METHODS.confirmation : FORMAL_P3_TASK_METHODS.mutate) : FORMAL_P3_TASK_METHODS.intent,
+      params: Object.freeze(params), request_id: id, input: Object.freeze({ ...input }),
+      command: Object.freeze({ ...command, request_id: id }), structured_intent: structured, correlation_id: correlationId });
+  }
+
+  async #dispatchRetained(epoch: number, sessionId: string): Promise<FormalP3TaskExperienceSnapshot> {
+    const rpc = this.#rpc;
+    if (rpc === null || rpc.session_id !== sessionId) throw new Error('formal P3 Task recovery is unavailable');
+    this.#requireEpoch(epoch, sessionId);
+    this.#publish({ ...this.#state, command: Object.freeze({ ...rpc.command, phase: 'issuing', reason: null }) });
+    try {
+      const response = await this.#requestRecognizingRejection(rpc.method, rpc.params, rpc.request_id);
+      this.#requireEpoch(epoch, sessionId);
+      const result = envelope(response, rpc.request_id);
+      const taskId = rpc.input.task_id ?? null;
+      if (rpc.stage === 'issue' && (result.status === 'confirmation_issued' || result.status === 'clarification')) {
+        let continuation: string;
+        if (rpc.input.operation === 'task.retry') {
+          if (result.status !== 'confirmation_issued' || result.operation !== rpc.input.operation
+              || result.command_id !== rpc.command.command_id || result.target_task_id !== taskId) {
+            throw new Error('formal P3 retry confirmation binding mismatch');
+          }
+          continuation = text(result.confirmation_id, 'confirmation_id');
+        } else {
+          if (result.status !== 'clarification' || result.operation !== rpc.input.operation
+              || (result.task_id ?? null) !== taskId || typeof result.confirmation_token !== 'string'
+              || result.confirmation_form !== `confirm task request ${result.confirmation_token}`) {
+            throw new Error('formal P3 confirmation target mismatch');
+          }
+          continuation = text(result.confirmation_token, 'confirmation token');
+        }
+        const next = Object.freeze({ ...rpc.command, phase: 'confirmation_required' as const });
+        this.#pending = Object.freeze({ input: rpc.input, command: next, continuation_id: continuation,
+          structured_intent: rpc.structured_intent, correlation_id: rpc.correlation_id });
+        this.#rpc = null;
+        return this.#publish({ ...this.#state, command: next });
+      }
+      await this.#settle(result, rpc.command, taskId, epoch, sessionId);
+      return this.#state;
+    } catch (error) {
+      if (epoch === this.#epoch && this.#state.session_id === sessionId) {
+        const definitive = error instanceof FormalP3DefinitiveRejection;
+        if (definitive) { this.#pending = null; this.#rpc = null; }
+        const known = this.#state.command?.command_id === rpc.command.command_id && this.#state.command.accepted;
+        this.#publish({ ...this.#state, command: known
+          ? Object.freeze({ ...this.#state.command!, reason: reason(error) })
+          : Object.freeze({ ...rpc.command, phase: definitive ? 'rejected' : 'unknown', reason: reason(error) }) });
+      }
+      throw error;
+    }
   }
 
   async #requestRecognizingRejection(method: string, params: Record<string, unknown>, id: string): Promise<unknown> {
@@ -828,10 +899,10 @@ export class FormalP3TaskExperienceOwner {
     }
   }
 
-  async #settle(result: JsonObject, command: FormalP3TaskCommand, taskId: string | null): Promise<void> {
+  async #settle(result: JsonObject, command: FormalP3TaskCommand, taskId: string | null, epoch: number, sessionId: string): Promise<void> {
     const status = result.status;
     if (status !== 'dispatched' && status !== 'mutation_processed') {
-      throw new FormalP3DefinitiveRejection(optionalText(result.reason, 'mutation reason') ?? 'FORMAL_P3_MUTATION_REJECTED');
+      throw new Error('formal P3 mutation outcome is not a validated receipt');
     }
     if (result.operation !== command.operation) throw new Error('formal P3 mutation operation binding mismatch');
     if (
@@ -856,9 +927,15 @@ export class FormalP3TaskExperienceOwner {
     const applied = formal.applied === true;
     const accepted = true;
     const resolvedTaskId = command.operation === 'task.create' || command.operation === 'task.create_successor' ? formalTaskId : taskId;
-    this.#publish({ ...this.#state, command: Object.freeze({ ...command, task_id: resolvedTaskId, phase: applied ? 'applied' : 'accepted', accepted, applied, reason: optionalText(formal.reason, 'formal mutation reason') }) });
+    const nextCommand = Object.freeze({ ...command, task_id: resolvedTaskId, phase: applied ? 'applied' as const : 'accepted' as const,
+      accepted, applied, reason: optionalText(formal.reason, 'formal mutation reason') });
+    this.#requireEpoch(epoch, sessionId);
+    this.#rpc = null;
+    this.#pending = null;
+    this.#publish({ ...this.#state, command: nextCommand });
     if (this.#state.session_id !== null) {
-      await this.refresh(this.#state.session_id);
+      await this.refresh(sessionId);
+      this.#requireEpoch(epoch, sessionId);
       if (resolvedTaskId !== null && this.#state.tasks.some(task => task.task_id === resolvedTaskId)) await this.select(resolvedTaskId);
     }
   }

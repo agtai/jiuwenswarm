@@ -34,6 +34,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextSnapshot,
+    PresentedAgentAnalysis,
 )
 
 from .agent_conversation_runtime import (
@@ -716,6 +717,31 @@ class P2ActivationLease:
                     "PRODUCT_TURN_SUBMISSION_UNAVAILABLE",
                     "retained runtime returned no canonical Agent handle",
                     ErrorCode.UNAVAILABLE,
+                )
+            return outcome
+
+    async def presented_agent_analysis(
+        self, binding: P2InteractionBinding, response: ResponseRef
+    ) -> PresentedAgentAnalysis | None:
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            if response.interaction_id != binding.interaction_id:
+                raise _violation(
+                    "FORMAL_CONTEXT_SCOPE_MISMATCH",
+                    "analysis response changed interaction",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            outcome = self._runtime.presented_agent_analysis(response)
+            if outcome is not None and (
+                not isinstance(outcome, PresentedAgentAnalysis)
+                or outcome.commit.scope != binding.scope
+                or outcome.response != response
+            ):
+                raise _violation(
+                    "FORMAL_CONTEXT_SCOPE_MISMATCH",
+                    "analysis changed scope",
+                    ErrorCode.PERMISSION_DENIED,
                 )
             return outcome
 

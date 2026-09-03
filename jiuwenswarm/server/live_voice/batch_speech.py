@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from jiuwenswarm.common.live_voice_capture_limits import MAX_CAPTURE_WAV_BYTES
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,
     Assurance,
@@ -66,7 +67,7 @@ SYNTHESIZE_OPERATION = "speech.synthesize.batch"
 CANCEL_OPERATION = "speech.batch.cancel"
 CAPABILITIES_OPERATION = "speech.capabilities.get"
 
-MAX_BATCH_AUDIO_BYTES = 4 * 1024 * 1024
+MAX_BATCH_AUDIO_BYTES = MAX_CAPTURE_WAV_BYTES
 MAX_SYNTHESIS_AUDIO_BYTES = 8 * 1024 * 1024
 MAX_RECOGNITION_TEXT_CHARS = 16_000
 MAX_SYNTHESIS_TEXT_CHARS = 4_000

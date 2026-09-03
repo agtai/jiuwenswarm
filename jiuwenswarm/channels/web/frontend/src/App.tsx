@@ -40,7 +40,6 @@ import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
 } from './features/tool-events/toolEventNormalizer';
-import { resolveLiveVoiceTaskExecutionContext } from './features/live-voice/liveVoiceTaskClient';
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages } from './hooks';
 import { webRequest } from './services/webClient';
 import { useTeamPanelState } from './features/teamPanelState';
@@ -69,6 +68,7 @@ import {
 } from './multi-session/state/newConversationLifecycle';
 import { toDisplaySessionTitle } from './utils/documentMessage';
 import { createConversationSession } from './multi-session/state/createConversationSession';
+import { createLiveVoiceConversation } from './multi-session/state/createLiveVoiceConversation';
 import { useTranslation } from 'react-i18next';
 import {
   normalizeA2UIEnabled,
@@ -488,35 +488,6 @@ function AppContent() {
       || Boolean(project.project_dir && project.project_dir === session.project_dir)
     )) ?? null;
   }, [currentSession, projects, sessions, sessionId]);
-  const liveVoiceTaskExecutionContext = useMemo(() => {
-    const session = currentSession?.session_id === sessionId
-      ? currentSession
-      : sessions.find((item) => item.session_id === sessionId);
-    if (!session || sessionId === NEW_CONVERSATION_ID) return null;
-
-    // Only trust the persisted session itself or the exact project registry
-    // entry referenced by that session. Never fall back to cwd/selectedProject.
-    const exactRegisteredProject =
-      sessionProject
-      ?? projects.find((project) => (
-        project.project_id === session.project_id && Boolean(project.project_dir?.trim())
-      ))
-      ?? null;
-    return resolveLiveVoiceTaskExecutionContext(
-      sessionId,
-      {
-        sessionId: session.session_id,
-        projectDir: session.project_dir,
-        projectId: session.project_id,
-      },
-      exactRegisteredProject
-        ? {
-            projectDir: exactRegisteredProject.project_dir,
-            projectId: exactRegisteredProject.project_id,
-          }
-        : null,
-    );
-  }, [currentSession, projects, sessionId, sessionProject, sessions]);
   const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent');
   const teamTaskEvents = useSessionStore((s) => s.runtimes[sessionId]?.teamTaskEvents ?? []);
   const teamTasks = useSessionStore((s) => s.runtimes[sessionId]?.teamTasks ?? []);
@@ -1705,6 +1676,71 @@ function AppContent() {
     enterNewConversation(mode, options);
   }, [enterNewConversation, mode]);
 
+  const handlePrepareLiveVoiceSession = useCallback(
+    async (accept: (sessionId: string) => boolean) => {
+      if (!isConnected || sessionIdRef.current !== NEW_CONVERSATION_ID || creatingSessionRef.current) return null;
+      const readDraftContext = () => {
+        const runtime = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID);
+        const base = getWorkContextForSession(NEW_CONVERSATION_ID);
+        return {
+          mode: runtime?.mode ?? mode,
+          model: useSessionStore.getState().getEffectiveModelName(NEW_CONVERSATION_ID),
+          project_id: base.project_id || newConversationProjectRef.current?.project_id,
+          project_dir: base.project_dir || newConversationProjectRef.current?.project_dir,
+          work_mode: useWorkspaceStore.getState().workMode,
+        };
+      };
+      const context = readDraftContext();
+      if (context.mode !== 'agent') return null;
+      const path = window.location.pathname;
+      creatingSessionRef.current = true;
+      useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, true);
+      try {
+        const params: Record<string, unknown> = {
+          create_token: generateUuidV4(),
+          mode: context.mode,
+          is_swarm: false,
+          title: t('liveVoice.label'),
+          work_mode: context.work_mode,
+        };
+        if (context.model) params.model_name = context.model;
+        if (context.project_id) params.project_id = context.project_id;
+        if (context.project_dir) params.project_dir = context.project_dir;
+        const previous = newConversationPreviousSessionRef.current;
+        if (previous) {
+          params.previous_session_id = previous.sessionId;
+          params.previous_mode = previous.mode;
+        }
+        const session = await createLiveVoiceConversation({
+          request,
+          params,
+          settings: { mode: context.mode, selectedModelName: context.model, projectDir: context.project_dir },
+          accept: id =>
+            sessionIdRef.current === NEW_CONVERSATION_ID &&
+            window.location.pathname === path &&
+            JSON.stringify(readDraftContext()) === JSON.stringify(context) &&
+            accept(id),
+        });
+        if (!session) return null;
+        useWorkspaceStore.getState().upsertSession(session, { isNew: true });
+        sessionIdsCreatedInThisPageRef.current.add(session.session_id);
+        newSessionPromotionSequenceRef.current += 1;
+        setNewSessionPromotion({ targetSessionId: session.session_id, sequence: newSessionPromotionSequenceRef.current });
+        sessionIdRef.current = session.session_id;
+        useChatStore.getState().setActiveSessionId(session.session_id);
+        setSessionId(session.session_id);
+        navigate({ kind: 'chat-session', sessionId: session.session_id }, { replace: true });
+        newConversationProjectRef.current = null;
+        newConversationPreviousSessionRef.current = null;
+        return session.session_id;
+      } finally {
+        useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
+        creatingSessionRef.current = false;
+      }
+    },
+    [isConnected, mode, request, navigate, t],
+  );
+
   // 切换模式
   const handleSwitchMode = useCallback((targetMode: AgentMode) => {
     const currentId = sessionIdRef.current;
@@ -2379,11 +2415,10 @@ function AppContent() {
                   <div className={`flex-1 min-h-0`}>
                     <ChatPanel
                       onSendMessage={handleSendMessage}
+                      onPrepareLiveVoiceSession={handlePrepareLiveVoiceSession}
                       onPersistMedia={handlePersistMedia}
                       onPersistDocuments={handlePersistDocuments}
                       onInterrupt={handleInterrupt}
-                      liveVoiceTaskRequest={request}
-                      liveVoiceTaskExecutionContext={liveVoiceTaskExecutionContext}
                       isConnected={isConnected}
                       onCancel={handleCancel}
                       onSwitchMode={handleSwitchMode}
