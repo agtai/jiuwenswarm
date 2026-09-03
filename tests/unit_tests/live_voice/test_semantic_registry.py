@@ -198,6 +198,8 @@ async def test_explicit_local_delegation_creates_once_with_normal_authority(sema
     def program(data):
         assert s.harness.composition._core.store.counts()["tasks"] == 0
         assert s.manager.get_calls == []
+        assert data["commit"]["text"] == text
+        assert data["context"]["tasks"] == []
         return {**model_output(data, operation="task.create", arguments={
             "name": "Equipment report", "instruction": "Read the equipment list and save report.md."}),
             "requested_work": "local_artifacts",
@@ -216,7 +218,32 @@ async def test_explicit_local_delegation_creates_once_with_normal_authority(sema
     assert replay.payload == done.payload
     assert s.harness.composition._core.store.counts()["tasks"] == 1
     assert s.manager.get_calls == []
-    assert len(s.calls) == (2 if invalid_first else 1)
+    assert len(s.calls) == (3 if invalid_first else 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("review_route", ["dialogue", "clarification"])
+async def test_local_delegation_review_has_zero_task_effects_and_replays(semantic_runtime, review_route):
+    s = semantic_runtime
+
+    def program(data):
+        assert s.harness.composition._core.store.counts()["tasks"] == 0
+        if len(s.calls) == 1:
+            return {**model_output(data, operation="task.create", arguments={
+                "name": "Unapproved report", "instruction": "Prepare a local report."}),
+                "requested_work": "local_artifacts"}
+        return {**model_output(data, route=review_route),
+                "message": "Which work do you mean?" if review_route == "clarification" else None}
+
+    s.program = program
+    result = await s.text("review-no-task", "Do that work in the background.")
+    assert s.harness.composition._core.store.counts()["tasks"] == 0
+    assert s.manager.get_calls == []
+    replay = await s.text("review-no-task", "Do that work in the background.")
+    assert replay.payload == result.payload
+    assert s.harness.composition._core.store.counts()["tasks"] == 0
+    assert s.manager.get_calls == [] and len(s.calls) == 2
+    assert s.registry._pending_production_task_intents == {}
 
 
 @pytest.mark.asyncio

@@ -77,8 +77,8 @@ repeat the old whole-project audit solely to resume a bounded task.
 
 The product objective remains: final committed speech reaches the real
 JiuwenSwarm Agent/tools and authoritative Task results through one semantic
-implementation. The current bounded repair addresses Task notification
-presentation and usable result locations; broader business/audio gates remain open.
+implementation. The current bounded repair addresses contextual delegation after
+foreground analysis; broader business/audio gates remain open.
 
 - **Intended behavior:** model semantics propose; Bridge/Registry/Core validate
   exact scope, targets, capabilities, replay and effects. Clear authorized local
@@ -98,6 +98,13 @@ presentation and usable result locations; broader business/audio gates remain op
   one recorded real-path check when needed for the changed seam. Do not repeatedly
   run the full Demo or full suites to chase a PASS. Candidate-level requirements
   stay open until actually performed; self-review is not independent review.
+- **Contextual delegation repair:** the pre-create review now reuses the complete
+  semantic contract and frozen input/context, replacing the inconsistent short
+  Boolean review. Scoped model/Registry checks preserve explicit delegation,
+  clarification and zero-effect rejection; the new spoken Task A and independent
+  review remain open. See the [bounded repair evidence](evidence/DELEGATION_REVIEW_CONTRACT_REPAIR_20260903.md).
+  This Tier-2 scope excludes artifact calculations/Agent quality and broader
+  Demo acceptance; it introduces no keyword classifier or public schema change.
 - **Current limits:** focused latency fixes have been authorized; performance
   redesign and optional buffer/Native experiments are not prerequisites for this
   repair packet. No new classifier/policy/schema, Executor/positive unsupported
