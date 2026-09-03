@@ -12127,6 +12127,7 @@ async function runMountedC2FirstTailScenario({
   bargeWhileAttaching = false,
   closeWhileBuffered = false,
   delayPrefixAck = false,
+  delayLastTailAck = false,
   twoTails = false,
   rejectPrefixAck = false,
   retryablePrefixAck = false,
@@ -12146,6 +12147,9 @@ async function runMountedC2FirstTailScenario({
   let activeMediaBinding = null;
   let notificationBinding = null;
   let releasePrefixAck = null;
+  let releaseLastTailAck = null;
+  let rootPublishedWhileLastTailAckPending = false;
+  let notificationCallsBeforeLastTailRelease = null;
   let renderer;
   const browser = installP1BrowserEnvironment({
     mediaBinding: () => activeMediaBinding,
@@ -12273,7 +12277,10 @@ async function runMountedC2FirstTailScenario({
       if (nextIndex !== null) {
         assert.ok(notificationBinding);
         setTimeout(
-          () => publishNotification(productNotification(notifications[nextIndex], notificationBinding)),
+          () => {
+            publishNotification(productNotification(notifications[nextIndex], notificationBinding));
+            if (delayLastTailAck) rootPublishedWhileLastTailAckPending = true;
+          },
           0,
         );
       }
@@ -12307,6 +12314,14 @@ async function runMountedC2FirstTailScenario({
       if (delayPrefixAck && params.unit_id === 'mounted-c2-prefix') {
         return new Promise(resolve => {
           releasePrefixAck = () => resolve(result);
+        });
+      }
+      if (
+        delayLastTailAck
+        && params.unit_id === (twoTails ? 'mounted-c2-tail-2' : 'mounted-c2-tail')
+      ) {
+        return new Promise(resolve => {
+          releaseLastTailAck = () => resolve(result);
         });
       }
       return result;
@@ -12358,10 +12373,26 @@ async function runMountedC2FirstTailScenario({
         duplex_media_observed: false,
       };
     }
-    if (method === 'live_voice.speech.recognize_batch') return mountedRecognition(params, 'Explain Paris.', 1);
+    if (method === 'live_voice.speech.recognize_batch') {
+      return mountedRecognition(
+        params,
+        'Explain Paris.',
+        calls.filter(call => call.method === method).length,
+      );
+    }
     if (method === 'live_voice.composition.unified.submit') {
-      response.interaction_id = params.interaction_id;
-      notificationBinding = { ...params };
+      const submissionCount = calls.filter(call => call.method === method).length;
+      const acceptedResponse = submissionCount === 1
+        ? response
+        : {
+            interaction_id: params.interaction_id,
+            response_id: `mounted-c2-followup-response-${submissionCount}`,
+            response_generation: submissionCount,
+          };
+      if (submissionCount === 1) {
+        response.interaction_id = params.interaction_id;
+        notificationBinding = { ...params };
+      }
       return {
         request_id: options.requestId,
         ok: true,
@@ -12377,7 +12408,7 @@ async function runMountedC2FirstTailScenario({
           commit_id: params.commit_id,
           request_id: 'mounted-c2-agent-request',
           round_id: 'mounted-c2-round',
-          response,
+          response: acceptedResponse,
         },
       };
     }
@@ -12706,12 +12737,65 @@ async function runMountedC2FirstTailScenario({
     await act(async () => {
       browser.endLatestSource();
       lifecycle.push('rendered');
+      if (delayLastTailAck) {
+        await waitForMounted(
+          () => calls.some(
+            call => call.method === 'live_voice.composition.p2.presentation.ack'
+              && call.params.unit_id === (twoTails ? 'mounted-c2-tail-2' : 'mounted-c2-tail'),
+          ),
+          'C2 last-tail ACK did not enter delayed settlement',
+        );
+        await waitForMounted(
+          () => rootPublishedWhileLastTailAckPending,
+          'C2 authoritative root did not arrive while the last-tail ACK remained in flight',
+        );
+        for (let turn = 0; turn < 5; turn += 1) await new Promise(resolve => setImmediate(resolve));
+        assert.equal(
+          states.some(state => state.text_reason === 'TTS_CONTINUATION_LOCAL_RELEASE_FAILED'),
+          false,
+          'C2 treated its own in-flight last-tail ACK as a foreign root conflict',
+        );
+        assert.equal(
+          calls.some(
+            call => call.method === 'live_voice.composition.p2.presentation.ack'
+              && call.params.unit_id === 'mounted-c2-root',
+          ),
+          false,
+          'C2 root ACK bypassed the delayed last-tail ACK',
+        );
+        notificationCallsBeforeLastTailRelease = calls.filter(
+          call => call.method === 'live_voice.composition.p2.notification.next',
+        ).length;
+        assert.equal(typeof releaseLastTailAck, 'function', 'C2 last-tail ACK was not retained in flight');
+        releaseLastTailAck();
+        await waitForMounted(
+          () => projectedMessages.some(
+            event => event.message.role === 'assistant' && event.message.content === completeText,
+          ),
+          `C2 authoritative root was lost after the delayed last-tail ACK settled; states=${states.slice(-10).map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')}`,
+        );
+      }
       await waitForMounted(
         () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length === (twoTails ? 4 : 3),
         `C2 root did not settle after both audio units; sources=${browser.counts.sourceStarts}/${browser.counts.sourceEnds} acks=${calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').map(call => call.params.unit_id).join(',')} states=${states.slice(-10).map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')}`,
       );
       lifecycle.push('presentation_acked');
       await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'C2 did not retain successor capture');
+      if (notificationCallsBeforeLastTailRelease !== null) {
+        await browser.emitSpeechEndOfTurn();
+        await waitForMounted(
+          () => calls.filter(
+            call => call.method === 'live_voice.composition.unified.submit',
+          ).length === 2,
+          `C2 did not submit the continuous follow-up turn; states=${states.slice(-12).map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')} methods=${calls.slice(-20).map(call => call.method).join(',')}`,
+        );
+        await waitForMounted(
+          () => calls.filter(
+            call => call.method === 'live_voice.composition.p2.notification.next',
+          ).length > notificationCallsBeforeLastTailRelease,
+          'C2 did not resume P2 polling for the continuous follow-up turn',
+        );
+      }
     });
 
     assert.deepEqual(
@@ -12726,10 +12810,14 @@ async function runMountedC2FirstTailScenario({
         ? ['mounted-c2-prefix', 'mounted-c2-tail', 'mounted-c2-tail-2', 'mounted-c2-root']
         : ['mounted-c2-prefix', 'mounted-c2-tail', 'mounted-c2-root'],
     );
-    assert.deepEqual(projectedMessages.map(event => [event.message.role, event.message.content]), [
-      ['user', 'Explain Paris.'],
-      ['assistant', completeText],
-    ]);
+    assert.deepEqual(
+      projectedMessages.map(event => [event.message.role, event.message.content]),
+      [
+        ['user', 'Explain Paris.'],
+        ['assistant', completeText],
+        ...(delayLastTailAck ? [['user', 'Explain Paris.']] : []),
+      ],
+    );
     assert.equal(browser.counts.getUserMedia, 2);
     assert.equal(states.some(state => state.text_reason === 'PRODUCT_AGENT_OUTPUT_FAILED'), false);
     await act(async () => controlRef.current.close());
@@ -12747,6 +12835,7 @@ async function runMountedC2FirstTailScenario({
       'closed',
     ]);
   } finally {
+    releaseLastTailAck?.();
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();
   }
@@ -12762,6 +12851,10 @@ test('mounted C2 promotes the staged tail before a delayed prefix ACK settles', 
 
 test('mounted C2 keeps local render as the sole adoption authority across two prefetched tails', async () => {
   await runMountedC2FirstTailScenario({ delayPrefixAck: true, twoTails: true });
+});
+
+test('mounted C2 preserves its authoritative root while the last-tail ACK is in flight', async () => {
+  await runMountedC2FirstTailScenario({ delayLastTailAck: true, twoTails: true });
 });
 
 test('mounted C2 notification batch defers the second negotiated tail until exact promotion ACK', async () => {

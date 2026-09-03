@@ -2770,6 +2770,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const group = productTtsContinuationRef.current;
     if (group === null) return;
     productTtsContinuationRef.current = null;
+    if (
+      activeVoiceResponseRef.current !== null &&
+      sameContinuationResponse(activeVoiceResponseRef.current, group.response)
+    ) {
+      activeVoiceResponseRef.current = null;
+    }
     group.scheduler.cancel(reason);
     group.ackOwner.cancel(reason);
     group.currentPresentation = null;
@@ -3472,6 +3478,33 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               prefetchedDisposition.projection_role,
             )
           ) return;
+          if (prefetchedDisposition.projection_role === 'authoritative_text_root') {
+            // Audio successors are promoted synchronously when their
+            // predecessor renders. The display-only root shares the global
+            // ACK slot, so defer only that adoption until the final audio ACK
+            // leaves the slot; do not perturb successor prefetch timing.
+            void continuationGroup.ackOwner.whenIdle().then(() => {
+              if (
+                productTtsContinuationRef.current !== continuationGroup ||
+                continuationGroup.prefetched !== prefetched
+              ) return;
+              continuationGroup.adoptingPrefetched = true;
+              try {
+                adoptProductP2NotificationRef.current(continuationGroup.owner, prefetched);
+                continuationGroup.prefetched = null;
+              } finally {
+                continuationGroup.adoptingPrefetched = false;
+              }
+            }).catch(error => {
+              if (productTtsContinuationRef.current !== continuationGroup) return;
+              cancelProductTtsContinuation('TTS_CONTINUATION_LOCAL_RELEASE_FAILED');
+              setProductTextReason(stableProductTextReason(error, 'TTS_CONTINUATION_LOCAL_RELEASE_FAILED'));
+              setProductTextStatus('failed');
+            });
+            return;
+          }
+          // Clear an audio successor before adoption so that adoption can
+          // immediately start prefetching the following successor.
           continuationGroup.prefetched = null;
           continuationGroup.adoptingPrefetched = true;
           try {
