@@ -73,8 +73,14 @@ def test_spoken_revision_reason_only_for_length_or_tool_backed_arithmetic():
     assert spoken_revision_reason("x" * 200, []) is None
     assert spoken_revision_reason("x" * 201, []) == "length"
     assert spoken_revision_reason("工作区干净", [{"content": "## master"}]) is None
-    assert spoken_revision_reason("耗时 12 分钟", [{"content": "log"}]) == "arithmetic"
     assert spoken_revision_reason("x" * 201, [{"content": "log"}]) == "length"
+    # Time or cost quantities backed by tool results are the arithmetic path.
+    for text in ("耗时 12 分钟", "共 3 天", "16:10 出发", "费用 120 元", "$45 total", "2026-09-04 截止", "2.5 hours"):
+        assert spoken_revision_reason(text, [{"content": "log"}]) == "arithmetic", text
+    # Bare counts, ordinals and identifiers are not arithmetic, tool results or not.
+    for text in ("已创建 1 个任务", "第 2 步完成", "共 3 个文件", "版本 v2", "编号 12345"):
+        assert spoken_revision_reason(text, [{"content": "log"}]) is None, text
+    assert spoken_revision_reason("耗时 12 分钟", []) is None
 
 
 def test_spoken_revision_reasoning_only_on_arithmetic_path(monkeypatch):

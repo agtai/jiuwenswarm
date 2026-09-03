@@ -8,6 +8,7 @@ import json
 import hashlib
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -94,18 +95,31 @@ SPOKEN_ANSWER_BUDGET_CHARS = 200
 LENGTH_REVISION_TIMEOUT_SECONDS = 6
 ARITHMETIC_REVISION_TIMEOUT_SECONDS = 12
 
+# The reasoning-backed revision exists to recompute time and cost arithmetic
+# (deadlines, journey durations, buffers, fares). Only drafts that state such a
+# quantity can carry that kind of error; a bare count ("1 个任务") cannot, and
+# routing it through reasoning cost 3.7-8.2 s per task turn in the re-test.
+_ARITHMETIC_QUANTITY = re.compile(
+    r"\d{1,2}:\d{2}"                                        # clock time 16:10
+    r"|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}月\d{1,2}日"            # calendar dates
+    r"|\d+(?:\.\d+)?\s*(?:秒|分钟|小时|个小时|天|周|个月|年)"  # durations (zh)
+    r"|\d+(?:\.\d+)?\s*(?:ms|sec|secs|min|mins|minutes?|h|hr|hrs|hours?|days?|weeks?|months?)\b"
+    r"|[¥￥$€£]\s*\d"                                        # currency prefix
+    r"|\d[\d,]*(?:\.\d+)?\s*(?:元|块|美元|欧元|英镑|日元|RMB|CNY|USD|EUR|GBP|JPY)"
+)
+
 
 def spoken_revision_reason(candidate: str, tool_results: list[dict]) -> str | None:
     """Why the final answer needs a bounded revision, or None to skip it.
 
     A draft inside the spoken budget is already speakable. Tool results alone
     used to force a revision on every tool turn (4 s p50 for 65-character
-    answers); they matter only when the draft carries numbers whose time/cost
-    arithmetic the revision must recompute from evidence.
+    answers); they matter only when the draft states a time or cost quantity
+    whose arithmetic the revision must recompute from evidence.
     """
     if len(candidate) > SPOKEN_ANSWER_BUDGET_CHARS:
         return "length"
-    if tool_results and any(char.isdigit() for char in candidate):
+    if tool_results and _ARITHMETIC_QUANTITY.search(candidate):
         return "arithmetic"
     return None
 
