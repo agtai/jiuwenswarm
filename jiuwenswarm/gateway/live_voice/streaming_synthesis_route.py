@@ -3399,8 +3399,20 @@ def _log_queue_pressure(
 ) -> None:
     """Emit the content-free bounded-pressure diagnostic for one exact phase."""
 
+    wait_elapsed_ms = round(max(0.0, time.monotonic() - started_at) * 1000, 3)
     _LOGGER.warning(
-        "live_voice_streaming_synthesis_queue_pressure",
+        "live_voice_streaming_synthesis_queue_pressure "
+        "phase=%s response_generation=%s unit_seq=%s "
+        "queue_size=%s queue_capacity=%s frames_enqueued=%s "
+        "frames_pulled=%s wait_elapsed_ms=%s",
+        phase,
+        handle.ref.response.response_generation,
+        handle.ref.unit_seq,
+        handle.queue.qsize(),
+        handle.queue.maxsize,
+        handle.frames_enqueued,
+        handle.frames_pulled,
+        wait_elapsed_ms,
         extra={
             "response_id": handle.ref.response.response_id,
             "response_generation": handle.ref.response.response_generation,
@@ -3411,7 +3423,7 @@ def _log_queue_pressure(
             "frames_enqueued": handle.frames_enqueued,
             "frames_pulled": handle.frames_pulled,
             "source_state": f"{phase}_timeout",
-            "wait_elapsed_ms": round(max(0.0, time.monotonic() - started_at) * 1000, 3),
+            "wait_elapsed_ms": wait_elapsed_ms,
         },
     )
 
