@@ -217,6 +217,7 @@ class _FakeProvider(NativeStreamingSpeechProvider):
         self.parked: list[tuple[SynthesisStreamRef, int, float]] = []
         self.park_started = asyncio.Event()
         self.park_gate: asyncio.Event | None = None
+        self.park_error: BaseException | None = None
         self.promoted: list[tuple[SynthesisStreamRef, int]] = []
         self.promote_started = asyncio.Event()
         self.promote_gate: asyncio.Event | None = None
@@ -306,6 +307,8 @@ class _FakeProvider(NativeStreamingSpeechProvider):
         self.park_started.set()
         if self.park_gate is not None:
             await self.park_gate.wait()
+        if self.park_error is not None:
+            raise self.park_error
 
     async def promote_parked_synthesis(
         self,
@@ -947,6 +950,276 @@ async def test_real_adapter_dual_full_queues_resume_without_deadlock() -> None:
     finally:
         await owner.close()
     assert owner.retained_task_count == 0
+
+
+@pytest.mark.parametrize(
+    ("queue_capacity", "frame_count", "pull_interval", "pause_wait", "max_cycles"),
+    (
+        (8, 450, 0.005, 1.0, 100),
+        (8, 30, 0.02, 0.05, 6),
+    ),
+)
+@pytest.mark.asyncio
+async def test_slow_consumer_makes_bounded_backpressure_progress(
+    queue_capacity: int,
+    frame_count: int,
+    pull_interval: float,
+    pause_wait: float,
+    max_cycles: int,
+) -> None:
+    """A progressing playout consumer must not cause one pause per frame."""
+
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="slow-progress-backpressure")
+
+    async def selector() -> StreamingSpeechSelection:
+        return StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None)
+
+    owner = StreamingSynthesisRouteOwner(
+        selector,
+        max_pending_frames=queue_capacity,
+        queue_wait_seconds=0.05,
+        pause_wait_seconds=pause_wait,
+    )
+    handle, begin_outcome = await owner.begin(request)
+    assert handle is not None and begin_outcome is None
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    for frame_seq in range(frame_count):
+        provider.events.put_nowait(
+            _event(
+                request,
+                seq=frame_seq + 1,
+                cursor=frame_seq * 480,
+                kind=SynthesisEventKind.CHUNK,
+                samples=(1000,) * 480,
+            )
+        )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=frame_count + 1,
+            cursor=frame_count * 480,
+            kind=SynthesisEventKind.COMPLETED,
+        )
+    )
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+
+    frame_sequences: list[int] = []
+    while True:
+        pull = await owner.next_chunk(handle, timeout_seconds=1)
+        if pull.chunk is not None:
+            frame_sequences.append(pull.chunk.frame.seq)
+            # Scaled real-time playout: downstream keeps making progress,
+            # but remains materially slower than the Provider producer.
+            await asyncio.sleep(pull_interval)
+            continue
+        assert pull.outcome is not None and pull.outcome.completed is True
+        break
+
+    pause_count = len(provider.paused)
+    resume_count = len(provider.resumed)
+    await owner.close()
+
+    assert frame_sequences == list(range(frame_count))
+    assert pause_count == resume_count
+    # A full->one-free->full loop is a liveness defect even if a short test
+    # happens to finish. Progress must amortize pressure across frames.
+    assert pause_count <= max_cycles
+    assert owner.retained_task_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_watermark_wait_never_resumes_fenced_provider() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    provider.cancel_gate = asyncio.Event()
+    request = _request(stream_id="cancel-watermark-wait")
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=8,
+        queue_wait_seconds=0.05,
+        pause_wait_seconds=1.0,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * (480 * 20),
+        )
+    )
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+    first = await owner.next_chunk(handle, timeout_seconds=1)
+    assert first.chunk is not None
+
+    cancel_task = asyncio.create_task(owner.cancel(handle))
+    await asyncio.wait_for(provider.cancel_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert handle.fenced is True
+    assert provider.resumed == []
+    provider.cancel_gate.set()
+    outcome = await cancel_task
+    assert outcome.reason is StreamingSynthesisReason.ROUTE_ABORTED
+    assert provider.resumed == []
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_linearizes_after_an_admitted_provider_resume() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    provider.cancel_gate = asyncio.Event()
+    request = _request(stream_id="cancel-admitted-resume")
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=1,
+        queue_wait_seconds=0.1,
+        pause_wait_seconds=0.5,
+    )
+    resume_admitted = asyncio.Event()
+    release_resume = asyncio.Event()
+    original_run = owner._task_owner.run
+
+    async def gated_run(awaitable, **kwargs):
+        if kwargs.get("operation") == "provider-resume":
+            resume_admitted.set()
+            await release_resume.wait()
+        return await original_run(awaitable, **kwargs)
+
+    owner._task_owner.run = gated_run
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * 960,
+        )
+    )
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+    first = await owner.next_chunk(handle, timeout_seconds=1)
+    assert first.chunk is not None
+    await asyncio.wait_for(resume_admitted.wait(), timeout=1)
+
+    cancel_task = asyncio.create_task(owner.cancel(handle))
+    await asyncio.sleep(0)
+    assert handle.fenced is False
+    assert provider.cancel_started.is_set() is False
+
+    release_resume.set()
+    await asyncio.wait_for(provider.resume_started.wait(), timeout=1)
+    await asyncio.wait_for(provider.cancel_started.wait(), timeout=1)
+    assert handle.fenced is True
+    provider.cancel_gate.set()
+    outcome = await cancel_task
+
+    assert outcome.reason is StreamingSynthesisReason.ROUTE_ABORTED
+    assert len(provider.resumed) == 1
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_park_returns_ordinary_pause_to_watermark_owner() -> None:
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    provider.park_gate = asyncio.Event()
+    provider.park_error = RuntimeError("injected park failure")
+    request = _request(stream_id="failed-park-watermark-owner")
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=8,
+        queue_wait_seconds=0.05,
+        pause_wait_seconds=1.0,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=1.0,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    frame_count = 30
+    for frame_seq in range(frame_count):
+        provider.events.put_nowait(
+            _event(
+                request,
+                seq=frame_seq + 1,
+                cursor=frame_seq * 480,
+                kind=SynthesisEventKind.CHUNK,
+                samples=(1000,) * 480,
+            )
+        )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=frame_count + 1,
+            cursor=frame_count * 480,
+            kind=SynthesisEventKind.COMPLETED,
+        )
+    )
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+    first = await owner.next_chunk(handle, timeout_seconds=1)
+    assert first.chunk is not None
+
+    park_task = asyncio.create_task(
+        owner.park_prefetch(handle, park_generation=9, timeout_seconds=1.0)
+    )
+    await asyncio.wait_for(provider.park_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+    provider.park_gate.set()
+    with pytest.raises(RuntimeError, match="injected park failure"):
+        await park_task
+
+    frame_sequences = [first.chunk.frame.seq]
+    while True:
+        pull = await owner.next_chunk(handle, timeout_seconds=1)
+        if pull.chunk is not None:
+            frame_sequences.append(pull.chunk.frame.seq)
+            continue
+        assert pull.outcome is not None and pull.outcome.completed is True
+        break
+
+    assert frame_sequences == list(range(frame_count))
+    assert len(provider.paused) == len(provider.resumed)
+    assert handle.flow_state is route_module.StreamingSynthesisFlowState.TERMINAL
+    await owner.close()
 
 
 @pytest.mark.asyncio

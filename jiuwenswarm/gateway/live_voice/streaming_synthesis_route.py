@@ -534,6 +534,9 @@ class StreamingSynthesisHandle:
     provider_control_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock, repr=False
     )
+    terminal_control_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, repr=False
+    )
     next_provider_seq: int = 0
     next_provider_cursor: int = 0
     next_frame_seq: int = 0
@@ -561,7 +564,11 @@ class StreamingSynthesisHandle:
         default_factory=asyncio.Event, repr=False
     )
     parked_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    park_settled_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     promoted_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    downstream_progress_event: asyncio.Event = field(
+        default_factory=asyncio.Event, repr=False
+    )
     promotion_timeout_task: asyncio.Task[None] | None = field(default=None, repr=False)
     promotion_lease_expired: bool = False
     park_adopted_resuming: bool = False
@@ -1101,6 +1108,7 @@ class StreamingSynthesisRouteOwner:
                     handle.park_deadline = time.monotonic() + timeout
                     handle.prefetch_decision_event.set()
                     handle.parked_event.set()
+                    handle.park_settled_event.set()
                     handle.promotion_lease_expired = False
                     handle.promotion_timeout_task = asyncio.create_task(
                         self._expire_parked_prefetch(
@@ -1140,6 +1148,7 @@ class StreamingSynthesisRouteOwner:
             handle.park_deadline = time.monotonic() + timeout
             handle.prefetch_decision_event.set()
             handle.promotion_lease_expired = False
+            handle.park_settled_event.clear()
             handle.promoted_event.clear()
             handle.flow_state = StreamingSynthesisFlowState.PARK_REQUESTED
             handle.park_requested_event.set()
@@ -1211,6 +1220,7 @@ class StreamingSynthesisRouteOwner:
                 self._cancel_promotion_timeout(handle)
                 if not handle.fenced:
                     handle.flow_state = StreamingSynthesisFlowState.ACTIVE
+                handle.park_settled_event.set()
             raise
         async with handle.state_lock:
             if handle.fenced:
@@ -1238,6 +1248,7 @@ class StreamingSynthesisRouteOwner:
                 )
             handle.flow_state = StreamingSynthesisFlowState.PREFETCH_PARKED
             handle.parked_event.set()
+            handle.park_settled_event.set()
             _LOGGER.info(
                 "live_voice_prefetch_transition_trace stage=route_park_acknowledged "
                 "response_generation=%s unit_seq=%s park_generation=%s",
@@ -1508,6 +1519,7 @@ class StreamingSynthesisRouteOwner:
 
         if isinstance(item, StreamingSynthesisChunk):
             handle.frames_pulled += 1
+            handle.downstream_progress_event.set()
 
         late_control = await self._take_process_control(handle)
         if late_control is not None:
@@ -2262,6 +2274,7 @@ class StreamingSynthesisRouteOwner:
             handle.next_frame_cursor += len(samples)
         paused = False
         parked_owned = False
+        queued = False
         drain_only = bool(
             provider_terminal
             and handle.capability.bounded_pause is not CapabilityProvenance.UNAVAILABLE
@@ -2332,6 +2345,7 @@ class StreamingSynthesisRouteOwner:
                 ),
             )
             handle.frames_enqueued += 1
+            queued = True
         except TimeoutError as exc:
             _LOGGER.warning(
                 "live_voice_streaming_synthesis_queue_pressure",
@@ -2381,52 +2395,95 @@ class StreamingSynthesisRouteOwner:
                             # 25 frames, while this route queue holds eight.
                             # Ordinary pressure must therefore resume until an
                             # actual PARK request transfers pause ownership.
-                    async with handle.state_lock:
-                        if handle.flow_state in {
-                            StreamingSynthesisFlowState.PARK_REQUESTED,
-                            StreamingSynthesisFlowState.PREFETCH_PARKED,
-                            StreamingSynthesisFlowState.PROMOTED,
-                        }:
-                            parked_owned = True
-                        elif not handle.fenced:
-                            handle.flow_state = (
-                                StreamingSynthesisFlowState.ORDINARY_RESUMING
-                            )
-                    if not parked_owned:
+
+                    terminal_owned = False
+                    while True:
+                        if queued:
+                            await self._wait_for_resume_watermark(handle)
+
+                        park_pending = False
+                        retry_watermark = False
                         async with handle.provider_control_lock:
-                            async with handle.state_lock:
-                                parked_owned = handle.flow_state in {
-                                    StreamingSynthesisFlowState.PARK_REQUESTED,
-                                    StreamingSynthesisFlowState.PREFETCH_PARKED,
-                                    StreamingSynthesisFlowState.PROMOTED,
-                                }
-                            if not parked_owned:
-                                _LOGGER.info(
-                                    "live_voice_streaming_synthesis_backpressure "
-                                    "stage=resume_requested response_generation=%s unit_seq=%s",
-                                    handle.ref.response.response_generation,
-                                    handle.ref.unit_seq,
-                                )
-                                await self._task_owner.run(
-                                    handle.provider.resume_synthesis(handle.ref),
-                                    timeout_seconds=self._queue_wait_seconds,
-                                    operation="provider-resume",
-                                )
+                            async with handle.terminal_control_lock:
                                 async with handle.state_lock:
-                                    if (
-                                        not handle.fenced
-                                        and handle.flow_state
-                                        is StreamingSynthesisFlowState.ORDINARY_RESUMING
+                                    terminal_owned = bool(
+                                        handle.fenced
+                                        or handle.flow_state
+                                        is StreamingSynthesisFlowState.TERMINAL
+                                    )
+                                    park_pending = (
+                                        handle.flow_state
+                                        is StreamingSynthesisFlowState.PARK_REQUESTED
+                                    )
+                                    parked_owned = handle.flow_state in {
+                                        StreamingSynthesisFlowState.PREFETCH_PARKED,
+                                        StreamingSynthesisFlowState.PROMOTED,
+                                    }
+                                    retry_watermark = bool(
+                                        queued
+                                        and not terminal_owned
+                                        and not park_pending
+                                        and not parked_owned
+                                        and handle.queue.qsize()
+                                        > self._resume_low_watermark(handle.queue)
+                                    )
+                                    if not (
+                                        terminal_owned
+                                        or park_pending
+                                        or parked_owned
+                                        or retry_watermark
                                     ):
-                                        handle.flow_state = (
-                                            StreamingSynthesisFlowState.ACTIVE
+                                        handle.flow_state = StreamingSynthesisFlowState.ORDINARY_RESUMING
+                                if not (
+                                    terminal_owned
+                                    or park_pending
+                                    or parked_owned
+                                    or retry_watermark
+                                ):
+                                    _LOGGER.info(
+                                        "live_voice_streaming_synthesis_backpressure "
+                                        "stage=resume_requested response_generation=%s unit_seq=%s",
+                                        handle.ref.response.response_generation,
+                                        handle.ref.unit_seq,
+                                    )
+                                    await self._task_owner.run(
+                                        handle.provider.resume_synthesis(handle.ref),
+                                        timeout_seconds=self._queue_wait_seconds,
+                                        operation="provider-resume",
+                                    )
+                                    async with handle.state_lock:
+                                        if (
+                                            not handle.fenced
+                                            and handle.flow_state
+                                            is StreamingSynthesisFlowState.ORDINARY_RESUMING
+                                        ):
+                                            handle.flow_state = (
+                                                StreamingSynthesisFlowState.ACTIVE
+                                            )
+                                        terminal_owned = bool(
+                                            handle.fenced
+                                            or handle.flow_state
+                                            is StreamingSynthesisFlowState.TERMINAL
                                         )
-                        # A concurrent PARK queues behind the in-flight resume.
-                        # Cross that control boundary before another local frame
-                        # or Provider event can be consumed, then wait for the
-                        # exact promotion if ownership transferred.
-                        async with handle.provider_control_lock:
-                            pass
+                                        park_pending = (
+                                            handle.flow_state
+                                            is StreamingSynthesisFlowState.PARK_REQUESTED
+                                        )
+                                        parked_owned = handle.flow_state in {
+                                            StreamingSynthesisFlowState.PREFETCH_PARKED,
+                                            StreamingSynthesisFlowState.PROMOTED,
+                                        }
+
+                        if terminal_owned or parked_owned:
+                            break
+                        if park_pending:
+                            await self._wait_for_park_settlement(handle)
+                            continue
+                        if retry_watermark:
+                            continue
+                        break
+
+                    if parked_owned and not terminal_owned:
                         await self._wait_for_prefetch_promotion(handle)
                 except _PROCESS_CONTROL:
                     raise
@@ -2435,6 +2492,90 @@ class StreamingSynthesisRouteOwner:
                 except Exception:
                     if not handle.fenced:
                         raise
+
+    async def _wait_for_park_settlement(self, handle: StreamingSynthesisHandle) -> None:
+        """Wait until a concurrent PARK either commits or rolls back."""
+
+        async with handle.state_lock:
+            if handle.flow_state is not StreamingSynthesisFlowState.PARK_REQUESTED:
+                return
+            deadline = handle.park_deadline
+        if deadline is None:
+            raise StreamingSynthesisRouteViolation(
+                "SYNTHESIS_PARK_STATE_INVALID",
+                "pending synthesis park has no bounded deadline",
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise StreamingSynthesisRouteViolation(
+                StreamingSynthesisReason.PROMOTION_TIMEOUT.value,
+                "pending synthesis park exceeded its bounded lifetime",
+            )
+        try:
+            await asyncio.wait_for(handle.park_settled_event.wait(), timeout=remaining)
+        except TimeoutError as exc:
+            raise StreamingSynthesisRouteViolation(
+                StreamingSynthesisReason.PROMOTION_TIMEOUT.value,
+                "pending synthesis park exceeded its bounded lifetime",
+            ) from exc
+
+    @staticmethod
+    def _resume_low_watermark(queue: asyncio.Queue[_QueueValue]) -> int:
+        """Return a conservative drain point before reopening a full producer."""
+
+        capacity = queue.maxsize
+        # Capacities below four cannot form a useful high/low band without
+        # withholding the only frame a pull-driven consumer needs in order to
+        # request the next one. Preserve their bounded compatibility behavior;
+        # the product route uses the eight-frame queue.
+        if capacity < 4:
+            return capacity
+        return max(0, (capacity // 2) - 1)
+
+    async def _wait_for_resume_watermark(
+        self, handle: StreamingSynthesisHandle
+    ) -> None:
+        """Hold an ordinary pause until downstream has useful free capacity."""
+
+        watermark = self._resume_low_watermark(handle.queue)
+        observed_pulls = handle.frames_pulled
+        while handle.queue.qsize() > watermark:
+            # Clear before rechecking the counter/queue so a concurrent pull
+            # cannot be lost between observation and waiter installation.
+            handle.downstream_progress_event.clear()
+            if handle.frames_pulled > observed_pulls:
+                observed_pulls = handle.frames_pulled
+                continue
+            if handle.queue.qsize() <= watermark:
+                return
+
+            progress_task = asyncio.create_task(handle.downstream_progress_event.wait())
+            park_task = asyncio.create_task(handle.park_requested_event.wait())
+            terminal_task = asyncio.create_task(handle.terminal_ready.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    {progress_task, park_task, terminal_task},
+                    timeout=self._pause_wait_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    raise StreamingSynthesisRouteViolation(
+                        StreamingSynthesisReason.QUEUE_EXHAUSTED.value,
+                        "streaming synthesis consumer stopped making progress",
+                    )
+                if park_task in done or terminal_task in done:
+                    return
+                observed_pulls = handle.frames_pulled
+            finally:
+                for task in (progress_task, park_task, terminal_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(
+                    progress_task,
+                    park_task,
+                    terminal_task,
+                    return_exceptions=True,
+                )
 
     async def _wait_for_prefetch_promotion(
         self, handle: StreamingSynthesisHandle
@@ -2592,13 +2733,14 @@ class StreamingSynthesisRouteOwner:
         cancel_producer: bool = True,
     ) -> StreamingSynthesisOutcome:
         async with handle.cleanup_lock:
-            return await self._terminate_locked(
-                handle,
-                reason,
-                allow_batch=allow_batch,
-                cancel_provider=cancel_provider,
-                cancel_producer=cancel_producer,
-            )
+            async with handle.terminal_control_lock:
+                return await self._terminate_locked(
+                    handle,
+                    reason,
+                    allow_batch=allow_batch,
+                    cancel_provider=cancel_provider,
+                    cancel_producer=cancel_producer,
+                )
 
     async def _terminate_locked(
         self,
