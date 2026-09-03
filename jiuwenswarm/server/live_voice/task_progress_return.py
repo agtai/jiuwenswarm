@@ -74,7 +74,6 @@ from .task_store import SqliteTaskStore
 
 _EVENTS_CAPABILITY = frozenset({"task.events"})
 TASK_PROGRESS_PRESENTABLE_EVENTS = {
-    "task.accepted": "accepted",
     "task.retry_accepted": "accepted",
     "task.recovery_accepted": "accepted",
     "task.running": "running",
@@ -84,6 +83,7 @@ TASK_PROGRESS_PRESENTABLE_EVENTS = {
 }
 TASK_PROGRESS_NON_PRESENTABLE_EVENTS = frozenset(
     {
+        "task.accepted",
         "attempt.accepted",
         "attempt.running",
         "attempt.terminal",
@@ -97,8 +97,10 @@ TASK_PROGRESS_NON_PRESENTABLE_EVENTS = frozenset(
         "task.reprioritize_applied",
     }
 )
-_PROJECTABLE_EVENTS = TASK_PROGRESS_PRESENTABLE_EVENTS
-_NO_PROJECTION_EVENTS = TASK_PROGRESS_NON_PRESENTABLE_EVENTS
+# Initial acceptance still establishes the Arbiter lifecycle. The product's
+# direct command receipt already acknowledges it; it is not a second notification.
+_PROJECTABLE_EVENTS = {"task.accepted": "accepted", **TASK_PROGRESS_PRESENTABLE_EVENTS}
+_NO_PROJECTION_EVENTS = TASK_PROGRESS_NON_PRESENTABLE_EVENTS - {"task.accepted"}
 _TASK_EVENT_PRODUCERS = {
     "task.accepted": frozenset({"task_core"}),
     "task.retry_accepted": frozenset({"task_core"}),

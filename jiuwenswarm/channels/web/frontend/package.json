@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "test:task-notification-timeline": "esbuild src/features/chatTimeline/buildTurnTimeline.ts --bundle --platform=node --format=esm --packages=external --loader:.css=empty --loader:.svg=file --loader:.png=file --outfile=node_modules/.cache/task-notification-timeline/buildTurnTimeline.mjs --define:import.meta.env={} && node --test tests/taskNotificationTimeline.test.mjs",
     "predev": "cd ../../../.. && node ./jiuwenswarm/scripts/generate-agent-folders.js",
     "prebuild": "cd ../../../.. && node ./jiuwenswarm/scripts/generate-agent-folders.js",
     "prebuild:live-voice": "cd ../../../.. && node ./jiuwenswarm/scripts/generate-agent-folders.js",

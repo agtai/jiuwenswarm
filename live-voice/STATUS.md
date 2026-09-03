@@ -12,8 +12,9 @@ and “only human acceptance remains” are not justified.**
 - The real Cascade analysis → explicit delegation → one Task → sealed file path
   has scoped evidence. It does not prove complete A/B/A2 control, offline recovery,
   artifact correctness or this entire working candidate.
-- Confirmed open result defects include arithmetic/cost consistency, exact
-  literal filenames and user-facing paths to temporary checkouts. Spoken
+- Confirmed open result defects include arithmetic/cost consistency and exact
+  literal filenames. New results relocate exact artifact paths to the retained
+  project; old sealed results remain unchanged. Spoken
   feasibility and brevity also lack stable closure. See the
   [artifact evidence](evidence/ARTIFACT_QUALITY_REHEARSAL_CHECK_20260903.md).
 - Recent delegation, capture-recovery and right-side Task presentation repairs
@@ -76,8 +77,8 @@ repeat the old whole-project audit solely to resume a bounded task.
 
 The product objective remains: final committed speech reaches the real
 JiuwenSwarm Agent/tools and authoritative Task results through one semantic
-implementation. This documentation cleanup does not restart product tests or
-activate a new implementation batch.
+implementation. The current bounded repair addresses Task notification
+presentation and usable result locations; broader business/audio gates remain open.
 
 - **Intended behavior:** model semantics propose; Bridge/Registry/Core validate
   exact scope, targets, capabilities, replay and effects. Clear authorized local
@@ -110,8 +111,13 @@ activate a new implementation batch.
 
 Recognition/media-start and Gateway exact-ID replay have scoped repairs. Later
 Web fixes address interrupted-answer context, notification priority, empty-fetch
-listening recovery and per-Task/Chinese presentation. Their combined current-source
-physical recovery and cumulative review remain open. Read only the implicated
+listening recovery and per-Task/Chinese presentation. Initial accepted no longer
+duplicates the direct receipt in integrated product notifications; each Task
+notification keeps its own time and cannot extend foreground elapsed time.
+Focused Store/ACK/fallback and result-location checks are recorded in the
+[notification repair](evidence/TASK_NOTIFICATION_PRESENTATION_REPAIR_20260903.md).
+Existing retry/recovery failures, combined physical recovery and independent
+review remain open. Read only the implicated
 [query/interruption repair](evidence/REHEARSAL_QUERY_INTERRUPTION_REPAIR_20260903.md),
 [six-defect repair](evidence/REHEARSAL_SIX_DEFECT_REPAIR_20260903.md) or
 [Gateway replay evidence](evidence/P3_TERMINAL_RPC_REPLAY_REPAIR_20260902.md).

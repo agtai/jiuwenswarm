@@ -2187,6 +2187,11 @@ class AgentServerProductCompositionRegistry:
             raise RuntimeError("Task progress pending class is invalid")
         if event.origin != retained.binding:
             raise RuntimeError("Task progress pending event changed route binding")
+        if (
+            self._p3_presentation_consumption_available
+            and event.task_event.event_type == "task.accepted"
+        ):
+            return
         key = (presentation_class, event.task_event.event_id)
         pending = _PendingProgressPresentation(
             event=event,
@@ -2293,6 +2298,13 @@ class AgentServerProductCompositionRegistry:
         *,
         fallback_reason: str | None = None,
     ) -> None:
+        # Keep initial acceptance in the authoritative event stream, without a
+        # second receipt, presentation reservation or synthetic consumption ACK.
+        if (
+            self._p3_presentation_consumption_available
+            and event.task_event.event_type == "task.accepted"
+        ):
+            return
         binding = event.origin
         key = (
             binding.session_id,
@@ -3651,6 +3663,11 @@ class AgentServerProductCompositionRegistry:
     async def _emit_voice_progress(
         self, intent: TaskProgressNotificationIntent
     ) -> None:
+        if (
+            self._p3_presentation_consumption_available
+            and intent.task_event.event_type == "task.accepted"
+        ):
+            return
         binding = intent.origin
         origin = self._voice_task_origins.get(binding.task_id)
         retained = (

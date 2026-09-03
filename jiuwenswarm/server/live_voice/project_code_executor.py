@@ -1219,6 +1219,37 @@ def _bounded_chat_final(payload: Mapping[str, Any]) -> str | None:
     return content
 
 
+def _relocate_result_artifact_paths(
+    text: str | None,
+    worktree: Path,
+    target_root: Path,
+    artifacts: tuple[TaskResultArtifact, ...],
+) -> str | None:
+    """Narrate retained artifact locations, never the disposable checkout.
+
+    Only exact paths for discovered artifacts are eligible. Applying and hashing
+    those files still gates publication; unrelated paths and prose are untouched.
+    """
+    if text is None or not artifacts:
+        return text
+    replacements: dict[str, str] = {}
+    for artifact in artifacts:
+        source = worktree / artifact.relative_path
+        target = target_root / artifact.relative_path
+        replacements[str(source)] = str(target)
+        replacements[source.as_posix()] = target.as_posix()
+        replacements[source.as_uri()] = target.as_uri()
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_/\\])(?:"
+        + "|".join(re.escape(path) for path in sorted(replacements, key=len, reverse=True))
+        + r")(?![\w./\\%\-])"
+    )
+    relocated = pattern.sub(lambda match: replacements[match.group()], text)
+    if _bounded_chat_final({"event_type": "chat.final", "content": relocated}) is None:
+        raise RuntimeError("RESULT_PATH_RELOCATION_TOO_LARGE")
+    return relocated
+
+
 def _attempt_result_artifacts(worktree: Path) -> tuple[TaskResultArtifact, ...]:
     raw_paths = _git_output(
         worktree,
@@ -5207,6 +5238,9 @@ class DirectProjectCodeExecutorAdapter:
             )
             result_artifacts = await asyncio.to_thread(
                 _attempt_result_artifacts, created_worktree
+            )
+            chat_final = _relocate_result_artifact_paths(
+                chat_final, created_worktree, target_root, result_artifacts
             )
             interruption = self._interruptions.get(item.attempt_id)
             refreshed = await asyncio.to_thread(self._journal.get, item.attempt_id)

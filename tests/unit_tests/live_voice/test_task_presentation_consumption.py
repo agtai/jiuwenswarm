@@ -42,6 +42,7 @@ from tests.unit_tests.live_voice.test_persistent_task_core import (
     _Executor,
     _create,
     _grant,
+    _observations,
     _scope,
 )
 
@@ -257,6 +258,7 @@ def test_text_requires_exact_dom_adoption_before_consumption_command() -> None:
 def test_reservation_skips_only_a_closed_nonpresentable_prefix() -> None:
     owner, runtime = _owner()
     page = _page(
+        _event(0, event_type="task.accepted", state="accepted", source_event_id=None),
         _event(
             1,
             event_type="attempt.accepted",
@@ -490,6 +492,21 @@ def test_real_core_port_advances_only_the_exact_presented_text_prefix(
     )
     response = ResponseRef("interaction-real", "response-real", 1)
     owner, _runtime = _owner(response)
+    with pytest.raises(TaskPresentationViolation) as accepted_only:
+        owner.reserve_next(
+            page, scope=scope, response_ref=response,
+            delivery_id="not-presented-accepted", unit_id="not-presented-accepted",
+        )
+    assert accepted_only.value.reason == "PRESENTATION_APPLICABLE_EVENT_UNAVAILABLE"
+    assert _runtime.calls == []
+    assert page.watermark == -1
+    dispatch = store.claim_outbox("presentation-worker")
+    assert dispatch is not None
+    store.complete_outbox(
+        dispatch, executor_ref=f"legacy:{dispatch.attempt_id}",
+        observations=tuple(replace(event, occurred_at=NOW) for event in _observations(dispatch)),
+    )
+    page = store.unread_events_page(task_id, scope, presentation_class="text", limit=500)
     delivery = owner.reserve_next(
         page,
         scope=scope,
@@ -498,6 +515,7 @@ def test_real_core_port_advances_only_the_exact_presented_text_prefix(
         unit_id="unit-real",
     )
     command, _ = _ack_command(delivery, command_id="command-real-ack")
+    assert delivery.event_seq == 3
     grant = replace(
         _grant(
             "task.ack_events",

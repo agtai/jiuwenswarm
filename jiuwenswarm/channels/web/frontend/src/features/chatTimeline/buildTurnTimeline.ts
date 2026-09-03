@@ -16,6 +16,15 @@ import { parseTimestampToMs } from '../../utils/timestamp';
 const legacyMessageKeyCache = new WeakMap<Message, string>();
 let legacyMessageKeyCounter = 0;
 
+function isTaskNotification(message: Message): boolean {
+  // This response namespace is minted by the Task presentation owner and is
+  // persisted in history. Content or Task names must not decide this boundary.
+  return (
+    message.role === 'assistant' &&
+    /^live-voice:[^:]+:response-task-progress-[a-f0-9]{40}:/.test(message.id)
+  );
+}
+
 export function getMessageRenderKey(message: Message): string {
   if (message.renderKey) {
     return message.renderKey;
@@ -321,7 +330,7 @@ export function buildRenderItems(items: TimelineItem[], isTeamMode: boolean, isP
     }
     // Goal 完成卡片是该目标的结论卡，不是「中间文字」：自己永不折进「已完成」，
     // 也不能顶掉它上面那条真正的收尾回答（否则完成卡一到，最后一条回答就被折走）。
-    if (isGoalCompletedContent(renderItem.message.content)) {
+    if (isGoalCompletedContent(renderItem.message.content) || isTaskNotification(renderItem.message)) {
       renderItem.hideMeta = false;
       continue;
     }
@@ -391,6 +400,11 @@ function assignTurnTopAvatars(items: RenderItem[], isTeamMode: boolean): void {
       continue;
     }
 
+    if (isTaskNotification(item.message)) {
+      item.showAvatar = true;
+      continue;
+    }
+
     if (!isTeamMode) {
       item.showAvatar =
         item.message.role === 'assistant' ? claimLeaderAvatar(item.turnId) : false;
@@ -418,6 +432,7 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
   let hasWork = false;
   let turnId = 0;
   let seq = 0;
+  let summaryInsertIndex = 0;
 
   const acc = (value: number, asWork = false) => {
     if (!Number.isFinite(value) || value <= 0) return;
@@ -435,7 +450,7 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
     // 从首次思考才开始算，耗时显示成 0s。
     const carryTimestamps = !hasActivity;
     if (shouldShow && Number.isFinite(startMs) && Number.isFinite(endMs)) {
-      out.push({
+      out.splice(summaryInsertIndex, 0, {
         type: 'turnSummary',
         key: `turn-summary-${seq}`,
         turnId,
@@ -463,6 +478,13 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       flush(false);
       turnId += 1;
       acc(toTimestampMs(item.message.timestamp), false);
+      out.push(item);
+      summaryInsertIndex = out.length;
+      continue;
+    }
+    if (item.type === 'message' && isTaskNotification(item.message)) {
+      // Detached Task progress has its own timestamp; it cannot extend the
+      // foreground turn or move that turn's elapsed-time line below itself.
       out.push(item);
       continue;
     }
@@ -496,6 +518,7 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       }
     }
     out.push(item);
+    summaryInsertIndex = out.length;
   }
   flush(true);
   return out;

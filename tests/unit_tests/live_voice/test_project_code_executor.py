@@ -1949,6 +1949,61 @@ async def test_direct_preserves_user_instruction_and_seals_actual_artifact(
     assert _git(project, "status", "--porcelain") == "?? itinerary.md"
 
 
+@pytest.mark.asyncio
+async def test_direct_result_relocates_exact_artifact_paths_before_checkout_cleanup(tmp_path: Path) -> None:
+    project = tmp_path / "retained project"
+    _git_project(project)
+    filename = "《计算结果.md》"
+
+    class PathReportingAgent(_DirectProjectExecutor):
+        async def process_background_code_task_stream(self, request):
+            self.requests.append(request)
+            root = Path(request.params["project_dir"]).resolve()
+            (root / filename).write_text("verified content", encoding="utf-8")
+            self.reported_root = root
+            yield AgentResponseChunk(
+                request.request_id, request.channel_id,
+                payload={"event_type": "chat.final", "content": f"Written: `{root / filename}`"},
+                is_complete=True,
+            )
+
+    executor = PathReportingAgent(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)), tmp_path / "paths.sqlite3",
+    )
+    try:
+        await adapter.dispatch(_item(project))
+        await _wait_direct_settled(adapter)
+        task, attempt = _direct_task_attempt(project)
+        terminal = await adapter.status(task, attempt)
+        observation = terminal.observations[-1]
+        assert observation.attempt_outcome is TerminalOutcome.COMPLETED
+        assert observation.result_text == f"Written: `{project / filename}`"
+        assert not executor.reported_root.exists()
+        assert (project / filename).read_text(encoding="utf-8") == "verified content"
+        assert observation.result_artifacts[0].relative_path == filename
+        assert observation.result_artifacts[0].sha256 == hashlib.sha256(b"verified content").hexdigest()
+        # Re-reading the durable journal cannot restore the disposable path.
+        assert adapter._journal.get("attempt-1").result_text == observation.result_text
+    finally:
+        await adapter.close()
+
+
+def test_result_path_relocation_preserves_unrelated_paths_and_literal_text(tmp_path: Path) -> None:
+    from jiuwenswarm.server.live_voice.formal_task_models import TaskResultArtifact
+
+    source, target = tmp_path / "checkout", tmp_path / "retained project"
+    artifact = TaskResultArtifact("nested/《result.md》", "a" * 64)
+    path, final = source / artifact.relative_path, target / artifact.relative_path
+    unrelated = f"{path}.bak {source / 'missing.md'} 650+240+100"
+    text = f"`{path}` [{artifact.relative_path}]({path.as_uri()})\n{path.as_posix()}\n{unrelated}"
+    expected = f"`{final}` [{artifact.relative_path}]({final.as_uri()})\n{final.as_posix()}\n{unrelated}"
+    assert project_code_executor._relocate_result_artifact_paths(text, source, target, (artifact,)) == expected
+    assert project_code_executor._relocate_result_artifact_paths(f"文件:{path}", source, target, (artifact,)) == f"文件:{final}"
+    assert project_code_executor._relocate_result_artifact_paths(text, source, target, ()) == text
+    assert project_code_executor._relocate_result_artifact_paths(None, source, target, (artifact,)) is None
+
+
 @pytest.mark.parametrize("lose_settlement", [False, True])
 @pytest.mark.asyncio
 async def test_real_direct_core_adjustment_does_not_block_other_running_cancel(
