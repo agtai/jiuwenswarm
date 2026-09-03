@@ -25,6 +25,20 @@ structurally unable to pass its single-request TTS text limit. The lifecycle
 matrix remains open and Task 2 remains blocked. See the
 [consolidated physical pilot evidence](../evidence/C019_TASK1_ABA_PHYSICAL_PILOT_20260903.md).
 
+### B/long recovery update
+
+Two later clean B/long retries preserved the failed pilot and tested the
+Gateway pause-pressure repair independently. The first retry still failed after
+unit 3 promotion with `STREAMING_SPEECH_EVENT_QUEUE_EXHAUSTED`. The second,
+whose only additional source change exposed the timeout phase in ordinary log
+formatting, completed 5/5 ordered units with zero Browser L0 drops and no
+operator-observed audible gap, stutter or truncation. Its digital TTFA was
+`4,410.2 ms`; digital completion-to-next-start intervals were
+`4,540.5 / 1,347.5 / 1,349.7 / 1,406.4 ms`, but these did not represent audible
+silence in the physical observation. One PASS after one FAIL is not stability
+or causal-fix evidence. Task 1 remains open and Task 2 remains blocked. See the
+[B/long recovery smoke](../evidence/C019_B_LONG_RECOVERY_SMOKE_20260903.md).
+
 ## Hongxing Task assessment
 
 ### Task 1 — Complete C019 physical validation

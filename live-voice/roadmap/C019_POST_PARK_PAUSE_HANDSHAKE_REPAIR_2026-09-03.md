@@ -177,6 +177,18 @@ exact clean candidate remains mandatory: the Provider stall after a ≥ 60 s PAR
 is inferred from one sample and is not reproduced by these tests. The physical
 defect is not claimed fixed.
 
+### Physical follow-up
+
+Two later clean B/long attempts produced one failure and one PASS. The first
+failed after a successful unit-3 promotion with
+`STREAMING_SPEECH_EVENT_QUEUE_EXHAUSTED`; the second completed 5/5 units with
+zero Browser-record loss and no operator-observed audible gap. The second
+source differed only by rendering the already recorded queue-pressure phase in
+the ordinary log message, so it cannot establish that this repair caused the
+success. Physical stability and the exact intermittent timeout phase remain
+open. See
+[`C019_B_LONG_RECOVERY_SMOKE_20260903.md`](../evidence/C019_B_LONG_RECOVERY_SMOKE_20260903.md).
+
 ## Residual concerns
 
 - `_reason_for_exception` still defaults any non-route, non-speech exception to
