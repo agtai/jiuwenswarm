@@ -1073,6 +1073,19 @@ test('terminal fallback chat projection shares the exact backend TEXT history id
   const chineseDigest = createHash('sha256').update(chinese.message.content, 'utf8').digest('hex');
   assert.equal(chinese.message.id, `live-voice:interaction-a:response-a:13:text:0:0:${chineseDigest}`);
   assert.equal(await terminalTextFallbackMessage(event, 'task-b', true), null);
+  for (const [taskId, name, chinese, expected] of [
+    ['task-a', '设备检查', true, '“设备检查”已完成，结果已经生成。'],
+    ['task-b', '客户说明草稿', true, '“客户说明草稿”已完成，结果已经生成。'],
+    ['task-c', 'Equipment review', false, 'Task "Equipment review" is complete and its result is ready.'],
+  ]) {
+    const namedEvent = { ...event, task_id: taskId };
+    const named = await terminalTextFallbackMessage(namedEvent, taskId, chinese, name);
+    assert.equal(named.message.content, expected);
+    const namedDigest = createHash('sha256').update(expected, 'utf8').digest('hex');
+    assert.equal(named.message.id, `live-voice:interaction-a:response-a:13:text:0:0:${namedDigest}`);
+    assert.equal((await terminalTextFallbackMessage(namedEvent, taskId, chinese, name)).message.id, named.message.id);
+    assert.equal(await terminalTextFallbackMessage(namedEvent, 'task-foreign', chinese, name), null);
+  }
 });
 
 test('terminal notification receive transport remains subscribed while an outstanding Task starts idle capture', () => {

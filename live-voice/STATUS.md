@@ -56,7 +56,7 @@ repeat the old whole-project audit solely to resume a bounded task.
 | Capability / module | Implemented boundary | Remaining / dependency |
 |---|---|---|
 | Audio Device & browser I/O | Capture/playout, dedicated media wiring, exact-owner lifecycle fencing; project-home listening/transcription observed | Stable physical listening/recovery and heard playback; permission/device coverage; AEC/NS/AGC, double-talk, loss/stop targets |
-| Speech Recognition | Streaming/batch recognition, committed finals, typed stream failure and bounded capture-only retry | Long/paused speech and barge-in robustness; fallback/cancel, provider/configuration and device/network evidence |
+| Speech Recognition | Streaming/batch recognition, committed finals, typed stream failure and bounded capture-only retry | OPEN cumulative 64-identity exhaustion blocks new capture; lifecycle repair and truthful diagnostics required. Long/paused speech, fallback/cancel and device/network evidence remain open |
 | Speech Synthesis | Streaming/batch TTS, response ownership and playback ACK | Current interrupted-answer/long-answer stability; first-audio, underrun, pronunciation and stale-output proof |
 | Realtime Media | Dedicated transport, registration, rotation and bounded P2 notification pull | Backpressure/load, loss/reordering/corruption/reconnect and truthful recovery diagnostics |
 | Conversation Runtime | Committed-input/generation fencing, Stop/Exit, playback/generation interruption, unanswered-input continuity, presentation/ACK ownership | Combined listening/notification/Task races on current source; no old audio revival or accidental detached-Task control |
@@ -120,6 +120,14 @@ foreground analysis; broader business/audio gates remain open.
   review-only windows and superseded latency deferrals are not current instructions.
 
 ### Reopened terminal Task notification presentation repair
+
+The implemented Tier-1 wording repair uses authoritative Task names in notifications
+and the existing text fallback, without changing Task matching, ACK or protocol.
+Focused checks and the frontend build pass; existing fallback ACK and stale UI
+assertion failures remain open. Named physical playback has not been accepted.
+Scope and bounded evidence: [named notifications](evidence/NAMED_TASK_NOTIFICATIONS_20260903.md).
+The [cumulative capture identity defect](evidence/CAPTURE_IDENTITY_CAPACITY_20260903.md)
+is recorded as OPEN and excluded from this wording repair; restart only mitigates it.
 
 Recognition/media-start and Gateway exact-ID replay have scoped repairs. Later
 Web fixes address interrupted-answer context, notification priority, empty-fetch

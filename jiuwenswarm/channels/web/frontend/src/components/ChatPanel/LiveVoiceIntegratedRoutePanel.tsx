@@ -1044,26 +1044,29 @@ export function terminalTextFallbackNotificationText(
   event: Readonly<ProductTextProgressEvent>,
   currentTaskId: string | null,
   chinese = false,
+  taskName: string | null = null,
 ): string | null {
   if (!terminalTextFallbackCompletesVoiceAnnouncement(event, currentTaskId)) return null;
   // This is a display projection of the reconciled canonical terminal event,
   // not a new result or a client-authored P2 response/history record.
+  const subject = taskName === null ? (chinese ? '后台任务' : 'The background task')
+    : chinese ? `“${taskName}”` : `Task "${taskName}"`;
   if (chinese) {
     switch (event.source_event.payload.outcome) {
-      case 'completed': return '后台任务已完成，结果已经生成。';
-      case 'cancelled': return '后台任务已取消。';
-      case 'failed': return '后台任务失败了。';
-      case 'interrupted': return '后台任务已中断。';
-      case 'unknown': return '后台任务已经结束，结果状态未知。';
+      case 'completed': return `${subject}已完成，结果已经生成。`;
+      case 'cancelled': return `${subject}已取消。`;
+      case 'failed': return `${subject}失败了。`;
+      case 'interrupted': return `${subject}已中断。`;
+      case 'unknown': return `${subject}已经结束，结果状态未知。`;
       default: return null;
     }
   }
   switch (event.source_event.payload.outcome) {
-    case 'completed': return 'The background task is complete and its result is ready.';
-    case 'cancelled': return 'The background task was cancelled.';
-    case 'failed': return 'The background task failed.';
-    case 'interrupted': return 'The background task was interrupted.';
-    case 'unknown': return 'The background task ended with an unknown outcome.';
+    case 'completed': return `${subject} is complete and its result is ready.`;
+    case 'cancelled': return `${subject} was cancelled.`;
+    case 'failed': return `${subject} failed.`;
+    case 'interrupted': return `${subject} was interrupted.`;
+    case 'unknown': return `${subject} ended with an unknown outcome.`;
     default: return null;
   }
 }
@@ -1072,8 +1075,9 @@ export async function terminalTextFallbackMessage(
   event: Readonly<ProductTextProgressEvent>,
   currentTaskId: string | null,
   chinese = false,
+  taskName: string | null = null,
 ): Promise<ProductLiveVoiceMessageEvent | null> {
-  const text = terminalTextFallbackNotificationText(event, currentTaskId, chinese);
+  const text = terminalTextFallbackNotificationText(event, currentTaskId, chinese, taskName);
   const response = event.response_ref;
   if (text === null || response === null) return null;
   const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
@@ -1965,6 +1969,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     closed: boolean;
     terminal_presented: boolean;
     notification_chinese: boolean;
+    notification_name: string | null;
     voice_generation: number;
     ready: Promise<void>;
   }>());
@@ -4088,6 +4093,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               parsed,
               owned.voice !== null ? parsed.task_id : createdProgressRouteRef.current?.task_id ?? null,
               owned.voice?.notification_chinese ?? false,
+              owned.voice?.notification_name ?? null,
             );
             if (!isCurrent()) return;
             if (fallbackMessage !== null) props.onProductVoiceMessage?.(fallbackMessage);
@@ -5990,6 +5996,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       },
     });
     const entry = { binding, owner, leaf: null as FormalTaskControlLeaf | null, closed: false, terminal_presented: false, notification_chinese: false,
+      notification_name: null as string | null,
       voice_generation: voiceLoopGenerationRef.current, ready: Promise.resolve() };
     voiceProgressOwnersRef.current.set(taskId, entry);
     const isCurrent = () => voiceProgressOwnersRef.current.get(taskId) === entry && voiceProgressIsCurrent(entry);
@@ -6000,9 +6007,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       entry.leaf = bootstrapProductP3TaskInspectionLeaf(response, { session_id: binding.session_id, task_id: taskId });
       const task = recordValue(recordValue(recordValue(response)?.result)?.task);
       const instruction = recordValue(task?.spec)?.instruction;
+      const name = recordValue(task?.spec)?.name;
       // Match the server's language projection from this validated exact Task,
       // including the content used by durable TEXT-fallback history IDs.
       entry.notification_chinese = typeof instruction === 'string' && /[\u4e00-\u9fff]/.test(instruction);
+      entry.notification_name = typeof name === 'string' && name.trim() ? name : taskId;
       await inspectProductP3RetryCandidate({ request: productRequest, leaf: entry.leaf, session_id: binding.session_id,
         task_id: taskId, request_nonce: `voice-progress-${Date.now()}`, is_current: isCurrent });
       if (!isCurrent()) throw new Error('PRODUCT_VOICE_TASK_PROGRESS_STALE');

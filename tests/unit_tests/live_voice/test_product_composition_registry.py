@@ -6387,7 +6387,7 @@ async def test_terminal_notification_claims_completion_only_with_exact_valid_res
     no_result = await registry._terminal_notification_text(
         event(TerminalOutcome.COMPLETED)
     )
-    assert no_result == "The background task ended, but no valid result is available."
+    assert no_result == 'Task "Three-day itinerary" ended, but no valid result is available.'
 
     composition.result_availability = TaskResultAvailability.AVAILABLE.value
     composition.result_reason = "TASK_RESULT_AVAILABLE"
@@ -6402,7 +6402,7 @@ async def test_terminal_notification_claims_completion_only_with_exact_valid_res
     completed = await registry._terminal_notification_text(
         event(TerminalOutcome.COMPLETED)
     )
-    assert completed == "The background task is complete and its result is ready."
+    assert completed == 'Task "Three-day itinerary" is complete and its result is ready.'
 
     composition.result_record = {
         **composition.result_record,
@@ -6411,19 +6411,33 @@ async def test_terminal_notification_claims_completion_only_with_exact_valid_res
     mismatched = await registry._terminal_notification_text(
         event(TerminalOutcome.COMPLETED)
     )
-    assert mismatched == "The background task ended, but no valid result is available."
+    assert mismatched == 'Task "Three-day itinerary" ended, but no valid result is available.'
     assert (
         await registry._terminal_notification_text(event(TerminalOutcome.FAILED))
-        == "The background task failed."
+        == 'Task "Three-day itinerary" failed.'
     )
     assert (
         await registry._terminal_notification_text(event(TerminalOutcome.CANCELLED))
-        == "The background task was cancelled."
+        == 'Task "Three-day itinerary" was cancelled.'
     )
     assert (
         await registry._terminal_notification_text(event(TerminalOutcome.INTERRUPTED))
-        == "The background task was interrupted."
+        == 'Task "Three-day itinerary" was interrupted.'
     )
+
+    # Names come from the event's exact Task, not the most recently selected one.
+    for task_id, name in (("task-analysis", "设备检查"), ("task-draft", "客户说明草稿")):
+        named = replace(terminal, task_id=task_id, spec=replace(
+            terminal.spec, name=name, instruction="整理项目资料。",
+        ))
+        composition.known_tasks[task_id] = named
+        text = await registry._terminal_notification_text(replace(
+            event(TerminalOutcome.CANCELLED), task_id=task_id,
+        ))
+        assert text == f"“{name}”已取消。"
+    assert composition.current is terminal
+    assert composition.handle_calls == []
+    assert _manager.agent.calls == 0
 
 
 @pytest.mark.asyncio
@@ -6517,7 +6531,7 @@ async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_repla
     assert notification["kind"] == "agent.output"
     assert agent_event["source_provenance"] == "server.task_notification"
     assert agent_event["text"] == (
-        "The background task is complete and its result is ready."
+        'Task "Three-day itinerary" is complete and its result is ready.'
     )
     assert tuple(registry._pending_terminal_notifications) == (task_event.event_id,)
     assert registry._terminal_notification_responses == {
@@ -7607,7 +7621,7 @@ async def test_terminal_after_voice_playout_failure_replays_on_successor_p2(
     unit = cast(dict[str, object], payload["presentation_unit"])
     event = cast(dict[str, object], payload["agent_event"])
     assert event["source_provenance"] == "server.task_notification"
-    assert event["text"] == "后台任务已完成，结果已经生成。"
+    assert event["text"] == "“三天行程规划”已完成，结果已经生成。"
     acknowledged = await registry.handle_p2_presentation_ack(
         params={
             **successor_binding,
@@ -11708,6 +11722,12 @@ async def test_real_store_audio_resumes_nonzero_watermark_in_fresh_registry(
                 notification = candidate
                 break
         assert notification is not None
+        task_name = store.get_task(task_id, SCOPE).spec.name
+        text = cast(dict[str, object], notification["agent_event"])["text"]
+        assert text == (
+            f"“{task_name}”正在执行。" if expected_seq == 3
+            else f"“{task_name}”失败了。"
+        )
         response = cast(dict[str, object], notification["response"])
         unit = cast(dict[str, object], notification["presentation_unit"])
         acknowledged = await registry.handle_p2_presentation_ack(

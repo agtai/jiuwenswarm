@@ -509,6 +509,7 @@ class _ProgressRoute:
     orphaned_terminal: TaskProgressTextEvent | None = None
     text_fallback_reason: str | None = None
     notification_chinese: bool | None = None
+    notification_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2625,33 +2626,38 @@ class AgentServerProductCompositionRegistry:
                 scope=event.task_event.scope,
             )
             retained_progress.notification_chinese = self._is_chinese_voice_text(task.spec.instruction)
+            retained_progress.notification_name = task.spec.name
+        subject = self._task_notification_subject(
+            retained_progress.notification_name or event.task_event.task_id,
+            chinese=retained_progress.notification_chinese,
+        )
         if event.task_event.event_type != "task.terminal":
-            text = f"Background task update: {event.task_event.state}."
+            text = f"{subject} update: {event.task_event.state}."
         elif outcome == TerminalOutcome.COMPLETED.value:
-            text = "The background task is complete and its result is ready."
+            text = f"{subject} is complete and its result is ready."
         elif outcome == TerminalOutcome.CANCELLED.value:
-            text = "The background task was cancelled."
+            text = f"{subject} was cancelled."
         elif outcome == TerminalOutcome.FAILED.value:
-            text = "The background task failed."
+            text = f"{subject} failed."
         elif outcome == TerminalOutcome.INTERRUPTED.value:
-            text = "The background task was interrupted."
+            text = f"{subject} was interrupted."
         else:
-            text = "The background task ended with an unknown outcome."
+            text = f"{subject} ended with an unknown outcome."
         if retained_progress.notification_chinese:
             if event.task_event.event_type == "task.terminal":
                 text = {
-                    "completed": "后台任务已完成，结果已经生成。",
-                    "cancelled": "后台任务已取消。",
-                    "failed": "后台任务失败了。",
-                    "interrupted": "后台任务已中断。",
-                }.get(outcome, "后台任务已经结束，结果状态未知。")
+                    "completed": f"{subject}已完成，结果已经生成。",
+                    "cancelled": f"{subject}已取消。",
+                    "failed": f"{subject}失败了。",
+                    "interrupted": f"{subject}已中断。",
+                }.get(outcome, f"{subject}已经结束，结果状态未知。")
             else:
                 text = {
-                    "accepted": "后台任务已受理，等待执行。",
-                    "running": "后台任务正在执行。",
-                    "blocked": "后台任务受阻，等待所需条件。",
-                    "decision_required": "后台任务需要你的决定。",
-                }.get(event.task_event.state, "后台任务状态已更新。")
+                    "accepted": f"{subject}已受理，等待执行。",
+                    "running": f"{subject}正在执行。",
+                    "blocked": f"{subject}受阻，等待所需条件。",
+                    "decision_required": f"{subject}需要你的决定。",
+                }.get(event.task_event.state, f"{subject}状态已更新。")
         commit = TurnCommit.from_dict(
             {
                 "contract_version": CONTRACT_VERSION,
@@ -3504,7 +3510,14 @@ class AgentServerProductCompositionRegistry:
             if authority.lease is not None:
                 await authority.lease.close()
 
+    @staticmethod
+    def _task_notification_subject(name: str, *, chinese: bool) -> str:
+        # Display metadata only; exact Task/scope/attempt authority is resolved
+        # before reading the name. Never use the name to select a Task.
+        return f"“{name}”" if chinese else f'Task "{name}"'
+
     async def _terminal_notification_text(self, task_event: PersistentTaskEvent) -> str:
+        name = task_event.task_id
         try:
             (
                 task,
@@ -3517,10 +3530,12 @@ class AgentServerProductCompositionRegistry:
                 scope=task_event.scope,
             )
             chinese = self._is_chinese_voice_text(task.spec.instruction)
+            name = task.spec.name
         except Exception:
             chinese = False
             availability = TaskResultAvailability.UNAVAILABLE
             record = None
+        subject = self._task_notification_subject(name, chinese=chinese)
         outcome = task_event.outcome
         if outcome == TerminalOutcome.COMPLETED.value:
             result_valid = bool(
@@ -3531,31 +3546,31 @@ class AgentServerProductCompositionRegistry:
             )
             if result_valid:
                 return (
-                    "后台任务已完成，结果已经生成。"
+                    f"{subject}已完成，结果已经生成。"
                     if chinese
-                    else "The background task is complete and its result is ready."
+                    else f"{subject} is complete and its result is ready."
                 )
             return (
-                "后台任务已经结束，但没有可用的合法结果。"
+                f"{subject}已经结束，但没有可用的合法结果。"
                 if chinese
-                else "The background task ended, but no valid result is available."
+                else f"{subject} ended, but no valid result is available."
             )
         if outcome == TerminalOutcome.CANCELLED.value:
             return (
-                "后台任务已取消。" if chinese else "The background task was cancelled."
+                f"{subject}已取消。" if chinese else f"{subject} was cancelled."
             )
         if outcome == TerminalOutcome.FAILED.value:
-            return "后台任务失败了。" if chinese else "The background task failed."
+            return f"{subject}失败了。" if chinese else f"{subject} failed."
         if outcome == TerminalOutcome.INTERRUPTED.value:
             return (
-                "后台任务已中断。"
+                f"{subject}已中断。"
                 if chinese
-                else "The background task was interrupted."
+                else f"{subject} was interrupted."
             )
         return (
-            "后台任务已经结束，但终态不可用。"
+            f"{subject}已经结束，但终态不可用。"
             if chinese
-            else "The background task ended with an unavailable terminal state."
+            else f"{subject} ended with an unavailable terminal state."
         )
 
     async def _deliver_terminal_notification(
