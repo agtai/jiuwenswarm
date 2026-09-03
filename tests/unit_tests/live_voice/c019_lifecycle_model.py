@@ -70,6 +70,16 @@ class TransportState(StrEnum):
     CLOSED = "closed"
 
 
+class InterruptingCaptureState(StrEnum):
+    """Browser successor capture opened during playout of the response."""
+
+    NONE = "none"
+    LIVE = "live"
+    END_OF_TURN = "end_of_turn"
+    REVOKED = "revoked"
+    RELEASED = "released"
+
+
 class LifecycleEvent(StrEnum):
     PROVIDER_EVENT_WAIT_STARTED = "provider_event_wait_started"
     PROVIDER_EVENT_DELIVERED = "provider_event_delivered"
@@ -111,6 +121,15 @@ class LifecycleEvent(StrEnum):
     EXPECTED_TRANSPORT_CLOSE = "expected_transport_close"
     TRANSPORT_CLOSE = "transport_close"
     REPORT_TRANSPORT_FAILURE = "report_transport_failure"
+    SUCCESSOR_CAPTURE_READY = "successor_capture_ready"
+    SPOKEN_BARGE_IN = "spoken_barge_in"
+    STOP_REQUESTED = "stop_requested"
+    EXIT_REQUESTED = "exit_requested"
+    CAPTURE_AUTHORITY_REVOKED = "capture_authority_revoked"
+    CAPTURE_END_OF_TURN = "capture_end_of_turn"
+    UNIFIED_SUBMIT = "unified_submit"
+    FENCED_RESPONSE_EFFECT = "fenced_response_effect"
+    CONTINUATION_SETTLEMENT_DEADLINE = "continuation_settlement_deadline"
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +183,12 @@ class LifecycleState:
     transport_failure_reported: bool = False
     foreign_control_rejected: bool = False
     authority_effects_after_foreign: int = 0
+    interrupting_capture: InterruptingCaptureState = InterruptingCaptureState.NONE
+    spoken_barge_fenced: bool = False
+    local_stop_requested: bool = False
+    committed_submits_after_fence: int = 0
+    fenced_response_effects: int = 0
+    continuation_settled: bool = False
 
 
 _PENDING_CONTROL_STATES = frozenset(
@@ -291,6 +316,37 @@ def applicable_events(state: LifecycleState) -> tuple[LifecycleEvent, ...]:
         and not state.transport_failure_reported
     ):
         events.append(LifecycleEvent.REPORT_TRANSPORT_FAILURE)
+    fence_admitted = not state.spoken_barge_fenced and not state.local_stop_requested
+    if (
+        state.interrupting_capture is InterruptingCaptureState.NONE
+        and state.outcome is OutcomeState.ACTIVE
+    ):
+        events.append(LifecycleEvent.SUCCESSOR_CAPTURE_READY)
+    if (
+        state.interrupting_capture is InterruptingCaptureState.LIVE
+        and state.outcome in {OutcomeState.ACTIVE, OutcomeState.SUCCEEDED}
+        and fence_admitted
+    ):
+        events.append(LifecycleEvent.SPOKEN_BARGE_IN)
+    if (
+        state.outcome in {OutcomeState.ACTIVE, OutcomeState.SUCCEEDED}
+        and fence_admitted
+    ):
+        events.append(LifecycleEvent.STOP_REQUESTED)
+        events.append(LifecycleEvent.EXIT_REQUESTED)
+    if state.interrupting_capture in {
+        InterruptingCaptureState.LIVE,
+        InterruptingCaptureState.END_OF_TURN,
+    }:
+        events.append(LifecycleEvent.CAPTURE_AUTHORITY_REVOKED)
+    if state.interrupting_capture is InterruptingCaptureState.LIVE:
+        events.append(LifecycleEvent.CAPTURE_END_OF_TURN)
+    if state.interrupting_capture is InterruptingCaptureState.END_OF_TURN:
+        events.append(LifecycleEvent.UNIFIED_SUBMIT)
+    if state.spoken_barge_fenced or state.local_stop_requested:
+        events.append(LifecycleEvent.FENCED_RESPONSE_EFFECT)
+        if not state.continuation_settled:
+            events.append(LifecycleEvent.CONTINUATION_SETTLEMENT_DEADLINE)
     return tuple(events)
 
 
@@ -532,7 +588,70 @@ def apply_event(state: LifecycleState, event: LifecycleEvent) -> LifecycleState:
         return replace(state, transport=TransportState.CLOSED)
     if event is LifecycleEvent.REPORT_TRANSPORT_FAILURE:
         return replace(state, transport_failure_reported=True)
+    if event is LifecycleEvent.SUCCESSOR_CAPTURE_READY:
+        return replace(state, interrupting_capture=InterruptingCaptureState.LIVE)
+    if event is LifecycleEvent.SPOKEN_BARGE_IN:
+        # Real speech on the successor capture fences the response exactly
+        # like CANCEL, but the capture that carries the interrupting speech
+        # stays authoritative until its own end of turn.
+        return replace(
+            _fence_response(state),
+            spoken_barge_fenced=True,
+        )
+    if event in {LifecycleEvent.STOP_REQUESTED, LifecycleEvent.EXIT_REQUESTED}:
+        return replace(
+            _fence_response(state),
+            local_stop_requested=True,
+            interrupting_capture=(
+                InterruptingCaptureState.RELEASED
+                if state.interrupting_capture
+                in {InterruptingCaptureState.LIVE, InterruptingCaptureState.END_OF_TURN}
+                else state.interrupting_capture
+            ),
+        )
+    if event is LifecycleEvent.CAPTURE_AUTHORITY_REVOKED:
+        return replace(state, interrupting_capture=InterruptingCaptureState.REVOKED)
+    if event is LifecycleEvent.CAPTURE_END_OF_TURN:
+        return replace(state, interrupting_capture=InterruptingCaptureState.END_OF_TURN)
+    if event is LifecycleEvent.UNIFIED_SUBMIT:
+        return replace(
+            state,
+            interrupting_capture=InterruptingCaptureState.RELEASED,
+            committed_submits_after_fence=(
+                state.committed_submits_after_fence
+                + (1 if state.spoken_barge_fenced or state.local_stop_requested else 0)
+            ),
+        )
+    if event is LifecycleEvent.FENCED_RESPONSE_EFFECT:
+        return replace(state, fenced_response_effects=state.fenced_response_effects + 1)
+    if event is LifecycleEvent.CONTINUATION_SETTLEMENT_DEADLINE:
+        # The bounded settlement window after a fence has elapsed: an end of
+        # turn observed on the interrupting capture must have produced its one
+        # committed submit by now.
+        return replace(state, continuation_settled=True)
     raise AssertionError(f"unhandled lifecycle event: {event}")
+
+
+def _fence_response(state: LifecycleState) -> LifecycleState:
+    """Cancel the response: Provider, reader, pause owners, successor."""
+
+    return replace(
+        state,
+        provider=ProviderState.CANCELLED,
+        outcome=OutcomeState.CANCELLED,
+        reader=ReaderState.EXITED,
+        control=ControlState.ACTIVE,
+        pause_owner=PauseOwner.NONE,
+        pause_deadline_kind=PauseDeadlineKind.NONE,
+        successor=SuccessorState.CANCELLED,
+        waiting_for_park=False,
+        pause_deadline_ms=None,
+        ordinary_deadline_ms=None,
+        promotion_deadline_ms=None,
+        expected_transport_close=(
+            state.expected_transport_close or state.transport is TransportState.ATTACHED
+        ),
+    )
 
 
 def violations(state: LifecycleState) -> tuple[str, ...]:
@@ -595,6 +714,24 @@ def violations(state: LifecycleState) -> tuple[str, ...]:
         found.append("C019-ORDINARY-DEADLINE-01")
     if state.foreign_control_rejected and state.authority_effects_after_foreign:
         found.append("C019-IDENTITY-01")
+    if (
+        state.spoken_barge_fenced
+        and (
+            state.interrupting_capture is InterruptingCaptureState.REVOKED
+            or state.committed_submits_after_fence > 1
+            or state.fenced_response_effects > 0
+            or (
+                state.continuation_settled
+                and state.interrupting_capture is InterruptingCaptureState.END_OF_TURN
+            )
+        )
+    ) or (
+        state.local_stop_requested
+        and (
+            state.committed_submits_after_fence > 0 or state.fenced_response_effects > 0
+        )
+    ):
+        found.append("C019-SPOKEN-BARGE-CONTINUATION-01")
     active_resume_chain = (
         state.adapter_resume_requested
         and state.adapter_resume_acknowledged
@@ -832,6 +969,41 @@ def with_transport_observation(
         transport=transport,
         expected_transport_close=expected_close,
         transport_failure_reported=failure_reported,
+    )
+
+
+def with_spoken_barge_observation(
+    state: LifecycleState,
+    *,
+    fence: str,
+    interrupting_capture: str,
+    committed_submits_after_fence: int,
+    fenced_response_effects: int,
+    settled: bool = False,
+) -> LifecycleState:
+    """Translate observed Browser/Gateway facts after a playout fence.
+
+    ``fence`` is ``"spoken_barge"`` (real speech during playout), ``"stop"``,
+    ``"exit"`` or ``"none"``. ``interrupting_capture`` is the observed state of
+    the successor capture that carried the interrupting speech: ``"live"``,
+    ``"end_of_turn"``, ``"revoked"`` (its media authority was revoked or its
+    streaming recognition was aborted before an end of turn), ``"released"``
+    or ``"none"``. ``settled`` records that the bounded settlement window after
+    the fence has elapsed in the observed run.
+    """
+
+    if fence not in {"spoken_barge", "stop", "exit", "none"}:
+        raise ValueError("fence must be spoken_barge, stop, exit or none")
+    if committed_submits_after_fence < 0 or fenced_response_effects < 0:
+        raise ValueError("observed counts cannot be negative")
+    return replace(
+        state,
+        spoken_barge_fenced=fence == "spoken_barge",
+        local_stop_requested=fence in {"stop", "exit"},
+        interrupting_capture=InterruptingCaptureState(interrupting_capture),
+        committed_submits_after_fence=committed_submits_after_fence,
+        fenced_response_effects=fenced_response_effects,
+        continuation_settled=settled,
     )
 
 

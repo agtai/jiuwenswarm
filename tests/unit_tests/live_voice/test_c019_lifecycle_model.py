@@ -6,6 +6,7 @@ import pytest
 
 from tests.unit_tests.live_voice.c019_lifecycle_model import (
     ControlState,
+    InterruptingCaptureState,
     LifecycleEvent,
     LifecycleState,
     PauseDeadlineKind,
@@ -21,6 +22,7 @@ from tests.unit_tests.live_voice.c019_lifecycle_model import (
     from_adapter_snapshot,
     violations,
     with_identity_observation,
+    with_spoken_barge_observation,
     with_unit_sequence_observation,
 )
 
@@ -534,3 +536,177 @@ def test_cancel_releases_park_owner_and_deadlines() -> None:
     assert state.promotion_deadline_ms is None
     assert LifecycleEvent.ADVANCE_TO_PROMOTION_DEADLINE not in applicable_events(state)
     assert violations(state) == ()
+
+
+def spoken_barge_state() -> LifecycleState:
+    state = apply_event(LifecycleState(), LifecycleEvent.TRANSPORT_ATTACH)
+    state = apply_event(state, LifecycleEvent.SUCCESSOR_PREFETCH)
+    state = apply_event(state, LifecycleEvent.SUCCESSOR_CAPTURE_READY)
+    return apply_event(state, LifecycleEvent.SPOKEN_BARGE_IN)
+
+
+def test_spoken_barge_fences_the_response_and_keeps_the_interrupting_capture() -> None:
+    state = spoken_barge_state()
+
+    assert state.outcome is OutcomeState.CANCELLED
+    assert state.successor is SuccessorState.CANCELLED
+    assert state.expected_transport_close is True
+    assert state.interrupting_capture is InterruptingCaptureState.LIVE
+    assert LifecycleEvent.AUDIO_DELTA not in applicable_events(state)
+    assert LifecycleEvent.SUCCESSOR_PLAY not in applicable_events(state)
+    assert violations(state) == ()
+
+
+def test_spoken_barge_continuation_submits_exactly_one_new_turn() -> None:
+    state = apply_event(spoken_barge_state(), LifecycleEvent.TRANSPORT_CLOSE)
+    state = apply_event(state, LifecycleEvent.CAPTURE_END_OF_TURN)
+    assert violations(state) == ()
+
+    submitted = apply_event(state, LifecycleEvent.UNIFIED_SUBMIT)
+    assert submitted.committed_submits_after_fence == 1
+    assert submitted.interrupting_capture is InterruptingCaptureState.RELEASED
+    assert violations(submitted) == ()
+    assert LifecycleEvent.UNIFIED_SUBMIT not in applicable_events(submitted)
+
+    duplicated = replace(submitted, committed_submits_after_fence=2)
+    assert violations(duplicated) == ("C019-SPOKEN-BARGE-CONTINUATION-01",)
+
+
+def test_spoken_barge_revoking_the_interrupting_capture_is_a_violation() -> None:
+    state = apply_event(spoken_barge_state(), LifecycleEvent.CAPTURE_AUTHORITY_REVOKED)
+
+    assert state.interrupting_capture is InterruptingCaptureState.REVOKED
+    assert LifecycleEvent.CAPTURE_END_OF_TURN not in applicable_events(state)
+    assert violations(state) == ("C019-SPOKEN-BARGE-CONTINUATION-01",)
+
+
+def test_spoken_barge_rejects_late_effects_of_the_fenced_response() -> None:
+    state = apply_event(spoken_barge_state(), LifecycleEvent.FENCED_RESPONSE_EFFECT)
+
+    assert violations(state) == ("C019-SPOKEN-BARGE-CONTINUATION-01",)
+
+
+@pytest.mark.parametrize(
+    "event", (LifecycleEvent.STOP_REQUESTED, LifecycleEvent.EXIT_REQUESTED)
+)
+def test_stop_and_exit_release_the_capture_and_never_submit(
+    event: LifecycleEvent,
+) -> None:
+    state = apply_event(LifecycleState(), LifecycleEvent.SUCCESSOR_CAPTURE_READY)
+    state = apply_event(state, event)
+
+    assert state.outcome is OutcomeState.CANCELLED
+    assert state.interrupting_capture is InterruptingCaptureState.RELEASED
+    assert LifecycleEvent.SPOKEN_BARGE_IN not in applicable_events(state)
+    assert LifecycleEvent.UNIFIED_SUBMIT not in applicable_events(state)
+    assert violations(state) == ()
+
+    submitted = replace(state, committed_submits_after_fence=1)
+    assert violations(submitted) == ("C019-SPOKEN-BARGE-CONTINUATION-01",)
+
+
+def test_explorer_reaches_the_spoken_barge_continuation_violation() -> None:
+    assert explore(LifecycleState(), max_depth=1) == {}
+    assert "C019-SPOKEN-BARGE-CONTINUATION-01" in explore(LifecycleState(), max_depth=3)
+
+    traces = explore(spoken_barge_state(), max_depth=1)
+    assert traces["C019-SPOKEN-BARGE-CONTINUATION-01"] in {
+        (LifecycleEvent.CAPTURE_AUTHORITY_REVOKED,),
+        (LifecycleEvent.FENCED_RESPONSE_EFFECT,),
+    }
+
+
+def test_physical_a1_spoken_barge_observation_is_valid() -> None:
+    # c019-task1-aba-20260903T175213Z/A1 long-0: barge fence 0.6 ms, then a
+    # second EOT on the same capture and one new committed unified submit.
+    state = with_spoken_barge_observation(
+        LifecycleState(),
+        fence="spoken_barge",
+        interrupting_capture="released",
+        committed_submits_after_fence=1,
+        fenced_response_effects=0,
+    )
+
+    assert violations(state) == ()
+
+
+def test_physical_b_spoken_barge_observation_is_a_violation() -> None:
+    # c019-task1-aba-20260903T175213Z/B long-0: barge fence 0.8 ms, then the
+    # Browser revoked the successor capture subject, the Gateway aborted its
+    # streaming recognition (STREAMING_SPEECH_ROUTE_ABORTED), no second EOT
+    # and no unified submit.
+    state = with_spoken_barge_observation(
+        LifecycleState(),
+        fence="spoken_barge",
+        interrupting_capture="revoked",
+        committed_submits_after_fence=0,
+        fenced_response_effects=0,
+    )
+
+    assert violations(state) == ("C019-SPOKEN-BARGE-CONTINUATION-01",)
+
+
+def test_spoken_barge_observation_rejects_unknown_fence() -> None:
+    with pytest.raises(ValueError, match="fence must be"):
+        with_spoken_barge_observation(
+            LifecycleState(),
+            fence="barge",
+            interrupting_capture="live",
+            committed_submits_after_fence=0,
+            fenced_response_effects=0,
+        )
+
+
+def test_spoken_barge_eot_without_submit_is_a_violation_once_settlement_elapses() -> (
+    None
+):
+    state = apply_event(spoken_barge_state(), LifecycleEvent.CAPTURE_END_OF_TURN)
+    # The transient window between EOT and the committed submit is normal.
+    assert violations(state) == ()
+
+    unsettled = apply_event(state, LifecycleEvent.CONTINUATION_SETTLEMENT_DEADLINE)
+    assert violations(unsettled) == ("C019-SPOKEN-BARGE-CONTINUATION-01",)
+
+    submitted = apply_event(state, LifecycleEvent.UNIFIED_SUBMIT)
+    settled = apply_event(submitted, LifecycleEvent.CONTINUATION_SETTLEMENT_DEADLINE)
+    assert violations(settled) == ()
+    assert LifecycleEvent.CONTINUATION_SETTLEMENT_DEADLINE not in applicable_events(
+        settled
+    )
+
+
+def test_settlement_deadline_with_the_capture_still_live_is_not_a_violation() -> None:
+    state = apply_event(
+        spoken_barge_state(), LifecycleEvent.CONTINUATION_SETTLEMENT_DEADLINE
+    )
+
+    assert state.interrupting_capture is InterruptingCaptureState.LIVE
+    assert violations(state) == ()
+
+
+@pytest.mark.parametrize(
+    "event", (LifecycleEvent.STOP_REQUESTED, LifecycleEvent.EXIT_REQUESTED)
+)
+def test_stop_and_exit_settlement_never_demands_a_submit(
+    event: LifecycleEvent,
+) -> None:
+    state = apply_event(LifecycleState(), LifecycleEvent.SUCCESSOR_CAPTURE_READY)
+    state = apply_event(state, event)
+    state = apply_event(state, LifecycleEvent.CONTINUATION_SETTLEMENT_DEADLINE)
+
+    assert violations(state) == ()
+
+
+def test_physical_b_observation_with_eot_but_no_submit_is_a_violation_when_settled() -> (
+    None
+):
+    state = with_spoken_barge_observation(
+        LifecycleState(),
+        fence="spoken_barge",
+        interrupting_capture="end_of_turn",
+        committed_submits_after_fence=0,
+        fenced_response_effects=0,
+        settled=True,
+    )
+
+    assert violations(state) == ("C019-SPOKEN-BARGE-CONTINUATION-01",)

@@ -875,6 +875,19 @@ function installP1BrowserEnvironment({
       assert.equal(typeof release, 'function', 'no retained prefetch promotion ACK exists');
       release();
     },
+    closeRoutesForLease(leaseId) {
+      // Gateway `live_voice.media.close` revokes every route of the subject
+      // and aborts its streaming recognition; the Browser observes each
+      // attached socket closing remotely and can never receive a later EOT.
+      let closed = 0;
+      for (const socket of sockets) {
+        if (socket.binding?.lease_id !== leaseId || socket.readyState === 3) continue;
+        socket.readyState = 3;
+        closed += 1;
+        queueMicrotask(() => socket.onclose?.({ code: 1000, reason: '', wasClean: true }));
+      }
+      return closed;
+    },
     async emitSpeechStartDuringPlayout() {
       await waitForMounted(
         () => sockets.filter(socket => socket.binding?.direction === 'uplink').length >= 2,
@@ -902,6 +915,8 @@ function installP1BrowserEnvironment({
     async emitSpeechEndOfTurnDuringPlayout() {
       const uplinkSockets = sockets.filter(socket => socket.binding?.direction === 'uplink');
       const socket = uplinkSockets.at(-1);
+      // A revoked or closed uplink can never deliver a later server EOT.
+      if (socket.readyState === 3) return false;
       const event = {
         type: 'media.end_of_turn',
         capability_version: 'media.end_of_turn.v1',
@@ -922,6 +937,7 @@ function installP1BrowserEnvironment({
         data: serializeMediaControl(event),
       });
       await new Promise(resolve => setImmediate(resolve));
+      return true;
     },
     async emitSpeechEndOfTurn() {
       await waitForMounted(
@@ -12157,6 +12173,7 @@ test('mounted Exit retires a deferred stale Task AUDIO owner before same-Session
 
 async function runMountedC2FirstTailScenario({
   bargeDuringPrefetch = false,
+  bargeContinuation = false,
   bargeWhileAttaching = false,
   bargeDuringActiveTail = false,
   closeWhileBuffered = false,
@@ -12187,6 +12204,7 @@ async function runMountedC2FirstTailScenario({
   let rootPublishedWhileLastTailAckPending = false;
   let notificationCallsBeforeLastTailRelease = null;
   let renderer;
+  const activationSubjects = [];
   const browser = installP1BrowserEnvironment({
     mediaBinding: () => activeMediaBinding,
     holdDownlinkDetach: prefetchPromotion
@@ -12387,6 +12405,7 @@ async function runMountedC2FirstTailScenario({
     if (method === 'live_voice.media.activate') {
       const index = calls.filter(call => call.method === method).length;
       activeMediaBinding = mountedMediaBinding(params, index);
+      activationSubjects.push(`mounted-c2-media-${index}`);
       return {
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
@@ -12406,7 +12425,15 @@ async function runMountedC2FirstTailScenario({
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
     }
-    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    if (method === 'live_voice.media.close') {
+      if (bargeContinuation) {
+        // Gateway revoke closes every route of the subject and aborts its
+        // streaming recognition (STREAMING_SPEECH_ROUTE_ABORTED).
+        const index = String(params.subject_id).replace('mounted-c2-media-', '');
+        browser.closeRoutesForLease(`mounted-media-lease-${index}`);
+      }
+      return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    }
     if (method === 'live_voice.media.playout_receipt') {
       return {
         status: 'media_playout_acknowledged',
@@ -12725,6 +12752,61 @@ async function runMountedC2FirstTailScenario({
             .map(state => state.text_reason ?? 'unknown')
             .join(',')}`,
         );
+        if (bargeContinuation) {
+          // C019-SPOKEN-BARGE-CONTINUATION-01: the successor capture that
+          // carried the interrupting speech must stay authoritative until its
+          // own EOT and produce exactly one new committed unified submit. The
+          // fenced response's successors are discarded, never the capture.
+          // The successor capture activated during playout carries the
+          // interrupting speech; the earlier subject only owns the fenced
+          // response's TTS receipts.
+          assert.equal(activationSubjects.length, 2, 'spoken barge scenario did not open exactly one successor capture');
+          const interruptingSubject = activationSubjects[1];
+          const closedSubjects = () => calls
+            .filter(call => call.method === 'live_voice.media.close')
+            .map(call => call.params.subject_id);
+          assert.equal(
+            calls.filter(call => call.method === 'live_voice.media.activate').length,
+            2,
+            'spoken barge re-allocated a capture instead of retaining the interrupting one',
+          );
+          await waitForMounted(
+            () => ['capturing'].includes(states.at(-1)?.p1_status),
+            `interrupting capture did not remain authoritative after the barge fence; states=${states.slice(-12).map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')}`,
+          );
+          await browser.emitSpeechEndOfTurnDuringPlayout();
+          await waitForMounted(
+            () => calls.filter(call => call.method === 'live_voice.composition.unified.submit').length === 2,
+            `spoken barge EOT did not submit exactly one new committed turn; submits=${calls.filter(call => call.method === 'live_voice.composition.unified.submit').length} closes=${closedSubjects().join(',')} states=${states.slice(-12).map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')} methods=${calls.slice(-20).map(call => call.method).join(',')}`,
+            5_000,
+          );
+          for (let turn = 0; turn < 5; turn += 1) await new Promise(resolve => setImmediate(resolve));
+          assert.equal(
+            calls.filter(call => call.method === 'live_voice.composition.unified.submit').length,
+            2,
+            'spoken barge produced more than one committed follow-up submit',
+          );
+          assert.equal(
+            closedSubjects().includes(interruptingSubject),
+            false,
+            `spoken barge revoked the capture that carried the interrupting speech; closes=${closedSubjects().join(',')} methods=${calls.map(call => `${call.method}${call.method === 'live_voice.media.close' ? `(${call.params.subject_id})` : ''}${call.method === 'live_voice.speech.synthesize_batch' ? `(${call.params.unit_id})` : ''}`).join(',')} states=${states.slice(-12).map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')}`,
+          );
+          assert.equal(
+            calls.some(
+              call => call.method === 'live_voice.composition.p2.presentation.ack'
+                && call.params.unit_id === 'mounted-c2-tail',
+            ),
+            false,
+            'fenced response received a late tail ACK after the spoken barge',
+          );
+          assert.equal(projectedMessages.some(event => event.message.role === 'assistant'), false);
+          assert.equal(browser.counts.sourceStarts, 1, 'fenced response released audio after the spoken barge');
+          assert.equal(
+            states.some(state => state.p1_status === 'failed' || state.p1_reason === 'MEDIA_LOCAL_CLOSE'),
+            false,
+            `spoken barge continuation became a P1 failure: ${states.filter(state => state.p1_status === 'failed' || state.p1_reason === 'MEDIA_LOCAL_CLOSE').map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}`).join(',')}`,
+          );
+        }
         return;
       }
     });
@@ -13026,6 +13108,14 @@ test('mounted C2 retryable prefix ACK uncertainty retains FIFO ownership over la
 
 test('mounted C2 barge during muted first-tail preparation releases no tail audio or ACK', async () => {
   await runMountedC2FirstTailScenario({ bargeDuringPrefetch: true });
+});
+
+test('mounted C2 spoken barge keeps the interrupting capture authoritative until its own EOT submits one new turn', async () => {
+  await runMountedC2FirstTailScenario({ bargeDuringPrefetch: true, bargeContinuation: true });
+});
+
+test('mounted C2 spoken barge over a negotiated staged successor keeps the interrupting capture authoritative', async () => {
+  await runMountedC2FirstTailScenario({ prefetchPromotion: true, bargeDuringPrefetch: true, bargeContinuation: true });
 });
 
 test('mounted C2 barge while the first tail attaches fences every late tail effect', async () => {

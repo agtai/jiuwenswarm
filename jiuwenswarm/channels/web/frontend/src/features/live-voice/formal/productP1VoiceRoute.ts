@@ -44,6 +44,26 @@ import {
 
 export const PRODUCT_P1_MEDIA_ACTIVATE_METHOD = 'live_voice.media.activate';
 export const PRODUCT_P1_MEDIA_CLOSE_METHOD = 'live_voice.media.close';
+
+// Temporary C019 diagnostic: every media authority revocation names its exact
+// call site with a closed label so a physical run can attribute the revoke
+// that aborted the interrupting capture (C019-SPOKEN-BARGE-CONTINUATION-01).
+export type ProductP1MediaAuthorityRevokeCaller =
+  | 'start_capture'
+  | 'playout_completed_receipt'
+  | 'degraded_concurrent_capture'
+  | 'overlap_capture_rotation'
+  | 'idle_capture_rotation'
+  | 'release_resources_close'
+  | 'release_resources_failed'
+  | 'continuation_playout_barged'
+  | 'continuation_recognition_requested'
+  | 'continuation_response_replaced'
+  | 'continuation_playout_completed'
+  | 'continuation_cancelled'
+  | 'continuation_completed';
+export type ProductP1MediaAuthorityRole = 'current' | 'continuation' | 'retained' | 'foreign';
+export const PRODUCT_P1_MEDIA_AUTHORITY_REVOKE_EVENT = 'browser_media_authority_revoke_requested';
 export const PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD = 'live_voice.media.playout_receipt';
 
 export const PRODUCT_P1_CAPTURE_MAX_DURATION_MS = 30_000;
@@ -752,7 +772,9 @@ export class ProductP1VoiceRouteOwner {
     this.#activationGeneration = activationGeneration;
     this.#deviceSelection = deviceSelection;
     try {
-      if (this.#mediaCloseBinding !== null) await this.#revokeMediaAuthority();
+      if (this.#mediaCloseBinding !== null) {
+        await this.#revokeMediaAuthority(this.#mediaCloseBinding, 'start_capture');
+      }
       this.#requireCurrent(operationGeneration);
       this.#playout = await this.#audio.unlockPlayout(
         deviceSelection.output_device_id ? { deviceId: deviceSelection.output_device_id } : {}
@@ -1025,7 +1047,7 @@ export class ProductP1VoiceRouteOwner {
     const speech = this.#speech;
     this.#setStatus('recognizing', null);
     try {
-      await this.#releaseContinuationSpeechAuthority();
+      await this.#releaseContinuationSpeechAuthority('continuation_recognition_requested');
       this.#requireCurrent(operationGeneration);
       await this.#audio.stopCapture('formal_recognition_requested');
       this.#l0Record('capture_stopped');
@@ -1194,7 +1216,7 @@ export class ProductP1VoiceRouteOwner {
         this.#continuationResponseKey !== null &&
         this.#continuationResponseKey !== responseKey
       ) {
-        await this.#releaseContinuationSpeechAuthority();
+        await this.#releaseContinuationSpeechAuthority('continuation_response_replaced');
       }
       this.#continuationResponseKey =
         input.response_continuation === true ? responseKey : null;
@@ -1795,7 +1817,7 @@ export class ProductP1VoiceRouteOwner {
           this.#setStatus('recognized', null);
         } else if (captureReadiness?.ready === true) {
           if (this.#continuationResponseKey !== responseKey) {
-            await this.#revokeMediaAuthority(receiptAuthority);
+            await this.#revokeMediaAuthority(receiptAuthority, 'playout_completed_receipt');
             this.#requireCurrent(operationGeneration);
           }
           this.#setStatus('capturing', pendingPlayout.degradationReason);
@@ -1812,7 +1834,7 @@ export class ProductP1VoiceRouteOwner {
         if (this.#continuationAdmissionCleanupPromise !== null) {
           await this.#continuationAdmissionCleanupPromise;
         }
-        await this.#releaseContinuationSpeechAuthority();
+        await this.#releaseContinuationSpeechAuthority('continuation_playout_barged');
         this.#setStatus(this.#route === null ? 'recognized' : 'capturing', null);
         this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
         return;
@@ -1868,7 +1890,7 @@ export class ProductP1VoiceRouteOwner {
     }
     if (speech !== null) await speech.fenceSynthesis(response.interaction_id);
     if (this.#continuationResponseKey === responseKey) {
-      await this.#releaseContinuationSpeechAuthority();
+      await this.#releaseContinuationSpeechAuthority('continuation_cancelled');
     }
   }
 
@@ -1884,7 +1906,7 @@ export class ProductP1VoiceRouteOwner {
       throw new Error('prepared formal speech remains unconsumed');
     }
     if (this.#continuationResponseKey === responseKey) {
-      await this.#releaseContinuationSpeechAuthority();
+      await this.#releaseContinuationSpeechAuthority('continuation_completed');
     }
   }
 
@@ -2065,7 +2087,7 @@ export class ProductP1VoiceRouteOwner {
     }
     this.#requireCurrent(operationGeneration);
     if (failedAuthority !== null && failedAuthority.subject_id !== priorAuthority.subject_id) {
-      await this.#revokeMediaAuthority(failedAuthority);
+      await this.#revokeMediaAuthority(failedAuthority, 'degraded_concurrent_capture');
       this.#requireCurrent(operationGeneration);
     }
     // The TTS downlink and its final receipt remain owned by the predecessor
@@ -2353,7 +2375,7 @@ export class ProductP1VoiceRouteOwner {
     this.#speech = null;
     await this.#startConcurrentCapture(operationGeneration);
     this.#requireCurrent(operationGeneration);
-    await this.#revokeMediaAuthority(priorAuthority);
+    await this.#revokeMediaAuthority(priorAuthority, 'overlap_capture_rotation');
     this.#requireCurrent(operationGeneration);
   }
 
@@ -2419,7 +2441,7 @@ export class ProductP1VoiceRouteOwner {
     this.#speech = null;
     await this.#startConcurrentCapture(operationGeneration);
     this.#requireCurrent(operationGeneration);
-    await this.#revokeMediaAuthority(priorAuthority);
+    await this.#revokeMediaAuthority(priorAuthority, 'idle_capture_rotation');
     this.#requireCurrent(operationGeneration);
     this.#setStatus('capturing', this.#streamingFallbackReason);
     this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
@@ -3052,8 +3074,30 @@ export class ProductP1VoiceRouteOwner {
     );
   }
 
-  async #revokeMediaAuthority(binding: Readonly<ProductP1MediaCloseBinding> | null = this.#mediaCloseBinding): Promise<void> {
-    if (binding === null) return;
+  #mediaAuthorityRole(binding: Readonly<ProductP1MediaCloseBinding>): ProductP1MediaAuthorityRole {
+    if (this.#mediaCloseBinding?.subject_id === binding.subject_id) return 'current';
+    if (this.#continuationReceiptAuthority?.subject_id === binding.subject_id) return 'continuation';
+    if (this.#retainedMediaAuthorities.has(binding.subject_id)) return 'retained';
+    return 'foreign';
+  }
+
+  async #revokeMediaAuthority(
+    binding: Readonly<ProductP1MediaCloseBinding>,
+    caller: ProductP1MediaAuthorityRevokeCaller,
+    role: ProductP1MediaAuthorityRole = this.#mediaAuthorityRole(binding),
+  ): Promise<void> {
+    // Content-free: no subject, ticket, text or audio; only the closed caller
+    // label, the binding's role for this owner and the owner's own truth.
+    console.info('[LiveVoiceC019] transition diagnostic', {
+      event: PRODUCT_P1_MEDIA_AUTHORITY_REVOKE_EVENT,
+      caller,
+      binding_role: role,
+      status: this.#status,
+      operation_generation: this.#operationGeneration,
+      activation_generation: binding.activation_generation,
+      capture_route_attached: this.#route !== null,
+      continuation_pending: this.#continuationResponseKey !== null,
+    });
     const value = exactObject(
       await this.#request(PRODUCT_P1_MEDIA_CLOSE_METHOD, { ...binding }),
       ['status', 'reason_id', 'session_id', 'subject_id', 'correlation_id', 'interaction_id', 'activation_id', 'activation_generation'],
@@ -3076,13 +3120,18 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
-  async #releaseContinuationSpeechAuthority(): Promise<void> {
+  async #releaseContinuationSpeechAuthority(
+    caller: ProductP1MediaAuthorityRevokeCaller,
+  ): Promise<void> {
     const authority = this.#continuationReceiptAuthority;
+    const role = authority === null ? null : this.#mediaAuthorityRole(authority);
     this.#continuationResponseKey = null;
     this.#continuationSpeech = null;
     this.#continuationReceiptAuthority = null;
     this.#continuationCaptureFramesAcked = 0;
-    if (authority !== null) await this.#revokeMediaAuthority(authority);
+    if (authority !== null && role !== null) {
+      await this.#revokeMediaAuthority(authority, caller, role);
+    }
   }
 
   async #acquireContinuationAdmission(
@@ -3593,7 +3642,11 @@ export class ProductP1VoiceRouteOwner {
     if (this.#mediaCloseBinding !== null) {
       authorities.set(this.#mediaCloseBinding.subject_id, this.#mediaCloseBinding);
     }
-    for (const authority of authorities.values()) await this.#revokeMediaAuthority(authority);
+    const releaseCaller: ProductP1MediaAuthorityRevokeCaller =
+      reason === 'formal_route_failed' ? 'release_resources_failed' : 'release_resources_close';
+    for (const authority of authorities.values()) {
+      await this.#revokeMediaAuthority(authority, releaseCaller);
+    }
   }
 
   #requireCurrent(operationGeneration: number): void {

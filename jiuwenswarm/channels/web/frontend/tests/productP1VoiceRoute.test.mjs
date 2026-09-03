@@ -8,6 +8,7 @@ import {
   PRODUCT_P1_CAPTURE_MAX_DURATION_MS,
   PRODUCT_P1_EMPTY_TRANSCRIPT_REASON,
   PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
+  PRODUCT_P1_MEDIA_AUTHORITY_REVOKE_EVENT,
   PRODUCT_P1_MEDIA_CLOSE_METHOD,
   PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD,
   ProductP1VoiceRouteOwner,
@@ -17,6 +18,36 @@ import {
   encodeAudioFrame,
   serializeMediaControl,
 } from '../node_modules/.cache/live-voice-browser-dedicated-media/browserDedicatedMediaRoute.mjs';
+
+// Temporary C019 diagnostic capture: every media authority revoke names its
+// closed caller label. Tests clear this list before a journey and assert the
+// labels emitted by the call sites under test.
+const revokeDiagnostics = [];
+const originalConsoleInfo = console.info;
+console.info = (...args) => {
+  if (args[0] === '[LiveVoiceC019] transition diagnostic' && args[1]?.event === PRODUCT_P1_MEDIA_AUTHORITY_REVOKE_EVENT) {
+    revokeDiagnostics.push(args[1]);
+  }
+  return originalConsoleInfo(...args);
+};
+const REVOKE_DIAGNOSTIC_KEYS = [
+  'activation_generation',
+  'binding_role',
+  'caller',
+  'capture_route_attached',
+  'continuation_pending',
+  'event',
+  'operation_generation',
+  'status',
+];
+function revokeLabels() {
+  for (const diagnostic of revokeDiagnostics) {
+    assert.deepEqual(Object.keys(diagnostic).sort(), REVOKE_DIAGNOSTIC_KEYS, 'revoke diagnostic leaked a field');
+    assert.equal(typeof diagnostic.operation_generation, 'number');
+    assert.equal(typeof diagnostic.activation_generation, 'number');
+  }
+  return revokeDiagnostics.map(diagnostic => [diagnostic.caller, diagnostic.binding_role]);
+}
 
 const captureProcessorSource = readFileSync(new URL('../src/features/live-voice/formal/adapters/liveVoiceCaptureProcessor.js', import.meta.url), 'utf8');
 const productP1VoiceRouteSource = readFileSync(
@@ -6084,6 +6115,7 @@ test('formal P1 continuation admission rejects foreign identity and capacity ove
 });
 
 test('formal P1 barge-in fences every later same-response continuation', async () => {
+  revokeDiagnostics.splice(0);
   const journey = await runConcurrentCaptureJourney({
     responseContinuation: true,
     negotiatedEot: true,
@@ -6113,10 +6145,15 @@ test('formal P1 barge-in fences every later same-response continuation', async (
     true,
   );
   assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  // The barged playout releases only the response's continuation receipt
+  // authority; the live successor capture (`current`) must not be revoked.
+  assert.deepEqual(revokeLabels(), [['continuation_playout_barged', 'continuation']]);
   await journey.owner.close();
+  assert.deepEqual(revokeLabels().slice(1), [['release_resources_close', 'current']]);
 });
 
 test('formal P1 rotates thirty seconds of silent overlap during active long playout without dropping the boundary frame', async () => {
+  revokeDiagnostics.splice(0);
   const journey = await runConcurrentCaptureJourney({
     agentText:
       '实时语音系统会持续朗读较长回答，同时保持受控监听并轮换静默的上行媒体租约。'.repeat(8),
@@ -6143,6 +6180,9 @@ test('formal P1 rotates thirty seconds of silent overlap during active long play
     false,
   );
   assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.deepEqual(revokeLabels().filter(([caller]) => caller === 'overlap_capture_rotation'), [
+    ['overlap_capture_rotation', 'retained'],
+  ]);
   await journey.owner.close();
 });
 
@@ -6321,6 +6361,7 @@ test('formal P1 does not carry short-playout echo energy into later idle rotatio
 });
 
 test('formal P1 decays one post-playout energy frame and rotates the silent lease boundary', async () => {
+  revokeDiagnostics.splice(0);
   const journey = await runConcurrentCaptureJourney();
   const { owner, calls, environment } = journey;
   assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
@@ -6375,7 +6416,17 @@ test('formal P1 decays one post-playout energy frame and rotates the silent leas
   assert.equal(rotationDiagnostics.actual_processing?.echo_cancellation, true);
   assert.equal(rotationDiagnostics.actual_processing?.noise_suppression, true);
   assert.equal(rotationDiagnostics.actual_processing?.auto_gain_control, true);
+  // The prior lease is revoked only after the successor capture is live, so
+  // drive the successor's first frame before expecting the rotation label.
+  await sendFirstFrameToNextWorklet(environment, priorWorklet);
+  for (let turn = 0; turn < 3_000 && !revokeDiagnostics.some(item => item.caller === 'idle_capture_rotation'); turn += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  assert.deepEqual(revokeLabels().filter(([caller]) => caller === 'idle_capture_rotation'), [
+    ['idle_capture_rotation', 'retained'],
+  ]);
   await owner.close();
+  assert.deepEqual(revokeLabels().at(-1), ['release_resources_close', 'current']);
 });
 
 test('formal P1 defers the boundary rotation for recent local energy and rotates when it decays', async () => {
@@ -7457,6 +7508,7 @@ test('formal P1 concurrent capture cannot publish readiness without a real frame
 });
 
 test('formal P1 concurrent capture without a Gateway ACK degrades barge-in without discarding TTS', async () => {
+  revokeDiagnostics.splice(0);
   const journey = await runConcurrentCaptureJourney({ ackSecondCapture: false });
   const { owner, calls, statuses, playError, capturingBeforeConcurrent, environment } = journey;
 
@@ -7474,11 +7526,13 @@ test('formal P1 concurrent capture without a Gateway ACK degrades barge-in witho
   assert.equal(owner.captureDiagnostics().successor_readiness, 'degraded');
   assert.equal(owner.captureDiagnostics().successor_readiness_reason, 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED');
   assert.ok(owner.captureDiagnostics().successor_readiness_elapsed_ms >= 1_000);
+  assert.deepEqual(revokeLabels(), [['degraded_concurrent_capture', 'current']]);
   await owner.close();
 });
 
 test('formal P1 restarts listening after degraded successor capture without replaying the response', async () => {
   const journey = await runConcurrentCaptureJourney({ ackSecondCapture: false });
+  revokeDiagnostics.splice(0);
   const priorWorklet = journey.environment.worklet;
   const restarting = journey.owner.startCapture({
     session_id: 'session-1',
@@ -7497,6 +7551,7 @@ test('formal P1 restarts listening after degraded successor capture without repl
   assert.equal(journey.calls.filter(([method]) => method === 'live_voice.speech.synthesize_batch').length, 1);
   assert.equal(journey.calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
   assert.equal(journey.calls.some(([method]) => method.includes('task.') || method.includes('tool.')), false);
+  assert.deepEqual(revokeLabels(), [['start_capture', 'current']]);
   await journey.owner.close();
 });
 
