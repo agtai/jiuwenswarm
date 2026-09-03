@@ -417,6 +417,8 @@ function installP1BrowserEnvironment({
   getUserMedia: getUserMediaOverride = null,
   holdDownlinkDetach = false,
   holdPrefetchPromotionAck = false,
+  holdPrefetchParkAck = false,
+  emitSocketCloseOnLocalClose = false,
   closeAudioContext: closeAudioContextOverride = null,
   startAudioSource: startAudioSourceOverride = null,
 } = {}) {
@@ -635,7 +637,10 @@ function installP1BrowserEnvironment({
               type: 'media.prefetch_transition_ack',
             }),
           });
-          if (holdPrefetchPromotionAck && control.state !== 'prefetch_parked') {
+          if (
+            (holdPrefetchPromotionAck && control.state !== 'prefetch_parked')
+            || (holdPrefetchParkAck && control.state === 'prefetch_parked')
+          ) {
             releasePrefetchPromotionAck = acknowledge;
           } else {
             queueMicrotask(acknowledge);
@@ -684,6 +689,9 @@ function installP1BrowserEnvironment({
     close() {
       if (this.readyState !== 3) counts.socketCloses += 1;
       this.readyState = 3;
+      if (emitSocketCloseOnLocalClose) {
+        queueMicrotask(() => this.onclose?.({ code: 1000, reason: '', wasClean: true }));
+      }
     }
   }
 
@@ -824,6 +832,31 @@ function installP1BrowserEnvironment({
         }),
       });
       await new Promise(resolve => setImmediate(resolve));
+    },
+    async emitDownlinkFrames(count, { fromSeq = 0 } = {}) {
+      // Drive the latest attached downlink far enough for a staged successor
+      // to retain its PARK reserve (25 frames) without rendering any audio.
+      await waitForMounted(
+        () => sockets.some(socket => socket.binding?.direction === 'downlink' && socket.readyState === FakeWebSocket.OPEN),
+        'dedicated downlink media route did not attach',
+      );
+      const socket = sockets
+        .filter(candidate => candidate.binding?.direction === 'downlink' && candidate.readyState === FakeWebSocket.OPEN)
+        .at(-1);
+      for (let seq = fromSeq; seq < fromSeq + count; seq += 1) {
+        socket.onmessage?.({
+          data: encodeAudioFrame(socket.binding, {
+            seq,
+            sample_cursor: seq * 960,
+            samples: new Float32Array(960).fill(0.125),
+          }),
+        });
+        if (seq % 8 === 7) await new Promise(resolve => setImmediate(resolve));
+      }
+      await new Promise(resolve => setImmediate(resolve));
+    },
+    hasRetainedPrefetchTransition() {
+      return releasePrefetchPromotionAck !== null;
     },
     latestDownlinkControlTypes() {
       const socket = sockets
@@ -12125,7 +12158,10 @@ test('mounted Exit retires a deferred stale Task AUDIO owner before same-Session
 async function runMountedC2FirstTailScenario({
   bargeDuringPrefetch = false,
   bargeWhileAttaching = false,
+  bargeDuringActiveTail = false,
   closeWhileBuffered = false,
+  exitWhileParkInFlight = false,
+  bargeWhileParkInFlight = false,
   delayPrefixAck = false,
   delayLastTailAck = false,
   twoTails = false,
@@ -12157,6 +12193,13 @@ async function runMountedC2FirstTailScenario({
       ? binding => binding.playout?.unit_id !== 'mounted-c2-prefix'
       : false,
     holdPrefetchPromotionAck: admissionOnly,
+    holdPrefetchParkAck: exitWhileParkInFlight || bargeWhileParkInFlight,
+    emitSocketCloseOnLocalClose:
+      bargeDuringPrefetch
+      || bargeWhileAttaching
+      || bargeDuringActiveTail
+      || exitWhileParkInFlight
+      || bargeWhileParkInFlight,
   });
   const activateP2 = createMountedP2ActivationResponder();
   const response = {
@@ -12438,8 +12481,12 @@ async function runMountedC2FirstTailScenario({
             media_ticket: 'D'.repeat(43),
             subprotocol: 'live-voice.media.v1',
             ticket_ttl_ms: 30_000,
-            frame_count: 1,
-            streaming: false,
+            // A parking successor is a long streaming unit: it must retain its
+            // 25-frame PARK reserve, which a single-frame result never can.
+            ...((exitWhileParkInFlight || bargeWhileParkInFlight)
+              && params.unit_id !== 'mounted-c2-prefix'
+              ? { frame_count: null, streaming: true }
+              : { frame_count: 1, streaming: false }),
             degradation_reason: null,
             binding: downlink,
             max_pending_frames: 8,
@@ -12558,6 +12605,14 @@ async function runMountedC2FirstTailScenario({
           'attaching first tail received a presentation ACK after barge',
         );
         assert.equal(projectedMessages.some(event => event.message.role === 'assistant'), false);
+        assert.equal(
+          states.some(state => state.text_status === 'failed'),
+          false,
+          `expected barge-in close became a visible failure: ${states
+            .filter(state => state.text_status === 'failed')
+            .map(state => state.text_reason ?? 'unknown')
+            .join(',')}`,
+        );
         return;
       }
       await browser.emitDownlinkFrame();
@@ -12576,6 +12631,54 @@ async function runMountedC2FirstTailScenario({
           0,
           'prefix ACK was emitted before its audio completed',
         );
+      }
+      if (exitWhileParkInFlight || bargeWhileParkInFlight) {
+        // Retain the successor's PARK reserve so the Browser requests PARK,
+        // and hold the Gateway ACK so that transition is still in flight when
+        // the local Stop/Exit closes the staged route.
+        await browser.emitDownlinkFrames(24, { fromSeq: 1 });
+        await waitForMounted(
+          () => browser.latestDownlinkControlTypes().includes('media.prefetch_transition'),
+          'staged successor did not request PARK after retaining its reserve',
+          5_000,
+        );
+        assert.equal(browser.hasRetainedPrefetchTransition(), true, 'PARK ACK was not held in flight');
+        const failureStates = () => states
+          .filter(state => state.p1_status === 'failed' || state.text_status === 'failed' || state.p1_reason === 'MEDIA_LOCAL_CLOSE')
+          .map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}/${state.text_status}/${state.text_reason ?? 'none'}`)
+          .join(',');
+        if (exitWhileParkInFlight) {
+          await controlRef.current.close();
+          await waitForMounted(() => states.at(-1)?.p1_status === 'closed', 'C2 Exit did not close the parking successor');
+        } else {
+          await browser.emitSpeechStartDuringPlayout();
+          await waitForMounted(
+            () => calls.some(call => call.method === 'live_voice.composition.p2.barge_in'),
+            'C2 barge did not fence the parking successor',
+          );
+          await new Promise(resolve => setImmediate(resolve));
+        }
+        assert.equal(browser.counts.sourceStarts, 1, 'parking successor reached playout after the local close');
+        assert.equal(
+          calls.some(
+            call => call.method === 'live_voice.composition.p2.presentation.ack'
+              && call.params.unit_id === 'mounted-c2-tail',
+          ),
+          false,
+          'parking successor received a presentation ACK after the local close',
+        );
+        assert.equal(projectedMessages.some(event => event.message.role === 'assistant'), false);
+        assert.equal(
+          states.some(state => state.p1_status === 'failed' || state.p1_reason === 'MEDIA_LOCAL_CLOSE'),
+          false,
+          `expected local close of a parking successor became a P1 failure: ${failureStates()}`,
+        );
+        assert.equal(
+          states.some(state => state.text_status === 'failed'),
+          false,
+          `expected local close of a parking successor became a visible failure: ${failureStates()}`,
+        );
+        return;
       }
       if (closeWhileBuffered) {
         await controlRef.current.close();
@@ -12613,6 +12716,14 @@ async function runMountedC2FirstTailScenario({
           projectedMessages.some(event => event.message.role === 'assistant'),
           false,
           'cancelled first-tail response wrote authoritative assistant history',
+        );
+        assert.equal(
+          states.some(state => state.text_status === 'failed'),
+          false,
+          `expected barge-in close became a visible failure: ${states
+            .filter(state => state.text_status === 'failed')
+            .map(state => state.text_reason ?? 'unknown')
+            .join(',')}`,
         );
         return;
       }
@@ -12657,7 +12768,13 @@ async function runMountedC2FirstTailScenario({
       });
       return;
     }
-    if (bargeDuringPrefetch || bargeWhileAttaching || closeWhileBuffered) return;
+    if (
+      bargeDuringPrefetch
+      || bargeWhileAttaching
+      || closeWhileBuffered
+      || exitWhileParkInFlight
+      || bargeWhileParkInFlight
+    ) return;
     await act(async () => {
       browser.endLatestSource();
       lifecycle.push('predecessor_rendered');
@@ -12722,6 +12839,38 @@ async function runMountedC2FirstTailScenario({
           false,
           'prepared second tail received a presentation ACK before first-tail render completion',
         );
+        if (bargeDuringActiveTail) {
+          await browser.emitDownlinkFrame();
+          assert.equal(
+            browser.counts.sourceStarts,
+            2,
+            'prepared second tail played before the active first tail completed',
+          );
+          await browser.emitSpeechStartDuringPlayout();
+          await waitForMounted(
+            () => calls.some(call => call.method === 'live_voice.composition.p2.barge_in'),
+            'C2 barge did not fence the active tail and its staged successor',
+          );
+          await new Promise(resolve => setImmediate(resolve));
+          assert.equal(browser.counts.sourceStarts, 2, 'staged successor played after active-tail barge');
+          assert.equal(
+            calls.some(
+              call => call.method === 'live_voice.composition.p2.presentation.ack'
+                && ['mounted-c2-tail', 'mounted-c2-tail-2'].includes(call.params.unit_id),
+            ),
+            false,
+            'active or staged tail received presentation ACK after barge',
+          );
+          assert.equal(
+            states.some(state => state.text_status === 'failed'),
+            false,
+            `active-tail barge became visible failure: ${states
+              .filter(state => state.text_status === 'failed')
+              .map(state => state.text_reason ?? 'unknown')
+              .join(',')}`,
+          );
+          return;
+        }
         releasePrefixAck?.();
         await new Promise(resolve => setImmediate(resolve));
         assert.equal(browser.counts.sourceStarts, 2, 'prefix ACK adopted the second tail before first-tail render completion');
@@ -12734,6 +12883,7 @@ async function runMountedC2FirstTailScenario({
         );
       });
     }
+    if (bargeDuringActiveTail) return;
     await act(async () => {
       browser.endLatestSource();
       lifecycle.push('rendered');
@@ -12880,6 +13030,28 @@ test('mounted C2 barge during muted first-tail preparation releases no tail audi
 
 test('mounted C2 barge while the first tail attaches fences every late tail effect', async () => {
   await runMountedC2FirstTailScenario({ bargeWhileAttaching: true });
+});
+
+test('mounted C2 barge during active tail keeps staged successor close invisible', async () => {
+  await runMountedC2FirstTailScenario({
+    twoTails: true,
+    prefetchPromotion: true,
+    bargeDuringActiveTail: true,
+  });
+});
+
+test('mounted C2 Exit while the successor PARK is in flight is an expected close', async () => {
+  await runMountedC2FirstTailScenario({
+    prefetchPromotion: true,
+    exitWhileParkInFlight: true,
+  });
+});
+
+test('mounted C2 barge while the successor PARK is in flight is an expected close', async () => {
+  await runMountedC2FirstTailScenario({
+    prefetchPromotion: true,
+    bargeWhileParkInFlight: true,
+  });
 });
 
 test('mounted C2 Exit while the first tail is buffered closes the staged slot exactly once', async () => {

@@ -1474,11 +1474,23 @@ export class ProductP1VoiceRouteOwner {
             !staged.promoted
             && staged.metadata.result.downlink?.prefetch_promotion_capability !== null
           ) {
-            if (this.#stagedSuccessor === staged) this.#stagedSuccessor = null;
-            void this.#fail(Object.assign(
-              new Error('negotiated staged downlink closed before promotion'),
-              { reason: event.reason_id },
-            ));
+            if (event.source === 'local_close' || this.#stagedTransitionSuperseded(staged)) {
+              // Stop, barge-in or Exit released this staged slot and closed
+              // its route locally. That owned close is expected and must not
+              // become a visible failure or an L0 failure record.
+              console.info('[LiveVoiceC019] transition diagnostic', {
+                event: 'browser_staged_close_expected',
+                response_generation: staged.prepared.response.response_generation,
+                unit_seq: staged.prepared.unitSeq,
+                reason_id: event.reason_id,
+              });
+            } else {
+              this.#stagedSuccessor = null;
+              void this.#fail(Object.assign(
+                new Error('negotiated staged downlink closed before promotion'),
+                { reason: event.reason_id },
+              ));
+            }
           }
           if (staged.promoted && staged.pending !== null && staged.downlinkRoute !== null) {
             this.#observeMediaTerminal(staged.downlinkRoute, event);
@@ -1938,12 +1950,15 @@ export class ProductP1VoiceRouteOwner {
   async close(): Promise<void> {
     if (this.#closed) return;
     if (this.#closePromise !== null) return this.#closePromise;
+    // Exit is an owned close: mark it before any route closes so a late
+    // transport terminal or staged transition rejection is classified as
+    // expected instead of reaching the failure path.
+    this.#closeRequested = true;
     this.#preparedSpeech.clear();
     const staged = this.#stagedSuccessor;
     this.#stagedSuccessor = null;
     staged?.downlinkRoute?.leaf.close('MEDIA_LOCAL_CLOSE');
     staged?.chunks.splice(0);
-    this.#closeRequested = true;
     this.#operationGeneration += 1;
     this.#status = 'cleanup_pending';
     this.#reason = 'FORMAL_P1_CLEANUP_IN_PROGRESS';
@@ -2675,6 +2690,12 @@ export class ProductP1VoiceRouteOwner {
     });
   }
 
+  #stagedTransitionSuperseded(staged: StagedProductSuccessor): boolean {
+    // A staged slot released by an owned local close (Stop, barge-in, Exit)
+    // or replaced by promotion no longer owns transport failure authority.
+    return this.#stagedSuccessor !== staged || this.#closeRequested || this.#closed;
+  }
+
   #scheduleStagedDownlinkAck(staged: StagedProductSuccessor, throughSeq: number): void {
     // A staged frame has no WebAudio owner yet. After it is retained in the
     // bounded reserve, release only the exact sender window; rendering and
@@ -2730,17 +2751,29 @@ export class ProductP1VoiceRouteOwner {
             }
           });
           void staged.transitionPromise.catch(error => {
+            if (this.#stagedTransitionSuperseded(staged)) {
+              // Stop, barge-in, Exit or promotion already released this
+              // staged slot and closed its route locally. The rejected PARK
+              // acknowledgement is that expected local close, not a failure.
+              console.info('[LiveVoiceC019] transition diagnostic', {
+                event: 'browser_product_park_superseded',
+                response_generation: staged.prepared.response.response_generation,
+                unit_seq: staged.prepared.unitSeq,
+              });
+              return;
+            }
             console.warn('[LiveVoiceC019] transition diagnostic', {
               event: 'browser_product_park_failed',
               response_generation: staged.prepared.response.response_generation,
               unit_seq: staged.prepared.unitSeq,
             });
-            if (this.#stagedSuccessor === staged) this.#stagedSuccessor = null;
+            this.#stagedSuccessor = null;
             void this.#fail(error instanceof Error ? error : new Error('staged PARK failed'));
           });
         }
       } catch (error) {
-        if (this.#stagedSuccessor === staged) this.#stagedSuccessor = null;
+        if (this.#stagedTransitionSuperseded(staged)) return;
+        this.#stagedSuccessor = null;
         route.leaf.close('MEDIA_TRANSPORT_PROTOCOL_ERROR');
         void this.#fail(error instanceof Error ? error : new Error('staged transport ACK failed'));
       }
