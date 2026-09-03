@@ -1749,3 +1749,21 @@
   retain their previous exact replay. Tier-1 recorded probes and assertions
   verify the source identity plus actual retained constraints, not one mandatory
   wording of proposal acceptance. No performance or Executor expansion.
+
+## D-111 Single semantic decision for local Task creation
+
+- Date: 2026-09-03. The user explicitly requests removing the repeated model
+  decision before local creation. A valid semantic result proceeds through the
+  existing D-109/D-110 authority and provenance checks; it is not subjected to
+  another model consent vote. Repeating the same model is not an independent
+  permission boundary and caused contradictory routing in the rehearsal.
+- This Tier-2 interpreter-path removal leaves the public schema, Registry/Core
+  authority, exact scope/capability/state checks, cancellation, durable consent
+  and idempotency intact. The bounded structural retry is preserved, as is the
+  separate adjustment-specification check. Old frozen decisions replay exactly;
+  new commits use the changed semantic configuration digest.
+- No lexical classifier, fixed business answer, unconditional permission grant
+  or change to Provider configuration is introduced. One valid local-create
+  response now needs one model call; end-to-end latency and general language
+  accuracy require their own evidence. Observed unrelated dialogue/adjustment
+  misroutes remain recorded defects, not reasons to restore a default second vote.

@@ -12,8 +12,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import logging
-import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -45,14 +43,6 @@ _MAX_INPUT_BYTES = 8_192
 _MAX_CONTEXT_BYTES = 98_304
 _MAX_OUTPUT_BYTES = 16_384
 _TIMEOUT_SECONDS = SEMANTIC_MODEL_TIMEOUT_SECONDS
-_LOGGER = logging.getLogger(__name__)
-_DELEGATION_REVIEW_INSTRUCTIONS = """Independently re-evaluate the CURRENT input
-using the same semantic contract and original authority context. No candidate
-plan supplies user consent. Return a complete semantic decision, not a Boolean
-permission verdict. Distinguish actual foreground dialogue from an unresolved
-background request, which must ask a useful clarification. Current delegation
-may continue prior analysis without a new topic, filename or assistant offer.
-"""
 _INVOCATION_OPTIONS = {
     "temperature": 0.0,
     "response_format": {"type": "json_object"},
@@ -917,7 +907,6 @@ class TaskSemanticResolver:
                     "invocation_options": invocation_options,
                     "final_max_attempts": 2,
                     "structural_retry_instructions": _STRUCTURAL_RETRY_INSTRUCTIONS,
-                    "delegation_review_instructions": _DELEGATION_REVIEW_INSTRUCTIONS,
                     "adjustment_check_instructions": _ADJUSTMENT_CHECK_INSTRUCTIONS,
                 })
                 payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -963,49 +952,6 @@ class TaskSemanticResolver:
                             raise
                         attempt_instructions = instructions + "\n" + _structural_feedback(raw_final)
                         continue
-                    if decision.requests_local_artifacts:
-                        # A useful local artifact is not itself evidence that
-                        # the user delegated it. Check before any Task effect;
-                        # regular dialogue pays no extra model invocation.
-                        started = time.monotonic()
-                        reviewed = None
-                        review_instructions = instructions + "\n" + _DELEGATION_REVIEW_INSTRUCTIONS
-                        for check_attempt in range(2):
-                            if self._before_invoke is not None:
-                                await self._before_invoke()
-                            verification = await resolved.model.invoke(
-                                messages=[SystemMessage(content=review_instructions),
-                                          UserMessage(content=payload_json)],
-                                tools=[], **invocation_options,
-                            )
-                            if getattr(verification, "tool_calls", None):
-                                raise _fail("SEMANTIC_OUTPUT_INVALID")
-                            raw_review = getattr(verification, "content", None)
-                            try:
-                                reviewed = self._decode(
-                                    raw_review, commit=commit, context=context_payload,
-                                    phase=phase, context_digest=context_digest,
-                                    model_identity=resolved.identity,
-                                    model_config_version=resolved.config_version,
-                                    config_digest=config_digest, payload_json=payload_json,
-                                )
-                                break
-                            except FormalTaskViolation as error:
-                                if check_attempt == 1 or error.reason != "SEMANTIC_OUTPUT_INVALID":
-                                    raise
-                                review_instructions = (
-                                    instructions + "\n" + _DELEGATION_REVIEW_INSTRUCTIONS
-                                    + "\n" + _structural_feedback(raw_review)
-                                )
-                        if reviewed is None:
-                            raise _fail("SEMANTIC_OUTPUT_INVALID")
-                        _LOGGER.info("semantic_delegation_review commit_id=%s route=%s elapsed_ms=%.1f",
-                                     commit.commit_id, reviewed.route, (time.monotonic() - started) * 1000)
-                        if reviewed.route in {"dialogue", "clarification"}:
-                            return reviewed
-                        if not reviewed.requests_local_artifacts:
-                            raise _fail("SEMANTIC_DELEGATION_REVIEW_CONFLICT")
-                        decision = reviewed
                     if (decision.proposal.operation == "task.adjust" and context_payload["history"]
                             and decision.continuation_action != "confirm"):
                         if self._before_invoke is not None:

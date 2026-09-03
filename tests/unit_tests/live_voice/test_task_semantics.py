@@ -127,8 +127,6 @@ async def test_invalid_acceptance_regenerates_from_original_requirements_then_fr
     class Model:
         async def invoke(self, **kwargs):
             calls.append(kwargs)
-            if len(calls) == 3:
-                return SimpleNamespace(content=json.dumps(valid), tool_calls=[])
             output = valid if len(calls) == 2 else {
                 **valid, "continuation_action": "accept_proposal",
                 "arguments": {**valid["arguments"], "name": "unvalidated-output-marker"},
@@ -136,7 +134,7 @@ async def test_invalid_acceptance_regenerates_from_original_requirements_then_fr
             return SimpleNamespace(content=json.dumps(output), tool_calls=[])
 
     decision = await TaskSemanticResolver(_Catalog(Model())).resolve(commit, context)
-    assert len(calls) == 3 and all(call["tools"] == [] for call in calls)
+    assert len(calls) == 2 and all(call["tools"] == [] for call in calls)
     assert calls[0]["messages"][1].content == calls[1]["messages"][1].content
     assert "failed server" in calls[1]["messages"][0].content
     assert "unvalidated-output-marker" not in calls[1]["messages"][0].content
@@ -225,7 +223,7 @@ async def test_requirement_sources_preserve_originals_without_accepting_old_deli
     assert "Unrelated gardening" not in decision.proposal.arguments["instruction"]
     restored = TaskSemanticDecision.from_frozen_record(decision.frozen_record(), commit=commit)
     assert restored.proposal == decision.proposal
-    assert len(model.calls) == 2
+    assert len(model.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -526,18 +524,13 @@ def _output(commit, *, route="task", **changes):
 
 
 class _Model:
-    def __init__(self, output, *, tool_calls=None, delegation_verdict=True):
+    def __init__(self, output, *, tool_calls=None):
         self.output = output
         self.tool_calls = tool_calls
         self.calls = []
-        self.delegation_verdict = delegation_verdict
 
     async def invoke(self, **kwargs):
         self.calls.append(kwargs)
-        payload = json.loads(kwargs["messages"][1].content)
-        if len(self.calls) > 1 and not self.delegation_verdict:
-            return SimpleNamespace(content=json.dumps(_output(
-                TurnCommit.from_dict(payload["commit"]), route="dialogue")), tool_calls=[])
         return SimpleNamespace(content=self.output, tool_calls=self.tool_calls)
 
 
@@ -554,11 +547,10 @@ async def test_followup_delegation_without_offer_keeps_context_and_replays():
         requirement_source_ids=["equipment-requirements"])))
     decision = await TaskSemanticResolver(_Catalog(model)).resolve(commit, context)
 
-    check = json.loads(model.calls[1]["messages"][1].content)
+    check = json.loads(model.calls[0]["messages"][1].content)
     assert check["commit"]["text"] == commit.text
     assert check["context"]["history"] == list(context.history)
     assert check["context"]["tasks"] == []
-    assert model.calls[0]["messages"][1].content == model.calls[1]["messages"][1].content
     assert "candidate" not in check
     assert decision.proposal.operation == "task.create"
     assert decision.reference_id is decision.continuation_action is None
@@ -566,111 +558,20 @@ async def test_followup_delegation_without_offer_keeps_context_and_replays():
     assert commit.text in decision.proposal.arguments["instruction"]
     frozen = decision.frozen_record()
     assert TaskSemanticDecision.from_frozen_record(frozen, commit=commit).frozen_record() == frozen
-    assert len(model.calls) == 2 and all(call["tools"] == [] for call in model.calls)
+    assert len(model.calls) == 1 and all(call["tools"] == [] for call in model.calls)
 
 
 @pytest.mark.asyncio
-async def test_unapproved_candidate_returns_foreground_without_task_or_confirmation():
-    commit = _commit("Compare the alternatives again. Keep the current background work unchanged.")
-    model = _Model(json.dumps(_output(commit, requested_work="local_artifacts")), delegation_verdict=False)
+@pytest.mark.parametrize("route", ["dialogue", "clarification"])
+async def test_non_task_semantics_remain_non_task_without_a_second_verdict(route):
+    commit = _commit("Please clarify what work we are discussing.")
+    model = _Model(json.dumps(_output(commit, route=route)))
     decision = await TaskSemanticResolver(_Catalog(model)).resolve(commit, _context(commit))
-    assert decision.route == "dialogue"
+    assert decision.route == route
     assert decision.proposal.operation is None and not decision.requests_local_artifacts
-    assert len(model.calls) == 2 and all(call["tools"] == [] for call in model.calls)
+    assert len(model.calls) == 1 and model.calls[0]["tools"] == []
     frozen = decision.frozen_record()
     assert TaskSemanticDecision.from_frozen_record(frozen, commit=commit).frozen_record() == frozen
-
-
-@pytest.mark.asyncio
-async def test_malformed_delegation_review_retries_without_turning_consent_into_dialogue():
-    commit = _commit("你在后台帮我重新安排一下行程，酒店别动，最后整理成文档给我。")
-    candidate = _output(commit, requested_work="local_artifacts")
-    calls = []
-
-    class Model:
-        async def invoke(self, **kwargs):
-            calls.append(kwargs)
-            if len(calls) == 1:
-                return SimpleNamespace(content=json.dumps(candidate), tool_calls=[])
-            if len(calls) == 2:
-                return SimpleNamespace(content=json.dumps({**candidate,
-                    "message": "This is not a clarification."}), tool_calls=[])
-            return SimpleNamespace(content=json.dumps(candidate), tool_calls=[])
-
-    decision = await TaskSemanticResolver(_Catalog(Model())).resolve(commit, _context(commit))
-    assert decision.proposal.operation == "task.create"
-    assert decision.requests_local_artifacts
-    assert len(calls) == 3 and all(call["tools"] == [] for call in calls)
-    assert "failed server" in calls[-1]["messages"][0].content
-    assert calls[0]["messages"][1].content == calls[-1]["messages"][1].content
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("review_kind", ["clarification", "other_operation", "tool_call", "malformed"])
-async def test_delegation_review_cannot_silently_replace_unresolved_or_conflicting_work(review_kind):
-    commit = _commit("Please do that work in the background.")
-    calls = []
-
-    class Model:
-        async def invoke(self, **kwargs):
-            calls.append(kwargs)
-            if len(calls) == 1:
-                return SimpleNamespace(content=json.dumps(_output(commit, requested_work="local_artifacts")))
-            value = _output(commit, route="clarification")
-            if review_kind == "other_operation":
-                value = _output(commit, operation="task.list", arguments={"query_kind": "list", "limit": 20})
-            if review_kind == "malformed":
-                value = {"authorized": False, "evidence_quote": None}
-            return SimpleNamespace(content=json.dumps(value), tool_calls=[{"name":"write"}] if review_kind == "tool_call" else [])
-
-    resolver = TaskSemanticResolver(_Catalog(Model()))
-    if review_kind == "clarification":
-        result = await resolver.resolve(commit, _context(commit))
-        assert result.route == "clarification" and result.proposal.operation is None
-        assert result.frozen_record()["body"]["output"]["message"] == "Which work should I carry out?"
-    else:
-        with pytest.raises(FormalTaskViolation) as error:
-            await resolver.resolve(commit, _context(commit))
-        assert error.value.reason == ("SEMANTIC_DELEGATION_REVIEW_CONFLICT"
-                                     if review_kind == "other_operation" else "SEMANTIC_OUTPUT_INVALID")
-    assert len(calls) == (3 if review_kind == "malformed" else 2)
-    assert all(call["tools"] == [] for call in calls)
-
-
-@pytest.mark.asyncio
-async def test_delegation_review_shares_deadline_without_fallback(monkeypatch):
-    from jiuwenswarm.server.live_voice import task_semantics
-
-    commit = _commit("Prepare the local report in the background.")
-    calls = []
-
-    class Model:
-        async def invoke(self, **kwargs):
-            calls.append(kwargs)
-            if len(calls) == 1:
-                return SimpleNamespace(content=json.dumps(_output(commit, requested_work="local_artifacts")))
-            await asyncio.sleep(1)
-
-    monkeypatch.setattr(task_semantics, "_TIMEOUT_SECONDS", 0.03)
-    with pytest.raises(FormalTaskViolation) as error:
-        await TaskSemanticResolver(_Catalog(Model())).resolve(commit, _context(commit))
-    assert error.value.reason == "SEMANTIC_PROVIDER_TIMEOUT"
-    assert len(calls) == 2 and all(call["tools"] == [] for call in calls)
-
-
-@pytest.mark.asyncio
-async def test_delegation_guard_rechecks_authority_before_second_model_call():
-    commit = _commit()
-    model = _Model(json.dumps(_output(commit, requested_work="local_artifacts")))
-    checks = 0
-    async def check():
-        nonlocal checks
-        checks += 1
-        if checks == 2:
-            raise asyncio.CancelledError()
-    with pytest.raises(asyncio.CancelledError):
-        await TaskSemanticResolver(_Catalog(model), before_invoke=check).resolve(commit, _context(commit))
-    assert len(model.calls) == 1
 
 
 @pytest.mark.asyncio

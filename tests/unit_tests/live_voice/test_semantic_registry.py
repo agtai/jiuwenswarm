@@ -218,32 +218,30 @@ async def test_explicit_local_delegation_creates_once_with_normal_authority(sema
     assert replay.payload == done.payload
     assert s.harness.composition._core.store.counts()["tasks"] == 1
     assert s.manager.get_calls == []
-    assert len(s.calls) == (3 if invalid_first else 2)
+    assert len(s.calls) == (2 if invalid_first else 1)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("review_route", ["dialogue", "clarification"])
-async def test_local_delegation_review_has_zero_task_effects_and_replays(semantic_runtime, review_route):
+@pytest.mark.parametrize("route,text", [
+    ("dialogue", "Read the project information and compare the options; do not create a task."),
+    ("clarification", "Do that work in the background."),
+])
+async def test_non_task_semantics_have_zero_task_effects_and_replay(semantic_runtime, route, text):
     s = semantic_runtime
-
-    def program(data):
-        assert s.harness.composition._core.store.counts()["tasks"] == 0
-        if len(s.calls) == 1:
-            return {**model_output(data, operation="task.create", arguments={
-                "name": "Unapproved report", "instruction": "Prepare a local report."}),
-                "requested_work": "local_artifacts"}
-        return {**model_output(data, route=review_route),
-                "message": "Which work do you mean?" if review_route == "clarification" else None}
-
-    s.program = program
-    result = await s.text("review-no-task", "Do that work in the background.")
-    assert s.harness.composition._core.store.counts()["tasks"] == 0
-    assert s.manager.get_calls == []
-    replay = await s.text("review-no-task", "Do that work in the background.")
+    before = s.harness.composition._core.store.counts()
+    s.program = lambda data: {
+        **model_output(data, route=route),
+        "message": "Which work do you mean?" if route == "clarification" else None,
+    }
+    result = await s.text("no-task", text)
+    assert result.ok, result.payload
+    replay = await s.text("no-task", text)
     assert replay.payload == result.payload
-    assert s.harness.composition._core.store.counts()["tasks"] == 0
-    assert s.manager.get_calls == [] and len(s.calls) == 2
+    assert s.harness.composition._core.store.counts() == before
+    assert s.harness.executor.dispatches == s.harness.executor.cancels == s.harness.executor.adjustments == []
+    assert s.manager.get_calls == [] and s.manager.agent.calls == 0 and len(s.calls) == 1
     assert s.registry._pending_production_task_intents == {}
+    assert s.registry._voice_task_origins == {}
 
 
 @pytest.mark.asyncio
@@ -441,6 +439,7 @@ async def test_model_exact_multitask_control_uses_real_store_and_formal_confirma
         "malformed",
         "tool-request",
         "unknown-target",
+        "unknown-adjustment-target",
     ],
 )
 async def test_controlled_semantic_negative_has_zero_protected_effects(
@@ -455,6 +454,9 @@ async def test_controlled_semantic_negative_has_zero_protected_effects(
             return {**model_output(data), "tool_calls": [{"name": "delete"}]}
         if case == "unknown-target":
             return model_output(data, operation="task.cancel", target="not-visible")
+        if case == "unknown-adjustment-target":
+            return model_output(data, operation="task.adjust", target="not-visible",
+                                arguments={"adjustment": "Keep the backup running."})
         output = model_output(data)
         if case in {"missing-proposal", "ambiguous-target"}:
             output.update(route="clarification", message="请明确要处理的事项或任务。")
@@ -469,7 +471,7 @@ async def test_controlled_semantic_negative_has_zero_protected_effects(
     }
     before = s.harness.composition._core.store.counts()
     result = await s.text(case, inputs.get(case, "处理指定事项。"))
-    if case in {"malformed", "tool-request", "unknown-target"}:
+    if case in {"malformed", "tool-request", "unknown-target", "unknown-adjustment-target"}:
         assert not result.ok, result.payload
     else:
         assert result.ok, result.payload

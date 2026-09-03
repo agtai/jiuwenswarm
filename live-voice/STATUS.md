@@ -98,13 +98,15 @@ foreground analysis; broader business/audio gates remain open.
   one recorded real-path check when needed for the changed seam. Do not repeatedly
   run the full Demo or full suites to chase a PASS. Candidate-level requirements
   stay open until actually performed; self-review is not independent review.
-- **Contextual delegation repair:** the pre-create review now reuses the complete
-  semantic contract and frozen input/context, replacing the inconsistent short
-  Boolean review. Scoped model/Registry checks preserve explicit delegation,
-  clarification and zero-effect rejection; the new spoken Task A and independent
-  review remain open. See the [bounded repair evidence](evidence/DELEGATION_REVIEW_CONTRACT_REPAIR_20260903.md).
-  This Tier-2 scope excludes artifact calculations/Agent quality and broader
-  Demo acceptance; it introduces no keyword classifier or public schema change.
+- **Contextual delegation repair:** D-111 removes the repeated local-create model
+  review. One valid semantic result proceeds through existing Registry authority;
+  bounded structural retry and the separate adjustment check remain. Scoped
+  Store/replay checks and real-model positive cases support this removal. Negative
+  probes still exposed dialogue/adjustment misroutes, so language generalization,
+  the new spoken Task A and independent review remain open. See the
+  [single-pass evidence](evidence/SINGLE_PASS_DELEGATION_20260903.md).
+  This Tier-2 scope excludes artifact calculations/Agent quality and broader Demo
+  acceptance; it introduces no keyword classifier or public schema change.
 - **Current limits:** focused latency fixes have been authorized; performance
   redesign and optional buffer/Native experiments are not prerequisites for this
   repair packet. No new classifier/policy/schema, Executor/positive unsupported
