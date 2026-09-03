@@ -175,7 +175,7 @@ def main() -> int:
         a = attribute(r, calls, anchors)
         per_round.append({"scenario": r["scenario"], "round": r["round"], "failures": r.get("failures", []), **a})
     by_scenario: dict[str, dict] = {}
-    keys = ["submit->semantic_start", "semantic_call_ms", "main_model_start_after_submit", "main_model_ms", "post_main_nonstream_ms", "main_end->final_sent(revision+present)", "submit->final_sent(server)"]
+    keys = ["submit->semantic_start", "semantic_ms(until main start)", "main_model_start_after_submit", "main_model_ms(until next call)", "main_model_ms(until final_sent)", "post_main_ms(until final_sent)", "submit->final_sent(server)"]
     for scenario in sorted({r["scenario"] for r in per_round}):
         rows = [r for r in per_round if r["scenario"] == scenario and not r["failures"] and "skipped" not in r]
         by_scenario[scenario] = {k: _stats([r[k] for r in rows if k in r]) for k in keys if any(k in r for r in rows)}
