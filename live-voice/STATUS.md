@@ -12,17 +12,20 @@ and “only human acceptance remains” are not justified.**
 - The real Cascade analysis → explicit delegation → one Task → sealed file path
   has scoped evidence. It does not prove complete A/B/A2 control, offline recovery,
   artifact correctness or this entire working candidate.
-- Confirmed open result defects include arithmetic/cost consistency and exact
-  literal filename fidelity. Spoken feasibility and brevity also lack stable
-  closure. See the [artifact evidence](evidence/ARTIFACT_QUALITY_REHEARSAL_CHECK_20260903.md).
+- Confirmed open result defects include arithmetic/cost consistency, exact
+  literal filenames and user-facing paths to temporary checkouts. Spoken
+  feasibility and brevity also lack stable closure. See the
+  [artifact evidence](evidence/ARTIFACT_QUALITY_REHEARSAL_CHECK_20260903.md).
 - Recent delegation, capture-recovery and right-side Task presentation repairs
   are deployed with focused evidence. The bottom manual Registry control form
   is removed; “最近任务” reads the existing scoped Registry owner.
 - Project-home Live Voice creates/binds an empty Session without a typed first
   message. Existing Sessions are reused. The backend still requires an authorized
-  Code project; projectless/Work entry prompts for one. Browser verification
-  reached voice recovery, not demonstrated microphone listening. Universal
-  projectless startup and physical acceptance remain open.
+  Code project; projectless/Work entry prompts for one. A current-source browser
+  run reached listening, actual transcription, analysis without a Task and one
+  direct delegation. Its output missed the intended two-result scenario, with
+  a recorded speech/transcript ambiguity. Speaker acceptance, stable recovery
+  and universal projectless startup remain open.
 - Prior controlled-candidate PASS on `83fde5622`, imported Native/generation
   results and older module Gates are exact-source history. They do not grant
   this candidate acceptance. Historical details are conditional, not a work queue.
@@ -51,17 +54,17 @@ repeat the old whole-project audit solely to resume a bounded task.
 
 | Capability / module | Implemented boundary | Remaining / dependency |
 |---|---|---|
-| Audio Device & browser I/O | Capture/playout, dedicated media wiring, exact-owner lifecycle fencing and bounded recovery | Current physical listening/recovery; permission/device coverage; AEC/NS/AGC, double-talk, loss/stop targets |
+| Audio Device & browser I/O | Capture/playout, dedicated media wiring, exact-owner lifecycle fencing; project-home listening/transcription observed | Stable physical listening/recovery and heard playback; permission/device coverage; AEC/NS/AGC, double-talk, loss/stop targets |
 | Speech Recognition | Streaming/batch recognition, committed finals, typed stream failure and bounded capture-only retry | Long/paused speech and barge-in robustness; fallback/cancel, provider/configuration and device/network evidence |
 | Speech Synthesis | Streaming/batch TTS, response ownership and playback ACK | Current interrupted-answer/long-answer stability; first-audio, underrun, pronunciation and stale-output proof |
 | Realtime Media | Dedicated transport, registration, rotation and bounded P2 notification pull | Backpressure/load, loss/reordering/corruption/reconnect and truthful recovery diagnostics |
 | Conversation Runtime | Committed-input/generation fencing, Stop/Exit, playback/generation interruption, unanswered-input continuity, presentation/ACK ownership | Combined listening/notification/Task races on current source; no old audio revival or accidental detached-Task control |
 | Interaction Intelligence | Model-based semantic route; opt-in Native engine source imported; Cascade remains the default route | Native through the current semantic business path, endpoint/false-interruption evaluation, broader language/device support |
-| Agent Bridge and dialogue truth | Real Agent/file tools; current-turn/requirement context; grounded receipt/result narration | Correct calculations, feasibility, literal filenames and concise spoken answers; Task-truth isolation |
+| Agent Bridge and dialogue truth | Real Agent/file tools; current-turn/requirement context; grounded receipt/result narration | Correct calculations, feasibility, literal filenames, usable result paths and concise spoken answers; Task-truth isolation |
 | Task Control Core and Store | Canonical multi-Task authority, durable commands/replay, exact targets/CAS, bounded running-adjustment delivery | Current multi-Task/concurrency/restart integration and feature-complete operation coverage |
-| Executor & Durability | Direct D0/D2 v2 profiles, admission, reconciliation, sealed results and generic adjustment checkpoints; retained v1 records cannot authorize new v2 dispatch | Current real result/control acceptance; additional Executor/D1 capability needs its own packet. No D1 or generic host-crash claim |
+| Executor & Durability | Direct D0/D2 v2 profiles, admission, reconciliation, sealed results and generic adjustment checkpoints; dedicated no-memory rail repair; retained v1 records cannot authorize new v2 dispatch | Required independent review and real result/control acceptance; scope broader file-tool access outside checkout separately. Additional Executor/D1 capability needs its own packet; no D1 or generic host-crash claim |
 | Voice–Task Bridge | Unified committed semantics, exact scoped targets, queries/mutations and requirement sources | Full language/domain generalization and retirement audit; pause/resume/provide-input retain truthful unsupported behavior until a real primitive is accepted |
-| Integrated Web product experience | Scoped Registry Tasks in the right panel, no bottom manual form; project-home Session allocation; recovery/notification repairs | Actual microphone startup, interruptions, A/B/A2 and offline/unread/ACK/refresh journey; projectless startup requires backend authority design |
+| Integrated Web product experience | Scoped Registry Tasks in the right panel, no bottom manual form; project-home Session allocation through microphone transcription; recovery/notification repairs | Stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh journey; projectless startup requires backend authority design |
 | Observability, benchmark and latency | Correlated stage timings and historical bounded warm L0 evidence; several avoidable waits repaired | Current speech-end → first-audible baseline; causal optimization, cold/device/network coverage and declared SLO. Historical percentiles are not current gains |
 | Automated verification and product acceptance | Focused module/regression checks and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative independent review and final human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, production semantic cutover, bounded legacy removals and scoped prompt/config isolation | Complete production reachability/retirement audit; remaining manifest rows; keep artifacts/private runtime data out of integration |
@@ -152,6 +155,8 @@ physical recovery and cumulative review remain open. Read only the implicated
   The most recent rehearsal reports concern port 6175, but a reachable page or
   activated toolbar is not proof of microphone capture, Agent work or playback.
 - Home entry evidence: [Session allocation and limits](evidence/HOME_SESSION_VOICE_START_20260903.md).
+  Current listening/transcription, failed output and dedicated memory repair:
+  [real-voice follow-up](evidence/PROJECT_HOME_REAL_VOICE_AND_MEMORY_REPAIR_20260903.md).
   Recent Task UI/delegation/capture evidence: [bounded repair](evidence/DELEGATION_AUDIO_RECENT_TASKS_REPAIR_20260903.md).
   These reports retain source hashes, commands and exclusions; no need to load
   all reports to perform an unrelated change.

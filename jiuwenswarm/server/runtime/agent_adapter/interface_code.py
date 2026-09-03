@@ -904,6 +904,11 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         通过 self._coding_memory_rail 缓存避免重复构建。
         受 modes.code.memory.enabled 开关控制，关闭时返回 None。
         """
+        # Dedicated project tasks carry their requirements explicitly and set
+        # enable_memory=False. Also fence configuration rebuilds, not just mode
+        # updates, so they cannot reintroduce application conversation memory.
+        if getattr(self, "_is_dedicated_background_project_adapter", False):
+            return None
         # 检查 memory 开关
         if not is_memory_enabled("code", get_config()):
             logger.info("[JiuwenSwarmCodeAdapter] CodingMemoryRail disabled by modes.code.memory.enabled")
@@ -1231,8 +1236,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     mode,
                 )
 
-        # code 模式保留 CodingMemoryRail；若缺失则补充注册
-        if self._coding_memory_rail is None:
+        # Ordinary Code retains coding memory. Dedicated tasks have an explicit
+        # no-memory contract, including repeated runtime/mode updates.
+        if not dedicated_background_project and self._coding_memory_rail is None:
             coding_memory_rail = self._build_coding_memory_rail()
             if coding_memory_rail is not None:
                 # _build_coding_memory_rail 已缓存到 self._coding_memory_rail
@@ -1364,16 +1370,17 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """Remove rails whose capabilities are forbidden by the formal profile.
 
         The dedicated background project adapter exposes only bounded project
-        file tools.  LSP and subagent capabilities are therefore unavailable
-        by contract; retaining their rails can still run synchronous first-turn
-        initialization on the AgentServer event loop even though their tools
-        are removed immediately afterwards.
+        file tools and disables conversation memory. Retaining LSP/subagent or
+        coding-memory rails can still initialize unused capabilities or read
+        application memory even after their tools are filtered out. Project
+        instruction loading remains available through ProjectMemoryRail.
         """
 
         instance = getattr(self, "_instance", None)
         for attr, label in (
             ("_lsp_rail", "LspRail"),
             ("_subagent_rail", "SubagentRail"),
+            ("_coding_memory_rail", "CodingMemoryRail"),
         ):
             rail = getattr(self, attr, None)
             if rail is None:

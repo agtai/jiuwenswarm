@@ -1041,6 +1041,8 @@ def test_code_adapter_removes_non_file_rails_from_dedicated_background_child():
 
     lsp_rail = object()
     subagent_rail = object()
+    coding_memory_rail = object()
+    project_memory_rail = object()
 
     class Instance:
         def __init__(self):
@@ -1053,6 +1055,8 @@ def test_code_adapter_removes_non_file_rails_from_dedicated_background_child():
     child._instance = Instance()
     child._lsp_rail = lsp_rail
     child._subagent_rail = subagent_rail
+    child._coding_memory_rail = coding_memory_rail
+    child._project_memory_rail = project_memory_rail
 
     adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
     adapter._is_session_scoped_adapter = False
@@ -1066,12 +1070,16 @@ def test_code_adapter_removes_non_file_rails_from_dedicated_background_child():
     asyncio.run(adapter.prepare_background_project_session("sched-file-only"))
 
     assert child._is_dedicated_background_project_adapter is True
-    assert child._instance.unregistered == [lsp_rail, subagent_rail]
+    assert child._instance.unregistered == [lsp_rail, subagent_rail, coding_memory_rail]
     assert child._lsp_rail is None
     assert child._subagent_rail is None
+    assert child._coding_memory_rail is None
+    assert child._project_memory_rail is project_memory_rail
+    asyncio.run(child._disable_background_project_non_file_rails())
+    assert child._instance.unregistered == [lsp_rail, subagent_rail, coding_memory_rail]
 
 
-def test_code_adapter_does_not_rebuild_subagent_rail_for_background_project():
+def test_code_adapter_does_not_rebuild_disabled_rails_for_background_project():
     from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
         JiuwenSwarmCodeAdapter,
     )
@@ -1096,10 +1104,16 @@ def test_code_adapter_does_not_rebuild_subagent_rail_for_background_project():
     adapter._build_subagent_rail = lambda: (_ for _ in ()).throw(
         AssertionError("background project rebuilt SubagentRail")
     )
+    adapter._build_coding_memory_rail = lambda: (_ for _ in ()).throw(
+        AssertionError("background project rebuilt CodingMemoryRail")
+    )
 
+    asyncio.run(adapter._update_rails_for_mode("code"))
     asyncio.run(adapter._update_rails_for_mode("code"))
 
     assert adapter._subagent_rail is None
+    assert adapter._coding_memory_rail is None
+    assert adapter._project_memory_rail is not None
 
 
 def test_ordinary_code_adapter_rebuilds_and_registers_subagent_rail():
@@ -1135,6 +1149,93 @@ def test_ordinary_code_adapter_rebuilds_and_registers_subagent_rail():
 
     assert adapter._subagent_rail is rebuilt_rail
     assert adapter._instance.registered == [rebuilt_rail]
+
+
+def test_background_memory_builder_cannot_reintroduce_cached_or_new_memory(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter import interface_code
+
+    def unexpected_config_read():
+        raise AssertionError("dedicated task consulted normal memory configuration")
+
+    monkeypatch.setattr(interface_code, "get_config", unexpected_config_read)
+    adapter = interface_code.JiuwenSwarmCodeAdapter.__new__(
+        interface_code.JiuwenSwarmCodeAdapter
+    )
+    adapter._is_dedicated_background_project_adapter = True
+    for cached in (None, object()):
+        adapter._coding_memory_rail = cached
+        assert adapter._build_coding_memory_rail() is None
+        assert adapter._coding_memory_rail is cached
+
+
+def test_ordinary_code_still_rebuilds_coding_memory():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
+
+    rebuilt = object()
+    registered = []
+    adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
+    adapter._is_dedicated_background_project_adapter = False
+    adapter._task_planning_rail = None
+    adapter._skill_evolution_rail = None
+    adapter._evolution_interrupt_rail = None
+    adapter._subagent_rail = object()
+    adapter._project_memory_rail = object()
+    adapter._coding_memory_rail = None
+
+    async def register(rail):
+        registered.append(rail)
+
+    def build():
+        adapter._coding_memory_rail = rebuilt
+        return rebuilt
+
+    adapter._instance = SimpleNamespace(register_rail=register)
+    adapter._build_coding_memory_rail = build
+    asyncio.run(adapter._update_rails_for_mode("code"))
+    asyncio.run(adapter._update_rails_for_mode("code"))
+    assert adapter._coding_memory_rail is rebuilt
+    assert registered == [rebuilt]
+
+
+def test_background_memory_detaches_real_core_rail_and_prompt(tmp_path):
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+    from openjiuwen.harness.deep_agent import DeepAgent
+    from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
+    from openjiuwen.harness.schema.config import DeepAgentConfig
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        CodingMemoryRail,
+        JiuwenSwarmCodeAdapter,
+    )
+
+    async def scenario():
+        agent = DeepAgent(AgentCard(id="background-memory-teardown-test", name="test"))
+        agent._deep_config = DeepAgentConfig()
+        agent.system_prompt_builder = SystemPromptBuilder(language="en")
+        rail = CodingMemoryRail(str(tmp_path / "memory"), embedding_config=None)
+        adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
+        adapter._instance = agent
+        adapter._coding_memory_rail = rail
+        await agent.register_rail(rail)
+        try:
+            agent.system_prompt_builder.add_section(
+                PromptSection(name="memory", content={"en": "Application memory location"})
+            )
+            assert agent.is_registered_rail(rail)
+            owned_names = set(rail._owned_tool_cards)
+            assert owned_names
+            await adapter._disable_background_project_non_file_rails()
+            assert not agent.is_registered_rail(rail)
+            assert agent.system_prompt_builder.get_section("memory") is None
+            assert adapter._coding_memory_rail is None
+            assert all(agent.ability_manager.get(name) is None for name in owned_names)
+            assert rail._manager_init_task is None
+            assert rail._prefetch_task is None
+            assert not (tmp_path / "memory").exists()
+            await adapter._disable_background_project_non_file_rails()
+        finally:
+            await agent.unregister_rail(rail)
+
+    asyncio.run(scenario())
 
 
 def test_background_code_task_rejects_reused_session_before_adapter_call(tmp_path):
