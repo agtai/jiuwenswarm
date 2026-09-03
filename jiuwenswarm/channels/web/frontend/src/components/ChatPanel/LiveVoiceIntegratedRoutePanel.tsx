@@ -389,6 +389,15 @@ function isStaleProductResponseError(value: unknown): boolean {
   );
 }
 
+function isOwnedContinuationCancellation(value: unknown): boolean {
+  // Product P1 settles a staged successor closed by an owned local close
+  // (barge-in, Stop, Exit, continuation cancel) with this exact shape. Real
+  // transport failures keep their transport reason and a different source.
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return candidate.reason === 'TTS_CONTINUATION_CANCELLED' && candidate.source === 'local_close';
+}
+
 function isHarmlessCompletedBargeInError(value: unknown): boolean {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const candidate = value as Record<string, unknown>;
@@ -3688,6 +3697,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           if (cancelledContinuationAttemptRef.current === presentationAttempt) {
             setProductTextReason('TTS_CONTINUATION_BARGE_IN');
             setProductTextStatus('failed');
+            return;
+          }
+          if (isOwnedContinuationCancellation(error)) {
+            // The staged tail was closed locally by barge-in, Stop, Exit or a
+            // continuation cancel before it attached. That close is expected:
+            // it is neither a TTS failure nor a terminal recovery.
             return;
           }
           if (

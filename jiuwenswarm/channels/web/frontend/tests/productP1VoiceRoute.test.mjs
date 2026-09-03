@@ -3944,6 +3944,21 @@ async function runConcurrentCaptureJourney(options = {}) {
           socket.onclose?.({ code: 1006, reason: 'injected staged attach failure' });
           return;
         }
+        if (
+          binding.direction === 'downlink'
+          && environment.holdNextDownlinkAttach === true
+        ) {
+          // The Gateway has not attached this downlink yet. The test decides
+          // whether the attach ever arrives or an owned close wins first.
+          environment.holdNextDownlinkAttach = false;
+          environment.releaseHeldDownlinkAttach = () => {
+            environment.releaseHeldDownlinkAttach = null;
+            socket.onmessage?.({
+              data: serializeMediaControl({ type: 'media.attach', binding }),
+            });
+          };
+          return;
+        }
         socket.onmessage?.({
           data: serializeMediaControl({ type: 'media.attach', binding }),
         });
@@ -5375,6 +5390,64 @@ test('formal P1 rejects a second staged successor and a foreign prepared handle 
     false,
   );
   await journey.owner.cancelPreparedResponse(journey.response, 'TEST_CLEANUP');
+  await journey.owner.close();
+});
+
+test('formal P1 owned local close of an unattached staged successor rejects as a cancellation, not a transport failure', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+    downlinkFrameCount: 35,
+    downlinkFramesToSend: 35,
+  });
+  assert.equal(journey.playError, null);
+  journey.environment.holdNextDownlinkAttach = true;
+  const tail = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-owned-close-1',
+    unit_seq: 1,
+    text: 'staged successor cancelled before its Gateway attach',
+    response_continuation: true,
+  });
+  const staging = journey.owner.stagePreparedAgentText(tail).then(() => null, error => error);
+  for (let turn = 0; turn < 200 && typeof journey.environment.releaseHeldDownlinkAttach !== 'function'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(typeof journey.environment.releaseHeldDownlinkAttach, 'function', 'staged downlink attach was not held');
+  // Barge-in, Stop, Exit and continuation cancel all close the staged route
+  // locally. That owned close is expected: the preparation must settle as a
+  // cancellation and never surface the transport reason as a failure.
+  await journey.owner.cancelPreparedResponse(journey.response, 'TTS_CONTINUATION_BARGE_IN');
+  const error = await staging;
+  assert.ok(error instanceof Error, 'staging did not settle after the owned close');
+  assert.equal(error.reason, 'TTS_CONTINUATION_CANCELLED');
+  assert.equal(error.source, 'local_close');
+  assert.equal(error.transport_reason_id, 'MEDIA_LOCAL_CLOSE');
+  // The owned close leaves the owner healthy: no failure status, no reason.
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  await journey.owner.close();
+});
+
+test('formal P1 transport close of an unattached staged successor keeps its transport failure reason', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    responseContinuation: true,
+    prefetchPromotion: true,
+    downlinkFrameCount: 35,
+    downlinkFramesToSend: 35,
+  });
+  assert.equal(journey.playError, null);
+  journey.environment.failNextDownlinkAttach = true;
+  const tail = await journey.owner.prepareAgentText({
+    response: journey.response,
+    unit_id: 'unit-transport-close-1',
+    unit_seq: 1,
+    text: 'staged successor lost its transport before attach',
+    response_continuation: true,
+  });
+  const error = await journey.owner.stagePreparedAgentText(tail).then(() => null, error => error);
+  assert.ok(error instanceof Error, 'staging did not settle after the transport close');
+  assert.equal(error.reason, 'MEDIA_TRANSPORT_CLOSED');
+  assert.equal(error.source, 'transport_close');
   await journey.owner.close();
 });
 

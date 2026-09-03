@@ -1482,16 +1482,27 @@ export class ProductP1VoiceRouteOwner {
         },
         event => {
           staged.terminal = event;
+          // An owned local close (barge-in, Stop, Exit, continuation cancel)
+          // settles a staged route that never attached or never buffered as a
+          // cancellation. Only peer_detach, transport_close and internal
+          // failures keep the transport reason as the failure reason.
+          const stagedClosure = (message: string): Error =>
+            Object.assign(
+              new Error(message),
+              event.source === 'local_close'
+                ? {
+                    reason: 'TTS_CONTINUATION_CANCELLED',
+                    source: event.source,
+                    transport_reason_id: event.reason_id,
+                  }
+                : { reason: event.reason_id, source: event.source },
+            );
           if (!staged.attached) {
-            const failure = Object.assign(new Error('staged downlink closed before attach'), {
-              reason: event.reason_id,
-            });
+            const failure = stagedClosure('staged downlink closed before attach');
             rejectAttach(failure);
             rejectFirstFrame(failure);
           } else if (staged.chunks.length === 0) {
-            rejectFirstFrame(Object.assign(new Error('staged downlink closed before first frame'), {
-              reason: event.reason_id,
-            }));
+            rejectFirstFrame(stagedClosure('staged downlink closed before first frame'));
           } else if (
             !staged.promoted
             && staged.metadata.result.downlink?.prefetch_promotion_capability !== null
