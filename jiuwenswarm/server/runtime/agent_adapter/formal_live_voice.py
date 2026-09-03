@@ -88,24 +88,61 @@ FORMAL_VOICE_PRESENTATION_INSTRUCTIONS = (
 )
 
 
-async def finalize_spoken_answer(model, *, envelope: str, candidate: str, tool_results: list[dict]) -> str:
-    """Bounded tool-free final revision; never dispatch work or change raw input."""
-    if model is None or (len(candidate) <= 200 and not tool_results):
-        return candidate
-    from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
+SPOKEN_ANSWER_BUDGET_CHARS = 200
+# A brevity-only rewrite needs no reasoning; the 2026-09-03 baseline measured
+# 7-9 s p50 per medium/long turn in this call with thinking enabled.
+LENGTH_REVISION_TIMEOUT_SECONDS = 6
+ARITHMETIC_REVISION_TIMEOUT_SECONDS = 12
+
+
+def spoken_revision_reason(candidate: str, tool_results: list[dict]) -> str | None:
+    """Why the final answer needs a bounded revision, or None to skip it.
+
+    A draft inside the spoken budget is already speakable. Tool results alone
+    used to force a revision on every tool turn (4 s p50 for 65-character
+    answers); they matter only when the draft carries numbers whose time/cost
+    arithmetic the revision must recompute from evidence.
+    """
+    if len(candidate) > SPOKEN_ANSWER_BUDGET_CHARS:
+        return "length"
+    if tool_results and any(char.isdigit() for char in candidate):
+        return "arithmetic"
+    return None
+
+
+def spoken_revision_request_options(model, reason: str) -> dict:
+    """Reasoning stays enabled only for the arithmetic verification path."""
     from jiuwenswarm.common.reasoning_injector import bounded_semantic_request_options
 
-    request_options = {}
     client_config = getattr(model, "model_client_config", None)
     model_config = getattr(model, "model_config", None)
-    if client_config is not None and callable(getattr(client_config, "model_dump", None)):
-        supported = bounded_semantic_request_options(client_config.model_dump(), model_config)
-        if supported:
-            # Non-thinking routing is useful for latency, but the observed
-            # arithmetic failure persisted in non-thinking final revision.
-            # Restore reasoning only for this bounded, tool-free verification.
-            request_options = {"extra_body": {**supported["extra_body"], "thinking": {"type": "enabled"}},
-                               "reasoning_effort": "low"}
+    if client_config is None or not callable(getattr(client_config, "model_dump", None)):
+        return {}
+    supported = bounded_semantic_request_options(client_config.model_dump(), model_config)
+    if not supported:
+        return {}
+    if reason == "arithmetic":
+        # Non-thinking routing is useful for latency, but the observed
+        # arithmetic failure persisted in non-thinking final revision.
+        # Restore reasoning only for this bounded, tool-free verification.
+        return {"extra_body": {**supported["extra_body"], "thinking": {"type": "enabled"}},
+                "reasoning_effort": "low"}
+    return dict(supported)
+
+
+async def finalize_spoken_answer(model, *, envelope: str, candidate: str, tool_results: list[dict]) -> str:
+    """Bounded tool-free final revision; never dispatch work or change raw input."""
+    if model is None:
+        return candidate
+    reason = spoken_revision_reason(candidate, tool_results)
+    if reason is None:
+        return candidate
+    from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
+
+    request_options = spoken_revision_request_options(model, reason)
+    timeout_seconds = (
+        ARITHMETIC_REVISION_TIMEOUT_SECONDS if reason == "arithmetic" else LENGTH_REVISION_TIMEOUT_SECONDS
+    )
 
     instructions = (
         "Revise only the spoken answer to committed_turn.text in the supplied formal envelope. "
@@ -124,7 +161,7 @@ async def finalize_spoken_answer(model, *, envelope: str, candidate: str, tool_r
         "whether to start already-delegated work. This revision has no tools or action authority."
     )
     try:
-        async with asyncio.timeout(12):
+        async with asyncio.timeout(timeout_seconds):
             result = await model.invoke(messages=[SystemMessage(content=instructions), UserMessage(content=json.dumps({
                 "formal_envelope": envelope, "tool_results": tool_results,
                 "draft": candidate,
