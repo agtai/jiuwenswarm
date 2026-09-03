@@ -1064,7 +1064,9 @@ class DedicatedMediaProductRegistry:
             tuple[str, str, str], _ProductActivationAuthority
         ] = OrderedDict()
         self._prefetch_capability_ledger: set[tuple[str, str, str, int]] = set()
-        self._prefetch_next_unit_seq: dict[tuple[str, str, str, int], int] = {}
+        self._prefetch_next_unit_seq: dict[
+            tuple[str, str, str, int], tuple[ResponseRef | None, int]
+        ] = {}
         self._successor_reservations: dict[
             tuple[object, ...], _SuccessorReservation
         ] = {}
@@ -1293,7 +1295,7 @@ class DedicatedMediaProductRegistry:
         ):
             with self._lock:
                 self._prefetch_capability_ledger.add(ledger_key)
-                self._prefetch_next_unit_seq.setdefault(ledger_key, 1)
+                self._prefetch_next_unit_seq.setdefault(ledger_key, (None, 1))
             selected = MEDIA_PREFETCH_PROMOTION_CAPABILITY
         return {"selected": selected}
 
@@ -1454,13 +1456,35 @@ class DedicatedMediaProductRegistry:
         reservation = self._successor_reservations.pop(key, None)
         if promoted and reservation is not None:
             ledger_key = reservation.identity[:4]
+            response = reservation.identity[-2]
             unit_seq = reservation.identity[-1]
+            cursor = self._prefetch_next_unit_seq.get(ledger_key)
             if (
                 len(ledger_key) == 4
+                and isinstance(response, ResponseRef)
                 and isinstance(unit_seq, int)
-                and self._prefetch_next_unit_seq.get(ledger_key) == unit_seq
+                and cursor == (response, unit_seq)
             ):
-                self._prefetch_next_unit_seq[ledger_key] = unit_seq + 1
+                self._prefetch_next_unit_seq[ledger_key] = (
+                    response,
+                    unit_seq + 1,
+                )
+
+    @staticmethod
+    def _prefetch_cursor_allows_successor(
+        cursor: tuple[ResponseRef | None, int] | None,
+        response: ResponseRef,
+        unit_seq: int,
+    ) -> bool:
+        current_response, next_unit_seq = cursor or (None, 1)
+        if current_response == response:
+            return unit_seq == next_unit_seq
+        if unit_seq != 1:
+            return False
+        return (
+            current_response is None
+            or response.response_generation > current_response.response_generation
+        )
 
     def _consume_stream_cleanup(self, task: asyncio.Task[None]) -> None:
         self._stream_cleanup_tasks.discard(task)
@@ -3529,7 +3553,11 @@ class DedicatedMediaProductRegistry:
                     or transfer is None
                     or transfer.unit_seq != unit_seq
                     or unit_seq <= 0
-                    or self._prefetch_next_unit_seq.get(ledger_key) != unit_seq
+                    or not self._prefetch_cursor_allows_successor(
+                        self._prefetch_next_unit_seq.get(ledger_key),
+                        request.response,
+                        unit_seq,
+                    )
                 ):
                     return _streaming_error_envelope(
                         request, "MEDIA_PREFETCH_SUCCESSOR_UNAVAILABLE"
@@ -3587,9 +3615,7 @@ class DedicatedMediaProductRegistry:
             )
             reservation_identity = (
                 *ledger_key,
-                request.response.interaction_id,
-                request.response.response_id,
-                request.response.response_generation,
+                request.response,
                 unit_seq,
             )
             with self._lock:
@@ -3618,10 +3644,22 @@ class DedicatedMediaProductRegistry:
                     or transfer is None
                     or transfer.unit_seq != unit_seq
                     or unit_seq <= 0
-                    or self._prefetch_next_unit_seq.get(ledger_key) != unit_seq
+                    or not self._prefetch_cursor_allows_successor(
+                        self._prefetch_next_unit_seq.get(ledger_key),
+                        request.response,
+                        unit_seq,
+                    )
                 ):
                     return _streaming_error_envelope(
                         request, "MEDIA_PREFETCH_SUCCESSOR_UNAVAILABLE"
+                    )
+                current_response, _ = self._prefetch_next_unit_seq.get(
+                    ledger_key, (None, 1)
+                )
+                if current_response != request.response:
+                    self._prefetch_next_unit_seq[ledger_key] = (
+                        request.response,
+                        1,
                     )
                 successor_reservation = _SuccessorReservation(
                     reservation_key, reservation_identity

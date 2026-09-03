@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance
+from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ResponseRef
 from jiuwenswarm.gateway.live_voice import dedicated_media_registration
 from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
     DedicatedMediaProductRegistry,
@@ -817,6 +817,317 @@ async def test_same_response_successor_preserves_authoritative_unit_sequence() -
     assert timeout_record.downlink_stream_source is None
     assert registry._successor_reservations == {}
     await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_successor_sequence_restarts_for_a_new_response_in_the_same_activation() -> None:
+    """A completed response must not leak its successor cursor into the next turn."""
+
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _Provider(capability=capability)
+    registry, owner, context, params = _authorized_registry(provider)
+    selected = await registry.negotiate_prefetch_promotion(
+        params={
+            "session_id": "session-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+            "offered": ["live-voice.media.prefetch-promotion.v1"],
+        },
+        routed_session_id="session-1",
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    assert selected == {"selected": "live-voice.media.prefetch-promotion.v1"}
+    batch = _Batch()
+
+    def observe_audio_unit(
+        *, response_id: str, response_generation: int, unit_id: str, seq: int, text: str
+    ) -> None:
+        registry.observe_agent_response(
+            {
+                "ok": True,
+                "result": {
+                    "status": "notification",
+                    "kind": "agent.output",
+                    "session_id": "session-1",
+                    "correlation_id": "correlation-1",
+                    "interaction_id": "interaction-1",
+                    "activation_id": "activation-1",
+                    "activation_generation": 1,
+                    "response": {
+                        "interaction_id": "interaction-1",
+                        "response_id": response_id,
+                        "response_generation": response_generation,
+                    },
+                    "agent_event": {"event_type": "chat.final", "text": text},
+                    "presentation_unit": {
+                        "surface": "audio",
+                        "unit_id": unit_id,
+                        "seq": seq,
+                        "projection_role": "audio_segment",
+                    },
+                    "presentation_text": text,
+                    "presentation_delivery": "speak_only",
+                    "source_event": None,
+                    "progress_event": None,
+                    "error_reason": None,
+                    "publish_seq": seq + 1,
+                },
+            },
+            routed_session_id="session-1",
+            user_id="user-1",
+            connection_id="connection-1",
+        )
+
+    async def synthesize_and_drain(unit_params: dict[str, object]):
+        result = await registry.try_streaming_synthesis(
+            "speech.synthesize.batch",
+            unit_params,
+            context,
+            "session-1",
+            batch_service=batch,  # type: ignore[arg-type]
+        )
+        assert result is not None and result["ok"] is True
+        audio = result["result"]["audio"]  # type: ignore[index]
+        record = registry.consume_ticket(
+            str(audio["media_ticket"]), request_origin=ORIGIN
+        )
+        assert record is not None and record.downlink_stream_source is not None
+        source = record.downlink_stream_source
+        return record, source
+
+    try:
+        first_record, first_source = await synthesize_and_drain(params)
+        del first_record
+        assert (await first_source.__anext__()).seq == 0
+        with pytest.raises(StopAsyncIteration):
+            await first_source.__anext__()
+
+        response_a_tail_text = "response A successor"
+        observe_audio_unit(
+            response_id="response-1",
+            response_generation=0,
+            unit_id="response-a-tail-1",
+            seq=1,
+            text=response_a_tail_text,
+        )
+        response_a_tail = json.loads(json.dumps(params))
+        response_a_tail.update(
+            {
+                "request_id": "request-a-tail-1",
+                "operation_id": "operation-a-tail-1",
+                "unit_id": "response-a-tail-1",
+                "unit_seq": 1,
+                "prefetch_promotion_capability": "live-voice.media.prefetch-promotion.v1",
+                "render_plan": {
+                    "display_text": response_a_tail_text,
+                    "spoken_text": response_a_tail_text,
+                    "transforms": [],
+                },
+            }
+        )
+        tail_record, tail_source = await synthesize_and_drain(response_a_tail)
+        tail_binding = tail_record.binding
+        assert tail_binding.playout is not None
+        promoted = MediaPrefetchTransition(
+            lease_id=tail_binding.lease_id,
+            generation=tail_binding.generation.value,
+            session_id=tail_binding.session_id,
+            correlation_id=tail_binding.correlation_id,
+            interaction_id=tail_binding.interaction_id,
+            response_id=tail_binding.playout.response_id,
+            response_generation=tail_binding.playout.response_generation,
+            unit_id=tail_binding.playout.unit_id,
+            unit_seq=1,
+            transition_seq=0,
+            state=MediaPrefetchTransitionState.PROMOTED_UNPARKED,
+            retained_through_seq=0,
+        )
+        await registry.apply_prefetch_transition(tail_record, promoted)
+        assert (await tail_source.__anext__()).seq == 0
+        with pytest.raises(StopAsyncIteration):
+            await tail_source.__anext__()
+
+        response_b_prefix_text = "response B prefix"
+        observe_audio_unit(
+            response_id="response-2",
+            response_generation=1,
+            unit_id="response-b-prefix",
+            seq=0,
+            text=response_b_prefix_text,
+        )
+        response_b_prefix = json.loads(json.dumps(params))
+        response_b_prefix.update(
+            {
+                "request_id": "request-b-prefix",
+                "operation_id": "operation-b-prefix",
+                "response": {
+                    "interaction_id": "interaction-1",
+                    "response_id": "response-2",
+                    "response_generation": 1,
+                },
+                "unit_id": "response-b-prefix",
+                "unit_seq": 0,
+                "render_plan": {
+                    "display_text": response_b_prefix_text,
+                    "spoken_text": response_b_prefix_text,
+                    "transforms": [],
+                },
+            }
+        )
+        prefix_record, prefix_source = await synthesize_and_drain(response_b_prefix)
+        del prefix_record
+        assert (await prefix_source.__anext__()).seq == 0
+        with pytest.raises(StopAsyncIteration):
+            await prefix_source.__anext__()
+
+        response_b_tail_text = "response B successor"
+        observe_audio_unit(
+            response_id="response-2",
+            response_generation=1,
+            unit_id="response-b-tail-1",
+            seq=1,
+            text=response_b_tail_text,
+        )
+        response_b_tail = json.loads(json.dumps(response_b_prefix))
+        response_b_tail.update(
+            {
+                "request_id": "request-b-tail-1",
+                "operation_id": "operation-b-tail-1",
+                "unit_id": "response-b-tail-1",
+                "unit_seq": 1,
+                "prefetch_promotion_capability": "live-voice.media.prefetch-promotion.v1",
+                "render_plan": {
+                    "display_text": response_b_tail_text,
+                    "spoken_text": response_b_tail_text,
+                    "transforms": [],
+                },
+            }
+        )
+        response_b_successor = await registry.try_streaming_synthesis(
+            "speech.synthesize.batch",
+            response_b_tail,
+            context,
+            "session-1",
+            batch_service=batch,  # type: ignore[arg-type]
+        )
+
+        assert response_b_successor is not None
+        assert response_b_successor["ok"] is True
+        assert [request.ref.unit_seq for request in provider.requests] == [0, 1, 0, 1]
+        response_b_audio = response_b_successor["result"]["audio"]  # type: ignore[index]
+        response_b_record = registry.consume_ticket(
+            str(response_b_audio["media_ticket"]), request_origin=ORIGIN
+        )
+        assert (
+            response_b_record is not None
+            and response_b_record.downlink_stream_source is not None
+            and response_b_record.binding.playout is not None
+        )
+        response_b_binding = response_b_record.binding
+        response_b_promoted = MediaPrefetchTransition(
+            lease_id=response_b_binding.lease_id,
+            generation=response_b_binding.generation.value,
+            session_id=response_b_binding.session_id,
+            correlation_id=response_b_binding.correlation_id,
+            interaction_id=response_b_binding.interaction_id,
+            response_id=response_b_binding.playout.response_id,
+            response_generation=response_b_binding.playout.response_generation,
+            unit_id=response_b_binding.playout.unit_id,
+            unit_seq=1,
+            transition_seq=0,
+            state=MediaPrefetchTransitionState.PROMOTED_UNPARKED,
+            retained_through_seq=0,
+        )
+        await registry.apply_prefetch_transition(
+            response_b_record, response_b_promoted
+        )
+        response_b_source = response_b_record.downlink_stream_source
+        assert response_b_source is not None
+        assert (await response_b_source.__anext__()).seq == 0
+        with pytest.raises(StopAsyncIteration):
+            await response_b_source.__anext__()
+
+        def assert_rejection_has_zero_media_effect() -> None:
+            assert [request.ref.unit_seq for request in provider.requests] == [
+                0,
+                1,
+                0,
+                1,
+            ]
+            assert registry._successor_reservations == {}
+            assert registry._pending_tickets == {}
+            assert registry._prefetch_next_unit_seq[
+                ("session-1", "connection-1", "activation-1", 1)
+            ] == (
+                ResponseRef("interaction-1", "response-2", 1),
+                2,
+            )
+
+        replayed_tail = await registry.try_streaming_synthesis(
+            "speech.synthesize.batch",
+            response_b_tail,
+            context,
+            "session-1",
+            batch_service=batch,  # type: ignore[arg-type]
+        )
+        assert replayed_tail is not None and replayed_tail["ok"] is False
+        assert_rejection_has_zero_media_effect()
+
+        stale_result = await registry.try_streaming_synthesis(
+            "speech.synthesize.batch",
+            response_a_tail,
+            context,
+            "session-1",
+            batch_service=batch,  # type: ignore[arg-type]
+        )
+        assert stale_result is not None and stale_result["ok"] is False
+        assert_rejection_has_zero_media_effect()
+
+        skipped_text = "response C skipped successor"
+        observe_audio_unit(
+            response_id="response-3",
+            response_generation=2,
+            unit_id="response-c-tail-2",
+            seq=2,
+            text=skipped_text,
+        )
+        skipped_tail = json.loads(json.dumps(response_b_tail))
+        skipped_tail.update(
+            {
+                "request_id": "request-c-tail-2",
+                "operation_id": "operation-c-tail-2",
+                "response": {
+                    "interaction_id": "interaction-1",
+                    "response_id": "response-3",
+                    "response_generation": 2,
+                },
+                "unit_id": "response-c-tail-2",
+                "unit_seq": 2,
+                "render_plan": {
+                    "display_text": skipped_text,
+                    "spoken_text": skipped_text,
+                    "transforms": [],
+                },
+            }
+        )
+        skipped_result = await registry.try_streaming_synthesis(
+            "speech.synthesize.batch",
+            skipped_tail,
+            context,
+            "session-1",
+            batch_service=batch,  # type: ignore[arg-type]
+        )
+        assert skipped_result is not None and skipped_result["ok"] is False
+        assert_rejection_has_zero_media_effect()
+    finally:
+        await owner.close()
 
 
 @pytest.mark.asyncio
