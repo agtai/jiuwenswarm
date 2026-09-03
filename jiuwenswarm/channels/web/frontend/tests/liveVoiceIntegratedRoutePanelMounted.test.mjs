@@ -16,6 +16,30 @@ import {
   terminalTextFallbackCompletesVoiceAnnouncement,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
 import { parseProductTextProgressEvent } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productTextProgress.js';
+
+// Temporary C019 diagnostic capture: Product P1 names every failure and media
+// authority revoke with a closed caller label. Scenarios assert on them.
+const p1TransitionDiagnostics = [];
+const originalMountedConsoleInfo = console.info;
+console.info = (...args) => {
+  if (
+    args[0] === '[LiveVoiceC019] transition diagnostic'
+    && ['browser_p1_failure_requested', 'browser_media_authority_revoke_requested'].includes(args[1]?.event)
+  ) {
+    p1TransitionDiagnostics.push(args[1]);
+  }
+  return originalMountedConsoleInfo(...args);
+};
+function p1FailureCallers() {
+  return p1TransitionDiagnostics
+    .filter(item => item.event === 'browser_p1_failure_requested')
+    .map(item => `${item.caller}:${item.reason}:${item.status}`);
+}
+function p1RevokeCallers() {
+  return p1TransitionDiagnostics
+    .filter(item => item.event === 'browser_media_authority_revoke_requested')
+    .map(item => `${item.caller}/${item.binding_role}`);
+}
 import {
   encodeAudioFrame,
   serializeMediaControl,
@@ -12212,6 +12236,7 @@ async function runMountedC2FirstTailScenario({
   bargeDuringPrefetch = false,
   bargeContinuation = false,
   bargeWhileTailPlayAwaitsAttach = false,
+  bargeContinuousOneAhead = false,
   bargeWhileAttaching = false,
   bargeDuringActiveTail = false,
   closeWhileBuffered = false,
@@ -12259,7 +12284,8 @@ async function runMountedC2FirstTailScenario({
       || bargeDuringActiveTail
       || exitWhileParkInFlight
       || bargeWhileParkInFlight
-      || bargeWhileTailPlayAwaitsAttach,
+      || bargeWhileTailPlayAwaitsAttach
+      || bargeContinuousOneAhead,
   });
   const activateP2 = createMountedP2ActivationResponder();
   const response = {
@@ -12267,11 +12293,14 @@ async function runMountedC2FirstTailScenario({
     response_id: 'mounted-c2-response',
     response_generation: 1,
   };
+  const threeTails = bargeContinuousOneAhead;
   const firstTailText = twoTails ? 'Second stable sentence. ' : 'Final tail.';
-  const secondTailText = 'Final tail.';
-  const completeText = `First stable sentence. ${firstTailText}${twoTails ? secondTailText : ''}`;
+  const secondTailText = threeTails ? 'Third stable sentence. ' : 'Final tail.';
+  const thirdTailText = 'Final tail.';
+  const completeText = `First stable sentence. ${firstTailText}${twoTails ? secondTailText : ''}${threeTails ? thirdTailText : ''}`;
   const prefixEndUtf8 = Buffer.byteLength('First stable sentence. ', 'utf8');
   const firstTailEndUtf8 = prefixEndUtf8 + Buffer.byteLength(firstTailText, 'utf8');
+  const secondTailEndUtf8 = firstTailEndUtf8 + Buffer.byteLength(secondTailText, 'utf8');
   const completeEndUtf8 = Buffer.byteLength(completeText, 'utf8');
   const notifications = [
     {
@@ -12299,16 +12328,28 @@ async function runMountedC2FirstTailScenario({
       digest: 'b',
     },
     ...(twoTails ? [{
-      eventType: 'chat.final',
+      eventType: threeTails ? 'chat.delta' : 'chat.final',
       text: secondTailText,
       surface: 'audio',
       unitId: 'mounted-c2-tail-2',
       seq: 2,
       sourceStartUtf8: firstTailEndUtf8,
-      sourceEndUtf8: completeEndUtf8,
+      sourceEndUtf8: threeTails ? secondTailEndUtf8 : completeEndUtf8,
       projectionRole: 'audio_segment',
       delivery: 'speak_only',
       digest: 'd',
+    }] : []),
+    ...(threeTails ? [{
+      eventType: 'chat.final',
+      text: thirdTailText,
+      surface: 'audio',
+      unitId: 'mounted-c2-tail-3',
+      seq: 3,
+      sourceStartUtf8: secondTailEndUtf8,
+      sourceEndUtf8: completeEndUtf8,
+      projectionRole: 'audio_segment',
+      delivery: 'speak_only',
+      digest: 'e',
     }] : []),
     {
       eventType: 'chat.final',
@@ -12552,7 +12593,7 @@ async function runMountedC2FirstTailScenario({
             ticket_ttl_ms: 30_000,
             // A parking successor is a long streaming unit: it must retain its
             // 25-frame PARK reserve, which a single-frame result never can.
-            ...((exitWhileParkInFlight || bargeWhileParkInFlight)
+            ...((exitWhileParkInFlight || bargeWhileParkInFlight || bargeContinuousOneAhead)
               && params.unit_id !== 'mounted-c2-prefix'
               ? { frame_count: null, streaming: true }
               : { frame_count: 1, streaming: false }),
@@ -13010,6 +13051,83 @@ async function runMountedC2FirstTailScenario({
           false,
           'prepared second tail received a presentation ACK before first-tail render completion',
         );
+        if (bargeContinuousOneAhead) {
+          // Physical B 198ec657b sample 2: unit 1 promoted and playing, unit 2
+          // staged with its reserve retained (PARK acknowledged), the third
+          // unit still owned by the Gateway (one-ahead fetches it only at the
+          // second unit's adoption), then a spoken barge-in. Every fenced
+          // callback must settle as an owned cancellation without a Product P1
+          // failure, the interrupting capture must stay authoritative until
+          // its own EOT, and exactly one new turn must be submitted.
+          await browser.emitDownlinkFrame();
+          await browser.emitDownlinkFrames(24, { fromSeq: 1 });
+          await waitForMounted(
+            () => browser.latestDownlinkControlTypes().includes('media.prefetch_transition'),
+            'staged second tail did not request PARK after retaining its reserve',
+            5_000,
+          );
+          for (let turn = 0; turn < 10; turn += 1) await new Promise(resolve => setImmediate(resolve));
+          assert.equal(browser.hasRetainedPrefetchTransition(), false, 'PARK ACK was not delivered');
+          assert.equal(browser.counts.sourceStarts, 2, 'staged second tail played before the active first tail completed');
+          p1TransitionDiagnostics.splice(0);
+          assert.equal(activationSubjects.length, 2, 'scenario did not open exactly one successor capture');
+          const interruptingSubject = activationSubjects[1];
+          await browser.emitSpeechStartDuringPlayout();
+          await waitForMounted(
+            () => calls.some(call => call.method === 'live_voice.composition.p2.barge_in'),
+            `C2 barge did not fence the active tail; states=${states.slice(-8).map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')}`,
+          );
+          for (let turn = 0; turn < 20; turn += 1) await new Promise(resolve => setImmediate(resolve));
+          // The Gateway still holds the fenced response's next audio unit and
+          // delivers it through the notification lane after the barge.
+          for (let turn = 0; turn < 200 && notificationWaiters.length === 0; turn += 1) {
+            await new Promise(resolve => setImmediate(resolve));
+          }
+          if (notificationWaiters.length === 1) {
+            publishNotification(productNotification(notifications[3], notificationBinding));
+            for (let turn = 0; turn < 20; turn += 1) await new Promise(resolve => setImmediate(resolve));
+          }
+          const closedSubjects = () => calls
+            .filter(call => call.method === 'live_voice.media.close')
+            .map(call => call.params.subject_id);
+          assert.deepEqual(
+            p1FailureCallers(),
+            [],
+            `spoken barge raced a Product P1 failure; waiters=${notificationWaiters.length} revokes=${p1RevokeCallers().join(',')} closes=${closedSubjects().join(',')} states=${states.slice(-10).map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')}`,
+          );
+          assert.equal(closedSubjects().includes(interruptingSubject), false, `spoken barge revoked the interrupting capture; revokes=${p1RevokeCallers().join(',')}`);
+          assert.equal(browser.counts.sourceStarts, 2, 'staged successor played after the spoken barge');
+          assert.equal(
+            calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length,
+            3,
+            'fenced third tail crossed synthesis after the spoken barge',
+          );
+          assert.equal(
+            calls.some(
+              call => call.method === 'live_voice.composition.p2.presentation.ack'
+                && ['mounted-c2-tail', 'mounted-c2-tail-2', 'mounted-c2-tail-3'].includes(call.params.unit_id),
+            ),
+            false,
+            'fenced tail received a presentation ACK after the spoken barge',
+          );
+          await waitForMounted(
+            () => states.at(-1)?.p1_status === 'capturing',
+            `interrupting capture did not remain authoritative; states=${states.slice(-10).map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')}`,
+          );
+          await assertNoExpectedCloseFailure(states, 'continuous one-ahead spoken barge');
+          const delivered = await browser.emitSpeechEndOfTurnDuringPlayout();
+          assert.equal(delivered, true, 'interrupting capture could not deliver its EOT');
+          await waitForMounted(
+            () => calls.filter(call => call.method === 'live_voice.composition.unified.submit').length === 2,
+            `spoken barge EOT did not submit exactly one new turn; submits=${calls.filter(call => call.method === 'live_voice.composition.unified.submit').length} failures=${p1FailureCallers().join(',')} states=${states.slice(-10).map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')}`,
+            5_000,
+          );
+          for (let turn = 0; turn < 5; turn += 1) await new Promise(resolve => setImmediate(resolve));
+          assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 2);
+          assert.deepEqual(p1FailureCallers(), []);
+          assert.equal(projectedMessages.some(event => event.message.role === 'assistant'), false);
+          return;
+        }
         if (bargeDuringActiveTail) {
           await browser.emitDownlinkFrame();
           assert.equal(
@@ -13054,7 +13172,7 @@ async function runMountedC2FirstTailScenario({
         );
       });
     }
-    if (bargeDuringActiveTail) return;
+    if (bargeDuringActiveTail || bargeContinuousOneAhead) return;
     await act(async () => {
       browser.endLatestSource();
       lifecycle.push('rendered');
@@ -13226,6 +13344,14 @@ test('mounted C2 spoken barge while the tail play awaits its staged attach is an
 
 test('mounted C2 barge while the first tail attaches fences every late tail effect', async () => {
   await runMountedC2FirstTailScenario({ bargeWhileAttaching: true });
+});
+
+test('mounted C2 spoken barge over a promoted tail, a parked successor and a queued third unit keeps the capture and submits once', async () => {
+  await runMountedC2FirstTailScenario({
+    twoTails: true,
+    prefetchPromotion: true,
+    bargeContinuousOneAhead: true,
+  });
 });
 
 test('mounted C2 barge during active tail keeps staged successor close invisible', async () => {

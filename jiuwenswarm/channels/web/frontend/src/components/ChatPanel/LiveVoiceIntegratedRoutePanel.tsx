@@ -1999,6 +1999,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const presentedProductResponsesRef = useRef(new Map<string, true>());
   const presentedProductUnitsRef = useRef(new Map<string, true>());
   const presentedProductFinalResponsesRef = useRef(new Map<string, true>());
+  // Responses fenced by a spoken barge-in or Stop. The Gateway may still
+  // deliver their later audio units and root through the notification lane;
+  // those units are owned by the fence and must be discarded, never adopted
+  // as a new continuation (C019-SPOKEN-BARGE-CONTINUATION-01).
+  const fencedProductResponsesRef = useRef(new Map<string, true>());
+  const productResponseIdentityOf = (response: ProductTtsContinuationGroup['response']) =>
+    `${response.interaction_id}:${response.response_id}:${response.response_generation}`;
   const progressActivationOwnerRef = useRef<ProductWebP3ProgressOwner | null>(null);
   const p3MutationOwnerRef = useRef<ProductWebP3MutationOwner | null>(null);
   const taskIntentOwnerRef = useRef<ProductFormalTaskIntentOwner | null>(null);
@@ -2746,6 +2753,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         );
         if (disposition.kind === 'continue') continue;
         if (
+          responseIdentity !== null
+          && fencedProductResponsesRef.current.has(responseIdentity)
+        ) continue;
+        if (
           disposition.kind !== 'presentation' ||
           disposition.task_notification ||
           !sameContinuationResponse(group.response, disposition.response) ||
@@ -3193,6 +3204,18 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     );
     const presentationBinding = owner.snapshot().binding;
     const isTaskNotification = disposition.kind === 'presentation' && disposition.task_notification;
+    if (
+      disposition.kind === 'presentation'
+      && !disposition.task_notification
+      && responsePresentationIdentity !== null
+      && fencedProductResponsesRef.current.has(responsePresentationIdentity)
+    ) {
+      // A later unit of a response already fenced by spoken barge-in or Stop.
+      // It settles as an owned cancellation: no UI, history, TTS, ACK or new
+      // continuation group may be minted from it.
+      const fencedDisposition: ProductP2NotificationDisposition = { kind: 'continue' };
+      return fencedDisposition;
+    }
     if (
       admission !== null &&
       (voiceLoopP2RefreshAfterGenerationRef.current !== null ||
@@ -4338,6 +4361,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     clearCapturedTaskNotification();
     presentedProductUnitsRef.current.clear();
     presentedProductFinalResponsesRef.current.clear();
+    fencedProductResponsesRef.current.clear();
     terminalNotificationTaskIdRef.current = null;
     terminalAnnouncementSpeechOwnerRef.current = null;
     updateTerminalAnnouncementState('idle', null);
@@ -6734,6 +6758,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         : null;
     cancelledContinuationAttemptRef.current = preparationWindowAttempt;
     cancelProductTtsContinuation('TTS_CONTINUATION_BARGE_IN');
+    retainBoundedPresentedProductResponse(fencedProductResponsesRef.current, productResponseIdentityOf(response));
     activeVoiceResponseRef.current = null;
     let retained = pendingBargeInRef.current;
     if (retained !== null && retained.owner !== p2Owner) {

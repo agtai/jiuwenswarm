@@ -64,6 +64,25 @@ export type ProductP1MediaAuthorityRevokeCaller =
   | 'continuation_completed';
 export type ProductP1MediaAuthorityRole = 'current' | 'continuation' | 'retained' | 'foreign';
 export const PRODUCT_P1_MEDIA_AUTHORITY_REVOKE_EVENT = 'browser_media_authority_revoke_requested';
+// Temporary C019 diagnostic: every Product P1 failure names its exact call
+// site with a closed label so a physical run can attribute the failure that
+// raced a spoken barge-in and revoked the interrupting capture.
+export type ProductP1FailureCaller =
+  | 'capture_state'
+  | 'start_capture'
+  | 'notification_capture_pause'
+  | 'stop_and_recognize'
+  | 'prepare_agent_text'
+  | 'staged_closed_before_promotion'
+  | 'play_prepared_agent_text'
+  | 'staged_park_transition'
+  | 'staged_transport_ack'
+  | 'playout_output_device'
+  | 'downlink_completed_early'
+  | 'media_route_terminated'
+  | 'capture_rotation'
+  | 'capture_duration_exceeded';
+export const PRODUCT_P1_FAILURE_EVENT = 'browser_p1_failure_requested';
 export const PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD = 'live_voice.media.playout_receipt';
 
 export const PRODUCT_P1_CAPTURE_MAX_DURATION_MS = 30_000;
@@ -602,7 +621,7 @@ export class ProductP1VoiceRouteOwner {
             }
             this.#publish();
           } else if (['capturing', 'playing'].includes(this.#status)) {
-            void this.#fail(failure);
+            void this.#fail(failure, 'capture_state');
           }
         },
         onPlayoutState: event => this.#observePlayout(event),
@@ -944,7 +963,7 @@ export class ProductP1VoiceRouteOwner {
       this.#mediaTerminalFailure = null;
       this.#captureReadinessPending = false;
       this.#captureReadinessPurpose = null;
-      await this.#fail(failure);
+      await this.#fail(failure, 'start_capture');
       throw failure;
     }
   }
@@ -1033,7 +1052,7 @@ export class ProductP1VoiceRouteOwner {
           reason: 'FORMAL_P1_CLOSED',
         });
       }
-      await this.#fail(error);
+      await this.#fail(error, 'notification_capture_pause');
       throw error;
     }
   }
@@ -1164,7 +1183,7 @@ export class ProductP1VoiceRouteOwner {
         this.#setStatus('idle', PRODUCT_P1_EMPTY_TRANSCRIPT_REASON);
         throw error;
       }
-      await this.#fail(error);
+      await this.#fail(error, 'stop_and_recognize');
       throw error;
     }
   }
@@ -1345,7 +1364,7 @@ export class ProductP1VoiceRouteOwner {
         });
         throw cancellation;
       }
-      if (!this.#closeRequested) await this.#fail(error);
+      if (!this.#closeRequested) await this.#fail(error, 'prepare_agent_text');
       throw error;
     }
   }
@@ -1522,7 +1541,7 @@ export class ProductP1VoiceRouteOwner {
               void this.#fail(Object.assign(
                 new Error('negotiated staged downlink closed before promotion'),
                 { reason: event.reason_id },
-              ));
+              ), 'staged_closed_before_promotion');
             }
           }
           if (staged.promoted && staged.pending !== null && staged.downlinkRoute !== null) {
@@ -1870,7 +1889,7 @@ export class ProductP1VoiceRouteOwner {
         this.#pendingPlayout = null;
         this.#audio.stopPlayout(playoutResponse, 'formal_playout_failed');
       }
-      await this.#fail(failure);
+      await this.#fail(failure, 'play_prepared_agent_text');
       throw failure;
     }
   }
@@ -2801,14 +2820,14 @@ export class ProductP1VoiceRouteOwner {
               unit_seq: staged.prepared.unitSeq,
             });
             this.#stagedSuccessor = null;
-            void this.#fail(error instanceof Error ? error : new Error('staged PARK failed'));
+            void this.#fail(error instanceof Error ? error : new Error('staged PARK failed'), 'staged_park_transition');
           });
         }
       } catch (error) {
         if (this.#stagedTransitionSuperseded(staged)) return;
         this.#stagedSuccessor = null;
         route.leaf.close('MEDIA_TRANSPORT_PROTOCOL_ERROR');
-        void this.#fail(error instanceof Error ? error : new Error('staged transport ACK failed'));
+        void this.#fail(error instanceof Error ? error : new Error('staged transport ACK failed'), 'staged_transport_ack');
       }
     });
   }
@@ -2837,7 +2856,7 @@ export class ProductP1VoiceRouteOwner {
         this.#publish();
         return;
       }
-      void this.#fail(failure);
+      void this.#fail(failure, 'playout_output_device');
       return;
     }
     if (pending === null) return;
@@ -3068,7 +3087,8 @@ export class ProductP1VoiceRouteOwner {
       void this.#fail(
         Object.assign(new Error('formal dedicated media downlink completed before every declared frame rendered'), {
           reason: 'MEDIA_TRANSPORT_PROTOCOL_ERROR',
-        })
+        }),
+        'downlink_completed_early',
       );
       return;
     }
@@ -3081,7 +3101,8 @@ export class ProductP1VoiceRouteOwner {
     void this.#fail(
       Object.assign(new Error('formal dedicated media route terminated unexpectedly'), {
         reason: event.reason_id,
-      })
+      }),
+      'media_route_terminated',
     );
   }
 
@@ -3401,7 +3422,7 @@ export class ProductP1VoiceRouteOwner {
             }
           })
           .catch(async error => {
-            if (!this.#closed && this.#operationGeneration === operationGeneration) await this.#fail(error);
+            if (!this.#closed && this.#operationGeneration === operationGeneration) await this.#fail(error, 'capture_rotation');
           })
           .finally(() => {
             if (this.#captureRotationPromise === rotation) this.#captureRotationPromise = null;
@@ -3429,7 +3450,8 @@ export class ProductP1VoiceRouteOwner {
       void this.#fail(
         Object.assign(new Error('formal capture duration exceeded'), {
           reason: PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
-        })
+        }),
+        'capture_duration_exceeded',
       );
       return;
     }
@@ -3547,7 +3569,21 @@ export class ProductP1VoiceRouteOwner {
     );
   }
 
-  async #fail(error: unknown): Promise<void> {
+  async #fail(error: unknown, caller: ProductP1FailureCaller): Promise<void> {
+    // Content-free: the closed caller label, the stable reason and the
+    // owner's own truth; no text, audio, token or subject.
+    console.info('[LiveVoiceC019] transition diagnostic', {
+      event: PRODUCT_P1_FAILURE_EVENT,
+      caller,
+      reason: stableFailureReason(error),
+      status: this.#status,
+      operation_generation: this.#operationGeneration,
+      close_requested: this.#closeRequested,
+      cleanup_pending: this.#failureCleanupPromise !== null,
+      capture_route_attached: this.#route !== null,
+      pending_playout: this.#pendingPlayout !== null,
+      staged_successor: this.#stagedSuccessor !== null,
+    });
     if (this.#closed) {
       this.#setStatus('closed', null);
       return;

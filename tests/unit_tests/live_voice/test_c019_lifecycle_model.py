@@ -6,9 +6,11 @@ import pytest
 
 from tests.unit_tests.live_voice.c019_lifecycle_model import (
     ControlState,
+    FailureCleanupSource,
     InterruptingCaptureState,
     LifecycleEvent,
     LifecycleState,
+    NextPreparationState,
     PauseDeadlineKind,
     PauseOwner,
     OutcomeState,
@@ -19,6 +21,7 @@ from tests.unit_tests.live_voice.c019_lifecycle_model import (
     applicable_events,
     apply_event,
     explore,
+    fenced_callbacks_pending,
     from_adapter_snapshot,
     violations,
     with_identity_observation,
@@ -710,3 +713,311 @@ def test_physical_b_observation_with_eot_but_no_submit_is_a_violation_when_settl
     )
 
     assert violations(state) == ("C019-SPOKEN-BARGE-CONTINUATION-01",)
+
+
+def one_ahead_state() -> LifecycleState:
+    """Unit 1 playing, unit 2 buffered, unit 3 preparation in flight."""
+
+    state = LifecycleState()
+    for event in (
+        LifecycleEvent.TRANSPORT_ATTACH,
+        LifecycleEvent.SUCCESSOR_PREFETCH,
+        LifecycleEvent.SUCCESSOR_CAPTURE_READY,
+        LifecycleEvent.ACTIVE_UNIT_PLAYOUT,
+        LifecycleEvent.SUCCESSOR_BUFFERED,
+        LifecycleEvent.NEXT_PREPARATION_STARTED,
+    ):
+        state = apply_event(state, event)
+    return state
+
+
+def apply_all(
+    state: LifecycleState, events: tuple[LifecycleEvent, ...]
+) -> LifecycleState:
+    for event in events:
+        state = apply_event(state, event)
+    return state
+
+
+def test_spoken_barge_fences_the_active_unit_the_successor_and_the_preparation() -> (
+    None
+):
+    state = apply_event(one_ahead_state(), LifecycleEvent.SPOKEN_BARGE_IN)
+
+    assert state.active_unit_playing is False
+    assert state.next_preparation is NextPreparationState.FENCED
+    assert fenced_callbacks_pending(state) == 3
+    assert LifecycleEvent.NEXT_PREPARATION_STARTED not in applicable_events(state)
+    assert violations(state) == ()
+
+
+def test_physical_b_sample_two_trace_violates_the_model() -> None:
+    # c019-task1-aba-20260903T193642Z/B long-2: unit 1 promoted and playing,
+    # unit 2 buffered, barge at 69060 ms (fence 2.3 ms), the barge handler
+    # released the continuation authority, then a Product P1 failure cleanup
+    # (release_resources_failed) revoked the interrupting capture; the Gateway
+    # aborted its streaming recognition and no EOT or submit followed.
+    state = apply_all(
+        one_ahead_state(),
+        (
+            LifecycleEvent.SPOKEN_BARGE_IN,
+            LifecycleEvent.BARGE_HANDLER_SETTLED,
+            LifecycleEvent.FENCED_CALLBACK_FAILURE_CLEANUP,
+            LifecycleEvent.CAPTURE_AUTHORITY_REVOKED,
+        ),
+    )
+
+    assert state.failure_cleanup is FailureCleanupSource.FENCED
+    assert violations(state) == (
+        "C019-FENCED-CALLBACK-01",
+        "C019-SPOKEN-BARGE-CONTINUATION-01",
+    )
+
+
+def test_physical_b_sample_two_observation_is_a_violation() -> None:
+    state = with_spoken_barge_observation(
+        LifecycleState(),
+        fence="spoken_barge",
+        interrupting_capture="revoked",
+        committed_submits_after_fence=0,
+        fenced_response_effects=0,
+        failure_cleanup="fenced",
+    )
+
+    assert violations(state) == (
+        "C019-FENCED-CALLBACK-01",
+        "C019-SPOKEN-BARGE-CONTINUATION-01",
+    )
+
+
+@pytest.mark.parametrize(
+    "settlement",
+    (
+        # cancel signal before the Provider rejection
+        (
+            LifecycleEvent.PREPARATION_CANCEL_SIGNAL,
+            LifecycleEvent.PREPARATION_PROVIDER_REJECTED,
+            LifecycleEvent.PREPARATION_SETTLED_CANCELLED,
+            LifecycleEvent.STAGED_LOCAL_CLOSE,
+            LifecycleEvent.BARGE_HANDLER_SETTLED,
+        ),
+        # Provider rejection before the cancel signal
+        (
+            LifecycleEvent.PREPARATION_PROVIDER_REJECTED,
+            LifecycleEvent.PREPARATION_CANCEL_SIGNAL,
+            LifecycleEvent.PREPARATION_SETTLED_CANCELLED,
+            LifecycleEvent.STAGED_LOCAL_CLOSE,
+            LifecycleEvent.BARGE_HANDLER_SETTLED,
+        ),
+        # deferred admission waiter: cancel signal alone settles the preparation
+        (
+            LifecycleEvent.PREPARATION_CANCEL_SIGNAL,
+            LifecycleEvent.PREPARATION_SETTLED_CANCELLED,
+            LifecycleEvent.STAGED_LOCAL_CLOSE,
+            LifecycleEvent.BARGE_HANDLER_SETTLED,
+        ),
+        # staged local close before the barge handler
+        (
+            LifecycleEvent.STAGED_LOCAL_CLOSE,
+            LifecycleEvent.BARGE_HANDLER_SETTLED,
+            LifecycleEvent.PREPARATION_CANCEL_SIGNAL,
+            LifecycleEvent.PREPARATION_PROVIDER_REJECTED,
+            LifecycleEvent.PREPARATION_SETTLED_CANCELLED,
+        ),
+        # staged local close after the barge handler
+        (
+            LifecycleEvent.BARGE_HANDLER_SETTLED,
+            LifecycleEvent.STAGED_LOCAL_CLOSE,
+            LifecycleEvent.PREPARATION_PROVIDER_REJECTED,
+            LifecycleEvent.PREPARATION_CANCEL_SIGNAL,
+            LifecycleEvent.PREPARATION_SETTLED_CANCELLED,
+        ),
+    ),
+    ids=(
+        "cancel-then-reject",
+        "reject-then-cancel",
+        "cancel-only-waiter",
+        "close-then-handler",
+        "handler-then-close",
+    ),
+)
+def test_spoken_barge_one_ahead_race_settles_as_owned_cancellations_then_submits_once(
+    settlement: tuple[LifecycleEvent, ...],
+) -> None:
+    state = apply_all(one_ahead_state(), (LifecycleEvent.SPOKEN_BARGE_IN, *settlement))
+
+    assert fenced_callbacks_pending(state) == 0
+    assert state.next_preparation is NextPreparationState.SETTLED
+    assert state.failure_cleanup is FailureCleanupSource.NONE
+    assert state.interrupting_capture is InterruptingCaptureState.LIVE
+    assert violations(state) == ()
+
+    state = apply_all(
+        state,
+        (
+            LifecycleEvent.TRANSPORT_CLOSE,
+            LifecycleEvent.CAPTURE_END_OF_TURN,
+            LifecycleEvent.UNIFIED_SUBMIT,
+            LifecycleEvent.CONTINUATION_SETTLEMENT_DEADLINE,
+        ),
+    )
+    assert state.committed_submits_after_fence == 1
+    assert violations(state) == ()
+
+
+@pytest.mark.parametrize(
+    "race",
+    (
+        # the concurrent failure callback wins before the barge handler
+        (
+            LifecycleEvent.FENCED_CALLBACK_FAILURE_CLEANUP,
+            LifecycleEvent.BARGE_HANDLER_SETTLED,
+        ),
+        # the barge handler settles first, then the fenced Provider rejection fails
+        (
+            LifecycleEvent.BARGE_HANDLER_SETTLED,
+            LifecycleEvent.STAGED_LOCAL_CLOSE,
+            LifecycleEvent.PREPARATION_PROVIDER_REJECTED,
+            LifecycleEvent.FENCED_CALLBACK_FAILURE_CLEANUP,
+        ),
+        # the buffered successor's close callback fails instead of cancelling
+        (
+            LifecycleEvent.BARGE_HANDLER_SETTLED,
+            LifecycleEvent.PREPARATION_CANCEL_SIGNAL,
+            LifecycleEvent.PREPARATION_SETTLED_CANCELLED,
+            LifecycleEvent.FENCED_CALLBACK_FAILURE_CLEANUP,
+        ),
+    ),
+    ids=(
+        "failure-before-handler",
+        "provider-rejection-after-handler",
+        "staged-close-failure",
+    ),
+)
+def test_fenced_callback_entering_failure_cleanup_is_a_violation(
+    race: tuple[LifecycleEvent, ...],
+) -> None:
+    state = apply_all(one_ahead_state(), (LifecycleEvent.SPOKEN_BARGE_IN, *race))
+
+    assert violations(state) == ("C019-FENCED-CALLBACK-01",)
+    revoked = apply_event(state, LifecycleEvent.CAPTURE_AUTHORITY_REVOKED)
+    assert violations(revoked) == (
+        "C019-FENCED-CALLBACK-01",
+        "C019-SPOKEN-BARGE-CONTINUATION-01",
+    )
+
+
+def test_preparation_rejected_before_any_fence_is_an_external_failure() -> None:
+    state = apply_event(one_ahead_state(), LifecycleEvent.PREPARATION_PROVIDER_REJECTED)
+
+    assert state.failure_cleanup is FailureCleanupSource.EXTERNAL
+    assert violations(state) == ()
+
+
+def test_external_failure_after_spoken_barge_may_enter_cleanup_and_revoke() -> None:
+    state = apply_all(
+        one_ahead_state(),
+        (
+            LifecycleEvent.SPOKEN_BARGE_IN,
+            LifecycleEvent.EXTERNAL_FAILURE_CLEANUP,
+            LifecycleEvent.CAPTURE_AUTHORITY_REVOKED,
+        ),
+    )
+
+    assert violations(state) == ()
+
+
+@pytest.mark.parametrize(
+    "event", (LifecycleEvent.STOP_REQUESTED, LifecycleEvent.EXIT_REQUESTED)
+)
+def test_stop_and_exit_settle_fenced_callbacks_as_owned_cancellations_without_submit(
+    event: LifecycleEvent,
+) -> None:
+    state = apply_all(
+        one_ahead_state(),
+        (
+            event,
+            LifecycleEvent.STAGED_LOCAL_CLOSE,
+            LifecycleEvent.BARGE_HANDLER_SETTLED,
+            LifecycleEvent.PREPARATION_CANCEL_SIGNAL,
+            LifecycleEvent.PREPARATION_SETTLED_CANCELLED,
+            LifecycleEvent.CONTINUATION_SETTLEMENT_DEADLINE,
+        ),
+    )
+
+    assert fenced_callbacks_pending(state) == 0
+    assert LifecycleEvent.UNIFIED_SUBMIT not in applicable_events(state)
+    assert violations(state) == ()
+    failed = apply_all(
+        one_ahead_state(), (event, LifecycleEvent.FENCED_CALLBACK_FAILURE_CLEANUP)
+    )
+    assert violations(failed) == ("C019-FENCED-CALLBACK-01",)
+
+
+def test_explorer_reaches_the_fenced_callback_violation_from_the_one_ahead_race() -> (
+    None
+):
+    assert explore(LifecycleState(), max_depth=1) == {}
+    traces = explore(
+        apply_event(one_ahead_state(), LifecycleEvent.SPOKEN_BARGE_IN), max_depth=1
+    )
+    assert traces["C019-FENCED-CALLBACK-01"] == (
+        LifecycleEvent.FENCED_CALLBACK_FAILURE_CLEANUP,
+    )
+
+
+def test_fenced_unit_delivered_after_the_spoken_barge_must_be_discarded() -> None:
+    fenced = apply_all(
+        one_ahead_state(),
+        (
+            LifecycleEvent.SPOKEN_BARGE_IN,
+            LifecycleEvent.BARGE_HANDLER_SETTLED,
+            LifecycleEvent.STAGED_LOCAL_CLOSE,
+            LifecycleEvent.PREPARATION_CANCEL_SIGNAL,
+            LifecycleEvent.PREPARATION_SETTLED_CANCELLED,
+            LifecycleEvent.FENCED_UNIT_DELIVERED,
+        ),
+    )
+    assert violations(fenced) == ()
+
+    discarded = apply_event(fenced, LifecycleEvent.FENCED_UNIT_DISCARDED)
+    assert violations(discarded) == ()
+    submitted = apply_all(
+        discarded,
+        (
+            LifecycleEvent.TRANSPORT_CLOSE,
+            LifecycleEvent.CAPTURE_END_OF_TURN,
+            LifecycleEvent.UNIFIED_SUBMIT,
+        ),
+    )
+    assert violations(submitted) == ()
+
+    adopted = apply_event(fenced, LifecycleEvent.FENCED_UNIT_ADOPTED)
+    assert violations(adopted) == ("C019-SPOKEN-BARGE-CONTINUATION-01",)
+
+
+@pytest.mark.parametrize(
+    "event", (LifecycleEvent.STOP_REQUESTED, LifecycleEvent.EXIT_REQUESTED)
+)
+def test_fenced_unit_after_stop_or_exit_must_be_discarded_without_submit(
+    event: LifecycleEvent,
+) -> None:
+    state = apply_all(
+        one_ahead_state(),
+        (
+            event,
+            LifecycleEvent.FENCED_UNIT_DELIVERED,
+            LifecycleEvent.FENCED_UNIT_DISCARDED,
+        ),
+    )
+    assert violations(state) == ()
+    assert LifecycleEvent.UNIFIED_SUBMIT not in applicable_events(state)
+    adopted = apply_all(
+        one_ahead_state(),
+        (
+            event,
+            LifecycleEvent.FENCED_UNIT_DELIVERED,
+            LifecycleEvent.FENCED_UNIT_ADOPTED,
+        ),
+    )
+    assert violations(adopted) == ("C019-SPOKEN-BARGE-CONTINUATION-01",)

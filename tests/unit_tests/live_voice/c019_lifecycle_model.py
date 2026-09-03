@@ -70,6 +70,21 @@ class TransportState(StrEnum):
     CLOSED = "closed"
 
 
+class NextPreparationState(StrEnum):
+    """Browser one-ahead preparation of the unit after the buffered successor."""
+
+    NONE = "none"
+    IN_FLIGHT = "in_flight"
+    FENCED = "fenced"
+    SETTLED = "settled"
+
+
+class FailureCleanupSource(StrEnum):
+    NONE = "none"
+    FENCED = "fenced"
+    EXTERNAL = "external"
+
+
 class InterruptingCaptureState(StrEnum):
     """Browser successor capture opened during playout of the response."""
 
@@ -130,6 +145,19 @@ class LifecycleEvent(StrEnum):
     UNIFIED_SUBMIT = "unified_submit"
     FENCED_RESPONSE_EFFECT = "fenced_response_effect"
     CONTINUATION_SETTLEMENT_DEADLINE = "continuation_settlement_deadline"
+    ACTIVE_UNIT_PLAYOUT = "active_unit_playout"
+    SUCCESSOR_BUFFERED = "successor_buffered"
+    NEXT_PREPARATION_STARTED = "next_preparation_started"
+    PREPARATION_CANCEL_SIGNAL = "preparation_cancel_signal"
+    PREPARATION_PROVIDER_REJECTED = "preparation_provider_rejected"
+    STAGED_LOCAL_CLOSE = "staged_local_close"
+    BARGE_HANDLER_SETTLED = "barge_handler_settled"
+    PREPARATION_SETTLED_CANCELLED = "preparation_settled_cancelled"
+    FENCED_CALLBACK_FAILURE_CLEANUP = "fenced_callback_failure_cleanup"
+    EXTERNAL_FAILURE_CLEANUP = "external_failure_cleanup"
+    FENCED_UNIT_DELIVERED = "fenced_unit_delivered"
+    FENCED_UNIT_DISCARDED = "fenced_unit_discarded"
+    FENCED_UNIT_ADOPTED = "fenced_unit_adopted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +217,18 @@ class LifecycleState:
     committed_submits_after_fence: int = 0
     fenced_response_effects: int = 0
     continuation_settled: bool = False
+    active_unit_playing: bool = False
+    buffered_successor: bool = False
+    next_preparation: NextPreparationState = NextPreparationState.NONE
+    preparation_cancel_signalled: bool = False
+    preparation_provider_rejected: bool = False
+    staged_locally_closed: bool = False
+    barge_handler_settled: bool = False
+    fenced_unit_pending: bool = False
+    fenced_successor_pending: bool = False
+    fenced_preparation_pending: bool = False
+    failure_cleanup: FailureCleanupSource = FailureCleanupSource.NONE
+    fenced_unit_delivered: bool = False
 
 
 _PENDING_CONTROL_STATES = frozenset(
@@ -347,6 +387,42 @@ def applicable_events(state: LifecycleState) -> tuple[LifecycleEvent, ...]:
         events.append(LifecycleEvent.FENCED_RESPONSE_EFFECT)
         if not state.continuation_settled:
             events.append(LifecycleEvent.CONTINUATION_SETTLEMENT_DEADLINE)
+    fenced = state.spoken_barge_fenced or state.local_stop_requested
+    if state.outcome is OutcomeState.ACTIVE and not state.active_unit_playing:
+        events.append(LifecycleEvent.ACTIVE_UNIT_PLAYOUT)
+    if state.active_unit_playing and not state.buffered_successor:
+        events.append(LifecycleEvent.SUCCESSOR_BUFFERED)
+    if (
+        state.buffered_successor
+        and state.next_preparation is NextPreparationState.NONE
+        and not fenced
+    ):
+        events.append(LifecycleEvent.NEXT_PREPARATION_STARTED)
+    if state.next_preparation in {
+        NextPreparationState.IN_FLIGHT,
+        NextPreparationState.FENCED,
+    }:
+        if not state.preparation_cancel_signalled and fenced:
+            events.append(LifecycleEvent.PREPARATION_CANCEL_SIGNAL)
+        if not state.preparation_provider_rejected:
+            events.append(LifecycleEvent.PREPARATION_PROVIDER_REJECTED)
+    if state.fenced_preparation_pending and (
+        state.preparation_cancel_signalled or state.preparation_provider_rejected
+    ):
+        events.append(LifecycleEvent.PREPARATION_SETTLED_CANCELLED)
+    if state.fenced_successor_pending:
+        events.append(LifecycleEvent.STAGED_LOCAL_CLOSE)
+    if state.fenced_unit_pending:
+        events.append(LifecycleEvent.BARGE_HANDLER_SETTLED)
+    if fenced_callbacks_pending(state) > 0:
+        events.append(LifecycleEvent.FENCED_CALLBACK_FAILURE_CLEANUP)
+    if state.failure_cleanup is FailureCleanupSource.NONE:
+        events.append(LifecycleEvent.EXTERNAL_FAILURE_CLEANUP)
+    if fenced and not state.fenced_unit_delivered:
+        events.append(LifecycleEvent.FENCED_UNIT_DELIVERED)
+    if state.fenced_unit_delivered:
+        events.append(LifecycleEvent.FENCED_UNIT_DISCARDED)
+        events.append(LifecycleEvent.FENCED_UNIT_ADOPTED)
     return tuple(events)
 
 
@@ -595,12 +671,12 @@ def apply_event(state: LifecycleState, event: LifecycleEvent) -> LifecycleState:
         # like CANCEL, but the capture that carries the interrupting speech
         # stays authoritative until its own end of turn.
         return replace(
-            _fence_response(state),
+            _fence_continuation(_fence_response(state)),
             spoken_barge_fenced=True,
         )
     if event in {LifecycleEvent.STOP_REQUESTED, LifecycleEvent.EXIT_REQUESTED}:
         return replace(
-            _fence_response(state),
+            _fence_continuation(_fence_response(state)),
             local_stop_requested=True,
             interrupting_capture=(
                 InterruptingCaptureState.RELEASED
@@ -624,12 +700,114 @@ def apply_event(state: LifecycleState, event: LifecycleEvent) -> LifecycleState:
         )
     if event is LifecycleEvent.FENCED_RESPONSE_EFFECT:
         return replace(state, fenced_response_effects=state.fenced_response_effects + 1)
+    if event is LifecycleEvent.ACTIVE_UNIT_PLAYOUT:
+        return replace(state, active_unit_playing=True)
+    if event is LifecycleEvent.SUCCESSOR_BUFFERED:
+        return replace(state, buffered_successor=True)
+    if event is LifecycleEvent.NEXT_PREPARATION_STARTED:
+        return replace(state, next_preparation=NextPreparationState.IN_FLIGHT)
+    if event is LifecycleEvent.PREPARATION_CANCEL_SIGNAL:
+        return replace(state, preparation_cancel_signalled=True)
+    if event is LifecycleEvent.PREPARATION_PROVIDER_REJECTED:
+        # A Provider rejection of a fenced preparation is a fenced callback;
+        # before any fence it is an independent, still authoritative failure.
+        if state.next_preparation is NextPreparationState.FENCED:
+            return replace(state, preparation_provider_rejected=True)
+        return replace(
+            state,
+            preparation_provider_rejected=True,
+            next_preparation=NextPreparationState.SETTLED,
+            failure_cleanup=FailureCleanupSource.EXTERNAL,
+        )
+    if event is LifecycleEvent.STAGED_LOCAL_CLOSE:
+        # The owned local close of the buffered successor settles as a
+        # cancellation.
+        return replace(
+            state, staged_locally_closed=True, fenced_successor_pending=False
+        )
+    if event is LifecycleEvent.BARGE_HANDLER_SETTLED:
+        # The FORMAL_PLAYOUT_BARGED / Stop / Exit handler settles the active
+        # unit as a cancellation.
+        return replace(state, barge_handler_settled=True, fenced_unit_pending=False)
+    if event is LifecycleEvent.PREPARATION_SETTLED_CANCELLED:
+        return replace(
+            state,
+            fenced_preparation_pending=False,
+            next_preparation=NextPreparationState.SETTLED,
+        )
+    if event is LifecycleEvent.FENCED_CALLBACK_FAILURE_CLEANUP:
+        # The defect: an error or callback that belongs to a continuation or
+        # preparation already fenced by the spoken barge enters failure cleanup
+        # instead of settling as an owned cancellation.
+        if state.fenced_preparation_pending:
+            consumed = {
+                "fenced_preparation_pending": False,
+                "next_preparation": NextPreparationState.SETTLED,
+            }
+        elif state.fenced_successor_pending:
+            consumed = {"fenced_successor_pending": False}
+        else:
+            consumed = {"fenced_unit_pending": False}
+        return replace(state, failure_cleanup=FailureCleanupSource.FENCED, **consumed)
+    if event is LifecycleEvent.EXTERNAL_FAILURE_CLEANUP:
+        return replace(state, failure_cleanup=FailureCleanupSource.EXTERNAL)
+    if event is LifecycleEvent.FENCED_UNIT_DELIVERED:
+        # The Gateway still delivers a later audio unit of the fenced response
+        # through the notification lane after the fence.
+        return replace(state, fenced_unit_delivered=True)
+    if event is LifecycleEvent.FENCED_UNIT_DISCARDED:
+        return replace(state, fenced_unit_delivered=False)
+    if event is LifecycleEvent.FENCED_UNIT_ADOPTED:
+        # The defect: the fenced unit is adopted as a new continuation, which
+        # can only fail (sequence gap) or replay fenced audio.
+        return replace(
+            state,
+            fenced_unit_delivered=False,
+            fenced_response_effects=state.fenced_response_effects + 1,
+        )
     if event is LifecycleEvent.CONTINUATION_SETTLEMENT_DEADLINE:
         # The bounded settlement window after a fence has elapsed: an end of
         # turn observed on the interrupting capture must have produced its one
         # committed submit by now.
         return replace(state, continuation_settled=True)
     raise AssertionError(f"unhandled lifecycle event: {event}")
+
+
+def _fence_continuation(state: LifecycleState) -> LifecycleState:
+    """Fence the active unit, the buffered successor and the next preparation.
+
+    Every callback still owned by them (staged local close, Provider
+    rejection, cancel signal, transition ACK) becomes a fenced callback that
+    must settle as an owned cancellation.
+    """
+
+    next_preparation = state.next_preparation
+    fenced_preparation = state.fenced_preparation_pending
+    if next_preparation is NextPreparationState.IN_FLIGHT:
+        next_preparation = NextPreparationState.FENCED
+        fenced_preparation = True
+    return replace(
+        state,
+        active_unit_playing=False,
+        fenced_unit_pending=state.fenced_unit_pending or state.active_unit_playing,
+        fenced_successor_pending=(
+            state.fenced_successor_pending or state.buffered_successor
+        ),
+        fenced_preparation_pending=fenced_preparation,
+        next_preparation=next_preparation,
+    )
+
+
+def fenced_callbacks_pending(state: LifecycleState) -> int:
+    """Callbacks still owned by the fenced continuation or preparation."""
+
+    return sum(
+        (
+            state.fenced_unit_pending,
+            state.fenced_successor_pending,
+            state.fenced_preparation_pending,
+        )
+    )
 
 
 def _fence_response(state: LifecycleState) -> LifecycleState:
@@ -714,10 +892,15 @@ def violations(state: LifecycleState) -> tuple[str, ...]:
         found.append("C019-ORDINARY-DEADLINE-01")
     if state.foreign_control_rejected and state.authority_effects_after_foreign:
         found.append("C019-IDENTITY-01")
+    if state.failure_cleanup is FailureCleanupSource.FENCED:
+        found.append("C019-FENCED-CALLBACK-01")
     if (
         state.spoken_barge_fenced
         and (
-            state.interrupting_capture is InterruptingCaptureState.REVOKED
+            (
+                state.interrupting_capture is InterruptingCaptureState.REVOKED
+                and state.failure_cleanup is not FailureCleanupSource.EXTERNAL
+            )
             or state.committed_submits_after_fence > 1
             or state.fenced_response_effects > 0
             or (
@@ -980,6 +1163,7 @@ def with_spoken_barge_observation(
     committed_submits_after_fence: int,
     fenced_response_effects: int,
     settled: bool = False,
+    failure_cleanup: str = "none",
 ) -> LifecycleState:
     """Translate observed Browser/Gateway facts after a playout fence.
 
@@ -989,7 +1173,11 @@ def with_spoken_barge_observation(
     ``"end_of_turn"``, ``"revoked"`` (its media authority was revoked or its
     streaming recognition was aborted before an end of turn), ``"released"``
     or ``"none"``. ``settled`` records that the bounded settlement window after
-    the fence has elapsed in the observed run.
+    the fence has elapsed in the observed run. ``failure_cleanup`` is
+    ``"none"``, ``"fenced"`` (Product P1 entered failure cleanup from an error
+    or callback owned by the fenced continuation or preparation) or
+    ``"external"`` (an independent, still authoritative Provider or transport
+    failure).
     """
 
     if fence not in {"spoken_barge", "stop", "exit", "none"}:
@@ -1004,6 +1192,7 @@ def with_spoken_barge_observation(
         committed_submits_after_fence=committed_submits_after_fence,
         fenced_response_effects=fenced_response_effects,
         continuation_settled=settled,
+        failure_cleanup=FailureCleanupSource(failure_cleanup),
     )
 
 
