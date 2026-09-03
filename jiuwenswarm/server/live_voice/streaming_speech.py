@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import hashlib
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -257,14 +258,39 @@ class RecognitionCommitDisposition(StrEnum):
     SERVER_VAD_OBSERVED = "server_vad_observed"
 
 
+SERVER_VAD_SILENCE_MS_ENV = "LIVE_VOICE_SERVER_VAD_SILENCE_MS"
+# The Provider default of 500 ms cuts ordinary breath pauses into separate
+# turns (D115 raised it to 1 200 ms). The 2026-09-03 baseline measured the
+# whole speech-end-to-EOT wait at 2.0-2.1 s, of which the silence hold is the
+# only part this process controls; 800 ms keeps a sentence-internal pause
+# intact while returning about 0.4 s per turn. Deployments that still trip on
+# breath pauses set the environment override back to 1 200.
+DEFAULT_SERVER_VAD_SILENCE_MS = 800
+
+
+def default_server_vad_silence_ms() -> int:
+    """Silence hold before server VAD commits a turn, from env or the default."""
+    raw = os.getenv(SERVER_VAD_SILENCE_MS_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_SERVER_VAD_SILENCE_MS
+    try:
+        value = int(raw.strip())
+    except ValueError as error:
+        raise StreamingSpeechViolation(
+            "INVALID_SERVER_VAD", f"{SERVER_VAD_SILENCE_MS_ENV} must be an integer"
+        ) from error
+    if not 0 < value <= 10_000:
+        raise StreamingSpeechViolation(
+            "INVALID_SERVER_VAD", "server VAD silence duration is out of bounds"
+        )
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ServerVadConfig:
     threshold: float = 0.5
     prefix_padding_ms: int = 300
-    # The Provider default of 500 ms cuts ordinary breath pauses into separate
-    # turns. Keep server VAD's already-proven event contract, but allow a
-    # natural sentence-internal pause before committing the user's turn.
-    silence_duration_ms: int = 1_200
+    silence_duration_ms: int = field(default_factory=default_server_vad_silence_ms)
     create_response: bool = False
     interrupt_response: bool = False
 

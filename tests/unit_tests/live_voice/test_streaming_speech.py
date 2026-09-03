@@ -251,9 +251,25 @@ def test_server_vad_default_tolerates_a_natural_breath_pause() -> None:
     assert detection.server_vad is not None
     assert detection.server_vad.threshold == 0.5
     assert detection.server_vad.prefix_padding_ms == 300
-    assert detection.server_vad.silence_duration_ms == 1_200
+    assert detection.server_vad.silence_duration_ms == 800
     assert detection.server_vad.create_response is False
     assert detection.server_vad.interrupt_response is False
+
+
+def test_server_vad_silence_hold_honours_environment_override(monkeypatch) -> None:
+    from jiuwenswarm.server.live_voice.streaming_speech import SERVER_VAD_SILENCE_MS_ENV
+
+    monkeypatch.setenv(SERVER_VAD_SILENCE_MS_ENV, "1200")
+    assert RecognitionTurnDetection.server_vad_default().server_vad.silence_duration_ms == 1_200
+    assert RecognitionTurnDetection.server_vad_barge_in().server_vad.silence_duration_ms == 1_200
+
+    monkeypatch.setenv(SERVER_VAD_SILENCE_MS_ENV, "   ")
+    assert RecognitionTurnDetection.server_vad_default().server_vad.silence_duration_ms == 800
+
+    for invalid in ("abc", "0", "10001"):
+        monkeypatch.setenv(SERVER_VAD_SILENCE_MS_ENV, invalid)
+        with pytest.raises(StreamingSpeechViolation):
+            RecognitionTurnDetection.server_vad_default()
 
 
 def test_server_vad_barge_in_retains_wider_prefix_without_changing_authority() -> None:
@@ -262,7 +278,7 @@ def test_server_vad_barge_in_retains_wider_prefix_without_changing_authority() -
     assert detection.server_vad is not None
     assert detection.server_vad.threshold == 0.5
     assert detection.server_vad.prefix_padding_ms == 800
-    assert detection.server_vad.silence_duration_ms == 1_200
+    assert detection.server_vad.silence_duration_ms == 800
     assert detection.server_vad.create_response is False
     assert detection.server_vad.interrupt_response is False
     assert (
