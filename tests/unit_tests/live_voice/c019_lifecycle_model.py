@@ -152,6 +152,7 @@ class LifecycleState:
     reader_resumed_after_promotion: bool = False
     terminal_noop_settled: bool = False
     park_started_ms: int | None = None
+    ordinary_deadline_ms: int | None = None
     pause_deadline_ms: int | None = None
     promotion_deadline_ms: int | None = None
     now_ms: int = 0
@@ -349,6 +350,7 @@ def apply_event(state: LifecycleState, event: LifecycleEvent) -> LifecycleState:
             successor=SuccessorState.FAILED,
             waiting_for_park=False,
             pause_deadline_ms=None,
+            ordinary_deadline_ms=None,
             promotion_deadline_ms=None,
         )
     if event is LifecycleEvent.ADAPTER_FAILURE:
@@ -361,6 +363,7 @@ def apply_event(state: LifecycleState, event: LifecycleEvent) -> LifecycleState:
             successor=SuccessorState.FAILED,
             waiting_for_park=False,
             pause_deadline_ms=None,
+            ordinary_deadline_ms=None,
             promotion_deadline_ms=None,
         )
     if event is LifecycleEvent.COMPLETED_PUBLISHED:
@@ -381,7 +384,12 @@ def apply_event(state: LifecycleState, event: LifecycleEvent) -> LifecycleState:
             successor=SuccessorState.CANCELLED,
             waiting_for_park=False,
             pause_deadline_ms=None,
+            ordinary_deadline_ms=None,
             promotion_deadline_ms=None,
+            expected_transport_close=(
+                state.expected_transport_close
+                or state.transport is TransportState.ATTACHED
+            ),
         )
     if event is LifecycleEvent.PAUSE_REQUESTED:
         return replace(
@@ -389,6 +397,7 @@ def apply_event(state: LifecycleState, event: LifecycleEvent) -> LifecycleState:
             control=ControlState.PAUSE_REQUESTED,
             pause_owner=PauseOwner.ORDINARY,
             pause_deadline_kind=PauseDeadlineKind.ORDINARY,
+            ordinary_deadline_ms=state.now_ms + 60_000,
             pause_deadline_ms=state.now_ms + 60_000,
         )
     if event is LifecycleEvent.PAUSE_ACKNOWLEDGED:
@@ -401,6 +410,7 @@ def apply_event(state: LifecycleState, event: LifecycleEvent) -> LifecycleState:
             control=ControlState.ACTIVE,
             pause_owner=PauseOwner.NONE,
             pause_deadline_kind=PauseDeadlineKind.NONE,
+            ordinary_deadline_ms=None,
             pause_deadline_ms=None,
         )
     if event is LifecycleEvent.SUCCESSOR_PREFETCH:
@@ -428,6 +438,7 @@ def apply_event(state: LifecycleState, event: LifecycleEvent) -> LifecycleState:
             pause_deadline_kind=PauseDeadlineKind.PARKED,
             adapter_park_generation=state.gateway_park_generation,
             park_started_ms=state.now_ms,
+            ordinary_deadline_ms=None,
             pause_deadline_ms=state.now_ms + 185_000,
             promotion_deadline_ms=state.now_ms + 180_000,
             waiting_for_park=False,
@@ -467,6 +478,7 @@ def apply_event(state: LifecycleState, event: LifecycleEvent) -> LifecycleState:
             reader_resumed_after_promotion=True,
             pause_owner=PauseOwner.NONE,
             pause_deadline_kind=PauseDeadlineKind.NONE,
+            ordinary_deadline_ms=None,
             pause_deadline_ms=None,
         )
     if event is LifecycleEvent.TERMINAL_NOOP_SETTLED:
@@ -478,6 +490,7 @@ def apply_event(state: LifecycleState, event: LifecycleEvent) -> LifecycleState:
             terminal_noop_settled=True,
             pause_owner=PauseOwner.NONE,
             pause_deadline_kind=PauseDeadlineKind.NONE,
+            ordinary_deadline_ms=None,
             pause_deadline_ms=None,
         )
     if event is LifecycleEvent.ADVANCE_TO_PROMOTION_DEADLINE:
@@ -575,6 +588,11 @@ def violations(state: LifecycleState) -> tuple[str, ...]:
         found.append("C019-CANCEL-01")
     if state.expected_transport_close and state.transport_failure_reported:
         found.append("C019-TRANSPORT-01")
+    if (
+        state.ordinary_deadline_ms is not None
+        and state.pause_owner is not PauseOwner.ORDINARY
+    ):
+        found.append("C019-ORDINARY-DEADLINE-01")
     if state.foreign_control_rejected and state.authority_effects_after_foreign:
         found.append("C019-IDENTITY-01")
     active_resume_chain = (

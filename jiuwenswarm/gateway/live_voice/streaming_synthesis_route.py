@@ -2365,6 +2365,12 @@ class StreamingSynthesisRouteOwner:
                 # promoted put keeps the undiminished ordinary put bound.
                 promoted_put_timeout_seconds=put_timeout_seconds,
             )
+            if parked_owned:
+                # PARK adopted the ordinary pause and PROMOTE already resumed
+                # the Provider.  The pre-PARK deadline and cleanup owner must
+                # not survive that transfer into the promoted stream.
+                pressure_deadline = None
+                paused = False
             handle.frames_enqueued += 1
             queued = True
         except TimeoutError as exc:

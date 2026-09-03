@@ -14,6 +14,10 @@ from dataclasses import replace
 import pytest
 
 from tests.unit_tests.live_voice.c019_lifecycle_model import (
+    LifecycleEvent,
+    LifecycleState,
+    PauseOwner,
+    apply_event as lifecycle_apply_event,
     from_adapter_snapshot,
     violations as lifecycle_violations,
     with_delivery_snapshot,
@@ -2231,9 +2235,11 @@ async def test_bounded_queue_failure_before_delivery_clears_retained_pcm(
     diagnostics: list[dict[str, object]] = []
 
     def record_pressure(message: str, *args: object, **kwargs: object) -> None:
-        if message == "live_voice_streaming_synthesis_queue_pressure":
+        if message.startswith("live_voice_streaming_synthesis_queue_pressure"):
             extra = kwargs.get("extra")
             assert isinstance(extra, dict)
+            assert "phase=%s" in message
+            assert args[0] == "queue_put"
             diagnostics.append(extra)
 
     monkeypatch.setattr(route_module._LOGGER, "warning", record_pressure)
@@ -2262,6 +2268,7 @@ async def test_bounded_queue_failure_before_delivery_clears_retained_pcm(
     assert diagnostics[0]["frames_enqueued"] == 1
     assert diagnostics[0]["frames_pulled"] == 0
     assert diagnostics[0]["unit_seq"] == 0
+    assert diagnostics[0]["source_state"] == "queue_put_timeout"
     assert "private display text" not in repr(diagnostics[0])
     assert "private spoken text" not in repr(diagnostics[0])
     assert "samples=" not in repr(handle)
@@ -2496,6 +2503,139 @@ async def test_park_prefetch_adopts_ordinary_queue_pause_without_timeout() -> No
     assert provider.promoted == [(request.ref, 3)]
     assert provider.resumed == []
     await owner.cancel(handle, reason=StreamingSynthesisReason.ROUTE_ABORTED)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_park_transfer_discards_expired_ordinary_deadline_at_product_capacity() -> (
+    None
+):
+    """A product-size queue must not reuse its pre-PARK deadline after PROMOTE."""
+
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id="park-transfer-product-capacity")
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=8,
+        queue_wait_seconds=0.01,
+        pause_wait_seconds=0.05,
+        event_timeout_seconds=1.0,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=0.5,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * (480 * 9),
+        )
+    )
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+
+    await owner.park_prefetch(handle, park_generation=3, timeout_seconds=1.0)
+    await asyncio.sleep(0.12)  # Cross the superseded ordinary 50 ms deadline.
+    assert handle.cleanup_done.is_set() is False
+    await owner.promote_prefetch(handle, park_generation=3)
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=2,
+            cursor=480 * 9,
+            kind=SynthesisEventKind.COMPLETED,
+        )
+    )
+
+    frame_sequences = []
+    while True:
+        pull = await owner.next_chunk(handle, timeout_seconds=1)
+        if pull.chunk is not None:
+            frame_sequences.append(pull.chunk.frame.seq)
+            await asyncio.sleep(0.004)
+            continue
+        assert pull.outcome is not None
+        assert pull.outcome.completed is True, pull.outcome
+        break
+
+    assert frame_sequences == list(range(9))
+    assert provider.cancelled == []
+    # PROMOTE resumed the Provider; the superseded ordinary owner must not
+    # issue a stale cleanup resume of its own.
+    assert provider.resumed == []
+    assert provider.parked == [(request.ref, 3, 6.0)]
+    assert provider.promoted == [(request.ref, 3)]
+
+    # Replay the transitions the fake Provider actually observed into the
+    # lifecycle oracle: the ordinary deadline must be released at PARK
+    # adoption and stay released through PROMOTE and completion.
+    oracle = LifecycleState()
+    replayed: list[LifecycleEvent] = []
+    if provider.paused:
+        replayed.extend(
+            (LifecycleEvent.PAUSE_REQUESTED, LifecycleEvent.PAUSE_ACKNOWLEDGED)
+        )
+    if provider.parked:
+        replayed.extend(
+            (
+                LifecycleEvent.SUCCESSOR_PREFETCH,
+                LifecycleEvent.BROWSER_PARK_REQUESTED,
+                LifecycleEvent.GATEWAY_PARK_ACCEPTED,
+                LifecycleEvent.ADAPTER_PARK_ACKNOWLEDGED,
+            )
+        )
+    if provider.promoted:
+        replayed.extend(
+            (
+                LifecycleEvent.PREDECESSOR_COMPLETE,
+                LifecycleEvent.BROWSER_PROMOTION_REQUESTED,
+                LifecycleEvent.GATEWAY_PROMOTION_ACCEPTED,
+                LifecycleEvent.ADAPTER_PROMOTION_RESUME_REQUESTED,
+                LifecycleEvent.ADAPTER_PROMOTION_RESUME_ACKNOWLEDGED,
+                LifecycleEvent.READER_RESUMED_AFTER_PROMOTION,
+            )
+        )
+    for event in replayed:
+        oracle = lifecycle_apply_event(oracle, event)
+        assert lifecycle_violations(oracle) == (), (event, oracle)
+        if event is LifecycleEvent.ADAPTER_PARK_ACKNOWLEDGED:
+            assert oracle.ordinary_deadline_ms is None
+            assert oracle.pause_owner is PauseOwner.PARKED
+    oracle = with_gateway_snapshot(
+        oracle,
+        queue_size=handle.queue.qsize(),
+        queue_capacity=handle.queue.maxsize,
+        browser_reserved_frames=len(frame_sequences),
+        prefetch_candidate=False,
+        waiting_for_park=False,
+    )
+    oracle = with_delivery_snapshot(
+        oracle,
+        accepted_audio_frames=9,
+        delivered_audio_frames=len(frame_sequences),
+        completed_published=True,
+    )
+    assert oracle.ordinary_deadline_ms is None
+    assert oracle.pause_owner is not PauseOwner.ORDINARY
+    assert lifecycle_violations(oracle) == ()
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.agent_dispatches == 0
+    assert snapshot.tool_dispatches == 0
+    assert snapshot.task_mutations == 0
+    assert snapshot.chat_mutations == 0
+    assert snapshot.turn_commits == 0
     await owner.close()
 
 

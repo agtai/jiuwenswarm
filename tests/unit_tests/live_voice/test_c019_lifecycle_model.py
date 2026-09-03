@@ -1,5 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+from dataclasses import replace
+
 import pytest
 
 from tests.unit_tests.live_voice.c019_lifecycle_model import (
@@ -269,6 +271,18 @@ def test_expected_transport_close_without_failure_report_is_valid() -> None:
     assert violations(state) == ()
 
 
+def test_cancel_makes_transport_close_expected_and_rejects_visible_failure() -> None:
+    state = apply_event(LifecycleState(), LifecycleEvent.TRANSPORT_ATTACH)
+    state = apply_event(state, LifecycleEvent.CANCEL)
+
+    assert state.expected_transport_close is True
+    state = apply_event(state, LifecycleEvent.TRANSPORT_CLOSE)
+    assert violations(state) == ()
+
+    leaked = apply_event(state, LifecycleEvent.REPORT_TRANSPORT_FAILURE)
+    assert violations(leaked) == ("C019-TRANSPORT-01",)
+
+
 def test_real_adapter_snapshot_translation_rejects_dead_reader_waiter() -> None:
     state = from_adapter_snapshot(
         reader_state="exited",
@@ -324,6 +338,25 @@ def test_park_adoption_cannot_retain_ordinary_owner_or_deadline() -> None:
     )
 
     assert "C019-PARK-DEADLINE-01" in violations(state)
+
+
+def test_park_adoption_releases_the_superseded_ordinary_deadline() -> None:
+    state = apply_event(LifecycleState(), LifecycleEvent.PAUSE_REQUESTED)
+    assert state.ordinary_deadline_ms == 60_000
+    for event in (
+        LifecycleEvent.PAUSE_ACKNOWLEDGED,
+        LifecycleEvent.SUCCESSOR_PREFETCH,
+        LifecycleEvent.BROWSER_PARK_REQUESTED,
+        LifecycleEvent.GATEWAY_PARK_ACCEPTED,
+        LifecycleEvent.ADAPTER_PARK_ACKNOWLEDGED,
+    ):
+        state = apply_event(state, event)
+
+    assert state.ordinary_deadline_ms is None
+    assert violations(state) == ()
+
+    leaked = replace(state, ordinary_deadline_ms=60_000)
+    assert violations(leaked) == ("C019-ORDINARY-DEADLINE-01",)
 
 
 def test_promotion_deadline_requires_resume_terminal_or_explicit_failure() -> None:
