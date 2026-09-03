@@ -2279,6 +2279,16 @@ class StreamingSynthesisRouteOwner:
             provider_terminal
             and handle.capability.bounded_pause is not CapabilityProvenance.UNAVAILABLE
         )
+        # One absolute deadline owns the whole ordinary pause: Provider pause
+        # handshake, the blocked queue admission and the resume watermark
+        # share its remaining budget and never renew it, so total ownership
+        # stays inside the Adapter's hard pause lifetime.
+        pressure_started_at = time.monotonic()
+        pressure_deadline: float | None = None
+        pressure_phase = "queue_put"
+        put_timeout_seconds = (
+            self._pause_wait_seconds if drain_only else self._queue_wait_seconds
+        )
         try:
             if (
                 handle.queue.full()
@@ -2302,6 +2312,8 @@ class StreamingSynthesisRouteOwner:
                             )
                             paused = True
                     if paused:
+                        pressure_deadline = time.monotonic() + self._pause_wait_seconds
+                        put_timeout_seconds = self._pause_wait_seconds
                         _LOGGER.info(
                             "live_voice_streaming_synthesis_backpressure "
                             "stage=pause_requested response_generation=%s "
@@ -2314,9 +2326,15 @@ class StreamingSynthesisRouteOwner:
                             handle.frames_enqueued,
                             handle.frames_pulled,
                         )
+                        # The Adapter acknowledges an ordinary pause only at a
+                        # reader boundary, so this handshake draws on the
+                        # bounded pause budget rather than the queue-wait bound.
+                        pressure_phase = "pause_handshake"
                         await self._task_owner.run(
                             handle.provider.pause_synthesis(handle.ref),
-                            timeout_seconds=self._queue_wait_seconds,
+                            timeout_seconds=_remaining_pressure_budget(
+                                pressure_deadline
+                            ),
                             operation="provider-pause",
                         )
                         async with handle.state_lock:
@@ -2334,36 +2352,23 @@ class StreamingSynthesisRouteOwner:
                             handle.ref.response.response_generation,
                             handle.ref.unit_seq,
                         )
-            queued_at = time.monotonic()
+            pressure_phase = "queue_put"
             parked_owned = await self._queue_put_with_optional_prefetch(
                 handle,
                 chunk,
                 timeout_seconds=(
-                    self._pause_wait_seconds
-                    if paused or drain_only
-                    else self._queue_wait_seconds
+                    put_timeout_seconds
+                    if pressure_deadline is None
+                    else _remaining_pressure_budget(pressure_deadline)
                 ),
+                # A PARK transfer keeps its own promotion lease and the
+                # promoted put keeps the undiminished ordinary put bound.
+                promoted_put_timeout_seconds=put_timeout_seconds,
             )
             handle.frames_enqueued += 1
             queued = True
         except TimeoutError as exc:
-            _LOGGER.warning(
-                "live_voice_streaming_synthesis_queue_pressure",
-                extra={
-                    "response_id": handle.ref.response.response_id,
-                    "response_generation": handle.ref.response.response_generation,
-                    "unit_id": handle.ref.unit_id,
-                    "unit_seq": handle.ref.unit_seq,
-                    "queue_size": handle.queue.qsize(),
-                    "queue_capacity": handle.queue.maxsize,
-                    "frames_enqueued": handle.frames_enqueued,
-                    "frames_pulled": handle.frames_pulled,
-                    "source_state": "queue_put_timeout",
-                    "wait_elapsed_ms": round(
-                        max(0.0, time.monotonic() - queued_at) * 1000, 3
-                    ),
-                },
-            )
+            _log_queue_pressure(handle, pressure_phase, pressure_started_at)
             raise StreamingSynthesisRouteViolation(
                 StreamingSynthesisReason.QUEUE_EXHAUSTED.value,
                 "streaming synthesis output queue is exhausted",
@@ -2399,7 +2404,11 @@ class StreamingSynthesisRouteOwner:
                     terminal_owned = False
                     while True:
                         if queued:
-                            await self._wait_for_resume_watermark(handle)
+                            await self._wait_for_resume_watermark(
+                                handle,
+                                deadline=pressure_deadline,
+                                started_at=pressure_started_at,
+                            )
 
                         park_pending = False
                         retry_watermark = False
@@ -2446,9 +2455,21 @@ class StreamingSynthesisRouteOwner:
                                         handle.ref.response.response_generation,
                                         handle.ref.unit_seq,
                                     )
+                                    # Cleanup resume after an expired budget
+                                    # keeps its queue-wait bound so the single
+                                    # cleanup resume still reaches the Provider.
+                                    resume_timeout_seconds = self._queue_wait_seconds
+                                    if pressure_deadline is not None:
+                                        budget_left = (
+                                            pressure_deadline - time.monotonic()
+                                        )
+                                        if budget_left > 0:
+                                            resume_timeout_seconds = min(
+                                                resume_timeout_seconds, budget_left
+                                            )
                                     await self._task_owner.run(
                                         handle.provider.resume_synthesis(handle.ref),
-                                        timeout_seconds=self._queue_wait_seconds,
+                                        timeout_seconds=resume_timeout_seconds,
                                         operation="provider-resume",
                                     )
                                     async with handle.state_lock:
@@ -2533,9 +2554,17 @@ class StreamingSynthesisRouteOwner:
         return max(0, (capacity // 2) - 1)
 
     async def _wait_for_resume_watermark(
-        self, handle: StreamingSynthesisHandle
+        self,
+        handle: StreamingSynthesisHandle,
+        *,
+        deadline: float | None = None,
+        started_at: float | None = None,
     ) -> None:
-        """Hold an ordinary pause until downstream has useful free capacity."""
+        """Hold an ordinary pause until downstream has useful free capacity.
+
+        With ``deadline`` the wait draws on the remaining absolute
+        ordinary-pause budget and never renews it per iteration.
+        """
 
         watermark = self._resume_low_watermark(handle.queue)
         observed_pulls = handle.frames_pulled
@@ -2548,6 +2577,20 @@ class StreamingSynthesisRouteOwner:
                 continue
             if handle.queue.qsize() <= watermark:
                 return
+            if deadline is None:
+                wait_timeout = self._pause_wait_seconds
+            else:
+                wait_timeout = deadline - time.monotonic()
+                if wait_timeout <= 0:
+                    _log_queue_pressure(
+                        handle,
+                        "resume_watermark",
+                        started_at if started_at is not None else time.monotonic(),
+                    )
+                    raise StreamingSynthesisRouteViolation(
+                        StreamingSynthesisReason.QUEUE_EXHAUSTED.value,
+                        "streaming synthesis consumer stopped making progress",
+                    )
 
             progress_task = asyncio.create_task(handle.downstream_progress_event.wait())
             park_task = asyncio.create_task(handle.park_requested_event.wait())
@@ -2555,10 +2598,15 @@ class StreamingSynthesisRouteOwner:
             try:
                 done, _ = await asyncio.wait(
                     {progress_task, park_task, terminal_task},
-                    timeout=self._pause_wait_seconds,
+                    timeout=wait_timeout,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if not done:
+                    _log_queue_pressure(
+                        handle,
+                        "resume_watermark",
+                        started_at if started_at is not None else time.monotonic(),
+                    )
                     raise StreamingSynthesisRouteViolation(
                         StreamingSynthesisReason.QUEUE_EXHAUSTED.value,
                         "streaming synthesis consumer stopped making progress",
@@ -2616,8 +2664,13 @@ class StreamingSynthesisRouteOwner:
         chunk: StreamingSynthesisChunk,
         *,
         timeout_seconds: float,
+        promoted_put_timeout_seconds: float | None = None,
     ) -> bool:
-        """Transfer one blocked put from the ordinary deadline to PARK."""
+        """Transfer one blocked put from the ordinary deadline to PARK.
+
+        ``promoted_put_timeout_seconds`` bounds the put issued after PROMOTE
+        independently of the (possibly diminished) ordinary budget.
+        """
 
         put_task = asyncio.create_task(self._queue_put_guarded(handle, chunk))
         park_task = asyncio.create_task(handle.parked_event.wait())
@@ -2658,7 +2711,11 @@ class StreamingSynthesisRouteOwner:
                 ) from exc
             await self._task_owner.run(
                 self._queue_put_guarded(handle, chunk),
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=(
+                    timeout_seconds
+                    if promoted_put_timeout_seconds is None
+                    else promoted_put_timeout_seconds
+                ),
                 operation="queue-put-promoted-audio",
             )
             return True
@@ -3321,6 +3378,42 @@ def _drain_queue(queue: asyncio.Queue[_QueueValue]) -> None:
             queue.get_nowait()
         except asyncio.QueueEmpty:
             return
+
+
+def _remaining_pressure_budget(deadline: float | None) -> float:
+    """Return the positive remainder of an absolute ordinary-pause deadline."""
+
+    if deadline is None:
+        raise StreamingSynthesisRouteViolation(
+            "SYNTHESIS_PAUSE_STATE_INVALID",
+            "ordinary synthesis pause has no bounded deadline",
+        )
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("ordinary synthesis pause budget expired")
+    return remaining
+
+
+def _log_queue_pressure(
+    handle: StreamingSynthesisHandle, phase: str, started_at: float
+) -> None:
+    """Emit the content-free bounded-pressure diagnostic for one exact phase."""
+
+    _LOGGER.warning(
+        "live_voice_streaming_synthesis_queue_pressure",
+        extra={
+            "response_id": handle.ref.response.response_id,
+            "response_generation": handle.ref.response.response_generation,
+            "unit_id": handle.ref.unit_id,
+            "unit_seq": handle.ref.unit_seq,
+            "queue_size": handle.queue.qsize(),
+            "queue_capacity": handle.queue.maxsize,
+            "frames_enqueued": handle.frames_enqueued,
+            "frames_pulled": handle.frames_pulled,
+            "source_state": f"{phase}_timeout",
+            "wait_elapsed_ms": round(max(0.0, time.monotonic() - started_at) * 1000, 3),
+        },
+    )
 
 
 def _reason_for_exception(exc: BaseException) -> StreamingSynthesisReason:

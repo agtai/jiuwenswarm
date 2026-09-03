@@ -222,6 +222,7 @@ class _FakeProvider(NativeStreamingSpeechProvider):
         self.promote_started = asyncio.Event()
         self.promote_gate: asyncio.Event | None = None
         self.pause_error: BaseException | None = None
+        self.pause_gate: asyncio.Event | None = None
         self.resume_error: BaseException | None = None
         self.resume_gate: asyncio.Event | None = None
         self.closed = 0
@@ -285,6 +286,11 @@ class _FakeProvider(NativeStreamingSpeechProvider):
     async def pause_synthesis(self, ref: SynthesisStreamRef) -> None:
         self.paused.append(ref)
         self.pause_started.set()
+        if self.pause_gate is not None:
+            # A real Adapter acknowledges only at a reader boundary; the gate
+            # models that boundary arriving late. Route cancellation of this
+            # pending acknowledgement must propagate, never be swallowed.
+            await _wait_gate(self.pause_gate, ignore_cancel=False)
         if self.pause_error is not None:
             raise self.pause_error
 
@@ -956,7 +962,9 @@ async def test_real_adapter_dual_full_queues_resume_without_deadlock() -> None:
     ("queue_capacity", "frame_count", "pull_interval", "pause_wait", "max_cycles"),
     (
         (8, 450, 0.005, 1.0, 100),
-        (8, 30, 0.02, 0.05, 6),
+        # One ordinary pause owns handshake, admission and the drain to the
+        # low watermark (five 20 ms pulls) under a single absolute budget.
+        (8, 30, 0.02, 0.3, 6),
     ),
 )
 @pytest.mark.asyncio
@@ -1299,6 +1307,292 @@ async def test_promoted_prefetch_resumes_later_ordinary_queue_pressure() -> None
     assert provider.paused
     assert provider.resumed
     assert provider.cancelled == []
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.agent_dispatches == 0
+    assert snapshot.tool_dispatches == 0
+    assert snapshot.task_mutations == 0
+    assert snapshot.chat_mutations == 0
+    assert snapshot.turn_commits == 0
+    await owner.close()
+
+
+async def _begin_promoted_first_audio_stream(
+    *,
+    stream_id: str,
+    queue_wait_seconds: float,
+    pause_wait_seconds: float,
+):
+    """PARK then PROMOTE a stream whose first audio frame already reached downstream."""
+
+    capability = replace(
+        _CAPABILITY,
+        synthesis=replace(
+            _CAPABILITY.synthesis,
+            bounded_pause=CapabilityProvenance.ADAPTER_DERIVED,
+            parked_pause=CapabilityProvenance.ADAPTER_DERIVED,
+        ),
+    )
+    provider = _FakeProvider(capability)
+    request = _request(stream_id=stream_id)
+    owner, handle = await _begin(
+        provider,
+        request,
+        max_pending_frames=1,
+        queue_wait_seconds=queue_wait_seconds,
+        pause_wait_seconds=pause_wait_seconds,
+        event_timeout_seconds=0.5,
+        require_prefetch_decision=True,
+        prefetch_decision_timeout_seconds=0.03,
+    )
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * 480,
+        )
+    )
+    first = await owner.next_chunk(handle, timeout_seconds=1)
+    assert first.chunk is not None and first.chunk.frame.seq == 0
+    assert handle.first_audio_emitted is True
+
+    await owner.park_prefetch(handle, park_generation=7, timeout_seconds=1.0)
+    await owner.promote_prefetch(handle, park_generation=7)
+    assert handle.flow_state.value == "promoted"
+    await asyncio.sleep(0.04)
+    return provider, request, owner, handle, first.chunk.frame.seq
+
+
+@pytest.mark.asyncio
+async def test_post_promotion_pause_ack_after_queue_wait_within_pause_wait_drains() -> (
+    None
+):
+    """A late ordinary pause ACK inside the pause budget must not fail the stream.
+
+    Physical B/long: after a 65 s PARK the first post-promotion pause was not
+    acknowledged within the 2 s queue-wait bound and the route failed closed
+    although first audio had already been emitted.
+    """
+
+    queue_wait_seconds = 0.01
+    pause_wait_seconds = 0.10
+    (
+        provider,
+        request,
+        owner,
+        handle,
+        first_seq,
+    ) = await _begin_promoted_first_audio_stream(
+        stream_id="post-promotion-late-pause-ack",
+        queue_wait_seconds=queue_wait_seconds,
+        pause_wait_seconds=pause_wait_seconds,
+    )
+    clock = asyncio.get_running_loop().time
+    provider.pause_gate = asyncio.Event()
+    provider.pause_started.clear()
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=2,
+            cursor=480,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * (480 * 3),
+        )
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=3,
+            cursor=480 * 4,
+            kind=SynthesisEventKind.COMPLETED,
+        )
+    )
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+    pause_requested_at = clock()
+
+    # Downstream keeps draining while the Provider acknowledgement is pending.
+    queued = await owner.next_chunk(handle, timeout_seconds=1)
+    assert queued.chunk is not None and queued.chunk.frame.seq == 1
+
+    await asyncio.sleep(queue_wait_seconds * 3)
+    released_after = clock() - pause_requested_at
+    assert queue_wait_seconds < released_after < pause_wait_seconds, released_after
+    provider.pause_gate.set()
+
+    frame_sequences = [first_seq, queued.chunk.frame.seq]
+    while True:
+        pull = await owner.next_chunk(handle, timeout_seconds=1)
+        if pull.chunk is not None:
+            frame_sequences.append(pull.chunk.frame.seq)
+            continue
+        assert pull.outcome is not None
+        assert pull.outcome.completed is True, pull.outcome
+        break
+
+    assert frame_sequences == [0, 1, 2, 3]
+    assert provider.paused == [request.ref]
+    assert provider.resumed == [request.ref]
+    assert provider.cancelled == []
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.agent_dispatches == 0
+    assert snapshot.tool_dispatches == 0
+    assert snapshot.task_mutations == 0
+    assert snapshot.chat_mutations == 0
+    assert snapshot.turn_commits == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_post_promotion_pause_without_ack_fails_closed_by_pause_wait() -> None:
+    """An ordinary pause that never acknowledges still fails closed, bounded by pause_wait."""
+
+    queue_wait_seconds = 0.01
+    pause_wait_seconds = 0.10
+    provider, request, owner, handle, _ = await _begin_promoted_first_audio_stream(
+        stream_id="post-promotion-pause-never-acked",
+        queue_wait_seconds=queue_wait_seconds,
+        pause_wait_seconds=pause_wait_seconds,
+    )
+    clock = asyncio.get_running_loop().time
+    provider.pause_gate = asyncio.Event()
+    provider.pause_started.clear()
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=2,
+            cursor=480,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * (480 * 3),
+        )
+    )
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+    pause_requested_at = clock()
+
+    await asyncio.wait_for(handle.cleanup_done.wait(), timeout=2)
+    failed_after = clock() - pause_requested_at
+    assert pause_wait_seconds <= failed_after < 1.0, failed_after
+
+    terminal = await owner.next_chunk(handle, timeout_seconds=1)
+    assert terminal.chunk is None
+    assert terminal.outcome is not None
+    assert terminal.outcome.completed is False
+    assert terminal.outcome.reason is StreamingSynthesisReason.QUEUE_EXHAUSTED
+    assert terminal.outcome.fact is not None
+    assert terminal.outcome.fact.reason is StreamingSynthesisReason.QUEUE_EXHAUSTED
+    assert (
+        terminal.outcome.fact.fallback_action
+        is StreamingSynthesisFallbackAction.TEXT_OR_RETRY
+    )
+    assert terminal.outcome.fact.visible is True
+    assert terminal.outcome.first_audio_emitted is True
+    assert terminal.outcome.batch_eligible is False
+    assert provider.paused == [request.ref]
+    assert provider.resumed == [request.ref]
+    assert provider.cancelled == [request.ref]
+    assert handle.fenced is True
+
+    # A late Provider event after the fence cannot revive the stream.
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=3,
+            cursor=480 * 4,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * 480,
+        )
+    )
+    await asyncio.sleep(0.02)
+    assert handle.queue.qsize() == 0
+    assert provider.cancelled == [request.ref]
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.agent_dispatches == 0
+    assert snapshot.tool_dispatches == 0
+    assert snapshot.task_mutations == 0
+    assert snapshot.chat_mutations == 0
+    assert snapshot.turn_commits == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_post_promotion_late_pause_ack_with_stalled_queue_fails_by_single_pause_wait() -> (
+    None
+):
+    """Handshake and blocked admission share one absolute ordinary-pause deadline.
+
+    A late-but-valid pause ACK must not grant a fresh pause budget to the
+    still-blocked queue put; total ownership fails at the original deadline.
+    """
+
+    queue_wait_seconds = 0.01
+    pause_wait_seconds = 0.10
+    provider, request, owner, handle, _ = await _begin_promoted_first_audio_stream(
+        stream_id="post-promotion-late-ack-stalled-queue",
+        queue_wait_seconds=queue_wait_seconds,
+        pause_wait_seconds=pause_wait_seconds,
+    )
+    clock = asyncio.get_running_loop().time
+    provider.pause_gate = asyncio.Event()
+    provider.pause_started.clear()
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=2,
+            cursor=480,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * (480 * 3),
+        )
+    )
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=3,
+            cursor=480 * 4,
+            kind=SynthesisEventKind.COMPLETED,
+        )
+    )
+    await asyncio.wait_for(provider.pause_started.wait(), timeout=1)
+    pause_requested_at = clock()
+
+    # The ACK is late but inside the budget; downstream never pulls again.
+    await asyncio.sleep(pause_wait_seconds * 0.6)
+    released_after = clock() - pause_requested_at
+    assert queue_wait_seconds < released_after < pause_wait_seconds, released_after
+    provider.pause_gate.set()
+
+    await asyncio.wait_for(handle.cleanup_done.wait(), timeout=2)
+    failed_after = clock() - pause_requested_at
+    assert pause_wait_seconds <= failed_after < pause_wait_seconds * 1.4, failed_after
+
+    terminal = await owner.next_chunk(handle, timeout_seconds=1)
+    assert terminal.chunk is None
+    assert terminal.outcome is not None
+    assert terminal.outcome.completed is False
+    assert terminal.outcome.reason is StreamingSynthesisReason.QUEUE_EXHAUSTED
+    assert terminal.outcome.fact is not None
+    assert terminal.outcome.fact.reason is StreamingSynthesisReason.QUEUE_EXHAUSTED
+    assert terminal.outcome.first_audio_emitted is True
+    assert terminal.outcome.batch_eligible is False
+    assert provider.paused == [request.ref]
+    assert provider.resumed == [request.ref]
+    assert provider.cancelled == [request.ref]
+    assert handle.fenced is True
+
+    provider.events.put_nowait(
+        _event(
+            request,
+            seq=4,
+            cursor=480 * 4,
+            kind=SynthesisEventKind.CHUNK,
+            samples=(1000,) * 480,
+        )
+    )
+    await asyncio.sleep(0.02)
+    assert handle.queue.qsize() == 0
+    assert provider.cancelled == [request.ref]
     snapshot = provider.conformance.snapshot()
     assert snapshot.agent_dispatches == 0
     assert snapshot.tool_dispatches == 0
