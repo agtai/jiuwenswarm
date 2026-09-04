@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from jiuwenswarm.common.live_voice_profiling import profiled
+
 import json
 import hashlib
 import asyncio
@@ -152,6 +154,7 @@ def spoken_revision_unavailable_notice(language: str = "zh") -> str:
     return "这次回答的口播整理与核对未能完成，我暂时不朗读未经核对的草稿。"
 
 
+@profiled('agent.spoken_revision')
 async def finalize_spoken_answer(
     model, *, envelope: str, candidate: str, tool_results: list[dict],
     language: str = "zh", request_id: str = "",

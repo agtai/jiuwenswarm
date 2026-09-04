@@ -9264,9 +9264,11 @@ class JiuWenSwarmDeepAdapter:
         """
 
         if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(
-                request.session_id
-            )
+            from jiuwenswarm.common.live_voice_profiling import ProfileSpan
+            with ProfileSpan("agent.session_acquire", request_id=request.request_id):
+                session_adapter = await self._get_or_create_session_adapter(
+                    request.session_id
+                )
             try:
                 async for chunk in session_adapter.process_formal_live_voice_stream_impl(
                     request, inputs
@@ -9340,16 +9342,18 @@ class JiuWenSwarmDeepAdapter:
         voice_original_output = None
         voice_original_model = None
         try:
-            await self._update_runtime_config(
-                self._RuntimeConfig(
-                    session_id=session_id,
-                    mode="agent",
-                    request_id=rid,
-                    channel_id=cid,
-                    request_metadata=metadata,
-                    supports_user_interaction=False,
+            from jiuwenswarm.common.live_voice_profiling import ProfileSpan
+            with ProfileSpan("agent.runtime_configuration", request_id=rid):
+                await self._update_runtime_config(
+                    self._RuntimeConfig(
+                        session_id=session_id,
+                        mode="agent",
+                        request_id=rid,
+                        channel_id=cid,
+                        request_metadata=metadata,
+                        supports_user_interaction=False,
+                    )
                 )
-            )
             # This validated formal adapter is isolated from ordinary chat and
             # background execution. Keep spoken analysis and receipts responsive,
             # including the model calls that select and consume real file tools.
@@ -9463,6 +9467,8 @@ class JiuWenSwarmDeepAdapter:
                     if spoken_tool_result_chars + size <= 32_000:
                         spoken_tool_results.append(parsed_capture)
                         spoken_tool_result_chars += size
+                from jiuwenswarm.common.live_voice_profiling import profile_tool_event
+                profile_tool_event(parsed_capture, request_id=rid, execution_session_id=session_id)
                 return AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
@@ -10030,6 +10036,9 @@ class JiuWenSwarmDeepAdapter:
         token_perm = setup_permission_context(request)
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
+        if getattr(self, "_is_dedicated_background_project_adapter", False):
+            from jiuwenswarm.server.runtime.agent_adapter.formal_model_diagnostics import observe_private_task_model
+            observe_private_task_model(resolved_model, request_id=rid, session_id=session_id)
         self._apply_model_to_react_agent(resolved_model)
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)

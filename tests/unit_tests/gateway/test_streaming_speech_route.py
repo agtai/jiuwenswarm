@@ -372,6 +372,8 @@ async def test_server_vad_eot_fences_frames_and_finish_coalesces_provider_commit
 ):
     provider = _ServerVadProvider()
     from jiuwenswarm.common import live_voice_audio_diagnostics as audio_diagnostics
+    # Drain prior tests before installing a sink that reuses fixture identities.
+    await asyncio.to_thread(audio_diagnostics._QUEUE.join)
     diagnostic_lines = []
     monkeypatch.setattr(audio_diagnostics._LOGGER, "info", lambda template, *args: diagnostic_lines.append(template % args))
     owner = StreamingRecognitionRouteOwner(
@@ -459,8 +461,9 @@ async def test_server_vad_eot_fences_frames_and_finish_coalesces_provider_commit
              if line.startswith("live_voice_audio_diagnostic ")]
     assert {"opened", "gateway_audio_received", "provider_send_started", "provider_audio_sent",
             "provider_speech_started", "provider_speech_stopped", "final_available"} <= {fact["event"] for fact in facts}
-    assert all(fact["fields"]["media_session_id"] == "media-session-1" for fact in facts)
-    assert all(fact["fields"]["capture_id"] == "capture-1" for fact in facts)
+    media_facts = [fact for fact in facts if not fact["event"].startswith("profile_span_")]
+    assert all(fact["fields"]["media_session_id"] == "media-session-1" for fact in media_facts)
+    assert all(fact["fields"]["capture_id"] == "capture-1" for fact in media_facts)
     assert next(fact for fact in facts if fact["event"] == "opened")["fields"]["vad_silence_ms"] == 800
     assert "EOT final" not in "".join(json.dumps(fact) for fact in facts)
 

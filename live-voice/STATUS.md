@@ -66,44 +66,43 @@ repeat the old whole-project audit solely to resume a bounded task.
 | Executor & Durability | Direct D0/D2 v2 profiles, admission, reconciliation, sealed results and generic adjustment checkpoints; dedicated no-memory rail repair; retained v1 records cannot authorize new v2 dispatch | Required independent review and real result/control acceptance; scope broader file-tool access outside checkout separately. Additional Executor/D1 capability needs its own packet; no D1 or generic host-crash claim |
 | Voice–Task Bridge | Unified committed semantics, direct exact local creation/modification consent, scoped targets and requirement sources | Current modification/query real-model acceptance; full generalization and retirement audit; pause/resume/provide-input remain unsupported until a real primitive is accepted |
 | Integrated Web product experience | Scoped Registry Tasks in the right panel, no bottom manual form; project-home Session allocation through microphone transcription; recovery/notification repairs | Stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh journey; projectless startup requires backend authority design |
-| Observability, benchmark and latency | Correlated stage timings; bounded capture/playout/interruption, Speech protocol/send-lock/HTTP diagnostics; passive Socket flow-control, event-loop and queue-age increment deployed | Physically reproduce with the new trace; independent review, ineffective interruption, current first-audible baseline and declared SLO remain open. Historical percentiles are not current gains |
+| Observability, benchmark and latency | Default Demo spans across browser/Speech/semantic/Agent/tools/Executor/notifications; safe errors, bounded refresh-retained browser export and offline timing/trace report; existing Socket/queue/VAD evidence retained | Scoped tests/build and independent review close this profiling increment; deployment, physical reproduction, interruption, first-audible baseline and declared SLO remain open. Missing evidence and clock domains are explicit; percentiles are not measured gains |
 | Automated verification and product acceptance | Focused module/regression checks and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative independent review and final human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, production semantic cutover, bounded legacy removals and scoped prompt/config isolation | Complete production reachability/retirement audit; remaining manifest rows; keep artifacts/private runtime data out of integration |
 | Production operations | Privacy/preflight/observability foundations only | Authentication/tenancy, public deployment, operations, retention, security, compatibility and release support after separate scope |
 
 ## Current execution packet
 
-### Segmented Speech and dialogue mismatch diagnostics / repair checkpoint
+### Demo profiling and post-rehearsal diagnosis
 
-The user authorized repairs, correlated diagnostics, tests and local deployment
-before resuming VAD acceptance. The current bounded diagnostic increment and
-its unresolved scope boundary are recorded in the
-[segmentation/dialogue evidence](evidence/SEGMENT_AND_DIALOGUE_DIAGNOSTICS_20260904.md).
+The user requests normal-Demo timing and error evidence sufficient to analyze a
+rehearsal without another instrumentation change. The passive Observability
+packet covers browser/RPC/media, Speech, semantic resolution, Agent/model/tools,
+Task execution and notification/ACK boundaries. Bounded same-tab export and an
+offline timeline/report are implemented. Scope and verification are in the
+[profiling evidence](evidence/DEMO_PROFILING_20260904.md); operational steps are in
+[runbook §7.7](runbooks/E2E_RUNBOOK.md#77-普通-demo-的性能记录与故障报告).
 
-- The weekend input reached semantic routing correctly, but a new foreground
-  response repeated the previous greeting. Actual final-model message observation
-  was absent; context/model causality is not established. The new passive client
-  observer checks the committed envelope at the actual isolated model boundary
-  and output equality with selected assistant history, without exporting content.
-- The next capture received stop/commit then a different-item start; the adapter
-  rejected it and batch fallback timed out waiting for response headers after
-  upload completed. Add precise later-item and batch audio-size/duration facts.
-  Keep whole-capture fallback; never silently discard a later correction or
-  concatenate unowned provider items into a committed final.
-- One capture/one final and stop-on-EOT do not provide lossless post-EOT capture.
-  Split-versus-merge behavior is requested before expanding into successor
-  capture/turn authority. Diagnostics are not a completed segmentation repair,
-  and this source does not yet authorize a VAD acceptance PASS.
-- Preserve isolated `deepseek-v4-flash`, project/data, VAD 800 ms and startup
-  250 ms. No timeout increase, model/history reset, protocol/schema changes,
-  public deployment or remote updates. The diagnostic increment is locally
-  deployed; affected regressions, full build and real Speech/rejection readiness
-  pass. These checks do not close the remaining segmentation or model defects.
-- Existing passive Socket/queue diagnostics and their earlier physical evidence
-  remain in the [backpressure report](evidence/SPEECH_BACKPRESSURE_DIAGNOSTICS_20260904.md).
-  Independent review remains unavailable under the local CLI/model mismatch.
-  Ineffective interruption and misleading `activation` labels remain open;
-  browser export is not a prerequisite for the next reproduction.
+- This increment observes the existing business path and keeps VAD 800 ms,
+  startup 250 ms, timeout/retry/buffer policy, model configuration and all Task /
+  capture / presentation authority unchanged. It requires refreshed services
+  and frontend assets; this workspace has no managed-service manifest and has
+  not deployed or physically rehearsed the increment.
+- Automatic timing, error breadcrumbs and explicit missing/dropped-record
+  reporting are implementation evidence, not a latency improvement or a physical
+  acceptance PASS. Scoped regressions, the frontend build and independent
+  review close this instrumentation batch; all identified review issues were
+  fixed and independently rechecked. The wider capability remains PARTIAL.
+- Prior segmentation/dialogue questions remain open: a later Provider item is
+  rejected under one-capture/one-final ownership and whole-capture fallback can
+  time out; lossless post-EOT continuation still requires accepted split/merge
+  semantics. A previous reply repeated a greeting; model/context causality must
+  be established from a new reproduction. See the conditional
+  [segmentation evidence](evidence/SEGMENT_AND_DIALOGUE_DIAGNOSTICS_20260904.md).
+- Earlier deployed Socket/queue diagnostics and physical observations remain
+  historical evidence in the [backpressure report](evidence/SPEECH_BACKPRESSURE_DIAGNOSTICS_20260904.md).
+  Ineffective interruption and misleading activation labels remain open. These
+  defects are not repaired by adding more observation.
 
 ### Retained consequences of earlier repairs
 

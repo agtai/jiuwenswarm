@@ -541,6 +541,55 @@ Remove-Item Env:JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED -ErrorAction Sile
 Remove-Item Env:JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED -ErrorAction SilentlyContinue
 ```
 
+### 7.7 普通 Demo 的性能记录与故障报告
+
+当前源码在普通 Live Voice 路径自动记录诊断，不需要开启 L0 corpus、改代码或
+增加 Provider 调用。先按 §7.5 启动包含本次改动的后端和前端；旧进程或缓存的旧
+前端不会自动获得新埋点。源码与验证边界见
+[Demo profiling evidence](../evidence/DEMO_PROFILING_20260904.md)。
+
+1. 正常预演。每次遇到慢、报错、被打断或不再回听，记下大致时间即可；也可以
+   记下页面 Session 或 Task ID。保留该次后端服务日志。
+2. 预演结束或问题刚出现时，点击语音栏的 **导出诊断**。退出 Live Voice 后按钮
+   仍可用。下载 `live-voice-diagnostics-*.json`；最好在关闭标签页之前导出。
+3. 在仓库根目录运行以下命令，`--browser` 替换为下载文件的实际路径：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\live_voice\analyze_demo_profile.py --latest --browser 'C:\实际下载目录\live-voice-diagnostics-实际时间.json'
+```
+
+`--latest` 读取受控启动器的 `logs/debug_service.json` 所指向的服务日志；没有该
+清单时会给出明确提示。分析已保存的日志、分开启动的 Gateway/AgentServer，或
+多个浏览器导出时，可重复提供输入：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\live_voice\analyze_demo_profile.py --log 'C:\实际日志目录\gateway.log' --log 'C:\实际日志目录\agent.log' --browser 'C:\实际下载目录\live-voice-diagnostics.json'
+```
+
+终端打印生成的 `profile.html` 路径，双击即可离线打开。相同目录还包含完整的
+`profile.json` 和可供 Chrome Trace/Perfetto 导入的 `trace.json`。默认输出到
+忽略的 `logs/live-voice-profile-时间/`；可用 `--output` 指定目录，或用
+`--session <精确SessionID>` 提取关联记录。仅提供 `--log` 或 `--browser` 也能
+分析；报告会显示缺失的输入，不能把另一侧的缺失当成“没有耗时”。
+
+报告包括各阶段次数/P50/P95/最大耗时、逐次调用、模型首 chunk 与 chunk 间隙、
+逐次工具调用、HTTP 连接/TLS/上传/等响应头/读响应体，以及错误码、结构化原因、
+异常类和后端模块/函数/行号。按 capture/request/response/Task/阶段筛选并查看
+首个失败；再展开事件核对队列积压、Socket 背压、VAD/EOT、回退、取消及清理。
+`notification.wait` 包含正常等待通知的时间，不能单凭它最慢判为性能缺陷。
+
+浏览器内存保留最近 2,048 条；同一标签页的 sessionStorage 滚动保存最多 4,096
+条，通常每秒或每 32 条刷新一次。同一标签页刷新可恢复已落盘记录，关闭标签页、
+禁用存储、配额耗尽或崩溃前未落盘的尾部不保证恢复。导出会合并内存与存储并去重，
+显示覆盖/存储失败计数。后端异步队列上限 256，拥塞时丢记录并计数；进程硬退出
+可能丢尾部。长预演应分段导出并保留各次日志，分析器可合并输入。
+
+所有耗时只在同一个时钟域内计算；跨浏览器/进程的墙钟排序仅作参考。嵌套和并行
+耗时不能相加；未结束或缺头的调用会明确标记。播放排程、AudioContext 时钟到点
+和 ACK 都不等于耳机实际出声。音频、对话、提示词、工具参数/结果、凭据、URL、
+设备 ID 和任意异常正文不进入诊断导出。正常业务日志仍可能含有内容，分享前应
+选用生成的诊断文件，而不是直接分享整个服务日志。
+
 ## 8. 先做文字工具冒烟，再做语音
 
 先用文字发送一个强制使用真实终端工具、结果可核对的请求：

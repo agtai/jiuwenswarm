@@ -10,6 +10,8 @@ routes are not selected, replaced, or reclassified by this module.
 
 from __future__ import annotations
 
+from jiuwenswarm.common.live_voice_profiling import profiled
+
 import asyncio
 import hashlib
 import hmac
@@ -2550,6 +2552,7 @@ class AgentServerProductCompositionRegistry:
                 fallback_reason=fallback_reason,
             )
 
+    @profiled('notification.prepare', 'event', 'event.origin', 'retained_p2.binding')
     async def _prepare_progress_presentation(
         self,
         event: TaskProgressTextEvent,
@@ -3340,6 +3343,7 @@ class AgentServerProductCompositionRegistry:
             if authority.lease is not None:
                 await authority.lease.close()
 
+    @profiled('notification.ack', 'ack', 'params', 'retained.binding')
     async def _acknowledge_task_voice_presentation(
         self,
         *,
@@ -3573,6 +3577,7 @@ class AgentServerProductCompositionRegistry:
             else f"{subject} ended with an unavailable terminal state."
         )
 
+    @profiled('notification.terminal_delivery', 'event', 'event.origin')
     async def _deliver_terminal_notification(
         self,
         event: TaskProgressTextEvent,
@@ -4346,6 +4351,7 @@ class AgentServerProductCompositionRegistry:
                 ErrorCode.CONFLICT,
             )
 
+    @profiled('rpc.activation', 'params')
     async def handle_p2_activate(
         self,
         *,
@@ -5056,6 +5062,7 @@ class AgentServerProductCompositionRegistry:
         # a second model pass here used to lock that input behind old analysis.
         # Existing structured proposal/confirmation records remain readable.
 
+    @profiled('semantic.context_and_resolution', 'commit')
     async def _resolve_semantic_input(
         self,
         *,
@@ -6696,6 +6703,7 @@ class AgentServerProductCompositionRegistry:
             if authority.lease is not None:
                 await authority.lease.close()
 
+    @profiled('agent.dispatch', 'commit')
     async def _dispatch_semantic_agent_turn(
         self,
         *,
@@ -7160,6 +7168,7 @@ class AgentServerProductCompositionRegistry:
             self._critical_input_guarded_commits.discard(commit_id)
             self._critical_token_gate.release_commit(commit_id)
 
+    @profiled('rpc.submit', 'params')
     async def handle_p2_submit(
         self,
         *,
@@ -8049,6 +8058,7 @@ class AgentServerProductCompositionRegistry:
             )
         return value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
 
+    @profiled('turn.execution', 'commit')
     async def _run_unified_submit(
         self,
         *,
@@ -8435,6 +8445,7 @@ class AgentServerProductCompositionRegistry:
                         )
         return result
 
+    @profiled('rpc.unified_submit', 'params')
     async def handle_unified_submit(
         self,
         *,
@@ -9117,6 +9128,7 @@ class AgentServerProductCompositionRegistry:
             "publish_seq": None,
         }
 
+    @profiled('notification.wait', 'retained.binding')
     async def _next_p2_notification(
         self,
         retained: _P2Route,
@@ -9248,6 +9260,7 @@ class AgentServerProductCompositionRegistry:
                     (finished - started) * 1000,
                 )
 
+    @profiled('rpc.notification', 'params')
     async def handle_p2_notification_next(
         self,
         *,
@@ -9409,6 +9422,7 @@ class AgentServerProductCompositionRegistry:
                 request_id, reason=exc.reason, code=exc.code, message=str(exc)
             )
 
+    @profiled('rpc.presentation_ack', 'params')
     async def handle_p2_presentation_ack(
         self,
         *,
@@ -9678,6 +9692,7 @@ class AgentServerProductCompositionRegistry:
                 request_id, reason=exc.reason, code=exc.code, message=str(exc)
             )
 
+    @profiled('rpc.presentation_failed', 'params')
     async def handle_p2_presentation_failed(
         self,
         *,
@@ -9993,6 +10008,7 @@ class AgentServerProductCompositionRegistry:
                 request_id, reason=exc.reason, code=exc.code, message=str(exc)
             )
 
+    @profiled('rpc.barge_in', 'params')
     async def handle_p2_barge_in(
         self,
         *,
@@ -10188,6 +10204,7 @@ class AgentServerProductCompositionRegistry:
             )
         return ResponseRef(interaction_id, response_id, generation)
 
+    @profiled('rpc.interrupt_generation', 'params')
     async def handle_p2_interrupt_generation(
         self,
         *,
@@ -10377,6 +10394,7 @@ class AgentServerProductCompositionRegistry:
                 request_id, reason=exc.reason, code=exc.code, message=str(exc)
             )
 
+    @profiled('rpc.close', 'params')
     async def handle_p2_close(
         self,
         *,
@@ -11153,6 +11171,7 @@ class AgentServerProductCompositionRegistry:
         self._reserved_voice_origin_requests[commit_id] = request_id
         return commit_id
 
+    @profiled('rpc.task_mutation', 'params')
     async def handle_p3_mutation(
         self,
         *,
@@ -11264,6 +11283,7 @@ class AgentServerProductCompositionRegistry:
                 request_id, reason=exc.reason, code=exc.code, message=str(exc)
             )
 
+    @profiled('rpc.task_query', 'params')
     async def handle_p3_query(
         self,
         *,

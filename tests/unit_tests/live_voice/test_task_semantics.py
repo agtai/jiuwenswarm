@@ -823,11 +823,15 @@ async def test_semantic_confirmation_cannot_change_bound_arguments():
 async def test_semantic_provider_timeout_has_no_fallback(monkeypatch):
     from jiuwenswarm.server.live_voice import task_semantics
 
-    monkeypatch.setattr(task_semantics, "_TIMEOUT_SECONDS", 0.02)
+    # Expire the existing deadline once the Provider is entered. A 20 ms wall
+    # deadline can expire during thread startup on Windows before any invoke.
+    deadline = asyncio.timeout(None)
+    monkeypatch.setattr(task_semantics.asyncio, "timeout", lambda delay: deadline)
 
     class NeverModel(_Model):
         async def invoke(self, **kwargs):
             self.calls.append(kwargs)
+            deadline.reschedule(asyncio.get_running_loop().time())
             await asyncio.Event().wait()
 
     commit = _commit()

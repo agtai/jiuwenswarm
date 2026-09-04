@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from jiuwenswarm.common.live_voice_profiling import profiled, profile_event, identity_fields
+
 import asyncio
 import math
 import time
@@ -845,6 +847,7 @@ class AgentBridgeRuntime:
         if self._wake is not None:
             self._wake.set()
 
+    @profiled('agent.round', 'pending.submission.request')
     async def _run_request(self, pending: _PendingDispatch) -> None:
         submission = pending.submission
         request = submission.request
@@ -868,6 +871,7 @@ class AgentBridgeRuntime:
             response_generation=request.response_ref.response_generation,
         )
         request_started = time.monotonic()
+        profile_event("agent_request_started", **identity_fields(request))
         measurement_failure_emitted = False
 
         def emit_measurement_failure() -> None:
@@ -904,6 +908,11 @@ class AgentBridgeRuntime:
                     )
                     expected_agent_seq += 1
                     agent_event_count += 1
+                    if item.event_type != "chat.delta" or agent_event_count == 1:
+                        profile_event("agent_progress", **identity_fields(request),
+                                      milestone=item.event_type, event_seq=item.seq,
+                                      elapsed_ms=(time.monotonic() - request_started) * 1000,
+                                      outcome="failed" if item.event_type == "chat.error" or item.tool_result_succeeded is False else "unknown")
                     if item.event_type == "chat.final":
                         canonical_final_count += 1
                         if (

@@ -10,6 +10,8 @@ dispatches Agent, Tool, or Task work.
 
 from __future__ import annotations
 
+from jiuwenswarm.common.live_voice_profiling import profiled
+
 import asyncio
 import logging
 import struct
@@ -223,6 +225,7 @@ class StreamingRecognitionRouteOwner:
         self._provider_close_complete = False
         self._closed = False
 
+    @profiled('recognition.begin', 'binding', 'request')
     async def begin(
         self,
         binding: MediaAuthorityBinding,
@@ -444,6 +447,7 @@ class StreamingRecognitionRouteOwner:
         except Exception:
             handle.failure = StreamingRecognitionFallbackReason.PROVIDER_PROTOCOL
 
+    @profiled('recognition.wait_end_of_turn', 'handle')
     async def wait_end_of_turn(
         self, handle: StreamingRecognitionHandle
     ) -> StreamingRecognitionEndOfTurn:
@@ -452,6 +456,7 @@ class StreamingRecognitionRouteOwner:
             raise RuntimeError("end-of-turn was not negotiated for this stream")
         return await asyncio.shield(future)
 
+    @profiled('recognition.wait_speech_start', 'handle')
     async def wait_speech_start(
         self, handle: StreamingRecognitionHandle
     ) -> StreamingRecognitionSpeechStart:
@@ -460,6 +465,7 @@ class StreamingRecognitionRouteOwner:
             raise RuntimeError("speech-start was not negotiated for this stream")
         return await asyncio.shield(future)
 
+    @profiled('recognition.finish', 'handle')
     async def finish(
         self, handle: StreamingRecognitionHandle
     ) -> StreamingRecognitionOutcome:
@@ -622,6 +628,7 @@ class StreamingRecognitionRouteOwner:
             raise operation_process_control from None
         raise RuntimeError("streaming recognition operation did not settle")
 
+    @profiled('recognition.abort', 'handle')
     async def abort(self, handle: StreamingRecognitionHandle) -> None:
         if handle.settled:
             return
@@ -831,6 +838,7 @@ class StreamingRecognitionRouteOwner:
         ):
             raise RuntimeError("streaming speech route cleanup is incomplete")
 
+    @profiled('recognition.select')
     async def _select(self) -> StreamingSpeechSelection:
         async with self._selection_lock:
             if self._selection is not None:
@@ -976,6 +984,7 @@ class StreamingRecognitionRouteOwner:
                 self._diagnose(handle, "provider_send_failed")
                 return
 
+    @profiled('recognition.collect_final', 'handle')
     async def _collect_final(
         self, handle: StreamingRecognitionHandle
     ) -> StreamingRecognitionEvent:
@@ -1197,6 +1206,7 @@ class StreamingRecognitionRouteOwner:
         finally:
             self._release_provider_task_capacity(task)
 
+    @profiled('recognition.bounded_provider_close')
     async def _bounded_provider_close(
         self, factory: Callable[[], Awaitable[None]]
     ) -> None:

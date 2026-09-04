@@ -10,6 +10,8 @@ It never owns Agent, Tool, Task, presentation, or history effects.
 
 from __future__ import annotations
 
+from jiuwenswarm.common.live_voice_profiling import profiled
+
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -163,6 +165,7 @@ class ProductStreamingSynthesisSource:
             return
 
 
+@profiled('synthesis.first_audio', 'request')
 async def start_product_streaming_synthesis(
     owner: StreamingSynthesisRouteOwner,
     request: SynthesisStreamRequest,

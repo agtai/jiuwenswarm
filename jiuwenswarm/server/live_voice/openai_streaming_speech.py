@@ -10,6 +10,8 @@ Provider cancel acknowledgement.
 
 from __future__ import annotations
 
+from jiuwenswarm.common.live_voice_profiling import profiled, profile_event, identity_fields
+
 import asyncio
 import base64
 import binascii
@@ -786,10 +788,14 @@ async def _default_sse_factory(
 ) -> SpeechSseStream:
     client = httpx.AsyncClient(follow_redirects=False, timeout=None)
     try:
+        from jiuwenswarm.server.live_voice.speech_http_diagnostics import SpeechHttpDiagnostics
+        diagnostic = SpeechHttpDiagnostics("", "speech.synthesize.stream")
         request = client.build_request("POST", url, headers=headers, json=dict(payload))
+        request.extensions["trace"] = diagnostic.trace
         response = await asyncio.wait_for(
             client.send(request, stream=True), timeout=timeout_seconds
         )
+        profile_event("synthesis_http_headers", status_code=response.status_code)
         if response.status_code != 200:
             raise OpenAIStreamingSpeechError(
                 "SPEECH_PROVIDER_REQUEST_REJECTED",
@@ -925,6 +931,7 @@ class OpenAIStreamingSpeechProvider:
             ),
         )
 
+    @profiled('provider.open_recognition', 'request')
     async def open_recognition(
         self,
         request: RecognitionStreamRequest | RecognitionStreamRef,
@@ -1110,6 +1117,7 @@ class OpenAIStreamingSpeechProvider:
         if failure is not None:
             raise failure
 
+    @profiled('provider.commit_recognition', 'ref')
     async def commit_recognition(
         self, ref: RecognitionStreamRef
     ) -> RecognitionCommitDisposition:
@@ -1200,6 +1208,7 @@ class OpenAIStreamingSpeechProvider:
             await self._retire_recognition(session)
         return event
 
+    @profiled('provider.cancel_recognition', 'ref')
     async def cancel_recognition(
         self, ref: RecognitionStreamRef, *, reason: str = "caller_cancel"
     ) -> None:
@@ -1215,6 +1224,7 @@ class OpenAIStreamingSpeechProvider:
         session.terminal = True
         await self._retire_recognition(session)
 
+    @profiled('provider.open_synthesis', 'request')
     async def open_synthesis(self, request: SynthesisStreamRequest) -> None:
         session: _SynthesisSession | None = None
         failure: BaseException | None = None
@@ -1268,6 +1278,7 @@ class OpenAIStreamingSpeechProvider:
             await self._retire_synthesis(session)
         return event
 
+    @profiled('provider.cancel_synthesis', 'ref')
     async def cancel_synthesis(
         self, ref: SynthesisStreamRef, *, reason: str = "caller_cancel"
     ) -> None:
@@ -1748,6 +1759,10 @@ class OpenAIStreamingSpeechProvider:
             await self._retire_synthesis(session)
             raise failure
         if failure is not None and not session.closing:
+            from jiuwenswarm.common.live_voice_profiling import error_fields
+            profile_event("synthesis_provider_failed", **identity_fields(session.request),
+                          outcome="timeout" if isinstance(failure, TimeoutError) else "failed",
+                          **error_fields(failure))
             if isinstance(failure, (TimeoutError, asyncio.TimeoutError)):
                 self._conformance.expire()
             self._conformance.provider_closed_synthesis(session.request.ref)
@@ -1765,6 +1780,7 @@ class OpenAIStreamingSpeechProvider:
             if session.stream is not None:
                 await self._close_stream(session.stream)
 
+    @profiled('provider.open_synthesis_stream', 'session.request')
     async def _open_synthesis_stream(
         self, session: _SynthesisSession
     ) -> SpeechSseStream:
@@ -1804,6 +1820,7 @@ class OpenAIStreamingSpeechProvider:
             )
         return stream
 
+    @profiled('provider.consume_synthesis_stream', 'session.request')
     async def _consume_synthesis_stream(self, session: _SynthesisSession) -> bool:
         if session.stream is None:
             raise OpenAIStreamingSpeechError(
@@ -1936,6 +1953,10 @@ class OpenAIStreamingSpeechProvider:
             raise
         session.event_seq += 1
         session.audio_cursor += sample_count
+        if kind is not SynthesisEventKind.CHUNK or event.seq == 1 or event.seq % 50 == 0:
+            profile_event("synthesis_provider_event", **identity_fields(session.request),
+                          milestone=kind.value, event_seq=event.seq,
+                          received_samples=session.audio_cursor, event_queue_frames=session.events.qsize())
         await self._put_bounded(session.events, accepted)
 
     async def _put_bounded(
@@ -2090,6 +2111,7 @@ class OpenAIStreamingSpeechProvider:
             identity=f"{session.ref.session_id}:{session.ref.session_generation}",
         )
 
+    @profiled('provider.open_recognition_socket')
     async def _open_recognition_socket(
         self, *, url: str, timeout_seconds: float
     ) -> RealtimeSocket:

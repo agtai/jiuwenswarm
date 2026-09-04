@@ -7,6 +7,42 @@ import {
   inspectBrowserAudioPlatform,
 } from '../node_modules/.cache/live-voice-browser-audio-io/browserAudioIOAdapter.mjs';
 
+test('passive playout-clock observation cannot acknowledge, replay or revive closed audio', async () => {
+  const previousTimer = globalThis.setTimeout;
+  const previousClear = globalThis.clearTimeout;
+  const previousInfo = console.info;
+  try {
+    for (const closeFirst of [false, true]) {
+      const callbacks = [];
+      const records = [];
+      globalThis.setTimeout = (callback, delay, ...args) => delay === 16
+        ? (callbacks.push(callback), { diagnostic: true }) : previousTimer(callback, delay, ...args);
+      globalThis.clearTimeout = handle => { if (!handle?.diagnostic) previousClear(handle); };
+      console.info = line => { if (String(line).startsWith('live_voice_audio_diagnostic ')) records.push(JSON.parse(line.slice(28))); };
+      const fake = fakeEnvironment();
+      const adapter = new BrowserAudioIOAdapter({ enabled: true, environment: fake.environment });
+      await adapter.unlockPlayout();
+      adapter.beginPlayout(firstResponse);
+      assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+      assert.equal(callbacks.length, 1);
+      const context = fake.contexts[0];
+      const before = context.bufferSources.length;
+      if (closeFirst) await adapter.close();
+      context.currentTime = 100;
+      callbacks[0]();
+      assert.equal(context.bufferSources.length, before);
+      assert.equal(adapter.businessCancelCount(), 0);
+      const reached = records.filter(row => row.event === 'playout_clock_reached_start');
+      assert.equal(reached.length, closeFirst ? 0 : 1);
+      await adapter.close();
+    }
+  } finally {
+    globalThis.setTimeout = previousTimer;
+    globalThis.clearTimeout = previousClear;
+    console.info = previousInfo;
+  }
+});
+
 class FakeEventTarget {
   listeners = new Map();
 

@@ -1,4 +1,5 @@
-import { useId } from 'react';
+import { downloadAudioDiagnostics } from '../../features/live-voice/formal/audioDiagnostics';
+import { useId, useState } from 'react';
 import { AlertCircle, LoaderCircle, Mic, Square, Volume2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { LiveVoiceTaskActivity } from '../../features/live-voice/taskPresentationView';
@@ -381,12 +382,18 @@ export function LiveVoiceDemoBar({
 }: LiveVoiceDemoBarProps) {
   const { t } = useTranslation();
   const unavailableHintId = useId();
+  const [exportFailed, setExportFailed] = useState(false);
+  const exportDiagnostics = () => setExportFailed(!downloadAudioDiagnostics());
   const resolvedUnavailableMessage = unavailableMessage || t('liveVoice.unavailable');
 
   if (!active) {
     return (
       <div className={`live-voice-demo live-voice-demo--inactive${taskActivity ? ' live-voice-demo--with-task' : ''}`} data-testid="live-voice-demo">
         <div className="live-voice-demo__inactive-actions">
+          <button type="button" className="live-voice-demo__stop" onClick={exportDiagnostics}>
+            {t('liveVoice.exportDiagnostics')}
+          </button>
+          {exportFailed && <span role="alert">{t('liveVoice.exportDiagnosticsFailed')}</span>}
           <span className="live-voice-demo__launch-wrap" title={!available && !launchPending && !launchError ? resolvedUnavailableMessage : undefined}>
             <button
               type="button"
@@ -495,6 +502,10 @@ export function LiveVoiceDemoBar({
         />
 
         <div className="live-voice-demo__actions">
+          <button type="button" className="live-voice-demo__stop" onClick={exportDiagnostics}>
+            {t('liveVoice.exportDiagnostics')}
+          </button>
+          {exportFailed && <span role="alert">{t('liveVoice.exportDiagnosticsFailed')}</span>}
           {!handsFree && (
             <button
               type="button"

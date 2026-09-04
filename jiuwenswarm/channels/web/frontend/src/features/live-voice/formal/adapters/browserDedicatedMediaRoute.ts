@@ -731,6 +731,7 @@ export class BrowserDedicatedMediaSocketLeaf {
     socket.binaryType = 'arraybuffer';
     socket.onopen = () => {
       if (this.#closed) return;
+      this.#diagnose('media_socket_open', { elapsed_ms: monotonicNowMs() - this.#diagnosticStartedAtMs });
       if (socket.protocol !== DEDICATED_MEDIA_SUBPROTOCOL) {
         this.#terminate('MEDIA_TRANSPORT_PROTOCOL_ERROR', false);
         return;
@@ -1111,6 +1112,7 @@ export class BrowserDedicatedMediaSocketLeaf {
         return;
       }
       this.#attached = true;
+      this.#diagnose('media_attached', { elapsed_ms: monotonicNowMs() - this.#diagnosticStartedAtMs });
       return;
     }
     if (!this.#attached) {
@@ -1385,6 +1387,7 @@ export class BrowserDedicatedMediaSocketLeaf {
 
   #notifyTerminal(reasonId: MediaDetachReason, source: DedicatedMediaTerminalSource, attachedBeforeClose: boolean): void {
     if (this.#terminalNotified) return;
+    this.#diagnose('media_terminal', { reason: reasonId, elapsed_ms: monotonicNowMs() - this.#diagnosticStartedAtMs });
     this.#terminalNotified = true;
     try {
       this.#onTerminal?.(

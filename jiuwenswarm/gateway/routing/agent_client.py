@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from jiuwenswarm.common.live_voice_profiling import profiled
+
 import logging
 import asyncio
 import hashlib
@@ -545,6 +547,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 await self._stop_receiver_after_fatal_error(exc)
             raise RuntimeError("AgentServer WebSocket connection closed") from exc
 
+    @profiled('gateway.agent_rpc', 'envelope', require_context=True)
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         (
             connection_ws,

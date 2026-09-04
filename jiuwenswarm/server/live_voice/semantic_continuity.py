@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from jiuwenswarm.common.live_voice_profiling import profiled
+
 import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable, Mapping
@@ -162,6 +164,7 @@ class SemanticContinuity:
             else:
                 self._locks[key] = (current, users - 1)
 
+    @profiled('semantic.pending', 'scope')
     async def pending(self, scope: ScopeRef) -> tuple[Mapping[str, object], ...]:
         records = await asyncio.to_thread(
             self.journal.read_semantic_contexts, scope=scope
@@ -172,6 +175,7 @@ class SemanticContinuity:
             if record.kind != "analysis"
         )
 
+    @profiled('semantic.history', 'scope')
     async def history(
         self, scope: ScopeRef, *, committed: tuple[TurnCommit, ...] = ()
     ) -> tuple[Mapping[str, object], ...]:

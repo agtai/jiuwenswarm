@@ -2129,6 +2129,8 @@
     "errorPrefix": "错误: {{message}}"
   },
   "liveVoice": {
+    "exportDiagnostics": "导出诊断",
+    "exportDiagnosticsFailed": "导出失败，请允许文件下载后重试。",
     "startingSession": "正在开启语音…",
     "sessionStartFailed": "语音会话未能开启，请重试。",
     "sessionProjectRequired": "当前 Live Voice 需要项目上下文。请切换到 Code 并选择已授权的项目，再开启语音。",

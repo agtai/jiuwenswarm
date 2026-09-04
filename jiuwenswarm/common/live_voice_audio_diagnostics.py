@@ -4,10 +4,13 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import queue
 import re
 import threading
 import time
+import uuid
+from itertools import count
 from datetime import UTC, datetime
 
 _LOGGER = logging.getLogger(__name__)
@@ -15,7 +18,11 @@ _QUEUE: queue.Queue[str] = queue.Queue(maxsize=256)
 _START_LOCK = threading.Lock()
 _WORKER: threading.Thread | None = None
 _DROPPED = 0
+_CLOCK_ID = f"python-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+_SEQUENCE = count(1)
 _IDS = frozenset({"session_id", "media_session_id", "capture_id", "lease_id", "interaction_id", "correlation_id", "response_id", "operation_id", "request_id"})
+_IDS = _IDS | frozenset({"span_id", "model_call_id", "parent_span_id", "turn_id", "commit_id", "round_id", "task_id", "attempt_id", "command_id", "outbox_id", "tool_call_id", "unit_id", "activation_id", "project_id", "execution_session_id"})
+_TOKENS = frozenset({"stage", "rpc_method", "error_type", "error_location", "error_code", "error_reason", "result_state", "milestone", "tool_name"})
 _VALUES = frozenset({"generation", "frame_count", "frames_sent", "frames_acked", "queue_frames", "received_samples", "sent_sample_end", "send_peak_ms", "vad_silence_ms", "provider_ms", "provider_start_ms", "provider_end_ms", "speech_started", "input_fenced", "elapsed_ms", "preopen_frames"})
 _VALUES = _VALUES | frozenset({
     "frame_seq", "lock_wait_ms", "encode_ms", "socket_send_ms", "wire_seq",
@@ -31,6 +38,9 @@ _VALUES = _VALUES | frozenset({
     "current_envelope_in_last_user", "diagnostic_complete", "output_chars",
     "repeats_selected_assistant", "audio_bytes", "audio_duration_ms", "sample_rate_hz",
     "channels", "sample_width_bytes",
+    "duration_ms", "response_generation", "activation_generation", "capture_generation",
+    "first_output_ms", "chunk_count", "max_chunk_gap_ms", "attempt_number", "tool_seq",
+    "source_line", "diagnostic_sequence", "queue_wait_ms", "event_count",
 })
 WIRE_EVENTS = frozenset({
     "session.updated", "transcription_session.updated", "session.created",
@@ -70,8 +80,8 @@ _LABELS = {
     "wire_event": WIRE_EVENTS,
     "failure_code": FAILURE_CODES,
     "commit_owner": frozenset({"none", "manual", "server_vad"}),
-    "outcome": frozenset({"started", "complete", "failed", "cancelled", "timeout"}),
-    "operation": frozenset({"speech.recognize.batch", "speech.synthesize.batch"}),
+    "outcome": frozenset({"started", "complete", "failed", "cancelled", "timeout", "returned", "rejected", "fallback", "unknown", "skipped"}),
+    "operation": frozenset({"speech.recognize.batch", "speech.synthesize.batch", "speech.synthesize.stream"}),
     "http_phase": frozenset({"request", "connect_tcp", "connect_unix_socket", "start_tls",
         "send_request_headers", "send_request_body", "receive_response_headers",
         "receive_response_body", "response_closed"}),
@@ -90,12 +100,14 @@ def _run() -> None:
             _QUEUE.task_done()
 
 
-def record_audio_diagnostic(event: str, **fields: object) -> None:
+def record_audio_diagnostic(event: str, *, _inherit_context: bool = True, **fields: object) -> None:
     """Drop on overload/sink failure; the event loop never waits for disk I/O."""
-    global _WORKER, _DROPPED
+    global _WORKER, _DROPPED, _SEQUENCE
     try:
         if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", event):
             return
+        from jiuwenswarm.common.live_voice_profiling import current_profile_fields
+        fields = {**(current_profile_fields() if _inherit_context else {}), **fields}
         safe: dict[str, object] = {}
         for key, value in fields.items():
             if key in _IDS and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value):
@@ -104,8 +116,11 @@ def record_audio_diagnostic(event: str, **fields: object) -> None:
                 safe[key] = value
             elif key in _LABELS and isinstance(value, str) and value in _LABELS[key]:
                 safe[key] = value
+            elif key in _TOKENS and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value):
+                safe[key] = value
         item = json.dumps({"event": event, "observed_at": datetime.now(UTC).isoformat(),
-            "monotonic_ms": time.monotonic() * 1000, "dropped_records": _DROPPED, "fields": safe}, separators=(",", ":"))
+            "monotonic_ms": time.perf_counter() * 1000, "clock_id": _CLOCK_ID,
+            "sequence": next(_SEQUENCE), "dropped_records": _DROPPED, "fields": safe}, separators=(",", ":"))
         if _WORKER is None:
             with _START_LOCK:
                 if _WORKER is None:

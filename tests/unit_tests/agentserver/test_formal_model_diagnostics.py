@@ -73,7 +73,9 @@ async def test_exact_model_boundary_and_history_repeat_without_content(
         assert (await wrapped.invoke(**kwargs)).content == "PRIVATE_PREVIOUS_ANSWER"
     assert client.calls == [((), kwargs)]
     assert client.calls[0][1]["messages"] is messages
-    request, result = records
+    request, result = [record for record in records if record[0] in {"formal_model_request", "formal_model_result"}]
+    if streaming:
+        assert len([record for record in records if record[0] == "formal_model_first_output"]) == 1
     assert request[1]["current_envelope_count"] == 1
     assert request[1]["current_envelope_in_last_user"] is True
     assert result[1]["repeats_selected_assistant"] is True
@@ -117,6 +119,10 @@ async def test_observation_bounds_do_not_bound_model_calls_and_sink_failure_is_p
     for _ in range(20):
         await wrapped.invoke(messages=[])
     assert len(client.calls) == 20 and len(records) == 32
+    async for _ in wrapped.stream(messages=[]):
+        pass
+    assert any(event == "formal_model_first_output" and fields["model_call_seq"] == 21 for event, fields in records)
+    assert not any(event == "formal_model_result" and fields["model_call_seq"] == 21 for event, fields in records)
 
     def fail(*args, **kwargs):
         raise OSError("PRIVATE_SINK")

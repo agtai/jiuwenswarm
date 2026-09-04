@@ -1,3 +1,4 @@
+import { recordAudioDiagnostic } from './audioDiagnostics.js';
 import {
   OBSERVABILITY_SCHEMA_VERSION,
   createObservation,
@@ -310,6 +311,7 @@ export function recordBrowserL0Milestone(input: Readonly<{
   observed_at?: string;
   monotonic_ms?: number;
 }>): boolean {
+  recordAudioDiagnostic('browser_milestone', { ...input.binding, milestone: input.milestone, duration_ms: input.duration_ms });
   const active = state;
   if (active === null || active.labels === null) return false;
   try {

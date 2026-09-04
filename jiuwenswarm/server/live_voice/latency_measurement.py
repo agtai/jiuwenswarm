@@ -1765,6 +1765,15 @@ def emit_runtime_l0_milestone(
 ) -> bool:
     """Best-effort production hook; diagnostics can never alter business truth."""
 
+    # Normal rehearsals retain existing milestones without L0 corpus labels.
+    # This local diagnostic stream never registers or authorizes an L0 binding.
+    try:
+        if binding is not None:
+            from jiuwenswarm.common.live_voice_profiling import profile_event, identity_fields
+            profile_event("runtime_milestone", **identity_fields(binding),
+                          milestone=milestone.value, duration_ms=duration_ms)
+    except Exception:
+        pass
     try:
         if binding is None:
             return False

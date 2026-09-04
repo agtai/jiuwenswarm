@@ -9,6 +9,8 @@ There is no natural-language fallback in this module.
 
 from __future__ import annotations
 
+from jiuwenswarm.common.live_voice_profiling import ProfileSpan, profiled
+
 import asyncio
 import hashlib
 import json
@@ -856,6 +858,7 @@ class TaskSemanticResolver:
         self._model_resolver = model_resolver
         self._before_invoke = before_invoke
 
+    @profiled('semantic.resolve', 'commit')
     async def resolve(
         self,
         commit: TurnCommit,
@@ -906,11 +909,12 @@ class TaskSemanticResolver:
         context_digest = _digest(payload)
         try:
             async with asyncio.timeout(_TIMEOUT_SECONDS):
-                resolved = await asyncio.to_thread(
-                    self._model_resolver.resolve,
-                    None,
-                    instantiate=True,
-                )
+                with ProfileSpan("semantic.model_configuration"):
+                    resolved = await asyncio.to_thread(
+                        self._model_resolver.resolve,
+                        None,
+                        instantiate=True,
+                    )
                 from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
 
                 invocation_options = {
@@ -932,14 +936,15 @@ class TaskSemanticResolver:
                 for final_attempt in range(2):
                     if self._before_invoke is not None:
                         await self._before_invoke()
-                    response = await resolved.model.invoke(
-                        messages=[
-                            SystemMessage(content=attempt_instructions),
-                            UserMessage(content=payload_json),
-                        ],
-                        tools=[],
-                        **invocation_options,
-                    )
+                    with ProfileSpan("semantic.model_invoke", attempt_number=final_attempt + 1):
+                        response = await resolved.model.invoke(
+                            messages=[
+                                SystemMessage(content=attempt_instructions),
+                                UserMessage(content=payload_json),
+                            ],
+                            tools=[],
+                            **invocation_options,
+                        )
                     if getattr(response, "tool_calls", None):
                         raise _fail("SEMANTIC_TOOL_CALL_FORBIDDEN")
                     # At most one fresh model interpretation, before any Task

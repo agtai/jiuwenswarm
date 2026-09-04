@@ -1,4 +1,4 @@
-import { recordAudioDiagnostic } from '../audioDiagnostics.js';
+import { recordAudioDiagnostic, profileAudioOperation } from '../audioDiagnostics.js';
 import {
   AudioPort,
   AudioPortViolation,
@@ -355,6 +355,7 @@ interface PlaybackSourceRecord {
 }
 
 interface PlaybackSession {
+  diagnosticStartTimer: ReturnType<typeof setTimeout> | null;
   diagnosticLastMs: number | null;
   diagnosticMaxGapMs: number;
   readonly response: Readonly<AudioResponseRef>;
@@ -783,9 +784,9 @@ export class BrowserAudioIOAdapter {
         ...(deviceId === null ? {} : { deviceId: { exact: deviceId } }),
       };
       const mediaConstraints = { audio: audioConstraints, video: false } as const;
-      mediaAcquisition = this.#captureStreamFactory === null
+      mediaAcquisition = profileAudioOperation('capture.get_user_media', { capture_generation: token }, () => this.#captureStreamFactory === null
         ? mediaDevices.getUserMedia(mediaConstraints)
-        : this.#captureStreamFactory(mediaConstraints);
+        : this.#captureStreamFactory(mediaConstraints));
       stream = await Promise.race([mediaAcquisition, permissionObservation.revocation]);
       if (this.#ownsCapturePermissionObservation(permissionObservation)) {
         permissionObservation.mediaAccessGranted = true;
@@ -837,7 +838,7 @@ export class BrowserAudioIOAdapter {
       const frameSamples = audioFrameSamples(context.sampleRate);
       if (context.state === 'suspended') {
         try {
-          await Promise.race([context.resume(), permissionObservation.revocation]);
+          await profileAudioOperation('capture.context_resume', { capture_generation: token }, () => Promise.race([context!.resume(), permissionObservation.revocation]));
         } catch (error) {
           throw mapAudioContextFailure(error, 'AUDIO_CONTEXT_RESUME_FAILED');
         }
@@ -851,7 +852,7 @@ export class BrowserAudioIOAdapter {
         throw new BrowserAudioIOViolation('AUDIO_WORKLET_UNAVAILABLE', 'AudioWorklet is unavailable in this context');
       }
       try {
-        await Promise.race([context.audioWorklet.addModule(this.#captureWorkletModuleUrl), permissionObservation.revocation]);
+        await profileAudioOperation('capture.worklet_load', { capture_generation: token }, () => Promise.race([context!.audioWorklet!.addModule(this.#captureWorkletModuleUrl), permissionObservation.revocation]));
       } catch (error) {
         if (error instanceof BrowserAudioIOViolation) throw error;
         throw new BrowserAudioIOViolation('AUDIO_WORKLET_LOAD_FAILED', 'the capture AudioWorklet module could not be loaded', true);
@@ -1095,7 +1096,7 @@ export class BrowserAudioIOAdapter {
           throw new BrowserAudioIOViolation('AUDIO_OUTPUT_SELECTION_UNAVAILABLE', 'AudioContext output selection is unavailable');
         }
         try {
-          await context.setSinkId(deviceId);
+          await profileAudioOperation('playout.select_output', {}, () => context.setSinkId!(deviceId));
         } catch (error) {
           this.#requireCurrentPlayoutUnlock(generation, context);
           throw mapAudioOutputFailure(error);
@@ -1107,7 +1108,7 @@ export class BrowserAudioIOAdapter {
           throw new BrowserAudioIOViolation('AUDIO_OUTPUT_SELECTION_UNAVAILABLE', 'AudioContext output selection is unavailable');
         }
         try {
-          await context.setSinkId('');
+          await profileAudioOperation('playout.select_output', {}, () => context.setSinkId!(''));
         } catch (error) {
           this.#requireCurrentPlayoutUnlock(generation, context);
           throw mapAudioOutputFailure(error);
@@ -1117,7 +1118,7 @@ export class BrowserAudioIOAdapter {
       }
       if (context.state === 'suspended') {
         try {
-          await context.resume();
+          await profileAudioOperation('playout.context_resume', {}, () => context.resume());
         } catch (error) {
           this.#requireCurrentPlayoutUnlock(generation, context);
           throw mapAudioContextFailure(error, 'AUDIO_CONTEXT_RESUME_FAILED');
@@ -1212,6 +1213,7 @@ export class BrowserAudioIOAdapter {
       nextStartTime: context.currentTime + PLAYOUT_STARTUP_LEAD_SECONDS,
       diagnosticLastMs: null,
       diagnosticMaxGapMs: 0,
+      diagnosticStartTimer: null,
       stopped: false,
     };
     this.#playback = playback;
@@ -1311,6 +1313,7 @@ export class BrowserAudioIOAdapter {
       const diagnosticNow = performance.now();
       playback.diagnosticMaxGapMs = Math.max(playback.diagnosticMaxGapMs, (context.currentTime - playback.nextStartTime) * 1000);
       if (playback.diagnosticLastMs === null || diagnosticNow - playback.diagnosticLastMs >= 1000) {
+        if (playback.diagnosticLastMs === null) this.#observeDiagnosticStart(playback, context, startAt);
         recordAudioDiagnostic(playback.diagnosticLastMs === null ? 'playout_first_scheduled' : 'playout_progress', {
           ...playback.response, seq: chunk.seq, startup_lead_ms: PLAYOUT_STARTUP_LEAD_MS,
           buffer_ahead_ms: Math.max(0, (startAt - context.currentTime) * 1000),
@@ -1419,6 +1422,8 @@ export class BrowserAudioIOAdapter {
 
   #stopPlaybackSources(playback: PlaybackSession, reason: string, emitState = true): Readonly<PlaybackSourceCleanupSummary> {
     playback.stopped = true;
+    if (playback.diagnosticStartTimer !== null) clearTimeout(playback.diagnosticStartTimer);
+    playback.diagnosticStartTimer = null;
     if (this.#playback === playback) this.#playback = null;
     const sourceCount = playback.sources.size;
     let stopCompletedCount = 0;
@@ -2147,6 +2152,21 @@ export class BrowserAudioIOAdapter {
     }
   }
 
+  #observeDiagnosticStart(playback: PlaybackSession, context: BrowserAudioContextLike, startAt: number): void {
+    const deadline = performance.now() + 2000;
+    const observe = () => {
+      playback.diagnosticStartTimer = null;
+      try {
+        if (this.#closed || this.#playback !== playback || playback.stopped) return;
+        if (context.state === 'running' && context.currentTime >= startAt) {
+          recordAudioDiagnostic('playout_clock_reached_start', { ...playback.response, context_state: context.state });
+        } else if (performance.now() < deadline) playback.diagnosticStartTimer = setTimeout(observe, 16);
+        else recordAudioDiagnostic('playout_start_observation_expired', { ...playback.response, context_state: context.state });
+      } catch { /* Clock observation never starts, stops or acknowledges audio. */ }
+    };
+    try { playback.diagnosticStartTimer = setTimeout(observe, 16); } catch { /* Passive. */ }
+  }
+
   #emitCaptureState(
     state: BrowserAudioCaptureState,
     reason: string,
@@ -2154,6 +2174,7 @@ export class BrowserAudioIOAdapter {
     generation: number | null = null
   ): void {
     this.#captureState = state;
+    recordAudioDiagnostic('capture_state', { status: state, reason, capture_id: metadata?.capture_id ?? null, capture_generation: metadata?.capture_generation ?? generation });
     try {
       this.#observer.onCaptureState?.(
         Object.freeze({
@@ -2176,6 +2197,9 @@ export class BrowserAudioIOAdapter {
     throughSeq: number | null = null
   ): void {
     this.#playoutState = state;
+    if (reason !== 'chunk_scheduled' && reason !== 'render_completed') {
+      recordAudioDiagnostic('playout_state', { ...playback?.response, status: state, reason, unit_id: unitId, seq: throughSeq });
+    }
     try {
       this.#observer.onPlayoutState?.(
         Object.freeze({

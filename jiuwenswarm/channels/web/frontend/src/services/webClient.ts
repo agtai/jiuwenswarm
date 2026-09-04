@@ -12,6 +12,7 @@ import { getWsBase } from '../utils/env';
 import { resolveUserId } from '../utils/userId';
 import i18n from '../i18n';
 import { GoalRecord } from '../types/goal';
+import { diagnosticIdentity, markAudioRpcRejection, profileAudioOperation } from '../features/live-voice/formal/audioDiagnostics';
 
 type EventHandler = (event: WsEvent) => void;
 type TypedEventHandler<TPayload> = (event: WsEvent & { payload: TPayload }) => void;
@@ -265,6 +266,15 @@ class WebClient {
     params?: Record<string, unknown>,
     options: WebRequestOptions = {}
   ): Promise<T> {
+    if (!method.startsWith('live_voice.')) return this.requestCore<T>(method, params, options);
+    const fields: Record<string, unknown> = { ...diagnosticIdentity(params), rpc_method: method, timeout_ms: options.timeoutMs ?? DEFAULT_TIMEOUT_MS };
+    return profileAudioOperation('browser.rpc', fields, () => this.requestCore<T>(method, params, options, fields));
+  }
+
+  private async requestCore<T>(
+    method: string, params: Record<string, unknown> | undefined, options: WebRequestOptions,
+    diagnosticFields?: Record<string, unknown>,
+  ): Promise<T> {
     await this.ensureReady();
 
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -276,6 +286,7 @@ class WebClient {
       throw this.createWebError('request id is invalid', 'INVALID_REQUEST_ID', undefined, false);
     }
     const id = requestedId ?? this.generateRequestId();
+    if (diagnosticFields) diagnosticFields.request_id = id;
     if (this.pending.has(id)) {
       throw this.createWebError('request id is already in flight', 'REQUEST_ID_IN_FLIGHT', id, false);
     }
@@ -480,6 +491,7 @@ class WebClient {
       message.payload
     );
     error.reason = extractWebErrorReason(message.payload, message.code);
+    markAudioRpcRejection(error);
     pending.reject(error);
   }
 

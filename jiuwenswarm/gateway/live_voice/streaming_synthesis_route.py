@@ -10,6 +10,8 @@ write history, or retain text/audio after a stream is consumed or fenced.
 
 from __future__ import annotations
 
+from jiuwenswarm.common.live_voice_profiling import profiled
+
 import asyncio
 import hashlib
 import inspect
@@ -627,6 +629,7 @@ class StreamingSynthesisRouteOwner:
             is CapabilityProvenance.UNAVAILABLE
         )
 
+    @profiled('synthesis.begin', 'request')
     async def begin(
         self,
         request: SynthesisStreamRequest,
@@ -1108,6 +1111,7 @@ class StreamingSynthesisRouteOwner:
         ):
             pass
 
+    @profiled('synthesis.cancel', 'handle')
     async def cancel(
         self,
         handle: StreamingSynthesisHandle,
@@ -1308,6 +1312,7 @@ class StreamingSynthesisRouteOwner:
         self._close_cleanup_complete = cleanup_complete
         return _CloseResult(interruption, cleanup_complete)
 
+    @profiled('synthesis.select')
     async def _select(self) -> StreamingSpeechSelection:
         async with self._selection_lock:
             if self._selection is not None:
@@ -1474,6 +1479,7 @@ class StreamingSynthesisRouteOwner:
                 "synthesis requires a strictly newer exact response generation",
             )
 
+    @profiled('synthesis.produce', 'handle')
     async def _produce(self, handle: StreamingSynthesisHandle) -> None:
         pending: list[float] = []
         pending_source_seq = 0
@@ -1735,6 +1741,7 @@ class StreamingSynthesisRouteOwner:
                     "a late queue write completed after synthesis was fenced",
                 )
 
+    @profiled('synthesis.terminate', 'handle')
     async def _terminate(
         self,
         handle: StreamingSynthesisHandle,
@@ -1929,6 +1936,7 @@ class StreamingSynthesisRouteOwner:
             handle.process_control = None
             return process_control
 
+    @profiled('synthesis.retire', 'handle')
     async def _retire(self, handle: StreamingSynthesisHandle) -> None:
         async with self._lifecycle_lock:
             self._forget_retired_handle(handle)

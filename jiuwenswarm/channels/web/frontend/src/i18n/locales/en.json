@@ -2131,6 +2131,8 @@
     "errorPrefix": "Error: {{message}}"
   },
   "liveVoice": {
+    "exportDiagnostics": "Export diagnostics",
+    "exportDiagnosticsFailed": "Export failed. Allow file downloads and try again.",
     "startingSession": "Starting voice…",
     "sessionStartFailed": "Could not start the voice session. Please try again.",
     "sessionProjectRequired": "Live Voice currently requires a project. Switch to Code and select an authorized project, then start voice.",

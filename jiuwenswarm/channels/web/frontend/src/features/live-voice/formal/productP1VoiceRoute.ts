@@ -726,6 +726,7 @@ export class ProductP1VoiceRouteOwner {
     classification?: Parameters<typeof recordBrowserL0Milestone>[0]['classification'],
     clock?: Readonly<{ observedAt: string; monotonicMs: number }>,
   ): boolean {
+    this.#diagnose('p1_milestone', { ...response, milestone, duration_ms: durationMs });
     if (!this.#l0Available) return false;
     const binding = this.#l0Binding(response);
     if (binding === null) return false;

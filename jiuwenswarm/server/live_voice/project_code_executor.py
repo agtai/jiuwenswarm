@@ -9,6 +9,8 @@ neither adapter owns formal command, task, event, or retry identity.
 
 from __future__ import annotations
 
+from jiuwenswarm.common.live_voice_profiling import profiled, profile_tool_event
+
 import asyncio
 import base64
 import contextlib
@@ -895,6 +897,7 @@ def _git_run_with_input(root: Path, args: tuple[str, ...], payload: bytes) -> No
         raise RuntimeError("PROJECT_CHANGE_APPLICATION_FAILED")
 
 
+@profiled('executor.worktree_create')
 def _create_attempt_worktree(
     root: Path, attempt_id: str, before_head: str
 ) -> tuple[Path, Path]:
@@ -1137,6 +1140,7 @@ def _remove_attempt_worktree(root: Path, parent: Path, worktree: Path) -> None:
         raise RuntimeError("PROJECT_WORKTREE_CLEANUP_PENDING") from error
 
 
+@profiled('executor.worktree_seed')
 def _seed_attempt_worktree(root: Path, worktree: Path, expected_tree: str) -> None:
     cached_patch = _git_output(
         root, "diff", "--cached", "--binary", "--full-index", "HEAD", "--"
@@ -1168,6 +1172,7 @@ def _seed_attempt_worktree(root: Path, worktree: Path, expected_tree: str) -> No
     _git_output(worktree, "add", "-A", "--")
 
 
+@profiled('executor.artifact_diff')
 def _attempt_patch(worktree: Path) -> tuple[bytes, str]:
     expected_content = _project_content_fingerprint(worktree)
     raw_untracked = _git_output(
@@ -1250,6 +1255,7 @@ def _relocate_result_artifact_paths(
     return relocated
 
 
+@profiled('executor.artifact_collect')
 def _attempt_result_artifacts(worktree: Path) -> tuple[TaskResultArtifact, ...]:
     raw_paths = _git_output(
         worktree,
@@ -3012,6 +3018,7 @@ class DirectProjectCodeExecutorAdapter:
         sequence: int,
         stream_kind: str,
     ) -> int:
+        profile_tool_event(payload, task_id=task_ref, attempt_id=attempt_ref, request_id=run_ref)
         observer = self._stream_observer
         if observer is None or payload.get("event_type") not in {
             "chat.tool_call",
@@ -4012,6 +4019,7 @@ class DirectProjectCodeExecutorAdapter:
         finally:
             ownership.release()
 
+    @profiled('executor.prepare_d2_project_effect', 'item')
     async def _prepare_d2_project_effect(
         self,
         *,
@@ -4128,6 +4136,7 @@ class DirectProjectCodeExecutorAdapter:
         )
         return effect_binding
 
+    @profiled('executor.settle_d2_project_effect', 'item')
     async def _settle_d2_project_effect(
         self,
         *,
@@ -4615,6 +4624,7 @@ class DirectProjectCodeExecutorAdapter:
                     ownership.release()
         return recovered
 
+    @profiled('executor.dispatch', 'item')
     async def dispatch(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
         async with self._lifecycle_lock:
             return await self._dispatch(item)
@@ -5020,6 +5030,7 @@ class DirectProjectCodeExecutorAdapter:
             except Exception as error:  # noqa: BLE001 -- wake delivery owner
                 pending.delivery.set_exception(error)
 
+    @profiled('executor.run_attempt', 'item')
     async def _run_attempt(
         self,
         item: PersistentOutboxItem,
@@ -5546,6 +5557,7 @@ class DirectProjectCodeExecutorAdapter:
             reason=record.reason,
         )
 
+    @profiled('executor.adjust', 'item')
     async def adjust(self, item: PersistentOutboxItem) -> TaskAdjustmentDeliveryResult:
         self._require_item(item, expected_kind=OutboxKind.ATTEMPT_ADJUST)
         self._selection_binding(item.selection, require_current_profile=False)
@@ -5597,6 +5609,7 @@ class DirectProjectCodeExecutorAdapter:
                 checkpoint.changed.set()
         return await asyncio.shield(pending.delivery)
 
+    @profiled('executor.settle_adjustment', 'item')
     async def settle_adjustment(
         self,
         item: PersistentOutboxItem,
@@ -5613,6 +5626,7 @@ class DirectProjectCodeExecutorAdapter:
             pending.settlement.set_result(settlement)
             checkpoint.changed.set()
 
+    @profiled('executor.cancel', 'item')
     async def cancel(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
         self._require_item(item, expected_kind=OutboxKind.ATTEMPT_CANCEL)
         self._selection_binding(item.selection, require_current_profile=False)
@@ -5785,6 +5799,7 @@ class DirectProjectCodeExecutorAdapter:
         cleanup.coordinator = coordinator
         return coordinator
 
+    @profiled('executor.cleanup_attempt_resources')
     async def _cleanup_attempt_resources(
         self,
         attempt_id: str,
