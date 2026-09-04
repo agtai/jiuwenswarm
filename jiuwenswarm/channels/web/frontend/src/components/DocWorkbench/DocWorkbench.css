@@ -21,15 +21,25 @@
 .doc-workbench__dot { width: 7px; height: 7px; border-radius: 9999px; }
 .doc-workbench__fallback { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(248, 249, 250, 0.92); }
 .doc-workbench__chat { display: flex; flex-direction: column; gap: 4px; padding: 6px 12px 8px; border-top: 1px solid var(--color-border-default); background: var(--color-surface-page); }
-.doc-workbench__chat-last { display: flex; align-items: center; gap: 8px; min-height: 20px; font-size: 12.5px; color: var(--color-text-chat); }
+.doc-workbench__chat-last { display: flex; align-items: flex-start; gap: 8px; min-height: 20px; font-size: 12.5px; color: var(--color-text-chat); }
 .doc-workbench__chat-avatar { width: 20px; height: 20px; border-radius: 9999px; object-fit: cover; flex: none; }
 .doc-workbench__chat-doc { display: inline-flex; align-items: center; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 8px; border-radius: 9999px; background: var(--color-tag-info-surface); color: var(--color-tag-info-text); font-size: 11px; flex: none; }
 /* 工作台里的输入区收矮一档：隐藏项目目录一行，压缩外框留白。 */
 .doc-workbench__chat .chat-work-context-wrapper { display: none; }
 .doc-workbench__chat .chat-input-frame { margin: 0; }
+/* The composer sits ~20% shorter here than in the chat view: the document is the
+   subject on this screen, the composer is the aside. The editor's own height
+   variable is what the chat view sizes it by, so scoping the variable is enough
+   -- no per-element overrides that would drift from the shared composer. */
+.doc-workbench__chat .chat-input-container { --chat-input-textarea-min-height: 77px; }
+.doc-workbench__chat .chat-input-editor { padding-top: 10px; padding-bottom: 8px; }
+.doc-workbench__chat .chat-input-toolbar { padding-top: 4px; padding-bottom: 6px; }
 .doc-workbench__return-btn { position: absolute; top: 10px; right: 14px; z-index: 40; display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 15px; border: 1px solid var(--color-chat-card-border); background: var(--color-surface-elevated); box-shadow: var(--effect-shadow-md); font-size: 12px; color: var(--color-text-primary); cursor: pointer; }
 .doc-workbench__return-btn:hover { background: var(--color-surface-hover); }
-.doc-workbench__chat-last-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The reply is shown whole, not clipped to one line: a truncated answer sends
+   the reader to the rail for something the strip could have said. It wraps and
+   scrolls past a few lines so the composer never gets pushed off screen. */
+.doc-workbench__chat-last-text { flex: 1; min-width: 0; max-height: 6.4em; overflow-y: auto; white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
 .doc-workbench__chat-pill { position: absolute; left: 16px; bottom: 40px; display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px; border-radius: 18px; background: var(--color-surface-elevated); border: 1px solid var(--color-chat-card-border); box-shadow: var(--effect-shadow-md); font-size: 12px; cursor: pointer; z-index: 2; }
 .doc-workbench__rail { display: flex; flex-direction: column; width: var(--tool-panel-width, 300px); min-width: var(--tool-panel-width, 300px); border-left: 1px solid var(--color-border-default); background: var(--color-surface-elevated); min-height: 0; }
 .doc-workbench__rail-tabs { display: flex; align-items: center; gap: 12px; height: 40px; min-height: 40px; padding: 0 12px; border-bottom: 1px solid var(--color-border-default); }

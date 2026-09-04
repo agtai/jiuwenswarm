@@ -54,6 +54,31 @@ export function receiptAnchor(r: ReceiptRow): string {
 }
 
 /**
+ * The document the session's clouddoc tools touched most recently -- the one the
+ * model is actually working on, which is not necessarily the tab on screen. Read
+ * from the tool call's own argument, never from the model's prose.
+ */
+export function activeToolDocId(
+  executions: Iterable<ToolExecution> | undefined,
+): string {
+  if (!executions) return '';
+  let newest = '';
+  let newestAt = '';
+  for (const exec of executions) {
+    if (!(exec.toolCall?.name ?? '').startsWith('clouddoc_')) continue;
+    const args = exec.toolCall?.arguments as { doc_id?: unknown } | undefined;
+    const docId = typeof args?.doc_id === 'string' ? args.doc_id : '';
+    if (!docId) continue;
+    const at = exec.updatedAt || exec.startedAt || '';
+    if (!newest || at >= newestAt) {
+      newest = docId;
+      newestAt = at;
+    }
+  }
+  return newest;
+}
+
+/**
  * Receipt ids the session's own tool calls produced, newest last. The tool
  * result is the ledger's word (`receipt_id` in the JSON the tool returned); a
  * model that merely mentions a number is not a source.

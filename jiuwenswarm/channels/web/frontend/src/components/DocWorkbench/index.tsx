@@ -29,6 +29,25 @@ export function DocWorkbench({ composer }: { composer: ComposerProps }) {
   const [watches, setWatches] = useState<Record<string, WatchInfo>>({});
   const [globalSuspended, setGlobalSuspended] = useState(false);
   const [mdHighlight, setMdHighlight] = useState<[number, number] | null>(null);
+  // Titles for every registered document, not only the open tabs: the model can
+  // work on a document that has no tab, and the strip must still name it.
+  const [docTitles, setDocTitles] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let alive = true;
+    webRequest<{ docs?: { doc_id: string; title?: string }[] }>('clouddoc.list_docs')
+      .then((out) => {
+        if (!alive) return;
+        const map: Record<string, string> = {};
+        for (const d of out?.docs ?? []) if (d.doc_id && d.title) map[d.doc_id] = d.title;
+        setDocTitles(map);
+      })
+      .catch(() => undefined);
+    return () => { alive = false; };
+  }, [wb.tabs.length]);
+  const titleOf = useCallback(
+    (docId: string) => wb.tabs.find((x) => x.docId === docId)?.title || docTitles[docId] || '',
+    [wb.tabs, docTitles],
+  );
 
   // Receipts for every open tab: the focused one to show, the others to count
   // as unread. Polling, since no push event exists for the ledger yet.
@@ -162,6 +181,7 @@ export function DocWorkbench({ composer }: { composer: ComposerProps }) {
           composer={composer}
           visible={wb.chatVisible}
           docTitle={tab.title || tab.docId}
+          titleOf={titleOf}
           onHide={wb.toggleChat}
           onShow={wb.toggleChat}
           unreadReceipts={unreadTotal}

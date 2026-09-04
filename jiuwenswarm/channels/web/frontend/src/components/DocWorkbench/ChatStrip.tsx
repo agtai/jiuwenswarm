@@ -9,15 +9,17 @@ import { useChatStore } from '../../stores/chatStore';
 import { InputArea } from '../ChatPanel/InputArea';
 import beeAvatar from '../../assets/bee-static.png';
 import type { ComponentProps } from 'react';
-import { receiptsFromExecutions } from '../../features/clouddoc/receipts';
+import { activeToolDocId, receiptsFromExecutions } from '../../features/clouddoc/receipts';
 
 export type ComposerProps = ComponentProps<typeof InputArea>;
 
-export function ChatStrip({ composer, visible, docTitle, onHide, onShow, unreadReceipts, onLocate, onHistory }: {
+export function ChatStrip({ composer, visible, docTitle, titleOf, onHide, onShow, unreadReceipts, onLocate, onHistory }: {
   composer: ComposerProps;
   visible: boolean;
-  /** 当前正在编辑的文档名，作为聊天条上的标签。 */
+  /** 聚焦标签页的文档名，作为回落值。 */
   docTitle?: string;
+  /** doc_id -> 标题，用来给"正在编辑"标签取模型实际在动的那篇。 */
+  titleOf?: (docId: string) => string;
   onHide: () => void;
   onShow: () => void;
   unreadReceipts: number;
@@ -33,6 +35,14 @@ export function ChatStrip({ composer, visible, docTitle, onHide, onShow, unreadR
     for (let i = list.length - 1; i >= 0; i--) if (list[i].role === 'assistant' && list[i].content) return list[i];
     return null;
   }, [messages]);
+  // The tag names what the model is working on, not what the person is looking
+  // at: the two differ whenever a turn reaches a document in another tab. The
+  // focused tab is only the fallback before any tool has run.
+  const workingTitle = useMemo(() => {
+    const docId = activeToolDocId(executions ? executions.values() : undefined);
+    const named = docId && titleOf ? titleOf(docId) : '';
+    return named || docTitle || '';
+  }, [executions, titleOf, docTitle]);
   const lastReceipt = useMemo(() => {
     const all = receiptsFromExecutions(executions ? executions.values() : undefined);
     return all.length ? all[all.length - 1] : null;
@@ -52,9 +62,9 @@ export function ChatStrip({ composer, visible, docTitle, onHide, onShow, unreadR
     <div className="doc-workbench__chat" data-testid="doc-workbench-chat">
       <div className="doc-workbench__chat-last">
         <img src={beeAvatar} className="doc-workbench__chat-avatar" alt="jiuwen" />
-        {docTitle && (
-          <span className="doc-workbench__chat-doc" title={docTitle} data-testid="doc-workbench-chat-doc">
-            {t('docs.workbench.editingDoc')}{docTitle}
+        {workingTitle && (
+          <span className="doc-workbench__chat-doc" title={workingTitle} data-testid="doc-workbench-chat-doc">
+            {t('docs.workbench.editingDoc')}{workingTitle}
           </span>
         )}
         <span className="doc-workbench__chat-last-text" data-testid="doc-workbench-chat-last">{last?.content ?? t('docs.workbench.noReplyYet')}</span>
