@@ -167,6 +167,9 @@ class StreamingRecognitionHandle:
     diagnostic_sent_frames: int = 0
     diagnostic_send_peak_ms: float = 0
     diagnostic_vad_silence_ms: int | None = None
+    diagnostic_enqueued_at: dict[int, float] = field(default_factory=dict, repr=False)
+    diagnostic_frame_queue_wait_ms: float | None = None
+    diagnostic_frame_seq: int | None = None
 
 
 StreamingSpeechSelector = Callable[[], Awaitable[StreamingSpeechSelection]]
@@ -428,6 +431,10 @@ class StreamingRecognitionRouteOwner:
                 pcm_f32le=payload,
             )
             handle.queue.put_nowait(provider_frame)
+            with suppress(Exception):
+                # Scalar timestamps only; bounded by the already bounded queue.
+                if len(handle.diagnostic_enqueued_at) < _MAX_PENDING_PROVIDER_FRAMES:
+                    handle.diagnostic_enqueued_at[frame.seq] = time.monotonic()
             handle.next_frame_seq += 1
             handle.next_sample_cursor += len(frame.samples)
             if frame.seq % 50 == 0:
@@ -603,6 +610,7 @@ class StreamingRecognitionRouteOwner:
                     cleanup_process_control = task_process_control
             handle.finish_task = None
             handle.settled = True
+            handle.diagnostic_enqueued_at.clear()
             await self._release_handle(handle)
             if (
                 cleanup_process_control is not None
@@ -938,6 +946,11 @@ class StreamingRecognitionRouteOwner:
                 return
             try:
                 send_started = time.monotonic()
+                with suppress(Exception):
+                    queued_at = handle.diagnostic_enqueued_at.pop(item.seq, None)
+                    handle.diagnostic_frame_seq = item.seq
+                    handle.diagnostic_frame_queue_wait_ms = (
+                        None if queued_at is None else max(0.0, (send_started - queued_at) * 1000))
                 if item.seq % 50 == 0:
                     self._diagnose(handle, "provider_send_started")
                 # Publish the product-side send boundary before awaiting the
@@ -1072,6 +1085,7 @@ class StreamingRecognitionRouteOwner:
             handle.speech_stopped = True
             self._diagnose(handle, "provider_speech_stopped", event.provider_end_ms)
             handle.input_fenced = True
+            handle.diagnostic_enqueued_at.clear()
             while True:
                 try:
                     queued = handle.queue.get_nowait()
@@ -1103,6 +1117,7 @@ class StreamingRecognitionRouteOwner:
     def _diagnose(handle: StreamingRecognitionHandle, stage: str, provider_ms: int | None = None) -> None:
         """Rate-limited by caller; scalar diagnostics never retain audio/text."""
         try:
+            oldest = next(iter(handle.diagnostic_enqueued_at.values()), None)
             record_audio_diagnostic(
                 stage, media_session_id=handle.ref.session_id, capture_id=handle.ref.capture.capture_id,
                 generation=handle.ref.capture.capture_generation,
@@ -1112,6 +1127,10 @@ class StreamingRecognitionRouteOwner:
                 sent_sample_end=handle.sent_sample_end, send_peak_ms=handle.diagnostic_send_peak_ms,
                 vad_silence_ms=handle.diagnostic_vad_silence_ms, provider_ms=provider_ms,
                 speech_started=handle.speech_start_ms is not None, input_fenced=handle.input_fenced,
+                oldest_queue_age_ms=(None if oldest is None else max(0.0, (time.monotonic() - oldest) * 1000)),
+                frame_queue_wait_ms=handle.diagnostic_frame_queue_wait_ms,
+                frame_seq=handle.diagnostic_frame_seq,
+                pending_audio_ms=len(handle.diagnostic_enqueued_at) * 20,
             )
         except Exception:
             # A diagnostic sink must not change media or Provider authority.

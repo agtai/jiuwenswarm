@@ -22,6 +22,10 @@ _VALUES = _VALUES | frozenset({
     "wire_bytes", "event_queue_frames", "event_seq", "committed", "closing",
     "terminal", "item_matches_speech", "item_matches_committed", "has_item",
     "speech_stopped", "timeout_ms", "status_code", "response_bytes", "phase_ms",
+    "write_buffer_bytes", "write_buffer_low_bytes", "write_buffer_high_bytes",
+    "write_buffer_peak_bytes", "transport_paused", "write_pause_ms", "drain_ms",
+    "loop_lag_ms", "loop_lag_peak_ms", "peer_loopback", "flow_observer",
+    "oldest_queue_age_ms", "frame_queue_wait_ms", "pending_audio_ms",
 })
 WIRE_EVENTS = frozenset({
     "session.updated", "transcription_session.updated", "session.created",
@@ -57,6 +61,7 @@ FAILURE_CODES = frozenset({
     "UNPROVEN_RECOGNITION_CANCEL_ACK", "CANCELLED_HYPOTHESIS_FORBIDDEN",
 })
 _LABELS = {
+    "proxy_route_hint": frozenset({"direct", "http", "https", "socks5", "socks5h", "socks4", "socks4a", "unknown"}),
     "wire_event": WIRE_EVENTS,
     "failure_code": FAILURE_CODES,
     "commit_owner": frozenset({"none", "manual", "server_vad"}),

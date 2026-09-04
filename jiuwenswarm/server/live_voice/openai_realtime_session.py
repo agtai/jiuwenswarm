@@ -391,7 +391,8 @@ def official_realtime_url(
 
 
 async def default_realtime_socket_factory(
-    url: str, headers: Mapping[str, str], timeout_seconds: float
+    url: str, headers: Mapping[str, str], timeout_seconds: float,
+    *, connection_factory: object | None = None,
 ) -> RealtimeSocket:
     import websockets
 
@@ -407,6 +408,9 @@ async def default_realtime_socket_factory(
         else "extra_headers"
     )
     kwargs[parameter] = dict(headers)
+    # Optional passive observer; older supported websockets keeps its old path.
+    if connection_factory is not None and "create_connection" in inspect.signature(websockets.connect).parameters:
+        kwargs["create_connection"] = connection_factory
     return await websockets.connect(url, **kwargs)
 
 

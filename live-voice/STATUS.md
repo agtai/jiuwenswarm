@@ -66,46 +66,43 @@ repeat the old whole-project audit solely to resume a bounded task.
 | Executor & Durability | Direct D0/D2 v2 profiles, admission, reconciliation, sealed results and generic adjustment checkpoints; dedicated no-memory rail repair; retained v1 records cannot authorize new v2 dispatch | Required independent review and real result/control acceptance; scope broader file-tool access outside checkout separately. Additional Executor/D1 capability needs its own packet; no D1 or generic host-crash claim |
 | Voice–Task Bridge | Unified committed semantics, direct exact local creation/modification consent, scoped targets and requirement sources | Current modification/query real-model acceptance; full generalization and retirement audit; pause/resume/provide-input remain unsupported until a real primitive is accepted |
 | Integrated Web product experience | Scoped Registry Tasks in the right panel, no bottom manual form; project-home Session allocation through microphone transcription; recovery/notification repairs | Stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh journey; projectless startup requires backend authority design |
-| Observability, benchmark and latency | Correlated stage timings; deployed bounded capture/playout/interruption diagnostics plus Speech protocol subcodes, send-lock/Socket and batch HTTP/deadline phases; historical bounded warm L0 evidence | Reproduce endpoint delay and ineffective voice interruption with the new trace; independent review, current first-audible baseline and declared SLO. Historical percentiles are not current gains |
+| Observability, benchmark and latency | Correlated stage timings; bounded capture/playout/interruption, Speech protocol/send-lock/HTTP diagnostics; passive Socket flow-control, event-loop and queue-age increment implemented | Deploy and physically reproduce with the new trace; independent review, ineffective interruption, current first-audible baseline and declared SLO remain open. Historical percentiles are not current gains |
 | Automated verification and product acceptance | Focused module/regression checks and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative independent review and final human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, production semantic cutover, bounded legacy removals and scoped prompt/config isolation | Complete production reachability/retirement audit; remaining manifest rows; keep artifacts/private runtime data out of integration |
 | Production operations | Privacy/preflight/observability foundations only | Authentication/tenancy, public deployment, operations, retention, security, compatibility and release support after separate scope |
 
 ## Current execution packet
 
-### Speech failure precision diagnostics and local redeployment
+### Speech backpressure diagnostics and local redeployment
 
-The user authorized finer diagnostics after the latest two-turn acceptance run
-hit streaming protocol failure and unsuccessful batch fallback. This is a Tier 2
-Speech/Observability packet, not a speculative latency or protocol fix. See the
-[precision diagnostic evidence](evidence/SPEECH_FAILURE_DIAGNOSTICS_20260904.md).
+The user authorized a Tier 2 Speech/Realtime Media observability increment and
+necessary local redeployment, then their own physical verification. This is not
+a speculative latency fix. See the
+[backpressure diagnostic evidence](evidence/SPEECH_BACKPRESSURE_DIAGNOSTICS_20260904.md).
 
-- Existing evidence confirms Provider-send accumulation and failure before a
-  second final transcript. It does not identify the specific protocol trigger,
-  timeout stage or the physical end-of-speech delay. Keep VAD 800 ms and startup
-  lead 250 ms unchanged while reproducing.
-- Passive diagnostics now separate send-lock, encoding and Socket send-await;
-  parsed stop receipt, lock acquisition and publication; allowlisted protocol
-  subcodes/state; HTTP connect/TLS/upload/response stages and outer deadline.
-  The shared bounded sink stores no speech, raw Provider events or secrets.
-- Focused and affected backend checks pass; complete manual diff review is the
-  recorded substitute for an independent review that the incompatible local
-  CLI could not run. Physical two-turn reproduction and browser export remain
-  required; ineffective interruption and the misleading `activation` label are
-  not claimed fixed by this diagnostic-only packet.
-- Controlled local deployment completed with the user's current isolated
-  `deepseek-v4-flash` configuration unchanged, VAD 800 ms and startup 250 ms.
-  Served build, runtime settings, real Speech round trip and rejection probes
-  passed; a separate tool-free configured-model probe passed. Correction to
-  the previous deployment claim: project/data and
-  Speech credentials were retained, but the selected isolated dialogue config
-  was then a template. Speech-only probes did not validate the dialogue model.
-- The earlier truthful spoken-revision failure notice and browser
-  capture/playout/interruption diagnostics remain included. Their
-  [evidence and limits](evidence/SPOKEN_FALLBACK_AND_AUDIO_DIAGNOSTICS_20260904.md)
-  remain applicable, including five pre-existing selected UI failures.
-- No VAD/interruption policy, timeout increase, sentence TTS pipeline, Task
-  behavior, protocol/schema, credential rewrite, public deployment or push.
+- The 16:25 reproduction isolates multi-second Socket send-awaits and a separate
+  672 ms stop-event send-lock wait. At Gateway stop handling, 458 frames remained
+  queued (9.16 s of audio, not an exact physical listening delay). The lower-level
+  transport/scheduling cause and physical stop-to-UI timing are still unproved.
+- The passive increment records write-buffer size/limits, actual pause/resume
+  callbacks and drain duration, send-owned event-loop heartbeat lag, queued-frame
+  age and source progress. Existing stop/lock/final correlation remains. Proxy
+  policy is explicitly a hint; no route change or Provider-consumption claim.
+- Focused and final affected regressions pass; local deployment is pending.
+  Complete manual diff review substitutes for an unavailable independent
+  review (local CLI/model incompatibility); Tier 2 review closure stays PARTIAL.
+- Preserve current isolated `deepseek-v4-flash`, project/data, VAD 800 ms and
+  startup 250 ms. Prior deployment/configuration correction and Speech failure
+  traces remain in the [precision evidence](evidence/SPEECH_FAILURE_DIAGNOSTICS_20260904.md).
+- User deferred manual browser export after the undefined-object error. Next
+  reproduction uses backend diagnostics plus microphone/screen recording; do
+  not make the failed export a prerequisite. Ineffective interruption, protocol
+  failure recovery and the misleading `activation` label remain separate gaps.
+- Earlier truthful spoken fallback and browser diagnostics remain included with
+  their [limits](evidence/SPOKEN_FALLBACK_AND_AUDIO_DIAGNOSTICS_20260904.md), including
+  five pre-existing selected UI failures. No VAD/interruption or EOT-lock repair,
+  timeout/queue tuning, network/proxy change, TTS pipeline, Task/protocol/schema,
+  credential rewrite, public deployment or remote update in this increment.
 
 ### Retained consequences of earlier repairs
 

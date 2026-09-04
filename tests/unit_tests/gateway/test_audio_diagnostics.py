@@ -28,6 +28,23 @@ async def test_audio_diagnostics_allowlist_scalars_without_payload_or_secrets(mo
 
 
 @pytest.mark.asyncio
+async def test_transport_diagnostics_allowlist_does_not_leak_proxy_or_peer(monkeypatch):
+    lines = []
+    monkeypatch.setattr(diagnostics._LOGGER, "info", lambda template, *args: lines.append(template % args))
+    diagnostics.record_audio_diagnostic("socket_observer_attached", capture_id="capture-a",
+        proxy_route_hint="https", peer_loopback=True, flow_observer=True,
+        write_buffer_bytes=40000, drain_ms=2000, loop_lag_peak_ms=5,
+        oldest_queue_age_ms=9000, pending_audio_ms=9160,
+        proxy_url="https://PRIVATE_PASSWORD@proxy.invalid", peer="PRIVATE_IP", headers="PRIVATE_HEADER")
+    diagnostics.record_audio_diagnostic("socket_observer_attached", proxy_route_hint="PRIVATE_PROXY")
+    await asyncio.to_thread(diagnostics._QUEUE.join)
+    assert "PRIVATE" not in repr(lines)
+    payload = json.loads(lines[0].split(" ", 1)[1])["fields"]
+    assert payload["proxy_route_hint"] == "https" and payload["peer_loopback"] is True
+    assert payload["oldest_queue_age_ms"] == 9000 and payload["drain_ms"] == 2000
+
+
+@pytest.mark.asyncio
 async def test_throwing_sink_is_passive_and_bounded_queue_drops_without_wait(monkeypatch):
     await asyncio.to_thread(diagnostics._QUEUE.join)
     def fail(*args, **kwargs):

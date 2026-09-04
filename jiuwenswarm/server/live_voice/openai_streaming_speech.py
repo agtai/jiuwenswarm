@@ -33,6 +33,9 @@ import httpx
 from jiuwenswarm.common.live_voice_audio_diagnostics import (
     FAILURE_CODES, WIRE_EVENTS, record_audio_diagnostic,
 )
+from jiuwenswarm.server.live_voice.speech_socket_diagnostics import (
+    attach_socket_diagnostics, diagnostic_socket_factory,
+)
 from jiuwenswarm.server.live_voice.batch_speech import (
     SPEECH_API_BASE_ENV,
     SPEECH_API_KEY_ENV,
@@ -666,6 +669,7 @@ class _RecognitionSession:
     diagnostic_event: str = "unparsed"
     diagnostic_item_matches_speech: bool | None = None
     diagnostic_item_matches_committed: bool | None = None
+    socket_diagnostics: Any = field(default=None, repr=False)
 
     @property
     def ref(self) -> RecognitionStreamRef:
@@ -834,7 +838,7 @@ class OpenAIStreamingSpeechProvider:
             )
         self._event_queue_wait_seconds = event_queue_wait_seconds
         self._config = config
-        self._socket_factory = socket_factory or _default_socket_factory
+        self._socket_factory = socket_factory or diagnostic_socket_factory
         self._sse_factory = sse_factory or _default_sse_factory
         self._degradation_sink = degradation_sink
         if fallback_tier is not SpeechRouteTier.TEXT:
@@ -972,6 +976,9 @@ class OpenAIStreamingSpeechProvider:
                 ready=loop.create_future(),
                 deadline=deadline,
             )
+            session.socket_diagnostics = attach_socket_diagnostics(socket, url,
+                media_session_id=ref.session_id, capture_id=ref.capture.capture_id,
+                generation=ref.capture.capture_generation)
             key = _recognition_key(ref)
             async with self._lock:
                 if self._closed or key in self._recognition:
@@ -2108,11 +2115,15 @@ class OpenAIStreamingSpeechProvider:
         session.diagnostic_wire_seq += 1
         wire_seq = session.diagnostic_wire_seq
         sampled = frame_seq is None or frame_seq % 50 == 0
-        started = time.monotonic()
         outcome = "failed"
+        observer = session.socket_diagnostics
+        if observer is not None:
+            with suppress(Exception):
+                observer.begin(frame_seq, wire_seq, budget_seconds=remaining)
         if sampled:
             self._diagnose_recognition(session, "adapter_socket_send_started",
                 wire_seq=wire_seq, frame_seq=frame_seq)
+        started = time.monotonic()
         try:
             await asyncio.wait_for(session.socket.send(message), timeout=remaining)
             outcome = "complete"
@@ -2124,12 +2135,16 @@ class OpenAIStreamingSpeechProvider:
             raise
         finally:
             elapsed_ms = (time.monotonic() - started) * 1000
+            transport_fields = {}
+            if observer is not None:
+                with suppress(Exception):
+                    transport_fields = observer.finish()
             if (sampled or elapsed_ms >= 100 or (lock_wait_ms or 0) >= 100
                     or (encode_ms or 0) >= 100 or outcome != "complete"):
                 self._diagnose_recognition(session, "adapter_socket_send_settled",
                     wire_seq=wire_seq, frame_seq=frame_seq, wire_bytes=len(message),
                     socket_send_ms=elapsed_ms, lock_wait_ms=lock_wait_ms,
-                    encode_ms=encode_ms, outcome=outcome)
+                    encode_ms=encode_ms, outcome=outcome, **transport_fields)
 
     @staticmethod
     def _diagnose_recognition(session: _RecognitionSession, event: str, **fields: object) -> None:

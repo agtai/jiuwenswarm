@@ -762,7 +762,9 @@ async def test_streaming_owner_queue_exhaustion_falls_back_without_dropping_capt
     for seq in range(overflow_frame_count):
         owner.offer(handle, _frame(seq))
     assert handle.failure is StreamingRecognitionFallbackReason.QUEUE_EXHAUSTED
+    assert len(handle.diagnostic_enqueued_at) <= streaming_speech_route._MAX_PENDING_PROVIDER_FRAMES
     outcome = await owner.finish(handle)
+    assert handle.diagnostic_enqueued_at == {}
 
     assert outcome.completed is False
     # The Provider owner cannot decide whether a complete bounded capture is
@@ -771,6 +773,50 @@ async def test_streaming_owner_queue_exhaustion_falls_back_without_dropping_capt
     assert outcome.fallback_tier is SpeechRouteTier.TEXT
     assert outcome.reason is StreamingRecognitionFallbackReason.QUEUE_EXHAUSTED
     assert provider.cancel_count == 1
+
+
+@pytest.mark.asyncio
+async def test_queue_age_observes_wait_without_changing_frames_or_authority(monkeypatch):
+    from types import SimpleNamespace
+    records = []
+    clock = [100.0]
+    entered = asyncio.Event()
+    class Provider(_Provider):
+        async def send_recognition_audio(self, frame):
+            entered.set()
+            await super().send_recognition_audio(frame)
+    provider = Provider(block_send=True)
+    owner = StreamingRecognitionRouteOwner(lambda: asyncio.sleep(0,
+        result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None)))
+    handle, _ = await begin_recognition(owner, _binding())
+    monkeypatch.setattr(streaming_speech_route, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(streaming_speech_route, "record_audio_diagnostic",
+        lambda e, **f: records.append((e, f)))
+    try:
+        owner.offer(handle, _frame(0))
+        await asyncio.wait_for(entered.wait(), 1)
+        clock[0] += 0.1
+        owner.offer(handle, _frame(1))
+        owner.offer(handle, _frame(2))
+        clock[0] += 0.5
+        owner._diagnose(handle, "queue_test")
+        fields = records[-1][1]
+        assert fields["oldest_queue_age_ms"] == pytest.approx(500)
+        assert fields["pending_audio_ms"] == 40
+        assert fields["frame_queue_wait_ms"] == 0 and fields["frame_seq"] == 0
+        assert fields["received_samples"] == 960 and fields["sent_sample_end"] == 320
+        assert fields["capture_id"] == "capture-1" and fields["generation"] == 0
+        assert provider.frames == []  # Send boundary isn't Provider completion.
+        provider.send_gate.set()
+        outcome = await owner.finish(handle)
+        assert outcome.completed and outcome.final_text == "hello"
+        assert [frame.seq for frame in provider.frames] == [0, 1, 2]
+        assert handle.diagnostic_frame_queue_wait_ms == pytest.approx(500)
+        assert handle.diagnostic_enqueued_at == {} and provider.cancel_count == 0
+        assert "hello" not in repr(records)
+    finally:
+        provider.send_gate.set()
+        await owner.close()
 
 
 @pytest.mark.parametrize("defect", ["provider", "sequence", "cursor"])
