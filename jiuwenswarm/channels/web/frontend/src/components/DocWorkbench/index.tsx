@@ -161,6 +161,7 @@ export function DocWorkbench({ composer }: { composer: ComposerProps }) {
         <ChatStrip
           composer={composer}
           visible={wb.chatVisible}
+          docTitle={tab.title || tab.docId}
           onHide={wb.toggleChat}
           onShow={wb.toggleChat}
           unreadReceipts={unreadTotal}
@@ -181,6 +182,7 @@ export function DocWorkbench({ composer }: { composer: ComposerProps }) {
           onLocate={locateReceipt}
           onJump={wb.activate}
           onWatch={(m) => void setWatch(m)}
+          onHide={wb.toggleRail}
         />
       )}
     </div>

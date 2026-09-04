@@ -39,6 +39,7 @@ import {
 import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
+import { FileText } from 'lucide-react';
 import {
   beginHistoryRestore,
   fetchHistoryPage,
@@ -729,6 +730,7 @@ function AppContent({
   const prependMessages = useChatStore((s) => s.prependMessages);
   const isProcessing = useChatStore((s) => s.runtimes[sessionId]?.isProcessing ?? false);
   const docWorkbenchOpen = useDocWorkbenchStore((s) => s.open && s.tabs.length > 0);
+  const docWorkbenchTabCount = useDocWorkbenchStore((s) => s.tabs.length);
   const isPaused = useChatStore((s) => s.runtimes[sessionId]?.isPaused ?? false);
   const hasPendingQuestion = useChatStore((s) => Boolean(s.runtimes[sessionId]?.pendingQuestion));
   const setProcessing = useChatStore((s) => s.setProcessing);
@@ -3056,7 +3058,9 @@ function AppContent({
   // composer below the document is the session's own, and sending the first
   // message from there promotes the new conversation exactly as the chat view
   // does, so the workbench stays up across the promotion (verified live).
-  const docWorkbenchShown = docWorkbenchOpen && !showConversationNotFound && !!sessionId;
+  // Everything the workbench renders is co-scribe UI: uninstalling the plugin
+  // (cloudDocInstalled false) takes it away wholesale, tabs and all.
+  const docWorkbenchShown = cloudDocInstalled && docWorkbenchOpen && !showConversationNotFound && !!sessionId;
 const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFound && !shouldFullscreen;
   const isNewSessionPromotion = Boolean(sessionId && sessionIdsCreatedInThisPageRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
@@ -3145,8 +3149,19 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
               )}
               <div
                 className={`chat-workspace flex-1 flex min-h-0 overflow-hidden ${insetTrajectoryFloatingTasks ? 'chat-workspace--trajectory-floating-tools' : ''}`}
-                style={docWorkbenchShown ? { display: 'none' } : undefined}
+                style={docWorkbenchShown ? { display: 'none' } : { position: 'relative' }}
               >
+                {cloudDocInstalled && docWorkbenchTabCount > 0 && !docWorkbenchShown && (
+                  <button
+                    type="button"
+                    className="doc-workbench__return-btn"
+                    onClick={() => useDocWorkbenchStore.getState().reopen()}
+                    data-testid="doc-workbench-return"
+                    title={t('docs.workbench.returnToDoc')}
+                  >
+                    <FileText size={13} /> {t('docs.workbench.returnToDoc')}
+                  </button>
+                )}
                 {showConversationNotFound && (
                   <div className="flex-1 flex flex-col items-center justify-center gap-4" data-testid="app-conversation-not-found">
                     <h1 className="text-lg font-semibold text-text" data-testid="app-conversation-not-found-title">{t('multiSession.notFound.title')}</h1>

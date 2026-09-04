@@ -7,14 +7,17 @@ import { useTranslation } from 'react-i18next';
 import { Minus, MessageSquare, ChevronUp } from 'lucide-react';
 import { useChatStore } from '../../stores/chatStore';
 import { InputArea } from '../ChatPanel/InputArea';
+import beeAvatar from '../../assets/bee-static.png';
 import type { ComponentProps } from 'react';
 import { receiptsFromExecutions } from '../../features/clouddoc/receipts';
 
 export type ComposerProps = ComponentProps<typeof InputArea>;
 
-export function ChatStrip({ composer, visible, onHide, onShow, unreadReceipts, onLocate, onHistory }: {
+export function ChatStrip({ composer, visible, docTitle, onHide, onShow, unreadReceipts, onLocate, onHistory }: {
   composer: ComposerProps;
   visible: boolean;
+  /** 当前正在编辑的文档名，作为聊天条上的标签。 */
+  docTitle?: string;
   onHide: () => void;
   onShow: () => void;
   unreadReceipts: number;
@@ -48,7 +51,12 @@ export function ChatStrip({ composer, visible, onHide, onShow, unreadReceipts, o
   return (
     <div className="doc-workbench__chat" data-testid="doc-workbench-chat">
       <div className="doc-workbench__chat-last">
-        <span className="h-5 w-5 rounded-full bg-accent" />
+        <img src={beeAvatar} className="doc-workbench__chat-avatar" alt="jiuwen" />
+        {docTitle && (
+          <span className="doc-workbench__chat-doc" title={docTitle} data-testid="doc-workbench-chat-doc">
+            {t('docs.workbench.editingDoc')}{docTitle}
+          </span>
+        )}
         <span className="doc-workbench__chat-last-text" data-testid="doc-workbench-chat-last">{last?.content ?? t('docs.workbench.noReplyYet')}</span>
         {lastReceipt && (
           <span className="inline-flex items-center gap-2" data-testid="doc-workbench-chat-receipt">

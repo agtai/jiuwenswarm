@@ -41,6 +41,8 @@ interface DocWorkbenchState {
   activate: (docId: string) => void;
   closeTab: (docId: string) => void;
   exit: () => void;
+  /** 从任务主界面回到文档编辑（仍有打开的标签时）。 */
+  reopen: () => void;
   setRailTab: (tab: RailTab) => void;
   toggleRail: () => void;
   toggleChat: () => void;
@@ -105,6 +107,7 @@ export const useDocWorkbenchStore = create<DocWorkbenchState>((set, get) => ({
     return { tabs, activeDocId, open: tabs.length > 0 ? s.open : false };
   }),
   exit: () => set({ open: false }),
+  reopen: () => set((s) => (s.tabs.length > 0 ? { open: true } : {})),
   setRailTab: (railTab) => set({ railTab }),
   toggleRail: () => set((s) => {
     const next = { railVisible: !s.railVisible };

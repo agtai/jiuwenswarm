@@ -5,6 +5,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { PanelRightClose } from 'lucide-react';
 import { webRequest } from '../../services/webClient';
 import { useChatStore } from '../../stores/chatStore';
 import { useSessionStore } from '../../stores/sessionStore';
@@ -20,7 +21,7 @@ const TONE: Record<string, string> = {
 export type WatchInfo = { mode: string; suspended: boolean; expires_at?: number | null; expired?: boolean } | undefined;
 
 export function SideRail({
-  tab, tabs, railTab, receipts, watch, globalSuspended, onTab, onRefresh, onLocate, onJump, onWatch,
+  tab, tabs, railTab, receipts, watch, globalSuspended, onTab, onRefresh, onLocate, onJump, onWatch, onHide,
 }: {
   tab: WorkbenchTab | null;
   tabs: WorkbenchTab[];
@@ -33,6 +34,7 @@ export function SideRail({
   onLocate: (r: ReceiptRow) => void;
   onJump: (docId: string) => void;
   onWatch: (mode: 'off' | 'reply_only' | 'apply_scoped' | 'suspend' | 'resume') => void;
+  onHide: () => void;
 }) {
   const { t } = useTranslation();
   const sid = useChatStore((s) => s.activeSessionId) ?? '';
@@ -77,6 +79,10 @@ export function SideRail({
             {k === 'receipts' && receipts.length > 0 && <span className="rounded-full bg-bg-muted px-1.5 text-[10px] text-text-muted">{receipts.length}</span>}
           </button>
         ))}
+        <span className="ml-auto" />
+        <button type="button" className="doc-workbench__icon-btn" style={{ width: 26, height: 26 }} onClick={onHide} title={t('docs.workbench.toggleRail')} data-testid="doc-workbench-rail-hide">
+          <PanelRightClose size={15} />
+        </button>
       </div>
 
       {railTab === 'receipts' && (
