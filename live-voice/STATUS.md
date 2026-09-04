@@ -85,14 +85,29 @@ offline timeline/report are implemented. Scope and verification are in the
 
 - This increment observes the existing business path and keeps VAD 800 ms,
   startup 250 ms, timeout/retry/buffer policy, model configuration and all Task /
-  capture / presentation authority unchanged. It requires refreshed services
+  capture / presentation authority unchanged. The user has now accepted the
+  physical P1-3/P1-4 checks and selected 800 ms / 250 ms as the defaults; source
+  already uses those defaults, while bounded environment/build overrides remain
+  available for controlled comparisons. This acceptance does not close latency
+  SLOs or playback-time interruption. It requires refreshed services
   and frontend assets. The controlled launcher and a synthetic-speech browser
   run now exercised the real Agent/file tool and digital playback. That run
   exposed numeric-log parsing, synthesis identity and overlapping HTTP timing
   gaps; the bounded repair is now deployed and a second synthetic run retained
-  complete parseable Session-filtered evidence. The diagnostic path is ready
-  for the user's physical VAD rehearsal. See the
+  complete parseable Session-filtered evidence. A later physical run accepted
+  the VAD/playout defaults and exposed three playback-time interruption
+  recognition failures. Correlated backend evidence shows fast cancellation
+  after Provider speech-start, one 420 ms queue/backfill plus batch-fallback
+  case, and incorrect Speech finals before Agent submission. The retained
+  browser export confirms AEC/noise suppression/automatic gain control were
+  active and that local playout stopped all sources in 0.1–0.2 ms once the
+  Provider speech-start arrived. The common delay is before that remote-only
+  interruption gate under speaker/microphone double-talk; the incorrect text is
+  already present at Speech final/commit. Another reproduction is not required
+  to locate the failure. See the
   [deployment evidence](evidence/DEMO_PROFILING_DEPLOYMENT_20260904.md).
+  The scoped acceptance and diagnosis are in the
+  [barge-in evidence](evidence/VAD_PLAYOUT_ACCEPTANCE_AND_BARGE_IN_DIAGNOSIS_20260904.md).
 - Automatic timing, error breadcrumbs and explicit missing/dropped-record
   reporting are implementation evidence, not a latency improvement or a physical
   acceptance PASS. Scoped regressions, the frontend build and independent
