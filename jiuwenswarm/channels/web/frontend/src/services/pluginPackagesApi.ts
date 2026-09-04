@@ -60,6 +60,8 @@ interface RawPluginPackageSummary {
   // v2 §3.1：connection_state 是 snake_case（跟这个接口族其余字段的驼峰写法不一致，但文档
   // 原文就是这么给的，如实照抄，不擅自"统一"成驼峰再要求后端改）。
   connection_state?: PluginConnectionState;
+  /** list 也下发真实图标 data-url（后端 _build 卡片统一带 avatar）。 */
+  avatar?: string;
 }
 
 function fromRawSummary(raw: RawPluginPackageSummary): PluginPackageSummary {
@@ -67,6 +69,7 @@ function fromRawSummary(raw: RawPluginPackageSummary): PluginPackageSummary {
     id: raw.id,
     displayName: raw.displayName,
     displayDescription: raw.displayDescription,
+    avatar: raw.avatar,
     category: raw.category ?? '',
     source: raw.source ?? 'local',
     installed: raw.installed ?? false,
@@ -81,6 +84,7 @@ interface RawPluginPackageDetail extends RawPluginPackageSummary {
   avatar?: string;
   version?: string;
   details?: string;
+  details_en?: string;
   tags: LocalizedText[];
   skills: PluginCapabilityRef[];
   tools: PluginCapabilityRef[];
@@ -100,6 +104,7 @@ function fromRawDetail(raw: RawPluginPackageDetail): PluginPackageDetail {
     avatar: raw.avatar,
     version: raw.version,
     details: raw.details,
+    detailsEn: raw.details_en,
     tags: raw.tags ?? [],
     skills: raw.skills ?? [],
     tools: raw.tools ?? [],

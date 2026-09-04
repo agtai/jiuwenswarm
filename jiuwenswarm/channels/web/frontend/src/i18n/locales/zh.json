@@ -1,4 +1,226 @@
 {
+  "docs": {
+    "title": "文档",
+    "subtitle": "协同编辑：让 agent 成为共享云文档里的协作者",
+    "copy": "复制",
+    "copied": "已复制",
+    "watch": {
+      "watchOff": "只读",
+      "watchReply": "建议权",
+      "watchApply": "操作权",
+      "watchSuspended": "已挂起",
+      "watchSuspend": "挂起",
+      "watchResume": "恢复",
+      "watchApplyConfirm": "确认开启操作权？协作者在批注里 @ 我（或指派给我）即可触发有界修改；每次修改都留回执，撤销请用平台的版本历史",
+      "backlog": "积压 {{count}} 条批注待授权处理",
+      "globalSuspend": "全部挂起",
+      "globalResume": "全部恢复",
+      "killSwitch": "撤销全部授权",
+      "killSwitchConfirm": "再点一次确认：撤销所有文档的常设授权",
+      "watchExpired": "已到期"
+    },
+    "addPlaceholder": "＋ 粘贴文档链接添加，如 https://docs.google.com/document/d/…",
+    "status": {
+      "ok": "正常",
+      "comment_only": "仅评论权",
+      "frozen": "已冻结",
+      "backoff": "退避中",
+      "commentOnlyHint": "agent 能读、能提议，但提议永远无法应用。请把权限改为「编辑者」。",
+      "frozenHint": "连续访问失败后暂停轮询。点「刷新」立即重检；网络恢复后也会自动重试。"
+    },
+    "add": {
+      "exists": {
+        "title": "已在纳管列表中",
+        "detail": "这篇文档已经在监听。"
+      },
+      "comment_only": {
+        "title": "只有评论权",
+        "detail": "agent 能读、能提议，但没有编辑权时任何提议都永远无法应用。请在文档「共享」里把权限从「评论者」改为「编辑者」，然后重新检查。"
+      },
+      "not_shared": {
+        "title": "无法访问该文档",
+        "detail": "文档不存在，或还没有共享给 agent 的地址。请先在 Google Docs 里完成共享。"
+      },
+      "unknown": {
+        "title": "暂时无法检查",
+        "detail": "网络或配额问题，稍后重试。"
+      },
+      "invalid": {
+        "title": "链接无法解析",
+        "detail": "请粘贴完整的 Google Docs 链接或文档 id。"
+      },
+      "no_connection": {
+        "title": "还没有可用的连接",
+        "detail": "请先在左侧添加一个连接。"
+      }
+    },
+    "recheck": "重新检查",
+    "copyAddress": "复制 agent 地址",
+    "remove": "移出纳管",
+    "removeConfirm": "把「{{title}}」移出纳管？文档本身不受影响，重新添加后 agent 不会重放历史评论。",
+    "footCount": "{{count}} 篇文档",
+    "refresh": "刷新",
+    "refreshing": "检查中…",
+    "notEnabled": "到 设置 → Cloud Docs 提供服务账号密钥即可开始。",
+    "connDocs": "{{count}} 篇",
+    "noConn": "尚未添加连接",
+    "refreshedAt": "刷新时间: {{time}}",
+    "addBtn": "添加",
+    "adding": "校验中…",
+    "sub": {
+      "commentOnly": "需「编辑者」权限，提议无法应用",
+      "frozen": "已停止轮询 · 点刷新重试",
+      "backoff": "暂时退避中",
+      "backoffAt": "{{time}} 后自动重试",
+      "checkedAt": "上次检查 {{time}}"
+    },
+    "connProvider": "厂商：",
+    "addConn": "添加连接",
+    "connProviderLabel": "厂商",
+    "providerFeishu": "飞书文档",
+    "providerSoon": "规划中",
+    "connKeyLabel": "服务账号密钥",
+    "connMode": {
+      "path": "服务器路径",
+      "upload": "上传 JSON",
+      "saved": "已存密钥"
+    },
+    "connPathPlaceholder": "/path/to/service-account.json",
+    "connChooseFile": "选择密钥文件…",
+    "connUploadHint": "以 600 权限落盘到配置目录，私钥不写入 config.yaml。",
+    "connErr": {
+      "invalid_key": "密钥无效：{{detail}}",
+      "duplicate": "该账号已有连接，同一身份不能有两个 watcher（每条 @ 会收到两份回应）",
+      "unknown": "添加失败,请检查服务端日志。{{detail}}"
+    },
+    "removeConn": "删除连接",
+    "removeConnConfirm": "删除连接 {{address}}？其下 {{count}} 篇文档将停止监听；文档本身与共享关系不受影响。",
+    "cancel": "取消",
+    "adopted": "已自动纳管 {{count}} 篇新共享的文档",
+    "needsEditor": "有 {{count}} 篇已共享，但只给了评论权——在 Google 文档里改成「编辑者」后点刷新",
+    "unsupported": "有 {{count}} 个共享文件暂不支持——目前仅支持 Google 文档协同",
+    "kind": {
+      "spreadsheet": "表格",
+      "presentation": "幻灯片",
+      "form": "表单",
+      "file": "文件",
+      "document": "文档",
+      "markdown": "Markdown"
+    },
+    "keyInUse": "启用中",
+    "keyDelete": "删除",
+    "keyDeleteConfirm": "确认删除？",
+    "savedEmpty": "没有已存的密钥",
+    "keyDeleteHint": "删除只移除本机文件；凭证本身要在 GCP 控制台吊销才失效。",
+    "history": {
+      "open": "查看履历",
+      "title": "修改履历",
+      "loading": "读取中…",
+      "empty": "这篇文档还没有 agent 的修改记录。",
+      "unhighlight": "撤销高亮",
+      "highlighted": "已高亮",
+      "failed": "操作未成功",
+      "more": "另有 {{n}} 处修改",
+      "statusUnknown": "结果未知",
+      "statusAppliedUnverified": "已应用（回读不符）",
+      "unknownNote": "进程在写入过程中结束，这次修改是否落地无从判断，请对照文档确认。",
+      "statusReverted": "已回退",
+      "statusPending": "写入中",
+      "statusApplied": "已应用",
+      "statusAborted": "未写入",
+      "actionUnconfirmed": "请求未在时限内返回：操作可能已经完成，下方列表已刷新为真实状态。",
+      "opCreate": "建档",
+      "opShare": "共享给",
+      "opTrash": "移入回收站",
+      "opRestore": "从回收站恢复",
+      "opUnshare": "取消共享",
+      "undoHint": "这里只记录，不撤销。要撤销改动，请用平台的版本历史（Google「版本记录」/ 飞书「历史版本」）。"
+    },
+    "usage": {
+      "open": "使用审计",
+      "title": "授权使用审计（已授 − 已用）",
+      "unavailable": "读取审计失败",
+      "granted": "已授",
+      "used": "已用",
+      "since": "自",
+      "until": "至",
+      "permanent": "永久",
+      "summaryLine": "派发 {{dispatches}} 轮 · 拒绝 {{denied}} 次 · 写入 {{writes}} 批",
+      "lastWrite": "最近写入：",
+      "executors": "执行者：",
+      "regions": "区域包络：",
+      "hintIdle": "该授权已闲置两周以上且从未写入——可考虑收窄为仅回帖。",
+      "hintFriction": "近期多次派发被拒——可考虑续期或放宽档位（决定权在你）。",
+      "renew30": "续期 30 天",
+      "makePermanent": "改为永久"
+    },
+    "mode": {
+      "directBanner": "Co-Scribe 保障已关闭（直连模式）：无回执、无无人值守——错误不留痕，指派不会被处理。",
+      "restoreMandate": "重新开启保障",
+      "mandateNote": "Co-Scribe 保障：开启——写入留回执可查，批注指派可无人值守处理。",
+      "goDirect": "关闭保障（切直连）",
+      "confirmDirect": "再点一次确认：关闭全部保障"
+    },
+    "manageConnInSettings": "连接管理已移至 设置 → Cloud Docs",
+    "table": {
+      "allConns": "全部连接",
+      "allTiers": "全部档位",
+      "colDoc": "文档",
+      "colConn": "连接",
+      "colStatus": "状态",
+      "colTier": "值守档",
+      "colActivity": "检查于",
+      "daysLeft": "剩 {{count}} 天",
+      "allKinds": "全部类型",
+      "colKind": "类型"
+    },
+    "backlogBanner": "{{count}} 条批注积压待授权",
+    "linkUnknown": "平台链接未知——重新粘贴该文档链接即可恢复",
+    "workbench": {
+      "openHere": "在工作台打开",
+      "openExternal": "新标签打开",
+      "reload": "刷新",
+      "toggleChat": "底部聊天",
+      "toggleRail": "右栏",
+      "exit": "退出编辑",
+      "closeTab": "关闭标签页",
+      "newReceipts": "{{n}} 条新回执",
+      "launcherTitle": "这份文档按你的设置在新标签打开",
+      "embedAgain": "改回在这里显示",
+      "loginTitle": "这里空白？{{platform}} 要求先登录",
+      "loginBody": "浏览器把这个内嵌框当作第三方站点，没带上你的 {{platform}} 登录时，平台会跳到登录页，而登录页拒绝在框里显示，所以这里是一片空白。在新标签登录一次，回来点「重试」即可。",
+      "loginOpen": "在新标签登录并打开",
+      "loginRetry": "已登录，重试",
+      "alwaysExternal": "总是在新标签打开",
+      "cantSee": "看不到文档？",
+      "reloadsOnReceipt": "新回执到达时自动重载",
+      "chat": "聊天",
+      "noReplyYet": "还没有回复",
+      "receipt": "回执",
+      "locate": "定位",
+      "history": "历史",
+      "hideChat": "隐藏聊天",
+      "revoke": "停止并撤权",
+      "thisTab": "当前标签页",
+      "elsewhere": "其他标签页有 {{n}} 条新回执",
+      "historyNote": "本会话全部消息 · 跨文档",
+      "rail": {
+        "receipts": "回执",
+        "history": "聊天历史",
+        "status": "状态"
+      },
+      "mdEditor": "swarm 自带编辑器",
+      "mdView": {
+        "edit": "编辑",
+        "preview": "预览",
+        "split": "分栏"
+      },
+      "mdSave": "保存",
+      "mdSaved": "已保存，回执 {{id}}",
+      "mdStaleWhileEditing": "文件在平台上有了新改动；保存或放弃你的编辑后会重新载入。",
+      "editingDoc": "正在编辑："
+    }
+  },
   "common": {
     "noData": "暂无数据",
     "confirm": "确认",
@@ -31,6 +253,7 @@
     "unsupportedProtocol": "不支持的 A2UI 协议版本：{{version}}"
   },
   "nav": {
+    "docs": "文档",
     "chat": "对话",
     "work": "任务",
     "agent": "专家",
@@ -54,8 +277,29 @@
     "noSettings": "此插件未提供设置页面。"
   },
   "settingsPanel": {
+    "clouddoc": {
+      "connectionsTitle": "已连接",
+      "noConnections": "尚未连接任何云文档平台",
+      "docsCount": "{{n}} 篇文档",
+      "copyAddress": "复制账号地址",
+      "remove": "断开",
+      "removeConfirm": "断开连接即卸下这条线上的 Co-Scribe：其名下全部 watch 授权失效、无人值守停止、纳管文档不再被处理；已留下的回执历史保留可查。确定断开？",
+      "addTitle": "添加连接（Google 服务账号 / 飞书应用）",
+      "add": "连接",
+      "addHint": "粘贴 Google 服务账号的 JSON 密钥，或飞书自建应用的 JSON（app_id、app_secret，可选 brand）。密钥仅保存在本机（600 权限），不会上传。",
+      "added": "已连接。",
+      "savedKeys": "或使用已保存的密钥：",
+      "modelTitle": "无人值守回合使用的模型",
+      "modelHint": "对所有连接下由文档评论触发的回合生效；不设置则使用部署的默认模型。",
+      "modelDefault": "当前使用部署默认模型",
+      "modelUseDefault": "恢复默认",
+      "guideTitle": "接入前的准备",
+      "guideApis": "1. 在 GCP 项目中启用 Docs / Drive / Sheets / Slides API。",
+      "guideShare": "2. 把要协作的文档共享给上方的 SA 邮箱（编辑者权限），然后到 Docs 面板纳管。"
+    },
     "title": "设置",
     "categories": {
+      "clouddoc": "云文档连接",
       "general": "常规",
       "models": "模型",
       "agent": "智能体",
@@ -595,6 +839,10 @@
     }
   },
   "chat": {
+    "docRefs": {
+      "label": "本会话文档",
+      "hint": "打开这篇文档的编辑界面"
+    },
     "placeholder": "需要帮你做些什么？输入“/”快速引用技能及指令",
     "placeholderCompacting": "压缩进行中，暂时无法发送消息",
     "placeholderAwaitingApproval": "请先处理上方待确认项",
@@ -2952,6 +3200,7 @@
       "mcpDisconnectedBannerSelf": "当前连接器未连接，无法正常使用",
       "connectMcp": "点击连接",
       "sections": {
+        "about": "详情",
         "basicInfo": "基本信息",
         "skills": "技能",
         "tools": "工具",

@@ -1,0 +1,22 @@
+{
+  "package_type": "agent_template",
+  "name": "审校专员",
+  "description": "只读复核：实读文档对照任务要求逐条核验，从不以执笔人的汇报代替读文档",
+  "persona": {
+    "dir": "./persona"
+  },
+  "rails": [
+    {
+      "file": "rails/one_pen_rail.py",
+      "class": "OnePenRail",
+      "display_name": {
+        "en": "one_pen",
+        "zh": "one_pen"
+      },
+      "display_description": {
+        "en": "One pen per team: refuses document-writing clouddoc tools for this member; changes route through the leader to the scribe.",
+        "zh": "每队一支笔：本成员的文档写入类 clouddoc 工具一律拒绝，改动经 leader 分派执笔专员执行。"
+      }
+    }
+  ]
+}

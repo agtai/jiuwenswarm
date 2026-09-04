@@ -1,4 +1,226 @@
 {
+  "docs": {
+    "title": "Docs",
+    "subtitle": "Co-scribe — let your agent collaborate inside shared cloud documents",
+    "copy": "Copy",
+    "copied": "Copied",
+    "watch": {
+      "watchOff": "Read-only",
+      "watchReply": "Suggest",
+      "watchApply": "Operate",
+      "watchSuspended": "Suspended",
+      "watchSuspend": "Suspend",
+      "watchResume": "Resume",
+      "watchApplyConfirm": "Enable Operate? A collaborator @-ing me (or assigning to me) in a comment triggers a bounded edit; every edit leaves a receipt, and undoing one is done in the platform's version history",
+      "backlog": "{{count}} comment(s) backlogged awaiting authorization",
+      "globalSuspend": "Suspend all",
+      "globalResume": "Resume all",
+      "killSwitch": "Revoke all mandates",
+      "killSwitchConfirm": "Click again to confirm: revoke every document's standing mandate",
+      "watchExpired": "Expired"
+    },
+    "addPlaceholder": "＋ Paste a document link to add, e.g. https://docs.google.com/document/d/…",
+    "status": {
+      "ok": "OK",
+      "comment_only": "Comment-only",
+      "frozen": "Frozen",
+      "backoff": "Backing off",
+      "commentOnlyHint": "The agent can read and propose, but proposals can never be applied. Grant Editor access.",
+      "frozenHint": "Paused after repeated failures. Refresh re-checks now; it also retries on its own."
+    },
+    "add": {
+      "exists": {
+        "title": "Already watched",
+        "detail": "This document is already being watched."
+      },
+      "comment_only": {
+        "title": "Comment-only access",
+        "detail": "The agent can read and propose, but without edit access no proposal can ever be applied. Change its role from Commenter to Editor in the document's Share dialog, then re-check."
+      },
+      "not_shared": {
+        "title": "Cannot access this document",
+        "detail": "It does not exist, or has not been shared with the agent's address yet."
+      },
+      "unknown": {
+        "title": "Could not check right now",
+        "detail": "Network or quota issue — try again shortly."
+      },
+      "invalid": {
+        "title": "Unparseable link",
+        "detail": "Paste a full Google Docs link or a bare document id."
+      },
+      "no_connection": {
+        "title": "No connection available",
+        "detail": "Add a connection on the left first."
+      }
+    },
+    "recheck": "Re-check",
+    "copyAddress": "Copy agent address",
+    "remove": "Remove",
+    "removeConfirm": "Stop watching \"{{title}}\"? The document itself is untouched; re-adding it will not replay old comments.",
+    "footCount": "{{count}} document(s)",
+    "refresh": "Refresh",
+    "refreshing": "Checking…",
+    "notEnabled": "Provide a service-account key in Settings → Cloud Docs to get started.",
+    "connDocs": "{{count}} docs",
+    "noConn": "No connections yet",
+    "refreshedAt": "refreshed at: {{time}}",
+    "addBtn": "Add",
+    "adding": "Checking…",
+    "sub": {
+      "commentOnly": "Needs Editor access — proposals cannot apply",
+      "frozen": "Polling stopped · refresh to retry",
+      "backoff": "Backing off",
+      "backoffAt": "retrying after {{time}}",
+      "checkedAt": "checked {{time}}"
+    },
+    "connProvider": "Provider: ",
+    "addConn": "Add connection",
+    "connProviderLabel": "Provider",
+    "providerFeishu": "Feishu Docs",
+    "providerSoon": "Planned",
+    "connKeyLabel": "Service-account key",
+    "connMode": {
+      "path": "Server path",
+      "upload": "Upload JSON",
+      "saved": "Saved keys"
+    },
+    "connPathPlaceholder": "/path/to/service-account.json",
+    "connChooseFile": "Choose key file…",
+    "connUploadHint": "Saved under the config directory with 0600; the private key never enters config.yaml.",
+    "connErr": {
+      "invalid_key": "Invalid key: {{detail}}",
+      "duplicate": "This account already has a connection — one identity, one watcher (two would answer every mention twice)",
+      "unknown": "Could not add the connection; check the server log. {{detail}}"
+    },
+    "removeConn": "Remove connection",
+    "removeConnConfirm": "Remove connection {{address}}? Its {{count}} document(s) stop being watched; the documents and their sharing are untouched.",
+    "cancel": "Cancel",
+    "adopted": "Adopted {{count}} newly shared document(s)",
+    "needsEditor": "{{count}} document(s) are shared comment-only -- change them to Editor in Google Docs, then Refresh",
+    "unsupported": "{{count}} shared file(s) can't be co-edited yet — only Google Docs are supported",
+    "kind": {
+      "spreadsheet": "Sheets",
+      "presentation": "Slides",
+      "form": "Form",
+      "file": "File",
+      "document": "Document",
+      "markdown": "Markdown"
+    },
+    "keyInUse": "In use",
+    "keyDelete": "Delete",
+    "keyDeleteConfirm": "Confirm?",
+    "savedEmpty": "No saved keys yet",
+    "keyDeleteHint": "Deleting removes the local file only; revoke the credential in the GCP console to invalidate it.",
+    "history": {
+      "open": "View history",
+      "title": "Edit history",
+      "loading": "Loading…",
+      "empty": "No agent edits recorded for this document yet.",
+      "unhighlight": "Clear highlight",
+      "highlighted": "highlighted",
+      "failed": "The action did not succeed",
+      "more": "and {{n}} more edits",
+      "statusUnknown": "outcome unknown",
+      "statusAppliedUnverified": "applied (read-back differs)",
+      "unknownNote": "The process ended mid-write; whether this change landed cannot be determined. Please check the document.",
+      "statusReverted": "reverted",
+      "statusPending": "in flight",
+      "statusApplied": "applied",
+      "statusAborted": "not written",
+      "actionUnconfirmed": "The request did not return in time. The action may still have completed; the list below now shows the true status.",
+      "opCreate": "created",
+      "opShare": "shared with",
+      "opTrash": "moved to trash",
+      "opRestore": "restored from trash",
+      "opUnshare": "unshared from",
+      "undoHint": "This is a record, not an undo. To undo a change, use the platform's version history."
+    },
+    "usage": {
+      "open": "Usage audit",
+      "title": "Grant usage audit (granted − used)",
+      "unavailable": "Failed to read the audit",
+      "granted": "Granted",
+      "used": "Used",
+      "since": "since",
+      "until": "until",
+      "permanent": "permanent",
+      "summaryLine": "{{dispatches}} dispatches · {{denied}} refusals · {{writes}} write batches",
+      "lastWrite": "Last write:",
+      "executors": "Executors:",
+      "regions": "Regions envelope:",
+      "hintIdle": "This grant has sat idle for over two weeks with no writes — consider narrowing to reply-only.",
+      "hintFriction": "Several recent dispatches were refused — consider renewing or widening (your call).",
+      "renew30": "Renew 30 days",
+      "makePermanent": "Make permanent"
+    },
+    "mode": {
+      "directBanner": "Co-Scribe safeguards are OFF (direct mode): no receipts, no unattended handling — errors leave no trace and assignments will not be processed.",
+      "restoreMandate": "Turn safeguards back on",
+      "mandateNote": "Co-Scribe safeguards: ON — writes leave receipts you can audit, assigned comments can run unattended.",
+      "goDirect": "Turn off safeguards (direct)",
+      "confirmDirect": "Click again to confirm: drop every safeguard"
+    },
+    "manageConnInSettings": "Connections are managed in Settings → Cloud Docs",
+    "table": {
+      "allConns": "All connections",
+      "allTiers": "All tiers",
+      "colDoc": "Document",
+      "colConn": "Connection",
+      "colStatus": "Status",
+      "colTier": "Watch tier",
+      "colActivity": "Checked",
+      "daysLeft": "{{count}}d left",
+      "allKinds": "All types",
+      "colKind": "Type"
+    },
+    "backlogBanner": "{{count}} comment(s) backlogged awaiting authorization",
+    "linkUnknown": "Link unknown — paste the document's link again to restore it",
+    "workbench": {
+      "openHere": "Open in workbench",
+      "openExternal": "Open in new tab",
+      "reload": "Reload",
+      "toggleChat": "Chat strip",
+      "toggleRail": "Side rail",
+      "exit": "Exit editing",
+      "closeTab": "Close tab",
+      "newReceipts": "{{n}} new receipts",
+      "launcherTitle": "This document opens in a new tab, as you set",
+      "embedAgain": "Show it here again",
+      "loginTitle": "Blank here? {{platform}} needs you signed in",
+      "loginBody": "The browser treats this frame as a third-party site. Without your {{platform}} session the platform redirects to its login page, which refuses to render in a frame, so the frame stays blank. Sign in once in a new tab, then come back and retry.",
+      "loginOpen": "Sign in and open in a new tab",
+      "loginRetry": "Signed in, retry",
+      "alwaysExternal": "Always open in a new tab",
+      "cantSee": "Can't see the document?",
+      "reloadsOnReceipt": "Reloads when a new receipt arrives",
+      "chat": "Chat",
+      "noReplyYet": "No reply yet",
+      "receipt": "receipt",
+      "locate": "Locate",
+      "history": "History",
+      "hideChat": "Hide chat",
+      "revoke": "Stop and revoke",
+      "thisTab": "This tab",
+      "elsewhere": "{{n}} new receipts on other tabs",
+      "historyNote": "Every message of this session, across documents",
+      "rail": {
+        "receipts": "Receipts",
+        "history": "Chat history",
+        "status": "Status"
+      },
+      "mdEditor": "Built-in editor",
+      "mdView": {
+        "edit": "Edit",
+        "preview": "Preview",
+        "split": "Split"
+      },
+      "mdSave": "Save",
+      "mdSaved": "Saved, receipt {{id}}",
+      "mdStaleWhileEditing": "The file changed on the platform; it reloads once you save or discard your edits.",
+      "editingDoc": "Editing: "
+    }
+  },
   "common": {
     "noData": "No data",
     "confirm": "Confirm",
@@ -31,6 +253,7 @@
     "unsupportedProtocol": "Unsupported A2UI protocol version: {{version}}"
   },
   "nav": {
+    "docs": "Docs",
     "chat": "Chat",
     "work": "Tasks",
     "agent": "Experts",
@@ -54,8 +277,29 @@
     "noSettings": "This plugin does not provide a settings page."
   },
   "settingsPanel": {
+    "clouddoc": {
+      "connectionsTitle": "Connected",
+      "noConnections": "No cloud-doc platform connected yet",
+      "docsCount": "{{n}} documents",
+      "copyAddress": "Copy account address",
+      "remove": "Disconnect",
+      "removeConfirm": "Disconnecting removes Co-Scribe from this line: every watch granted under it lapses, unattended handling stops, and its adopted documents are no longer served; receipts already on the ledger remain readable. Disconnect?",
+      "addTitle": "Add a connection (Google service account / Feishu app)",
+      "add": "Connect",
+      "addHint": "Paste a Google service account's JSON key, or a Feishu custom app's JSON (app_id, app_secret, optional brand). It is stored locally only (mode 600), never uploaded.",
+      "added": "Connected.",
+      "savedKeys": "Or use a saved key:",
+      "modelTitle": "Model for unattended turns",
+      "modelHint": "Applies to every turn dispatched from a document comment, across all connections. Leave unset to use the deployment's default model.",
+      "modelDefault": "Using the deployment default",
+      "modelUseDefault": "Use default",
+      "guideTitle": "Before connecting",
+      "guideApis": "1. Enable the Docs / Drive / Sheets / Slides APIs on your GCP project.",
+      "guideShare": "2. Share the documents with the SA email above (editor role), then adopt them in the Docs panel."
+    },
     "title": "Settings",
     "categories": {
+      "clouddoc": "Cloud Docs",
       "general": "General",
       "models": "Models",
       "agent": "Agent",
@@ -607,6 +851,10 @@
     }
   },
   "chat": {
+    "docRefs": {
+      "label": "Docs in this session",
+      "hint": "Open this document's editor"
+    },
     "placeholder": "What can I do for you? Type \"/\" to quickly reference skills and commands",
     "placeholderCompacting": "Context compression in progress. Messages are temporarily disabled",
     "placeholderAwaitingApproval": "Please respond to the pending confirmation above",
@@ -2971,6 +3219,7 @@
       "mcpDisconnectedBannerSelf": "This connector isn't connected, so it can't be used normally",
       "connectMcp": "Connect",
       "sections": {
+        "about": "About",
         "basicInfo": "Basic info",
         "skills": "Skills",
         "tools": "Tools",

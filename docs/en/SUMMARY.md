@@ -40,6 +40,7 @@
   - [Browser Extension](browser-extension/BrowserExtension.md)
     - [Browser Extension Guide](browser-extension/BrowserExtensionGuide.md)
     - [Browser Extension Install](browser-extension/BrowserExtensionInstall.md)
+  - [Cloud-document co-editing](CloudDoc.md)
   - [MCP Configuration](MCPConfiguration.md)
   - [Packaging desktop executables](PackExeGuide.md)
   - [ACP Plugin Usage](ACP_Client_Config.md)
