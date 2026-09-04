@@ -298,7 +298,7 @@ def server_vad_wire() -> dict[str, object]:
         "type": "server_vad",
         "threshold": 0.5,
         "prefix_padding_ms": 300,
-        "silence_duration_ms": 1_200,
+        "silence_duration_ms": 800,
         "create_response": False,
         "interrupt_response": False,
     }
@@ -904,7 +904,7 @@ async def test_ga_server_vad_echo_without_response_fields_opens_the_stream() -> 
         "type": "server_vad",
         "threshold": 0.5,
         "prefix_padding_ms": 300,
-        "silence_duration_ms": 1_200,
+        "silence_duration_ms": 800,
     }
     socket = FakeSocket((session_updated_event(ga_echo),))
 
@@ -939,7 +939,7 @@ async def test_unknown_server_vad_echo_field_still_fails_closed() -> None:
         "type": "server_vad",
         "threshold": 0.5,
         "prefix_padding_ms": 300,
-        "silence_duration_ms": 1_200,
+        "silence_duration_ms": 800,
         "eagerness": "high",
     }
     socket = FakeSocket((session_updated_event(unknown_echo),))
