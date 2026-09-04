@@ -385,6 +385,7 @@ def set_user_home(path: Path, initialized: bool = False) -> None:
         initialized: If True, skip cache reset (use when paths are already initialized elsewhere).
     """
     global _user_home, _initialized, _config_dir, _workspace_dir, _root_dir
+    global _workspace_base_dir
     _user_home = Path(path)
     if initialized:
         return
@@ -392,6 +393,13 @@ def set_user_home(path: Path, initialized: bool = False) -> None:
     _config_dir = None
     _workspace_dir = None
     _root_dir = None
+    # _workspace_base_dir caches ``<home>/.jiuwenswarm`` and is filled on the first path
+    # lookup -- which happens at import time, from the *real* home, via setup_logger().
+    # Leaving it set made the promise above false: get_user_workspace_dir() returns the
+    # cached value before it ever consults get_user_home(), so a test that redirected the
+    # home still resolved to the developer's own workspace, and a force init deleted the
+    # real ~/.jiuwenswarm/config subdirectories.
+    _workspace_base_dir = None
 
 
 def get_user_workspace_dir() -> Path:
@@ -1530,6 +1538,32 @@ def _find_mcp_builtins_seed(template_agent_workspace: Path) -> Path | None:
     """
     candidates = sorted(template_agent_workspace.glob("mcp_builtins*.zip"))
     return candidates[-1] if candidates else None
+
+
+def mcp_builtins_seed_outdated(mcp_builtins_dir: Path) -> bool:
+    """True when the packaged seed zip carries a version other than the extracted one.
+
+    The upgrade half of ``_ensure_mcp_builtins``'s contract can only run if
+    something calls ``prepare_workspace``, and the startup gates call it for a
+    missing config or a missing package dir only. This predicate lets a version
+    bump through the same door -- without it an upgraded seed sits in resources
+    forever while every initialized workspace keeps the old packages.
+    """
+    package_root = _find_package_root()
+    if not package_root:
+        return False
+    seed = _find_mcp_builtins_seed(package_root / "resources" / "agent" / "workspace")
+    if seed is None:
+        return False
+    seed_version = _read_zip_index_version(seed)
+    if seed_version is None:
+        return False
+    try:
+        with (mcp_builtins_dir / "index.json").open("r", encoding="utf-8") as fh:
+            local_version = str(json.load(fh).get("version", "")).strip() or None
+    except (OSError, json.JSONDecodeError):
+        return True
+    return seed_version != local_version
 
 
 def _read_zip_index_version(zip_path: Path) -> str | None:

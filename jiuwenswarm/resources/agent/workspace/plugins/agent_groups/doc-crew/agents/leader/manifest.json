@@ -1,0 +1,22 @@
+{
+  "package_type": "agent_template",
+  "name": "文档组长",
+  "description": "理解目标、拆解文档任务、分派执笔与审校、对最终交付负责；自己不动笔",
+  "persona": {
+    "dir": "."
+  },
+  "rails": [
+    {
+      "file": "rails/one_pen_rail.py",
+      "class": "OnePenRail",
+      "display_name": {
+        "en": "one_pen",
+        "zh": "one_pen"
+      },
+      "display_description": {
+        "en": "One pen per team: refuses document-writing clouddoc tools for this member; changes route through the leader to the scribe.",
+        "zh": "每队一支笔：本成员的文档写入类 clouddoc 工具一律拒绝，改动经 leader 分派执笔专员执行。"
+      }
+    }
+  ]
+}

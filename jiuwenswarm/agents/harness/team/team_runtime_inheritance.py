@@ -30,6 +30,9 @@ from openjiuwen.extensions.observability.demand import (
     get_trajectory_span_processor,
 )
 
+from jiuwenswarm.agents.harness.common.tools.clouddoc.clouddoc_tools import (
+    ALL_TOOL_NAMES as ALL_CLOUDDOC_TOOL_NAMES,
+)
 from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskUserRail
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
@@ -149,6 +152,13 @@ TOOL_WHITELIST = frozenset({
     "web_paid_search",
     "skill_toolkit",
     "acp_chat",
+    # Co-scribe, taken from the toolkit's own list rather than copied.
+    #
+    # Copied is how it would drift: a tool added to the toolkit and forgotten here does
+    # not appear for a team member, and nothing raises -- the whitelist filter logs at
+    # debug and moves on. The design already carried that drift once, describing seven
+    # tools while the code built nine.
+    *ALL_CLOUDDOC_TOOL_NAMES,
 })
 
 

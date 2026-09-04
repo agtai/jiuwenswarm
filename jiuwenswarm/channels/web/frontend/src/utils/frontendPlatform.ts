@@ -7,6 +7,7 @@ export type SidebarNavKey =
   | 'teams'
   | 'sessions'
   | 'cron'
+  | 'docs'
   | 'settings'
   | 'updatepanel';
 

@@ -686,3 +686,49 @@ def test_linux_desktop_keeps_version_comparison(monkeypatch):
 
     assert status["state"] == "up_to_date"
     assert status["has_update"] is False
+
+
+class TestUvEnvironmentPinning:
+    """The updater must not depend on ambient facts (VIRTUAL_ENV, a .venv near
+    the cwd): the service may be launched without either, and then both the
+    install and the editable guard that protects it failed for the same reason
+    -- the guard silently, the install visibly ("No virtual environment
+    found")."""
+
+    def _executor(self):
+        from jiuwenswarm.common.upgrade_executor import PipExecutor
+
+        ex = object.__new__(PipExecutor)
+        ex._config = {"package_name": "pkg", "timeout_seconds": 60}
+        return ex
+
+    def test_install_args_pin_the_running_interpreter(self, monkeypatch):
+        import sys
+
+        ex = self._executor()
+        monkeypatch.setattr(type(ex), "_resolve_uv_command", lambda self: "uv", raising=False)
+        args = ex._build_install_args("pkg", 60)
+        assert "--python" in args
+        assert args[args.index("--python") + 1] == sys.executable
+
+    def test_editable_guard_reads_plain_text_output(self, monkeypatch):
+        import subprocess
+        from types import SimpleNamespace
+
+        ex = self._executor()
+        monkeypatch.setattr(type(ex), "_resolve_uv_command", lambda self: "uv", raising=False)
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            return SimpleNamespace(
+                returncode=0,
+                stdout="Name: pkg\nEditable project location: /src/pkg\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        msg = ex._check_editable_install("pkg")
+        assert msg and "editable" in msg
+        assert "--python" in seen["cmd"], "守卫也必须钉解释器"
+        assert "--format" not in seen["cmd"], "--format json 并非所有 uv 版本都有"

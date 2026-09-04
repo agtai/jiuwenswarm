@@ -42,7 +42,8 @@
     "more": "More",
     "settings": "Settings",
     "logs": "Logs",
-    "update": "Updates"
+    "update": "Updates",
+    "docs": "Docs"
   },
   "settingsPanel": {
     "title": "Settings",
@@ -52,7 +53,8 @@
       "agent": "Agent",
       "browser": "Browser",
       "channels": "Channels",
-      "experimental": "Experimental"
+      "experimental": "Experimental",
+      "clouddoc": "Cloud Docs"
     },
     "feedback": {
       "loadFailed": "Failed to load settings",
@@ -267,15 +269,37 @@
         "title": "Browser run mode",
         "description": "Show the browser window in the foreground or run in headless mode."
       },
-      "model_name": { "title": "Model name", "placeholder": "e.g. glm-4.7" },
-      "alias": { "title": "Custom alias", "placeholder": "e.g. GLM-4.7 Production" },
-      "api_base": { "title": "API URL", "placeholder": "e.g. https://api.openai.com/v1" },
-      "api_key": { "title": "API key", "placeholder": "e.g. sk-..." },
-      "model_provider": { "title": "Model provider" },
-      "reasoning_level": { "title": "Reasoning" },
-      "embed_api_base": { "title": "API URL" },
-      "embed_api_key": { "title": "API key" },
-      "embed_model": { "title": "Model name" },
+      "model_name": {
+        "title": "Model name",
+        "placeholder": "e.g. glm-4.7"
+      },
+      "alias": {
+        "title": "Custom alias",
+        "placeholder": "e.g. GLM-4.7 Production"
+      },
+      "api_base": {
+        "title": "API URL",
+        "placeholder": "e.g. https://api.openai.com/v1"
+      },
+      "api_key": {
+        "title": "API key",
+        "placeholder": "e.g. sk-..."
+      },
+      "model_provider": {
+        "title": "Model provider"
+      },
+      "reasoning_level": {
+        "title": "Reasoning"
+      },
+      "embed_api_base": {
+        "title": "API URL"
+      },
+      "embed_api_key": {
+        "title": "API key"
+      },
+      "embed_model": {
+        "title": "Model name"
+      },
       "enable_free_models": {
         "title": "Enable free models",
         "description": "When enabled, available free models are fetched live. Note that free models may have limitations such as rate limits or restricted context window size. Free models are sourced from the Opencode Zen gateway (https://opencode.ai/zen), obtained by intersecting the models.dev catalog (https://models.opencode.ai/api.json) with the Zen live model list (criterion: input price is 0)."
@@ -292,30 +316,73 @@
         "title": "DuckDuckGo search",
         "description": "Enable the free DuckDuckGo search source."
       },
-      "free_search_bing_enabled": { "title": "Bing search", "description": "Enable the free Bing search source." },
-      "jina_api_key": { "title": "Jina API key" },
-      "bocha_api_key": { "title": "Bocha API key" },
-      "perplexity_api_key": { "title": "Perplexity API key" },
-      "serper_api_key": { "title": "Serper API key" },
-      "github_token": { "title": "GitHub access token" },
-      "vision_api_base": { "title": "API URL" },
-      "vision_api_key": { "title": "API key" },
-      "vision_model": { "title": "Model name" },
-      "vision_provider": { "title": "Model provider" },
-      "audio_api_base": { "title": "API URL" },
-      "audio_api_key": { "title": "API key" },
-      "audio_model": { "title": "Model name" },
-      "audio_provider": { "title": "Model provider" },
-      "video_api_base": { "title": "API URL" },
-      "video_api_key": { "title": "API key" },
-      "video_model": { "title": "Model name" },
-      "video_provider": { "title": "Model provider" },
+      "free_search_bing_enabled": {
+        "title": "Bing search",
+        "description": "Enable the free Bing search source."
+      },
+      "jina_api_key": {
+        "title": "Jina API key"
+      },
+      "bocha_api_key": {
+        "title": "Bocha API key"
+      },
+      "perplexity_api_key": {
+        "title": "Perplexity API key"
+      },
+      "serper_api_key": {
+        "title": "Serper API key"
+      },
+      "github_token": {
+        "title": "GitHub access token"
+      },
+      "vision_api_base": {
+        "title": "API URL"
+      },
+      "vision_api_key": {
+        "title": "API key"
+      },
+      "vision_model": {
+        "title": "Model name"
+      },
+      "vision_provider": {
+        "title": "Model provider"
+      },
+      "audio_api_base": {
+        "title": "API URL"
+      },
+      "audio_api_key": {
+        "title": "API key"
+      },
+      "audio_model": {
+        "title": "Model name"
+      },
+      "audio_provider": {
+        "title": "Model provider"
+      },
+      "video_api_base": {
+        "title": "API URL"
+      },
+      "video_api_key": {
+        "title": "API key"
+      },
+      "video_model": {
+        "title": "Model name"
+      },
+      "video_provider": {
+        "title": "Model provider"
+      },
       "permissions_mode": {
         "title": "Global permission mode",
         "description": "Choose the shared guardrail mode for ordinary Agents and Teams."
       },
-      "a2ui_enabled": { "title": "Enable A2UI", "description": "Render supported results as interactive interfaces." },
-      "trajectory_ui_enabled": { "title": "Enable trajectory UI", "description": "Show Chat and Trajectory switching in Agent and Team modes and enable the trajectory observability data path." },
+      "a2ui_enabled": {
+        "title": "Enable A2UI",
+        "description": "Render supported results as interactive interfaces."
+      },
+      "trajectory_ui_enabled": {
+        "title": "Enable trajectory UI",
+        "description": "Show Chat and Trajectory switching in Agent and Team modes and enable the trajectory observability data path."
+      },
       "external_cli_agent_claude_enabled": {
         "title": "Enable Claude",
         "description": "Allow a Team Leader to spawn a Claude Agent."
@@ -324,7 +391,9 @@
         "title": "Use built-in Claude CLI",
         "description": "Do not specify a local CLI path; let the SDK use its default lookup."
       },
-      "external_cli_agent_claude_cli_path": { "title": "Claude CLI path" },
+      "external_cli_agent_claude_cli_path": {
+        "title": "Claude CLI path"
+      },
       "external_cli_agent_codex_enabled": {
         "title": "Enable Codex",
         "description": "Allow a Team Leader to spawn a Codex Agent; first use may install dependencies."
@@ -333,7 +402,9 @@
         "title": "Use built-in Codex CLI",
         "description": "Do not specify a local CLI path; let the SDK use its default lookup."
       },
-      "external_cli_agent_codex_cli_path": { "title": "Codex CLI path" },
+      "external_cli_agent_codex_cli_path": {
+        "title": "Codex CLI path"
+      },
       "proactive_recommendation_enabled": {
         "title": "Enable proactive recommendations",
         "description": "Allow recommendations to be sent when their conditions are met."
@@ -347,12 +418,35 @@
         "title": "Conversation rounds per check",
         "description": "Maximum recent conversation rounds read on each check to infer recommendation context. Default: 20.",
         "placeholder": "Enter an integer from 1 to 50"
+      },
+      "swarmflow_enabled": {
+        "title": "Dynamic workflow",
+        "description": "Control whether the agent team enables dynamic workflow capabilities."
       }
     },
     "validation": {
       "required": "This field is required",
       "integerRange": "Enter an integer from {{min}} to {{max}}"
-
+    },
+    "clouddoc": {
+      "connectionsTitle": "Connected",
+      "noConnections": "No cloud-doc platform connected yet",
+      "docsCount": "{{n}} documents",
+      "copyAddress": "Copy account address",
+      "remove": "Disconnect",
+      "removeConfirm": "Disconnecting removes Co-Scribe from this line: every watch granted under it lapses, unattended handling stops, and its adopted documents are no longer served; receipts already on the ledger remain readable. Disconnect?",
+      "addTitle": "Add a connection (Google service account / Feishu app)",
+      "add": "Connect",
+      "addHint": "Paste a Google service account's JSON key, or a Feishu custom app's JSON (app_id, app_secret, optional brand). It is stored locally only (mode 600), never uploaded.",
+      "added": "Connected.",
+      "savedKeys": "Or use a saved key:",
+      "modelTitle": "Model for unattended turns",
+      "modelHint": "Applies to every turn dispatched from a document comment, across all connections. Leave unset to use the deployment's default model.",
+      "modelDefault": "Using the deployment default",
+      "modelUseDefault": "Use default",
+      "guideTitle": "Before connecting",
+      "guideApis": "1. Enable the Docs / Drive / Sheets / Slides APIs on your GCP project.",
+      "guideShare": "2. Share the documents with the SA email above (editor role), then adopt them in the Docs panel."
     }
   },
   "trajectory": {
@@ -762,7 +856,11 @@
     "delete": "Delete",
     "clearAttachments": "Clear attachments",
     "selectTeamMembers": "Select team members",
-    "noTeamMembersAvailable": "No team members available"
+    "noTeamMembersAvailable": "No team members available",
+    "docRefs": {
+      "label": "Docs in this session",
+      "hint": "Open this document's editor"
+    }
   },
   "autoHarness": {
     "busy": "An Auto-Harness task is already running",
@@ -2155,8 +2253,14 @@
     "title": "Agent Management",
     "subtitle": "Create and manage reusable Agent assets",
     "tabsLabel": "Agent management categories",
-    "tabs": { "catalog": "Agent marketplace", "mine": "My Agents" },
-    "source": { "builtin": "Official", "local": "Mine" },
+    "tabs": {
+      "catalog": "Agent marketplace",
+      "mine": "My Agents"
+    },
+    "source": {
+      "builtin": "Official",
+      "local": "Mine"
+    },
     "categoryLabel": "Agent categories",
     "categoryAll": "All",
     "categoryOther": "Other",
@@ -2199,7 +2303,10 @@
       "createViaChatPrompt": "Help me create an xxx Agent who is good at xxx",
       "back": "Back"
     },
-    "card": { "open": "Open {{name}} details", "actions": "Actions for {{name}}" },
+    "card": {
+      "open": "Open {{name}} details",
+      "actions": "Actions for {{name}}"
+    },
     "states": {
       "installed": "Installed",
       "loadError": "Unable to load the Agent list. Try again.",
@@ -2758,12 +2865,17 @@
       "cancel": "Cancel",
       "confirm": "Confirm"
     },
-    "runtime": { "processing": "Processing" },
+    "runtime": {
+      "processing": "Processing"
+    },
     "deleteDialog": {
       "title": "Delete",
       "description": "Delete “<name>{{title}}</name>”? This action cannot be undone."
     },
-    "notFound": { "title": "Conversation not found or deleted", "newConversation": "New conversation" },
+    "notFound": {
+      "title": "Conversation not found or deleted",
+      "newConversation": "New conversation"
+    },
     "errors": {
       "delete": "Failed to delete conversation",
       "create": "Failed to create conversation",
@@ -2954,7 +3066,8 @@
         "rails": "Rails",
         "mcps": "MCP",
         "connectionConfig": "Connection config",
-        "examples": "Try it like this"
+        "examples": "Try it like this",
+        "about": "About"
       },
       "integrationType": {
         "cli": "CLI authorization",
@@ -3089,10 +3202,21 @@
       "expired": "Expired"
     },
     "schedule": {
-      "tab": { "interval": "Interval", "cron": "Cron expression", "once": "Once" },
-      "interval": { "label": "Every", "unit": "minutes, return to this session" },
-      "cron": { "hint": "Standard 5-field format: minute hour day month weekday (e.g. 0 9 * * 1-5 = weekdays at 9am)" },
-      "once": { "hint": "Pick a date and time; the job fires once at that moment and is then marked completed" },
+      "tab": {
+        "interval": "Interval",
+        "cron": "Cron expression",
+        "once": "Once"
+      },
+      "interval": {
+        "label": "Every",
+        "unit": "minutes, return to this session"
+      },
+      "cron": {
+        "hint": "Standard 5-field format: minute hour day month weekday (e.g. 0 9 * * 1-5 = weekdays at 9am)"
+      },
+      "once": {
+        "hint": "Pick a date and time; the job fires once at that moment and is then marked completed"
+      },
       "summary": {
         "interval": "Return to this session every {{minutes}} min",
         "cron": "{{expr}} ({{timezone}}), return to this session",
@@ -3124,8 +3248,15 @@
       "titleEdit": "Edit heartbeat job",
       "back": "Back"
     },
-    "concurrencyPolicy": { "skip": "Skip", "queue": "Queue", "replace": "Replace" },
-    "sessionDeletedPolicy": { "disable": "Disable job", "completed": "Mark completed" },
+    "concurrencyPolicy": {
+      "skip": "Skip",
+      "queue": "Queue",
+      "replace": "Replace"
+    },
+    "sessionDeletedPolicy": {
+      "disable": "Disable job",
+      "completed": "Mark completed"
+    },
     "panel": {
       "title": "Heartbeat Jobs",
       "loading": "Loading…",
@@ -3226,5 +3357,227 @@
     "budgetPlaceholder": "Enter number",
     "budgetActualHint": "Configured limit: {{count}} tokens",
     "workflowList": "Workflow List"
+  },
+  "docs": {
+    "title": "Docs",
+    "subtitle": "Co-scribe — let your agent collaborate inside shared cloud documents",
+    "copy": "Copy",
+    "copied": "Copied",
+    "watch": {
+      "watchOff": "Read-only",
+      "watchReply": "Suggest",
+      "watchApply": "Operate",
+      "watchSuspended": "Suspended",
+      "watchSuspend": "Suspend",
+      "watchResume": "Resume",
+      "watchApplyConfirm": "Enable Operate? A collaborator @-ing me (or assigning to me) in a comment triggers a bounded edit; every edit leaves a receipt, and undoing one is done in the platform's version history",
+      "backlog": "{{count}} comment(s) backlogged awaiting authorization",
+      "globalSuspend": "Suspend all",
+      "globalResume": "Resume all",
+      "killSwitch": "Revoke all mandates",
+      "killSwitchConfirm": "Click again to confirm: revoke every document's standing mandate",
+      "watchExpired": "Expired"
+    },
+    "addPlaceholder": "＋ Paste a document link to add, e.g. https://docs.google.com/document/d/…",
+    "status": {
+      "ok": "OK",
+      "comment_only": "Comment-only",
+      "frozen": "Frozen",
+      "backoff": "Backing off",
+      "commentOnlyHint": "The agent can read and propose, but proposals can never be applied. Grant Editor access.",
+      "frozenHint": "Paused after repeated failures. Refresh re-checks now; it also retries on its own."
+    },
+    "add": {
+      "exists": {
+        "title": "Already watched",
+        "detail": "This document is already being watched."
+      },
+      "comment_only": {
+        "title": "Comment-only access",
+        "detail": "The agent can read and propose, but without edit access no proposal can ever be applied. Change its role from Commenter to Editor in the document's Share dialog, then re-check."
+      },
+      "not_shared": {
+        "title": "Cannot access this document",
+        "detail": "It does not exist, or has not been shared with the agent's address yet."
+      },
+      "unknown": {
+        "title": "Could not check right now",
+        "detail": "Network or quota issue — try again shortly."
+      },
+      "invalid": {
+        "title": "Unparseable link",
+        "detail": "Paste a full Google Docs link or a bare document id."
+      },
+      "no_connection": {
+        "title": "No connection available",
+        "detail": "Add a connection on the left first."
+      }
+    },
+    "recheck": "Re-check",
+    "copyAddress": "Copy agent address",
+    "remove": "Remove",
+    "removeConfirm": "Stop watching \"{{title}}\"? The document itself is untouched; re-adding it will not replay old comments.",
+    "footCount": "{{count}} document(s)",
+    "refresh": "Refresh",
+    "refreshing": "Checking…",
+    "notEnabled": "Provide a service-account key in Settings → Cloud Docs to get started.",
+    "connDocs": "{{count}} docs",
+    "noConn": "No connections yet",
+    "refreshedAt": "refreshed at: {{time}}",
+    "addBtn": "Add",
+    "adding": "Checking…",
+    "sub": {
+      "commentOnly": "Needs Editor access — proposals cannot apply",
+      "frozen": "Polling stopped · refresh to retry",
+      "backoff": "Backing off",
+      "backoffAt": "retrying after {{time}}",
+      "checkedAt": "checked {{time}}"
+    },
+    "connProvider": "Provider: ",
+    "addConn": "Add connection",
+    "connProviderLabel": "Provider",
+    "providerFeishu": "Feishu Docs",
+    "providerSoon": "Planned",
+    "connKeyLabel": "Service-account key",
+    "connMode": {
+      "path": "Server path",
+      "upload": "Upload JSON",
+      "saved": "Saved keys"
+    },
+    "connPathPlaceholder": "/path/to/service-account.json",
+    "connChooseFile": "Choose key file…",
+    "connUploadHint": "Saved under the config directory with 0600; the private key never enters config.yaml.",
+    "connErr": {
+      "invalid_key": "Invalid key: {{detail}}",
+      "duplicate": "This account already has a connection — one identity, one watcher (two would answer every mention twice)",
+      "unknown": "Could not add the connection; check the server log. {{detail}}"
+    },
+    "removeConn": "Remove connection",
+    "removeConnConfirm": "Remove connection {{address}}? Its {{count}} document(s) stop being watched; the documents and their sharing are untouched.",
+    "cancel": "Cancel",
+    "adopted": "Adopted {{count}} newly shared document(s)",
+    "needsEditor": "{{count}} document(s) are shared comment-only -- change them to Editor in Google Docs, then Refresh",
+    "unsupported": "{{count}} shared file(s) can't be co-edited yet — only Google Docs are supported",
+    "kind": {
+      "spreadsheet": "Sheets",
+      "presentation": "Slides",
+      "form": "Form",
+      "file": "File",
+      "document": "Document",
+      "markdown": "Markdown"
+    },
+    "keyInUse": "In use",
+    "keyDelete": "Delete",
+    "keyDeleteConfirm": "Confirm?",
+    "savedEmpty": "No saved keys yet",
+    "keyDeleteHint": "Deleting removes the local file only; revoke the credential in the GCP console to invalidate it.",
+    "history": {
+      "open": "View history",
+      "title": "Edit history",
+      "loading": "Loading…",
+      "empty": "No agent edits recorded for this document yet.",
+      "unhighlight": "Clear highlight",
+      "highlighted": "highlighted",
+      "failed": "The action did not succeed",
+      "more": "and {{n}} more edits",
+      "statusUnknown": "outcome unknown",
+      "statusAppliedUnverified": "applied (read-back differs)",
+      "unknownNote": "The process ended mid-write; whether this change landed cannot be determined. Please check the document.",
+      "statusReverted": "reverted",
+      "statusPending": "in flight",
+      "statusApplied": "applied",
+      "statusAborted": "not written",
+      "actionUnconfirmed": "The request did not return in time. The action may still have completed; the list below now shows the true status.",
+      "opCreate": "created",
+      "opShare": "shared with",
+      "opTrash": "moved to trash",
+      "opRestore": "restored from trash",
+      "opUnshare": "unshared from",
+      "undoHint": "This is a record, not an undo. To undo a change, use the platform's version history."
+    },
+    "usage": {
+      "open": "Usage audit",
+      "title": "Grant usage audit (granted − used)",
+      "unavailable": "Failed to read the audit",
+      "granted": "Granted",
+      "used": "Used",
+      "since": "since",
+      "until": "until",
+      "permanent": "permanent",
+      "summaryLine": "{{dispatches}} dispatches · {{denied}} refusals · {{writes}} write batches",
+      "lastWrite": "Last write:",
+      "executors": "Executors:",
+      "regions": "Regions envelope:",
+      "hintIdle": "This grant has sat idle for over two weeks with no writes — consider narrowing to reply-only.",
+      "hintFriction": "Several recent dispatches were refused — consider renewing or widening (your call).",
+      "renew30": "Renew 30 days",
+      "makePermanent": "Make permanent"
+    },
+    "mode": {
+      "directBanner": "Co-Scribe safeguards are OFF (direct mode): no receipts, no unattended handling — errors leave no trace and assignments will not be processed.",
+      "restoreMandate": "Turn safeguards back on",
+      "mandateNote": "Co-Scribe safeguards: ON — writes leave receipts you can audit, assigned comments can run unattended.",
+      "goDirect": "Turn off safeguards (direct)",
+      "confirmDirect": "Click again to confirm: drop every safeguard"
+    },
+    "manageConnInSettings": "Connections are managed in Settings → Cloud Docs",
+    "table": {
+      "allConns": "All connections",
+      "allTiers": "All tiers",
+      "colDoc": "Document",
+      "colConn": "Connection",
+      "colStatus": "Status",
+      "colTier": "Watch tier",
+      "colActivity": "Checked",
+      "daysLeft": "{{count}}d left",
+      "allKinds": "All types",
+      "colKind": "Type"
+    },
+    "backlogBanner": "{{count}} comment(s) backlogged awaiting authorization",
+    "linkUnknown": "Link unknown — paste the document's link again to restore it",
+    "workbench": {
+      "openHere": "Open in workbench",
+      "openExternal": "Open in new tab",
+      "reload": "Reload",
+      "toggleChat": "Chat strip",
+      "toggleRail": "Side rail",
+      "exit": "Exit editing",
+      "closeTab": "Close tab",
+      "newReceipts": "{{n}} new receipts",
+      "launcherTitle": "This document opens in a new tab, as you set",
+      "embedAgain": "Show it here again",
+      "loginTitle": "Blank here? {{platform}} needs you signed in",
+      "loginBody": "The browser treats this frame as a third-party site. Without your {{platform}} session the platform redirects to its login page, which refuses to render in a frame, so the frame stays blank. Sign in once in a new tab, then come back and retry.",
+      "loginOpen": "Sign in and open in a new tab",
+      "loginRetry": "Signed in, retry",
+      "alwaysExternal": "Always open in a new tab",
+      "cantSee": "Can't see the document?",
+      "reloadsOnReceipt": "Reloads when a new receipt arrives",
+      "chat": "Chat",
+      "noReplyYet": "No reply yet",
+      "receipt": "receipt",
+      "locate": "Locate",
+      "history": "History",
+      "hideChat": "Hide chat",
+      "revoke": "Stop and revoke",
+      "thisTab": "This tab",
+      "elsewhere": "{{n}} new receipts on other tabs",
+      "historyNote": "Every message of this session, across documents",
+      "rail": {
+        "receipts": "Receipts",
+        "history": "Chat history",
+        "status": "Status"
+      },
+      "mdEditor": "Built-in editor",
+      "mdView": {
+        "edit": "Edit",
+        "preview": "Preview",
+        "split": "Split"
+      },
+      "mdSave": "Save",
+      "mdSaved": "Saved, receipt {{id}}",
+      "mdStaleWhileEditing": "The file changed on the platform; it reloads once you save or discard your edits.",
+      "editingDoc": "Editing: "
+    }
   }
 }

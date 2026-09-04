@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
+import { webRequest } from '../../services/webClient';
 import { useTranslation } from 'react-i18next';
 import { ChevronLeft, Trash2, Plus, Wrench, Link2, Plug, Loader2, X, ExternalLink, Pencil } from 'lucide-react';
 import { usePluginPackageStore } from '../../stores/pluginPackageStore';
 import { localizedText, type PluginCapabilityRef } from '../../types/pluginPackage';
 import { NewConversationIcon } from './icons';
 import { getSkillAvatar } from '../../utils/skillAvatar';
+import './pluginAbout.css';
+import { MarkdownRenderer } from '../MarkdownRenderer/MarkdownRenderer';
 import { EntityAvatar } from './EntityAvatar';
 import { PillButton, DetailLinkButton } from './Buttons';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -67,6 +70,20 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
   const uninstall = usePluginPackageStore((s) => s.uninstall);
   const [installing, setInstalling] = useState(false);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
+  // Click-to-read for a plugin's skills: the market card only summarized them,
+  // and there was no way to see the actual SKILL.md a plugin mounts.
+  const [skillFile, setSkillFile] = useState<{ title: string; content: string } | null>(null);
+  const openSkillFile = async (skillId: string) => {
+    try {
+      const out = await webRequest<{ path: string; content: string }>(
+        'plugin_packages.file.read',
+        { name: detail.id, path: `skills/${skillId}/SKILL.md` },
+      );
+      setSkillFile({ title: skillId, content: out?.content ?? '' });
+    } catch (e) {
+      setSkillFile({ title: skillId, content: String(e) });
+    }
+  };
   const [uninstalling, setUninstalling] = useState(false);
   useEffect(() => {
     loadDetail(id);
@@ -244,6 +261,24 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
         </div>
       )}
 
+      {skillFile && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/30"
+          onClick={() => setSkillFile(null)}
+          data-testid="plugin-skill-file"
+        >
+          <div
+            className="max-h-[80vh] w-[min(720px,92vw)] overflow-auto rounded-lg border border-border bg-card p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-start justify-between gap-4">
+              <h3 className="text-sm font-semibold text-text-strong">{skillFile.title}</h3>
+              <button onClick={() => setSkillFile(null)} className="rounded-md px-2 py-1 text-text-muted hover:bg-bg-hover">✕</button>
+            </div>
+            <pre className="whitespace-pre-wrap break-words text-[12.5px] leading-relaxed text-text">{skillFile.content}</pre>
+          </div>
+        </div>
+      )}
       {confirmUninstall && (
         <ConfirmDialog
           title={t('connectorMarket.confirmUninstall.title', { name: title })}
@@ -295,9 +330,19 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseEx
         </div>
       )}
 
+      {(detail.details || detail.detailsEn) && (
+        <Section title={t('connectorMarket.detail.sections.about')}>
+          <div className="plugin-about-md rounded-xl border border-border bg-card p-4">
+            <MarkdownRenderer
+              content={(i18n.language.startsWith('en') ? detail.detailsEn : detail.details) || detail.details || detail.detailsEn || ''}
+            />
+          </div>
+        </Section>
+      )}
+
       {detail.skills.length > 0 && (
         <Section title={t('connectorMarket.detail.sections.skills')}>
-          <CapabilityGrid items={detail.skills} language={i18n.language} icon={undefined} skillStyle />
+          <CapabilityGrid items={detail.skills} language={i18n.language} icon={undefined} skillStyle onOpenItem={(id) => void openSkillFile(id)} />
         </Section>
       )}
 
@@ -333,11 +378,13 @@ function CapabilityGrid({
   language,
   icon,
   skillStyle,
+  onOpenItem,
 }: {
   items: PluginCapabilityRef[];
   language: string;
   icon?: React.ReactNode;
   skillStyle?: boolean;
+  onOpenItem?: (id: string) => void;
 }) {
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -346,7 +393,11 @@ function CapabilityGrid({
         const desc = localizedText(item.displayDescription, language);
         const avatar = getSkillAvatar(title);
         return (
-          <div key={item.id} className="relative rounded-xl border border-border bg-card p-4">
+          <div
+            key={item.id}
+            className={`relative rounded-xl border border-border bg-card p-4 ${onOpenItem ? 'cursor-pointer hover:border-border-strong hover:bg-bg-hover' : ''}`}
+            onClick={onOpenItem ? () => onOpenItem(item.id) : undefined}
+          >
             <div className="mb-1.5 flex items-center gap-2.5">
               {skillStyle ? (
                 <span

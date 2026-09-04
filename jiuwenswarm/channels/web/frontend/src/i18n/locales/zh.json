@@ -42,7 +42,8 @@
     "more": "更多",
     "settings": "设置",
     "logs": "日志",
-    "update": "更新"
+    "update": "更新",
+    "docs": "文档"
   },
   "settingsPanel": {
     "title": "设置",
@@ -52,7 +53,8 @@
       "agent": "智能体",
       "browser": "浏览器",
       "channels": "频道",
-      "experimental": "实验功能"
+      "experimental": "实验功能",
+      "clouddoc": "云文档连接"
     },
     "feedback": {
       "loadFailed": "设置加载失败",
@@ -267,43 +269,120 @@
         "title": "浏览器运行方式",
         "description": "选择在前台显示浏览器窗口或以无头模式运行。"
       },
-      "model_name": { "title": "模型名称", "placeholder": "例如：glm-4.7" },
-      "alias": { "title": "自定义别名", "placeholder": "例如：GLM-4.7 生产环境" },
-      "api_base": { "title": "API 地址", "placeholder": "例如：https://api.openai.com/v1" },
-      "api_key": { "title": "API 密钥", "placeholder": "例如：sk-..." },
-      "model_provider": { "title": "模型提供商" },
-      "reasoning_level": { "title": "推理" },
-      "embed_api_base": { "title": "API 地址" },
-      "embed_api_key": { "title": "API 密钥" },
-      "embed_model": { "title": "模型名称" },
+      "model_name": {
+        "title": "模型名称",
+        "placeholder": "例如：glm-4.7"
+      },
+      "alias": {
+        "title": "自定义别名",
+        "placeholder": "例如：GLM-4.7 生产环境"
+      },
+      "api_base": {
+        "title": "API 地址",
+        "placeholder": "例如：https://api.openai.com/v1"
+      },
+      "api_key": {
+        "title": "API 密钥",
+        "placeholder": "例如：sk-..."
+      },
+      "model_provider": {
+        "title": "模型提供商"
+      },
+      "reasoning_level": {
+        "title": "推理"
+      },
+      "embed_api_base": {
+        "title": "API 地址"
+      },
+      "embed_api_key": {
+        "title": "API 密钥"
+      },
+      "embed_model": {
+        "title": "模型名称"
+      },
       "enable_free_models": {
         "title": "启用免费模型",
         "description": "开启后实时拉取可用的免费模型，注意免费模型可能有限流、限窗口大小等限制。免费模型来源于 Opencode Zen 网关（https://opencode.ai/zen），由 models.dev 目录（https://models.opencode.ai/api.json）与 Zen 实时模型列表取交集得到（判定标准：输入价格为 0）。"
       },
-      "skill_evolution": { "title": "本地技能自动演进与沉淀", "description": "控制本地技能的自动演进和沉淀" },
-      "skill_retrieval_enabled": { "title": "技能自动搜索", "description": "控制智能体是否自动检索可用技能" },
-      "free_search_ddg_enabled": { "title": "DuckDuckGo 搜索", "description": "启用 DuckDuckGo 免费搜索来源。" },
-      "free_search_bing_enabled": { "title": "Bing 搜索", "description": "启用 Bing 免费搜索来源。" },
-      "jina_api_key": { "title": "Jina API 密钥" },
-      "bocha_api_key": { "title": "博查 API 密钥" },
-      "perplexity_api_key": { "title": "Perplexity API 密钥" },
-      "serper_api_key": { "title": "Serper API 密钥" },
-      "github_token": { "title": "GitHub 访问令牌" },
-      "vision_api_base": { "title": "API 地址" },
-      "vision_api_key": { "title": "API 密钥" },
-      "vision_model": { "title": "模型名称" },
-      "vision_provider": { "title": "模型提供商" },
-      "audio_api_base": { "title": "API 地址" },
-      "audio_api_key": { "title": "API 密钥" },
-      "audio_model": { "title": "模型名称" },
-      "audio_provider": { "title": "模型提供商" },
-      "video_api_base": { "title": "API 地址" },
-      "video_api_key": { "title": "API 密钥" },
-      "video_model": { "title": "模型名称" },
-      "video_provider": { "title": "模型提供商" },
-      "permissions_mode": { "title": "全局权限模式", "description": "为普通 Agent 与 Team 选择统一的安全护栏模式。" },
-      "a2ui_enabled": { "title": "启用 A2UI", "description": "允许将支持的结果渲染成交互式界面。" },
-      "trajectory_ui_enabled": { "title": "启用轨迹界面", "description": "在单 Agent 和集群模式中显示对话与轨迹切换，并启用轨迹观测数据链路。" },
+      "skill_evolution": {
+        "title": "本地技能自动演进与沉淀",
+        "description": "控制本地技能的自动演进和沉淀"
+      },
+      "skill_retrieval_enabled": {
+        "title": "技能自动搜索",
+        "description": "控制智能体是否自动检索可用技能"
+      },
+      "free_search_ddg_enabled": {
+        "title": "DuckDuckGo 搜索",
+        "description": "启用 DuckDuckGo 免费搜索来源。"
+      },
+      "free_search_bing_enabled": {
+        "title": "Bing 搜索",
+        "description": "启用 Bing 免费搜索来源。"
+      },
+      "jina_api_key": {
+        "title": "Jina API 密钥"
+      },
+      "bocha_api_key": {
+        "title": "博查 API 密钥"
+      },
+      "perplexity_api_key": {
+        "title": "Perplexity API 密钥"
+      },
+      "serper_api_key": {
+        "title": "Serper API 密钥"
+      },
+      "github_token": {
+        "title": "GitHub 访问令牌"
+      },
+      "vision_api_base": {
+        "title": "API 地址"
+      },
+      "vision_api_key": {
+        "title": "API 密钥"
+      },
+      "vision_model": {
+        "title": "模型名称"
+      },
+      "vision_provider": {
+        "title": "模型提供商"
+      },
+      "audio_api_base": {
+        "title": "API 地址"
+      },
+      "audio_api_key": {
+        "title": "API 密钥"
+      },
+      "audio_model": {
+        "title": "模型名称"
+      },
+      "audio_provider": {
+        "title": "模型提供商"
+      },
+      "video_api_base": {
+        "title": "API 地址"
+      },
+      "video_api_key": {
+        "title": "API 密钥"
+      },
+      "video_model": {
+        "title": "模型名称"
+      },
+      "video_provider": {
+        "title": "模型提供商"
+      },
+      "permissions_mode": {
+        "title": "全局权限模式",
+        "description": "为普通 Agent 与 Team 选择统一的安全护栏模式。"
+      },
+      "a2ui_enabled": {
+        "title": "启用 A2UI",
+        "description": "允许将支持的结果渲染成交互式界面。"
+      },
+      "trajectory_ui_enabled": {
+        "title": "启用轨迹界面",
+        "description": "在单 Agent 和集群模式中显示对话与轨迹切换，并启用轨迹观测数据链路。"
+      },
       "external_cli_agent_claude_enabled": {
         "title": "启用 Claude",
         "description": "允许 Team Leader 拉起 Claude Agent。"
@@ -312,7 +391,9 @@
         "title": "Claude 使用内置 CLI",
         "description": "不指定本机 CLI 路径，由 SDK 使用默认查找方式。"
       },
-      "external_cli_agent_claude_cli_path": { "title": "Claude CLI 路径" },
+      "external_cli_agent_claude_cli_path": {
+        "title": "Claude CLI 路径"
+      },
       "external_cli_agent_codex_enabled": {
         "title": "启用 Codex",
         "description": "允许 Team Leader 拉起 Codex Agent；首次启用可能需要安装依赖。"
@@ -321,7 +402,9 @@
         "title": "Codex 使用内置 CLI",
         "description": "不指定本机 CLI 路径，由 SDK 使用默认查找方式。"
       },
-      "external_cli_agent_codex_cli_path": { "title": "Codex CLI 路径" },
+      "external_cli_agent_codex_cli_path": {
+        "title": "Codex CLI 路径"
+      },
       "proactive_recommendation_enabled": {
         "title": "启用主动推荐",
         "description": "允许系统在满足条件时主动发送推荐。"
@@ -335,12 +418,35 @@
         "title": "每次检查对话轮数",
         "description": "每次检查时最多读取的近期对话轮数，用于推断推荐上下文。默认值：20。",
         "placeholder": "请输入 1–50 的整数"
+      },
+      "swarmflow_enabled": {
+        "title": "动态工作流",
+        "description": "控制智能体团队是否启用动态工作流能力"
       }
     },
     "validation": {
       "required": "此字段为必填项",
       "integerRange": "请输入 {{min}}–{{max}} 之间的整数"
-
+    },
+    "clouddoc": {
+      "connectionsTitle": "已连接",
+      "noConnections": "尚未连接任何云文档平台",
+      "docsCount": "{{n}} 篇文档",
+      "copyAddress": "复制账号地址",
+      "remove": "断开",
+      "removeConfirm": "断开连接即卸下这条线上的 Co-Scribe：其名下全部 watch 授权失效、无人值守停止、纳管文档不再被处理；已留下的回执历史保留可查。确定断开？",
+      "addTitle": "添加连接（Google 服务账号 / 飞书应用）",
+      "add": "连接",
+      "addHint": "粘贴 Google 服务账号的 JSON 密钥，或飞书自建应用的 JSON（app_id、app_secret，可选 brand）。密钥仅保存在本机（600 权限），不会上传。",
+      "added": "已连接。",
+      "savedKeys": "或使用已保存的密钥：",
+      "modelTitle": "无人值守回合使用的模型",
+      "modelHint": "对所有连接下由文档评论触发的回合生效；不设置则使用部署的默认模型。",
+      "modelDefault": "当前使用部署默认模型",
+      "modelUseDefault": "恢复默认",
+      "guideTitle": "接入前的准备",
+      "guideApis": "1. 在 GCP 项目中启用 Docs / Drive / Sheets / Slides API。",
+      "guideShare": "2. 把要协作的文档共享给上方的 SA 邮箱（编辑者权限），然后到 Docs 面板纳管。"
     }
   },
   "trajectory": {
@@ -750,7 +856,11 @@
     "delete": "删除",
     "clearAttachments": "清空附件",
     "selectTeamMembers": "选择团队成员",
-    "noTeamMembersAvailable": "暂无可选择的团队成员"
+    "noTeamMembersAvailable": "暂无可选择的团队成员",
+    "docRefs": {
+      "label": "本会话文档",
+      "hint": "打开这篇文档的编辑界面"
+    }
   },
   "autoHarness": {
     "busy": "当前已有 Auto-Harness 任务在运行",
@@ -2143,8 +2253,14 @@
     "title": "智能体管理",
     "subtitle": "创建并管理智能体，快速复用智能体资产",
     "tabsLabel": "智能体管理分类",
-    "tabs": { "catalog": "智能体广场", "mine": "我的智能体" },
-    "source": { "builtin": "官方", "local": "我的" },
+    "tabs": {
+      "catalog": "智能体广场",
+      "mine": "我的智能体"
+    },
+    "source": {
+      "builtin": "官方",
+      "local": "我的"
+    },
     "categoryLabel": "智能体分类",
     "categoryAll": "全部",
     "categoryOther": "其他",
@@ -2187,7 +2303,10 @@
       "createViaChatPrompt": "帮我创建一个xxx专家，擅长xxx",
       "back": "返回"
     },
-    "card": { "open": "查看 {{name}} 详情", "actions": "{{name}} 操作" },
+    "card": {
+      "open": "查看 {{name}} 详情",
+      "actions": "{{name}} 操作"
+    },
     "states": {
       "installed": "已安装",
       "loadError": "智能体列表加载失败，请重试。",
@@ -2746,10 +2865,22 @@
       "cancel": "取消",
       "confirm": "确定"
     },
-    "runtime": { "processing": "处理中" },
-    "deleteDialog": { "title": "删除", "description": "确定删除“<name>{{title}}</name>”吗？此操作不可撤销。" },
-    "notFound": { "title": "对话不存在或已删除", "newConversation": "新建对话" },
-    "errors": { "delete": "删除对话失败", "create": "创建对话失败", "send": "发送消息失败" }
+    "runtime": {
+      "processing": "处理中"
+    },
+    "deleteDialog": {
+      "title": "删除",
+      "description": "确定删除“<name>{{title}}</name>”吗？此操作不可撤销。"
+    },
+    "notFound": {
+      "title": "对话不存在或已删除",
+      "newConversation": "新建对话"
+    },
+    "errors": {
+      "delete": "删除对话失败",
+      "create": "创建对话失败",
+      "send": "发送消息失败"
+    }
   },
   "subagent": {
     "title": "Subagents",
@@ -2935,7 +3066,8 @@
         "rails": "Rail",
         "mcps": "MCP",
         "connectionConfig": "连接配置",
-        "examples": "试试这样用"
+        "examples": "试试这样用",
+        "about": "详情"
       },
       "integrationType": {
         "cli": "CLI 授权",
@@ -3070,10 +3202,21 @@
       "expired": "已过期"
     },
     "schedule": {
-      "tab": { "interval": "按间隔", "cron": "Cron 表达式", "once": "单次" },
-      "interval": { "label": "每隔", "unit": "分钟回到当前会话" },
-      "cron": { "hint": "标准 5 段格式：分 时 日 月 周（例：0 9 * * 1-5 表示工作日早上 9 点）" },
-      "once": { "hint": "选择具体日期和时间，到点后回到当前会话触发一次，之后自动标记为已完成" },
+      "tab": {
+        "interval": "按间隔",
+        "cron": "Cron 表达式",
+        "once": "单次"
+      },
+      "interval": {
+        "label": "每隔",
+        "unit": "分钟回到当前会话"
+      },
+      "cron": {
+        "hint": "标准 5 段格式：分 时 日 月 周（例：0 9 * * 1-5 表示工作日早上 9 点）"
+      },
+      "once": {
+        "hint": "选择具体日期和时间，到点后回到当前会话触发一次，之后自动标记为已完成"
+      },
       "summary": {
         "interval": "每 {{minutes}} 分钟回到当前会话",
         "cron": "{{expr}}（{{timezone}}）回到当前会话",
@@ -3105,8 +3248,15 @@
       "titleEdit": "编辑心跳任务",
       "back": "返回"
     },
-    "concurrencyPolicy": { "skip": "跳过（skip）", "queue": "排队（queue）", "replace": "替换（replace）" },
-    "sessionDeletedPolicy": { "disable": "停用任务", "completed": "标记为已完成" },
+    "concurrencyPolicy": {
+      "skip": "跳过（skip）",
+      "queue": "排队（queue）",
+      "replace": "替换（replace）"
+    },
+    "sessionDeletedPolicy": {
+      "disable": "停用任务",
+      "completed": "标记为已完成"
+    },
     "panel": {
       "title": "心跳任务",
       "loading": "加载中…",
@@ -3207,5 +3357,227 @@
     "budgetPlaceholder": "输入数字",
     "budgetActualHint": "本次配置上限：{{count}} tokens",
     "workflowList": "工作流列表"
+  },
+  "docs": {
+    "title": "文档",
+    "subtitle": "协同编辑：让 agent 成为共享云文档里的协作者",
+    "copy": "复制",
+    "copied": "已复制",
+    "watch": {
+      "watchOff": "只读",
+      "watchReply": "建议权",
+      "watchApply": "操作权",
+      "watchSuspended": "已挂起",
+      "watchSuspend": "挂起",
+      "watchResume": "恢复",
+      "watchApplyConfirm": "确认开启操作权？协作者在批注里 @ 我（或指派给我）即可触发有界修改；每次修改都留回执，撤销请用平台的版本历史",
+      "backlog": "积压 {{count}} 条批注待授权处理",
+      "globalSuspend": "全部挂起",
+      "globalResume": "全部恢复",
+      "killSwitch": "撤销全部授权",
+      "killSwitchConfirm": "再点一次确认：撤销所有文档的常设授权",
+      "watchExpired": "已到期"
+    },
+    "addPlaceholder": "＋ 粘贴文档链接添加，如 https://docs.google.com/document/d/…",
+    "status": {
+      "ok": "正常",
+      "comment_only": "仅评论权",
+      "frozen": "已冻结",
+      "backoff": "退避中",
+      "commentOnlyHint": "agent 能读、能提议，但提议永远无法应用。请把权限改为「编辑者」。",
+      "frozenHint": "连续访问失败后暂停轮询。点「刷新」立即重检；网络恢复后也会自动重试。"
+    },
+    "add": {
+      "exists": {
+        "title": "已在纳管列表中",
+        "detail": "这篇文档已经在监听。"
+      },
+      "comment_only": {
+        "title": "只有评论权",
+        "detail": "agent 能读、能提议，但没有编辑权时任何提议都永远无法应用。请在文档「共享」里把权限从「评论者」改为「编辑者」，然后重新检查。"
+      },
+      "not_shared": {
+        "title": "无法访问该文档",
+        "detail": "文档不存在，或还没有共享给 agent 的地址。请先在 Google Docs 里完成共享。"
+      },
+      "unknown": {
+        "title": "暂时无法检查",
+        "detail": "网络或配额问题，稍后重试。"
+      },
+      "invalid": {
+        "title": "链接无法解析",
+        "detail": "请粘贴完整的 Google Docs 链接或文档 id。"
+      },
+      "no_connection": {
+        "title": "还没有可用的连接",
+        "detail": "请先在左侧添加一个连接。"
+      }
+    },
+    "recheck": "重新检查",
+    "copyAddress": "复制 agent 地址",
+    "remove": "移出纳管",
+    "removeConfirm": "把「{{title}}」移出纳管？文档本身不受影响，重新添加后 agent 不会重放历史评论。",
+    "footCount": "{{count}} 篇文档",
+    "refresh": "刷新",
+    "refreshing": "检查中…",
+    "notEnabled": "到 设置 → Cloud Docs 提供服务账号密钥即可开始。",
+    "connDocs": "{{count}} 篇",
+    "noConn": "尚未添加连接",
+    "refreshedAt": "刷新时间: {{time}}",
+    "addBtn": "添加",
+    "adding": "校验中…",
+    "sub": {
+      "commentOnly": "需「编辑者」权限，提议无法应用",
+      "frozen": "已停止轮询 · 点刷新重试",
+      "backoff": "暂时退避中",
+      "backoffAt": "{{time}} 后自动重试",
+      "checkedAt": "上次检查 {{time}}"
+    },
+    "connProvider": "厂商：",
+    "addConn": "添加连接",
+    "connProviderLabel": "厂商",
+    "providerFeishu": "飞书文档",
+    "providerSoon": "规划中",
+    "connKeyLabel": "服务账号密钥",
+    "connMode": {
+      "path": "服务器路径",
+      "upload": "上传 JSON",
+      "saved": "已存密钥"
+    },
+    "connPathPlaceholder": "/path/to/service-account.json",
+    "connChooseFile": "选择密钥文件…",
+    "connUploadHint": "以 600 权限落盘到配置目录，私钥不写入 config.yaml。",
+    "connErr": {
+      "invalid_key": "密钥无效：{{detail}}",
+      "duplicate": "该账号已有连接，同一身份不能有两个 watcher（每条 @ 会收到两份回应）",
+      "unknown": "添加失败,请检查服务端日志。{{detail}}"
+    },
+    "removeConn": "删除连接",
+    "removeConnConfirm": "删除连接 {{address}}？其下 {{count}} 篇文档将停止监听；文档本身与共享关系不受影响。",
+    "cancel": "取消",
+    "adopted": "已自动纳管 {{count}} 篇新共享的文档",
+    "needsEditor": "有 {{count}} 篇已共享，但只给了评论权——在 Google 文档里改成「编辑者」后点刷新",
+    "unsupported": "有 {{count}} 个共享文件暂不支持——目前仅支持 Google 文档协同",
+    "kind": {
+      "spreadsheet": "表格",
+      "presentation": "幻灯片",
+      "form": "表单",
+      "file": "文件",
+      "document": "文档",
+      "markdown": "Markdown"
+    },
+    "keyInUse": "启用中",
+    "keyDelete": "删除",
+    "keyDeleteConfirm": "确认删除？",
+    "savedEmpty": "没有已存的密钥",
+    "keyDeleteHint": "删除只移除本机文件；凭证本身要在 GCP 控制台吊销才失效。",
+    "history": {
+      "open": "查看履历",
+      "title": "修改履历",
+      "loading": "读取中…",
+      "empty": "这篇文档还没有 agent 的修改记录。",
+      "unhighlight": "撤销高亮",
+      "highlighted": "已高亮",
+      "failed": "操作未成功",
+      "more": "另有 {{n}} 处修改",
+      "statusUnknown": "结果未知",
+      "statusAppliedUnverified": "已应用（回读不符）",
+      "unknownNote": "进程在写入过程中结束，这次修改是否落地无从判断，请对照文档确认。",
+      "statusReverted": "已回退",
+      "statusPending": "写入中",
+      "statusApplied": "已应用",
+      "statusAborted": "未写入",
+      "actionUnconfirmed": "请求未在时限内返回：操作可能已经完成，下方列表已刷新为真实状态。",
+      "opCreate": "建档",
+      "opShare": "共享给",
+      "opTrash": "移入回收站",
+      "opRestore": "从回收站恢复",
+      "opUnshare": "取消共享",
+      "undoHint": "这里只记录，不撤销。要撤销改动，请用平台的版本历史（Google「版本记录」/ 飞书「历史版本」）。"
+    },
+    "usage": {
+      "open": "使用审计",
+      "title": "授权使用审计（已授 − 已用）",
+      "unavailable": "读取审计失败",
+      "granted": "已授",
+      "used": "已用",
+      "since": "自",
+      "until": "至",
+      "permanent": "永久",
+      "summaryLine": "派发 {{dispatches}} 轮 · 拒绝 {{denied}} 次 · 写入 {{writes}} 批",
+      "lastWrite": "最近写入：",
+      "executors": "执行者：",
+      "regions": "区域包络：",
+      "hintIdle": "该授权已闲置两周以上且从未写入——可考虑收窄为仅回帖。",
+      "hintFriction": "近期多次派发被拒——可考虑续期或放宽档位（决定权在你）。",
+      "renew30": "续期 30 天",
+      "makePermanent": "改为永久"
+    },
+    "mode": {
+      "directBanner": "Co-Scribe 保障已关闭（直连模式）：无回执、无无人值守——错误不留痕，指派不会被处理。",
+      "restoreMandate": "重新开启保障",
+      "mandateNote": "Co-Scribe 保障：开启——写入留回执可查，批注指派可无人值守处理。",
+      "goDirect": "关闭保障（切直连）",
+      "confirmDirect": "再点一次确认：关闭全部保障"
+    },
+    "manageConnInSettings": "连接管理已移至 设置 → Cloud Docs",
+    "table": {
+      "allConns": "全部连接",
+      "allTiers": "全部档位",
+      "colDoc": "文档",
+      "colConn": "连接",
+      "colStatus": "状态",
+      "colTier": "值守档",
+      "colActivity": "检查于",
+      "daysLeft": "剩 {{count}} 天",
+      "allKinds": "全部类型",
+      "colKind": "类型"
+    },
+    "backlogBanner": "{{count}} 条批注积压待授权",
+    "linkUnknown": "平台链接未知——重新粘贴该文档链接即可恢复",
+    "workbench": {
+      "openHere": "在工作台打开",
+      "openExternal": "新标签打开",
+      "reload": "刷新",
+      "toggleChat": "底部聊天",
+      "toggleRail": "右栏",
+      "exit": "退出编辑",
+      "closeTab": "关闭标签页",
+      "newReceipts": "{{n}} 条新回执",
+      "launcherTitle": "这份文档按你的设置在新标签打开",
+      "embedAgain": "改回在这里显示",
+      "loginTitle": "这里空白？{{platform}} 要求先登录",
+      "loginBody": "浏览器把这个内嵌框当作第三方站点，没带上你的 {{platform}} 登录时，平台会跳到登录页，而登录页拒绝在框里显示，所以这里是一片空白。在新标签登录一次，回来点「重试」即可。",
+      "loginOpen": "在新标签登录并打开",
+      "loginRetry": "已登录，重试",
+      "alwaysExternal": "总是在新标签打开",
+      "cantSee": "看不到文档？",
+      "reloadsOnReceipt": "新回执到达时自动重载",
+      "chat": "聊天",
+      "noReplyYet": "还没有回复",
+      "receipt": "回执",
+      "locate": "定位",
+      "history": "历史",
+      "hideChat": "隐藏聊天",
+      "revoke": "停止并撤权",
+      "thisTab": "当前标签页",
+      "elsewhere": "其他标签页有 {{n}} 条新回执",
+      "historyNote": "本会话全部消息 · 跨文档",
+      "rail": {
+        "receipts": "回执",
+        "history": "聊天历史",
+        "status": "状态"
+      },
+      "mdEditor": "swarm 自带编辑器",
+      "mdView": {
+        "edit": "编辑",
+        "preview": "预览",
+        "split": "分栏"
+      },
+      "mdSave": "保存",
+      "mdSaved": "已保存，回执 {{id}}",
+      "mdStaleWhileEditing": "文件在平台上有了新改动；保存或放弃你的编辑后会重新载入。",
+      "editingDoc": "正在编辑："
+    }
   }
 }

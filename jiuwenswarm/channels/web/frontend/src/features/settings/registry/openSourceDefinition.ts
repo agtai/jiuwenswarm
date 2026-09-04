@@ -5,6 +5,7 @@ import { modelsModule } from '../modules/models';
 import { agentModule } from '../modules/agent';
 import { browserModule } from '../modules/browser';
 import { channelsModule } from '../modules/channels';
+import { cloudDocModule } from '../modules/clouddoc';
 import { experimentalModule } from '../modules/experimental';
 
 export const openSourceSettingsPageDefinition = createSettingsPageDefinition({
@@ -17,6 +18,7 @@ export const openSourceSettingsPageDefinition = createSettingsPageDefinition({
     agentModule,
     browserModule,
     channelsModule,
+    cloudDocModule,
     experimentalModule,
   ],
 });
