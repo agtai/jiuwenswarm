@@ -39,7 +39,6 @@ import {
 import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
-import { FileText } from 'lucide-react';
 import {
   beginHistoryRestore,
   fetchHistoryPage,
@@ -730,7 +729,6 @@ function AppContent({
   const prependMessages = useChatStore((s) => s.prependMessages);
   const isProcessing = useChatStore((s) => s.runtimes[sessionId]?.isProcessing ?? false);
   const docWorkbenchOpen = useDocWorkbenchStore((s) => s.open && s.tabs.length > 0);
-  const docWorkbenchTabCount = useDocWorkbenchStore((s) => s.tabs.length);
   const isPaused = useChatStore((s) => s.runtimes[sessionId]?.isPaused ?? false);
   const hasPendingQuestion = useChatStore((s) => Boolean(s.runtimes[sessionId]?.pendingQuestion));
   const setProcessing = useChatStore((s) => s.setProcessing);
@@ -3151,17 +3149,6 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 className={`chat-workspace flex-1 flex min-h-0 overflow-hidden ${insetTrajectoryFloatingTasks ? 'chat-workspace--trajectory-floating-tools' : ''}`}
                 style={docWorkbenchShown ? { display: 'none' } : { position: 'relative' }}
               >
-                {cloudDocInstalled && docWorkbenchTabCount > 0 && !docWorkbenchShown && (
-                  <button
-                    type="button"
-                    className="doc-workbench__return-btn"
-                    onClick={() => useDocWorkbenchStore.getState().reopen()}
-                    data-testid="doc-workbench-return"
-                    title={t('docs.workbench.returnToDoc')}
-                  >
-                    <FileText size={13} /> {t('docs.workbench.returnToDoc')}
-                  </button>
-                )}
                 {showConversationNotFound && (
                   <div className="flex-1 flex flex-col items-center justify-center gap-4" data-testid="app-conversation-not-found">
                     <h1 className="text-lg font-semibold text-text" data-testid="app-conversation-not-found-title">{t('multiSession.notFound.title')}</h1>

@@ -1,14 +1,21 @@
 /**
- * Session references: chips for the cloud documents this conversation touched,
- * each jumping to that document's receipts in the Docs panel. The source of
- * truth is the session's own tool executions -- a document appears here because
- * a clouddoc tool actually named it, not because the model mentioned it.
+ * Session references: chips for the cloud documents in play, each opening that
+ * document in the workbench. This is also the way back into the workbench after
+ * 退出编辑 -- one affordance, not two: a floating "return" button in another
+ * corner said the same thing without naming the document.
+ *
+ * Two sources, because either alone leaves a gap. The session's own tool
+ * executions name a document because a clouddoc tool actually touched it (never
+ * because the model mentioned it), which covers a document worked on in chat
+ * but never opened. The workbench's open tabs cover the other way round: a
+ * document opened from the Docs panel that this session never wrote to.
  */
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
 import { webRequest } from '../../services/webClient';
 import { requestOpenDoc } from '../../features/clouddoc/openDocSignal';
+import { useDocWorkbenchStore } from '../../stores/docWorkbenchStore';
 
 export function DocReferencesStrip() {
   const { t } = useTranslation();
@@ -16,6 +23,8 @@ export function DocReferencesStrip() {
   const toolExecutions = useChatStore(
     (s) => s.runtimes[activeSessionId ?? '']?.toolExecutions,
   );
+
+  const workbenchTabs = useDocWorkbenchStore((s) => s.tabs);
 
   const docIds = useMemo(() => {
     const ids: string[] = [];
@@ -29,8 +38,11 @@ export function DocReferencesStrip() {
         }
       }
     }
+    for (const tab of workbenchTabs) {
+      if (tab.docId && !ids.includes(tab.docId)) ids.push(tab.docId);
+    }
     return ids;
-  }, [toolExecutions]);
+  }, [toolExecutions, workbenchTabs]);
 
   // Titles come from the deployment's own document list; a doc outside it
   // (possible on widened grants) falls back to its id, still clickable.
@@ -64,7 +76,17 @@ export function DocReferencesStrip() {
           type="button"
           className="doc-refs-strip__chip"
           title={t('chat.docRefs.hint')}
-          onClick={() => requestOpenDoc(id)}
+          onClick={() => {
+            // Already a tab? Then this is a return: reopen the workbench on it,
+            // no metadata round trip. Otherwise the usual open signal.
+            const wb = useDocWorkbenchStore.getState();
+            if (wb.tabs.some((x) => x.docId === id)) {
+              wb.activate(id);
+              wb.reopen();
+            } else {
+              requestOpenDoc(id);
+            }
+          }}
           data-testid={`doc-ref-chip-${id}`}
         >
           <span aria-hidden="true">📄</span>

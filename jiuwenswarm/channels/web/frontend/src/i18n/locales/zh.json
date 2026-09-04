@@ -859,7 +859,7 @@
     "noTeamMembersAvailable": "暂无可选择的团队成员",
     "docRefs": {
       "label": "本会话文档",
-      "hint": "查看该文档的写入回执（Docs 面板）"
+      "hint": "打开这篇文档的编辑界面"
     }
   },
   "autoHarness": {
@@ -3580,8 +3580,7 @@
       "mdSave": "保存",
       "mdSaved": "已保存，回执 {{id}}",
       "mdStaleWhileEditing": "文件在平台上有了新改动；保存或放弃你的编辑后会重新载入。",
-      "editingDoc": "正在编辑：",
-      "returnToDoc": "返回文档编辑"
+      "editingDoc": "正在编辑："
     }
   }
 }

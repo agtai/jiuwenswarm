@@ -859,7 +859,7 @@
     "noTeamMembersAvailable": "No team members available",
     "docRefs": {
       "label": "Docs in this session",
-      "hint": "Open this document's write receipts in the Docs panel"
+      "hint": "Open this document's editor"
     }
   },
   "autoHarness": {
@@ -3580,8 +3580,7 @@
       "mdSave": "Save",
       "mdSaved": "Saved, receipt {{id}}",
       "mdStaleWhileEditing": "The file changed on the platform; it reloads once you save or discard your edits.",
-      "editingDoc": "Editing: ",
-      "returnToDoc": "Back to the document"
+      "editingDoc": "Editing: "
     }
   }
 }
