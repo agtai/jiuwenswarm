@@ -5063,7 +5063,6 @@ class AgentServerProductCompositionRegistry:
         auth_token: object,
         session_id: str,
         native_authority: NativeP3ActivationAuthority | None = None,
-        route_hint: Callable[[str], None] | None = None,
     ) -> TaskSemanticDecision:
         continuity = self._semantic_continuity
         if continuity is None:
@@ -5078,7 +5077,6 @@ class AgentServerProductCompositionRegistry:
                 bearer_token=auth_token,
                 session_id=session_id,
                 native_authority=native_authority,
-                route_hint=route_hint,
                 **kwargs,
             )
 
@@ -6716,7 +6714,6 @@ class AgentServerProductCompositionRegistry:
         l0_task_id: str | None = None,
         l0_attempt_id: str | None = None,
         l0_commit_admission: _L0CommitAdmissionClock | None = None,
-        presentation_gate: "asyncio.Future[str] | None" = None,
     ) -> P3RouteResult:
         result_unknown = False
         submission_started = time.monotonic()
@@ -6743,12 +6740,6 @@ class AgentServerProductCompositionRegistry:
             response_ref: ResponseRef,
             round_id: str,
         ) -> None:
-            if presentation_gate is not None:
-                # Installed before the Bridge dispatch, so no notification of
-                # this response can reach a consumer ahead of the hold.
-                retained.activation_lease.hold_presentation(
-                    retained.binding, response_ref, presentation_gate
-                )
             binding = measurement_binding(response_ref, round_id=round_id)
             if binding is not None:
                 register_runtime_l0_binding(binding)
@@ -7942,7 +7933,6 @@ class AgentServerProductCompositionRegistry:
         l0_task_id: str | None = None,
         l0_attempt_id: str | None = None,
         l0_commit_admission: _L0CommitAdmissionClock | None = None,
-        presentation_gate: "asyncio.Future[str] | None" = None,
     ) -> P3RouteResult:
         request_id = f"unified-agent-{voice_identity[:40]}"
         journal = self._unified_journal
@@ -8022,7 +8012,6 @@ class AgentServerProductCompositionRegistry:
                 l0_task_id=l0_task_id,
                 l0_attempt_id=l0_attempt_id,
                 l0_commit_admission=l0_commit_admission,
-                presentation_gate=presentation_gate,
             )
             if business_task_id is not None and result.ok:
                 return P3RouteResult(True, {
@@ -8060,33 +8049,6 @@ class AgentServerProductCompositionRegistry:
             )
         return value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
 
-    def _retain_semantic_dialogue_commit(self, commit: TurnCommit) -> None:
-        if len(self._semantic_dialogue_commits) >= self._PRODUCT_OPERATION_CAPACITY:
-            raise FormalTaskViolation(
-                "SEMANTIC_ANALYSIS_CAPACITY_EXCEEDED",
-                "bounded analysis origins full",
-                ErrorCode.UNAVAILABLE,
-            )
-        self._semantic_dialogue_commits[
-            hashlib.sha256(commit.canonical_bytes()).hexdigest()
-        ] = commit
-
-    async def _speculative_dialogue_admissible(self, commit: TurnCommit) -> bool:
-        """Speculate only where a confirmed dialogue decision is the only plain outcome.
-
-        A pending semantic context can turn the same words into a
-        confirmation, decline or adjustment, which changes the tool policy or
-        the route; without one, the announced dialogue route can only be
-        confirmed or fail outright, and the bounded dialogue ledger must have
-        room for the commit the confirmation will retain.
-        """
-        continuity = self._semantic_continuity
-        if continuity is None:
-            return False
-        if len(self._semantic_dialogue_commits) >= self._PRODUCT_OPERATION_CAPACITY:
-            return False
-        return not await continuity.pending(commit.scope)
-
     async def _run_unified_submit(
         self,
         *,
@@ -8122,75 +8084,13 @@ class AgentServerProductCompositionRegistry:
                 "input journal unavailable",
                 ErrorCode.UNAVAILABLE,
             )
-        recovered = await asyncio.to_thread(
-            journal.read_foreground_effect,
-            voice_identity_sha256=voice_identity,
-            fingerprint=fingerprint,
-        )
-        response_id = f"response-unified-{voice_identity[:32]}"
-        speculative: asyncio.Task[P3RouteResult] | None = None
-        presentation_gate: asyncio.Future[str] | None = None
         if semantic_binding is None:
-            # The semantic model emits ``route`` first. On a dialogue
-            # announcement the Agent request starts immediately; every
-            # notification it produces is parked in the Runtime until the
-            # complete decision confirms the route, so nothing provisional
-            # can reach a consumer, and a contradicting decision discards the
-            # speculative response through the ordinary generation fence.
-            loop = asyncio.get_running_loop()
-            route_announcement: asyncio.Future[str] = loop.create_future()
-
-            def announce_route(route: str) -> None:
-                if not route_announcement.done():
-                    route_announcement.set_result(route)
-
-            semantic_task = asyncio.create_task(
-                self._resolve_semantic_input(
-                    commit=commit,
-                    auth_token=auth_token,
-                    session_id=retained.binding.session_id,
-                    native_authority=native_p3_authority,
-                    route_hint=announce_route,
-                )
+            decision = await self._resolve_semantic_input(
+                commit=commit,
+                auth_token=auth_token,
+                session_id=retained.binding.session_id,
+                native_authority=native_p3_authority,
             )
-            try:
-                await asyncio.wait(
-                    {route_announcement, semantic_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if (
-                    not semantic_task.done()
-                    and route_announcement.done()
-                    and route_announcement.result() == "dialogue"
-                    and recovered is None
-                    and not native_result_only
-                    and await self._speculative_dialogue_admissible(commit)
-                ):
-                    presentation_gate = loop.create_future()
-                    speculative = asyncio.create_task(
-                        self._run_unified_agent_submit(
-                            retained=retained,
-                            voice_identity=voice_identity,
-                            fingerprint=fingerprint,
-                            response_id=response_id,
-                            commit=commit,
-                            context=context,
-                            channel_id=channel_id,
-                            allow_tools=True,
-                            l0_commit_admission=l0_commit_admission,
-                            presentation_gate=presentation_gate,
-                        )
-                    )
-                decision = await semantic_task
-            except BaseException:
-                if presentation_gate is not None and not presentation_gate.done():
-                    presentation_gate.set_result("discard")
-                if speculative is not None:
-                    await asyncio.gather(speculative, return_exceptions=True)
-                if not semantic_task.done():
-                    semantic_task.cancel()
-                    await asyncio.gather(semantic_task, return_exceptions=True)
-                raise
             await asyncio.to_thread(
                 journal.bind_semantic,
                 voice_identity_sha256=voice_identity,
@@ -8201,23 +8101,11 @@ class AgentServerProductCompositionRegistry:
             decision = TaskSemanticDecision.from_frozen_record(
                 semantic_binding, commit=commit
             )
-        if speculative is not None:
-            assert presentation_gate is not None
-            if decision.route == "dialogue" and decision.continuation_action != "decline":
-                self._retain_semantic_dialogue_commit(commit)
-                presentation_gate.set_result("release")
-                return await speculative
-            presentation_gate.set_result("discard")
-            await asyncio.gather(speculative, return_exceptions=True)
-            logger.warning(
-                "live_voice_semantic_speculation_discarded request_id=%s route=%s",
-                request_id, decision.route,
-            )
-            raise FormalTaskViolation(
-                "SEMANTIC_ROUTE_SPECULATION_MISMATCH",
-                "the announced route was not confirmed; resubmit the input",
-                ErrorCode.CONFLICT,
-            )
+        recovered = await asyncio.to_thread(
+            journal.read_foreground_effect,
+            voice_identity_sha256=voice_identity,
+            fingerprint=fingerprint,
+        )
         if recovered is not None:
             if (
                 not native_result_only
@@ -8239,6 +8127,7 @@ class AgentServerProductCompositionRegistry:
                 "prior foreground effect may exist",
                 ErrorCode.RESULT_UNKNOWN,
             )
+        response_id = f"response-unified-{voice_identity[:32]}"
         business_task_id = None
         l0_task_id = l0_attempt_id = None
         agent_context = context
@@ -8491,7 +8380,14 @@ class AgentServerProductCompositionRegistry:
                 })
                 agent_context = FormalContextSnapshot(commit.scope, (*self._reserve_task_result_context_slot(context), FormalContextEntry(ref, content)))
                 agent_commit = TurnCommit.from_dict({**commit.to_dict(), "context_refs": [entry.ref.to_dict() for entry in agent_context.entries]})
-            self._retain_semantic_dialogue_commit(agent_commit)
+            if len(self._semantic_dialogue_commits) >= self._PRODUCT_OPERATION_CAPACITY:
+                raise FormalTaskViolation(
+                    "SEMANTIC_ANALYSIS_CAPACITY_EXCEEDED",
+                    "bounded analysis origins full", ErrorCode.UNAVAILABLE,
+                )
+            self._semantic_dialogue_commits[
+                hashlib.sha256(agent_commit.canonical_bytes()).hexdigest()
+            ] = agent_commit
         if native_result_only:
             text = await retained.activation_lease.execute_native_delegate(
                 retained.binding,

@@ -234,21 +234,6 @@ class _NotificationConsumerDetached(RuntimeError):
     pass
 
 
-_PRESENTATION_HOLD_CAPACITY = 256
-
-
-class _PresentationHold:
-    """Notifications of one response parked until its route is confirmed."""
-
-    __slots__ = ("gate", "queued")
-
-    def __init__(self, gate: "asyncio.Future[str]") -> None:
-        self.gate = gate
-        self.queued: deque[
-            tuple[AgentConversationNotification, tuple[str, str] | None]
-        ] = deque()
-
-
 class _BoundedNotificationBuffer:
     """Lossy observer lane plus a bounded, non-blocking critical reserve."""
 
@@ -786,10 +771,6 @@ class AgentConversationRuntime:
         self._notification_leases_detached = 0
         self._notification_final_drain_leases_issued = 0
         self._discarded_invalidated_presentations = 0
-        self._presentation_holds: dict[ResponseRef, _PresentationHold] = {}
-        self._suppressed_presentations: set[ResponseRef] = set()
-        self._presentation_hold_discards = 0
-        self._presentation_hold_tasks: set[asyncio.Task[None]] = set()
         self._effect_backlog: deque[ConversationEffect] = deque()
         self._effect_backlog_ids: set[str] = set()
         self._effect_claims: dict[str, _ConversationEffectClaimEntry] = {}
@@ -3584,101 +3565,6 @@ class AgentConversationRuntime:
         self._require_started()
         return await self._cr.barge_in(action_id, ref, cancel_response=cancel_response)
 
-    def hold_presentation(self, ref: ResponseRef, gate: "asyncio.Future[str]") -> None:
-        """Park every notification of ``ref`` until ``gate`` settles.
-
-        ``gate`` resolves to ``"release"`` (the parked notifications are
-        published in order and later ones flow normally) or ``"discard"``
-        (they are dropped, everything later for this response is suppressed,
-        and the response is fenced through the ordinary generation
-        interruption so its Agent round is cancelled). A failed or cancelled
-        gate counts as discard. The hold must be installed before the Agent
-        dispatch, so no notification of the response can precede it, and a
-        hold that outgrows its bounded capacity fails closed to discard.
-
-        The decision may settle before the dispatch reaches this point. A gate
-        already released needs no hold: nothing the response produces is
-        provisional any more. A gate already discarded refuses the dispatch,
-        so the Agent round never starts.
-        """
-
-        self._require_started()
-        if not isinstance(ref, ResponseRef):
-            raise AgentConversationRuntimeViolation(
-                "INVALID_RESPONSE_REFERENCE",
-                "a presentation hold requires a canonical ResponseRef",
-                ErrorCode.INVALID_ARGUMENT,
-            )
-        if not isinstance(gate, asyncio.Future):
-            raise AgentConversationRuntimeViolation(
-                "INVALID_PRESENTATION_HOLD",
-                "a presentation hold requires a gate future",
-                ErrorCode.INVALID_ARGUMENT,
-            )
-        if gate.done():
-            if (
-                not gate.cancelled()
-                and gate.exception() is None
-                and gate.result() == "release"
-            ):
-                return
-            raise AgentConversationRuntimeViolation(
-                "PRESENTATION_HOLD_DISCARDED",
-                "the decision already discarded this response",
-                ErrorCode.CONFLICT,
-            )
-        if ref in self._presentation_holds or ref in self._suppressed_presentations:
-            raise AgentConversationRuntimeViolation(
-                "PRESENTATION_HOLD_CONFLICT",
-                "one response cannot be held twice",
-                ErrorCode.CONFLICT,
-            )
-        self._presentation_holds[ref] = _PresentationHold(gate)
-        gate.add_done_callback(
-            lambda settled: self._settle_presentation_hold(ref, settled)
-        )
-
-    def _settle_presentation_hold(
-        self, ref: ResponseRef, settled: "asyncio.Future[str]"
-    ) -> None:
-        hold = self._presentation_holds.pop(ref, None)
-        if hold is None:
-            return
-        verdict = None
-        if not settled.cancelled() and settled.exception() is None:
-            verdict = settled.result()
-        if verdict == "release":
-            # A synchronous flush: no await can interleave a newer notification
-            # of this response ahead of the parked ones.
-            while hold.queued:
-                notification, critical_key = hold.queued.popleft()
-                self._notifications.publish(notification, critical_key=critical_key)
-            return
-        self._presentation_hold_discards += 1
-        hold.queued.clear()
-        self._suppressed_presentations.add(ref)
-        task = asyncio.get_running_loop().create_task(self._discard_held_response(ref))
-        self._presentation_hold_tasks.add(task)
-        task.add_done_callback(self._presentation_hold_tasks.discard)
-
-    async def _discard_held_response(self, ref: ResponseRef) -> None:
-        try:
-            await self.interrupt_generation(
-                action_id=f"presentation-discard:{ref.response_id}", ref=ref
-            )
-        except AgentConversationRuntimeViolation:
-            # The response may already be terminal or never have reached CR;
-            # suppression alone still keeps it out of every consumer lane.
-            return
-
-    def presentation_hold_snapshot(self) -> dict[str, int]:
-        return {
-            "held": len(self._presentation_holds),
-            "parked": sum(len(hold.queued) for hold in self._presentation_holds.values()),
-            "suppressed": len(self._suppressed_presentations),
-            "discards": self._presentation_hold_discards,
-        }
-
     async def interrupt_generation(
         self, *, action_id: str, ref: ResponseRef
     ) -> AgentGenerationInterruption:
@@ -4367,10 +4253,6 @@ class AgentConversationRuntime:
                 else None
             ),
         )
-        if progress.state is WorkState.TERMINAL:
-            # A discarded speculative response has now settled in CR; nothing
-            # further can be published for it, so its suppression can go.
-            self._suppressed_presentations.discard(request.response_ref)
 
     async def _close_interaction_after_terminal(self, interaction_id: str) -> None:
         snapshot = self._cr.snapshot().conversation
@@ -4391,17 +4273,6 @@ class AgentConversationRuntime:
         *,
         critical_key: tuple[str, str] | None = None,
     ) -> None:
-        ref = notification.response_ref
-        if ref in self._suppressed_presentations:
-            return
-        hold = self._presentation_holds.get(ref)
-        if hold is not None:
-            if len(hold.queued) >= _PRESENTATION_HOLD_CAPACITY:
-                if not hold.gate.done():
-                    hold.gate.set_result("discard")
-                return
-            hold.queued.append((notification, critical_key))
-            return
         self._notifications.publish(notification, critical_key=critical_key)
 
     async def _shutdown_coordinator(

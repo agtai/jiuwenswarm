@@ -1545,7 +1545,6 @@ class P3AuthenticatedComposition:
         pending: tuple[Mapping[str, object], ...] = (),
         native_authority: NativeP3ActivationAuthority | None = None,
         analysis: Mapping[str, str] | None = None,
-        route_hint: Callable[[str], None] | None = None,
     ) -> TaskSemanticDecision:
         """Authenticate read-only model context; ingress retains commit authority.
 
@@ -1626,7 +1625,6 @@ class P3AuthenticatedComposition:
             commit,
             TaskSemanticContext(facts, session_id, history, pending),
             analysis=analysis,
-            route_hint=route_hint,
         )
 
     def prepare_production_intent_authority(

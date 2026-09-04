@@ -120,14 +120,10 @@ def attribute(round_record: dict, calls: list[dict], anchors: dict[str, list[flo
     # until the final chunk is sent for the last one).
     ordered = sorted((c for c in window if c["start"] >= submit_ms - 200), key=lambda c: c["start"])
     starts = [c["start"] for c in ordered] + [final_ms]
-    # The semantic resolution is always the first call after submit (it may
-    # itself stream since the early-route change); the main Agent request is
-    # the first streaming call after it, with any unary delegation checks in
-    # between counted as part of the semantic phase.
     unary_before_main: list[dict] = []
     main_index = None
     for index, c in enumerate(ordered):
-        if index > 0 and c["stream"]:
+        if c["stream"]:
             main_index = index
             break
         unary_before_main.append(c)

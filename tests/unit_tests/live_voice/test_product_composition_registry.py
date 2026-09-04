@@ -706,7 +706,7 @@ class _P3Composition(P3AuthenticatedComposition):
 
     async def resolve_production_semantics(
         self, *, commit, bearer_token, session_id, history=(), pending=(),
-        native_authority=None, analysis=None, route_hint=None,
+        native_authority=None, analysis=None,
     ):
         """Model-port double for lifecycle tests; real strict parser, no NLP claim.
 
