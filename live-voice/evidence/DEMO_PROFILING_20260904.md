@@ -3,6 +3,7 @@
 ## Scope recorded before implementation
 
 Baseline: `af1b47d638968e80e676c8c80f5e48647cd2e58b`.
+Verified implementation source: `35bbd842f37d9ba80427dc7c73a849646dcadf49`.
 The user requests diagnostic code sufficient to profile every Demo pipeline
 boundary and investigate failures after rehearsal without another instrumentation
 change. This supersedes the earlier diagnostic-only segmentation checkpoint as
@@ -179,4 +180,3 @@ No service manifest exists in this workspace. No real Provider invocation,
 physical microphone/speaker journey, redeployment or remote push is claimed.
 Prior segmentation/interruption/result defects and whole-project acceptance
 remain PARTIAL; this packet supplies their diagnostic evidence path.
-
