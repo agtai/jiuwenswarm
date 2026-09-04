@@ -44,6 +44,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommitLedger,
     canonical_json_bytes,
 )
+from jiuwenswarm.server.live_voice.speculative_dialogue import SpeculativeDialogue
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextEntry,
     FormalContextSnapshot,
@@ -248,6 +249,12 @@ from .semantic_continuity import SemanticContinuity
 from .task_semantics import TaskSemanticDecision
 
 logger = logging.getLogger(__name__)
+
+# Operational switch for the speculative dialogue candidate; anything but an
+# off value keeps it on. Read per turn, so a restart is not needed to flip it
+# for a process that re-reads its environment.
+_SPECULATION_SWITCH_ENV = "LIVE_VOICE_DIALOGUE_SPECULATION"
+_SPECULATION_OFF_VALUES = frozenset({"off", "0", "false", "no"})
 
 PRODUCT_COMPOSITION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED"
 PRODUCT_P2_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED"
@@ -1091,6 +1098,7 @@ class AgentServerProductCompositionRegistry:
         )
         self._semantic_analysis_tasks: dict[str, asyncio.Task[None]] = {}
         self._semantic_dialogue_commits: dict[str, TurnCommit] = {}
+        self._speculations_in_flight = 0
         self._pending_turn_commits_by_commit: dict[str, TurnCommit] = {}
         self._pending_turn_commits_by_turn: dict[str, TurnCommit] = {}
         self._pending_voice_commit_routes: dict[str, tuple[str, str]] = {}
@@ -6722,6 +6730,7 @@ class AgentServerProductCompositionRegistry:
         l0_task_id: str | None = None,
         l0_attempt_id: str | None = None,
         l0_commit_admission: _L0CommitAdmissionClock | None = None,
+        speculation: SpeculativeDialogue | None = None,
     ) -> P3RouteResult:
         result_unknown = False
         submission_started = time.monotonic()
@@ -6794,6 +6803,7 @@ class AgentServerProductCompositionRegistry:
                 before_dispatch=before_dispatch_with_measurement,
                 after_dispatch=after_dispatch_with_measurement,
                 allow_tools=allow_agent_tools,
+                speculation=speculation,
             )
             return _success_result(
                 request_id,
@@ -7942,6 +7952,7 @@ class AgentServerProductCompositionRegistry:
         l0_task_id: str | None = None,
         l0_attempt_id: str | None = None,
         l0_commit_admission: _L0CommitAdmissionClock | None = None,
+        speculation: SpeculativeDialogue | None = None,
     ) -> P3RouteResult:
         request_id = f"unified-agent-{voice_identity[:40]}"
         journal = self._unified_journal
@@ -8021,6 +8032,7 @@ class AgentServerProductCompositionRegistry:
                 l0_task_id=l0_task_id,
                 l0_attempt_id=l0_attempt_id,
                 l0_commit_admission=l0_commit_admission,
+                speculation=speculation,
             )
             if business_task_id is not None and result.ok:
                 return P3RouteResult(True, {
@@ -8058,6 +8070,67 @@ class AgentServerProductCompositionRegistry:
             )
         return value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
 
+    _MAX_SPECULATIONS_IN_FLIGHT = 4
+
+    async def _begin_dialogue_speculation(
+        self,
+        *,
+        retained: _P2Route,
+        request_id: str,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        channel_id: str,
+        auth_token: object,
+    ) -> SpeculativeDialogue | None:
+        """Start the dialogue candidate when a confirmed dialogue is the only plain outcome.
+
+        Only the model works before the decision: the candidate's tools are
+        paused and nothing is recorded for it.  With no pending semantic
+        context and no visible Task the plain commit is the whole input, so a
+        confirmed dialogue decision attaches the candidate unchanged; every
+        other decision discards it.  Any failure to start is the serial path.
+        """
+
+        if os.getenv(_SPECULATION_SWITCH_ENV, "on").strip().lower() in _SPECULATION_OFF_VALUES:
+            logger.info("live_voice_speculation_skipped request_id=%s reason=disabled", request_id)
+            return None
+        continuity = self._semantic_continuity
+        if continuity is None:
+            return None
+        if self._speculations_in_flight >= self._MAX_SPECULATIONS_IN_FLIGHT:
+            logger.info("live_voice_speculation_skipped request_id=%s reason=capacity", request_id)
+            return None
+        begin = getattr(retained.activation_lease, "begin_speculative_dialogue", None)
+        if not callable(begin):
+            return None
+        try:
+            if await continuity.pending(commit.scope):
+                logger.info("live_voice_speculation_skipped request_id=%s reason=pending_context", request_id)
+                return None
+            visible = await asyncio.to_thread(
+                self._p3_composition.count_scope_tasks, commit.scope
+            )
+            if visible:
+                logger.info("live_voice_speculation_skipped request_id=%s reason=visible_tasks", request_id)
+                return None
+            candidate = await begin(
+                retained.binding,
+                request_id=request_id,
+                commit=commit,
+                context=context,
+                channel_id=channel_id,
+            )
+        except Exception as error:  # noqa: BLE001 - speculation is best effort, never the turn
+            logger.info(
+                "live_voice_speculation_skipped request_id=%s reason=%s",
+                request_id, getattr(error, "reason", type(error).__name__),
+            )
+            return None
+        if not isinstance(candidate, SpeculativeDialogue):
+            return None
+        self._speculations_in_flight += 1
+        return candidate
+
     @profiled('turn.execution', 'commit')
     async def _run_unified_submit(
         self,
@@ -8075,6 +8148,66 @@ class AgentServerProductCompositionRegistry:
         native_result_only: bool = False,
         native_p3_authority: NativeP3ActivationAuthority | None = None,
         native_delegate_source_response: ResponseRef | None = None,
+    ) -> P3RouteResult:
+        """Speculate the dialogue candidate at submit, then decide and dispatch."""
+
+        speculation: SpeculativeDialogue | None = None
+        if (
+            semantic_binding is None
+            and not native_result_only
+            and native_p3_authority is None
+            and native_delegate_source_response is None
+        ):
+            speculation = await self._begin_dialogue_speculation(
+                retained=retained,
+                request_id=f"unified-agent-{voice_identity[:40]}",
+                commit=commit,
+                context=context,
+                channel_id=channel_id,
+                auth_token=auth_token,
+            )
+        try:
+            return await self._run_unified_submit_decided(
+                retained=retained,
+                request_id=request_id,
+                voice_identity=voice_identity,
+                fingerprint=fingerprint,
+                commit=commit,
+                context=context,
+                auth_token=auth_token,
+                channel_id=channel_id,
+                l0_commit_admission=l0_commit_admission,
+                semantic_binding=semantic_binding,
+                native_result_only=native_result_only,
+                native_p3_authority=native_p3_authority,
+                native_delegate_source_response=native_delegate_source_response,
+                speculation=speculation,
+            )
+        finally:
+            if speculation is not None:
+                # An attached candidate belongs to its round now; only one
+                # that never reached a round is unused.
+                if speculation.state == "pending":
+                    await speculation.discard("unused")
+                self._speculations_in_flight -= 1
+
+    async def _run_unified_submit_decided(
+        self,
+        *,
+        retained: _P2Route,
+        request_id: str,
+        voice_identity: str,
+        fingerprint: bytes,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        auth_token: object,
+        channel_id: str,
+        l0_commit_admission: _L0CommitAdmissionClock,
+        semantic_binding: Mapping[str, object] | None = None,
+        native_result_only: bool = False,
+        native_p3_authority: NativeP3ActivationAuthority | None = None,
+        native_delegate_source_response: ResponseRef | None = None,
+        speculation: SpeculativeDialogue | None = None,
     ) -> P3RouteResult:
         """One model decision, then deterministic formal control or the real Agent."""
         if not (
@@ -8116,6 +8249,13 @@ class AgentServerProductCompositionRegistry:
             voice_identity_sha256=voice_identity,
             fingerprint=fingerprint,
         )
+        if speculation is not None and (
+            recovered is not None
+            or decision.route != "dialogue"
+            or decision.continuation_action == "decline"
+        ):
+            await speculation.discard(f"route:{decision.route}")
+            speculation = None
         if recovered is not None:
             if (
                 not native_result_only
@@ -8398,6 +8538,11 @@ class AgentServerProductCompositionRegistry:
             self._semantic_dialogue_commits[
                 hashlib.sha256(agent_commit.canonical_bytes()).hexdigest()
             ] = agent_commit
+        if speculation is not None and (
+            agent_commit is not commit or agent_context is not context or not allow_tools
+        ):
+            await speculation.discard("context_changed")
+            speculation = None
         if native_result_only:
             text = await retained.activation_lease.execute_native_delegate(
                 retained.binding,
@@ -8424,6 +8569,7 @@ class AgentServerProductCompositionRegistry:
             l0_task_id=l0_task_id,
             l0_attempt_id=l0_attempt_id,
             l0_commit_admission=l0_commit_admission,
+            speculation=speculation,
         )
         if business_task_id is not None and result.ok and commit.hypothesis_provenance.get("kind") != "committed_text":
             data = result.payload.get("result")

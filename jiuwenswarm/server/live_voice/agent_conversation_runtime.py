@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import secrets
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from collections import deque
@@ -57,6 +58,14 @@ from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
     PresentationHistoryIntent,
     ResponseCancelResult,
 )
+from jiuwenswarm.server.live_voice.speculative_dialogue import (
+    AttachedFormalFacade,
+    SpeculativeDialogue,
+    SpeculativeDialogueViolation,
+    facade_supports_speculation,
+    speculative_session_id,
+)
+
 from jiuwenswarm.server.live_voice.formal_history_writer import (
     SessionFormalHistoryWriter,
 )
@@ -94,6 +103,7 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
     TaskProgressOriginKind,
 )
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+    FormalAgentExecution,
     FormalContextEntry,
     FormalContextSnapshot,
     PresentedAgentAnalysis,
@@ -112,6 +122,8 @@ _DEFAULT_NATIVE_DELEGATE_TIMEOUT_SECONDS = 25.0
 _MAX_NATIVE_DELEGATE_TIMEOUT_SECONDS = 28.0
 _NATIVE_DELEGATE_CANCEL_SETTLEMENT_SECONDS = 1.0
 
+
+_MAX_SPECULATIONS = 2
 
 class AgentConversationRuntimeViolation(ValueError):
     def __init__(self, reason: str, message: str, code: ErrorCode) -> None:
@@ -557,6 +569,7 @@ class _AdmissionEntry:
     bridge_reservation: AgentBridgeDispatchReservation
     outcome: asyncio.Future[_AdmissionOutcome]
     coordinator: asyncio.Task[None] | None
+    facade: object | None = None
 
 
 @dataclass(slots=True)
@@ -771,6 +784,7 @@ class AgentConversationRuntime:
         self._notification_leases_detached = 0
         self._notification_final_drain_leases_issued = 0
         self._discarded_invalidated_presentations = 0
+        self._speculations: dict[str, SpeculativeDialogue] = {}
         self._effect_backlog: deque[ConversationEffect] = deque()
         self._effect_backlog_ids: set[str] = set()
         self._effect_claims: dict[str, _ConversationEffectClaimEntry] = {}
@@ -1517,6 +1531,7 @@ class AgentConversationRuntime:
         after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
         allow_tools: bool = True,
         supersedes: ResponseRef | None = None,
+        speculation: SpeculativeDialogue | None = None,
     ) -> AgentConversationHandle:
         """Own one retained product submission from TurnCommit through dispatch.
 
@@ -1540,6 +1555,16 @@ class AgentConversationRuntime:
                 "INVALID_COMMITTED_TURN",
                 "TurnCommit must match the exact composition scope",
                 ErrorCode.PERMISSION_DENIED,
+            )
+        if speculation is not None and (
+            not isinstance(speculation, SpeculativeDialogue)
+            or speculation.request_id != request_id
+            or self._speculations.get(request_id) is not speculation
+        ):
+            raise AgentConversationRuntimeViolation(
+                "SPECULATION_MISMATCH",
+                "a speculative candidate belongs to exactly one registered request",
+                ErrorCode.CONFLICT,
             )
         if not isinstance(context, FormalContextSnapshot):
             raise AgentConversationRuntimeViolation(
@@ -1634,6 +1659,7 @@ class AgentConversationRuntime:
                         after_dispatch=after_dispatch,
                         allow_tools=allow_tools,
                         supersedes=supersedes,
+                        speculation=speculation,
                     )
                 else:
                     turn_key = (commit.interaction_id, commit.turn_id)
@@ -1661,6 +1687,7 @@ class AgentConversationRuntime:
                             after_dispatch=after_dispatch,
                             allow_tools=allow_tools,
                             supersedes=supersedes,
+                            speculation=speculation,
                         )
                     except BaseException:
                         self._release_product_identity(claim)
@@ -2502,6 +2529,7 @@ class AgentConversationRuntime:
         after_dispatch: Callable[[AgentConversationHandle], None] | None,
         allow_tools: bool,
         supersedes: ResponseRef | None = None,
+        speculation: SpeculativeDialogue | None = None,
     ) -> asyncio.Future[_AdmissionOutcome]:
         """Register one preflighted submission while admission fence is held."""
 
@@ -2552,6 +2580,14 @@ class AgentConversationRuntime:
         bridge_reservation: AgentBridgeDispatchReservation | None = None
         try:
             assert self._facade is not None
+            # A speculative candidate is taken over through a facade that
+            # attaches it to this exact round; the reservation pins that
+            # facade so the committed round cannot drift to another one.
+            round_facade: object = (
+                self._facade
+                if speculation is None
+                else AttachedFormalFacade(speculation, self._facade)
+            )
             harness_reservation = self._harness.reserve_round(
                 HarnessRoundBinding(
                     request_id=request_id,
@@ -2559,7 +2595,7 @@ class AgentConversationRuntime:
                     correlation_id=correlation_id,
                     commit=commit,
                 ),
-                facade=self._facade,
+                facade=round_facade,
             )
             bridge_reservation = self._bridge.reserve_dispatch(
                 request_id=request_id,
@@ -2593,6 +2629,7 @@ class AgentConversationRuntime:
             bridge_reservation=bridge_reservation,
             outcome=outcome,
             coordinator=None,
+            facade=round_facade,
         )
         product_entry = _CommittedTurnSubmissionEntry(
             fingerprint=fingerprint,
@@ -2613,6 +2650,7 @@ class AgentConversationRuntime:
                 after_dispatch=after_dispatch,
                 allow_tools=allow_tools,
                 supersedes=supersedes,
+                speculation=speculation,
             ),
             name=f"live-voice-product-turn:{request_id}",
         )
@@ -3565,6 +3603,86 @@ class AgentConversationRuntime:
         self._require_started()
         return await self._cr.barge_in(action_id, ref, cancel_response=cancel_response)
 
+    def begin_speculative_dialogue(
+        self,
+        *,
+        request_id: str,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        channel_id: str,
+        allow_tools: bool = True,
+    ) -> SpeculativeDialogue:
+        """Start the dialogue candidate for ``request_id`` before its decision.
+
+        The candidate is model work only: its tools are paused at the lower
+        adapter, and no response, dispatch, history record or notification
+        exists for it.  ``submit_committed_turn`` with the same request and
+        the candidate attaches it to the admitted round; ``discard`` ends it.
+        """
+
+        self._require_started()
+        if not isinstance(commit, TurnCommit) or commit.scope != self._scope:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_COMMITTED_TURN",
+                "TurnCommit must match the exact composition scope",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if not isinstance(context, FormalContextSnapshot):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_FORMAL_CONTEXT",
+                "speculation requires a canonical formal context snapshot",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if not facade_supports_speculation(self._facade):
+            raise AgentConversationRuntimeViolation(
+                "SPECULATION_UNAVAILABLE",
+                "the Agent facade exposes no formal tool execution gate",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        if (
+            request_id in self._speculations
+            or request_id in self._committed_turn_submissions
+            or request_id in self._admissions
+        ):
+            raise AgentConversationRuntimeViolation(
+                "SPECULATION_REQUEST_CONFLICT",
+                "one request cannot speculate twice or after its submission",
+                ErrorCode.CONFLICT,
+            )
+        if len(self._speculations) >= _MAX_SPECULATIONS:
+            raise AgentConversationRuntimeViolation(
+                "SPECULATION_CAPACITY_EXCEEDED",
+                "bounded speculative dialogue ledger is full for this runtime session",
+                ErrorCode.UNAVAILABLE,
+            )
+        execution = FormalAgentExecution(
+            request_id=request_id,
+            channel_id=channel_id,
+            internal_session_id=speculative_session_id(secrets.token_hex(8)),
+            commit=commit,
+            context=context,
+            allow_tools=allow_tools,
+        )
+        try:
+            candidate = SpeculativeDialogue(
+                facade=self._facade,
+                execution=execution,
+                on_settle=lambda settled: self._speculations.pop(settled.request_id, None),
+            )
+            candidate.start()
+        except SpeculativeDialogueViolation as error:
+            raise AgentConversationRuntimeViolation(
+                error.reason, str(error), error.code
+            ) from error
+        self._speculations[request_id] = candidate
+        return candidate
+
+    def speculation_snapshot(self) -> dict[str, object]:
+        return {
+            "pending": len(self._speculations),
+            "states": {key: value.state for key, value in self._speculations.items()},
+        }
+
     async def interrupt_generation(
         self, *, action_id: str, ref: ResponseRef
     ) -> AgentGenerationInterruption:
@@ -3814,6 +3932,8 @@ class AgentConversationRuntime:
                 AgentConversationShutdownStatus.CLOSED, "feature_disabled"
             )
         timeout = float(timeout_seconds)
+        for pending in list(self._speculations.values()):
+            await pending.discard("runtime_closing")
         deadline = asyncio.get_running_loop().time() + timeout
         self._close_requested = True
         try:
@@ -3937,10 +4057,13 @@ class AgentConversationRuntime:
         after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
         allow_tools: bool = True,
         superseded: AgentGenerationInterruption | None = None,
+        speculation: SpeculativeDialogue | None = None,
     ) -> None:
         reservation = entry.harness_reservation
         bridge_reservation = entry.bridge_reservation
-        facade = self._facade
+        # The reservation pinned the facade of this round: the real one, or
+        # the one that attaches the speculative candidate to it.
+        facade = entry.facade if entry.facade is not None else self._facade
         assert facade is not None
         response_ref: ResponseRef | None = None
         try:
@@ -3995,6 +4118,8 @@ class AgentConversationRuntime:
             history_task.add_done_callback(self._history_tasks.discard)
             entry.outcome.set_result(_AdmissionOutcome(handle=handle))
         except BaseException as error:  # noqa: BLE001
+            if speculation is not None and speculation.state == "pending":
+                await speculation.discard("admission_failed")
             # ``after_dispatch`` is the durable acceptance seam for unified
             # input.  It runs synchronously before this coroutine yields, so a
             # failure can still prove that neither the queued Bridge delivery
@@ -4047,6 +4172,7 @@ class AgentConversationRuntime:
         after_dispatch: Callable[[AgentConversationHandle], None] | None,
         allow_tools: bool,
         supersedes: ResponseRef | None = None,
+        speculation: SpeculativeDialogue | None = None,
     ) -> None:
         try:
             request_id = entry.harness_reservation.binding.request_id
@@ -4067,6 +4193,7 @@ class AgentConversationRuntime:
                 after_dispatch=after_dispatch,
                 allow_tools=allow_tools,
                 superseded=superseded,
+                speculation=speculation,
             )
         except BaseException as error:  # noqa: BLE001 - retained outcome truth
             try:

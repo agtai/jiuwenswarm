@@ -659,6 +659,45 @@ class P2ActivationLease:
             self._native_runtime_owner = owner
             return owner
 
+    async def begin_speculative_dialogue(
+        self,
+        binding: P2InteractionBinding,
+        *,
+        request_id: str,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        channel_id: str = "web",
+    ) -> object:
+        """Start the dialogue candidate for one committed turn of this activation.
+
+        Model work only: the retained runtime pauses the candidate's tools and
+        records nothing for it.  The later ``submit_committed_turn`` with the
+        same request either attaches the candidate or discards it.
+        """
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            if commit.interaction_id != binding.interaction_id:
+                raise _violation(
+                    "SPECULATION_SCOPE_MISMATCH",
+                    "a speculative candidate must belong to the activated interaction",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            begin = getattr(self._runtime, "begin_speculative_dialogue", None)
+            if not callable(begin):
+                raise _violation(
+                    "SPECULATION_UNAVAILABLE",
+                    "retained runtime cannot speculate",
+                    ErrorCode.UNAVAILABLE,
+                )
+            return begin(
+                request_id=request_id,
+                commit=commit,
+                context=context,
+                channel_id=channel_id,
+            )
+
     async def submit_committed_turn(
         self,
         binding: P2InteractionBinding,
@@ -673,6 +712,7 @@ class P2ActivationLease:
         after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
         allow_tools: bool = True,
         supersedes: ResponseRef | None = None,
+        speculation: object | None = None,
     ) -> AgentConversationHandle:
         """Forward one exact committed turn through the retained runtime owner.
 
@@ -711,6 +751,7 @@ class P2ActivationLease:
                 after_dispatch=after_dispatch,
                 allow_tools=allow_tools,
                 supersedes=supersedes,
+                speculation=speculation,
             )
             if not isinstance(outcome, AgentConversationHandle):
                 raise _violation(

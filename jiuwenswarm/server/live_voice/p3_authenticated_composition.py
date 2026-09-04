@@ -1535,6 +1535,25 @@ class P3AuthenticatedComposition:
             require_clean=require_clean,
         )
 
+    def count_scope_tasks(self, scope: ScopeRef) -> int:
+        """How many Tasks the formal Store holds for ``scope``.
+
+        A Store read only, without the authenticated authority ceremony of a
+        semantic read: the count gates the speculative dialogue candidate and
+        is never reported, so it must not add an audited authority read to
+        the turn. A dialogue answer over existing Tasks is grounded with
+        fresh Task facts after the decision, which is why the candidate
+        is only started when the scope holds none.
+        """
+
+        store = getattr(getattr(self, "_core", None), "store", None)
+        if not isinstance(store, SqliteTaskStore):
+            # Without the formal Store no Task can exist or be created for
+            # the scope (``production_intent_available`` is false), so a
+            # dialogue candidate has nothing to be grounded against.
+            return 0
+        return len(store.list_tasks(scope))
+
     async def resolve_production_semantics(
         self,
         *,

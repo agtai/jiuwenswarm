@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Tuple
 
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
+from jiuwenswarm.server.runtime.agent_adapter import formal_tool_gate
 from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     AgentAdapter,
     create_adapter,
@@ -1108,6 +1109,65 @@ class JiuWenSwarm:
             cleanup_session = getattr(adapter, "cleanup_session_adapter", None)
             if callable(cleanup_session):
                 await cleanup_session(background_request.session_id)
+
+    def _formal_session_rail(self, session_id: str) -> Any | None:
+        """The stream-event rail that gates ``session_id``'s tool calls, if it exists yet.
+
+        The formal stream runs on a per-session child adapter whose rail is
+        built when that child is created; before that there is no rail to
+        act on, and the gate registry carries the intent instead.
+        """
+
+        adapter = self._ensure_adapter(mode="agent")
+        session_adapters = getattr(adapter, "_session_adapters", None)
+        key_of = getattr(adapter, "_session_adapter_key", None)
+        holder = adapter
+        if isinstance(session_adapters, dict) and callable(key_of):
+            holder = session_adapters.get(key_of(session_id))
+            if holder is None:
+                return None
+        rail = getattr(holder, "_stream_event_rail", None)
+        if rail is None or not all(
+            callable(getattr(rail, name, None))
+            for name in ("pause_tools", "resume_tools", "abort")
+        ):
+            return None
+        return rail
+
+    def supports_speculative_dialogue(self) -> bool:
+        try:
+            adapter = self._ensure_adapter(mode="agent")
+        except Exception:  # noqa: BLE001 - an adapter that cannot be built has no gate
+            return False
+        return self.supports_formal_live_voice() and bool(
+            getattr(adapter, "supports_formal_tool_gate", False)
+        )
+
+    def pause_formal_tools(self, session_id: str) -> None:
+        """Hold every tool call of one formal session until it is released.
+
+        Recorded in the process-local gate before the session's stream
+        starts; the session adapter applies it on its rail right after it
+        opens the tool capture, ahead of the first model call. A rail that
+        already exists is paused immediately as well.
+        """
+
+        formal_tool_gate.request_pause(session_id)
+        rail = self._formal_session_rail(session_id)
+        if rail is not None:
+            rail.pause_tools(session_id)
+
+    def resume_formal_tools(self, session_id: str) -> None:
+        formal_tool_gate.release(session_id)
+        rail = self._formal_session_rail(session_id)
+        if rail is not None:
+            rail.resume_tools(session_id)
+
+    def abort_formal_tools(self, session_id: str) -> None:
+        formal_tool_gate.abort(session_id)
+        rail = self._formal_session_rail(session_id)
+        if rail is not None:
+            rail.abort(session_id)
 
     async def process_formal_live_voice_stream(
         self,
