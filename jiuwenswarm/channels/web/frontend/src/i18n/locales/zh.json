@@ -3495,7 +3495,8 @@
       "opTrash": "移入回收站",
       "opRestore": "从回收站恢复",
       "opUnshare": "取消共享",
-      "revertConfirm": "回读不符——再点一次确认回退"
+      "revertConfirm": "回读不符——再点一次确认回退",
+      "superseded": "已被回执 {{id}} 覆盖：要撤销这条，先撤销那条"
     },
     "usage": {
       "open": "使用审计",

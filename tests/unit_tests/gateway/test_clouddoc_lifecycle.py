@@ -412,3 +412,52 @@ async def test_deployment_rail_overrides_reach_the_chat_write_caps(tmp_path):
     edits = [{"old_string": f"第{w}句。", "new_string": f"改{w}。"} for w in ("一", "二", "三")]
     out = await kit.batch_edit(doc_id=DOC, edits=edits)
     assert not out["ok"] and "max_edits" in out["detail"] and "2" in out["detail"]
+
+
+# ------------------------------------------------------------------ supersession
+
+
+def test_a_later_write_marks_the_earlier_receipt_covered(tmp_path):
+    """A receipt whose ground a later write covered cannot be reverted -- the
+    platform refuses its inverse. The ledger can say so before the person clicks,
+    and says it without ever rewriting the receipt."""
+    s = ReceiptStore(tmp_path / "r.json")
+    first = s.begin(DOC, [{"old": "", "new": "A", "region": "p/i0", "old_grid": [[""]]}],
+                    highlight=False)
+    s.commit(first, revision_after=None)
+    second = s.begin(DOC, [{"old": "A", "new": "B", "region": "p/i0", "old_grid": [["A"]]}],
+                     highlight=False)
+    s.commit(second, revision_after=None)
+
+    rows = {r["receipt_id"]: r for r in s.list_for(DOC)}
+    assert rows[first]["superseded_by"] == second
+    assert "superseded_by" not in rows[second]  # the newest still stands
+    # The stored ledger is untouched: annotation happens on read.
+    import json as _json
+    raw = _json.loads((tmp_path / "r.json").read_text())["receipts"]
+    assert "superseded_by" not in raw[first]
+
+
+def test_a_text_edit_is_covered_when_a_later_edit_consumes_what_it_wrote(tmp_path):
+    s = ReceiptStore(tmp_path / "r.json")
+    first = s.begin(DOC, [{"old": "旧句", "new": "新句"}], highlight=False)
+    s.commit(first, revision_after=None)
+    second = s.begin(DOC, [{"old": "新句", "new": "更新的句"}], highlight=False)
+    s.commit(second, revision_after=None)
+    rows = {r["receipt_id"]: r for r in s.list_for(DOC)}
+    assert rows[first]["superseded_by"] == second
+
+
+def test_untouched_regions_and_settled_receipts_are_not_marked(tmp_path):
+    s = ReceiptStore(tmp_path / "r.json")
+    a = s.begin(DOC, [{"old": "", "new": "A", "region": "p/i0", "old_grid": [[""]]}], highlight=False)
+    s.commit(a, revision_after=None)
+    b = s.begin(DOC, [{"old": "", "new": "Z", "region": "p/i9", "old_grid": [[""]]}], highlight=False)
+    s.commit(b, revision_after=None)
+    aborted = s.begin(DOC, [{"old": "A", "new": "X", "region": "p/i0", "old_grid": [["A"]]}], highlight=False)
+    s.abort(aborted, reason="platform refused")
+    rows = {r["receipt_id"]: r for r in s.list_for(DOC)}
+    # Different regions do not cover each other, and a write that never landed
+    # covers nothing.
+    assert "superseded_by" not in rows[a]
+    assert "superseded_by" not in rows[b]

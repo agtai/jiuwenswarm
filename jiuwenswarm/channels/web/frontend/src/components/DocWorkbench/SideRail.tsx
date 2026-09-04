@@ -126,12 +126,17 @@ export function SideRail({
                   </span>
                 )}
                 {r.unverified_detail && <span className="text-[11px] text-amber-700">{r.unverified_detail}</span>}
+                {r.superseded_by && (
+                  <span className="text-[11px] text-text-muted" data-testid="doc-workbench-receipt-superseded">
+                    {t('docs.history.superseded', { id: r.superseded_by.slice(0, 8) })}
+                  </span>
+                )}
                 {r.status === 'reverted' && r.reverted_by && <span className="text-[11px] text-text-muted">{t('docs.history.revertedBy', { id: r.reverted_by.slice(0, 8) })}</span>}
                 <div className="flex items-center gap-3">
                   {!isLifecycle && (r.status === 'applied' || r.status === 'applied_unverified') && (
                     <a className="text-xs text-text-link hover:underline" onClick={() => onLocate(r)} data-testid="doc-workbench-receipt-locate">{t('docs.workbench.locate')}</a>
                   )}
-                  {(r.status === 'applied' || r.status === 'applied_unverified') && (
+                  {(r.status === 'applied' || r.status === 'applied_unverified') && !r.superseded_by && (
                     <button
                       type="button"
                       className="text-xs text-text-link hover:underline disabled:opacity-50"

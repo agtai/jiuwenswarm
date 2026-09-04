@@ -1218,7 +1218,7 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
                         {/* Both actions are offered only where they mean something: a
                             batch that never applied has nothing to undo, and one that
                             was not highlighted has nothing to clear. */}
-                        {(r.status === 'applied' || r.status === 'applied_unverified') && (
+                        {(r.status === 'applied' || r.status === 'applied_unverified') && !r.superseded_by && (
                           <button
                             data-testid="docs-panel-history-revert"
                             data-armed={armedRevertId === r.receipt_id || undefined}
@@ -1248,6 +1248,11 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
                         )}
                       </span>
                     </div>
+                    {r.superseded_by && (
+                      <p data-testid="docs-panel-history-superseded" className="mt-1 text-xs text-text-muted">
+                        {t('docs.history.superseded', { id: r.superseded_by.slice(0, 8) })}
+                      </p>
+                    )}
                     {r.status === 'reverted' && r.reverted_by && (
                       <p
                         data-testid="docs-panel-history-reverted-by"

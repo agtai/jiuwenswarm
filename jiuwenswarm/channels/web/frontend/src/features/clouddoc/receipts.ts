@@ -20,6 +20,10 @@ export type ReceiptRow = {
   source?: string;
   edits?: { old?: string; new?: string; region?: string; anchor?: string }[];
   op?: ReceiptOp;
+  /** A later write covered this one's ground, so its inverse no longer anchors
+   *  and reverting it would be refused at the platform. Derived at read time
+   *  from the ledger; the receipt itself is never rewritten. */
+  superseded_by?: string;
   subject?: { title?: string; email?: string; role?: string };
 };
 

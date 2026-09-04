@@ -3495,7 +3495,8 @@
       "opTrash": "moved to trash",
       "opRestore": "restored from trash",
       "opUnshare": "unshared from",
-      "revertConfirm": "Read-back differed — click again to confirm"
+      "revertConfirm": "Read-back differed — click again to confirm",
+      "superseded": "Covered by receipt {{id}} — undo that one first to undo this"
     },
     "usage": {
       "open": "Usage audit",

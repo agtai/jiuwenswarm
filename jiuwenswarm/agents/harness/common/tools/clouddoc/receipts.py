@@ -214,7 +214,7 @@ class ReceiptStore:
             r for r in self._load()["receipts"].values() if r["doc_id"] == doc_id
         ]
         recs.sort(key=lambda r: -r.get("ts", 0))
-        return recs[:limit]
+        return annotate_superseded(recs)[:limit]
 
     def pending(self) -> list[dict]:
         """Crash-window candidates for the startup sweep (IC-3)."""
@@ -260,3 +260,56 @@ class ReceiptStore:
 
         self._mutate(fn)
         return settled
+
+
+def _touched(receipt: dict) -> tuple[set, set]:
+    """What a receipt addressed: its regions, and the texts it left behind."""
+    regions, wrote = set(), set()
+    for e in receipt.get("edits") or []:
+        region = str((e or {}).get("region") or "")
+        if region:
+            regions.add(region)
+        new = str((e or {}).get("new") or "")
+        if new:
+            wrote.add(new)
+    return regions, wrote
+
+
+def annotate_superseded(receipts: list[dict]) -> list[dict]:
+    """Mark receipts a later write has covered, without touching the ledger.
+
+    A receipt records what it wrote and is never rewritten -- that immutability
+    is what revert stands on. But once a later write covers the same ground, the
+    older receipt's inverse no longer anchors, and revert refuses it at the
+    platform ("这些区域已不再是该回执写入的内容"). The reader deserves to know
+    that before clicking, not after, and the ledger alone can say it: a later
+    receipt naming the same region, or one whose own ``old`` text is exactly what
+    this receipt wrote, has covered it.
+
+    Read-time annotation on copies: ``superseded_by`` names the covering receipt.
+    The way to undo a covered receipt is to undo the covering one first, which is
+    what the surfaces tell the person.
+    """
+    out = [dict(r) for r in receipts]
+    by_time = sorted(out, key=lambda r: r.get("ts", 0))
+    for i, older in enumerate(by_time):
+        if older.get("status") not in ("applied", "applied_unverified"):
+            continue
+        regions, wrote = _touched(older)
+        if not regions and not wrote:
+            continue
+        for newer in by_time[i + 1:]:
+            if newer.get("status") not in ("applied", "applied_unverified", "reverted"):
+                continue
+            n_regions, _ = _touched(newer)
+            if regions and n_regions & regions:
+                older["superseded_by"] = newer.get("receipt_id", "")
+                break
+            # A text edit is covered when a later edit consumed what it wrote.
+            if not regions and any(
+                str((e or {}).get("old") or "") in wrote
+                for e in newer.get("edits") or []
+            ):
+                older["superseded_by"] = newer.get("receipt_id", "")
+                break
+    return out
