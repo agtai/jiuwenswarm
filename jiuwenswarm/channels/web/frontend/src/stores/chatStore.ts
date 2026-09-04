@@ -384,7 +384,11 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
               toolResultDedupDropped: 0,
             },
             taskQueue: [],
-            pendingQuestion: null,
+            // pendingQuestion 有意保留：重新挂载会话时，后端在 session.switch
+            // 上重推仍未回答的审批提示（parked ToolInterruptionState 重建），
+            // 而该推送可能赶在 history restore 的事件挂起窗口之前到达——若在这里
+            // 清空，restore 收尾会把刚重推的提示抹掉，工具调用继续无声等待。
+            // 提示的真正清空点仍是回答提交 / 新消息发送 / clearCurrentTurnData。
             pendingGoalObjectiveBubble: null,
           },
         },

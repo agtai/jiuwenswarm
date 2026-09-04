@@ -418,3 +418,70 @@ async def test_session_switch_republish_noop_for_other_session() -> None:
     server, pushed = _make_ws_server_for_republish(_parked_state(), "sess-a")
     assert await server._republish_pending_interrupt_ask("web", "sess-b") is False
     assert pushed == []
+
+
+# ── full republish chain: server push wire → gateway relay → robot_messages ──
+
+
+class _NullAgentClient:
+    async def send_request(self, env: Any) -> Any:  # pragma: no cover - unused
+        raise AssertionError("unexpected send_request")
+
+    async def send_request_stream(self, env: Any):  # pragma: no cover - unused
+        raise AssertionError("unexpected send_request_stream")
+        yield  # noqa: W0101
+
+
+@pytest.mark.asyncio
+async def test_republished_ask_reaches_web_channel_relay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The republish must survive the whole gateway leg, not just send_push.
+
+    Server side: ``_republish_pending_interrupt_ask`` encodes its message with
+    the real ``build_server_push_wire``. Gateway side: that exact wire dict is
+    fed to the real ``MessageHandler._handle_agent_server_push``, and the test
+    asserts a ``chat.ask_user_question`` Message routed to the parked session
+    lands in ``robot_messages`` — the web channel's input queue.
+    """
+    from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+    from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
+
+    session_id = "sess-republish-relay"
+    server, pushed = _make_ws_server_for_republish(_parked_state(), session_id)
+
+    wires: list[dict[str, Any]] = []
+    original_send_push = server.send_push
+
+    async def _send_push_and_encode(msg: dict[str, Any]) -> bool:
+        wires.append(build_server_push_wire(msg))
+        return await original_send_push(msg)
+
+    server.send_push = _send_push_and_encode
+    assert await server._republish_pending_interrupt_ask("web", session_id) is True
+    assert len(wires) == 1
+
+    saved_instance = MessageHandler._instance
+    MessageHandler._instance = None
+    try:
+        handler = MessageHandler(_NullAgentClient())
+        published: list[Any] = []
+
+        async def _capture(msg: Any) -> None:
+            published.append(msg)
+
+        monkeypatch.setattr(handler, "publish_robot_messages", _capture)
+        await handler._handle_agent_server_push(wires[0])
+    finally:
+        MessageHandler._instance = saved_instance
+
+    assert len(published) == 1, "gateway must relay the pushed ask to robot_messages"
+    out = published[0]
+    assert out.session_id == session_id
+    assert isinstance(out.payload, dict)
+    assert out.payload.get("event_type") == "chat.ask_user_question"
+    assert out.payload.get("request_id") == _TOOL_CALL_ID
+    # The frontend routes the prompt by payload.session_id; it must survive
+    # the wire round-trip so a freshly attached client can arm the prompt.
+    assert out.payload.get("session_id") == session_id
+    assert out.payload.get("questions"), "relayed prompt must stay answerable"
