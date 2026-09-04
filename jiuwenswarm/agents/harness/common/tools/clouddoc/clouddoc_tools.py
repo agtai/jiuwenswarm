@@ -2042,6 +2042,21 @@ class CloudDocToolkit:
             )
         return out
 
+    def _adopted_titles_line(self) -> str:
+        """The registered titles, embedded in the read card at registration time.
+
+        Mechanical routing evidence: the model keeps hunting the local disk for a
+        file-looking title unless the title itself is visible as a cloud document.
+        Capped so a large deployment does not bloat the card."""
+        from jiuwenswarm.agents.harness.common.tools.clouddoc.kinds import adopted_titles
+
+        titles = adopted_titles(self._watched_docs() or [])
+        if not titles:
+            return ""
+        shown = "、".join(f"《{x}》" for x in titles[:12])
+        more = f" 等 {len(titles)} 篇" if len(titles) > 12 else ""
+        return f"当前已纳管：{shown}{more}——这些名字都是云文档，直接用本工具族。"
+
     def get_tools(self) -> list[Tool]:
         def make(
             name: str,
@@ -2103,6 +2118,7 @@ class CloudDocToolkit:
                 "读取云文档正文，返回纯文本与 revision。"
                 "**用户提到的标题哪怕像文件名（带 .md、.pdf、「幻灯片」「表格」字样）也是云文档**："
                 "先用 clouddoc_list_documents 找到它，不要去本地文件系统里搜。"
+                + self._adopted_titles_line() +
                 "表格与幻灯片另返回 cells：每项 {at, text}，at 是单元格地址（如 "
                 "'Sheet1'!B7）或幻灯片元素地址；formula_cells 列出不可写入的公式格。"
                 "改表格前先看 cells 确定坐标——纯文本里的制表符与换行不表示行列。",

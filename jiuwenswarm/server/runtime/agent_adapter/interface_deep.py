@@ -1590,6 +1590,7 @@ class JiuWenSwarmDeepAdapter:
         self._permission_rail: Any = None
         self._avatar_rail: Any = None
         self._memory_forbidden_rail: Any = None
+        self._clouddoc_file_guard_rail: Any = None
         self._tool_cards = None
         self._evolution_watcher_tasks: set[asyncio.Task] = set()
         self._sys_operation = None
@@ -6868,6 +6869,21 @@ class JiuWenSwarmDeepAdapter:
             return None
 
     @staticmethod
+    def _build_clouddoc_file_guard_rail() -> Any | None:
+        """Build the guard that keeps generic file tools off co-scribe's own files."""
+        try:
+            from jiuwenswarm.agents.harness.common.rails.clouddoc_file_guard_rail import (
+                CloudDocFileGuardRail,
+            )
+
+            rail = CloudDocFileGuardRail()
+            logger.info("[JiuWenSwarmDeepAdapter] CloudDocFileGuardRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] CloudDocFileGuardRail create failed: %s", exc)
+            return None
+
+    @staticmethod
     def _build_model_anomaly_detection_rail(
         config_base: dict[str, Any] | None = None,
     ) -> ModelAnomalyDetectionRail | None:
@@ -7277,6 +7293,7 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
+            _RailBuildInfo("_clouddoc_file_guard_rail", self._build_clouddoc_file_guard_rail),
             _RailBuildInfo(
                 "_subagent_rail",
                 self._build_subagent_rail,
@@ -7547,6 +7564,8 @@ class JiuWenSwarmDeepAdapter:
             rails_list.append(self._avatar_rail)
         if self._memory_forbidden_rail is not None:
             rails_list.append(self._memory_forbidden_rail)
+        if self._clouddoc_file_guard_rail is not None:
+            rails_list.append(self._clouddoc_file_guard_rail)
         if self._permission_rail is not None:
             rails_list.append(self._permission_rail)
         if self._heartbeat_rail is not None:

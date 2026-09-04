@@ -81,3 +81,28 @@ def get_clouddoc_state_path() -> Path:
                 # empty -- forgetting consumed triggers would replay old comments.
                 return legacy
     return new_path
+
+
+def adopted_titles(doc_ids) -> list[str]:
+    """The registered documents' titles, straight from the panel's persisted
+    metadata -- synchronous and fail-soft like the priming above.
+
+    The tool cards put these in front of the model at routing time: a title
+    that looks like a filename ("README.md", a deck name) sent the model to
+    the local filesystem three campaigns in a row, because nothing in its
+    context said the name belongs to a cloud document. The titles themselves
+    are the signal; prose alone did not hold.
+    """
+    try:
+        import json as _json
+
+        data = _json.loads(get_clouddoc_state_path().read_text(encoding="utf-8"))
+        docs = data.get("docs") or {}
+        out: list[str] = []
+        for doc in doc_ids or []:
+            title = ((docs.get(str(doc)) or {}).get("panel_meta") or {}).get("title") or ""
+            if title:
+                out.append(str(title))
+        return out
+    except Exception:  # noqa: BLE001
+        return []
