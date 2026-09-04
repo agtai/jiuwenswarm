@@ -3352,7 +3352,19 @@ export class ProductP1VoiceRouteOwner {
   }
 
   #acceptCaptureFrame(frame: Readonly<CapturedAudioFrame>): void {
-    if (this.#closed || this.#closeRequested || this.#failureCleanupPromise !== null || ['cleanup_pending', 'failed', 'closed'].includes(this.#status)) return;
+    const ownedContinuationCleanup =
+      this.#status === 'cleanup_pending' &&
+      this.#reason === 'FORMAL_P1_CLEANUP_IN_PROGRESS' &&
+      this.#route !== null &&
+      this.#speech !== null;
+    if (
+      this.#closed ||
+      this.#closeRequested ||
+      this.#failureCleanupPromise !== null ||
+      this.#status === 'failed' ||
+      this.#status === 'closed' ||
+      (this.#status === 'cleanup_pending' && !ownedContinuationCleanup)
+    ) return;
     const captureDuringPlayout = this.#status === 'playing';
     if (!captureDuringPlayout) {
       let energy = 0;

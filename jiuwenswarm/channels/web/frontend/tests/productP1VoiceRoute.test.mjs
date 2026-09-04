@@ -1961,6 +1961,8 @@ test('formal P1 fails immediately when the current dedicated media transport clo
   const binding = serverBinding();
   const socket = new FakeSocket();
   const environment = audioEnvironment();
+  let retainedCaptureFrameHandler = null;
+  let failureCleanupFrameObservation = null;
   const owner = new ProductP1VoiceRouteOwner({
     enabled: true,
     expected_origin: 'https://voice.example.test',
@@ -1968,6 +1970,36 @@ test('formal P1 fails immediately when the current dedicated media transport clo
     socket_factory: () => {
       queueMicrotask(() => socket.open(binding));
       return socket;
+    },
+    on_status: status => {
+      if (
+        status !== 'cleanup_pending' ||
+        owner.status().reason !== 'MEDIA_TRANSPORT_CLOSED' ||
+        failureCleanupFrameObservation !== null
+      ) return;
+      assert.equal(typeof retainedCaptureFrameHandler, 'function');
+      const before = owner.captureDiagnostics();
+      const uplinkBinaryBefore = socket.sent.filter(
+        value => typeof value !== 'string',
+      ).length;
+      retainedCaptureFrameHandler({
+        data: {
+          kind: 'frame',
+          capture_generation: environment.worklet.captureGeneration,
+          seq: before.frame_count,
+          sample_rate_hz: 48_000,
+          sample_cursor: before.frame_count * 960,
+          context_time_s: before.frame_count * 0.02,
+          samples: new Float32Array(960).fill(0.25),
+        },
+      });
+      failureCleanupFrameObservation = {
+        frame_count_delta:
+          owner.captureDiagnostics().frame_count - before.frame_count,
+        uplink_binary_delta:
+          socket.sent.filter(value => typeof value !== 'string').length -
+          uplinkBinaryBefore,
+      };
     },
     request: async (method, params) => {
       calls.push([method, params]);
@@ -1997,6 +2029,8 @@ test('formal P1 fails immediately when the current dedicated media transport clo
     activation_id: 'activation-1',
     activation_generation: 7,
   });
+  retainedCaptureFrameHandler = environment.worklet.port.onmessage;
+  assert.equal(typeof retainedCaptureFrameHandler, 'function');
   socket.readyState = 3;
   socket.onclose?.({});
   for (let turn = 0; turn < 100 && owner.status().status !== 'failed'; turn += 1) {
@@ -2004,6 +2038,10 @@ test('formal P1 fails immediately when the current dedicated media transport clo
   }
 
   assert.deepEqual(owner.status(), { status: 'failed', reason: 'MEDIA_TRANSPORT_CLOSED' });
+  assert.deepEqual(failureCleanupFrameObservation, {
+    frame_count_delta: 0,
+    uplink_binary_delta: 0,
+  });
   assert.deepEqual(
     calls.map(([method]) => method),
     [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, PRODUCT_P1_MEDIA_CLOSE_METHOD]
@@ -3636,10 +3674,32 @@ test('formal P1 fences successor capture while retained close is in flight', asy
     activation_generation: 7,
   };
   await startCaptureWithFirstFrame(owner, environment, capture);
+  const retainedCaptureFrameHandler = environment.worklet.port.onmessage;
+  assert.equal(typeof retainedCaptureFrameHandler, 'function');
 
   const closing = owner.close();
-  await closeStarted;
   assert.equal(owner.status().status, 'cleanup_pending');
+  const frameCountWhileClosing = owner.captureDiagnostics().frame_count;
+  const uplinkBinaryCountWhileClosing = socket.sent.filter(
+    value => typeof value !== 'string',
+  ).length;
+  retainedCaptureFrameHandler({
+    data: {
+      kind: 'frame',
+      capture_generation: environment.worklet.captureGeneration,
+      seq: frameCountWhileClosing,
+      sample_rate_hz: 48_000,
+      sample_cursor: frameCountWhileClosing * 960,
+      context_time_s: frameCountWhileClosing * 0.02,
+      samples: new Float32Array(960).fill(0.25),
+    },
+  });
+  assert.equal(owner.captureDiagnostics().frame_count, frameCountWhileClosing);
+  assert.equal(
+    socket.sent.filter(value => typeof value !== 'string').length,
+    uplinkBinaryCountWhileClosing,
+  );
+  await closeStarted;
   await assert.rejects(owner.startCapture(capture), /cleanup is in progress/);
   releaseClose();
   await closing;
@@ -6073,11 +6133,29 @@ test('formal P1 barge-in reports cleanup pending until admitted successor synthe
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(journey.owner.status().status, 'cleanup_pending');
+  const captureBeforeOwnedCleanupFrame = journey.owner.captureDiagnostics();
+  const frameSeqDuringOwnedCleanup = captureBeforeOwnedCleanupFrame.frame_count;
+  sendNextFrameFromCurrentWorklet(
+    journey.environment,
+    frameSeqDuringOwnedCleanup,
+  );
   cancelGate.resolve();
   synthesisGate.resolve();
   assert.equal(await playOutcome, null);
   assert.equal((await secondOutcome) instanceof Error, true);
   assert.equal(journey.owner.status().status, 'capturing');
+  sendNextFrameFromCurrentWorklet(
+    journey.environment,
+    frameSeqDuringOwnedCleanup + 1,
+  );
+  for (let turn = 0; turn < 20; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(
+    journey.owner.captureDiagnostics().frame_count,
+    captureBeforeOwnedCleanupFrame.frame_count + 2,
+  );
   journey.environment.deferSourceEnds = false;
   journey.environment.contexts[0].releaseSourceEnds();
   await journey.owner.close();

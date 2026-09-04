@@ -1021,3 +1021,39 @@ def test_fenced_unit_after_stop_or_exit_must_be_discarded_without_submit(
         ),
     )
     assert violations(adopted) == ("C019-SPOKEN-BARGE-CONTINUATION-01",)
+
+
+def test_spoken_barge_owned_cleanup_cannot_drop_a_live_capture_frame() -> None:
+    state = apply_event(one_ahead_state(), LifecycleEvent.SPOKEN_BARGE_IN)
+    state = apply_event(state, LifecycleEvent.OWNED_CONTINUATION_CLEANUP_STARTED)
+    state = apply_event(
+        state, LifecycleEvent.CAPTURE_FRAME_DROPPED_DURING_OWNED_CLEANUP
+    )
+
+    assert state.capture_source_next_seq == 1
+    assert state.capture_owner_retained_next_seq == 0
+    assert "C019-CAPTURE-SEQUENCE-CONTINUITY-01" in violations(state)
+
+
+def test_spoken_barge_owned_cleanup_preserves_capture_sequence_until_submit() -> None:
+    state = apply_event(one_ahead_state(), LifecycleEvent.SPOKEN_BARGE_IN)
+    state = apply_event(state, LifecycleEvent.OWNED_CONTINUATION_CLEANUP_STARTED)
+    state = apply_event(state, LifecycleEvent.CAPTURE_FRAME_ACCEPTED)
+    state = apply_event(state, LifecycleEvent.OWNED_CONTINUATION_CLEANUP_SETTLED)
+    state = apply_event(state, LifecycleEvent.CAPTURE_FRAME_ACCEPTED)
+    state = apply_event(state, LifecycleEvent.CAPTURE_END_OF_TURN)
+    state = apply_event(state, LifecycleEvent.UNIFIED_SUBMIT)
+
+    assert state.capture_source_next_seq == 2
+    assert state.capture_owner_retained_next_seq == 2
+    assert violations(state) == ()
+
+
+def test_spoken_barge_owned_cleanup_cannot_restart_after_settlement() -> None:
+    state = apply_event(one_ahead_state(), LifecycleEvent.SPOKEN_BARGE_IN)
+    state = apply_event(state, LifecycleEvent.OWNED_CONTINUATION_CLEANUP_STARTED)
+    state = apply_event(state, LifecycleEvent.OWNED_CONTINUATION_CLEANUP_SETTLED)
+
+    assert LifecycleEvent.OWNED_CONTINUATION_CLEANUP_STARTED not in applicable_events(
+        state
+    )

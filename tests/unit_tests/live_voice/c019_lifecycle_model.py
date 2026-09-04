@@ -158,6 +158,12 @@ class LifecycleEvent(StrEnum):
     FENCED_UNIT_DELIVERED = "fenced_unit_delivered"
     FENCED_UNIT_DISCARDED = "fenced_unit_discarded"
     FENCED_UNIT_ADOPTED = "fenced_unit_adopted"
+    OWNED_CONTINUATION_CLEANUP_STARTED = "owned_continuation_cleanup_started"
+    CAPTURE_FRAME_ACCEPTED = "capture_frame_accepted"
+    CAPTURE_FRAME_DROPPED_DURING_OWNED_CLEANUP = (
+        "capture_frame_dropped_during_owned_cleanup"
+    )
+    OWNED_CONTINUATION_CLEANUP_SETTLED = "owned_continuation_cleanup_settled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +235,10 @@ class LifecycleState:
     fenced_preparation_pending: bool = False
     failure_cleanup: FailureCleanupSource = FailureCleanupSource.NONE
     fenced_unit_delivered: bool = False
+    owned_continuation_cleanup_pending: bool = False
+    owned_continuation_cleanup_settled: bool = False
+    capture_source_next_seq: int = 0
+    capture_owner_retained_next_seq: int = 0
 
 
 _PENDING_CONTROL_STATES = frozenset(
@@ -423,6 +433,21 @@ def applicable_events(state: LifecycleState) -> tuple[LifecycleEvent, ...]:
     if state.fenced_unit_delivered:
         events.append(LifecycleEvent.FENCED_UNIT_DISCARDED)
         events.append(LifecycleEvent.FENCED_UNIT_ADOPTED)
+    if (
+        state.spoken_barge_fenced
+        and state.interrupting_capture is InterruptingCaptureState.LIVE
+        and not state.owned_continuation_cleanup_pending
+        and not state.owned_continuation_cleanup_settled
+    ):
+        events.append(LifecycleEvent.OWNED_CONTINUATION_CLEANUP_STARTED)
+    if state.interrupting_capture is InterruptingCaptureState.LIVE:
+        events.append(LifecycleEvent.CAPTURE_FRAME_ACCEPTED)
+    if (
+        state.owned_continuation_cleanup_pending
+        and state.interrupting_capture is InterruptingCaptureState.LIVE
+    ):
+        events.append(LifecycleEvent.CAPTURE_FRAME_DROPPED_DURING_OWNED_CLEANUP)
+        events.append(LifecycleEvent.OWNED_CONTINUATION_CLEANUP_SETTLED)
     return tuple(events)
 
 
@@ -765,6 +790,25 @@ def apply_event(state: LifecycleState, event: LifecycleEvent) -> LifecycleState:
             fenced_unit_delivered=False,
             fenced_response_effects=state.fenced_response_effects + 1,
         )
+    if event is LifecycleEvent.OWNED_CONTINUATION_CLEANUP_STARTED:
+        return replace(state, owned_continuation_cleanup_pending=True)
+    if event is LifecycleEvent.CAPTURE_FRAME_ACCEPTED:
+        return replace(
+            state,
+            capture_source_next_seq=state.capture_source_next_seq + 1,
+            capture_owner_retained_next_seq=state.capture_owner_retained_next_seq + 1,
+        )
+    if event is LifecycleEvent.CAPTURE_FRAME_DROPPED_DURING_OWNED_CLEANUP:
+        return replace(
+            state,
+            capture_source_next_seq=state.capture_source_next_seq + 1,
+        )
+    if event is LifecycleEvent.OWNED_CONTINUATION_CLEANUP_SETTLED:
+        return replace(
+            state,
+            owned_continuation_cleanup_pending=False,
+            owned_continuation_cleanup_settled=True,
+        )
     if event is LifecycleEvent.CONTINUATION_SETTLEMENT_DEADLINE:
         # The bounded settlement window after a fence has elapsed: an end of
         # turn observed on the interrupting capture must have produced its one
@@ -894,6 +938,12 @@ def violations(state: LifecycleState) -> tuple[str, ...]:
         found.append("C019-IDENTITY-01")
     if state.failure_cleanup is FailureCleanupSource.FENCED:
         found.append("C019-FENCED-CALLBACK-01")
+    if (
+        state.spoken_barge_fenced
+        and state.failure_cleanup is not FailureCleanupSource.EXTERNAL
+        and state.capture_source_next_seq != state.capture_owner_retained_next_seq
+    ):
+        found.append("C019-CAPTURE-SEQUENCE-CONTINUITY-01")
     if (
         state.spoken_barge_fenced
         and (
