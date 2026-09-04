@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
 from jiuwenswarm.common.live_voice_capture_limits import MAX_CAPTURE_WAV_BYTES
-from jiuwenswarm.gateway.live_voice.audio_diagnostics import record_audio_diagnostic
+from jiuwenswarm.common.live_voice_audio_diagnostics import record_audio_diagnostic
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     ResponseRef,

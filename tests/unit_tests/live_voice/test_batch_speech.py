@@ -1621,6 +1621,7 @@ async def test_identity_response_rebuild_drops_stale_body_headers() -> None:
 
     response = await provider._post(
         "/audio/speech",
+        operation_id="operation-header-test", operation=SYNTHESIZE_OPERATION,
         json_payload={"model": "tts-model"},
         max_response_bytes=1024,
     )

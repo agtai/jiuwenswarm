@@ -29,6 +29,8 @@ from urllib.parse import urlparse
 import httpx
 
 from jiuwenswarm.common.live_voice_capture_limits import MAX_CAPTURE_WAV_BYTES
+from jiuwenswarm.common.live_voice_audio_diagnostics import record_audio_diagnostic
+from jiuwenswarm.server.live_voice.speech_http_diagnostics import SpeechHttpDiagnostics
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,
     Assurance,
@@ -727,6 +729,7 @@ class OpenAICompatibleBatchSpeechProvider:
             data["language"] = language
         response = await self._post(
             "/audio/transcriptions",
+            operation_id=request.operation_id, operation=RECOGNIZE_OPERATION,
             data=data,
             files={"file": ("capture.wav", request.audio_wav, "audio/wav")},
             max_response_bytes=256 * 1024,
@@ -776,6 +779,7 @@ class OpenAICompatibleBatchSpeechProvider:
             )
         response = await self._post(
             "/audio/speech",
+            operation_id=request.operation_id, operation=SYNTHESIZE_OPERATION,
             json_payload={
                 "model": model,
                 "voice": voice,
@@ -798,6 +802,8 @@ class OpenAICompatibleBatchSpeechProvider:
         self,
         path: str,
         *,
+        operation_id: str,
+        operation: str,
         data: dict[str, str] | None = None,
         files: dict[str, tuple[str, bytes, str]] | None = None,
         json_payload: dict[str, str] | None = None,
@@ -807,6 +813,8 @@ class OpenAICompatibleBatchSpeechProvider:
             "Accept-Encoding": "identity",
             "Authorization": f"Bearer {self._config.api_key}",
         }
+        diagnostic = SpeechHttpDiagnostics(operation_id, operation)
+        diagnostic.record("batch_http_started")
         try:
             async with self._client_factory() as client:
                 async with client.stream(
@@ -816,8 +824,10 @@ class OpenAICompatibleBatchSpeechProvider:
                     data=data,
                     files=files,
                     json=json_payload,
+                    extensions={"trace": diagnostic.trace},
                 ) as streamed:
                     status_code = streamed.status_code
+                    diagnostic.record("batch_http_headers", status_code=status_code)
                     self._raise_provider_status(status_code)
                     content_encoding = streamed.headers.get("content-encoding")
                     if (
@@ -846,16 +856,27 @@ class OpenAICompatibleBatchSpeechProvider:
                                 "speech Provider response exceeds the package limit",
                             )
                         chunks.append(chunk)
+                    diagnostic.record("batch_http_body_complete", response_bytes=response_size)
         except httpx.TimeoutException as exc:
+            timeout_kind = next((label for cls, label in (
+                (httpx.ConnectTimeout, "connect"), (httpx.ReadTimeout, "read"),
+                (httpx.WriteTimeout, "write"), (httpx.PoolTimeout, "pool"),
+            ) if isinstance(exc, cls)), "other")
+            diagnostic.record("batch_http_timeout", timeout_kind=timeout_kind)
             raise _fail(
                 ErrorCode.TIMEOUT,
                 "SPEECH_PROVIDER_TIMEOUT",
                 "speech Provider timed out",
                 retriable=True,
             ) from exc
+        except asyncio.CancelledError:
+            diagnostic.record("batch_http_cancelled")
+            raise
         except BatchSpeechError:
+            diagnostic.record("batch_http_rejected")
             raise
         except httpx.RequestError as exc:
+            diagnostic.record("batch_http_transport_failed")
             raise _fail(
                 ErrorCode.UNAVAILABLE,
                 "SPEECH_PROVIDER_UNAVAILABLE",
@@ -1034,6 +1055,21 @@ class _OperationEntry:
     fence_code: ErrorCode | None = None
     fence_reason: str | None = None
     fence_event: asyncio.Event = field(default_factory=asyncio.Event)
+    diagnostic_operation_id: str = ""
+    diagnostic_started_at: float | None = None
+
+
+def _diagnose_batch(entry: _OperationEntry, event: str, **fields: object) -> None:
+    try:
+        record_audio_diagnostic(event, session_id=entry.scope.session_id,
+            correlation_id=entry.correlation_id, operation_id=entry.diagnostic_operation_id,
+            operation=entry.kind,
+            input_fenced=entry.fence_code is not None,
+            elapsed_ms=(time.monotonic() - entry.diagnostic_started_at) * 1000
+                if entry.diagnostic_started_at is not None else None,
+            **fields)
+    except Exception:
+        pass
 
 
 def _parse_common(
@@ -2191,6 +2227,9 @@ class FormalBatchSpeechService:
         runner: Callable[[], Awaitable[dict[str, object]]],
     ) -> dict[str, object]:
         entry = self._operations[(scope, operation_id)]
+        entry.diagnostic_operation_id = operation_id
+        entry.diagnostic_started_at = time.monotonic()
+        _diagnose_batch(entry, "batch_operation_started", timeout_ms=timeout_ms)
         if entry.fence_code is not None:
             return _result_envelope(
                 request_id, operation_id, error=self._fence_error(entry)
@@ -2236,6 +2275,7 @@ class FormalBatchSpeechService:
                 request_id, operation_id, error=self._fence_error(entry)
             )
         except BatchSpeechError as exc:
+            _diagnose_batch(entry, "batch_operation_failed", failure_code=exc.error.reason)
             return _result_envelope(request_id, operation_id, error=exc.error)
         except SpeechPortViolation as exc:
             code = (
@@ -2283,6 +2323,7 @@ class FormalBatchSpeechService:
             self._record_worker_terminal(entry, cancelled=False)
             raise
         self._record_worker_terminal(entry, cancelled=False)
+        _diagnose_batch(entry, "batch_worker_complete")
         return result
 
     def _record_worker_terminal(
@@ -2350,6 +2391,8 @@ class FormalBatchSpeechService:
         if deadline_handle is not None:
             deadline_handle.cancel()
         entry.fence_event.set()
+        _diagnose_batch(entry,
+            "batch_operation_deadline" if code is ErrorCode.TIMEOUT else "batch_operation_cancelled")
         worker = entry.worker_task
         if cancel_worker and worker is not None and not worker.done():
             worker.cancel()
@@ -2509,6 +2552,13 @@ class FormalBatchSpeechService:
         session = recognition.start(request.capture_id, SpeechMode.BATCH)
         started = self._monotonic()
         try:
+            try:
+                record_audio_diagnostic("batch_recognition_provider_started",
+                    session_id=request.scope.session_id, correlation_id=request.correlation_id,
+                    operation_id=request.operation_id, capture_id=request.capture_id,
+                    generation=request.capture_generation)
+            except Exception:
+                pass
             provider_result = await self._provider.recognize(
                 ProviderRecognitionRequest(
                     request.operation_id, request.audio_wav, request.locale

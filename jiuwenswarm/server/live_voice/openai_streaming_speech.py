@@ -30,6 +30,9 @@ from typing import Any, Protocol, TypeVar
 
 import httpx
 
+from jiuwenswarm.common.live_voice_audio_diagnostics import (
+    FAILURE_CODES, WIRE_EVENTS, record_audio_diagnostic,
+)
 from jiuwenswarm.server.live_voice.batch_speech import (
     SPEECH_API_BASE_ENV,
     SPEECH_API_KEY_ENV,
@@ -659,6 +662,10 @@ class _RecognitionSession:
     terminal: bool = False
     failure: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     failure_reason: str = "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE"
+    diagnostic_wire_seq: int = 0
+    diagnostic_event: str = "unparsed"
+    diagnostic_item_matches_speech: bool | None = None
+    diagnostic_item_matches_committed: bool | None = None
 
     @property
     def ref(self) -> RecognitionStreamRef:
@@ -1038,7 +1045,12 @@ class OpenAIStreamingSpeechProvider:
         failure: BaseException | None = None
         try:
             session = self._require_recognition(frame.ref)
+            lock_started = time.monotonic()
             async with session.send_lock:
+                lock_wait_ms = (time.monotonic() - lock_started) * 1000
+                if frame.seq % 50 == 0 or lock_wait_ms >= 100:
+                    self._diagnose_recognition(session, "adapter_send_lock_acquired",
+                        frame_seq=frame.seq, lock_wait_ms=lock_wait_ms)
                 if session.input_fenced:
                     # The route consumes the typed STOPPED boundary on its own
                     # task. A frame already queued in that handoff window must
@@ -1057,6 +1069,7 @@ class OpenAIStreamingSpeechProvider:
                         "RECOGNITION_OUTPUT_FENCED", "recognition stream is fenced"
                     )
                 self._conformance.accept_audio_frame(frame)
+                encode_started = time.monotonic()
                 samples = _decode_f32le(frame.pcm_f32le)
                 encoded = _encode_s16le(session.resampler.feed(samples))
                 session.source_cursor = frame.sample_cursor + frame.sample_count
@@ -1070,6 +1083,9 @@ class OpenAIStreamingSpeechProvider:
                                     "audio": base64.b64encode(encoded).decode("ascii"),
                                 }
                             ),
+                            frame_seq=frame.seq,
+                            lock_wait_ms=lock_wait_ms,
+                            encode_started=encode_started,
                         )
                     except BaseException as exc:
                         transport_failure = _safe_transport_exception(exc)
@@ -1377,6 +1393,9 @@ class OpenAIStreamingSpeechProvider:
         raw: str | bytes | None = None
         try:
             while not session.closing and not session.terminal:
+                session.diagnostic_event = "receive_wait"
+                session.diagnostic_item_matches_speech = None
+                session.diagnostic_item_matches_committed = None
                 remaining = session.deadline - self._monotonic()
                 if remaining <= 0:
                     raise TimeoutError("recognition stream timed out")
@@ -1386,6 +1405,7 @@ class OpenAIStreamingSpeechProvider:
                 # failure unobserved and outside the cleanup owner.
                 async with asyncio.timeout(remaining):
                     raw = await session.socket.recv()
+                session.diagnostic_event = "unparsed"
                 terminal = await self._consume_recognition_message(session, raw)
                 raw = None
                 if terminal:
@@ -1394,6 +1414,12 @@ class OpenAIStreamingSpeechProvider:
             failure = _safe_boundary_exception(exc)
         finally:
             raw = None
+        if failure is not None:
+            reason = ("cancelled" if isinstance(failure, asyncio.CancelledError)
+                else "SPEECH_PROVIDER_TIMEOUT" if isinstance(failure, TimeoutError)
+                else getattr(failure, "reason", "other"))
+            self._diagnose_recognition(session, "adapter_receive_failed",
+                failure_code=reason if reason in FAILURE_CODES else "other")
         if isinstance(failure, asyncio.CancelledError):
             await self._close_socket(session.socket)
             raise failure
@@ -1449,6 +1475,14 @@ class OpenAIStreamingSpeechProvider:
             )
         event = _json_object(raw)
         kind = event.get("type")
+        session.diagnostic_event = kind if isinstance(kind, str) and kind in WIRE_EVENTS else "other"
+        # Keep only equality facts, never Provider item IDs or event payloads.
+        session.diagnostic_item_matches_speech = (
+            event.get("item_id") == session.speech_item_id if session.speech_item_id is not None else None)
+        session.diagnostic_item_matches_committed = (
+            event.get("item_id") == session.item_id if session.item_id is not None else None)
+        if kind != "conversation.item.input_audio_transcription.delta":
+            self._diagnose_recognition(session, "adapter_event_received")
         if kind in {"session.updated", "transcription_session.updated"}:
             _validate_transcription_session(
                 event,
@@ -1484,7 +1518,11 @@ class OpenAIStreamingSpeechProvider:
         if kind == "input_audio_buffer.speech_stopped":
             item_id = _safe_label(event.get("item_id"), "item_id")
             end_ms = _provider_milliseconds(event.get("audio_end_ms"), "audio_end_ms")
+            stop_started = time.monotonic()
+            self._diagnose_recognition(session, "adapter_stop_received", provider_end_ms=end_ms)
             async with session.send_lock:
+                self._diagnose_recognition(session, "adapter_stop_lock_acquired",
+                    lock_wait_ms=(time.monotonic() - stop_started) * 1000)
                 if (
                     session.request.turn_detection.mode
                     is not RecognitionTurnDetectionMode.SERVER_VAD
@@ -1511,6 +1549,8 @@ class OpenAIStreamingSpeechProvider:
                 item_id,
                 provider_end_ms=end_ms,
             )
+            self._diagnose_recognition(session, "adapter_stop_published",
+                elapsed_ms=(time.monotonic() - stop_started) * 1000)
             return False
         if kind == "input_audio_buffer.committed":
             item_id = _safe_label(event.get("item_id"), "item_id")
@@ -2056,12 +2096,61 @@ class OpenAIStreamingSpeechProvider:
         return socket
 
     async def _send_recognition_wire(
-        self, session: _RecognitionSession, message: str
+        self, session: _RecognitionSession, message: str, *,
+        frame_seq: int | None = None, lock_wait_ms: float | None = None,
+        encode_started: float | None = None,
     ) -> None:
+        # Includes resampling, PCM/base64 encoding and JSON serialization in the caller.
+        encode_ms = (time.monotonic() - encode_started) * 1000 if encode_started is not None else None
         remaining = session.deadline - self._monotonic()
         if remaining <= 0:
             raise TimeoutError("recognition stream timed out before send")
-        await asyncio.wait_for(session.socket.send(message), timeout=remaining)
+        session.diagnostic_wire_seq += 1
+        wire_seq = session.diagnostic_wire_seq
+        sampled = frame_seq is None or frame_seq % 50 == 0
+        started = time.monotonic()
+        outcome = "failed"
+        if sampled:
+            self._diagnose_recognition(session, "adapter_socket_send_started",
+                wire_seq=wire_seq, frame_seq=frame_seq)
+        try:
+            await asyncio.wait_for(session.socket.send(message), timeout=remaining)
+            outcome = "complete"
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except TimeoutError:
+            outcome = "timeout"
+            raise
+        finally:
+            elapsed_ms = (time.monotonic() - started) * 1000
+            if (sampled or elapsed_ms >= 100 or (lock_wait_ms or 0) >= 100
+                    or (encode_ms or 0) >= 100 or outcome != "complete"):
+                self._diagnose_recognition(session, "adapter_socket_send_settled",
+                    wire_seq=wire_seq, frame_seq=frame_seq, wire_bytes=len(message),
+                    socket_send_ms=elapsed_ms, lock_wait_ms=lock_wait_ms,
+                    encode_ms=encode_ms, outcome=outcome)
+
+    @staticmethod
+    def _diagnose_recognition(session: _RecognitionSession, event: str, **fields: object) -> None:
+        try:
+            record_audio_diagnostic(event,
+                media_session_id=session.ref.session_id,
+                capture_id=session.ref.capture.capture_id,
+                generation=session.ref.capture.capture_generation,
+                wire_event=session.diagnostic_event,
+                commit_owner=session.commit_owner.value,
+                input_fenced=session.input_fenced, committed=session.committed,
+                closing=session.closing, terminal=session.terminal,
+                speech_started=session.speech_start_ms is not None,
+                speech_stopped=session.speech_end_ms is not None,
+                has_item=session.item_id is not None,
+                item_matches_speech=session.diagnostic_item_matches_speech,
+                item_matches_committed=session.diagnostic_item_matches_committed,
+                event_seq=session.event_seq, event_queue_frames=session.events.qsize(),
+                **fields)
+        except Exception:
+            pass
 
     async def _retire_recognition(self, session: _RecognitionSession) -> None:
         key = _recognition_key(session.ref)

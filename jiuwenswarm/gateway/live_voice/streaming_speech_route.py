@@ -21,7 +21,7 @@ from enum import StrEnum
 from typing import Any, Awaitable, Callable, TypeVar
 
 from jiuwenswarm.common.live_voice_capture_limits import MAX_CAPTURE_DURATION_SECONDS
-from jiuwenswarm.gateway.live_voice.audio_diagnostics import record_audio_diagnostic
+from jiuwenswarm.common.live_voice_audio_diagnostics import record_audio_diagnostic
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAudioFrame,
     MediaAuthorityBinding,

@@ -73,35 +73,37 @@ repeat the old whole-project audit solely to resume a bounded task.
 
 ## Current execution packet
 
-### Spoken fallback, audio diagnosis and local redeployment
+### Speech failure precision diagnostics and local redeployment
 
-The current user request repairs spoken-revision failure fallback and instruments
-the roughly ten-second endpoint delay and ineffective playback-time interruption,
-then redeploys the existing local rehearsal service. Both changed boundaries are
-Tier 2. See [scoped repair evidence](evidence/SPOKEN_FALLBACK_AND_AUDIO_DIAGNOSTICS_20260904.md)
-for the intended behavior, owned surfaces, exact checks and diagnosis limits.
+The user authorized finer diagnostics after the latest two-turn acceptance run
+hit streaming protocol failure and unsuccessful batch fallback. This is a Tier 2
+Speech/Observability packet, not a speculative latency or protocol fix. See the
+[precision diagnostic evidence](evidence/SPEECH_FAILURE_DIAGNOSTICS_20260904.md).
 
-- Failed required revision now returns a truthful short localized notice. Keep
-  the existing fact-check, tool-free invocation and timeout budgets; do not retry
-  Agent/tools, truncate away qualifications or claim the draft was saved.
-- Bounded passive diagnostics join current media/capture/response identities
-  across capture energy/progress, send/ACK/queue, Provider speech events, playout
-  scheduling and interruption gates. They neither store content nor authorize
-  a new VAD/interruption path. Scheduling is not physical audibility evidence.
-- Focused regressions pass. Five selected mounted UI failures also occur on the
-  unchanged baseline; no new failure appeared in that comparison. Independent
-  review remains unavailable because of the local CLI/configuration mismatch;
-  complete manual diff review is a substitute with an explicit limitation.
-- The requested controlled local deployment is complete, preserving current
-  project/data/configuration and including the committed 800 ms VAD / 250 ms
-  startup changes. Actual served diagnostics, process settings, real TTS→STT
-  and identity/claim rejection probes passed. This is not microphone/speaker
-  or real-model spoken-fallback acceptance.
-- Historical logs place the long wait before EOT and voice interruption failure
-  before the barge-in RPC. They cannot uniquely identify capture, transport,
-  Provider/acoustics or UI gating. New physical reproduction remains required.
-- No sentence-level TTS pipeline, Task policy, protocol/schema, arithmetic
-  algorithm, credential/provider change, public deployment or remote push.
+- Existing evidence confirms Provider-send accumulation and failure before a
+  second final transcript. It does not identify the specific protocol trigger,
+  timeout stage or the physical end-of-speech delay. Keep VAD 800 ms and startup
+  lead 250 ms unchanged while reproducing.
+- Passive diagnostics now separate send-lock, encoding and Socket send-await;
+  parsed stop receipt, lock acquisition and publication; allowlisted protocol
+  subcodes/state; HTTP connect/TLS/upload/response stages and outer deadline.
+  The shared bounded sink stores no speech, raw Provider events or secrets.
+- Focused and affected backend checks pass; complete manual diff review is the
+  recorded substitute for an independent review that the incompatible local
+  CLI could not run. Physical two-turn reproduction and browser export remain
+  required; ineffective interruption and the misleading `activation` label are
+  not claimed fixed by this diagnostic-only packet.
+- Deployment is being prepared with the user's current isolated configuration.
+  It now contains `deepseek-v4-flash`; a separate tool-free configured-model
+  probe passed. Correction to the previous deployment claim: project/data and
+  Speech credentials were retained, but the selected isolated dialogue config
+  was then a template. Speech-only probes did not validate the dialogue model.
+- The earlier truthful spoken-revision failure notice and browser
+  capture/playout/interruption diagnostics remain included. Their
+  [evidence and limits](evidence/SPOKEN_FALLBACK_AND_AUDIO_DIAGNOSTICS_20260904.md)
+  remain applicable, including five pre-existing selected UI failures.
+- No VAD/interruption policy, timeout increase, sentence TTS pipeline, Task
+  behavior, protocol/schema, credential rewrite, public deployment or push.
 
 ### Retained consequences of earlier repairs
 

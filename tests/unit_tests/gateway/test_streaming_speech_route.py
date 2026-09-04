@@ -371,7 +371,7 @@ async def test_server_vad_eot_fences_frames_and_finish_coalesces_provider_commit
     None
 ):
     provider = _ServerVadProvider()
-    from jiuwenswarm.gateway.live_voice import audio_diagnostics
+    from jiuwenswarm.common import live_voice_audio_diagnostics as audio_diagnostics
     diagnostic_lines = []
     monkeypatch.setattr(audio_diagnostics._LOGGER, "info", lambda template, *args: diagnostic_lines.append(template % args))
     owner = StreamingRecognitionRouteOwner(
@@ -453,7 +453,7 @@ async def test_server_vad_eot_fences_frames_and_finish_coalesces_provider_commit
     assert provider.commit_count == 1
     assert provider.cancel_count == 0
     await owner.close()
-    from jiuwenswarm.gateway.live_voice import audio_diagnostics
+    from jiuwenswarm.common import live_voice_audio_diagnostics as audio_diagnostics
     await asyncio.to_thread(audio_diagnostics._QUEUE.join)
     facts = [json.loads(line.split(" ", 1)[1]) for line in diagnostic_lines
              if line.startswith("live_voice_audio_diagnostic ")]
