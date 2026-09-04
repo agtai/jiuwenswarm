@@ -72,8 +72,20 @@ SCENARIOS: dict[str, dict[str, str]] = {
         "expect": "tool result -> spoken revision (tool trigger)",
     },
     "task": {
-        "text": "帮我创建一个后台任务，任务内容是整理这个项目的 README 文件。",
-        "expect": "task.create -> semantic + delegation authorization checks",
+        # One distinct request per round: the delegation review refuses a
+        # repeated request as a duplicate and answers it as a foreground
+        # dialogue turn, and a task that writes into the project dirties the
+        # worktree so the next creation is rejected. Read-only analyses keep
+        # every round a genuine creation turn.
+        "text": "帮我创建一个后台任务，统计这个项目里一共有多少个 Python 文件。",
+        "texts": [
+            "帮我创建一个后台任务，统计这个项目里一共有多少个 Python 文件。",
+            "帮我创建一个后台任务，找出这个项目里最大的三个文件并告诉我文件名。",
+            "帮我创建一个后台任务，数一数这个项目的 README 有多少行。",
+            "帮我创建一个后台任务，列出这个项目里所有的 Markdown 文件名。",
+            "帮我创建一个后台任务，统计 scripts 目录下一共有多少个文件。",
+        ],
+        "expect": "task.create each round -> semantic resolution (+ any delegation review) before the spoken confirmation",
     },
 }
 
@@ -455,7 +467,15 @@ async def main_async(args: argparse.Namespace) -> int:
     out.mkdir(parents=True, exist_ok=True)
     scenarios = [s for s in args.scenarios.split(",") if s in SCENARIOS]
     print(f"synthesizing {len(scenarios)} fixtures ...", flush=True)
-    audio = await synthesize_fixtures({k: SCENARIOS[k]["text"] for k in scenarios})
+    fixture_texts: dict[str, str] = {}
+    for k in scenarios:
+        variants = SCENARIOS[k].get("texts")
+        if variants:
+            for i, text in enumerate(variants):
+                fixture_texts[f"{k}#{i}"] = text
+        else:
+            fixture_texts[k] = SCENARIOS[k]["text"]
+    audio = await synthesize_fixtures(fixture_texts)
     frames_by = {k: _wav_to_frames(v) for k, v in audio.items()}
     for k, (frames, last) in frames_by.items():
         print(f"  {k}: {len(frames)} frames, speech ends at frame {last} ({last * 20 / 1000:.2f}s)", flush=True)
@@ -473,8 +493,10 @@ async def main_async(args: argparse.Namespace) -> int:
         results: list[dict] = []
         with rounds_path.open("a", encoding="utf-8") as sink:
             for scenario in scenarios:
-                frames, last = frames_by[scenario]
+                variants = SCENARIOS[scenario].get("texts")
                 for index in range(args.rounds):
+                    key = f"{scenario}#{index % len(variants)}" if variants else scenario
+                    frames, last = frames_by[key]
                     started = time.perf_counter()
                     try:
                         r = await one_round(client, session_id, scenario, frames, last, index, log)
