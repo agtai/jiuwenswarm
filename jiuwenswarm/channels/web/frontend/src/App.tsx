@@ -3051,7 +3051,12 @@ function AppContent({
   // The workbench takes the whole chat view: the conversation sidebar (the "工作"
   // column) folds away with it, as the owner's layout has only the icon rail on
   // the left; 退出编辑 brings the sidebar back.
-  const docWorkbenchShown = docWorkbenchOpen && !showConversationNotFound && !!sessionId && sessionId !== NEW_CONVERSATION_ID;
+  // A new conversation counts: clicking "open in the workbench" from the new-task
+  // home used to hide the workbench silently, which reads as a dead click. The
+  // composer below the document is the session's own, and sending the first
+  // message from there promotes the new conversation exactly as the chat view
+  // does, so the workbench stays up across the promotion (verified live).
+  const docWorkbenchShown = docWorkbenchOpen && !showConversationNotFound && !!sessionId;
 const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFound && !shouldFullscreen;
   const isNewSessionPromotion = Boolean(sessionId && sessionIdsCreatedInThisPageRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
