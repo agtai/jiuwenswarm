@@ -9,7 +9,7 @@ from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
 from jiuwenswarm.server.live_voice.product_composition_registry import AgentServerProductCompositionRegistry
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextEntry, FormalContextSnapshot, finalize_spoken_answer,
-    spoken_revision_reason, spoken_revision_request_options,
+    spoken_revision_failure_notice, spoken_revision_reason, spoken_revision_request_options,
 )
 
 
@@ -53,7 +53,7 @@ async def test_spoken_revision_is_tool_free_and_does_not_change_source():
 
 
 @pytest.mark.asyncio
-async def test_short_dialogue_skips_revision_and_bad_revision_does_not_lose_answer():
+async def test_short_dialogue_skips_revision_and_bad_revision_does_not_release_draft():
     calls = []
     async def invoke(**kwargs):
         calls.append(kwargs)
@@ -64,8 +64,11 @@ async def test_short_dialogue_skips_revision_and_bad_revision_does_not_lose_answ
     # A short answer with tool results but nothing to recompute is already speakable.
     assert await finalize_spoken_answer(model, envelope="q", candidate="answer", tool_results=[{}]) == "answer"
     assert not calls
-    # Numbers backed by tool results still go through the bounded verification.
-    assert await finalize_spoken_answer(model, envelope="q", candidate="共 3 天", tool_results=[{}]) == "共 3 天"
+    # Numbers backed by tool results still go through the bounded verification;
+    # when it fails, the unverified figures are not spoken, and nothing is retried.
+    spoken = await finalize_spoken_answer(model, envelope="q", candidate="共 3 天", tool_results=[{}])
+    assert spoken == spoken_revision_failure_notice("arithmetic", "共 3 天")
+    assert "3 天" not in spoken
     assert len(calls) == 1
 
 

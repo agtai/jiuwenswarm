@@ -1829,3 +1829,35 @@
   [bounded lifecycle evidence](../evidence/SPEECH_LIFECYCLE_REPAIR_20260904.md).
   Deployment, Provider/account changes and remote updates remain excluded by the
   user's instructions; source completion does not update the running service.
+
+
+## D-114 A failed spoken revision never releases the draft
+
+- Context: `finalize_spoken_answer` runs two bounded, tool-free revisions
+  before a formal `chat.final` is spoken: a length revision for drafts over
+  the 200-character spoken budget and an arithmetic revision for tool-backed
+  time/cost figures. Until now both shared one degradation: on timeout or any
+  exception the unrevised draft was handed to TTS. The 2026-09-03 baseline
+  showed the worst combination in 3 of 15 turns: the user waited out the
+  12 s budget and then heard the whole long answer. Shortening budgets and
+  narrowing triggers (P0-1) lowered the frequency; it did not fix the path.
+- Decision: a failed required revision produces only a short, truthful
+  failure notice in the language of the draft. The draft is not spoken, not
+  shown and not recorded; a length revision that did not finish leaves an
+  answer the spoken budget already rejected, and an arithmetic revision that
+  did not finish leaves figures nobody recomputed, possibly wrong from the
+  first sentence, so truncating the draft is not an acceptable degradation
+  either. The failure is logged with its reason and the dropped draft length,
+  never with user content.
+- Boundaries: the revision is not retried and the Agent or its tools are
+  never rerun; cancellation keeps propagating (`asyncio.CancelledError` is
+  re-raised, never converted into a notice). Showing the draft marked as an
+  unverified draft would need a presentation state the unit model does not
+  have and is not introduced. The 200/6000-character validation, the
+  arithmetic trigger and the budgets are unchanged.
+- Verification: `tests/unit_tests/live_voice/test_spoken_revision_failure.py`
+  covers timeout on both paths, provider exception, five invalid responses
+  (non-JSON, empty, over budget, extra keys, tool calls), cancellation,
+  single invocation and the success path. Three reverse mutants were killed:
+  releasing the draft on failure (9 red), swallowing cancellation (1 red),
+  retrying once on failure (9 red).

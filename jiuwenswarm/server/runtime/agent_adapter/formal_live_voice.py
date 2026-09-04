@@ -124,6 +124,31 @@ def spoken_revision_reason(candidate: str, tool_results: list[dict]) -> str | No
     return None
 
 
+_CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿가-힯]")
+# Spoken when a required revision fails. The draft itself is never spoken or
+# shown: a length revision that never finished leaves an answer the spoken
+# budget already rejected, and an arithmetic revision that never finished
+# leaves figures nobody recomputed, which may be wrong from the first sentence.
+_FAILURE_NOTICES = {
+    "length": (
+        "这次回答的口播整理没有完成，我不念未经整理的草稿。请再问一次。",
+        "I could not finish preparing a spoken version of this answer, "
+        "so I will not read the unprepared draft. Please ask again.",
+    ),
+    "arithmetic": (
+        "这次没能完成对时间和费用数字的复核，我不给出未经核对的结论。请再问一次。",
+        "I could not finish verifying the time and cost figures, "
+        "so I will not state an unverified conclusion. Please ask again.",
+    ),
+}
+
+
+def spoken_revision_failure_notice(reason: str, candidate: str) -> str:
+    """The only spoken output of a failed required revision: short, truthful, draft-free."""
+    chinese, english = _FAILURE_NOTICES[reason]
+    return chinese if _CJK.search(candidate) else english
+
+
 def spoken_revision_request_options(model, reason: str) -> dict:
     """Reasoning stays enabled only for the arithmetic verification path."""
     from jiuwenswarm.common.reasoning_injector import bounded_semantic_request_options
@@ -192,10 +217,15 @@ async def finalize_spoken_answer(model, *, envelope: str, candidate: str, tool_r
     except asyncio.CancelledError:
         raise
     except Exception as error:
-        # Do not turn a provider revision outage into lost dialogue or rerun
-        # the Agent/tools. Record the limitation without logging user content.
-        logging.getLogger(__name__).warning("live_voice_spoken_revision_failed kind=%s", type(error).__name__)
-        return candidate
+        # A failed required revision must not release the draft (2026-09-03
+        # baseline: 3/15 turns waited out the 12 s budget and then read the
+        # whole unrevised answer). Say so briefly; never retry, never rerun
+        # the Agent or its tools. Record the limitation without user content.
+        logging.getLogger(__name__).warning(
+            "live_voice_spoken_revision_failed kind=%s reason=%s draft_chars=%d",
+            type(error).__name__, reason, len(candidate),
+        )
+        return spoken_revision_failure_notice(reason, candidate)
 
 
 class FormalLiveVoiceViolation(ValueError):
