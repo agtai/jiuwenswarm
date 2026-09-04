@@ -73,38 +73,35 @@ repeat the old whole-project audit solely to resume a bounded task.
 
 ## Current execution packet
 
-### Speech backpressure diagnostics and local redeployment
+### Segmented Speech and dialogue mismatch diagnostics / repair checkpoint
 
-The user authorized a Tier 2 Speech/Realtime Media observability increment and
-necessary local redeployment, then their own physical verification. This is not
-a speculative latency fix. See the
-[backpressure diagnostic evidence](evidence/SPEECH_BACKPRESSURE_DIAGNOSTICS_20260904.md).
+The user authorized repairs, correlated diagnostics, tests and local deployment
+before resuming VAD acceptance. The current bounded diagnostic increment and
+its unresolved scope boundary are recorded in the
+[segmentation/dialogue evidence](evidence/SEGMENT_AND_DIALOGUE_DIAGNOSTICS_20260904.md).
 
-- The 16:25 reproduction isolates multi-second Socket send-awaits and a separate
-  672 ms stop-event send-lock wait. At Gateway stop handling, 458 frames remained
-  queued (9.16 s of audio, not an exact physical listening delay). The lower-level
-  transport/scheduling cause and physical stop-to-UI timing are still unproved.
-- The passive increment records write-buffer size/limits, actual pause/resume
-  callbacks and drain duration, send-owned event-loop heartbeat lag, queued-frame
-  age and source progress. Existing stop/lock/final correlation remains. Proxy
-  policy is explicitly a hint; no route change or Provider-consumption claim.
-- Focused and final affected regressions pass; controlled local deployment,
-  served bundle and real Speech/rejection readiness probes pass.
-  Complete manual diff review substitutes for an unavailable independent
-  review (local CLI/model incompatibility); Tier 2 review closure stays PARTIAL.
-- Preserve current isolated `deepseek-v4-flash`, project/data, VAD 800 ms and
-  startup 250 ms; running process values and served bundle were verified, and
-  configuration hash and terminal Task/Attempt counts are unchanged. Prior deployment/configuration correction and Speech failure
-  traces remain in the [precision evidence](evidence/SPEECH_FAILURE_DIAGNOSTICS_20260904.md).
-- User deferred manual browser export after the undefined-object error. Next
-  reproduction uses backend diagnostics plus microphone/screen recording; do
-  not make the failed export a prerequisite. Ineffective interruption, protocol
-  failure recovery and the misleading `activation` label remain separate gaps.
-- Earlier truthful spoken fallback and browser diagnostics remain included with
-  their [limits](evidence/SPOKEN_FALLBACK_AND_AUDIO_DIAGNOSTICS_20260904.md), including
-  five pre-existing selected UI failures. No VAD/interruption or EOT-lock repair,
-  timeout/queue tuning, network/proxy change, TTS pipeline, Task/protocol/schema,
-  credential rewrite, public deployment or remote update in this increment.
+- The weekend input reached semantic routing correctly, but a new foreground
+  response repeated the previous greeting. Actual final-model message observation
+  was absent; context/model causality is not established. The new passive client
+  observer checks the committed envelope at the actual isolated model boundary
+  and output equality with selected assistant history, without exporting content.
+- The next capture received stop/commit then a different-item start; the adapter
+  rejected it and batch fallback timed out waiting for response headers after
+  upload completed. Add precise later-item and batch audio-size/duration facts.
+  Keep whole-capture fallback; never silently discard a later correction or
+  concatenate unowned provider items into a committed final.
+- One capture/one final and stop-on-EOT do not provide lossless post-EOT capture.
+  Split-versus-merge behavior is requested before expanding into successor
+  capture/turn authority. Diagnostics are not a completed segmentation repair,
+  and this source does not yet authorize a VAD acceptance PASS.
+- Preserve isolated `deepseek-v4-flash`, project/data, VAD 800 ms and startup
+  250 ms. No timeout increase, model/history reset, protocol/schema changes,
+  public deployment or remote updates. Deployment evidence follows verification.
+- Existing passive Socket/queue diagnostics and their earlier physical evidence
+  remain in the [backpressure report](evidence/SPEECH_BACKPRESSURE_DIAGNOSTICS_20260904.md).
+  Independent review remains unavailable under the local CLI/model mismatch.
+  Ineffective interruption and misleading `activation` labels remain open;
+  browser export is not a prerequisite for the next reproduction.
 
 ### Retained consequences of earlier repairs
 

@@ -1500,6 +1500,17 @@ class OpenAIStreamingSpeechProvider:
                 session.ready.set_result(None)
             return False
         if kind == "input_audio_buffer.speech_started":
+            # Preserve the single-capture contract: a later item is NOT a
+            # duplicate of the committed item, but must not be silently dropped
+            # or spliced into its transcript. Existing whole-capture fallback
+            # retains all acknowledged browser audio while a successor policy
+            # is resolved. Record the exact distinguishing facts before reject.
+            if session.speech_item_id is not None:
+                observed_start = event.get("audio_start_ms")
+                self._diagnose_recognition(session, "adapter_additional_speech_start",
+                    provider_start_ms=(observed_start
+                        if type(observed_start) is int and 0 <= observed_start <= 2**53 - 1
+                        else None))
             if (
                 session.request.turn_detection.mode
                 is not RecognitionTurnDetectionMode.SERVER_VAD

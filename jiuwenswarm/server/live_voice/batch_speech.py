@@ -716,6 +716,18 @@ class OpenAICompatibleBatchSpeechProvider:
     async def recognize(
         self, request: ProviderRecognitionRequest
     ) -> ProviderRecognitionResult:
+        # The service has already validated the capture. Observe header facts
+        # only; neither audio nor the configured endpoint/key enters the log.
+        try:
+            with wave.open(io.BytesIO(request.audio_wav), "rb") as capture:
+                record_audio_diagnostic("batch_recognition_audio",
+                    operation_id=request.operation_id, operation=RECOGNIZE_OPERATION,
+                    audio_bytes=len(request.audio_wav),
+                    audio_duration_ms=1000 * capture.getnframes() / capture.getframerate(),
+                    sample_rate_hz=capture.getframerate(), channels=capture.getnchannels(),
+                    sample_width_bytes=capture.getsampwidth())
+        except Exception:
+            pass
         model = self._config.stt_model
         if model is None:
             raise _fail(

@@ -15,7 +15,7 @@ _QUEUE: queue.Queue[str] = queue.Queue(maxsize=256)
 _START_LOCK = threading.Lock()
 _WORKER: threading.Thread | None = None
 _DROPPED = 0
-_IDS = frozenset({"session_id", "media_session_id", "capture_id", "lease_id", "interaction_id", "correlation_id", "response_id", "operation_id"})
+_IDS = frozenset({"session_id", "media_session_id", "capture_id", "lease_id", "interaction_id", "correlation_id", "response_id", "operation_id", "request_id"})
 _VALUES = frozenset({"generation", "frame_count", "frames_sent", "frames_acked", "queue_frames", "received_samples", "sent_sample_end", "send_peak_ms", "vad_silence_ms", "provider_ms", "provider_start_ms", "provider_end_ms", "speech_started", "input_fenced", "elapsed_ms", "preopen_frames"})
 _VALUES = _VALUES | frozenset({
     "frame_seq", "lock_wait_ms", "encode_ms", "socket_send_ms", "wire_seq",
@@ -27,6 +27,10 @@ _VALUES = _VALUES | frozenset({
     "loop_lag_ms", "loop_lag_peak_ms", "peer_loopback", "flow_observer",
     "oldest_queue_age_ms", "frame_queue_wait_ms", "pending_audio_ms",
     "observation_expired",
+    "model_call_seq", "message_count", "user_message_count", "current_envelope_count",
+    "current_envelope_in_last_user", "diagnostic_complete", "output_chars",
+    "repeats_selected_assistant", "audio_bytes", "audio_duration_ms", "sample_rate_hz",
+    "channels", "sample_width_bytes",
 })
 WIRE_EVENTS = frozenset({
     "session.updated", "transcription_session.updated", "session.created",

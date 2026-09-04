@@ -9361,13 +9361,16 @@ class JiuWenSwarmDeepAdapter:
                 options = bounded_semantic_request_options(
                     original_model.model_client_config.model_dump(), original_model.model_config,
                 )
-                if options:
-                    voice_model = Model(
-                        model_client_config=original_model.model_client_config,
-                        model_config=original_model.model_config.model_copy(update=options),
-                    )
-                    voice_original_model = original_model
-                    self._apply_model_to_react_agent(voice_model)
+                voice_model = Model(
+                    model_client_config=original_model.model_client_config,
+                    model_config=original_model.model_config.model_copy(update=options or {}),
+                )
+                from jiuwenswarm.server.runtime.agent_adapter.formal_model_diagnostics import observe_formal_model
+
+                observe_formal_model(voice_model, envelope=str(inputs.get("query", "")),
+                    request_id=rid, session_id=session_id)
+                voice_original_model = original_model
+                self._apply_model_to_react_agent(voice_model)
             # This seam has already validated the complete formal request and
             # runs in its own isolated adapter. Never derive system instructions
             # from a query, tool result or caller-supplied metadata string.

@@ -1,6 +1,8 @@
 """Deterministic diagnostic oracles; no physical-audio acceptance credit."""
 import asyncio
 import json
+import io
+import wave
 from types import SimpleNamespace
 
 import httpx
@@ -18,6 +20,67 @@ from tests.unit_tests.live_voice.test_openai_streaming_speech import (
     RecognitionStreamRequest, RecognitionTurnDetection, assert_zero_business_effects,
 )
 from tests.unit_tests.live_voice.speech_authority_support import speech_test_issuer
+
+
+@pytest.mark.asyncio
+async def test_batch_audio_metadata_matches_unchanged_multipart_request(monkeypatch):
+    records = []
+    monkeypatch.setattr(batch, "record_audio_diagnostic", lambda e, **f: records.append((e, f)))
+    output = io.BytesIO()
+    with wave.open(output, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16000)
+        audio.writeframes(b"\x00\x00" * 160000)
+    wav = output.getvalue()
+    provider = batch.OpenAICompatibleBatchSpeechProvider(batch.OpenAICompatibleSpeechConfig(
+        "https://private.invalid/v1", "PRIVATE_KEY", "whisper-1", None, None))
+    sent = []
+    async def post(path, **kwargs):
+        sent.append((path, kwargs))
+        return httpx.Response(200, json={"text": "private transcript"})
+    monkeypatch.setattr(provider, "_post", post)
+    result = await provider.recognize(batch.ProviderRecognitionRequest("operation-a", wav, "zh-CN"))
+    assert result.text == "private transcript"
+    assert sent[0][0] == "/audio/transcriptions"
+    assert sent[0][1]["files"]["file"][1] is wav
+    assert sent[0][1]["data"] == {"model": "whisper-1", "response_format": "json", "language": "zh"}
+    metadata = next(f for e, f in records if e == "batch_recognition_audio")
+    assert metadata["audio_duration_ms"] == 10000
+    assert metadata["audio_bytes"] == len(wav)
+    assert metadata["sample_rate_hz"] == 16000
+    assert "private" not in repr(records).lower()
+
+
+@pytest.mark.asyncio
+async def test_different_post_commit_speech_is_recorded_without_discarding_into_old_final(monkeypatch):
+    records = []
+    monkeypatch.setattr(streaming, "record_audio_diagnostic", lambda e, **f: records.append((e, f)))
+    socket = FakeSocket((session_updated_event(server_vad_wire()),))
+    async def factory(*args):
+        return socket
+    provider = streaming.OpenAIStreamingSpeechProvider(config(), socket_factory=factory)
+    ref = recognition_ref()
+    try:
+        await provider.open_recognition(authorized_request(RecognitionStreamRequest(
+            ref, RecognitionTurnDetection.server_vad_default())), timeout_seconds=2)
+        for event in [
+            {"type": "input_audio_buffer.speech_started", "item_id": "private-first", "audio_start_ms": 0},
+            {"type": "input_audio_buffer.speech_stopped", "item_id": "private-first", "audio_end_ms": 800},
+            {"type": "input_audio_buffer.committed", "item_id": "private-first"},
+        ]:
+            socket.push(event)
+            await provider.next_recognition_event(ref, timeout_seconds=1)
+        socket.push({"type": "input_audio_buffer.speech_started", "item_id": "private-next", "audio_start_ms": 840})
+        with pytest.raises(Exception):
+            await provider.next_recognition_event(ref, timeout_seconds=1)
+        fields = next(f for e, f in records if e == "adapter_additional_speech_start")
+        assert fields["committed"] is True and fields["speech_stopped"] is True
+        assert fields["item_matches_speech"] is False and fields["provider_start_ms"] == 840
+        assert "private-" not in repr(records)
+        assert_zero_business_effects(provider)
+    finally:
+        await provider.close()
 
 
 @pytest.mark.asyncio
