@@ -97,7 +97,9 @@ def adopted_titles(doc_ids) -> list[str]:
         import json as _json
 
         data = _json.loads(get_clouddoc_state_path().read_text(encoding="utf-8"))
-        docs = data.get("docs") or {}
+        # Same dual shape as the priming above: the live file's top level is the
+        # doc map itself; a "docs" wrapper appears in older snapshots and tests.
+        docs = data.get("docs") or data or {}
         out: list[str] = []
         for doc in doc_ids or []:
             title = ((docs.get(str(doc)) or {}).get("panel_meta") or {}).get("title") or ""

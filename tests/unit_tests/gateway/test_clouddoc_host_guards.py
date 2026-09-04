@@ -70,7 +70,9 @@ def test_read_card_carries_the_adopted_titles(tmp_path, monkeypatch):
 
     state = tmp_path / "clouddoc-state.json"
     docs = {f"d{i}": {"panel_meta": {"title": f"文档{i}"}} for i in range(14)}
-    state.write_text(json.dumps({"docs": docs}), encoding="utf-8")
+    # The live file's top level IS the doc map (no wrapper) -- the shape that
+    # slipped past the first version of adopted_titles. Assert on it directly.
+    state.write_text(json.dumps(docs), encoding="utf-8")
     monkeypatch.setattr(kinds_mod, "get_clouddoc_state_path", lambda: state)
 
     class _P:
