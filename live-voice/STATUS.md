@@ -107,7 +107,11 @@ offline timeline/report are implemented. Scope and verification are in the
   evidence does not support loudspeaker acoustic leakage as the primary cause
   and cannot yet separate browser/OS/device processing from Provider VAD/
   recognition. Another reproduction is unnecessary to locate the delayed gate,
-  but a finer controlled run is required to assign that remaining delay. See the
+  but a finer controlled run is required to assign that remaining delay. A
+  passive two-band local activity observer is now implemented and verified; it
+  records bounded content-free milestones and their age at remote speech-start
+  without gaining stop, cancel or commit authority. Deploy the rebuilt frontend,
+  run one headset reproduction and export same-tab diagnostics. See the
   [deployment evidence](evidence/DEMO_PROFILING_DEPLOYMENT_20260904.md).
   The scoped acceptance and diagnosis are in the
   [barge-in evidence](evidence/VAD_PLAYOUT_ACCEPTANCE_AND_BARGE_IN_DIAGNOSIS_20260904.md).

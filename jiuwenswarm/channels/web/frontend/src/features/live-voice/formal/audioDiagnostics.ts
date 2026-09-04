@@ -55,6 +55,16 @@ const VALUE_KEYS = new Set([
   'output_latency_ms',
   'base_latency_ms',
   'long_task_ms',
+  'activity_threshold',
+  'activity_run_frames',
+  'activity_first_age_ms',
+  'activity_observed_frames',
+  'activity_above_floor_frames',
+  'activity_rms_peak',
+  'activity_floor_first_age_ms',
+  'activity_floor_sustained_age_ms',
+  'activity_strong_first_age_ms',
+  'activity_strong_sustained_age_ms',
 ]);
 export interface AudioDiagnostic {
   readonly event: string;

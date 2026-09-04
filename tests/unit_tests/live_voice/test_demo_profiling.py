@@ -133,6 +133,21 @@ def test_import_privacy_dedup_unknown_clock_retention_and_html_injection(tmp_pat
     assert (tmp_path / "out/profile.html").is_file()
 
 
+def test_browser_overlap_activity_timing_survives_sanitized_report_import():
+    imported = row("barge_in_gate", 1, 100, session_id="session-a", activity_observed_frames=17,
+                   activity_above_floor_frames=9, activity_rms_peak=0.125,
+                   activity_floor_first_age_ms=480.5, activity_floor_sustained_age_ms=440.5,
+                   activity_strong_first_age_ms=220.5, activity_strong_sustained_age_ms=180.5,
+                   samples="PRIVATE_PCM")
+    assert imported["fields"] == {
+        "session_id": "session-a", "activity_observed_frames": 17,
+        "activity_above_floor_frames": 9, "activity_rms_peak": 0.125,
+        "activity_floor_first_age_ms": 480.5, "activity_floor_sustained_age_ms": 440.5,
+        "activity_strong_first_age_ms": 220.5, "activity_strong_sustained_age_ms": 180.5,
+    }
+    assert "PRIVATE" not in repr(imported)
+
+
 def test_session_join_keeps_explicit_foreign_session_out():
     rows = [row("opened", 1, 1, session_id="a", request_id="r"),
             row("opened", 2, 2, request_id="r", capture_id="c"),

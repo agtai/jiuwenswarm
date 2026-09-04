@@ -25,9 +25,14 @@ test('diagnostics contain only allowlisted scalars, freeze records and remain bo
       device_id: 'PRIVATE_DEVICE',
       reason: 'contains spaces PRIVATE',
       rms_peak: Infinity,
+      activity_threshold: 0.015,
+      activity_run_frames: 3,
+      activity_floor_first_age_ms: 125.5,
     });
     const first = audioDiagnosticSnapshot()[0];
-    assert.deepEqual(first.fields, { session_id: 'session-a', capture_id: 'capture-a', generation: 2, pending_frames: 8 });
+    assert.deepEqual(first.fields, { session_id: 'session-a', capture_id: 'capture-a', generation: 2,
+      pending_frames: 8, activity_threshold: 0.015, activity_run_frames: 3,
+      activity_floor_first_age_ms: 125.5 });
     assert.equal(JSON.stringify(first).includes('PRIVATE'), false);
     assert.ok(Object.isFrozen(first) && Object.isFrozen(first.fields));
     audioDiagnosticSnapshot().pop();

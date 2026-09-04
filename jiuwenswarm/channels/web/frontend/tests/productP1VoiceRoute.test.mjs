@@ -4367,6 +4367,9 @@ async function runConcurrentCaptureJourney(options = {}) {
   if (options.triggerBargeInEot === true) {
     const uplinkSocket = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-2');
     assert.ok(uplinkSocket);
+    if (options.captureActivityBeforeBargeIn === true) {
+      for (let seq = 1; seq <= 3; seq += 1) sendNextFrameFromCurrentWorklet(environment, seq);
+    }
     uplinkSocket.onmessage?.({
       data: serializeMediaControl({
         type: 'media.speech_start',
@@ -5126,6 +5129,42 @@ test('server speech-start/EOT during playout triggers barge-in without Task muta
     if (detach !== undefined) assert.equal(detach.business_cancel_count_delta, 0);
   }
   await journey.owner.close();
+});
+
+test('playout overlap diagnostics timestamp bounded local activity without gaining stop authority', async () => {
+  const previous = console.info;
+  console.info = () => undefined;
+  clearAudioDiagnostics();
+  let journey;
+  try {
+    journey = await runConcurrentCaptureJourney({
+      negotiatedEot: true, triggerBargeInEot: true, captureActivityBeforeBargeIn: true,
+      holdDownlinkDetachAfterFinalRender: true, deferSourceEndsUntilTransportAck: true,
+    });
+    const records = audioDiagnosticSnapshot();
+    const activity = records.filter(record => record.event === 'capture_playout_activity');
+    assert.deepEqual(activity.map(record => record.fields.milestone),
+      ['floor_first', 'strong_first', 'floor_sustained', 'strong_sustained']);
+    assert.ok(activity.every(record => typeof record.fields.seq === 'number'));
+    assert.ok(activity.every(record => typeof record.fields.rms_peak === 'number'));
+    assert.equal(JSON.stringify(activity).includes('samples'), false);
+    const gate = records.filter(record => record.event === 'barge_in_gate').at(-1);
+    assert.ok(gate);
+    assert.ok(gate.fields.activity_observed_frames >= 3);
+    assert.ok(gate.fields.activity_above_floor_frames >= 3);
+    assert.ok(gate.fields.activity_rms_peak >= 0.05);
+    assert.ok(gate.fields.activity_floor_first_age_ms >= 0);
+    assert.ok(gate.fields.activity_floor_sustained_age_ms >= 0);
+    assert.ok(gate.fields.activity_strong_first_age_ms >= 0);
+    assert.ok(gate.fields.activity_strong_sustained_age_ms >= 0);
+    assert.equal(journey.bargeInStopped, true);
+    assert.equal(journey.calls.some(([method]) =>
+      method.includes('agent') || method.includes('task') || method.includes('history')), false);
+  } finally {
+    await journey?.owner.close();
+    console.info = previous;
+    clearAudioDiagnostics();
+  }
 });
 
 test('server speech-start/EOT interrupts an answer estimated beyond twenty seconds without Task mutation', async () => {

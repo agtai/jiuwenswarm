@@ -32,6 +32,9 @@ BROWSER_VALUES = frozenset({
     "eot_delivered", "handler_present", "playout_pending", "rotation_in_flight", "attached", "closed",
     "callback_current", "capture_ready", "echo_cancellation", "noise_suppression", "auto_gain_control",
     "output_latency_ms", "base_latency_ms",
+    "activity_threshold", "activity_run_frames", "activity_first_age_ms", "activity_observed_frames",
+    "activity_above_floor_frames", "activity_rms_peak", "activity_floor_first_age_ms",
+    "activity_floor_sustained_age_ms", "activity_strong_first_age_ms", "activity_strong_sustained_age_ms",
 })
 JOIN_IDS = {"request_id", "capture_id", "response_id", "media_session_id", "correlation_id",
             "interaction_id", "task_id", "attempt_id", "commit_id", "operation_id", "execution_session_id"}

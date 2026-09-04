@@ -53,6 +53,10 @@ const MAX_CAPTURE_FRAMES = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / LIVE_VOICE_AUDIO
 // This local observation never commits speech or selects a business route. It
 // only prevents a lease rotation from truncating a possibly spoken utterance.
 const CAPTURE_SPEECH_ENERGY_FLOOR = 0.015;
+// Passive overlap diagnostics retain two fixed post-processing energy bands.
+// They never authorize speech, playout stop, cancellation or submission.
+const CAPTURE_STRONG_ACTIVITY_FLOOR = 0.05;
+const CAPTURE_SUSTAINED_ACTIVITY_FRAMES = 3;
 // A local energy observation is a short-lived hint that an utterance might be
 // in flight before the Provider confirms it. The hint decays after 1.5 seconds
 // of consecutive sub-floor frames, so one TTS tail, echo or environmental
@@ -497,6 +501,19 @@ export interface ProductP1CaptureDiagnostics {
   readonly successor_readiness_elapsed_ms: number | null;
 }
 
+interface PlayoutActivityDiagnostics {
+  responseKey: string;
+  observedFrames: number;
+  aboveFloorFrames: number;
+  rmsPeak: number;
+  floorRunFrames: number;
+  strongRunFrames: number;
+  firstFloorAtMs: number | null;
+  sustainedFloorAtMs: number | null;
+  firstStrongAtMs: number | null;
+  sustainedStrongAtMs: number | null;
+}
+
 export class ProductP1VoiceRouteOwner {
   #diagnosticTimer: ReturnType<typeof setInterval> | null = null;
   #diagnosticLastTickMs = 0;
@@ -504,6 +521,7 @@ export class ProductP1VoiceRouteOwner {
   #diagnosticCaptureId: string | null = null;
   #diagnosticEnergyFrames = 0;
   #diagnosticRmsPeak = 0;
+  #diagnosticPlayoutActivity: PlayoutActivityDiagnostics | null = null;
   readonly #enabled: boolean;
   readonly #request: ProductP1Request;
   readonly #origin: string;
@@ -1606,6 +1624,7 @@ export class ProductP1VoiceRouteOwner {
       };
       pendingRef = pendingPlayout;
       this.#pendingPlayout = pendingPlayout;
+      this.#resetPlayoutActivityDiagnostics(result.response);
       if (this.#l0Available) {
         this.#l0PlayoutStartedAtMs = monotonicNowMs();
         this.#l0PlayoutResponseKey = l0ResponseKey(result.response);
@@ -3086,6 +3105,7 @@ export class ProductP1VoiceRouteOwner {
     this.#diagnosticLastFrameMs = performance.now();
     this.#diagnosticRmsPeak = Math.max(this.#diagnosticRmsPeak, diagnosticRms);
     if (diagnosticRms >= CAPTURE_SPEECH_ENERGY_FLOOR) this.#diagnosticEnergyFrames += 1;
+    if (captureDuringPlayout) this.#observePlayoutActivity(frame, diagnosticRms);
     if (!captureDuringPlayout) {
       if (diagnosticRms >= CAPTURE_SPEECH_ENERGY_FLOOR) {
         // Local energy is a decaying recency hint, never authoritative speech
@@ -3675,6 +3695,7 @@ export class ProductP1VoiceRouteOwner {
       this.#diagnose('barge_in_gate', {
         handler_present: this.#onBargeInSpeechStart !== undefined,
         callback_current: route !== null && route === this.#route && operationGeneration === this.#operationGeneration,
+        ...this.#playoutActivityDiagnosticFields(),
       });
     }
     if (
@@ -3772,6 +3793,67 @@ export class ProductP1VoiceRouteOwner {
     this.#bargeInEndOfTurnDelivered = false;
     this.#compactNativeCaptureFrames();
     this.#onCaptureActivitySettled?.();
+  }
+
+  #resetPlayoutActivityDiagnostics(response: Readonly<AudioResponseRef>): void {
+    this.#diagnosticPlayoutActivity = {
+      responseKey: l0ResponseKey(response), observedFrames: 0, aboveFloorFrames: 0, rmsPeak: 0,
+      floorRunFrames: 0, strongRunFrames: 0, firstFloorAtMs: null, sustainedFloorAtMs: null,
+      firstStrongAtMs: null, sustainedStrongAtMs: null,
+    };
+  }
+
+  #observePlayoutActivity(frame: Readonly<CapturedAudioFrame>, rms: number): void {
+    const state = this.#diagnosticPlayoutActivity;
+    const response = this.#pendingPlayout?.response;
+    if (state === null || response === undefined || state.responseKey !== l0ResponseKey(response)) return;
+    const now = performance.now();
+    state.observedFrames += 1;
+    state.rmsPeak = Math.max(state.rmsPeak, rms);
+    if (rms >= CAPTURE_SPEECH_ENERGY_FLOOR) {
+      state.aboveFloorFrames += 1;
+      state.floorRunFrames += 1;
+      if (state.firstFloorAtMs === null) {
+        state.firstFloorAtMs = now;
+        this.#diagnose('capture_playout_activity', { milestone: 'floor_first', seq: frame.seq, rms_peak: rms,
+          activity_threshold: CAPTURE_SPEECH_ENERGY_FLOOR, activity_run_frames: state.floorRunFrames });
+      }
+      if (state.floorRunFrames === CAPTURE_SUSTAINED_ACTIVITY_FRAMES && state.sustainedFloorAtMs === null) {
+        state.sustainedFloorAtMs = now;
+        this.#diagnose('capture_playout_activity', { milestone: 'floor_sustained', seq: frame.seq, rms_peak: rms,
+          activity_threshold: CAPTURE_SPEECH_ENERGY_FLOOR, activity_run_frames: state.floorRunFrames,
+          activity_first_age_ms: now - state.firstFloorAtMs });
+      }
+    } else state.floorRunFrames = 0;
+    if (rms >= CAPTURE_STRONG_ACTIVITY_FLOOR) {
+      state.strongRunFrames += 1;
+      if (state.firstStrongAtMs === null) {
+        state.firstStrongAtMs = now;
+        this.#diagnose('capture_playout_activity', { milestone: 'strong_first', seq: frame.seq, rms_peak: rms,
+          activity_threshold: CAPTURE_STRONG_ACTIVITY_FLOOR, activity_run_frames: state.strongRunFrames });
+      }
+      if (state.strongRunFrames === CAPTURE_SUSTAINED_ACTIVITY_FRAMES && state.sustainedStrongAtMs === null) {
+        state.sustainedStrongAtMs = now;
+        this.#diagnose('capture_playout_activity', { milestone: 'strong_sustained', seq: frame.seq, rms_peak: rms,
+          activity_threshold: CAPTURE_STRONG_ACTIVITY_FLOOR, activity_run_frames: state.strongRunFrames,
+          activity_first_age_ms: now - state.firstStrongAtMs });
+      }
+    } else state.strongRunFrames = 0;
+  }
+
+  #playoutActivityDiagnosticFields(): Readonly<Record<string, number | null>> {
+    const state = this.#diagnosticPlayoutActivity;
+    const response = this.#pendingPlayout?.response;
+    if (state === null || response === undefined || state.responseKey !== l0ResponseKey(response)) return {};
+    const now = performance.now();
+    const age = (value: number | null): number | null => value === null ? null : Math.max(0, now - value);
+    return {
+      activity_observed_frames: state.observedFrames, activity_above_floor_frames: state.aboveFloorFrames,
+      activity_rms_peak: state.rmsPeak, activity_floor_first_age_ms: age(state.firstFloorAtMs),
+      activity_floor_sustained_age_ms: age(state.sustainedFloorAtMs),
+      activity_strong_first_age_ms: age(state.firstStrongAtMs),
+      activity_strong_sustained_age_ms: age(state.sustainedStrongAtMs),
+    };
   }
 
   #publish(): void {

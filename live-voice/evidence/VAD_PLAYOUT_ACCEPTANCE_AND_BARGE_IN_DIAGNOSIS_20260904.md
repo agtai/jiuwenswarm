@@ -20,11 +20,12 @@ tracked environment file. The acceptance is scoped to these two physical
 quality checks; it is not statistical latency/SLO proof and does not close the
 separate interruption defect below.
 
-The accompanying diagnosis is passive and changes no recognition, VAD,
-interruption, cancellation, playback, Agent, Tool or Task behavior. Raw audio,
-credentials and private configuration are not retained. Documentation work is
-Tier 0 under root `TESTING.md`; any later interruption repair is state/time/
-cancel sensitive and must be scoped and verified separately at Tier 2.
+The accompanying diagnosis and follow-up observer are passive and change no
+recognition, VAD, interruption, cancellation, playback, Agent, Tool or Task
+behavior. Raw audio, credentials and private configuration are not retained.
+The observer touches the capture/playout timing owner, so it is treated as Tier
+2 under root `TESTING.md` even though it has no business authority. Any later
+interruption repair remains a separate Tier-2 product-policy packet.
 
 ## Reproduction
 
@@ -146,6 +147,18 @@ a headset is not a mitigation supported by this evidence. A controlled rerun
 with finer local-onset observation is required before assigning the remaining
 delay to browser/OS/device processing or Provider VAD/recognition.
 
+That passive observation is now implemented. During each answer it emits at
+most four content-free milestones: first and three-consecutive-frame crossings
+at RMS 0.015 and 0.05. When remote speech-start arrives, `barge_in_gate` records
+the age of each local milestone, total observed/above-floor frame counts and the
+peak RMS. The fixed thresholds are measurement bands, not a local VAD decision;
+they cannot stop audio, cancel work, commit input or select a business route.
+
+Owned surfaces are the Product P1 overlap observer, browser diagnostic scalar
+allowlist, offline report importer and their focused tests. Provider settings,
+capture processing constraints, VAD policy, playback behavior, Agent/Tool/Task
+authority, raw audio and transcript logging are explicitly excluded.
+
 An engineering repair should be scoped separately as a Tier-2 interruption
 packet. The candidate direction is an echo-aware local double-talk detector that
 can pre-mute playout before remote Provider confirmation, with rollback and
@@ -165,6 +178,9 @@ false-trigger, rollback and old-audio-revival checks.
 
 - server VAD focused regression: 62 passed;
 - browser audio I/O regression: 107 passed, 0 failed;
+- complete Product P1 route regression after the passive observer: 115 passed;
+- browser diagnostic allowlist/privacy regression: 7 passed;
+- offline profiling regression: 27 passed;
 - combined profile analyzer: 13,529 records / 4,499 spans, no warning;
 - changed-document local links and `git diff --check`: pass.
 
