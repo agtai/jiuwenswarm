@@ -138,6 +138,45 @@ def test_spoken_revision_reason_only_for_length_or_tool_backed_arithmetic():
     assert spoken_revision_reason("耗时 12 分钟", []) is None
 
 
+def test_long_tool_backed_figures_are_verified_not_merely_shortened():
+    """A >200-char draft with tool-backed time/cost figures takes the arithmetic path."""
+    long_arithmetic = "从 16:10 出发，路上 45 分钟，费用 120 元，来得及。" + "另外还有一些背景说明。" * 20
+    assert len(long_arithmetic) > 200
+    assert spoken_revision_reason(long_arithmetic, [{"content": "timetable"}]) == "arithmetic"
+    # Without tool results the same long draft is only a brevity problem.
+    assert spoken_revision_reason(long_arithmetic, []) == "length"
+    # A long tool-backed draft without any quantity is also only a brevity problem.
+    assert spoken_revision_reason("工作区干净，没有未提交的改动。" * 20, [{"content": "log"}]) == "length"
+
+
+@pytest.mark.asyncio
+async def test_long_tool_backed_draft_uses_arithmetic_budget_and_options(monkeypatch):
+    """The arithmetic path's timeout and request options apply, not the length path's."""
+    from jiuwenswarm.server.runtime.agent_adapter import formal_live_voice as module
+    monkeypatch.setattr(module, "LENGTH_REVISION_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(module, "ARITHMETIC_REVISION_TIMEOUT_SECONDS", 5)
+    seen = {}
+
+    def options(model, reason):
+        seen["reason"] = reason
+        return {}
+
+    monkeypatch.setattr(module, "spoken_revision_request_options", options)
+
+    async def slow_but_within_arithmetic_budget(**kwargs):
+        await asyncio.sleep(0.1)
+        return SimpleNamespace(
+            content=json.dumps({"text": "最晚 15:00 出发，费用 120 元。", "detailed_requested": False}),
+            tool_calls=[],
+        )
+
+    long_arithmetic = "从 16:10 出发，路上 45 分钟，费用 120 元，来得及。" + "另外还有一些背景说明。" * 20
+    spoken = await finalize_spoken_answer(SimpleNamespace(invoke=slow_but_within_arithmetic_budget),
+        envelope="q", candidate=long_arithmetic, tool_results=[{"content": "timetable"}])
+    assert seen["reason"] == "arithmetic"
+    assert spoken == "最晚 15:00 出发，费用 120 元。"
+
+
 def test_spoken_revision_reasoning_only_on_arithmetic_path(monkeypatch):
     from jiuwenswarm.common import reasoning_injector
 

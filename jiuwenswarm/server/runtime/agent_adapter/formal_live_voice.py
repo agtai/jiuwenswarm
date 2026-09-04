@@ -119,11 +119,16 @@ def spoken_revision_reason(candidate: str, tool_results: list[dict]) -> str | No
     used to force a revision on every tool turn (4 s p50 for 65-character
     answers); they matter only when the draft states a time or cost quantity
     whose arithmetic the revision must recompute from evidence.
+
+    The arithmetic check comes first: a long draft with tool-backed figures
+    needs its figures recomputed, and the arithmetic revision also enforces
+    the spoken budget. Checking length first (2026-09-03) silently replaced
+    that verification with a brevity-only rewrite.
     """
-    if len(candidate) > SPOKEN_ANSWER_BUDGET_CHARS:
-        return "length"
     if tool_results and _ARITHMETIC_QUANTITY.search(candidate):
         return "arithmetic"
+    if len(candidate) > SPOKEN_ANSWER_BUDGET_CHARS:
+        return "length"
     return None
 
 
