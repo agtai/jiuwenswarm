@@ -130,6 +130,11 @@ def test_event_loop_lag_and_heartbeat_no_catchup_or_stale_callbacks(monkeypatch)
     handles[-1][1]()
     assert len(handles) == last_count and not observer.active and observer.timer is None
     assert any(e == "socket_observation_expired" for e, _ in records)
+    peak_at_expiry = observer.loop_lag_peak_ms
+    clock[0] += 90  # No heartbeat observed this interval; it isn't loop lag.
+    expired = observer.finish()
+    assert expired["loop_lag_peak_ms"] == peak_at_expiry
+    assert expired["drain_ms"] is None and expired["observation_expired"] is True
 
 
 @pytest.mark.asyncio

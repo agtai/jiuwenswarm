@@ -83,3 +83,18 @@ Pre-deployment read-only checks: same isolated default `deepseek-v4-flash`;
 configuration SHA-256 `7017784bbf44dcf1fc1432fb91df05dc004f0dd1dd08b2dd1fb2628f68a22c57`;
 two terminal Tasks and two terminal Attempts; retained business project clean,
 with no remote. No user browser/microphone action or data cleanup performed.
+
+### Post-commit timing-bound correction before user handoff
+
+Initial implementation commit `5097ca71425ac3e0df6c0e46bf6391b011343d33` passed
+the controlled deployment at 16:46, including full frontend build and real
+TTS/STT plus rejection probes. During final review, a deterministic check found
+that a send settling after the observer's own deadline incorrectly treated the
+unobserved interval as loop lag. A new assertion failed first (90,900 ms reported
+instead of the 900 ms actually observed). This same Tier 2 diagnostic-only scope
+now freezes the observed lag peak on expiry and reports `observation_expired`
+with null incomplete drain duration. It does not alter the send's deadline or
+cancellation behavior. The same full affected command passes **376 tests in
+31.65 s** after correction; new-module Ruff and complete changed-hunk review pass.
+Replacement deployment follows before handoff; independent review remains
+unavailable under the already recorded tool limitation.

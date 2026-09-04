@@ -19,6 +19,7 @@ class SocketDiagnostics:
         self.socket = socket
         self.identity = identity
         self.active = False
+        self.expired = False
         self.timer = None
         self.pause_started = None
         self.frame_seq = None
@@ -52,6 +53,7 @@ class SocketDiagnostics:
             self.loop_lag_peak_ms = self.drain_ms = 0.0
             self.buffer_peak_bytes = 0
             self.active = True
+            self.expired = False
             self.loop = asyncio.get_running_loop()
             self.send_started = self.loop.time()
             self.observation_deadline = self.send_started + budget_seconds
@@ -78,21 +80,25 @@ class SocketDiagnostics:
             if now >= self.observation_deadline:
                 self.emit("socket_observation_expired", **snapshot)
                 self.active = False
+                self.expired = True
                 return  # A cancellation-hostile custom socket cannot leak timers forever.
             self.next_tick = now + 0.1
             self.timer = self.loop.call_at(self.next_tick, self._tick)
 
     def finish(self):
         # Called synchronously in the send's finally, including cancellation.
+        was_active = self.active
         self.active = False
         if self.timer is not None:
             self.timer.cancel()
             self.timer = None
         with suppress(Exception):
-            self.loop_lag_peak_ms = max(self.loop_lag_peak_ms,
-                max(0.0, (self.loop.time() - self.next_tick) * 1000))
+            if was_active:
+                self.loop_lag_peak_ms = max(self.loop_lag_peak_ms,
+                    max(0.0, (self.loop.time() - self.next_tick) * 1000))
         result = dict(self.snapshot(), loop_lag_peak_ms=self.loop_lag_peak_ms,
-            drain_ms=self.drain_ms if isinstance(self.socket, _ObservedFlowControl) else None,
+            drain_ms=self.drain_ms if not self.expired and isinstance(self.socket, _ObservedFlowControl) else None,
+            observation_expired=self.expired,
             write_buffer_peak_bytes=self.buffer_peak_bytes,
             flow_observer=isinstance(self.socket, _ObservedFlowControl))
         self.frame_seq = self.wire_seq = None
