@@ -135,15 +135,48 @@ async def test_hold_capacity_overflow_fails_closed_to_discard() -> None:
 
 
 @pytest.mark.asyncio
-async def test_hold_rejects_settled_gates_and_duplicate_holds() -> None:
+async def test_already_released_gate_needs_no_hold_and_publishes_immediately() -> None:
+    # The decision can settle before the dispatch reaches the hold; nothing
+    # the response produces is provisional any more, so it flows normally.
+    current = runtime(LowerFormalAdapter(), RecordingHistoryWriter())
+    assert await current.start() is True
+    ref = _ref()
+    released: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    released.set_result("release")
+    current.hold_presentation(ref, released)
+    assert current.presentation_hold_snapshot() == {"held": 0, "parked": 0, "suppressed": 0, "discards": 0}
+    current._publish(_notice(ref, 0))
+    assert [item.request_id for item in _drain(current)] == ["request-0"]
+    await current.close(timeout_seconds=0.2)
+
+
+@pytest.mark.asyncio
+async def test_already_discarded_failed_or_cancelled_gate_refuses_the_hold() -> None:
+    current = runtime(LowerFormalAdapter(), RecordingHistoryWriter())
+    assert await current.start() is True
+    loop = asyncio.get_running_loop()
+    discarded: asyncio.Future[str] = loop.create_future()
+    discarded.set_result("discard")
+    failed: asyncio.Future[str] = loop.create_future()
+    failed.set_exception(RuntimeError("semantic resolution failed"))
+    cancelled: asyncio.Future[str] = loop.create_future()
+    cancelled.cancel()
+    for index, gate in enumerate((discarded, failed, cancelled)):
+        with pytest.raises(AgentConversationRuntimeViolation) as refusal:
+            current.hold_presentation(_ref(f"response-settled-{index}"), gate)
+        assert refusal.value.reason == "PRESENTATION_HOLD_DISCARDED"
+    assert current.presentation_hold_snapshot()["held"] == 0
+    await current.close(timeout_seconds=0.2)
+
+
+@pytest.mark.asyncio
+async def test_hold_rejects_non_future_gates_and_duplicate_holds() -> None:
     current = runtime(LowerFormalAdapter(), RecordingHistoryWriter())
     assert await current.start() is True
     loop = asyncio.get_running_loop()
     ref = _ref()
-    settled: asyncio.Future[str] = loop.create_future()
-    settled.set_result("release")
     with pytest.raises(AgentConversationRuntimeViolation) as failure:
-        current.hold_presentation(ref, settled)
+        current.hold_presentation(ref, "release")  # type: ignore[arg-type]
     assert failure.value.reason == "INVALID_PRESENTATION_HOLD"
     gate: asyncio.Future[str] = loop.create_future()
     current.hold_presentation(ref, gate)

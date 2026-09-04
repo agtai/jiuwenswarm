@@ -3595,6 +3595,11 @@ class AgentConversationRuntime:
         gate counts as discard. The hold must be installed before the Agent
         dispatch, so no notification of the response can precede it, and a
         hold that outgrows its bounded capacity fails closed to discard.
+
+        The decision may settle before the dispatch reaches this point. A gate
+        already released needs no hold: nothing the response produces is
+        provisional any more. A gate already discarded refuses the dispatch,
+        so the Agent round never starts.
         """
 
         self._require_started()
@@ -3604,11 +3609,23 @@ class AgentConversationRuntime:
                 "a presentation hold requires a canonical ResponseRef",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        if not isinstance(gate, asyncio.Future) or gate.done():
+        if not isinstance(gate, asyncio.Future):
             raise AgentConversationRuntimeViolation(
                 "INVALID_PRESENTATION_HOLD",
-                "a presentation hold requires an unsettled gate",
+                "a presentation hold requires a gate future",
                 ErrorCode.INVALID_ARGUMENT,
+            )
+        if gate.done():
+            if (
+                not gate.cancelled()
+                and gate.exception() is None
+                and gate.result() == "release"
+            ):
+                return
+            raise AgentConversationRuntimeViolation(
+                "PRESENTATION_HOLD_DISCARDED",
+                "the decision already discarded this response",
+                ErrorCode.CONFLICT,
             )
         if ref in self._presentation_holds or ref in self._suppressed_presentations:
             raise AgentConversationRuntimeViolation(

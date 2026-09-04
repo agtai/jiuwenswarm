@@ -163,3 +163,67 @@ async def test_failed_decision_discards_the_speculative_response_silently(
     assert runtime.snapshot().queued_notifications == 0
     assert runtime.presentation_hold_snapshot()["held"] == 0
     await _close_unified_route(registry, stem="p3-off-create")
+
+
+@pytest.mark.asyncio
+async def test_decision_that_completes_before_the_speculative_dispatch_still_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Reproduces the 2026-09-04 field failure: the route is announced and the
+    # decision completes before the speculative task even runs, so the gate
+    # is already released when the hold would be installed. The dispatch must
+    # proceed normally instead of failing the submit.
+    registry, composition, manager, _pushed = _registry(tmp_path, unified=True)
+    await _activate(registry)
+    original = composition.resolve_production_semantics
+
+    async def announcing_resolve(*args, route_hint=None, **kwargs):
+        route_hint("dialogue")
+        return await original(*args, route_hint=None, **kwargs)
+
+    monkeypatch.setattr(composition, "resolve_production_semantics", announcing_resolve)
+    result = await registry.handle_unified_submit(
+        params=_unified_final_params(stem="speculate-early-decision", text="你好。"),
+        request_id="request-speculate-early-decision",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert result.ok, result.payload
+    assert manager.agent.calls == 1
+    runtime = _runtime_of(registry)
+    await _wait_until(lambda: runtime.snapshot().queued_notifications > 0)
+    snapshot = runtime.presentation_hold_snapshot()
+    assert snapshot["held"] == 0 and snapshot["discards"] == 0
+    await _close_unified_route(registry, stem="p3-off-create")
+
+
+@pytest.mark.asyncio
+async def test_decision_that_fails_before_the_speculative_dispatch_never_starts_the_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry, composition, manager, _pushed = _registry(tmp_path, unified=True)
+    await _activate(registry)
+
+    async def failing_resolve(*args, route_hint=None, **kwargs):
+        route_hint("dialogue")
+        raise FormalTaskViolation(
+            "SEMANTIC_OUTPUT_INVALID", "model output failed validation twice", ErrorCode.INVALID_ARGUMENT
+        )
+
+    monkeypatch.setattr(composition, "resolve_production_semantics", failing_resolve)
+    result = await registry.handle_unified_submit(
+        params=_unified_final_params(stem="speculate-early-failure", text="你好。"),
+        request_id="request-speculate-early-failure",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert not result.ok
+    # The semantic failure is what the client sees, never the masked
+    # foreground-effect promotion error of a refused dispatch.
+    assert result.payload["error"]["reason"] == "SEMANTIC_OUTPUT_INVALID"
+    await asyncio.sleep(0.1)
+    assert manager.agent.calls == 0
+    runtime = _runtime_of(registry)
+    assert runtime.snapshot().queued_notifications == 0
+    assert runtime.presentation_hold_snapshot()["held"] == 0
+    await _close_unified_route(registry, stem="p3-off-create")
