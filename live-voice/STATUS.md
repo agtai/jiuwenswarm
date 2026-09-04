@@ -66,7 +66,7 @@ repeat the old whole-project audit solely to resume a bounded task.
 | Executor & Durability | Direct D0/D2 v2 profiles, admission, reconciliation, sealed results and generic adjustment checkpoints; dedicated no-memory rail repair; retained v1 records cannot authorize new v2 dispatch | Required independent review and real result/control acceptance; scope broader file-tool access outside checkout separately. Additional Executor/D1 capability needs its own packet; no D1 or generic host-crash claim |
 | Voice–Task Bridge | Unified committed semantics, direct exact local creation/modification consent, scoped targets and requirement sources | Current modification/query real-model acceptance; full generalization and retirement audit; pause/resume/provide-input remain unsupported until a real primitive is accepted |
 | Integrated Web product experience | Scoped Registry Tasks in the right panel, no bottom manual form; project-home Session allocation through microphone transcription; recovery/notification repairs | Stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh journey; projectless startup requires backend authority design |
-| Observability, benchmark and latency | Correlated stage timings; deployed bounded content-free capture/upload/provider/VAD/playout/interruption diagnostics; historical bounded warm L0 evidence | Reproduce endpoint delay and ineffective voice interruption with the new trace; independent review, current first-audible baseline and declared SLO. Historical percentiles are not current gains |
+| Observability, benchmark and latency | Correlated stage timings; deployed bounded capture/playout/interruption diagnostics plus Speech protocol subcodes, send-lock/Socket and batch HTTP/deadline phases; historical bounded warm L0 evidence | Reproduce endpoint delay and ineffective voice interruption with the new trace; independent review, current first-audible baseline and declared SLO. Historical percentiles are not current gains |
 | Automated verification and product acceptance | Focused module/regression checks and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative independent review and final human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, production semantic cutover, bounded legacy removals and scoped prompt/config isolation | Complete production reachability/retirement audit; remaining manifest rows; keep artifacts/private runtime data out of integration |
 | Production operations | Privacy/preflight/observability foundations only | Authentication/tenancy, public deployment, operations, retention, security, compatibility and release support after separate scope |
@@ -93,9 +93,11 @@ Speech/Observability packet, not a speculative latency or protocol fix. See the
   CLI could not run. Physical two-turn reproduction and browser export remain
   required; ineffective interruption and the misleading `activation` label are
   not claimed fixed by this diagnostic-only packet.
-- Deployment is being prepared with the user's current isolated configuration.
-  It now contains `deepseek-v4-flash`; a separate tool-free configured-model
-  probe passed. Correction to the previous deployment claim: project/data and
+- Controlled local deployment completed with the user's current isolated
+  `deepseek-v4-flash` configuration unchanged, VAD 800 ms and startup 250 ms.
+  Served build, runtime settings, real Speech round trip and rejection probes
+  passed; a separate tool-free configured-model probe passed. Correction to
+  the previous deployment claim: project/data and
   Speech credentials were retained, but the selected isolated dialogue config
   was then a template. Speech-only probes did not validate the dialogue model.
 - The earlier truthful spoken-revision failure notice and browser

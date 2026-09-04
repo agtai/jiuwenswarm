@@ -103,4 +103,47 @@ PowerShell 7 launcher; private helper/configuration/logs are excluded from Git.
 Final affected rerun: **346 passed in 44.77 seconds**. `git diff --check` and
 changed Markdown local-link checks passed. Frontend source was not changed;
 deployment will rebuild the existing package. No microphone/speaker acceptance.
-Deployment outcome pending below.
+
+### Completed deployment at 13:58 (local UTC+02)
+
+- Runtime source: `f66f89a85f180806d858f9734d02ca40956ad80d`, clean when launched.
+  Controlled profile `formal-web-validation`, Cascade engine, branch
+  `hx/0812_live_voice_w3`; no remote update.
+- Preflight passed without stopping services. The first deployment's online
+  `npm install` then stalled with an open HTTPS connection and no progress.
+  Stopped only its verified PID 6640; launcher correctly returned failure.
+  Retried with process-only `npm_config_offline=true`, `npm_config_audit=false`,
+  `npm_config_fund=false`. Existing locked dependencies were up to date in 1 s;
+  no lockfile/dependency change or global npm configuration write. This retry
+  does not provide a fresh vulnerability audit or resolve earlier audit findings.
+- Full `npm run build:live-voice` (TypeScript plus Vite) succeeded; Vite took
+  56.21 s. Existing dynamic/static import and large-chunk warnings remain.
+  `uv sync` resolved/checked existing dependencies without tracked changes.
+- Runtime log: `logs/swarm-20260904-135751.log`; parent PID 18404;
+  Agent 17292 on 18194; Web/Gateway 10140 on 19120/19121; UI 16336 on 6175.
+  Startup log names `deepseek-v4-flash`, not `your-model-name`. Agent/Web process
+  environments retain the same isolated config/data paths and VAD value 800.
+  Configuration hash after deployment exactly matches the pre-deployment hash.
+- The original acceptance URL returns HTTP 200. Served
+  `/assets/index-DsZyj0lX.js` exactly matches the local build, contains startup
+  lead `250` and `__liveVoiceDiagnostics`. Generation-time interruption flag
+  remains false as before; no change to playback interruption behavior.
+- Controlled probe passed real TTS→STT, receipt/claim, wrong-identity and forged
+  claim rejection with zero business effects. New HTTP diagnostics emitted in
+  this real probe: STT request-body send took **5485 ms**; subsequent response
+  header wait took **671 ms**; body complete at about **6281 ms** from HTTP start.
+  This is a batch HTTP upload observation, not the old streaming failure or a
+  proof of network/OS/root cause. Connect/TLS/upload/response phases are now
+  visible without content. The probe ran separately from the user's Session.
+- Post-deployment SQLite still has exactly two terminal Tasks and two terminal
+  Attempts. No browser refresh, microphone action, user Task creation or data
+  cleanup was performed. Old log remains available; browser export is pending.
+
+Next evidence: save the old browser snapshot before refreshing, then physically
+repeat two speech turns and capture recording plus new Session URL and browser
+snapshot. Compare media/capture identities, `adapter_stop_received` →
+`adapter_stop_lock_acquired` → `adapter_stop_published`,
+`adapter_receive_failed` subcode/state, and batch operation ID across HTTP
+phase/failure/deadline. Existing browser heartbeat/playout/interruption records
+remain necessary for endpoint and ineffective barge-in diagnosis. Neither
+diagnostics nor one successful probe establishes VAD/physical acceptance.
