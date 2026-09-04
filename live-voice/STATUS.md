@@ -105,15 +105,24 @@ offline timeline/report are implemented. Scope and verification are in the
   interruption gate; the incorrect text is already present at Speech
   final/commit. All trials used headset output and a headset microphone, so the
   evidence does not support loudspeaker acoustic leakage as the primary cause
-  and cannot yet separate browser/OS/device processing from Provider VAD/
-  recognition. Another reproduction is unnecessary to locate the delayed gate,
-  but a finer controlled run is required to assign that remaining delay. A
-  passive two-band local activity observer is now implemented, verified and
+  and initially could not separate browser/OS/device processing from Provider
+  VAD/recognition. A controlled headset rerun now shows the leading phrase had
+  only three low-band frames and RMS 0.044 before remote speech-start, while the
+  post-stop continuation reached RMS 0.218. Local activity preceded browser
+  speech-start by 239 ms; local hard-stop then took 1.2 ms. Upload queues were
+  empty and the Provider's 800 ms prefix was effective. The application-level
+  root cause is the remote-only interruption gate: playout remains active during
+  the double-talk interval that weakens the leading stop phrase. The exact hidden
+  DSP/transcription component causing that attenuation remains unassigned. A
+  passive two-band local activity observer is implemented, verified and
   deployed from `a7688f3ab4` on the controlled 5173/18092/19000/19001 service;
   the served frontend contains the new observer. It records bounded content-free
   milestones and their age at remote speech-start without gaining stop, cancel
-  or commit authority. Refresh the existing page, run one headset reproduction
-  and export same-tab diagnostics. See the earlier profiling
+  or commit authority. The next implementation is a separately scoped Tier-2
+  typed local double-talk candidate, reversible exact-cursor playout pause and
+  remote-confirmed cancellation across Audio I/O, Interaction Intelligence and
+  Conversation Runtime, plus device-processing/Provider A/B evidence. See the
+  earlier profiling
   [deployment evidence](evidence/DEMO_PROFILING_DEPLOYMENT_20260904.md).
   The scoped acceptance and diagnosis are in the
   [barge-in evidence](evidence/VAD_PLAYOUT_ACCEPTANCE_AND_BARGE_IN_DIAGNOSIS_20260904.md).

@@ -129,6 +129,52 @@ the queue was empty or only 20 ms. The common cause is the remote Provider-only
 speech-start gate. Concurrent-playout recognition failed, but the retained
 evidence does not identify one exact processing layer as its cause.
 
+### Controlled headset rerun
+
+The requested same-device rerun used Session
+`web_1a06dcf9e50_d9209702defd`, response
+`response-unified-c1527d9e05e168636d83dd044d31daa1` and capture
+`c041ba5e-a973-4687-80cb-a1fc2ff72264`. The user said “停一下，请改成只说一句话”; the
+Provider final was “请改成只说一句话”. The complete target capture reached a normal
+streaming final without fallback or transport failure.
+
+The same browser clock gives this exact onset-to-stop sequence:
+
+| Observation | Time | Delta |
+|---|---:|---:|
+| first processed capture frame above RMS 0.015 | 19:05:40.255Z | baseline |
+| three consecutive frames above RMS 0.015 | 19:05:40.295Z | +40.1 ms |
+| Provider speech-start reached the browser | 19:05:40.493Z | +238.7 ms from first / +198.7 ms from sustained |
+| all 254 scheduled playout sources stopped | 19:05:40.494Z | +1.2 ms from browser speech-start |
+
+Before the remote gate opened, 157 playout-overlap frames had been observed, but
+only three crossed RMS 0.015, peak RMS was 0.044, and no frame crossed the 0.05
+strong band. In the first periodic bucket after playout stopped, 24 frames were
+speech-like and peak RMS rose to 0.218, about five times the pre-stop peak. This
+matches the user-visible split: the low-energy leading stop phrase was omitted,
+while the stronger continuation spoken after local stop was retained.
+
+This was not an upload/backpressure loss. Browser sent/ACK counts were equal at
+the first activity frame; Gateway queue and pending audio were zero immediately
+before speech onset; all 326 capture frames were ultimately acknowledged. The
+Provider returned `audio_start_ms=2432`; the first local activity was nominally
+at frame 161, about 3220 ms into capture. The roughly 788 ms lookback matches the
+configured 800 ms barge-in prefix, so increasing prefix padding does not address
+this failure. The Provider wire speech-start arrived about 166 ms after local
+activity by same-host wall time, and the remaining control delivery took about
+72 ms; neither path dropped audio.
+
+The proximate failure is therefore a severely weakened leading phrase in the
+processed microphone stream while TTS is still playing, followed by a clear
+continuation after stop. Without an opt-in raw pre/post-processing recording, the
+evidence cannot honestly assign that attenuation to one hidden component among
+the headset/driver, OS, Chrome AEC/noise suppression/automatic gain control and
+Provider transcription. The product-level root cause is still precise: remote
+Provider VAD is the sole barge-in authority, so playout continues during the
+exact double-talk interval that weakens the words needed to trigger and identify
+the interruption. This feedback loop makes first-phrase preservation depend on
+the weakest concurrent-playout capture behavior.
+
 This evidence rules out the following as primary causes:
 
 - the browser stop routine: it stopped all scheduled sources without failure in
@@ -140,14 +186,7 @@ This evidence rules out the following as primary causes:
 
 ## Follow-up boundary
 
-The retained browser and backend records are sufficient to locate this failure;
-another reproduction is not required to show that the delay precedes the remote
-speech-start gate. Because the failed trials already used a headset, changing to
-a headset is not a mitigation supported by this evidence. A controlled rerun
-with finer local-onset observation is required before assigning the remaining
-delay to browser/OS/device processing or Provider VAD/recognition.
-
-That passive observation is now implemented. During each answer it emits at
+The passive observation emits at
 most four content-free milestones: first and three-consecutive-frame crossings
 at RMS 0.015 and 0.05. When remote speech-start arrives, `barge_in_gate` records
 the age of each local milestone, total observed/above-floor frame counts and the
@@ -159,20 +198,45 @@ allowlist, offline report importer and their focused tests. Provider settings,
 capture processing constraints, VAD policy, playback behavior, Agent/Tool/Task
 authority, raw audio and transcript logging are explicitly excluded.
 
-An engineering repair should be scoped separately as a Tier-2 interruption
-packet. The candidate direction is an echo-aware local double-talk detector that
-can pre-mute playout before remote Provider confirmation, with rollback and
-false-interruption tests. Local RMS crossing alone is not an acceptable policy:
-playback leakage can cross the same threshold, so promoting the existing
-diagnostic hint directly to cancellation authority would risk stopping answers
-when the user did not speak.
+The engineering repair is a separate Tier-2 interruption packet spanning Audio
+Device & I/O, Interaction Intelligence and Conversation Runtime:
 
-Tentative local pre-muting also has product costs even if it does not immediately
-cancel TTS: false positives create audible dips, continued playout can skip
-content while muted, and rollback can introduce gaps, duplication or stale-audio
-revival. Any repair therefore needs a tentative/confirmed state, a bounded
-confirmation deadline and explicit no-speech, breath, keyboard, device-noise,
-false-trigger, rollback and old-audio-revival checks.
+1. Audio I/O produces a typed, content-free near-end speech candidate carrying
+   capture, response and generation identity. It must use a real local voice/
+   double-talk detector with hysteresis and the known far-end playout signal;
+   the existing RMS milestones remain diagnostic only.
+2. Interaction Intelligence owns the tentative decision. Conversation Runtime
+   validates the active response/generation and asks Audio I/O to freeze local
+   playout at its exact unplayed cursor within the local latency target. This
+   tentative pause does not cancel Agent/TTS work and cannot commit input.
+3. Matching Provider speech-start within a bounded confirmation window promotes
+   the candidate to a permanent hard-stop and exact-response cancel/fence. A
+   false candidate resumes from the same cursor with a short ramp; clock time
+   must not advance through muted content, so no answer words are skipped.
+4. Capture processing becomes an explicit device profile rather than three
+   unconditional browser `ideal: true` hints. Headset and speaker paths require
+   separate A/B evidence. For the OpenAI Adapter, `near_field` Provider input
+   noise reduction and an explicit Chinese language hint are eligible headset
+   candidates, but browser and Provider suppression must not be stacked by
+   default before double-talk CER proves that combination.
+5. Keep the working 800 ms pre-roll and evaluate a current streaming
+   transcription model behind the existing Provider-neutral Port. Model or
+   input-processing changes are separate A/B dimensions from local pause logic.
+
+This design removes the circular dependency while preserving authority: a local
+candidate may temporarily pause only the exact active response; remote Speech
+still owns committed text and EOT, and Runtime still owns cancellation. Lowering
+the Provider VAD threshold, increasing the already-effective prefix, prompting
+for the literal words “停一下”, or making an RMS crossing cancel work would be
+parameter/hard-code patches that do not solve the double-talk control loop.
+
+Acceptance must include TTS-only, silence, breath, cough, keyboard/device noise,
+real near-end speech, one-second/five-second barge-in, false-candidate rollback,
+device change and stale-generation cases. Required outcomes are no committed
+input or cancel on false candidates, no skipped/duplicated/revived audio on
+rollback, exact-response-only permanent cancellation, double-talk CER no more
+than 5 percentage points worse than quiet speech, at least 95% playback-time
+barge-in success, and measured local pause/Provider confirmation percentiles.
 
 ## Passive-diagnostic deployment
 
@@ -188,9 +252,9 @@ receipt, identity-mismatch rejection and forged-claim rejection probes with
 zero business side effects. Runtime-contract source matched `a7688f3ab4`; ports
 5173, 18092, 19000 and 19001 were listening, the page returned HTTP 200, and
 the served `/assets/index-C1-6cszx.js` contained the
-`capture_playout_activity` diagnostic marker. The managed service remains
-available for one controlled headset reproduction. That physical result is
-pending and is not inferred from the deployment probes.
+`capture_playout_activity` diagnostic marker. The controlled headset
+reproduction above completed on that deployed source and closes the diagnostic
+question; it does not make the unrepaired interruption behavior pass.
 
 ## Verification
 
@@ -200,6 +264,8 @@ pending and is not inferred from the deployment probes.
 - browser diagnostic allowlist/privacy regression: 7 passed;
 - offline profiling regression: 27 passed;
 - combined profile analyzer: 13,529 records / 4,499 spans, no warning;
+- controlled headset rerun profile: 1,353 records / 438 spans; the target
+  capture has a normal streaming final and complete onset/queue/stop evidence;
 - changed-document local links and `git diff --check`: pass.
 
 The raw same-tab browser export remains outside Git because it contains runtime
