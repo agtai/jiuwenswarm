@@ -71,6 +71,14 @@ SCENARIOS: dict[str, dict[str, str]] = {
         "text": "请运行 git status 命令，告诉我当前项目的状态。",
         "expect": "tool result -> spoken revision (tool trigger)",
     },
+    "clarify": {
+        # A Task-like request without a target: the semantic contract
+        # routes it to clarification, never to plain dialogue. With a
+        # speculative dialogue candidate this is the discard path, and
+        # the spoken clarification must still be the only output.
+        "text": "帮我后台处理一下。",
+        "expect": "clarification -> candidate discarded, clarification spoken",
+    },
     "task": {
         # One distinct request per round: the delegation review refuses a
         # repeated request as a duplicate and answers it as a foreground
@@ -534,7 +542,7 @@ async def main_async(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rounds", type=int, default=5)
-    parser.add_argument("--scenarios", default="short,medium,long,tool,task")
+    parser.add_argument("--scenarios", default="short,medium,long,tool,task,clarify")
     parser.add_argument("--gap-seconds", type=float, default=1.0)
     parser.add_argument("--output-dir", default=str(REPO_ROOT / "logs" / f"lv-latency-baseline-{time.strftime('%Y%m%d-%H%M%S')}"))
     return asyncio.run(main_async(parser.parse_args()))
