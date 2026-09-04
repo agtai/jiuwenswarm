@@ -248,6 +248,12 @@ from .task_semantics import TaskSemanticDecision
 
 logger = logging.getLogger(__name__)
 
+# Operational switch for the speculative dialogue candidate; anything but an
+# off value keeps it on. Read per turn, so a restart is not needed to flip it
+# for a process that re-reads its environment.
+_SPECULATION_SWITCH_ENV = "LIVE_VOICE_DIALOGUE_SPECULATION"
+_SPECULATION_OFF_VALUES = frozenset({"off", "0", "false", "no"})
+
 PRODUCT_COMPOSITION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED"
 PRODUCT_P2_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED"
 PRODUCT_P3_TEXT_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED"
@@ -8076,6 +8082,9 @@ class AgentServerProductCompositionRegistry:
         other decision discards it.  Any failure to start is the serial path.
         """
 
+        if os.getenv(_SPECULATION_SWITCH_ENV, "on").strip().lower() in _SPECULATION_OFF_VALUES:
+            logger.info("live_voice_speculation_skipped request_id=%s reason=disabled", request_id)
+            return None
         continuity = self._semantic_continuity
         if continuity is None:
             return None

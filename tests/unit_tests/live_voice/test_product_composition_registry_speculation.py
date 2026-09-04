@@ -262,3 +262,19 @@ async def test_an_unattachable_candidate_falls_back_to_a_fresh_round(
     assert facade.aborted == [facade.sessions[0]] and facade.resumed == []
     assert not facade.sessions[1].startswith("lv-formal-spec-")
     await _close_unified_route(registry, stem="p3-off-create")
+
+
+@pytest.mark.asyncio
+async def test_the_operational_switch_forces_the_serial_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry, composition, manager, facade = _gated(tmp_path)
+    await _activate(registry)
+    monkeypatch.setenv("LIVE_VOICE_DIALOGUE_SPECULATION", "off")
+    facade.release.set()
+    result = await _submit(registry, stem="serial-switch")
+    assert result.ok, result.payload
+    assert facade.paused == [] and facade.calls == 1
+    assert not facade.sessions[0].startswith("lv-formal-spec-")
+    await _close_unified_route(registry, stem="p3-off-create")
+
