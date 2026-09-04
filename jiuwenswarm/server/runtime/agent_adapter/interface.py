@@ -1109,6 +1109,51 @@ class JiuWenSwarm:
             if callable(cleanup_session):
                 await cleanup_session(background_request.session_id)
 
+    def _formal_tool_rail(self) -> Any | None:
+        adapter = self._ensure_adapter(mode="agent")
+        rail = getattr(adapter, "_stream_event_rail", None)
+        if rail is None or not all(
+            callable(getattr(rail, name, None)) for name in ("pause", "resume", "abort")
+        ):
+            return None
+        return rail
+
+    def supports_speculative_dialogue(self) -> bool:
+        try:
+            return self.supports_formal_live_voice() and self._formal_tool_rail() is not None
+        except Exception:  # noqa: BLE001 - an adapter that cannot even be built has no gate
+            return False
+
+    def _require_formal_tool_session(self, session_id: str) -> str:
+        if not isinstance(session_id, str) or not session_id.startswith("lv-formal-"):
+            raise RuntimeError("FORMAL_TOOL_GATE_SESSION_INVALID")
+        return session_id
+
+    def pause_formal_tools(self, session_id: str) -> None:
+        """Hold every tool call of one formal session before it executes.
+
+        The lower adapter's stream-event rail checks the per-session pause
+        before each tool call, so a paused formal session can keep producing
+        model output without executing anything.
+        """
+
+        rail = self._formal_tool_rail()
+        if rail is None:
+            raise RuntimeError("FORMAL_TOOL_GATE_UNSUPPORTED")
+        rail.pause(self._require_formal_tool_session(session_id))
+
+    def resume_formal_tools(self, session_id: str) -> None:
+        rail = self._formal_tool_rail()
+        if rail is None:
+            raise RuntimeError("FORMAL_TOOL_GATE_UNSUPPORTED")
+        rail.resume(self._require_formal_tool_session(session_id))
+
+    def abort_formal_tools(self, session_id: str) -> None:
+        rail = self._formal_tool_rail()
+        if rail is None:
+            raise RuntimeError("FORMAL_TOOL_GATE_UNSUPPORTED")
+        rail.abort(self._require_formal_tool_session(session_id))
+
     async def process_formal_live_voice_stream(
         self,
         execution: "FormalAgentExecution",
