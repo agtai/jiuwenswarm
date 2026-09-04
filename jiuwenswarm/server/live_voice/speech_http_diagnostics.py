@@ -18,8 +18,9 @@ class SpeechHttpDiagnostics:
         self.operation = operation
         self.started = time.monotonic()
         self.phase = "request"
-        self.phase_started = self.started
-        self._failed_phase: tuple[str, float] | None = None
+        self.phase_started: float | None = self.started
+        self._phase_starts: dict[str, float] = {}
+        self._failed_phase: tuple[str, float | None] | None = None
         self._seen: set[tuple[str, str]] = set()
 
     def record(self, event: str, **fields: object) -> None:
@@ -31,7 +32,7 @@ class SpeechHttpDiagnostics:
             record_audio_diagnostic(event, operation_id=self.operation_id,
                 operation=self.operation, http_phase=phase,
                 elapsed_ms=(now - self.started) * 1000,
-                phase_ms=(now - phase_started) * 1000, **fields)
+                phase_ms=(now - phase_started) * 1000 if phase_started is not None else None, **fields)
         except Exception:
             pass
 
@@ -51,8 +52,11 @@ class SpeechHttpDiagnostics:
             self._seen.add(key)
             self.phase = phase
             if outcome == "started":
-                self.phase_started = time.monotonic()
-            elif outcome == "failed" and self._failed_phase is None:
+                self._phase_starts[phase] = time.monotonic()
+            # Body consumption and response closure can overlap. A late body
+            # completion must retain its own start, never the close timestamp.
+            self.phase_started = self._phase_starts.get(phase)
+            if outcome == "failed" and self._failed_phase is None:
                 self._failed_phase = (phase, self.phase_started)
             self.record("batch_http_phase", outcome=outcome)
         except Exception:

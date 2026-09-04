@@ -141,6 +141,76 @@ def test_session_join_keeps_explicit_foreign_session_out():
     assert len(report.select_session(rows, "a")) == 3
 
 
+def test_synthesis_response_identity_survives_session_filter_without_unit_guessing():
+    from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
+    from jiuwenswarm.server.live_voice.streaming_speech import SynthesisStreamRef
+
+    ref_a = SynthesisStreamRef("stream-a", 1, ResponseRef("interaction-a", "response-a", 1), "unit", 0)
+    ref_b = SynthesisStreamRef("stream-b", 1, ResponseRef("interaction-b", "response-b", 1), "unit", 0)
+    ids_a = profile.identity_fields({"ref": ref_a, "spoken_text": "PRIVATE"})
+    ids_b = profile.identity_fields({"ref": ref_b})
+    assert ids_a["response_id"] == "response-a"
+    assert ids_a["interaction_id"] == "interaction-a"
+    assert "PRIVATE" not in repr(ids_a)
+    rows = [row("playout", 1, 1, session_id="a", response_id="response-a"),
+            row("profile_span_started", 2, 2, stage="synthesis.begin", span_id="span-a", **ids_a),
+            row("profile_span_settled", 3, 3, stage="synthesis.begin", span_id="span-a", duration_ms=1, **ids_a),
+            row("profile_span_started", 4, 4, stage="synthesis.begin", span_id="span-b", **ids_b)]
+    selected = report.select_session(rows, "a")
+    assert len(selected) == 3
+    assert report.build_report(selected)["coverage"]["Synthesis / first audio"] == 2
+    assert all(r["fields"].get("response_id") != "response-b" for r in selected)
+
+
+@pytest.mark.parametrize("duration,counter", [(0.13812345678, 12), (13812345678.0, 13812345678),
+                                              (123456789012345678.0, 2**53 - 1)])
+def test_diagnostic_numbers_remain_json_through_actual_sensitive_log_filter(monkeypatch, duration, counter):
+    import logging
+    from jiuwenswarm.common.utils import SensitiveDataFilter
+
+    captured = []
+    monkeypatch.setattr(sink, "_WORKER", object())
+    monkeypatch.setattr(sink._QUEUE, "put_nowait", captured.append)
+    monkeypatch.setattr(sink.time, "perf_counter", lambda: 13812345.678)
+    monkeypatch.setattr(sink, "_SEQUENCE", iter([counter]))
+    monkeypatch.setattr(sink, "_DROPPED", counter)
+    sink.record_audio_diagnostic("profile_span_settled", duration_ms=duration,
+                                 phase_ms=1.13912345678, frame_count=counter, speech_started=True,
+                                 transcript="PRIVATE", api_key="PRIVATE")
+    record = logging.LogRecord("diagnostics", logging.INFO, __file__, 1,
+                               "live_voice_audio_diagnostic %s", (captured[0],), None)
+    assert SensitiveDataFilter().filter(record)
+    message = record.getMessage()
+    assert "PRIVATE" not in message
+    parsed = json.loads(message.split("live_voice_audio_diagnostic ", 1)[1])
+    assert parsed["fields"] == {"duration_ms": round(duration, 3), "phase_ms": 1.139,
+                                "frame_count": counter, "speech_started": True}
+    assert parsed["monotonic_ms"] == 13812345678
+    imported = report.sanitize_record(parsed)
+    assert imported["sequence"] == counter
+    assert imported["dropped_records"] == counter
+    assert type(imported["sequence"]) is int
+
+
+def test_numeric_encoding_never_rewrites_quoted_ids_or_escaped_content(tmp_path):
+    value = {"fields": {"request_id": "request-13812345678", "quoted": '"13812345678"',
+                        "frame_count": 13812345678, "duration_ms": -13812345678.125}}
+    encoded = sink._encode_record(value)
+    assert json.loads(encoded) == value
+    assert '"request-13812345678"' in encoded
+    assert report._counter(True, None) is None
+    assert report._counter(1.5, None) is None
+    assert report._counter(float("inf"), None) is None
+    assert report._counter(10**1000, None) is None
+    raw = {"event": "profile_span_settled", "sequence": 10**1000, "dropped_records": 10**1000,
+           "clock_id": "python-a", "monotonic_ms": 1, "observed_at": "2026-09-04T16:00:00Z", "fields": {}}
+    log = tmp_path / "oversized-counter.log"
+    log.write_text("live_voice_audio_diagnostic " + json.dumps(raw) + "\n", encoding="utf-8")
+    imported, _, _ = report.load_records([log], [])
+    assert len(imported) == 1 and imported[0]["sequence"] is None
+    assert imported[0]["dropped_records"] == 0
+
+
 def test_existing_sink_inherits_only_safe_scope_and_never_error_text(monkeypatch):
     captured = []
     monkeypatch.setattr(sink, "_WORKER", object())

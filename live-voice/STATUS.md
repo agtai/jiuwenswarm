@@ -86,8 +86,11 @@ offline timeline/report are implemented. Scope and verification are in the
 - This increment observes the existing business path and keeps VAD 800 ms,
   startup 250 ms, timeout/retry/buffer policy, model configuration and all Task /
   capture / presentation authority unchanged. It requires refreshed services
-  and frontend assets; this workspace has no managed-service manifest and has
-  not deployed or physically rehearsed the increment.
+  and frontend assets. The controlled launcher and a synthetic-speech browser
+  run now exercised the real Agent/file tool and digital playback. That run
+  exposed numeric-log parsing, synthesis identity and overlapping HTTP timing
+  gaps; their bounded repair is under verification. See the
+  [deployment evidence](evidence/DEMO_PROFILING_DEPLOYMENT_20260904.md).
 - Automatic timing, error breadcrumbs and explicit missing/dropped-record
   reporting are implementation evidence, not a latency improvement or a physical
   acceptance PASS. Scoped regressions, the frontend build and independent

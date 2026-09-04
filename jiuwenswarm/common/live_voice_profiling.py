@@ -23,7 +23,7 @@ _IDS = frozenset({
     "task_id", "attempt_id", "command_id", "outbox_id", "unit_id", "activation_id",
     "project_id", "response_generation", "capture_generation", "activation_generation", "execution_session_id",
 })
-_CONTAINERS = ("scope", "binding", "ref", "response_ref", "capture", "commit")
+_CONTAINERS = ("scope", "binding", "ref", "response", "response_ref", "capture", "commit")
 
 
 def identity_fields(*sources) -> dict:

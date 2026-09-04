@@ -295,3 +295,30 @@ async def test_http_observer_is_bounded_and_throwing_sink_cannot_fail_transport(
         200, stream=httpx.ByteStream(b'{"text":"hello"}'))))
     result = await service.recognize(_recognize_request(), CONTEXT)
     assert result["ok"] and len(service._voice_commit_receipts) == 1
+
+
+@pytest.mark.asyncio
+async def test_http_overlapping_close_preserves_body_start_and_missing_start(monkeypatch):
+    records, clock = [], [0.0]
+    monkeypatch.setattr(http_diagnostics, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(http_diagnostics, "record_audio_diagnostic", lambda e, **f: records.append((e, f)))
+    observer = http_diagnostics.SpeechHttpDiagnostics("operation", "speech.synthesize.stream")
+    for instant, name in [(1, "http11.receive_response_body.started"),
+                          (2, "http11.response_closed.started"),
+                          (2.1, "http11.response_closed.complete"),
+                          (2.2, "http11.receive_response_body.failed")]:
+        clock[0] = instant
+        await observer.trace(name, {"request": "PRIVATE", "exception": RuntimeError("PRIVATE")})
+    assert records[-2][1]["phase_ms"] == pytest.approx(100)
+    assert records[-1][1]["phase_ms"] == pytest.approx(1200)
+    clock[0] = 3
+    await observer.trace("http11.receive_response_body.failed", {})
+    await observer.trace("unknown.receive_response_body.started", {})
+    assert len(records) == 4
+    await observer.trace("http11.send_request_body.complete", {})
+    assert records[-1][1]["phase_ms"] is None
+    observer.record("batch_http_transport_failed")
+    assert records[-1][1]["http_phase"] == "receive_response_body"
+    assert records[-1][1]["phase_ms"] == pytest.approx(2000)
+    assert len(observer._phase_starts) == 2
+    assert "PRIVATE" not in repr(records)

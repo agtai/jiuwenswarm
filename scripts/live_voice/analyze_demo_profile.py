@@ -37,6 +37,14 @@ JOIN_IDS = {"request_id", "capture_id", "response_id", "media_session_id", "corr
             "interaction_id", "task_id", "attempt_id", "commit_id", "operation_id", "execution_session_id"}
 
 
+def _counter(value, default):
+    # JSON scientific notation remains a number; Python decodes it as float.
+    # Retain exact safe integers for sequence deduplication and loss reporting.
+    if type(value) in {int, float} and 0 <= value <= 2**53 - 1 and int(value) == value:
+        return int(value)
+    return default
+
+
 def sanitize_record(value):
     if not isinstance(value, dict) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", str(value.get("event", ""))):
         return None
@@ -73,8 +81,8 @@ def sanitize_record(value):
     dropped = value.get("dropped_records", 0)
     return {"event": value["event"], "observed_at": stamp, "wall_ms": wall_ms,
             "monotonic_ms": mono, "clock_id": clock,
-            "sequence": sequence if type(sequence) is int and sequence >= 0 else None,
-            "dropped_records": dropped if type(dropped) is int and dropped >= 0 else 0,
+            "sequence": _counter(sequence, None),
+            "dropped_records": _counter(dropped, 0),
             "fields": fields}
 
 

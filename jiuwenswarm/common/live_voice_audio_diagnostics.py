@@ -20,6 +20,36 @@ _WORKER: threading.Thread | None = None
 _DROPPED = 0
 _CLOCK_ID = f"python-{os.getpid()}-{uuid.uuid4().hex[:12]}"
 _SEQUENCE = count(1)
+# JSON strings are consumed whole so numeric-looking identifiers are never
+# rewritten. Only numeric tokens outside strings use the alternate notation.
+_JSON_TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)')
+
+
+def _encode_record(value: dict) -> str:
+    """Keep JSON numbers exact and parseable through the standard PII filter.
+
+    Scientific JSON notation can split long digit runs without disabling the
+    filter or turning numbers into strings. Up to 18 significant digits cover
+    binary64 floats and safe integer counters; larger numbers fail open at the
+    caller instead of generating potentially malformed diagnostic evidence.
+    """
+    def number(match: re.Match) -> str:
+        raw = match.group(1)
+        if raw is None or not re.search(r"\d{11}", raw):
+            return match.group(0)
+        mantissa, _, exponent = raw.lower().partition("e")
+        whole, _, fraction = mantissa.lstrip("-").partition(".")
+        digits = (whole + fraction).lstrip("0") or "0"
+        if len(digits) > 18:
+            raise ValueError("diagnostic numeric precision bound")
+        split = min(9, len(digits))
+        power = int(exponent or "0") - len(fraction) + len(digits) - split
+        sign = "-" if raw.startswith("-") else ""
+        return f"{sign}{digits[:split]}.{digits[split:] or '0'}e{power}"
+
+    return _JSON_TOKEN.sub(number, json.dumps(value, separators=(",", ":")))
+
+
 _IDS = frozenset({"session_id", "media_session_id", "capture_id", "lease_id", "interaction_id", "correlation_id", "response_id", "operation_id", "request_id"})
 _IDS = _IDS | frozenset({"span_id", "model_call_id", "parent_span_id", "turn_id", "commit_id", "round_id", "task_id", "attempt_id", "command_id", "outbox_id", "tool_call_id", "unit_id", "activation_id", "project_id", "execution_session_id"})
 _TOKENS = frozenset({"stage", "rpc_method", "error_type", "error_location", "error_code", "error_reason", "result_state", "milestone", "tool_name"})
@@ -113,14 +143,18 @@ def record_audio_diagnostic(event: str, *, _inherit_context: bool = True, **fiel
             if key in _IDS and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value):
                 safe[key] = value
             elif key in _VALUES and (value is None or type(value) is bool or (type(value) in {int, float} and math.isfinite(value))):
-                safe[key] = value
+                # Sub-millisecond precision is sufficient for these observations.
+                # Long decimal tails can match the standard log PII filter's
+                # phone pattern and turn a JSON number into invalid `0.******`.
+                # Keep that filter enabled; bound numeric precision at the sink.
+                safe[key] = round(value, 3) if type(value) is float else value
             elif key in _LABELS and isinstance(value, str) and value in _LABELS[key]:
                 safe[key] = value
             elif key in _TOKENS and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value):
                 safe[key] = value
-        item = json.dumps({"event": event, "observed_at": datetime.now(UTC).isoformat(),
-            "monotonic_ms": time.perf_counter() * 1000, "clock_id": _CLOCK_ID,
-            "sequence": next(_SEQUENCE), "dropped_records": _DROPPED, "fields": safe}, separators=(",", ":"))
+        item = _encode_record({"event": event, "observed_at": datetime.now(UTC).isoformat(),
+            "monotonic_ms": round(time.perf_counter() * 1000, 3), "clock_id": _CLOCK_ID,
+            "sequence": next(_SEQUENCE), "dropped_records": _DROPPED, "fields": safe})
         if _WORKER is None:
             with _START_LOCK:
                 if _WORKER is None:
