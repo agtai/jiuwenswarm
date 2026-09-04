@@ -1803,10 +1803,30 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [terminalAnnouncementState, setTerminalAnnouncementState] = useState<TerminalAnnouncementState>('idle');
   const [terminalAnnouncementArbitrationEpoch, setTerminalAnnouncementArbitrationEpoch] = useState(0);
   const [adjustmentNotification, setAdjustmentNotification] = useState<string | null>(null);
-  const [productTextStatus, setProductTextStatus] = useState<
+  const [productTextStatus, setProductTextStatusState] = useState<
     'idle' | 'submitting' | 'waiting' | 'presented' | 'acknowledged' | 'failed'
   >('idle');
-  const [productTextReason, setProductTextReason] = useState<string | null>(null);
+  const [productTextReason, setProductTextReasonState] = useState<string | null>(null);
+  // Temporary C019 diagnostic: every visible text failure names its closed
+  // site label and the stable reason it carries; no text, audio or token.
+  const productTextReasonDiagnosticRef = useRef<string | null>(null);
+  const setProductTextReason = (reason: string | null) => {
+    productTextReasonDiagnosticRef.current = reason;
+    setProductTextReasonState(reason);
+  };
+  const setProductTextStatus = (
+    status: Parameters<typeof setProductTextStatusState>[0],
+    site: string = 'text_status_unlabelled',
+  ) => {
+    if (status === 'failed') {
+      console.info('[LiveVoiceC019] transition diagnostic', {
+        event: 'browser_text_status_failed',
+        site,
+        reason: productTextReasonDiagnosticRef.current,
+      });
+    }
+    setProductTextStatusState(status);
+  };
   const [recoveryDiagnostic, setRecoveryDiagnostic] = useState<ProductLiveVoiceRecoveryDiagnostic | null>(null);
   const [p1VoiceStatus, setP1VoiceStatus] = useState<ProductP1VoiceStatus>(FEATURE_LIVE_VOICE_INTEGRATED_P1 ? 'idle' : 'closed');
   const [p1VoiceReason, setP1VoiceReason] = useState<string | null>(null);
@@ -1825,7 +1845,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [draftOutputDeviceToken, setDraftOutputDeviceToken] = useState(BROWSER_AUDIO_SYSTEM_DEFAULT_TOKEN);
   const [recognizedSpeechConfirmation, setRecognizedSpeechConfirmation] = useState<RecognizedSpeechConfirmation | null>(null);
   const [editedVoiceDraftConfirmation, setEditedVoiceDraftConfirmation] = useState<EditedVoiceDraftConfirmation | null>(null);
-  const [pendingPresentationAck, setPendingPresentationAck] = useState<ProductPresentationAckInput | null>(null);
+  const [pendingPresentationAck, setPendingPresentationAckState] = useState<ProductPresentationAckInput | null>(null);
+  // Temporary C019 diagnostic: every pending presentation ACK state change
+  // names its closed site so the poll gate can be attributed.
+  const setPendingPresentationAck = (
+    value: Parameters<typeof setPendingPresentationAckState>[0],
+    site: string = 'pending_ack_unlabelled',
+  ) => {
+    console.info('[LiveVoiceC019] transition diagnostic', {
+      event: 'browser_pending_presentation_ack_set',
+      site,
+      pending: value !== null,
+    });
+    setPendingPresentationAckState(value);
+  };
   const [p3MutationOperation, setP3MutationOperation] = useState<'task.create' | 'task.cancel' | 'task.retry'>('task.create');
   const [p3TaskName, setP3TaskName] = useState('');
   const [p3TaskInstruction, setP3TaskInstruction] = useState('');
@@ -2114,6 +2147,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     seam: ProductLiveVoiceRecoveryDiagnostic['seam'];
     disposition: ProductLiveVoiceRecoveryDiagnostic['disposition'];
     reason: string;
+    site?: string;
     binding: ProductWebP2ActivationSnapshot['binding'];
     response?: Readonly<{
       interaction_id: string;
@@ -2125,6 +2159,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     if (bindingSessionId !== null && bindingSessionId !== activeSessionRef.current) return;
     const sessionId = bindingSessionId ?? activeSessionRef.current;
     if (sessionId === null) return;
+    // Temporary C019 diagnostic: closed site label, seam, disposition, reason.
+    console.info('[LiveVoiceC019] transition diagnostic', {
+      event: 'browser_recovery_diagnostic_published',
+      site: input.site ?? 'recovery_unlabelled',
+      seam: input.seam,
+      disposition: input.disposition,
+      reason: input.reason,
+      response_generation: input.response?.response_generation ?? null,
+    });
     const diagnostic = Object.freeze<ProductLiveVoiceRecoveryDiagnostic>({
       seam: input.seam,
       disposition: input.disposition,
@@ -2360,9 +2403,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               if (isCurrentOwner() && isRetriableProductOperationError(error)) {
                 const reason = stableProductTextReason(error, 'PRODUCT_TASK_AUDIO_FALLBACK_RECOVERY_REQUIRED');
                 setProductTextReason(reason);
-                setProductTextStatus('failed');
+                setProductTextStatus('failed', 'text_failed_01');
                 publishProductRecoveryDiagnostic({
-                  seam: 'tts',
+                  site: 'recovery_01',
+seam: 'tts',
                   disposition: 'retrying',
                   reason,
                   binding: owner.snapshot().binding,
@@ -2381,7 +2425,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           activeVoiceResponseRef.current = null;
         }
         pendingPresentationAttemptRef.current = null;
-        setPendingPresentationAck(null);
+        setPendingPresentationAck(null, 'pending_ack_01');
         setProductTextReason(null);
         setProductTextStatus(pendingForegroundPresentationRef.current !== null ? 'waiting' : 'acknowledged');
         // presentation.failed only proves that AUDIO was not delivered. Even
@@ -2409,7 +2453,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             activeVoiceResponseRef.current = null;
           }
           pendingPresentationAttemptRef.current = null;
-          setPendingPresentationAck(null);
+          setPendingPresentationAck(null, 'pending_ack_02');
           terminalAnnouncementSpeechOwnerRef.current = null;
           updateTerminalAnnouncementState('idle', null);
           if (isStaleProductResponseError(error)) {
@@ -2422,9 +2466,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             });
           } else {
             setProductTextReason(reason);
-            setProductTextStatus('failed');
+            setProductTextStatus('failed', 'text_failed_02');
             publishProductRecoveryDiagnostic({
-              seam: 'tts',
+              site: 'recovery_02',
+seam: 'tts',
               disposition: 'terminal',
               reason,
               binding: owner.snapshot().binding,
@@ -2435,9 +2480,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           return;
         }
         setProductTextReason(reason);
-        setProductTextStatus('failed');
+        setProductTextStatus('failed', 'text_failed_03');
         publishProductRecoveryDiagnostic({
-          seam: 'tts',
+          site: 'recovery_03',
+seam: 'tts',
           disposition: 'retrying',
           reason,
           binding: owner.snapshot().binding,
@@ -2712,7 +2758,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           throw new Error('a foreign presentation ACK is still unresolved');
         }
         pendingPresentationAttemptRef.current = attempt;
-        setPendingPresentationAck(attempt.input);
+        setPendingPresentationAck(attempt.input, 'pending_ack_03');
         await settleProductTtsPresentationAckRef.current(attempt);
       },
       onFailure: error => {
@@ -2720,7 +2766,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         voiceOwner.stopAgentPlayout(response);
         void voiceOwner.cancelPreparedResponse(response, 'TTS_CONTINUATION_ACK_FAILED');
         setProductTextReason(stableProductTextReason(error, 'TTS_CONTINUATION_ACK_FAILED'));
-        setProductTextStatus('failed');
+        setProductTextStatus('failed', 'text_failed_04');
       },
     });
     return {
@@ -2779,7 +2825,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           'TTS_CONTINUATION_PREFETCH_FAILED',
         );
         setProductTextReason(stableProductTextReason(error, 'TTS_CONTINUATION_PREFETCH_FAILED'));
-        setProductTextStatus('failed');
+        setProductTextStatus('failed', 'text_failed_05');
       })
       .finally(() => {
         if (productTtsContinuationRef.current === group) group.prefetch = null;
@@ -2810,7 +2856,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     cancelProductTtsContinuation('TTS_CONTINUATION_PLAYOUT_FAILED');
     if (pendingPresentationAttemptRef.current === attempt) {
       pendingPresentationAttemptRef.current = null;
-      setPendingPresentationAck(null);
+      setPendingPresentationAck(null, 'pending_ack_04');
     }
     if (
       foregroundPresentationFenceMatchesResponse(
@@ -2827,7 +2873,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     setProductTextReason(
       stableProductTextReason(error, 'TTS_CONTINUATION_PLAYOUT_FAILED'),
     );
-    setProductTextStatus('failed');
+    setProductTextStatus('failed', 'text_failed_06');
 
     await Promise.resolve(group.prefetch).catch(() => undefined);
     let notification = group.prefetched;
@@ -2876,6 +2922,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const canAttemptPresentationAck = () =>
       isCurrentPresentationOwner() &&
       (voiceLoopP2RefreshAfterGenerationRef.current === null || !ackAttemptStarted);
+    // Temporary C019 diagnostic: whether this ACK settlement can be attempted.
+    console.info('[LiveVoiceC019] transition diagnostic', {
+      event: 'browser_presentation_ack_settlement',
+      surface: retained.input.surface,
+      current_owner: isCurrentOwner(),
+      current_presentation_owner: isCurrentPresentationOwner(),
+      pending_attempt_is_retained: pendingPresentationAttemptRef.current === retained,
+      pending_attempt: pendingPresentationAttemptRef.current !== null,
+    });
     let settlement: Promise<void>;
     settlement = Promise.resolve()
       .then(() => retryRetainedProductOperation({
@@ -2887,9 +2942,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             if (canMutateCurrentPresentationUi() && isRetriableProductOperationError(error)) {
               const reason = stableProductTextReason(error, 'PRODUCT_PRESENTATION_ACK_RECOVERY_REQUIRED');
               setProductTextReason(reason);
-              setProductTextStatus('failed');
+              setProductTextStatus('failed', 'text_failed_07');
               publishProductRecoveryDiagnostic({
-                seam: 'presentation_ack',
+                site: 'recovery_04',
+seam: 'presentation_ack',
                 disposition: 'retrying',
                 reason,
                 binding: owner.snapshot().binding,
@@ -2914,7 +2970,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         ) {
           const mayMutateUi = canMutateCurrentPresentationUi();
           pendingPresentationAttemptRef.current = null;
-          setPendingPresentationAck(null);
+          setPendingPresentationAck(null, 'pending_ack_05');
           if (!mayMutateUi) return;
           retainBoundedPresentedProductResponse(
             presentedProductUnitsRef.current,
@@ -2969,7 +3025,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                 setProductTextReason(
                   group.scheduler.snapshot().reason ?? 'TTS_CONTINUATION_CANCELLED',
                 );
-                setProductTextStatus('failed');
+                setProductTextStatus('failed', 'text_failed_08');
                 return;
               }
               // Presentation-ACK settlement records server truth only. The
@@ -2998,7 +3054,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           const reason = stableProductTextReason(error, 'PRODUCT_PRESENTATION_ACK_RECOVERY_REQUIRED');
           if (!owner.hasPendingPresentationAck()) {
             pendingPresentationAttemptRef.current = null;
-            setPendingPresentationAck(null);
+            setPendingPresentationAck(null, 'pending_ack_06');
             if (!mayMutateUi) return;
             if (isStaleProductResponseError(error)) {
               // A newer committed utterance already owns the response lane.
@@ -3051,9 +3107,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               }
             } else {
               setProductTextReason(reason);
-              setProductTextStatus('failed');
+              setProductTextStatus('failed', 'text_failed_09');
               publishProductRecoveryDiagnostic({
-                seam: 'presentation_ack',
+                site: 'recovery_05',
+seam: 'presentation_ack',
                 disposition: 'terminal',
                 reason,
                 binding: owner.snapshot().binding,
@@ -3062,9 +3119,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             }
           } else if (mayMutateUi) {
             setProductTextReason(reason);
-            setProductTextStatus('failed');
+            setProductTextStatus('failed', 'text_failed_10');
             publishProductRecoveryDiagnostic({
-              seam: 'presentation_ack',
+              site: 'recovery_06',
+seam: 'presentation_ack',
               disposition: 'retrying',
               reason,
               binding: owner.snapshot().binding,
@@ -3204,6 +3262,23 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     );
     const presentationBinding = owner.snapshot().binding;
     const isTaskNotification = disposition.kind === 'presentation' && disposition.task_notification;
+    // Temporary C019 diagnostic: how the notification lane classified this
+    // delivery before any effect.
+    console.info('[LiveVoiceC019] transition diagnostic', {
+      event: 'browser_notification_classified',
+      kind: disposition.kind,
+      unit_seq: disposition.kind === 'presentation' ? disposition.unit_seq : null,
+      projection_role: disposition.kind === 'presentation' ? disposition.projection_role : null,
+      replayed: disposition.kind === 'presentation' ? disposition.replayed : null,
+      task_notification: isTaskNotification,
+      fenced: responsePresentationIdentity !== null && fencedProductResponsesRef.current.has(responsePresentationIdentity),
+      admission_retired:
+        admission !== null
+        && (voiceLoopP2RefreshAfterGenerationRef.current !== null
+          || (voiceLoopGenerationRef.current !== admission.voice_loop_generation
+            && (!isTaskNotification || !voiceLoopEnabledRef.current))),
+      p1_status: p1VoiceOwnerRef.current?.status().status ?? null,
+    });
     if (
       disposition.kind === 'presentation'
       && !disposition.task_notification
@@ -3211,8 +3286,24 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       && fencedProductResponsesRef.current.has(responsePresentationIdentity)
     ) {
       // A later unit of a response already fenced by spoken barge-in or Stop.
-      // It settles as an owned cancellation: no UI, history, TTS, ACK or new
-      // continuation group may be minted from it.
+      // It settles as an owned cancellation: no audio, history, ACK or new
+      // continuation group may be minted from it. Its authoritative root only
+      // settles the local fences the fenced response still owns, so the next
+      // turn's presentation is admitted exactly as after a completed response.
+      if (disposition.projection_role !== 'audio_segment') {
+        retainBoundedPresentedProductResponse(presentedProductResponsesRef.current, disposition.response_id);
+        retainBoundedPresentedProductResponse(presentedProductFinalResponsesRef.current, responsePresentationIdentity);
+        if (
+          foregroundPresentationFenceMatchesResponse(
+            pendingForegroundPresentationRef.current,
+            presentationBinding,
+            disposition.response,
+          )
+        ) {
+          pendingForegroundPresentationRef.current = null;
+          setForegroundPresentationEpoch(epoch => epoch + 1);
+        }
+      }
       const fencedDisposition: ProductP2NotificationDisposition = { kind: 'continue' };
       return fencedDisposition;
     }
@@ -3244,9 +3335,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
       const reason = stableProductTextReason(disposition.reason, 'PRODUCT_AGENT_OUTPUT_FAILED');
       setProductTextReason(reason);
-      setProductTextStatus('failed');
+      setProductTextStatus('failed', 'text_failed_11');
       publishProductRecoveryDiagnostic({
-        seam: 'response_generation',
+        site: 'recovery_07',
+seam: 'response_generation',
         disposition: 'terminal',
         reason,
         binding: presentationBinding,
@@ -3334,6 +3426,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
       // Coalesced replay of the exact pop-on-read notification must have zero
       // duplicate projection, synthesis, or settlement effects.
+      console.info('[LiveVoiceC019] transition diagnostic', {
+        event: 'browser_notification_deferred',
+        branch: 'pending_attempt_replay',
+        unit_seq: disposition.unit_seq,
+      });
       return disposition;
     }
     const foregroundPresentationFence = pendingForegroundPresentationRef.current;
@@ -3355,6 +3452,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         // A foreground voice result is admitted only by the exact retained
         // response fence. Text-only P2 presentations have no such fence and
         // remain available while Live Voice is idle.
+        console.info('[LiveVoiceC019] transition diagnostic', {
+          event: 'browser_notification_deferred',
+          branch: 'foreground_fence',
+          unit_seq: disposition.unit_seq,
+          requires_foreground: requiresForegroundPresentation,
+          exact_fence_retained: exactForegroundPresentationRetained,
+          owns_foreground: ownsForegroundPresentation,
+          admission_fence: expectedForegroundPresentation !== null,
+          current_fence: foregroundPresentationFence !== null,
+        });
         return disposition;
       }
       retainBoundedPresentedProductResponse(presentedProductResponsesRef.current, disposition.response_id);
@@ -3482,7 +3589,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const retainAck = (playoutFailed = false) => {
       presentationAttempt.markPlayoutSettled();
       if (!isCurrentPresentationAttempt()) return;
-      if (playoutFailed) setProductTextStatus('failed');
+      if (playoutFailed) setProductTextStatus('failed', 'text_failed_12');
       const continuationGroup = productTtsContinuationRef.current;
       if (
         !playoutFailed
@@ -3531,7 +3638,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               if (productTtsContinuationRef.current !== continuationGroup) return;
               cancelProductTtsContinuation('TTS_CONTINUATION_LOCAL_RELEASE_FAILED');
               setProductTextReason(stableProductTextReason(error, 'TTS_CONTINUATION_LOCAL_RELEASE_FAILED'));
-              setProductTextStatus('failed');
+              setProductTextStatus('failed', 'text_failed_13');
             });
             return;
           }
@@ -3548,12 +3655,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           if (productTtsContinuationRef.current !== continuationGroup) return;
           cancelProductTtsContinuation('TTS_CONTINUATION_LOCAL_RELEASE_FAILED');
           setProductTextReason(stableProductTextReason(error, 'TTS_CONTINUATION_LOCAL_RELEASE_FAILED'));
-          setProductTextStatus('failed');
+          setProductTextStatus('failed', 'text_failed_14');
         });
         return;
       }
       if (presentationAttempt.task_notification != null) updateTerminalAnnouncementState('acking');
-      setPendingPresentationAck(disposition.ack);
+      setPendingPresentationAck(disposition.ack, 'pending_ack_07');
       void settleProductPresentationAck(presentationAttempt);
     };
     if (disposition.task_notification && disposition.ack.surface === 'text') {
@@ -3581,9 +3688,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
       const reason = 'PRODUCT_FOREGROUND_PLAYOUT_OWNER_LOST';
       setProductTextReason(reason);
-      setProductTextStatus('failed');
+      setProductTextStatus('failed', 'text_failed_15');
       publishProductRecoveryDiagnostic({
-        seam: 'tts',
+        site: 'recovery_08',
+seam: 'tts',
         disposition: 'terminal',
         reason,
         binding: presentationBinding,
@@ -3707,6 +3815,41 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         })
         .catch(error => {
           presentationAttempt.markPlayoutSettled();
+          const rejection = error !== null && typeof error === 'object' ? (error as Record<string, unknown>) : null;
+          const continuationOwnsRejectedResponse =
+            productTtsContinuationRef.current !== null
+            && sameContinuationResponse(productTtsContinuationRef.current.response, disposition.response);
+          // Temporary C019 diagnostic: how this playout rejection is classified.
+          console.info('[LiveVoiceC019] transition diagnostic', {
+            event: 'browser_playout_rejection_classified',
+            reason: stableProductTextReason(error, 'UNCLASSIFIED'),
+            source: typeof rejection?.source === 'string' ? rejection.source : null,
+            transport_reason_id: typeof rejection?.transport_reason_id === 'string' ? rejection.transport_reason_id : null,
+            unit_seq: disposition.unit_seq,
+            projection_role: disposition.projection_role,
+            branch: startsFirstTailPrefetch && continuationOwnsRejectedResponse
+              ? 'prefix_prefetch_cancel'
+              : cancelledContinuationAttemptRef.current === presentationAttempt
+                ? 'cancelled_attempt_barge_in'
+                : isOwnedContinuationCancellation(error)
+                  ? 'owned_cancellation'
+                  : !disposition.task_notification && disposition.projection_role === 'audio_segment' && disposition.unit_seq >= 1 && continuationOwnsRejectedResponse
+                    ? 'settle_failed_continuation'
+                    : disposition.task_notification && disposition.ack.surface === 'audio'
+                      ? 'task_audio_fallback'
+                      : !isCurrentVoicePlayout()
+                        ? 'not_current_playout'
+                        : foregroundPlayoutLease !== null
+                          ? 'foreground_terminal'
+                          : 'tts_playback_terminal',
+            is_current_voice_playout: isCurrentVoicePlayout(),
+            is_current_presentation_attempt: isCurrentPresentationAttempt(),
+            cancelled_attempt_match: cancelledContinuationAttemptRef.current === presentationAttempt,
+            continuation_owns_response: continuationOwnsRejectedResponse,
+            task_notification: disposition.task_notification,
+            foreground_lease: foregroundPlayoutLease !== null,
+            close_requested: !voiceLoopEnabledRef.current,
+          });
           if (
             startsFirstTailPrefetch &&
             productTtsContinuationRef.current !== null &&
@@ -3719,7 +3862,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           }
           if (cancelledContinuationAttemptRef.current === presentationAttempt) {
             setProductTextReason('TTS_CONTINUATION_BARGE_IN');
-            setProductTextStatus('failed');
+            setProductTextStatus('failed', 'text_failed_16');
             return;
           }
           if (isOwnedContinuationCancellation(error)) {
@@ -3758,9 +3901,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             if (activeVoiceResponseRef.current?.response_id === disposition.response_id) activeVoiceResponseRef.current = null;
             const reason = stableProductTextReason(error, 'PRODUCT_TASK_AUDIO_FALLBACK_RECOVERY_REQUIRED');
             setProductTextReason(reason);
-            setProductTextStatus('failed');
+            setProductTextStatus('failed', 'text_failed_17');
             publishProductRecoveryDiagnostic({
-              seam: 'tts',
+              site: 'recovery_09',
+seam: 'tts',
               disposition: 'retrying',
               reason,
               binding: presentationBinding,
@@ -3781,9 +3925,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           if (foregroundPlayoutLease !== null) {
             const reason = stableProductTextReason(error, 'PRODUCT_FOREGROUND_PLAYOUT_FAILED');
             setProductTextReason(reason);
-            setProductTextStatus('failed');
+            setProductTextStatus('failed', 'text_failed_18');
             publishProductRecoveryDiagnostic({
-              seam: 'tts',
+              site: 'recovery_10',
+seam: 'tts',
               disposition: 'terminal',
               reason,
               binding: presentationBinding,
@@ -3801,7 +3946,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               : 'PRODUCT_TTS_PLAYBACK_FAILED',
           );
           publishProductRecoveryDiagnostic({
-            seam: 'tts',
+            site: 'recovery_11',
+seam: 'tts',
             disposition: disposition.task_notification ? 'retrying' : 'terminal',
             reason,
             binding: presentationBinding,
@@ -3809,7 +3955,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           });
           if (disposition.task_notification) {
             setProductTextReason(reason);
-            setProductTextStatus('failed');
+            setProductTextStatus('failed', 'text_failed_19');
             updateTerminalAnnouncementState('recovering');
             retryTerminalAnnouncementHandlerRef.current(presentationAttempt);
           } else {
@@ -3821,9 +3967,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       const reason = 'PRODUCT_TASK_AUDIO_FALLBACK_RECOVERY_REQUIRED';
       presentationAttempt.markPlayoutSettled();
       setProductTextReason(reason);
-      setProductTextStatus('failed');
+      setProductTextStatus('failed', 'text_failed_20');
       publishProductRecoveryDiagnostic({
-        seam: 'tts',
+        site: 'recovery_12',
+seam: 'tts',
         disposition: 'retrying',
         reason,
         binding: presentationBinding,
@@ -3834,9 +3981,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     } else if (disposition.task_notification) {
       const reason = 'PRODUCT_TERMINAL_ANNOUNCEMENT_RECOVERY_REQUIRED';
       setProductTextReason(reason);
-      setProductTextStatus('failed');
+      setProductTextStatus('failed', 'text_failed_21');
       publishProductRecoveryDiagnostic({
-        seam: 'tts',
+        site: 'recovery_13',
+seam: 'tts',
         disposition: 'retrying',
         reason,
         binding: presentationBinding,
@@ -3904,7 +4052,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         if (owner.hasPendingSubmission()) throw error;
         if (pendingProductTurnRef.current === pendingTurn) {
           pendingProductTurnRef.current = null;
-          setProductTextStatus('failed');
+          setProductTextStatus('failed', 'text_failed_22');
         }
       }
     }
@@ -3917,7 +4065,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         adoptProductP2Notification(owner, notification);
       } catch (error) {
         if (owner.hasPendingNotification()) throw error;
-        setProductTextStatus('failed');
+        setProductTextStatus('failed', 'text_failed_23');
       }
     }
     const pendingPresentation = pendingPresentationAttemptRef.current;
@@ -4365,7 +4513,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     terminalNotificationTaskIdRef.current = null;
     terminalAnnouncementSpeechOwnerRef.current = null;
     updateTerminalAnnouncementState('idle', null);
-    setPendingPresentationAck(null);
+    setPendingPresentationAck(null, 'pending_ack_08');
     setProductInput('');
     setProductOutput(null);
     setTerminalNotification(null);
@@ -4483,7 +4631,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               }
               if (activePresentationMatchesRetiredAck && pendingPresentationAttemptRef.current === activePresentation) {
                 pendingPresentationAttemptRef.current = null;
-                setPendingPresentationAck(null);
+                setPendingPresentationAck(null, 'pending_ack_09');
               }
               setRetiredPresentationAckRecoveryEpoch(epoch => epoch + 1);
             } else {
@@ -4514,7 +4662,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               activationOwnerRef.current = null;
             }
             publishProductRecoveryDiagnostic({
-              seam: 'activation',
+              site: 'recovery_14',
+seam: 'activation',
               disposition: 'retrying',
               reason: PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED,
               binding: snapshot.binding,
@@ -4572,7 +4721,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               activationOwnerRef.current = null;
             }
             publishProductRecoveryDiagnostic({
-              seam: 'activation',
+              site: 'recovery_15',
+seam: 'activation',
               disposition: 'retrying',
               reason: PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED,
               binding: snapshot.binding,
@@ -4708,7 +4858,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         const unresolvedOwner = recovery.owner;
         const unresolvedBinding = unresolvedOwner?.snapshot().binding ?? null;
         publishProductRecoveryDiagnostic({
-          seam: 'activation',
+          site: 'recovery_16',
+seam: 'activation',
           disposition: recovered.kind === 'retry' ? 'retrying' : 'terminal',
           reason: recovered.reason,
           binding: unresolvedBinding,
@@ -4781,7 +4932,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       } catch {
         if (isCurrentRun()) {
           publishProductRecoveryDiagnostic({
-            seam: 'activation',
+            site: 'recovery_17',
+seam: 'activation',
             disposition: 'terminal',
             reason: PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED,
             binding: null,
@@ -4867,7 +5019,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
         if (owner.snapshot().status === 'active') {
           publishProductRecoveryDiagnostic({
-            seam: 'activation',
+            site: 'recovery_18',
+seam: 'activation',
             disposition: 'retrying',
             reason: activationReason,
             binding,
@@ -4900,7 +5053,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         const cleanupRequired = requiresProductActivationCleanup(error);
         if (!cleanupRequired && isRetriableProductOperationError(error)) {
           publishProductRecoveryDiagnostic({
-            seam: 'activation',
+            site: 'recovery_19',
+seam: 'activation',
             disposition: 'retrying',
             reason: activationReason,
             binding,
@@ -4912,7 +5066,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           }
         } else if (cleanupRequired) {
           publishProductRecoveryDiagnostic({
-            seam: 'activation',
+            site: 'recovery_20',
+seam: 'activation',
             disposition: 'retrying',
             reason: activationReason,
             binding,
@@ -4935,7 +5090,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         } else {
           const reason = extractWebErrorReason(error);
           publishProductRecoveryDiagnostic({
-            seam: 'activation',
+            site: 'recovery_21',
+seam: 'activation',
             disposition: 'terminal',
             reason: activationReason,
             binding,
@@ -5142,7 +5298,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           if (terminalAnnouncementTaskIdRef.current !== taskId) return;
           terminalAnnouncementSpeechOwnerRef.current = null;
           setProductTextReason(stableProductTextReason(error, 'PRODUCT_TERMINAL_CAPTURE_SUSPEND_FAILED'));
-          setProductTextStatus('failed');
+          setProductTextStatus('failed', 'text_failed_24');
           updateTerminalAnnouncementState('queued');
         });
       return;
@@ -5164,6 +5320,34 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const owner = activationOwnerRef.current;
     const binding = p2Activation.binding;
     const journal = p2ActivationJournalRef.current;
+    const pollGates = {
+      connected: props.isConnected,
+      activation_active: p2Activation.status === 'active' && Boolean(binding) && Boolean(owner) && Boolean(journal),
+      pending_unified_final: readPendingUnifiedFinal() !== null,
+      pending_presentation_ack: pendingPresentationAck !== null,
+      pending_presentation_attempt: pendingPresentationAttemptRef.current !== null,
+      tts_failure_drain: productTtsFailureDrainRef.current !== null,
+      active_voice_response: activeVoiceResponseRef.current !== null,
+      p2_refresh_pending: voiceLoopP2RefreshAfterGenerationRef.current !== null,
+      terminal_announcement_state: terminalAnnouncementState,
+      p1_status: p1VoiceStatus,
+    };
+    const pollBlocked =
+      !props.isConnected ||
+      p2Activation.status !== 'active' ||
+      !binding ||
+      !owner ||
+      !journal ||
+      readPendingUnifiedFinal() !== null ||
+      pendingPresentationAck !== null ||
+      pendingPresentationAttemptRef.current !== null ||
+      productTtsFailureDrainRef.current !== null ||
+      activeVoiceResponseRef.current !== null ||
+      voiceLoopP2RefreshAfterGenerationRef.current !== null;
+    // Temporary C019 diagnostic: why the notification poll is not running.
+    if (pollBlocked) {
+      console.info('[LiveVoiceC019] transition diagnostic', { event: 'browser_notification_poll_blocked', ...pollGates });
+    }
     if (
       !props.isConnected ||
       p2Activation.status !== 'active' ||
@@ -5451,7 +5635,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             );
           if (pendingUnified !== null && !exactForegroundDelivery) return;
           if (cancelled && !exactForegroundDelivery) return;
-          const disposition = adoptProductP2Notification(owner, outcome.notification, notificationAdmission);
+          // A poll superseded while its request was in flight may still adopt
+          // the exact foreground delivery, but only under the fence that owns
+          // it now. Its captured admission carries the fence that was pending
+          // when the poll started; presenting under that stale fence defers
+          // the pop-on-read notification and loses the response.
+          const deliveryAdmission: ProductP2NotificationAdmission =
+            exactForegroundDelivery
+            && notificationAdmission.foreground_presentation !== pendingForegroundPresentationRef.current
+              ? Object.freeze({
+                  voice_loop_generation: notificationAdmission.voice_loop_generation,
+                  foreground_presentation: pendingForegroundPresentationRef.current,
+                })
+              : notificationAdmission;
+          const disposition = adoptProductP2Notification(owner, outcome.notification, deliveryAdmission);
           if (
             cancelled ||
             voiceLoopGenerationRef.current !== notificationAdmission.voice_loop_generation ||
@@ -5520,7 +5717,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           if (!cancelled) {
             const reason = stableProductTextReason(error, PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED);
             setProductTextReason(reason);
-            setProductTextStatus('failed');
+            setProductTextStatus('failed', 'text_failed_25');
             setP2Activation({
               status: 'unavailable',
               binding: null,
@@ -5860,7 +6057,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       return null;
     let retained = pendingProductTurnRef.current;
     if (retained !== null && retained.owner !== owner) {
-      setProductTextStatus('failed');
+      setProductTextStatus('failed', 'text_failed_26');
       return null;
     }
     if (retained === null) {
@@ -5873,7 +6070,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         owner.hasPendingPresentationFailure() ||
         owner.hasPendingBargeIn()
       ) {
-        setProductTextStatus('failed');
+        setProductTextStatus('failed', 'text_failed_27');
         return null;
       }
       productTurnSequenceRef.current += 1;
@@ -5925,7 +6122,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         if (!owner.hasPendingSubmission()) {
           pendingProductTurnRef.current = null;
         }
-        setProductTextStatus('failed');
+        setProductTextStatus('failed', 'text_failed_28');
       }
       return null;
     }
@@ -6198,7 +6395,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         if (recognizedVoiceRef.current === recognized) recognizedVoiceRef.current = null;
         if (!mountedRef.current || activeSessionRef.current !== binding.session_id) return;
         setProductTextReason(stableProductTextReason(error, 'UNIFIED_INPUT_FAILED'));
-        setProductTextStatus('failed');
+        setProductTextStatus('failed', 'text_failed_29');
         if (settledWithoutPresentation) {
           const activationOwner = activationOwnerRef.current;
           const deferredTaskSettlementStarted =
@@ -6419,7 +6616,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                       retainedDiagnostic.response_generation === response.response_generation));
                 if (!retainsExactTerminalTruth) {
                   publishProductRecoveryDiagnostic({
-                    seam,
+                    site: 'recovery_22',
+seam,
                     disposition: 'retrying',
                     reason: stableProductTextReason(reason, 'FORMAL_P1_CLEANUP_PENDING'),
                     binding,
@@ -6428,7 +6626,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                 }
               } else if (status === 'failed') {
                 publishProductRecoveryDiagnostic({
-                  seam,
+                  site: 'recovery_23',
+seam,
                   disposition: 'terminal',
                   reason: stableProductTextReason(reason, 'PRODUCT_P1_ROUTE_FAILED'),
                   binding,
@@ -6638,7 +6837,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       terminal.retry_pending = false;
       retained.markPlayoutSettled();
       updateTerminalAnnouncementState('acking');
-      setPendingPresentationAck(terminal.disposition.ack);
+      setPendingPresentationAck(terminal.disposition.ack, 'pending_ack_10');
       void settleProductPresentationAck(retained);
     })().catch(error => {
       terminal.retry_pending = false;
@@ -6648,9 +6847,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (pendingPresentationAttemptRef.current === retained) {
         const reason = stableProductTextReason(error, 'PRODUCT_TERMINAL_ANNOUNCEMENT_AUDIO_FAILED');
         setProductTextReason(reason);
-        setProductTextStatus('failed');
+        setProductTextStatus('failed', 'text_failed_30');
         publishProductRecoveryDiagnostic({
-          seam: 'tts',
+          site: 'recovery_24',
+seam: 'tts',
           disposition: 'terminal',
           reason,
           binding: activationOwner.snapshot().binding,
@@ -6762,7 +6962,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     activeVoiceResponseRef.current = null;
     let retained = pendingBargeInRef.current;
     if (retained !== null && retained.owner !== p2Owner) {
-      setProductTextStatus('failed');
+      setProductTextStatus('failed', 'text_failed_31');
       return;
     }
     if (retained === null) {
@@ -6783,11 +6983,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // operation unresolved',并被误判为需重建整条 P2 路由。有意插话的旧 ACK
       // 应作为预期 stale 状态结算,而不是触发路由重建。
       const pendingPresentation = pendingPresentationAttemptRef.current;
+      // Temporary C019 diagnostic: how the barge settles the pending attempt.
+      console.info('[LiveVoiceC019] transition diagnostic', {
+        event: 'browser_barge_settlement',
+        pending_attempt: pendingPresentation !== null,
+        pending_surface: pendingPresentation?.input.surface ?? null,
+        pending_owner_current: pendingPresentation !== null && pendingPresentation.owner === p2Owner,
+        cancelled_attempt_match: cancelledContinuationAttemptRef.current !== null && cancelledContinuationAttemptRef.current === pendingPresentation,
+        continuation_owned_response: continuationOwnsResponse,
+        p1_status: p1Owner.status().status,
+      });
       if (pendingPresentation !== null && pendingPresentation.owner === p2Owner) {
         await pendingPresentation.playoutSettlement;
         if (cancelledContinuationAttemptRef.current === pendingPresentation) {
           pendingPresentationAttemptRef.current = null;
-          setPendingPresentationAck(null);
+          setPendingPresentationAck(null, 'pending_ack_11');
           cancelledContinuationAttemptRef.current = null;
         } else {
           await settleProductPresentationAck(pendingPresentation);
@@ -6809,7 +7019,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         return;
       }
       setProductTextReason(stableProductTextReason(error, 'PRODUCT_BARGE_IN_RECOVERY_REQUIRED'));
-      setProductTextStatus('failed');
+      setProductTextStatus('failed', 'text_failed_32');
       if (p2Owner.hasPendingBargeIn()) setP2RecoveryEpoch(epoch => epoch + 1);
     }
   };
