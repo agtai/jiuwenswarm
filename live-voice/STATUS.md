@@ -56,7 +56,7 @@ repeat the old whole-project audit solely to resume a bounded task.
 | Capability / module | Implemented boundary | Remaining / dependency |
 |---|---|---|
 | Audio Device & browser I/O | Capture/playout, dedicated media wiring, exact-owner lifecycle fencing; project-home listening/transcription observed | Stable physical listening/recovery and heard playback; permission/device coverage; AEC/NS/AGC, double-talk, loss/stop targets |
-| Speech Recognition | Streaming/batch recognition, committed finals, typed stream failure, bounded capture-only retry and scoped authority/resource lifetime repair | Lifetime repair passes focused tests and independent review but is not deployed. Long/paused speech, fallback/cancel and device/network evidence remain open |
+| Speech Recognition | Streaming/batch recognition, committed finals, typed stream failure, bounded capture-only retry and deployed scoped authority/resource lifetime repair | Lifetime repair has focused tests and independent review, not physical acceptance. Long/paused speech, fallback/cancel and device/network evidence remain open |
 | Speech Synthesis | Streaming/batch TTS, response ownership and playback ACK | Current interrupted-answer/long-answer stability; first-audio, underrun, pronunciation and stale-output proof |
 | Realtime Media | Dedicated transport, registration, rotation and bounded P2 notification pull | Backpressure/load, loss/reordering/corruption/reconnect and truthful recovery diagnostics |
 | Conversation Runtime | Committed-input/generation fencing, Stop/Exit, playback/generation interruption, unanswered-input continuity, presentation/ACK ownership | Combined listening/notification/Task races on current source; no old audio revival or accidental detached-Task control |
@@ -66,7 +66,7 @@ repeat the old whole-project audit solely to resume a bounded task.
 | Executor & Durability | Direct D0/D2 v2 profiles, admission, reconciliation, sealed results and generic adjustment checkpoints; dedicated no-memory rail repair; retained v1 records cannot authorize new v2 dispatch | Required independent review and real result/control acceptance; scope broader file-tool access outside checkout separately. Additional Executor/D1 capability needs its own packet; no D1 or generic host-crash claim |
 | Voice–Task Bridge | Unified committed semantics, direct exact local creation/modification consent, scoped targets and requirement sources | Current modification/query real-model acceptance; full generalization and retirement audit; pause/resume/provide-input remain unsupported until a real primitive is accepted |
 | Integrated Web product experience | Scoped Registry Tasks in the right panel, no bottom manual form; project-home Session allocation through microphone transcription; recovery/notification repairs | Stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh journey; projectless startup requires backend authority design |
-| Observability, benchmark and latency | Correlated stage timings; bounded content-free capture/upload/provider/VAD/playout/interruption diagnostics; historical bounded warm L0 evidence | Deploy and reproduce endpoint delay and ineffective voice interruption with the new trace; independent review, current first-audible baseline and declared SLO. Historical percentiles are not current gains |
+| Observability, benchmark and latency | Correlated stage timings; deployed bounded content-free capture/upload/provider/VAD/playout/interruption diagnostics; historical bounded warm L0 evidence | Reproduce endpoint delay and ineffective voice interruption with the new trace; independent review, current first-audible baseline and declared SLO. Historical percentiles are not current gains |
 | Automated verification and product acceptance | Focused module/regression checks and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative independent review and final human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, production semantic cutover, bounded legacy removals and scoped prompt/config isolation | Complete production reachability/retirement audit; remaining manifest rows; keep artifacts/private runtime data out of integration |
 | Production operations | Privacy/preflight/observability foundations only | Authentication/tenancy, public deployment, operations, retention, security, compatibility and release support after separate scope |
@@ -92,9 +92,11 @@ for the intended behavior, owned surfaces, exact checks and diagnosis limits.
   unchanged baseline; no new failure appeared in that comparison. Independent
   review remains unavailable because of the local CLI/configuration mismatch;
   complete manual diff review is a substitute with an explicit limitation.
-- Source is ready for the requested controlled local deployment, preserving
-  current project/data/configuration and importing the already committed
-  800 ms VAD / 250 ms startup changes. Actual deployment is pending.
+- The requested controlled local deployment is complete, preserving current
+  project/data/configuration and including the committed 800 ms VAD / 250 ms
+  startup changes. Actual served diagnostics, process settings, real TTS→STT
+  and identity/claim rejection probes passed. This is not microphone/speaker
+  or real-model spoken-fallback acceptance.
 - Historical logs place the long wait before EOT and voice interruption failure
   before the barge-in RPC. They cannot uniquely identify capture, transport,
   Provider/acoustics or UI gating. New physical reproduction remains required.
@@ -104,14 +106,14 @@ for the intended behavior, owned surfaces, exact checks and diagnosis limits.
 ### Retained consequences of earlier repairs
 
 The D-113 streaming Speech lifetime repair passes its scoped tests and independent
-review but is not yet deployed. It removes a cumulative identity quota while
+review and is included in this deployment. It removes a cumulative identity quota while
 retaining live-resource and exact-authority fences. Conditional evidence:
 [bounded lifecycle repair](evidence/SPEECH_LIFECYCLE_REPAIR_20260904.md).
 
 D-111/D-112 leave one model semantic decision, direct exact local modification
 and canonical pending/applied/rejected Task status. Focused tests and bounded
 configured-model probes pass; full execution/audio acceptance remains open.
-The change is not deployed, per user instruction. Read only the implicated
+The source is now deployed under the user's newer redeployment request. Read only the implicated
 [Task adjustment evidence](evidence/TASK_ADJUSTMENT_TRUTH_REPAIR_20260904.md)
 or [real Demo audit](evidence/DEMO_SESSION_AUDIT_20260903.md). Successful later
 A2 creation does not prove the complete preservation journey.

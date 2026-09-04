@@ -47,7 +47,8 @@ acceptance and root causes unsupported by historical logs remain explicitly open
 ## Results
 
 Source repair and focused automated checks completed on the baseline plus this
-batch. Deployment is pending. This is not full-product or physical acceptance.
+batch. Controlled local deployment completed at approximately 13:08 local time
+(Europe/Paris). This is not full-product or physical acceptance.
 
 ### Verification and limitations
 
@@ -63,7 +64,7 @@ batch. Deployment is pending. This is not full-product or physical acceptance.
   `node --test tests/productP1VoiceRoute.test.mjs tests/liveVoiceBrowserDedicatedMediaRoute.test.mjs`
   (145 passed). Compilation uses the package's integrated-web TypeScript options
   and dedicated-media esbuild entrypoint. Whole-package `tsc --noEmit` passed;
-  controlled deployment must also rebuild with `build:live-voice`.
+  controlled deployment also passed `build:live-voice` (TypeScript and Vite).
 - Selected UI regression: current and exact `e4dfab7ff40bdfe7f5dc490479863c58288fe6c0`
   baseline each run 37 tests, 32 passed and the same 5 failed. Selection:
   `node --test --test-name-pattern='barge|interrupt|stop|cancel|stale|foreign|generation'`
@@ -131,3 +132,46 @@ cross-process monotonic clocks are not interchangeable. RMS is only an energy
 hint, send completion/ACK is not speech understanding, and scheduled/stopped
 sources are not proof of physical audibility/silence. No PCM, transcript, ticket,
 credential or audio-device identifier is added by these diagnostics.
+
+### Actual local deployment
+
+- Deployed code: `40c93893404f92b3e7dc53312cc7402af2e4481a`,
+  `fix(live-voice): fail closed on spoken revision and trace audio boundaries`.
+  Source worktree was clean at build and service startup. A subsequent evidence/
+  STATUS-only commit does not change deployed runtime code.
+- Existing managed service was stopped only after preflight and a read-only
+  check found zero nonterminal Tasks. Existing project `proj_ad135a77`, its clean
+  no-remote checkout, private data/config directories and two terminal Tasks /
+  two terminal Attempts were preserved; no business Task was retried.
+- Initial preflight found Speech settings absent from the isolated Agent config.
+  The already-existing user-private Speech settings were supplied only in the
+  launcher child environment. No credential file was copied, edited or printed.
+- First restart attempt stopped the old managed process but Windows PowerShell
+  lacked `Get-FileHash`. Rerunning the unchanged controlled launcher with the
+  available PowerShell 7 completed. No business source workaround was added.
+- Controlled launcher: `scripts/live_voice/start_hands_free_demo.ps1`,
+  `formal-web-validation`, current source branch, explicit existing project,
+  data/config paths and ports; `-RestartExisting -NoBrowser`, Cascade, unchanged
+  generation-interruption flag off. Build-time startup lead explicitly 250 ms;
+  server VAD explicitly 800 ms. No saved configuration update or browser launch.
+- New root service PID 3692; listeners 6175→3712, 18194→1816 and
+  19120/19121→4568. Service log `swarm-20260904-130715.log`.
+  Runtime contract reports source `40c9389340`, zero dirty files, validated
+  routes/bundle, Speech round trip passed and eligible Gateway claim policy.
+- Actual HTTP page returned 200 and loaded `/assets/index-DsZyj0lX.js` containing
+  the diagnostic accessor, capture progress, UI barge-in gate and build setting
+  `VITE_LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS: "250"`. Read-only process checks found
+  `LIVE_VOICE_SERVER_VAD_SILENCE_MS=800` in both Agent and Web/Gateway processes;
+  this establishes configuration, not a physical endpoint latency result.
+- Launcher exit 0: real TTS→STT, formal receipt, mismatched identity rejection,
+  forged claim rejection and zero business side effects passed. Probe audio and
+  transcript were not retained. Microphone/speaker, spoken revision with a real
+  model, historical root-cause reproduction and latency gains remain unproved.
+- `npm install` left tracked dependency files unchanged and reported 16 audit
+  findings (5 moderate, 11 high); no dependency/security-policy upgrade was
+  attempted. Build emitted existing large-chunk/mixed-import warnings.
+- Reload the page to load the new bundle before reproduction; export the
+  browser diagnostic ring before a subsequent refresh. Reproduce speech end,
+  first heard audio and two spoken interruptions with video markers, then join
+  that ring to the new service log. Neither HTTP/probe success nor a short
+  sample alone establishes stable listening, interruption or physical sound.
