@@ -445,6 +445,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # would cause cross-session contamination (session A cancel kills session B).
         self._abort_requested: dict[str, bool] = {}
         self._pause_events: dict[str, asyncio.Event] = {}
+        # Tools-only pause: a formal session whose model may run while every
+        # tool call waits (speculative dialogue candidates). Set = allowed.
+        self._tool_pause_events: dict[str, asyncio.Event] = {}
         # Per-session conversation context
         self._conversation_ids: dict[str, str] = {}
         self._main_sessions: dict[str, Session] = {}
@@ -629,6 +632,24 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             self._pause_events[sid] = event
         return event
 
+    def _get_tool_pause_event(self, sid: str) -> asyncio.Event:
+        event = self._tool_pause_events.get(sid)
+        if event is None:
+            event = asyncio.Event()
+            event.set()
+            self._tool_pause_events[sid] = event
+        return event
+
+    def pause_tools(self, session_id: str = "") -> None:
+        """Hold every tool call of ``session_id``; model calls keep running."""
+
+        sid = session_id or "default"
+        self._get_tool_pause_event(sid).clear()
+
+    def resume_tools(self, session_id: str = "") -> None:
+        sid = session_id or "default"
+        self._get_tool_pause_event(sid).set()
+
     def pause(self, session_id: str = "") -> None:
         sid = session_id or "default"
         self._get_pause_event(sid).clear()
@@ -642,6 +663,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         sid = session_id or "default"
         self._abort_requested[sid] = True
         self._get_pause_event(sid).set()
+        # A tool call parked on the tools-only pause must wake up and see
+        # the abort instead of running.
+        self._get_tool_pause_event(sid).set()
         if sid:
             try:
                 from openjiuwen.core.sys_operation.shell_process_registry import (
@@ -690,6 +714,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         sid = session_id or "default"
         self._abort_requested.pop(sid, None)
         self._pause_events.pop(sid, None)
+        self._tool_pause_events.pop(sid, None)
         self._conversation_ids.pop(sid, None)
         self._main_sessions.pop(sid, None)
         self._cancelled_tool_results.pop(sid, None)
@@ -914,6 +939,9 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         sid = self._resolve_sid(ctx, ctx.session)
         await self._get_pause_event(sid).wait()
+        if self._abort_requested.get(sid, False):
+            raise asyncio.CancelledError("Agent abort requested")
+        await self._get_tool_pause_event(sid).wait()
         if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
         if sid in self._formal_no_tool_sessions:

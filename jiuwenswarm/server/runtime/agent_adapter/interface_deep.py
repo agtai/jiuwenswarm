@@ -9493,7 +9493,7 @@ class JiuWenSwarmDeepAdapter:
                 if formal_tool_gate.should_pause(session_id):
                     # A speculative candidate: every tool call waits for the
                     # semantic decision; the model may run meanwhile.
-                    stream_event_rail.pause(session_id)
+                    stream_event_rail.pause_tools(session_id)
                 interaction_stream = await self._instance.attach_output()
                 if interaction_stream is None:
                     raise RuntimeError("FORMAL_EXECUTION_OUTPUT_LEASE_UNAVAILABLE")

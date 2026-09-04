@@ -16,10 +16,10 @@ class _Rail:
         self.resumed: list[str] = []
         self.aborted: list[str] = []
 
-    def pause(self, session_id: str = "") -> None:
+    def pause_tools(self, session_id: str = "") -> None:
         self.paused.append(session_id)
 
-    def resume(self, session_id: str = "") -> None:
+    def resume_tools(self, session_id: str = "") -> None:
         self.resumed.append(session_id)
 
     def abort(self, session_id: str = "") -> None:
@@ -77,7 +77,7 @@ def test_pause_is_recorded_before_the_session_adapter_exists_and_applied_by_it()
     child = _Child()
     root._session_adapters[session] = child
     if formal_tool_gate.should_pause(session):
-        child._stream_event_rail.pause(session)
+        child._stream_event_rail.pause_tools(session)
     assert child._stream_event_rail.paused == [session]
     facade.resume_formal_tools(session)
     assert not formal_tool_gate.should_pause(session)

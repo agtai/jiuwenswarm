@@ -1128,7 +1128,8 @@ class JiuWenSwarm:
                 return None
         rail = getattr(holder, "_stream_event_rail", None)
         if rail is None or not all(
-            callable(getattr(rail, name, None)) for name in ("pause", "resume", "abort")
+            callable(getattr(rail, name, None))
+            for name in ("pause_tools", "resume_tools", "abort")
         ):
             return None
         return rail
@@ -1154,13 +1155,13 @@ class JiuWenSwarm:
         formal_tool_gate.request_pause(session_id)
         rail = self._formal_session_rail(session_id)
         if rail is not None:
-            rail.pause(session_id)
+            rail.pause_tools(session_id)
 
     def resume_formal_tools(self, session_id: str) -> None:
         formal_tool_gate.release(session_id)
         rail = self._formal_session_rail(session_id)
         if rail is not None:
-            rail.resume(session_id)
+            rail.resume_tools(session_id)
 
     def abort_formal_tools(self, session_id: str) -> None:
         formal_tool_gate.abort(session_id)

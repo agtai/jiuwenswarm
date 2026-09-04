@@ -28,10 +28,10 @@ class _FakeRail:
         self.resumed: list[str] = []
         self.aborted: list[str] = []
 
-    def pause(self, session_id: str = "") -> None:
+    def pause_tools(self, session_id: str = "") -> None:
         self.paused.append(session_id)
 
-    def resume(self, session_id: str = "") -> None:
+    def resume_tools(self, session_id: str = "") -> None:
         self.resumed.append(session_id)
 
     def abort(self, session_id: str = "") -> None:
