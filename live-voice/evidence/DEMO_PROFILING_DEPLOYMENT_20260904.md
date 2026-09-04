@@ -98,3 +98,54 @@ Commands used the repository `.venv/Scripts/python.exe`; logs are
 `logs/live-voice-profile-http-phase-tests.txt` and
 `logs/live-voice-profile-number-fix-tests.txt`. The last command resets pytest
 defaults explicitly but preserves auto asyncio mode.
+
+## Final deployed result
+
+The repair commit `be6c91ce4014bd18436ebdbce52c27a5cbea5c0b` was cleanly
+redeployed through the controlled launcher with the same saved project,
+DeepSeek foreground/background model selection, OpenAI Speech configuration,
+generation-interruption setting and four ports. The launcher again passed its
+real TTS-to-STT and rejection probes with zero business effects. The managed
+service remains available on `http://localhost:6175`; the owned headless test
+browser was stopped.
+
+A fresh 6.4-second Windows-synthesized utterance entered getUserMedia in a new
+formal Session. The committed speech reached the real Agent, produced exact
+`chat.tool_call` and `chat.tool_result` observations for `list_files`, generated
+a spoken revision, produced non-silent TTS PCM, completed 375 digitally
+scheduled/ended browser sources and returned to listening. There were 51
+explicit silent output buffers and 324 non-silent output buffers. Task Store
+counts, the complete project snapshot and both private configuration file hashes
+remained identical to their pre-run values.
+
+The exact Session report retains 551 records and 133 spans. All 13 coverage
+categories are present except Task execution, which the read-only prompt did
+not invoke. It contains 30 synthesis observations and paired first-audio,
+Provider consumption and production spans. There are no import warnings,
+malformed records, backend drops, browser memory overwrites, browser storage
+overwrites or browser storage failures. The one open browser activation span
+was exported while that final inactive-state request was still pending; the
+report exposes it as `open_or_truncated` rather than inventing a duration.
+
+Representative single-run durations are: recognition collection 6,517 ms
+median / 7,093 ms maximum across rotating captures; semantic context and
+resolution 1,160 ms; semantic model 908 ms; Agent round 3,854 ms; real
+`list_files` 195 ms; synthesis first audio 951 ms; synthesis production 3,253
+ms; TTS response headers 657 ms and body lifetime 1,109 ms; presentation ACK
+118 ms. These are observations of one synthetic run, not SLO percentiles.
+
+The report also retains the next-capture Provider transport failure and all
+related cancellation/cleanup source locations, including
+`SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE`, `RECOGNITION_STREAM_NOT_FOUND` and
+`RECOGNITION_CANCEL_ALREADY_REQUESTED`. The product recovered to listening;
+the evidence is sufficient to distinguish recognition/VAD, Agent/tool, TTS,
+playout and cleanup timing during the user's next rehearsal. It does not resolve
+the existing segmentation or physical-VAD questions and does not claim speaker
+audibility.
+
+Local evidence is retained in ignored directory
+`logs/profile-speech-retest-20260904/`: `report/profile.html`, full
+`report/profile.json`, Chrome `trace.json`, the browser export, safe
+`verification.json`, synthetic input manifest and command/result screenshots.
+No transcript, audio, credentials, Provider URL or private configuration was
+added to Git.

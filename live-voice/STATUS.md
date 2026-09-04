@@ -89,7 +89,9 @@ offline timeline/report are implemented. Scope and verification are in the
   and frontend assets. The controlled launcher and a synthetic-speech browser
   run now exercised the real Agent/file tool and digital playback. That run
   exposed numeric-log parsing, synthesis identity and overlapping HTTP timing
-  gaps; their bounded repair is under verification. See the
+  gaps; the bounded repair is now deployed and a second synthetic run retained
+  complete parseable Session-filtered evidence. The diagnostic path is ready
+  for the user's physical VAD rehearsal. See the
   [deployment evidence](evidence/DEMO_PROFILING_DEPLOYMENT_20260904.md).
 - Automatic timing, error breadcrumbs and explicit missing/dropped-record
   reporting are implementation evidence, not a latency improvement or a physical
