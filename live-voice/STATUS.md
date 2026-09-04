@@ -66,7 +66,7 @@ repeat the old whole-project audit solely to resume a bounded task.
 | Executor & Durability | Direct D0/D2 v2 profiles, admission, reconciliation, sealed results and generic adjustment checkpoints; dedicated no-memory rail repair; retained v1 records cannot authorize new v2 dispatch | Required independent review and real result/control acceptance; scope broader file-tool access outside checkout separately. Additional Executor/D1 capability needs its own packet; no D1 or generic host-crash claim |
 | Voice–Task Bridge | Unified committed semantics, direct exact local creation/modification consent, scoped targets and requirement sources | Current modification/query real-model acceptance; full generalization and retirement audit; pause/resume/provide-input remain unsupported until a real primitive is accepted |
 | Integrated Web product experience | Scoped Registry Tasks in the right panel, no bottom manual form; project-home Session allocation through microphone transcription; recovery/notification repairs | Stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh journey; projectless startup requires backend authority design |
-| Observability, benchmark and latency | Correlated stage timings; bounded capture/playout/interruption, Speech protocol/send-lock/HTTP diagnostics; passive Socket flow-control, event-loop and queue-age increment implemented | Deploy and physically reproduce with the new trace; independent review, ineffective interruption, current first-audible baseline and declared SLO remain open. Historical percentiles are not current gains |
+| Observability, benchmark and latency | Correlated stage timings; bounded capture/playout/interruption, Speech protocol/send-lock/HTTP diagnostics; passive Socket flow-control, event-loop and queue-age increment deployed | Physically reproduce with the new trace; independent review, ineffective interruption, current first-audible baseline and declared SLO remain open. Historical percentiles are not current gains |
 | Automated verification and product acceptance | Focused module/regression checks and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative independent review and final human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, production semantic cutover, bounded legacy removals and scoped prompt/config isolation | Complete production reachability/retirement audit; remaining manifest rows; keep artifacts/private runtime data out of integration |
 | Production operations | Privacy/preflight/observability foundations only | Authentication/tenancy, public deployment, operations, retention, security, compatibility and release support after separate scope |
@@ -88,11 +88,13 @@ a speculative latency fix. See the
   callbacks and drain duration, send-owned event-loop heartbeat lag, queued-frame
   age and source progress. Existing stop/lock/final correlation remains. Proxy
   policy is explicitly a hint; no route change or Provider-consumption claim.
-- Focused and final affected regressions pass; local deployment is pending.
+- Focused and final affected regressions pass; controlled local deployment,
+  served bundle and real Speech/rejection readiness probes pass.
   Complete manual diff review substitutes for an unavailable independent
   review (local CLI/model incompatibility); Tier 2 review closure stays PARTIAL.
 - Preserve current isolated `deepseek-v4-flash`, project/data, VAD 800 ms and
-  startup 250 ms. Prior deployment/configuration correction and Speech failure
+  startup 250 ms; running process values and served bundle were verified, and
+  configuration hash and terminal Task/Attempt counts are unchanged. Prior deployment/configuration correction and Speech failure
   traces remain in the [precision evidence](evidence/SPEECH_FAILURE_DIAGNOSTICS_20260904.md).
 - User deferred manual browser export after the undefined-object error. Next
   reproduction uses backend diagnostics plus microphone/screen recording; do

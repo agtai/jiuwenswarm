@@ -98,3 +98,36 @@ cancellation behavior. The same full affected command passes **376 tests in
 31.65 s** after correction; new-module Ruff and complete changed-hunk review pass.
 Replacement deployment follows before handoff; independent review remains
 unavailable under the already recorded tool limitation.
+
+## Final controlled deployment
+
+- Runtime source: `a5b076886ecbc57d273698128aad5a62adf17f65`, clean at launch,
+  branch `hx/0812_live_voice_w3`, `formal-web-validation`, Cascade. Local commits:
+  `5097ca71 feat(live-voice): trace socket backpressure and audio queue age`;
+  `a5b07688 fix(live-voice): keep expired observer timings truthful`. No push.
+- Used the existing private deployment helper and controlled launcher with
+  existing config/data/project and process-only offline npm settings. Full
+  TypeScript/Vite build passed (Vite 44.25 s); uv sync checked existing locked
+  dependencies. Existing import/chunk-size warnings remain; no fresh npm audit.
+- Runtime log: `logs/swarm-20260904-164927.log`, parent PID 11224; Agent 21160 on
+  18194; Web/Gateway 16560 on 19120/19121; UI 3876 on 6175. Earlier logs retained.
+- Launcher real TTS→STT, formal receipt, identity-mismatch rejection and forged
+  claim rejection passed with zero business effects. Runtime manifest names the
+  final source, zero dirty files and passed Speech/bundle/backend routes. This
+  batch Speech probe isn't streaming backpressure or physical-voice acceptance.
+- Original acceptance URL returns HTTP 200. Served `/assets/index-DsZyj0lX.js`
+  exactly matches local build and contains startup lead `250`. Running service
+  environments show VAD `800` and the same isolated config/data paths. Dialogue
+  configuration hash is unchanged with default `deepseek-v4-flash`; no new
+  dialogue-model invocation claimed. Generation-interruption flag stays false.
+- Read-only Gateway ACK/project-list verification passed: exact retained
+  `proj_ad135a77`, six Sessions, two Tasks. SQLite still has two terminal Tasks
+  and two terminal Attempts. No user history, project data or configuration was
+  removed, and no browser refresh/microphone operation was performed by the agent.
+
+Next human check: refresh the existing Session, re-enable Live Voice, record
+screen plus microphone, speak continuously for 10–15 s then remain silent.
+Repeat three rounds, waiting for playback and resumed listening between rounds.
+Report the Session URL and recording stop-time offsets. Do not require manual
+browser-console export. Diagnose queue age, write pause/drain and heartbeat lag
+on the same capture; physical root cause and ineffective interruption remain open.
