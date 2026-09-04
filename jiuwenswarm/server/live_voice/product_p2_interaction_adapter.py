@@ -720,6 +720,38 @@ class P2ActivationLease:
                 )
             return outcome
 
+    def hold_presentation(
+        self,
+        binding: P2InteractionBinding,
+        response: ResponseRef,
+        gate: "asyncio.Future[str]",
+    ) -> None:
+        """Park every notification of ``response`` until ``gate`` settles.
+
+        Speculative dialogue dispatch starts the Agent before the semantic
+        decision is final; nothing it produces may reach a consumer until the
+        decision confirms the route ("release") or the response is fenced and
+        silently discarded ("discard"). The hold is installed synchronously
+        before dispatch, inside the activated interaction only.
+        """
+
+        with self._state_lock:
+            self._require_open_exact_binding(binding)
+        if response.interaction_id != binding.interaction_id:
+            raise _violation(
+                "PRESENTATION_HOLD_SCOPE_MISMATCH",
+                "a presentation hold must target the activated interaction",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        hold = getattr(self._runtime, "hold_presentation", None)
+        if not callable(hold):
+            raise _violation(
+                "PRESENTATION_HOLD_UNAVAILABLE",
+                "retained runtime cannot hold presentations",
+                ErrorCode.UNAVAILABLE,
+            )
+        hold(response, gate)
+
     async def presented_agent_analysis(
         self, binding: P2InteractionBinding, response: ResponseRef
     ) -> PresentedAgentAnalysis | None:

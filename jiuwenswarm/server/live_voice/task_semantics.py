@@ -90,6 +90,62 @@ def _structural_feedback(raw: object) -> str:
         feedback += " after_seq must be an integer at least -1."
     feedback += " Extractions must describe the fields actually present. Reconsider the operation/target from the original request; a validation hint does not select a task."
     return feedback
+
+
+_ROUTES = frozenset({"dialogue", "task", "clarification"})
+
+
+def _route_hint_from_partial(text: str) -> str | None:
+    """Read ``route`` from a partially streamed JSON object without parsing it."""
+    index = text.find('"route"')
+    if index < 0:
+        return None
+    tail = text[index + len('"route"'):]
+    colon = tail.find(":")
+    if colon < 0:
+        return None
+    tail = tail[colon + 1:].lstrip()
+    if not tail.startswith('"'):
+        return None
+    end = tail.find('"', 1)
+    if end < 0:
+        return None
+    value = tail[1:end]
+    return value if value in _ROUTES else None
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamedModelResponse:
+    content: str
+    tool_calls: object
+
+
+async def _stream_semantic_response(stream, messages, invocation_options, announce) -> _StreamedModelResponse:
+    """Consume the model stream, announcing the route as soon as it is emitted.
+
+    The instructions require the model to emit ``route`` first, so a caller
+    can start a dialogue Agent request on that announcement while the closed
+    output finishes streaming. The complete text is then validated exactly
+    like a unary response; the announcement never substitutes for it.
+    """
+    parts: list[str] = []
+    announced = False
+    tool_calls = None
+    async for chunk in stream(messages=messages, tools=[], **invocation_options):
+        chunk_tool_calls = getattr(chunk, "tool_calls", None)
+        if chunk_tool_calls:
+            tool_calls = chunk_tool_calls
+        content = getattr(chunk, "content", None)
+        if isinstance(content, str) and content:
+            parts.append(content)
+            if not announced:
+                route = _route_hint_from_partial("".join(parts))
+                if route is not None:
+                    announced = True
+                    announce(route)
+    return _StreamedModelResponse(content="".join(parts), tool_calls=tool_calls)
+
+
 _OUTPUT_FIELDS = frozenset(
     {
         "route",
@@ -862,7 +918,25 @@ class TaskSemanticResolver:
         context: TaskSemanticContext,
         *,
         analysis: Mapping[str, str] | None = None,
+        route_hint: Callable[[str], None] | None = None,
     ) -> TaskSemanticDecision:
+        """Resolve one input; ``route_hint`` learns the route before the full decision.
+
+        When the configured model can stream, the first attempt announces the
+        emitted ``route`` as soon as it appears so the caller may overlap
+        dialogue dispatch with the rest of this call. The announcement is
+        binding: a structural retry must keep it, and a final decision that
+        contradicts it fails closed instead of silently diverging.
+        """
+        announced: list[str] = []
+
+        def announce(route: str) -> None:
+            if announced:
+                return
+            announced.append(route)
+            if route_hint is not None:
+                route_hint(route)
+
         context_payload = context.payload()
         if not isinstance(commit, TurnCommit) or commit.scope != context.scope:
             raise _fail("SEMANTIC_COMMIT_SCOPE_MISMATCH", ErrorCode.PERMISSION_DENIED)
@@ -932,14 +1006,26 @@ class TaskSemanticResolver:
                 for final_attempt in range(2):
                     if self._before_invoke is not None:
                         await self._before_invoke()
-                    response = await resolved.model.invoke(
-                        messages=[
-                            SystemMessage(content=attempt_instructions),
-                            UserMessage(content=payload_json),
-                        ],
-                        tools=[],
-                        **invocation_options,
-                    )
+                    messages = [
+                        SystemMessage(content=attempt_instructions),
+                        UserMessage(content=payload_json),
+                    ]
+                    stream = getattr(resolved.model, "stream", None)
+                    # A dialogue answer over existing Tasks is grounded with
+                    # fresh Task facts after the decision, which a speculative
+                    # dispatch would bypass: announce only when the context
+                    # holds no Task, where the plain commit is the whole input.
+                    if (route_hint is not None and not context_payload["tasks"]
+                            and final_attempt == 0 and callable(stream)):
+                        response = await _stream_semantic_response(
+                            stream, messages, invocation_options, announce,
+                        )
+                    else:
+                        response = await resolved.model.invoke(
+                            messages=messages,
+                            tools=[],
+                            **invocation_options,
+                        )
                     if getattr(response, "tool_calls", None):
                         raise _fail("SEMANTIC_TOOL_CALL_FORBIDDEN")
                     # At most one fresh model interpretation, before any Task
@@ -966,7 +1052,14 @@ class TaskSemanticResolver:
                         if final_attempt == 1 or error.reason != "SEMANTIC_OUTPUT_INVALID":
                             raise
                         attempt_instructions = instructions + "\n" + _structural_feedback(raw_final)
+                        if announced:
+                            attempt_instructions += (
+                                f"\nThe route already emitted for this input, {announced[0]!r}, "
+                                "is binding: repair the structure without changing route."
+                            )
                         continue
+                    if announced and decision.route != announced[0]:
+                        raise _fail("SEMANTIC_ROUTE_HINT_MISMATCH", ErrorCode.CONFLICT)
                     return decision
         except TimeoutError as error:
             raise _fail("SEMANTIC_PROVIDER_TIMEOUT", ErrorCode.TIMEOUT) from error
