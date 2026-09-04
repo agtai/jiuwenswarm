@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+from jiuwenswarm.server.runtime.agent_adapter import formal_tool_gate
 import copy
 import hashlib
 import json
@@ -1148,6 +1149,11 @@ class JiuWenSwarmDeepAdapter:
     - Deep evolution 绑定
     - Deep interrupt / user_answer 处理
     """
+
+    # The formal stream applies the process-local tool gate when it opens
+    # its tool capture, so a speculative candidate can be paused before its
+    # session adapter exists.
+    supports_formal_tool_gate = True
 
     def __init__(self) -> None:
         # Apply the MCP per-call timeout patch once per process: wraps
@@ -9484,6 +9490,10 @@ class JiuWenSwarmDeepAdapter:
                     session_id,
                     allow_tools=tools_allowed,
                 )
+                if formal_tool_gate.should_pause(session_id):
+                    # A speculative candidate: every tool call waits for the
+                    # semantic decision; the model may run meanwhile.
+                    stream_event_rail.pause(session_id)
                 interaction_stream = await self._instance.attach_output()
                 if interaction_stream is None:
                     raise RuntimeError("FORMAL_EXECUTION_OUTPUT_LEASE_UNAVAILABLE")

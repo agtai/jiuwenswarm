@@ -50,7 +50,8 @@ def _stats(values: list[float]) -> dict[str, float]:
 
 def load_run(directory: Path) -> tuple[dict[str, dict[str, dict]], dict[str, dict], dict[str, int]]:
     rows = [json.loads(line) for line in (directory / "rounds.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
-    scenarios = sorted({r["scenario"] for r in rows}, key=["short", "medium", "long", "tool", "task"].index)
+    order = ["short", "medium", "long", "tool", "task", "clarify"]
+    scenarios = sorted({r["scenario"] for r in rows}, key=lambda name: (order.index(name) if name in order else len(order), name))
     segments: dict[str, dict[str, dict]] = {}
     failures: dict[str, int] = {}
     for scenario in scenarios:

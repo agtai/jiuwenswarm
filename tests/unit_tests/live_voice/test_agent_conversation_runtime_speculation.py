@@ -39,6 +39,10 @@ class _FakeRail:
 
 
 class GatedLowerAdapter(LowerFormalAdapter):
+    # A root adapter without per-session children: the facade falls back to
+    # the adapter's own rail, which this double exposes directly.
+    supports_formal_tool_gate = True
+
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._stream_event_rail = _FakeRail()
