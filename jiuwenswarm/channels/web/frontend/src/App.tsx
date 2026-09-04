@@ -16,6 +16,10 @@ import CronPanel from './components/CronPanel';
 import HeartbeatPanel from './components/HeartbeatPanel';
 import { ToolPanel } from './components/ToolPanel';
 import { UpdatePanel } from './components/UpdatePanel';
+import { DocsPanel } from './components/DocsPanel';
+import { DocWorkbench } from './components/DocWorkbench';
+import { useDocWorkbenchStore } from './stores/docWorkbenchStore';
+import { OPEN_DOC_EVENT, consumePendingOpenDoc } from './features/clouddoc/openDocSignal';
 import { ExternalCliInstallDialog, type ExternalCliInstallStatuses } from './components/ExternalCliInstallDialog';
 import { SettingsPage } from './features/settings/SettingsPage';
 import type { SettingsPageDefinition } from './features/settings/registry/types';
@@ -325,6 +329,15 @@ function AppContent({
   const [externalCliInstallStatuses, setExternalCliInstallStatuses] = useState<ExternalCliInstallStatuses>({});
   const [hasVisitedAgents, setHasVisitedAgents] = useState(false);
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
+  const [hasVisitedDocs, setHasVisitedDocs] = useState(false);
+  // A2 (§25.3): the Docs nav item renders only when a cloud-doc connection exists —
+  // a deployment that never accessioned sees nothing. The Settings module announces
+  // changes so the item appears the moment a first key lands.
+  const [cloudDocReady, setCloudDocReady] = useState(false);
+  // The co-scribe plugin's install state (the 乙 plan): uninstalled hides both
+  // cloud-doc surfaces -- the Settings module and the Docs entry.
+  const [cloudDocInstalled, setCloudDocInstalled] = useState(false);
+
   const [requestedSettingsModuleId, setRequestedSettingsModuleId] =
     useState<SettingsModuleTarget | null>(null);
   const {
@@ -719,6 +732,7 @@ function AppContent({
   const settleHistoricalToolExecutions = useChatStore((s) => s.settleHistoricalToolExecutions);
   const prependMessages = useChatStore((s) => s.prependMessages);
   const isProcessing = useChatStore((s) => s.runtimes[sessionId]?.isProcessing ?? false);
+  const docWorkbenchOpen = useDocWorkbenchStore((s) => s.open && s.tabs.length > 0);
   const isPaused = useChatStore((s) => s.runtimes[sessionId]?.isPaused ?? false);
   const hasPendingQuestion = useChatStore((s) => Boolean(s.runtimes[sessionId]?.pendingQuestion));
   const setProcessing = useChatStore((s) => s.setProcessing);
@@ -741,7 +755,18 @@ function AppContent({
     import.meta.env.MODE,
     typeof serverConfig?.runtime_platform === 'string' ? serverConfig.runtime_platform : undefined,
   );
-  const hiddenNavItems = getHiddenNavItemsForPlatform(frontendPlatform);
+  const platformHiddenNavItems = getHiddenNavItemsForPlatform(frontendPlatform);
+  const effectiveSettingsDefinition = useMemo(() => {
+    if (cloudDocInstalled) return settingsPageDefinition;
+    return {
+      ...settingsPageDefinition,
+      modules: settingsPageDefinition.modules.filter((m) => m.id !== 'clouddoc'),
+    };
+  }, [cloudDocInstalled, settingsPageDefinition]);
+
+  const hiddenNavItems = cloudDocReady
+    ? platformHiddenNavItems
+    : [...platformHiddenNavItems, 'docs' as const];
 
   useEffect(() => {
     if (!serverConfig) {
@@ -893,6 +918,8 @@ function AppContent({
     },
     onDisconnect: () => {
       console.log('Disconnected');
+
+
     },
     onError: (error) => {
       console.error('WebSocket error:', error);
@@ -1502,6 +1529,74 @@ function AppContent({
       window.clearTimeout(timeoutId);
     };
   }, [isConnected, request]);
+
+  // A chat reference chip asks for a document's receipts: land on Docs. The doc id
+  // itself travels through the openDocSignal latch, not this event.
+  useEffect(() => {
+    const onGoSettings = (e: Event) => {
+      const module = (e as CustomEvent<{ module?: string }>).detail?.module;
+      setActiveNav('settings');
+      if (module === 'clouddoc') requestSettingsModule('clouddoc');
+    };
+    window.addEventListener('jiuwen:navigate-settings', onGoSettings);
+    return () => window.removeEventListener('jiuwen:navigate-settings', onGoSettings);
+  }, []);
+
+  useEffect(() => {
+    const onOpenDoc = () => {
+      // Opening a document lands in the workbench (release §14), which lives in
+      // the chat view so the session's composer is the one below the document.
+      // The row's metadata comes from the panel's own list; a document the list
+      // does not know is still opened by id, with the id as its title.
+      const docId = consumePendingOpenDoc();
+      if (!docId) return;
+      void webRequest<{ docs?: { doc_id: string; title?: string; kind?: string; url?: string; provider?: string; provider_name?: string }[] }>('clouddoc.list_docs')
+        .then((out) => {
+          const row = (out?.docs ?? []).find((d) => d.doc_id === docId);
+          useDocWorkbenchStore.getState().openDoc({
+            docId,
+            title: row?.title || docId,
+            kind: row?.kind || 'document',
+            url: row?.url || '',
+            provider: row?.provider || '',
+            providerName: row?.provider_name,
+          });
+          setActiveNav('chat');
+        })
+        .catch(() => {
+          useDocWorkbenchStore.getState().openDoc({ docId, title: docId, kind: 'document', url: '', provider: '' });
+          setActiveNav('chat');
+        });
+    };
+    window.addEventListener(OPEN_DOC_EVENT, onOpenDoc);
+    return () => window.removeEventListener(OPEN_DOC_EVENT, onOpenDoc);
+  }, []);
+
+  useEffect(() => {
+    if (!isConnected) return;
+    let stale = false;
+    const check = async () => {
+      try {
+        const conf = await request<{ enabled?: boolean; installed?: boolean; connections?: unknown[] }>('clouddoc.get_conf');
+        if (!stale) {
+          setCloudDocReady(
+            Boolean(conf?.enabled) && conf?.installed !== false && (conf?.connections?.length ?? 0) > 0,
+          );
+          setCloudDocInstalled(Boolean(conf?.enabled) && conf?.installed !== false);
+        }
+      } catch {
+        if (!stale) setCloudDocReady(false);
+      }
+    };
+    void check();
+    const onChanged = () => void check();
+    window.addEventListener('jiuwen:clouddoc-connections-changed', onChanged);
+    return () => {
+      stale = true;
+      window.removeEventListener('jiuwen:clouddoc-connections-changed', onChanged);
+    };
+  }, [isConnected]);
+
 
   const clearRestartAutoCloseTimer = useCallback(() => {
     if (restartAutoCloseTimerRef.current != null) {
@@ -2854,6 +2949,7 @@ function AppContent({
       }
       if (nav === 'agents') setHasVisitedAgents(true);
       if (nav === 'skills') setHasVisitedSkills(true);
+      if (nav === 'docs') setHasVisitedDocs(true);
     },
     [activeNav, isMobile, modelSetupGuideStep, setSingleAgentPanelExpanded, setTeamAreaExpanded, setToolPanelHidden, t],
   );
@@ -2986,6 +3082,17 @@ function AppContent({
     && missingSessionId === routeSessionId
     && isConversationMissing(routeSessionId, true, sessions);
   const showConversationNotFound = route.kind === 'not-found' || routeSessionMissing;
+  // The workbench takes the whole chat view: the conversation sidebar (the "工作"
+  // column) folds away with it, as the owner's layout has only the icon rail on
+  // the left; 退出编辑 brings the sidebar back.
+  // A new conversation counts: clicking "open in the workbench" from the new-task
+  // home used to hide the workbench silently, which reads as a dead click. The
+  // composer below the document is the session's own, and sending the first
+  // message from there promotes the new conversation exactly as the chat view
+  // does, so the workbench stays up across the promotion (verified live).
+  // Everything the workbench renders is co-scribe UI: uninstalling the plugin
+  // (cloudDocInstalled false) takes it away wholesale, tabs and all.
+  const docWorkbenchShown = cloudDocInstalled && docWorkbenchOpen && !showConversationNotFound && !!sessionId;
 const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFound && !shouldFullscreen;
   const isNewSessionPromotion = Boolean(sessionId && sessionIdsCreatedInThisPageRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
@@ -3044,6 +3151,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         {activeNav === 'chat' && (
           <>
             <div className="chat-layout flex-1 flex min-h-0 overflow-hidden">
+              {!docWorkbenchShown && (
               <ConversationSidebar
                 activeSessionId={sessionId === NEW_CONVERSATION_ID ? null : sessionId}
                 onNew={(options) => requestSessionNavigation('new', options)}
@@ -3055,8 +3163,29 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 floating={conversationSidebarFloating}
                 onToggleCollapse={() => setConversationSidebarCollapsed((v) => !v)}
               />
+              )}
+              {docWorkbenchShown && (
+                <DocWorkbench
+                  composer={{
+                    onSubmit: handleSendMessage,
+                    onInputIntent: kvCacheAffinityEnabled ? handleKVCInputIntent : undefined,
+                    onPersistMedia: handlePersistMedia,
+                    onPersistDocuments: handlePersistDocuments,
+                    onInterrupt: handleInterrupt,
+                    onCancel: handleCancel,
+                    onSwitchMode: handleSwitchMode,
+                    isProcessing,
+                    permissionsEnabled: serverConfig?.permissions_enabled !== 'false',
+                    onSavePermission: savePermissionSilent,
+                    onSetGoal: setGoalObjective,
+                    onClearGoal: handleClearGoal,
+                    onDrainTaskQueueIfIdle: drainTaskQueueIfIdle,
+                  }}
+                />
+              )}
               <div
                 className={`chat-workspace flex-1 flex min-h-0 overflow-hidden ${insetTrajectoryFloatingTasks ? 'chat-workspace--trajectory-floating-tools' : ''}`}
+                style={docWorkbenchShown ? { display: 'none' } : { position: 'relative' }}
               >
                 {showConversationNotFound && (
                   <div className="flex-1 flex flex-col items-center justify-center gap-4" data-testid="app-conversation-not-found">
@@ -3267,7 +3396,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         {activeNav === 'settings' && (
           <div className="app-section">
             <SettingsPage
-                definition={settingsPageDefinition}
+                definition={effectiveSettingsDefinition}
                 isConnected={isConnected}
                 connectionState={connectionState}
                 request={settingsRequest}
@@ -3306,6 +3435,11 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 onSymphonyEnabledChange={saveSymphonyEnabled}
                 onNavigateToSettings={() => requestSettingsModule('agent')}
             />
+          </div>
+        )}
+        {hasVisitedDocs && (
+          <div className={`app-section ${activeNav === 'docs' ? '' : 'is-hidden'}`}>
+            <DocsPanel isConnected={isConnected} />
           </div>
         )}
         {activeNav === 'connectorMarket' && (

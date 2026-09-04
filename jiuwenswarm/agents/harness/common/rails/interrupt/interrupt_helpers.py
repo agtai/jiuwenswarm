@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from collections.abc import Callable
 from typing import Any, Mapping
 
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
@@ -76,6 +77,7 @@ def build_permission_rail(
     config: dict[str, Any],
     llm: Any = None,
     model_name: str | None = None,
+    unattended_clouddoc: Callable[[], dict[str, Any] | None] | None = None,
 ) -> Any | None:
     """Build openjiuwen PermissionInterruptRail for tool permission checks.
 
@@ -83,6 +85,12 @@ def build_permission_rail(
         config: Agent config dict containing permissions section
         llm: LLM instance for risk assessment
         model_name: Model name for risk assessment
+        unattended_clouddoc: Returns this turn's clouddoc authorization snapshot, or
+            None when the turn is not an unattended cloud-document turn. The scene
+            hook runs while a tool is executing, where the request contextvars are no
+            longer bound, so the caller that owns the snapshot has to supply it --
+            see the hook below. Omitted, the hook falls back to the contextvars and
+            therefore never recognises an unattended turn from inside a tool call.
 
     Returns:
         PermissionInterruptRail instance or None if disabled
@@ -312,6 +320,34 @@ def build_permission_rail(
 
         def _is_silent_skills_rebuild_session() -> bool:
             return bool(SKILLS_REBUILD_SILENT.get())
+        def _resolve_unattended_clouddoc_turn() -> dict[str, Any] | None:
+            """This turn's clouddoc authorization snapshot, or None outside one.
+
+            **Never raises.** A resolver that threw would be caught by the rail, logged
+            as a scene-hook failure and then fall through to the tiered engine -- which
+            for a write tool means an approval interrupt on a turn with nobody to
+            answer it, i.e. exactly the silent stall this hook exists to prevent.
+            """
+            if unattended_clouddoc is not None:
+                try:
+                    turn = unattended_clouddoc()
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "[InterruptHelpers] clouddoc turn snapshot failed", exc_info=True
+                    )
+                    return None
+                return turn if isinstance(turn, dict) and turn else None
+
+            # No snapshot supplied (team members, code adapter): the contextvars are the
+            # only signal left, and they read False from inside a tool call.
+            from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+                get_clouddoc_turn_mode,
+                is_unattended_clouddoc_turn,
+            )
+
+            if not is_unattended_clouddoc_turn():
+                return None
+            return {"mode": get_clouddoc_turn_mode()}
 
         async def _permission_scene_hook(
             inp: PermissionSceneHookInput,
@@ -336,6 +372,51 @@ def build_permission_rail(
             # forever. Bypass the permission rail for ask_user so the ask_user
             # rail's answer reaches the model. The digital-avatar scene below
             # intentionally blocks interactive tools, so exclude it here.
+            # ---- clouddoc unattended session: refuse by default ----
+            # This must sit before **both** the ask_user bypass **and** the
+            # `perm_ctx is None` early return:
+            #   * ask_user is let through unconditionally outside avatar scenarios, and
+            #     calling it in an unattended session hangs until the turn times out --
+            #     exactly the failure this mechanism exists to close;
+            #   * a clouddoc turn has no avatar_mode and no enable_memory=False, so
+            #     perm_ctx is always None and that early return would mean this code is
+            #     never reached.
+            #
+            # **The turn is recognised from the caller's snapshot, not from the
+            # contextvars.** This hook runs while a tool is executing, and by then the
+            # request-scoped binding is gone -- ``is_unattended_clouddoc_turn()``
+            # answers False there, the branch below never ran in production, and every
+            # co-scribe turn that reached ``clouddoc_apply_for_comment`` (permission
+            # tier ``ask``) raised an approval interrupt with nobody to answer it. The
+            # round then ended with no text at all and the document got the watcher's
+            # "this turn didn't complete" wording. It is the same reason the toolkit
+            # reads ``_clouddoc_turn`` rather than the contextvar; see
+            # ``_update_clouddoc_tools``.
+            try:
+                from jiuwenswarm.agents.harness.common.tools.clouddoc.clouddoc_tools import (
+                    unattended_allowlist_for,
+                )
+
+                turn = _resolve_unattended_clouddoc_turn()
+                if turn is not None:
+                    # The allowlist is a **literal family keyed by watch mode** (IC-1),
+                    # never set subtraction: written as a subtraction it would let
+                    # removed tools back in, and written without the mode key a
+                    # reply_only turn would silently widen to apply_scoped.
+                    allowed = unattended_allowlist_for(turn.get("mode"))
+                    if inp.normalized_tool_name in allowed:
+                        return ("approve",)
+                    return (
+                        "reject",
+                        "[PERMISSION_DENIED] 无人值守的云文档会话只允许 "
+                        f"{sorted(allowed)}；"
+                        f"{inp.normalized_tool_name} 不在其中",
+                    )
+            except ImportError:
+                # With clouddoc absent or disabled this branch does nothing at all, so
+                # no other scenario is affected.
+                pass
+
             if inp.normalized_tool_name == "ask_user" and (
                 perm_ctx is None
                 or getattr(perm_ctx, "scene", None) != "group_digital_avatar"
@@ -653,6 +734,69 @@ def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | Non
         return payload
 
     return None
+
+
+def pending_interrupt_ask_payload_from_state(state: Any) -> dict | None:
+    """Rebuild the ``chat.ask_user_question`` payload for a parked tool interrupt.
+
+    The approval prompt is emitted exactly once, as a transient chunk inside the
+    live response stream, while the engine's ``ToolInterruptionState`` stays
+    parked in the session until the answer arrives. Those two lifetimes race:
+    when the web client is between WebSocket connections at the moment the
+    chunk is published (a dev-server reload, a page refresh mid-turn), the
+    prompt lands on zero subscribers, history never persisted it, and nothing
+    re-delivers it — the tool call then waits forever and the turn dies
+    silently. This helper closes the race from the durable side: the parked
+    state is the single source of truth for "a prompt is still owed to the
+    user", so a reconnecting client can have the exact same ask payload rebuilt
+    and re-pushed. The state is cleared the moment a resume answer is consumed,
+    which makes "state present" equivalent to "prompt unanswered".
+
+    Returns ``None`` when the state carries no interrupted tools (nothing owed).
+    """
+    interrupted_tools = getattr(state, "interrupted_tools", None)
+    if not isinstance(interrupted_tools, dict) or not interrupted_tools:
+        return None
+
+    interactions: list[Any] = []
+    for entry in interrupted_tools.values():
+        tool_call = getattr(entry, "tool_call", None)
+        requests = getattr(entry, "interrupt_requests", None)
+        if not isinstance(requests, dict):
+            continue
+        for inner_id, request in requests.items():
+            value: Any = request
+            # Mirror the engine's original emit: a bare InterruptRequest is
+            # wrapped with the tool-call context (tool_name / tool_args /
+            # tool_call_id) exactly like ToolInterruptHandler did when the
+            # interrupt was first raised, so the rebuilt prompt classifies to
+            # the same source (permission/confirm/ask_user) as the lost one.
+            try:
+                from openjiuwen.core.single_agent.interrupt.response import (
+                    InterruptRequest,
+                    ToolCallInterruptRequest,
+                )
+
+                if (
+                    isinstance(request, InterruptRequest)
+                    and not isinstance(request, ToolCallInterruptRequest)
+                    and tool_call is not None
+                ):
+                    value = ToolCallInterruptRequest.from_tool_call(
+                        request=request,
+                        tool_call=tool_call,
+                    )
+            except Exception:
+                logger.debug(
+                    "[interrupt_helpers] pending ask rebuild: tool-call wrap failed",
+                    exc_info=True,
+                )
+                value = request
+            interactions.append({"id": str(inner_id or ""), "value": value})
+
+    if not interactions:
+        return None
+    return convert_interactions_to_ask_user_question(interactions)
 
 
 def _iter_interactions(state_outputs: list) -> Any:

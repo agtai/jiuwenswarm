@@ -1,0 +1,8 @@
+{
+  "package_type": "agent_template",
+  "name": "执笔专员",
+  "description": "全组唯一执笔人：先读后写、外科手术式小步修改、每次写入留回执",
+  "persona": {
+    "dir": "./persona"
+  }
+}
