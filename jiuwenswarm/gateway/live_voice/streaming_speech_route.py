@@ -28,6 +28,7 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     SpeechDegradationFact,
     SpeechRouteTier,
     StreamingSpeechSelection,
+    _reason_for_exception,
 )
 from jiuwenswarm.server.live_voice.speech_ports import RecognitionEventKind, ProviderRef
 from jiuwenswarm.server.live_voice.streaming_speech import (
@@ -43,6 +44,8 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
     RecognitionTurnBoundaryKind,
     RecognitionTurnDetection,
     StreamingRecognitionEvent,
+    StreamingSpeechViolation,
+    require_stream_authority,
 )
 
 
@@ -88,6 +91,9 @@ class StreamingRecognitionFallbackReason(StrEnum):
     PROVIDER_TIMEOUT = "STREAMING_SPEECH_PROVIDER_TIMEOUT"
     QUEUE_EXHAUSTED = "STREAMING_SPEECH_EVENT_QUEUE_EXHAUSTED"
     ROUTE_ABORTED = "STREAMING_SPEECH_ROUTE_ABORTED"
+    RESOURCE_CAPACITY = "STREAMING_SPEECH_RESOURCE_CAPACITY"
+    CLEANUP_INCOMPLETE = "STREAMING_SPEECH_CLEANUP_INCOMPLETE"
+    AUTHORITY_EXPIRED = "STREAMING_SPEECH_AUTHORITY_EXPIRED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +219,7 @@ class StreamingRecognitionRouteOwner:
         binding: MediaAuthorityBinding,
         *,
         turn_detection: RecognitionTurnDetection | None = None,
+        request: RecognitionStreamRequest | None = None,
     ) -> tuple[StreamingRecognitionHandle | None, StreamingRecognitionOutcome | None]:
         if self._closed:
             return None, self._fallback(
@@ -247,6 +254,12 @@ class StreamingRecognitionRouteOwner:
             ),
         )
         stream_key = self._stream_key(ref)
+        if request is None or request.ref != ref or request.turn_detection != detection:
+            raise StreamingSpeechViolation(
+                "SPEECH_AUTHORITY_REQUIRED",
+                "exact Media-authorized recognition request required",
+            )
+        require_stream_authority(request, stage="route")
         operation_task = asyncio.current_task()
         if operation_task is None:
             return None, self._fallback(
@@ -270,7 +283,7 @@ class StreamingRecognitionRouteOwner:
             # reservation without also observing the operation that owns it.
             async def invoke_open() -> None:
                 await provider.open_recognition(
-                    RecognitionStreamRequest(ref, detection),
+                    request,
                     timeout_seconds=_RECOGNITION_SESSION_TIMEOUT_SECONDS,
                 )
 
@@ -297,10 +310,12 @@ class StreamingRecognitionRouteOwner:
                 raise
             except _PROCESS_CONTROL as exc:
                 open_process_control = self._safe_process_control(exc)
-            except Exception:
+            except Exception as exc:
                 await self._release_stream_reservation(stream_key)
                 return None, self._fallback(
-                    StreamingRecognitionFallbackReason.PROVIDER_UNAVAILABLE,
+                    StreamingRecognitionFallbackReason(
+                        _reason_for_exception(exc).value
+                    ),
                     SpeechRouteTier.TEXT,
                 )
             if open_process_control is not None:

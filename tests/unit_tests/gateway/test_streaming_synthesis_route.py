@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import base64
 import json
 import logging
@@ -12,6 +13,14 @@ import traceback
 from dataclasses import replace
 
 import pytest
+
+from tests.unit_tests.live_voice.speech_authority_support import (
+    authorized_request,
+    response_authority,
+    begin_recognition,
+    speech_test_issuer,
+    reset_test_issuer,
+)
 
 from jiuwenswarm.gateway.live_voice import streaming_synthesis_route as route_module
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
@@ -100,7 +109,6 @@ class _FakeProvider(NativeStreamingSpeechProvider):
             capability,
             enabled=True,
             max_synthesis_sessions=8,
-            max_identity_tombstones=64,
         )
         self.events: asyncio.Queue[StreamingSynthesisEvent | BaseException] = (
             asyncio.Queue()
@@ -139,7 +147,7 @@ class _FakeProvider(NativeStreamingSpeechProvider):
         self.open_count += 1
         if self.open_error is not None:
             raise self.open_error
-        self._conformance.start_synthesis(request)
+        self._conformance.start_synthesis(authorized_request(request))
         self.requests.append(request)
         self.open_started.set()
         if self.open_gate is not None:
@@ -315,7 +323,7 @@ async def _begin(
         return _selection(provider)
 
     owner = StreamingSynthesisRouteOwner(selector, **owner_options)
-    handle, outcome = await owner.begin(request)
+    handle, outcome = await owner.begin(authorized_request(request))
     assert handle is not None
     assert outcome is None
     return owner, handle
@@ -443,7 +451,7 @@ async def test_real_openai_adapter_streams_through_route_without_batch_materiali
 
     owner = StreamingSynthesisRouteOwner(selector)
     request = _request()
-    handle, begin_outcome = await owner.begin(request)
+    handle, begin_outcome = await owner.begin(authorized_request(request))
     assert handle is not None and begin_outcome is None
     first = await owner.next_chunk(handle)
     terminal = await owner.next_chunk(handle)
@@ -651,7 +659,7 @@ async def test_feature_off_and_invalid_request_have_zero_provider_effects() -> N
 
     owner = StreamingSynthesisRouteOwner(selector)
     assert await owner.available() is False
-    handle, outcome = await owner.begin(_request())
+    handle, outcome = await owner.begin(authorized_request(_request()))
     assert handle is None and outcome is not None
     assert outcome.reason is StreamingSynthesisReason.FEATURE_OFF
     assert outcome.ref == _request().ref
@@ -667,7 +675,7 @@ async def test_feature_off_and_invalid_request_have_zero_provider_effects() -> N
     enabled_owner, _ = await _begin(provider, _request())
     bad = replace(_request(stream_id="bad-rate"), sample_rate_hz=24_001)
     with pytest.raises(StreamingSynthesisRouteViolation) as invalid:
-        await enabled_owner.begin(bad)
+        await enabled_owner.begin(authorized_request(bad))
     assert invalid.value.reason == "INVALID_SYNTHESIS_SAMPLE_RATE"
     assert provider.open_count == 1
     await enabled_owner.close()
@@ -683,7 +691,7 @@ async def test_active_capacity_rejects_before_second_provider_effect() -> None:
         interaction_id="interaction-2",
         response_id="response-2",
     )
-    second, outcome = await owner.begin(second_request)
+    second, outcome = await owner.begin(authorized_request(second_request))
     assert second is None and outcome is not None
     assert outcome.reason is StreamingSynthesisReason.CAPACITY_EXHAUSTED
     assert outcome.batch_eligible is True
@@ -703,7 +711,7 @@ async def test_successor_cancels_predecessor_and_stale_response_fails_closed() -
         response_id="response-2",
         response_generation=1,
     )
-    successor, outcome = await owner.begin(successor_request)
+    successor, outcome = await owner.begin(authorized_request(successor_request))
     assert successor is not None and outcome is None
     assert provider.cancelled == [first_request.ref]
     predecessor_terminal = await owner.next_chunk(first)
@@ -720,7 +728,7 @@ async def test_successor_cancels_predecessor_and_stale_response_fails_closed() -
         response_generation=0,
     )
     with pytest.raises(StreamingSynthesisRouteViolation) as stale:
-        await owner.begin(stale_request)
+        await owner.begin(authorized_request(stale_request))
     assert stale.value.reason == "STALE_SYNTHESIS_RESPONSE"
     assert provider.open_count == 2
     await owner.cancel(successor)
@@ -760,7 +768,7 @@ async def test_successor_fences_provider_complete_but_unplayed_predecessor() -> 
         response_id="response-2",
         response_generation=1,
     )
-    successor, outcome = await owner.begin(successor_request)
+    successor, outcome = await owner.begin(authorized_request(successor_request))
     assert successor is not None and outcome is None
     stale_pull = await owner.next_chunk(first)
     assert stale_pull.chunk is None
@@ -781,14 +789,16 @@ async def test_successor_cancels_inflight_open_before_activating_new_response() 
 
     owner = StreamingSynthesisRouteOwner(selector)
     first_request = _request()
-    first_task = asyncio.create_task(owner.begin(first_request))
+    first_task = asyncio.create_task(owner.begin(authorized_request(first_request)))
     await provider.open_started.wait()
     successor_request = _request(
         stream_id="synthesis-2",
         response_id="response-2",
         response_generation=1,
     )
-    successor_task = asyncio.create_task(owner.begin(successor_request))
+    successor_task = asyncio.create_task(
+        owner.begin(authorized_request(successor_request))
+    )
     await provider.cancel_started.wait()
     provider.open_gate.set()
 
@@ -813,14 +823,14 @@ async def test_process_control_during_open_cleans_identity_and_rethrows() -> Non
 
     owner = StreamingSynthesisRouteOwner(selector)
     with pytest.raises(SystemExit):
-        await owner.begin(request)
+        await owner.begin(authorized_request(request))
     assert provider.open_count == 1
     assert provider.cancelled == [request.ref]
     assert owner.active_count == 0
     provider.open_error = None
     with pytest.raises(StreamingSynthesisRouteViolation) as reused:
-        await owner.begin(request)
-    assert reused.value.reason == "SYNTHESIS_STREAM_REUSED"
+        await owner.begin(authorized_request(request))
+    assert reused.value.reason == "SPEECH_AUTHORITY_CONSUMED"
     await owner.close()
 
 
@@ -834,7 +844,7 @@ async def test_close_cancels_inflight_open_and_closes_shared_provider_once() -> 
 
     owner = StreamingSynthesisRouteOwner(selector)
     request = _request()
-    begin_task = asyncio.create_task(owner.begin(request))
+    begin_task = asyncio.create_task(owner.begin(authorized_request(request)))
     await provider.open_started.wait()
     await owner.close()
 
@@ -859,7 +869,7 @@ async def test_cancel_between_provider_open_and_handle_registration_rolls_back()
     owner = StreamingSynthesisRouteOwner(selector)
     await owner._lifecycle_lock.acquire()
     request = _request()
-    begin_task = asyncio.create_task(owner.begin(request))
+    begin_task = asyncio.create_task(owner.begin(authorized_request(request)))
     await provider.open_started.wait()
     await provider.open_completed.wait()
     begin_task.cancel()
@@ -957,7 +967,7 @@ async def test_hard_deadlines_bound_cancellation_hostile_provider_calls(
 
     open_owner = StreamingSynthesisRouteOwner(open_selector, open_timeout_seconds=0.02)
     started = loop.time()
-    handle, outcome = await open_owner.begin(_request())
+    handle, outcome = await open_owner.begin(authorized_request(_request()))
     assert loop.time() - started < 0.2
     assert handle is None and outcome is not None
     assert outcome.reason is StreamingSynthesisReason.PROVIDER_TIMEOUT
@@ -966,6 +976,7 @@ async def test_hard_deadlines_bound_cancellation_hostile_provider_calls(
     await _wait_for_retained_cleanup(open_owner)
     await open_owner.close()
 
+    reset_test_issuer()
     eventing = _FakeProvider()
     eventing.event_gate = asyncio.Event()
     eventing.ignore_event_cancel = True
@@ -993,6 +1004,7 @@ async def test_hard_deadlines_bound_cancellation_hostile_provider_calls(
     await _wait_for_retained_cleanup(event_owner)
     await event_owner.close()
 
+    reset_test_issuer()
     cancelling = _FakeProvider()
     cancelling.cancel_gate = asyncio.Event()
     cancelling.ignore_cancel_cancel = True
@@ -1014,6 +1026,7 @@ async def test_hard_deadlines_bound_cancellation_hostile_provider_calls(
     assert cancel_owner.active_count == 0
     await cancel_owner.close()
 
+    reset_test_issuer()
     closing = _FakeProvider()
     closing.close_gate = asyncio.Event()
     closing.ignore_close_cancel = True
@@ -1110,27 +1123,34 @@ async def test_close_fences_late_selector_and_closes_provider_once(
 
 
 @pytest.mark.asyncio
-async def test_identity_capacity_preflight_has_zero_response_or_provider_effect() -> (
-    None
-):
+async def test_retired_route_handles_do_not_accumulate_or_authorize_replay():
     provider = _FakeProvider()
 
-    async def selector() -> StreamingSpeechSelection:
+    async def selector():
         return _selection(provider)
-
     owner = StreamingSynthesisRouteOwner(selector)
-    owner._retained_bindings.update(
-        {(f"retained-{index}", 0): f"sha256:{index:064x}" for index in range(256)}
-    )
-    request = _request(stream_id="capacity-preflight")
-    with pytest.raises(StreamingSynthesisRouteViolation) as exhausted:
-        await owner.begin(request)
-    assert exhausted.value.reason == "SYNTHESIS_IDENTITY_CAPACITY_EXHAUSTED"
-    assert provider.open_count == 0
-    assert provider.cancelled == []
-    assert provider.conformance._active_responses == {}
-    assert owner._opening == {}
-    assert owner._opening_responses == {}
+    first = None
+    for index in range(300):
+        request = authorized_request(
+            _request(
+                stream_id=f"stream-{index}",
+                response_id=f"response-{index}",
+                response_generation=index,
+            )
+        )
+        first = first or request
+        handle, outcome = await owner.begin(request)
+        assert handle is not None and outcome is None
+        await owner.cancel(handle)
+        assert owner._active == {}
+        assert owner._known_handles == {}
+        assert owner._retained_bindings == {}
+        assert owner._current_responses == {}
+    before = provider.open_count
+    with pytest.raises(StreamingSynthesisRouteViolation):
+        await owner.begin(first)
+    assert provider.open_count == before == 300
+    assert provider.conformance.snapshot().task_mutations == 0
     await owner.close()
 
 
@@ -1149,7 +1169,7 @@ async def test_retained_task_capacity_preflight_has_zero_route_or_provider_effec
     assert reservation is not None
     request = _request(stream_id="task-capacity-preflight")
 
-    handle, outcome = await owner.begin(request)
+    handle, outcome = await owner.begin(authorized_request(request))
 
     assert handle is None and outcome is not None
     assert outcome.reason is StreamingSynthesisReason.CAPACITY_EXHAUSTED
@@ -1184,8 +1204,8 @@ async def test_stale_response_attempts_do_not_consume_identity_ledger() -> None:
             response_generation=0,
         )
         with pytest.raises(StreamingSynthesisRouteViolation) as rejected:
-            await owner.begin(stale)
-        assert rejected.value.reason == "STALE_SYNTHESIS_RESPONSE"
+            await owner.begin(authorized_request(stale))
+        assert rejected.value.reason == "SPEECH_AUTHORITY_EXPIRED"
 
     assert owner._retained_bindings == retained_before
     assert provider.open_count == 1
@@ -1195,9 +1215,9 @@ async def test_stale_response_attempts_do_not_consume_identity_ledger() -> None:
         response_id="response-valid",
         response_generation=2,
     )
-    successor, outcome = await owner.begin(valid)
+    successor, outcome = await owner.begin(authorized_request(valid))
     assert successor is not None and outcome is None
-    assert len(owner._retained_bindings) == 2
+    assert len(owner._retained_bindings) == 1
     await owner.cancel(successor)
     await owner.close()
 
@@ -1220,7 +1240,7 @@ async def test_invalid_request_traceback_locals_do_not_retain_text() -> None:
         sample_rate_hz=24_001,
     )
     try:
-        await owner.begin(invalid)
+        await owner.begin(authorized_request(invalid))
     except StreamingSynthesisRouteViolation as error:
         assert error.__context__ is None
         route_traceback = error.__traceback__
@@ -1275,7 +1295,7 @@ async def test_declared_chunk_text_spans_fail_before_route_or_provider_effect(
         spoken_text="nonempty spoken content",
     )
 
-    handle, outcome = await owner.begin(request)
+    handle, outcome = await owner.begin(authorized_request(request))
 
     assert handle is None and outcome is not None
     assert outcome.reason is StreamingSynthesisReason.PROVIDER_PROTOCOL
@@ -1304,7 +1324,7 @@ async def test_post_validation_failures_capture_no_request_text(
         expected_reason: str,
     ) -> None:
         try:
-            await owner.begin(request)
+            await owner.begin(authorized_request(request))
         except StreamingSynthesisRouteViolation as error:
             assert error.reason == expected_reason
             route_traceback = error.__traceback__
@@ -1342,6 +1362,7 @@ async def test_post_validation_failures_capture_no_request_text(
     await reused_owner.cancel(reused_handle)
     await reused_owner.close()
 
+    reset_test_issuer()
     stale_provider = _FakeProvider()
     current = _request(
         stream_id="private-current",
@@ -1360,26 +1381,27 @@ async def test_post_validation_failures_capture_no_request_text(
     await stale_owner.cancel(current_handle)
     await stale_owner.close()
 
-    capacity_provider = _FakeProvider()
-
-    async def capacity_selector() -> StreamingSpeechSelection:
-        return _selection(capacity_provider)
-
-    capacity_owner = StreamingSynthesisRouteOwner(capacity_selector)
-    capacity_owner._retained_bindings.update(
-        {(f"full-{index}", 0): f"sha256:{index:064x}" for index in range(256)}
-    )
-    await assert_private_failure(
-        capacity_owner,
+    revoked_request = authorized_request(
         _request(
-            stream_id="private-capacity",
+            stream_id="private-revoked",
             display_text=canary_display,
             spoken_text=canary_spoken,
-        ),
-        "SYNTHESIS_IDENTITY_CAPACITY_EXHAUSTED",
+        )
     )
-    await capacity_owner.close()
+    revoked_request.authority.revoke()
+    revoked_provider = _FakeProvider()
 
+    async def revoked_selector():
+        return _selection(revoked_provider)
+
+    revoked_owner = StreamingSynthesisRouteOwner(revoked_selector)
+    await assert_private_failure(
+        revoked_owner, revoked_request, "SPEECH_AUTHORITY_EXPIRED"
+    )
+    assert revoked_provider.open_count == 0
+    await revoked_owner.close()
+
+    reset_test_issuer()
     activation_provider = _FakeProvider()
 
     def reject_activation(_response: ResponseRef) -> None:
@@ -1411,7 +1433,7 @@ async def test_post_validation_failures_capture_no_request_text(
         ("legacy-session", "legacy-subject", "legacy-correlation"),
         activation_request.ref.stream_id,
         activation_request.ref.stream_generation,
-    ) in activation_owner._retained_bindings
+    ) not in activation_owner._retained_bindings
     await activation_owner.close()
 
 
@@ -1424,6 +1446,7 @@ async def test_request_binding_binds_timeout_and_complete_capability_provenance(
     first_owner, first_handle = await _begin(first_provider, first_request)
     second_provider = _FakeProvider()
     second_request = replace(first_request, event_timeout_seconds=3.0)
+    reset_test_issuer()
     second_owner, second_handle = await _begin(second_provider, second_request)
     assert first_handle.request_binding_ref != second_handle.request_binding_ref
     assert first_handle.capability.provider == _PROVIDER_REF
@@ -1550,7 +1573,7 @@ async def test_predecessor_open_process_control_cleans_then_rethrows() -> None:
     )
 
     with pytest.raises(GeneratorExit):
-        await owner.begin(successor)
+        await owner.begin(authorized_request(successor))
     assert provider.open_count == 0
     assert provider.cancelled == []
     assert (
@@ -1665,6 +1688,7 @@ async def test_normal_control_outcomes_do_not_emit_degradation_or_failure_metric
     assert warnings == []
     await owner.close()
 
+    reset_test_issuer()
     supersede_provider = _FakeProvider()
     first_request = _request(stream_id="normal-predecessor")
     supersede_owner, predecessor = await _begin(supersede_provider, first_request)
@@ -1673,7 +1697,9 @@ async def test_normal_control_outcomes_do_not_emit_degradation_or_failure_metric
         response_id="normal-response-successor",
         response_generation=1,
     )
-    successor, begin_outcome = await supersede_owner.begin(successor_request)
+    successor, begin_outcome = await supersede_owner.begin(
+        authorized_request(successor_request)
+    )
     assert successor is not None and begin_outcome is None
     superseded = await supersede_owner.next_chunk(predecessor)
     assert superseded.outcome is not None and superseded.outcome.fact is not None
@@ -1682,6 +1708,7 @@ async def test_normal_control_outcomes_do_not_emit_degradation_or_failure_metric
     await supersede_owner.cancel(successor)
     await supersede_owner.close()
 
+    reset_test_issuer()
     closed_provider = _FakeProvider()
     closed_owner, closed_handle = await _begin(
         closed_provider, _request(stream_id="normal-owner-close")
@@ -1693,6 +1720,7 @@ async def test_normal_control_outcomes_do_not_emit_degradation_or_failure_metric
     assert closed.outcome.fact.x_obs_metric is None
     assert warnings == []
 
+    reset_test_issuer()
     failure_provider = _FakeProvider()
     failure_owner, failure_handle = await _begin(
         failure_provider, _request(stream_id="real-provider-failure")
@@ -1837,4 +1865,89 @@ async def test_cancel_api_caller_cancel_retries_cleanup_then_rethrows() -> None:
     assert handle.cleanup_complete is True
     assert owner.active_count == 0
     assert provider.cancelled == [handle.ref, handle.ref]
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_response_revocation_fences_already_queued_audio():
+    provider = _FakeProvider()
+    request = authorized_request(_request())
+    owner, handle = await _begin(provider, request)
+    provider.events.put_nowait(
+        _event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    provider.events.put_nowait(
+        _event(
+            request, seq=1, cursor=0, kind=SynthesisEventKind.CHUNK, samples=(0,) * 480
+        )
+    )
+
+    async def queued():
+        while handle.queue.empty():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(queued(), timeout=1)
+    request.response_authority.revoke()
+    pull = await owner.next_chunk(handle)
+    assert pull.chunk is None and pull.outcome is not None
+    assert pull.outcome.reason is StreamingSynthesisReason.AUTHORITY_EXPIRED
+    assert pull.outcome.batch_eligible is False
+    assert pull.outcome.first_audio_emitted is False
+    assert provider.conformance.snapshot().task_mutations == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_delayed_cleanup_releases_route_capacity_when_completion_arrives(
+    monkeypatch,
+):
+    monkeypatch.setattr(route_module, "_PROVIDER_CLEANUP_TIMEOUT_SECONDS", 0.01)
+    provider = _FakeProvider()
+    provider.cancel_gate = asyncio.Event()
+    provider.ignore_cancel_cancel = True
+    owner, handle = await _begin(provider, _request(), max_active_streams=1)
+    await owner.cancel(handle)
+    assert owner.active_count == 1
+    assert not handle.cleanup_complete
+    provider.cancel_gate.set()
+    await asyncio.wait_for(handle.cleanup_done.wait(), timeout=1)
+    assert owner.active_count == 0
+    assert owner._known_handles == owner._retained_bindings == {}
+    successor, failure = await owner.begin(
+        authorized_request(
+            _request(
+                stream_id="after-cleanup",
+                response_id="after-cleanup",
+                response_generation=1,
+            )
+        )
+    )
+    assert successor is not None and failure is None
+    await owner.cancel(successor)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_retirement_without_history_preserves_exact_handle_and_scope_ownership():
+    provider = _FakeProvider()
+    owner, handle = await _begin(provider, _request())
+    clone = copy.copy(handle)
+    with pytest.raises(StreamingSynthesisRouteViolation) as forged:
+        await owner.cancel(clone)
+    assert forged.value.reason == "SYNTHESIS_HANDLE_NOT_OWNED"
+    original_scope = handle.scope_identity
+    handle.scope_identity = (
+        "foreign-session",
+        "foreign-subject",
+        "foreign-correlation",
+    )
+    with pytest.raises(StreamingSynthesisRouteViolation) as foreign:
+        await owner.cancel(handle)
+    assert foreign.value.reason == "SYNTHESIS_HANDLE_NOT_OWNED"
+    assert provider.cancelled == [] and owner.active_count == 1
+    handle.scope_identity = original_scope
+    await owner.cancel(handle)
+    assert owner.active_count == 0 and owner._known_handles == {}
+    assert (await owner.next_chunk(handle)).outcome is not None
+    assert provider.cancelled == [handle.ref]
     await owner.close()

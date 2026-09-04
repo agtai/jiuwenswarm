@@ -12,13 +12,13 @@ capability.
 from __future__ import annotations
 
 import math
+import hashlib
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Collection
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Callable, Protocol
+from typing import Callable, Protocol, TypeVar
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     MAX_SAFE_INTEGER,
@@ -41,6 +41,9 @@ MAX_CANCEL_REASON_CHARS = 256
 MAX_RECOGNITION_ALTERNATIVES = 8
 MAX_RECOGNITION_TEXT_CHARS = 16_000
 MAX_SYNTHESIS_TEXT_CHARS = 4_000
+_SpeechRequestT = TypeVar(
+    "_SpeechRequestT", "RecognitionStreamRequest", "SynthesisStreamRequest"
+)
 
 
 class StreamingSpeechViolation(ValueError):
@@ -49,6 +52,161 @@ class StreamingSpeechViolation(ValueError):
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
         self.reason = reason
+
+
+class SpeechStreamAuthority:
+    """One-use local grant from the Media owner, never reconstructed from an ID.
+
+    The issuer must check its exact current record/epoch. A grant is attached to
+    one immutable request before async allocation; replay retains the consumed
+    grant even after the provider has reclaimed all stream records.
+    """
+
+    def __init__(self, binding: object, is_current: Callable[[], bool]) -> None:
+        self._binding = binding
+        self._is_current = is_current
+        self._claims: set[str] = set()
+        self._revoked = False
+        self._lock = threading.RLock()
+
+    def check(self, binding: object) -> None:
+        with self._lock:
+            checker = self._is_current
+            invalid = self._revoked or binding != self._binding
+        # Never call the Media owner while holding a permit lock: revocation
+        # may arrive under that owner's lock from another thread.
+        current = False if invalid else checker()
+        with self._lock:
+            if self._revoked or invalid or not current:
+                raise StreamingSpeechViolation(
+                    "SPEECH_AUTHORITY_EXPIRED", "stream authority is absent or stale"
+                )
+
+    def claim(self, binding: object, *, stage: str) -> None:
+        self.check(binding)
+        with self._lock:
+            if self._revoked:
+                raise StreamingSpeechViolation(
+                    "SPEECH_AUTHORITY_EXPIRED", "stream authority revoked"
+                )
+            if stage not in {"route", "provider"}:
+                raise StreamingSpeechViolation(
+                    "SPEECH_AUTHORITY_STAGE", "unknown admission stage"
+                )
+            if stage in self._claims:
+                raise StreamingSpeechViolation(
+                    "SPEECH_AUTHORITY_CONSUMED", "stream admission was already consumed"
+                )
+            self._claims.add(stage)
+
+    def revoke(self) -> None:
+        with self._lock:
+            self._revoked = True
+            self._is_current = lambda: False
+
+
+class SpeechResponseAuthority:
+    """Unit order belongs to an exact authorized response, not the provider."""
+
+    def __init__(self, response: ResponseRef, is_current: Callable[[], bool]) -> None:
+        self.response = response
+        self._is_current = is_current
+        self._revoked = False
+        self._next_unit_seq = 0
+        self._used_units: set[str] = set()
+        self._activated_by: object | None = None
+        self._lock = threading.RLock()
+
+    def check(self) -> None:
+        if self._revoked or not self._is_current():
+            raise StreamingSpeechViolation(
+                "SPEECH_AUTHORITY_EXPIRED", "response authority is absent or stale"
+            )
+
+    def claim_unit(self, ref: SynthesisStreamRef, *, limit: int) -> None:
+        with self._lock:
+            self.check()
+            if ref.response != self.response:
+                raise StreamingSpeechViolation(
+                    "STALE_SYNTHESIS_RESPONSE", "response differs"
+                )
+            if ref.unit_seq != self._next_unit_seq:
+                raise StreamingSpeechViolation(
+                    "SYNTHESIS_UNIT_SEQUENCE_GAP", "unit order differs"
+                )
+            if ref.unit_id in self._used_units:
+                raise StreamingSpeechViolation(
+                    "SYNTHESIS_UNIT_REUSED", "unit was already consumed"
+                )
+            if len(self._used_units) >= limit:
+                raise StreamingSpeechViolation(
+                    "SYNTHESIS_UNIT_IDENTITY_CAPACITY_EXHAUSTED",
+                    "response unit bound reached",
+                )
+            self._next_unit_seq += 1
+            self._used_units.add(ref.unit_id)
+
+    def bind_provider(self, owner: object) -> None:
+        with self._lock:
+            if self._activated_by not in (None, owner):
+                raise StreamingSpeechViolation(
+                    "SPEECH_AUTHORITY_EXPIRED",
+                    "response belongs to another provider owner",
+                )
+            self._activated_by = owner
+
+    def revoke(self) -> None:
+        with self._lock:
+            self._revoked = True
+            self._is_current = lambda: False
+            self._used_units.clear()
+
+
+def authorize_stream_request(
+    request: _SpeechRequestT, *, is_current: Callable[[], bool]
+) -> _SpeechRequestT:
+    """Issuer-only local port; never call on replay or in the Provider adapter."""
+    if not isinstance(request, (RecognitionStreamRequest, SynthesisStreamRequest)):
+        raise TypeError("stream request required")
+    if request.authority is not None:
+        raise StreamingSpeechViolation(
+            "SPEECH_AUTHORITY_REISSUE", "request already has authority"
+        )
+    binding = _stream_request_binding(request)
+    return replace(request, authority=SpeechStreamAuthority(binding, is_current))
+
+
+def require_stream_authority(
+    request: RecognitionStreamRequest | SynthesisStreamRequest,
+    *,
+    stage: str | None = None,
+) -> SpeechStreamAuthority:
+    authority = request.authority
+    if not isinstance(authority, SpeechStreamAuthority):
+        raise StreamingSpeechViolation(
+            "SPEECH_AUTHORITY_REQUIRED", "stream admission is required"
+        )
+    binding = _stream_request_binding(request)
+    if stage is None:
+        authority.check(binding)
+    else:
+        authority.claim(binding, stage=stage)
+    return authority
+
+
+def _stream_request_binding(
+    request: RecognitionStreamRequest | SynthesisStreamRequest,
+) -> tuple:
+    if isinstance(request, RecognitionStreamRequest):
+        return (request.ref, request.turn_detection)
+    return (
+        request.ref,
+        hashlib.sha256(request.display_text.encode()).digest(),
+        hashlib.sha256(request.spoken_text.encode()).digest(),
+        request.display_span,
+        request.sample_rate_hz,
+        request.event_timeout_seconds,
+    )
 
 
 class ProviderTransport(StrEnum):
@@ -270,6 +428,9 @@ class RecognitionStreamRef:
 class RecognitionStreamRequest:
     ref: RecognitionStreamRef
     turn_detection: RecognitionTurnDetection
+    authority: SpeechStreamAuthority | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +499,12 @@ class SynthesisStreamRequest:
     # Maximum idle interval until the next valid Provider synthesis event.
     # This is deliberately not a whole-stream duration budget.
     event_timeout_seconds: float
+    authority: SpeechStreamAuthority | None = field(
+        default=None, repr=False, compare=False
+    )
+    response_authority: SpeechResponseAuthority | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,6 +586,7 @@ class StreamingSpeechSnapshot:
     pending_provider_controls: int
     retained_identity_tombstones: int
     retained_synthesis_unit_identities: int
+    retained_response_authorities: int = 0
     agent_dispatches: int = 0
     tool_dispatches: int = 0
     task_mutations: int = 0
@@ -431,6 +599,7 @@ class _RecognitionState:
     ref: RecognitionStreamRef
     turn_detection: RecognitionTurnDetection
     deadline: float
+    request: RecognitionStreamRequest
     next_frame_seq: int = 0
     next_audio_cursor: int = 0
     next_event_seq: int = 0
@@ -472,11 +641,9 @@ class StreamingSpeechConformance:
     Provider callbacks are data passed to ``accept_*_event``; this class never
     invokes Provider or business callbacks.  Cancellation outputs are explicit
     ``ProviderCancelControl`` values and always carry ``business_cancel=False``.
-    Exact identities are retained for this instance's lifetime.  Once an
-    identity ledger reaches its configured bound, new identities fail closed;
-    an old identity is never evicted and therefore can never be reused as ABA.
-    Synthesis unit identities follow the same rule for the lifetime of their
-    exact response, which itself cannot be reactivated after supersession.
+    Only live resources are retained. Media/Runtime grants fence admission;
+    exact response authorities own unit ordering for their response lifetime.
+    Reclaiming a terminal resource never mints another admission grant.
     """
 
     def __init__(
@@ -486,7 +653,6 @@ class StreamingSpeechConformance:
         enabled: bool,
         max_recognition_sessions: int = 8,
         max_synthesis_sessions: int = 8,
-        max_identity_tombstones: int = 64,
         max_synthesis_units_per_response: int = 1_024,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -496,9 +662,6 @@ class StreamingSpeechConformance:
         )
         self._max_synthesis_sessions = _positive_int(
             max_synthesis_sessions, "max_synthesis_sessions"
-        )
-        self._max_identity_tombstones = _positive_int(
-            max_identity_tombstones, "max_identity_tombstones"
         )
         self._max_synthesis_units_per_response = _positive_int(
             max_synthesis_units_per_response,
@@ -519,13 +682,8 @@ class StreamingSpeechConformance:
         self._closed = False
         self._recognition: dict[_RecognitionKey, _RecognitionState] = {}
         self._synthesis: dict[_SynthesisKey, _SynthesisState] = {}
-        self._recognition_generations: OrderedDict[str, int] = OrderedDict()
-        self._synthesis_generations: OrderedDict[str, int] = OrderedDict()
-        self._active_responses: OrderedDict[str, ResponseRef] = OrderedDict()
-        self._response_generations: OrderedDict[str, int] = OrderedDict()
-        self._response_ids: OrderedDict[str, None] = OrderedDict()
-        self._next_unit_seq: dict[ResponseRef, int] = {}
-        self._used_synthesis_units: dict[ResponseRef, OrderedDict[str, None]] = {}
+        self._active_responses: dict[str, SpeechResponseAuthority] = {}
+        self._authority_owner = object()
         self._pending_controls: OrderedDict[_ControlKey, ProviderCancelControl] = (
             OrderedDict()
         )
@@ -577,30 +735,12 @@ class StreamingSpeechConformance:
                     "RECOGNITION_SESSION_CONFLICT",
                     "a recognition session id cannot overlap another generation",
                 )
-            last_generation = self._recognition_generations.get(ref.session_id)
-            if (
-                last_generation is not None
-                and ref.session_generation <= last_generation
-            ):
-                raise StreamingSpeechViolation(
-                    "STALE_RECOGNITION_GENERATION",
-                    "recognition generation must increase when an id is reused",
-                )
-            self._require_identity_capacity(
-                self._recognition_generations,
-                ref.session_id,
-                reason="RECOGNITION_IDENTITY_CAPACITY_EXHAUSTED",
-                message="recognition identity ledger capacity is exhausted",
-            )
+            require_stream_authority(request, stage="provider")
             self._recognition[_recognition_key(ref)] = _RecognitionState(
                 ref=ref,
                 turn_detection=request.turn_detection,
                 deadline=self._deadline(timeout),
-            )
-            self._retain_generation(
-                self._recognition_generations,
-                ref.session_id,
-                ref.session_generation,
+                request=request,
             )
 
     def accept_audio_frame(self, frame: RecognitionAudioFrame) -> None:
@@ -680,6 +820,7 @@ class StreamingSpeechConformance:
                     state.cancel_requested
                     and event.kind is RecognitionEventKind.CANCELLED
                 ):
+                    require_stream_authority(state.request)
                     self._require_before_deadline_recognition(state)
                 if event.provider != self._capability.provider:
                     raise StreamingSpeechViolation(
@@ -798,6 +939,7 @@ class StreamingSpeechConformance:
             self._require_not_terminal_recognition(state)
             try:
                 self._require_before_deadline_recognition(state)
+                require_stream_authority(state.request)
                 if (
                     state.turn_detection.mode
                     is not RecognitionTurnDetectionMode.SERVER_VAD
@@ -920,39 +1062,26 @@ class StreamingSpeechConformance:
             state.output_fenced = True
             state.terminal = True
 
-    def activate_response(self, response: ResponseRef) -> None:
+    def activate_response(self, authority: SpeechResponseAuthority) -> None:
         with self._lock:
             self._require_start_allowed(recognition=False)
+            if not isinstance(authority, SpeechResponseAuthority):
+                raise StreamingSpeechViolation(
+                    "SPEECH_AUTHORITY_REQUIRED", "response authority required"
+                )
+            authority.check()
+            authority.bind_provider(self._authority_owner)
+            response = authority.response
             _validate_response_ref(response)
-            prior_generation = self._response_generations.get(response.interaction_id)
-            if (
-                prior_generation is not None
-                and response.response_generation <= prior_generation
-            ):
-                raise StreamingSpeechViolation(
-                    "STALE_RESPONSE_GENERATION",
-                    "response generation must strictly increase per interaction",
-                )
-            if response.response_id in self._response_ids:
-                raise StreamingSpeechViolation(
-                    "RESPONSE_ID_REUSED", "response identifiers cannot be reused"
-                )
-            self._require_identity_capacity(
-                self._response_generations,
-                response.interaction_id,
-                reason="RESPONSE_IDENTITY_CAPACITY_EXHAUSTED",
-                message="response interaction identity ledger capacity is exhausted",
-            )
-            self._require_identity_capacity(
-                self._response_ids,
-                response.response_id,
-                reason="RESPONSE_IDENTITY_CAPACITY_EXHAUSTED",
-                message="response identifier ledger capacity is exhausted",
-            )
             prior = self._active_responses.get(response.interaction_id)
-            if prior is None:
-                self._make_response_capacity()
+            if prior is authority:
+                return
             if prior is not None:
+                if response.response_generation <= prior.response.response_generation:
+                    raise StreamingSpeechViolation(
+                        "STALE_RESPONSE_GENERATION", "response generation must advance"
+                    )
+                prior.revoke()
                 for state in self._synthesis.values():
                     if (
                         state.request.ref.response.interaction_id
@@ -960,19 +1089,8 @@ class StreamingSpeechConformance:
                         and not state.terminal
                     ):
                         self._fail_synthesis(state, "STALE_RESPONSE")
-                self._next_unit_seq.pop(prior, None)
-                self._used_synthesis_units.pop(prior, None)
-            self._active_responses[response.interaction_id] = response
-            self._active_responses.move_to_end(response.interaction_id)
-            self._next_unit_seq[response] = 0
-            self._used_synthesis_units[response] = OrderedDict()
-            self._retain_generation(
-                self._response_generations,
-                response.interaction_id,
-                response.response_generation,
-            )
-            self._response_ids[response.response_id] = None
-            self._response_ids.move_to_end(response.response_id)
+            self._make_response_capacity()
+            self._active_responses[response.interaction_id] = authority
 
     def start_synthesis(self, request: SynthesisStreamRequest) -> None:
         with self._lock:
@@ -984,34 +1102,23 @@ class StreamingSpeechConformance:
                     "synthesis session capacity is exhausted",
                 )
             ref = request.ref
-            active_response = self._active_responses.get(ref.response.interaction_id)
-            if active_response != ref.response:
+            authority = self._active_responses.get(ref.response.interaction_id)
+            if authority is None and isinstance(
+                request.response_authority, SpeechResponseAuthority
+            ):
+                candidate = request.response_authority
+                if candidate._activated_by is self._authority_owner:
+                    self.activate_response(candidate)
+                    authority = candidate
+            if authority is None or authority.response != ref.response:
                 raise StreamingSpeechViolation(
-                    "STALE_SYNTHESIS_RESPONSE",
-                    "synthesis must bind the exact active response generation",
+                    "STALE_SYNTHESIS_RESPONSE", "exact active response required"
                 )
-            expected_unit_seq = self._next_unit_seq.get(ref.response)
-            if expected_unit_seq is None or ref.unit_seq != expected_unit_seq:
+            if request.response_authority is not authority:
                 raise StreamingSpeechViolation(
-                    "SYNTHESIS_UNIT_SEQUENCE_GAP",
-                    "synthesis units must start in exact response order",
+                    "SPEECH_AUTHORITY_EXPIRED", "response authority differs"
                 )
-            used_units = self._used_synthesis_units.get(ref.response)
-            if used_units is None:
-                raise StreamingSpeechViolation(
-                    "STALE_SYNTHESIS_RESPONSE",
-                    "synthesis response unit identity ledger is not retained",
-                )
-            if ref.unit_id in used_units:
-                raise StreamingSpeechViolation(
-                    "SYNTHESIS_UNIT_REUSED",
-                    "a response unit identifier cannot be synthesized twice",
-                )
-            if len(used_units) >= self._max_synthesis_units_per_response:
-                raise StreamingSpeechViolation(
-                    "SYNTHESIS_UNIT_IDENTITY_CAPACITY_EXHAUSTED",
-                    "synthesis response unit identity ledger capacity is exhausted",
-                )
+            require_stream_authority(request)
             active = next(
                 (
                     state
@@ -1025,27 +1132,12 @@ class StreamingSpeechConformance:
                     "SYNTHESIS_STREAM_CONFLICT",
                     "a synthesis stream id cannot overlap another generation",
                 )
-            last_generation = self._synthesis_generations.get(ref.stream_id)
-            if last_generation is not None and ref.stream_generation <= last_generation:
-                raise StreamingSpeechViolation(
-                    "STALE_SYNTHESIS_GENERATION",
-                    "synthesis generation must increase when an id is reused",
-                )
-            self._require_identity_capacity(
-                self._synthesis_generations,
-                ref.stream_id,
-                reason="SYNTHESIS_IDENTITY_CAPACITY_EXHAUSTED",
-                message="synthesis identity ledger capacity is exhausted",
-            )
+            require_stream_authority(request, stage="provider")
+            authority.claim_unit(ref, limit=self._max_synthesis_units_per_response)
             self._synthesis[_synthesis_key(ref)] = _SynthesisState(
                 request=request,
                 event_deadline=self._deadline(request.event_timeout_seconds),
                 next_display_cursor=request.display_span.start,
-            )
-            self._next_unit_seq[ref.response] = expected_unit_seq + 1
-            used_units[ref.unit_id] = None
-            self._retain_generation(
-                self._synthesis_generations, ref.stream_id, ref.stream_generation
             )
 
     def accept_synthesis_event(
@@ -1064,6 +1156,22 @@ class StreamingSpeechConformance:
                     state.cancel_requested
                     and event.kind is SynthesisEventKind.CANCELLED
                 ):
+                    if state.output_fenced:
+                        raise StreamingSpeechViolation(
+                            "SYNTHESIS_OUTPUT_FENCED", "synthesis output is fenced"
+                        )
+                    require_stream_authority(state.request)
+                    authority = self._active_responses.get(
+                        state.request.ref.response.interaction_id
+                    )
+                    if (
+                        authority is None
+                        or authority.response != state.request.ref.response
+                    ):
+                        raise StreamingSpeechViolation(
+                            "STALE_SYNTHESIS_RESPONSE", "response was superseded"
+                        )
+                    authority.check()
                     self._require_before_deadline_synthesis(state)
                 if event.provider != self._capability.provider:
                     raise StreamingSpeechViolation(
@@ -1212,20 +1320,39 @@ class StreamingSpeechConformance:
                         self._request_synthesis_cancel(synthesis_state, "service_close")
             return self._snapshot_unlocked()
 
-    def reap_terminal(self) -> tuple[int, int]:
+    def reap_terminal(
+        self,
+        *,
+        recognition_ref: RecognitionStreamRef | None = None,
+        synthesis_ref: SynthesisStreamRef | None = None,
+    ) -> tuple[int, int]:
         """Release only streams with a Provider terminal/closed observation."""
 
         with self._lock:
+            all_streams = recognition_ref is None and synthesis_ref is None
             recognition_keys = [
-                key for key, state in self._recognition.items() if state.terminal
+                key
+                for key, state in self._recognition.items()
+                if state.terminal and (all_streams or state.ref == recognition_ref)
             ]
             synthesis_keys = [
-                key for key, state in self._synthesis.items() if state.terminal
+                key
+                for key, state in self._synthesis.items()
+                if state.terminal
+                and (all_streams or state.request.ref == synthesis_ref)
             ]
             for recognition_key in recognition_keys:
+                self._recognition[recognition_key].request.authority.revoke()
                 del self._recognition[recognition_key]
             for synthesis_key in synthesis_keys:
+                self._synthesis[synthesis_key].request.authority.revoke()
                 del self._synthesis[synthesis_key]
+            for interaction, authority in tuple(self._active_responses.items()):
+                if not any(
+                    s.request.ref.response == authority.response
+                    for s in self._synthesis.values()
+                ):
+                    del self._active_responses[interaction]
             retired_controls = {
                 (ProviderControlKind.CANCEL_RECOGNITION, key[0], key[1])
                 for key in recognition_keys
@@ -1256,17 +1383,11 @@ class StreamingSpeechConformance:
             retained_recognition=len(self._recognition),
             retained_synthesis=len(self._synthesis),
             pending_provider_controls=len(self._pending_controls),
-            # Every never-evicted identity ledger is counted. Omitting one lets
-            # a capacity monitor under-report retention and meet
-            # RESPONSE_IDENTITY_CAPACITY_EXHAUSTED without warning.
-            retained_identity_tombstones=(
-                len(self._recognition_generations)
-                + len(self._synthesis_generations)
-                + len(self._response_generations)
-                + len(self._response_ids)
-            ),
+            retained_identity_tombstones=0,
+            retained_response_authorities=len(self._active_responses),
             retained_synthesis_unit_identities=sum(
-                len(units) for units in self._used_synthesis_units.values()
+                len(authority._used_units)
+                for authority in self._active_responses.values()
             ),
         )
 
@@ -1455,7 +1576,7 @@ class StreamingSpeechConformance:
                 ),
                 None,
             )
-            if active is not None or ref.session_id in self._recognition_generations:
+            if active is not None:
                 raise StreamingSpeechViolation(
                     "STALE_RECOGNITION_SESSION",
                     "recognition callback does not match the retained generation",
@@ -1484,7 +1605,7 @@ class StreamingSpeechConformance:
                 ),
                 None,
             )
-            if active is not None or ref.stream_id in self._synthesis_generations:
+            if active is not None:
                 raise StreamingSpeechViolation(
                     "STALE_SYNTHESIS_STREAM",
                     "synthesis callback does not match the retained generation",
@@ -1508,6 +1629,7 @@ class StreamingSpeechConformance:
                 "RECOGNITION_INPUT_FENCED",
                 "recognition input is fenced after EOT, cancel, timeout, or failure",
             )
+        require_stream_authority(state.request)
 
     @staticmethod
     def _require_not_terminal_recognition(state: _RecognitionState) -> None:
@@ -1588,45 +1710,17 @@ class StreamingSpeechConformance:
         key = (control.kind, identity, generation)
         self._pending_controls.setdefault(key, control)
 
-    def _retain_generation(
-        self, store: OrderedDict[str, int], identity: str, generation: int
-    ) -> None:
-        store[identity] = generation
-        store.move_to_end(identity)
-
-    def _require_identity_capacity(
-        self,
-        store: Collection[str],
-        identity: str,
-        *,
-        reason: str,
-        message: str,
-    ) -> None:
-        if identity not in store and len(store) >= self._max_identity_tombstones:
-            raise StreamingSpeechViolation(reason, message)
-
     def _make_response_capacity(self) -> None:
-        while len(self._active_responses) >= self._max_identity_tombstones:
-            removable = next(
-                (
-                    (interaction_id, response)
-                    for interaction_id, response in self._active_responses.items()
-                    if not any(
-                        state.request.ref.response == response
-                        for state in self._synthesis.values()
-                    )
-                ),
-                None,
+        for interaction, authority in tuple(self._active_responses.items()):
+            if not any(
+                state.request.ref.response == authority.response
+                for state in self._synthesis.values()
+            ):
+                del self._active_responses[interaction]
+        if len(self._active_responses) >= self._max_synthesis_sessions:
+            raise StreamingSpeechViolation(
+                "RESPONSE_CAPACITY_EXHAUSTED", "responses still own synthesis resources"
             )
-            if removable is None:
-                raise StreamingSpeechViolation(
-                    "RESPONSE_CAPACITY_EXHAUSTED",
-                    "all retained response identities still own synthesis streams",
-                )
-            interaction_id, response = removable
-            del self._active_responses[interaction_id]
-            self._next_unit_seq.pop(response, None)
-            self._used_synthesis_units.pop(response, None)
 
     def _now(self) -> float:
         now = self._monotonic()

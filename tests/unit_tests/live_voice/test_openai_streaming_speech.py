@@ -11,6 +11,13 @@ from dataclasses import replace
 
 import pytest
 
+from tests.unit_tests.live_voice.speech_authority_support import (
+    authorized_request,
+    response_authority,
+    begin_recognition,
+    speech_test_issuer,
+)
+
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
 from jiuwenswarm.server.live_voice.batch_speech import (
     FORMAL_BATCH_SPEECH_FLAG,
@@ -402,7 +409,7 @@ async def test_server_vad_fences_input_and_final_uses_provider_time_truth() -> N
     request = RecognitionStreamRequest(
         ref, RecognitionTurnDetection.server_vad_default()
     )
-    await provider.open_recognition(request, timeout_seconds=2)
+    await provider.open_recognition(authorized_request(request), timeout_seconds=2)
     assert (
         socket.sent[0]["session"]["audio"]["input"]["turn_detection"]
         == server_vad_wire()
@@ -478,7 +485,9 @@ async def test_manual_commit_wins_server_vad_race_without_a_second_commit() -> N
     provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
     ref = recognition_ref()
     await provider.open_recognition(
-        RecognitionStreamRequest(ref, RecognitionTurnDetection.server_vad_default()),
+        authorized_request(
+            RecognitionStreamRequest(ref, RecognitionTurnDetection.server_vad_default())
+        ),
         timeout_seconds=2,
     )
     await provider.send_recognition_audio(recognition_frame(ref))
@@ -546,7 +555,9 @@ async def test_server_vad_wrong_item_fails_closed_without_business_effects() -> 
     provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
     ref = recognition_ref()
     await provider.open_recognition(
-        RecognitionStreamRequest(ref, RecognitionTurnDetection.server_vad_default()),
+        authorized_request(
+            RecognitionStreamRequest(ref, RecognitionTurnDetection.server_vad_default())
+        ),
         timeout_seconds=2,
     )
     socket.push(
@@ -556,6 +567,8 @@ async def test_server_vad_wrong_item_fails_closed_without_business_effects() -> 
             "audio_start_ms": 10,
         }
     )
+    started = await provider.next_recognition_event(ref, timeout_seconds=1)
+    assert isinstance(started, RecognitionTurnBoundaryEvent)
     socket.push(
         {
             "type": "input_audio_buffer.speech_stopped",
@@ -563,8 +576,6 @@ async def test_server_vad_wrong_item_fails_closed_without_business_effects() -> 
             "audio_end_ms": 20,
         }
     )
-    started = await provider.next_recognition_event(ref, timeout_seconds=1)
-    assert isinstance(started, RecognitionTurnBoundaryEvent)
     await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
     with pytest.raises(OpenAIStreamingSpeechError) as failed:
         await provider.next_recognition_event(ref, timeout_seconds=1)
@@ -595,7 +606,9 @@ async def test_whisper_one_server_vad_is_not_locally_rejected() -> None:
     )
     ref = recognition_ref()
     await provider.open_recognition(
-        RecognitionStreamRequest(ref, RecognitionTurnDetection.server_vad_default()),
+        authorized_request(
+            RecognitionStreamRequest(ref, RecognitionTurnDetection.server_vad_default())
+        ),
         timeout_seconds=1,
     )
     assert socket_calls == 1
@@ -622,13 +635,13 @@ async def test_unsupported_sample_rates_fail_before_provider_allocation() -> Non
         "recognition-rate", 0, CaptureRef("capture-rate", 0, 7_999)
     )
     with pytest.raises(OpenAIStreamingSpeechError) as bad_recognition:
-        await provider.open_recognition(bad_ref, timeout_seconds=1)
+        await provider.open_recognition(authorized_request(bad_ref), timeout_seconds=1)
     assert bad_recognition.value.reason == "SPEECH_SAMPLE_RATE_UNSUPPORTED"
 
     request = replace(synthesis_request(), sample_rate_hz=192_001)
-    provider.conformance.activate_response(request.ref.response)
+    provider.conformance.activate_response(response_authority(request.ref.response))
     with pytest.raises(OpenAIStreamingSpeechError) as bad_synthesis:
-        await provider.open_synthesis(request)
+        await provider.open_synthesis(authorized_request(request))
     assert bad_synthesis.value.reason == "SPEECH_SAMPLE_RATE_UNSUPPORTED"
     assert allocations == 0
     assert provider.conformance.snapshot().active_recognition == 0
@@ -649,7 +662,9 @@ async def test_cancelled_recognition_registration_rolls_back_exact_session() -> 
     provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
     await provider._lock.acquire()
     open_task = asyncio.create_task(
-        provider.open_recognition(recognition_ref(), timeout_seconds=1)
+        provider.open_recognition(
+            authorized_request(recognition_ref()), timeout_seconds=1
+        )
     )
     await asyncio.wait_for(socket_allocated.wait(), timeout=1)
     await asyncio.sleep(0)
@@ -669,9 +684,11 @@ async def test_cancelled_recognition_registration_rolls_back_exact_session() -> 
 async def test_cancelled_synthesis_registration_rolls_back_exact_session() -> None:
     provider = OpenAIStreamingSpeechProvider(config())
     request = synthesis_request()
-    provider.conformance.activate_response(request.ref.response)
+    provider.conformance.activate_response(response_authority(request.ref.response))
     await provider._lock.acquire()
-    open_task = asyncio.create_task(provider.open_synthesis(request))
+    open_task = asyncio.create_task(
+        provider.open_synthesis(authorized_request(request))
+    )
     while provider.conformance.snapshot().active_synthesis == 0:
         await asyncio.sleep(0)
     open_task.cancel()
@@ -698,7 +715,7 @@ async def test_realtime_transport_characterization_freezes_wire_and_order() -> N
 
     provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=2)
+    await provider.open_recognition(authorized_request(ref), timeout_seconds=2)
 
     assert len(connect_calls) == 1
     url, headers, timeout = connect_calls[0]
@@ -743,7 +760,7 @@ async def test_realtime_recognition_resamples_and_orders_partial_then_final() ->
 
     provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=2)
+    await provider.open_recognition(authorized_request(ref), timeout_seconds=2)
     await provider.send_recognition_audio(recognition_frame(ref))
     await provider.commit_recognition(ref)
     assert [item["type"] for item in socket.sent] == [
@@ -807,7 +824,7 @@ async def test_commit_atomically_fences_concurrent_audio_at_frozen_cursor() -> N
 
     provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=2)
+    await provider.open_recognition(authorized_request(ref), timeout_seconds=2)
     await provider.send_recognition_audio(recognition_frame(ref))
     commit_task = asyncio.create_task(provider.commit_recognition(ref))
     await asyncio.wait_for(socket.commit_started.wait(), timeout=1)
@@ -858,7 +875,9 @@ async def test_effective_transcription_session_mismatch_fails_closed() -> None:
         config(), socket_factory=socket_factory, degradation_sink=facts.append
     )
     with pytest.raises(OpenAIStreamingSpeechError) as exc_info:
-        await provider.open_recognition(recognition_ref(), timeout_seconds=1)
+        await provider.open_recognition(
+            authorized_request(recognition_ref()), timeout_seconds=1
+        )
     assert exc_info.value.reason == "SPEECH_PROVIDER_SESSION_MISMATCH"
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
@@ -895,7 +914,9 @@ async def test_ga_server_vad_echo_without_response_fields_opens_the_stream() -> 
     provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
     ref = recognition_ref()
     await provider.open_recognition(
-        RecognitionStreamRequest(ref, RecognitionTurnDetection.server_vad_default()),
+        authorized_request(
+            RecognitionStreamRequest(ref, RecognitionTurnDetection.server_vad_default())
+        ),
         timeout_seconds=2,
     )
 
@@ -931,8 +952,10 @@ async def test_unknown_server_vad_echo_field_still_fails_closed() -> None:
     )
     with pytest.raises(OpenAIStreamingSpeechError) as exc_info:
         await provider.open_recognition(
-            RecognitionStreamRequest(
-                recognition_ref(), RecognitionTurnDetection.server_vad_default()
+            authorized_request(
+                RecognitionStreamRequest(
+                    recognition_ref(), RecognitionTurnDetection.server_vad_default()
+                )
             ),
             timeout_seconds=1,
         )
@@ -959,8 +982,10 @@ async def test_effective_server_vad_response_creation_mismatch_fails_closed() ->
     )
     with pytest.raises(OpenAIStreamingSpeechError) as exc_info:
         await provider.open_recognition(
-            RecognitionStreamRequest(
-                recognition_ref(), RecognitionTurnDetection.server_vad_default()
+            authorized_request(
+                RecognitionStreamRequest(
+                    recognition_ref(), RecognitionTurnDetection.server_vad_default()
+                )
             ),
             timeout_seconds=1,
         )
@@ -984,7 +1009,7 @@ async def test_precommit_partials_order_then_final_uses_frozen_commit_cursor() -
         config(), socket_factory=socket_factory, degradation_sink=facts.append
     )
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=1)
+    await provider.open_recognition(authorized_request(ref), timeout_seconds=1)
     await provider.send_recognition_audio(recognition_frame(ref))
     socket.push(
         {
@@ -1068,7 +1093,7 @@ async def test_recognition_final_before_local_commit_fails_closed() -> None:
         config(), socket_factory=socket_factory, degradation_sink=facts.append
     )
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=1)
+    await provider.open_recognition(authorized_request(ref), timeout_seconds=1)
     await provider.send_recognition_audio(recognition_frame(ref))
     socket.push(
         {
@@ -1107,7 +1132,7 @@ async def test_recognition_queue_exhaustion_emits_one_closed_reason() -> None:
         event_queue_wait_seconds=0.05,
     )
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=2)
+    await provider.open_recognition(authorized_request(ref), timeout_seconds=2)
     await provider.send_recognition_audio(recognition_frame(ref))
     await provider.commit_recognition(ref)
     for seq in range(65):
@@ -1139,7 +1164,7 @@ async def test_item_mismatch_fails_closed_without_publishing_late_final() -> Non
         config(), socket_factory=socket_factory, degradation_sink=facts.append
     )
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=2)
+    await provider.open_recognition(authorized_request(ref), timeout_seconds=2)
     await provider.send_recognition_audio(recognition_frame(ref))
     await provider.commit_recognition(ref)
     socket.push(
@@ -1195,7 +1220,7 @@ async def test_non_primary_transcription_content_fails_closed(
         config(), socket_factory=socket_factory, degradation_sink=facts.append
     )
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=2)
+    await provider.open_recognition(authorized_request(ref), timeout_seconds=2)
     await provider.send_recognition_audio(recognition_frame(ref))
     await provider.commit_recognition(ref)
     socket.push(
@@ -1233,7 +1258,7 @@ async def test_audio_transport_failure_fences_and_emits_safe_fallback() -> None:
         config(), socket_factory=socket_factory, degradation_sink=facts.append
     )
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=2)
+    await provider.open_recognition(authorized_request(ref), timeout_seconds=2)
     waiting_event = asyncio.create_task(provider.next_recognition_event(ref, timeout_seconds=30))
     await asyncio.sleep(0)
     with pytest.raises(OpenAIStreamingSpeechError) as failed:
@@ -1270,7 +1295,7 @@ async def test_recognition_deadline_closes_transport_and_retains_cancel_truth() 
         monotonic=lambda: clock[0],
     )
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=2.0)
+    await provider.open_recognition(authorized_request(ref), timeout_seconds=2.0)
     session = provider._require_recognition(ref)
     assert session.receive_task is not None
     receive_task = session.receive_task
@@ -1283,7 +1308,7 @@ async def test_recognition_deadline_closes_transport_and_retains_cancel_truth() 
     snapshot = provider.conformance.snapshot()
     assert snapshot.active_recognition == 0
     assert snapshot.pending_provider_controls == 0
-    assert snapshot.retained_identity_tombstones == 1
+    assert snapshot.retained_identity_tombstones == 0
     assert_zero_business_effects(provider)
     await provider.close()
 
@@ -1306,14 +1331,16 @@ async def test_recognition_deadline_bounds_connect_before_socket_allocation() ->
     )
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(
-            provider.open_recognition(recognition_ref(), timeout_seconds=0.02),
+            provider.open_recognition(
+                authorized_request(recognition_ref()), timeout_seconds=0.02
+            ),
             timeout=1,
         )
     await asyncio.wait_for(cancelled.wait(), timeout=1)
     assert facts[-1].reason is SpeechDegradationReason.PROVIDER_TIMEOUT
     snapshot = provider.conformance.snapshot()
     assert snapshot.active_recognition == 0
-    assert snapshot.retained_identity_tombstones == 1
+    assert snapshot.retained_identity_tombstones == 0
     assert_zero_business_effects(provider)
     await provider.close()
 
@@ -1334,7 +1361,9 @@ async def test_x_obs_sink_failure_does_not_hide_retained_visible_fact() -> None:
     _LOGGER.addHandler(logs)
     try:
         with pytest.raises(OpenAIStreamingSpeechError) as unavailable:
-            await provider.open_recognition(recognition_ref(), timeout_seconds=1)
+            await provider.open_recognition(
+                authorized_request(recognition_ref()), timeout_seconds=1
+            )
     finally:
         _LOGGER.removeHandler(logs)
     assert unavailable.value.reason == "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE"
@@ -1349,7 +1378,7 @@ async def test_x_obs_sink_failure_does_not_hide_retained_visible_fact() -> None:
     assert "reason=sync-error" in safe_logs
     snapshot = provider.conformance.snapshot()
     assert snapshot.retained_recognition == 0
-    assert snapshot.retained_identity_tombstones == 1
+    assert snapshot.retained_identity_tombstones == 0
     await provider.close()
 
 
@@ -1364,7 +1393,9 @@ async def test_untrusted_connect_exception_drops_secret_traceback_and_chain() ->
         config(), socket_factory=failing_socket_factory
     )
     with pytest.raises(OpenAIStreamingSpeechError) as exc_info:
-        await provider.open_recognition(recognition_ref(), timeout_seconds=1)
+        await provider.open_recognition(
+            authorized_request(recognition_ref()), timeout_seconds=1
+        )
     assert exc_info.value.reason == "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE"
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
@@ -1387,7 +1418,9 @@ async def test_malformed_provider_json_drops_raw_traceback_and_chain() -> None:
 
     provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
     with pytest.raises(OpenAIStreamingSpeechError) as exc_info:
-        await provider.open_recognition(recognition_ref(), timeout_seconds=1)
+        await provider.open_recognition(
+            authorized_request(recognition_ref()), timeout_seconds=1
+        )
     assert exc_info.value.reason == "SPEECH_PROVIDER_INVALID_JSON"
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
@@ -1419,7 +1452,9 @@ async def test_async_x_obs_sink_is_bounded_cancelled_and_never_blocks_cleanup() 
     _LOGGER.addHandler(logs)
     try:
         with pytest.raises(OpenAIStreamingSpeechError) as unavailable:
-            await provider.open_recognition(recognition_ref(), timeout_seconds=1)
+            await provider.open_recognition(
+                authorized_request(recognition_ref()), timeout_seconds=1
+            )
     finally:
         _LOGGER.removeHandler(logs)
     elapsed = loop.time() - started_at
@@ -1704,7 +1739,7 @@ async def test_recognition_cancel_is_local_fence_not_provider_ack() -> None:
         config(), socket_factory=socket_factory, degradation_sink=facts.append
     )
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=2)
+    await provider.open_recognition(authorized_request(ref), timeout_seconds=2)
     await provider.send_recognition_audio(recognition_frame(ref))
     await provider.cancel_recognition(ref)
     assert socket.closed is True
@@ -1712,7 +1747,7 @@ async def test_recognition_cancel_is_local_fence_not_provider_ack() -> None:
     snapshot = provider.conformance.snapshot()
     assert snapshot.active_recognition == 0
     assert snapshot.retained_recognition == 0
-    assert snapshot.retained_identity_tombstones == 1
+    assert snapshot.retained_identity_tombstones == 0
     with pytest.raises(StreamingSpeechViolation) as fenced:
         provider.conformance.accept_recognition_event(
             replace(
@@ -1721,10 +1756,10 @@ async def test_recognition_cancel_is_local_fence_not_provider_ack() -> None:
                 audio_cursor=4,
             )
         )
-    assert fenced.value.reason == "STALE_RECOGNITION_SESSION"
+    assert fenced.value.reason == "RECOGNITION_SESSION_NOT_FOUND"
     with pytest.raises(StreamingSpeechViolation) as reused:
-        await provider.open_recognition(ref, timeout_seconds=1)
-    assert reused.value.reason == "STALE_RECOGNITION_GENERATION"
+        await provider.open_recognition(authorized_request(ref), timeout_seconds=1)
+    assert reused.value.reason == "SPEECH_AUTHORITY_EXPIRED"
     assert_zero_business_effects(provider)
     await provider.close()
 
@@ -1738,7 +1773,7 @@ async def test_noncooperative_socket_close_is_retained_and_reported() -> None:
 
     provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=1)
+    await provider.open_recognition(authorized_request(ref), timeout_seconds=1)
     try:
         loop = asyncio.get_running_loop()
         started_at = loop.time()
@@ -1771,7 +1806,7 @@ async def test_final_and_explicit_close_share_cleanup_before_successor_listening
 
     provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=2)
+    await provider.open_recognition(authorized_request(ref), timeout_seconds=2)
     await provider.send_recognition_audio(recognition_frame(ref))
     await provider.commit_recognition(ref)
     socket.push({"type": "input_audio_buffer.committed", "item_id": "race-item"})
@@ -1801,7 +1836,9 @@ async def test_final_and_explicit_close_share_cleanup_before_successor_listening
     successor_ref = RecognitionStreamRef(
         "recognition-1", 1, CaptureRef("capture-1", 1, 48_000)
     )
-    await provider.open_recognition(successor_ref, timeout_seconds=2)
+    await provider.open_recognition(
+        authorized_request(successor_ref), timeout_seconds=2
+    )
     await provider.send_recognition_audio(recognition_frame(successor_ref))
     await provider.commit_recognition(successor_ref)
     successor_socket.push(
@@ -1839,7 +1876,7 @@ async def test_recognition_process_control_cleans_up_and_rethrows() -> None:
         config(), socket_factory=socket_factory, degradation_sink=facts.append
     )
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=1)
+    await provider.open_recognition(authorized_request(ref), timeout_seconds=1)
     session = provider._require_recognition(ref)
     assert session.receive_task is not None
     receive_task = session.receive_task
@@ -1896,8 +1933,8 @@ async def test_streaming_tts_sse_has_derived_cursor_and_request_level_text_prove
 
     provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
     request = synthesis_request()
-    provider.conformance.activate_response(request.ref.response)
-    await provider.open_synthesis(request)
+    provider.conformance.activate_response(response_authority(request.ref.response))
+    await provider.open_synthesis(authorized_request(request))
     started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
     chunk1 = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
     chunk2 = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
@@ -1947,8 +1984,8 @@ async def test_synthesis_timeout_is_per_event_not_whole_stream() -> None:
 
     provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
     request = synthesis_request(event_timeout_seconds=0.3)
-    provider.conformance.activate_response(request.ref.response)
-    await provider.open_synthesis(request)
+    provider.conformance.activate_response(response_authority(request.ref.response))
+    await provider.open_synthesis(authorized_request(request))
 
     events = [
         await provider.next_synthesis_event(request.ref, timeout_seconds=1)
@@ -1980,8 +2017,8 @@ async def test_synthesis_sse_comments_do_not_renew_event_timeout() -> None:
         config(), sse_factory=sse_factory, degradation_sink=facts.append
     )
     request = synthesis_request(event_timeout_seconds=0.1)
-    provider.conformance.activate_response(request.ref.response)
-    await provider.open_synthesis(request)
+    provider.conformance.activate_response(response_authority(request.ref.response))
+    await provider.open_synthesis(authorized_request(request))
 
     started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
     assert started.kind is SynthesisEventKind.STARTED
@@ -2021,8 +2058,8 @@ async def test_tts_request_failure_retains_only_safe_fact_and_no_task_exception(
         config(), sse_factory=failing_sse_factory, degradation_sink=sink
     )
     request = synthesis_request()
-    provider.conformance.activate_response(request.ref.response)
-    await provider.open_synthesis(request)
+    provider.conformance.activate_response(response_authority(request.ref.response))
+    await provider.open_synthesis(authorized_request(request))
     await asyncio.wait_for(request_started.wait(), timeout=1)
     assert provider_task is not None
     _LOGGER.addHandler(logs)
@@ -2061,8 +2098,8 @@ async def test_synthesis_sse_event_bytes_are_bounded_and_visible() -> None:
         config(), sse_factory=sse_factory, degradation_sink=facts.append
     )
     request = synthesis_request()
-    provider.conformance.activate_response(request.ref.response)
-    await provider.open_synthesis(request)
+    provider.conformance.activate_response(response_authority(request.ref.response))
+    await provider.open_synthesis(authorized_request(request))
     started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
     assert started.kind is SynthesisEventKind.STARTED
     await asyncio.wait_for(stream.closed_event.wait(), timeout=1)
@@ -2101,8 +2138,8 @@ async def test_synthesis_cancel_closes_transport_without_cancelled_event() -> No
         config(), sse_factory=sse_factory, degradation_sink=facts.append
     )
     request = synthesis_request()
-    provider.conformance.activate_response(request.ref.response)
-    await provider.open_synthesis(request)
+    provider.conformance.activate_response(response_authority(request.ref.response))
+    await provider.open_synthesis(authorized_request(request))
     started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
     assert started.kind is SynthesisEventKind.STARTED
     await provider.cancel_synthesis(request.ref)
@@ -2124,8 +2161,8 @@ async def test_noncooperative_stream_close_is_retained_and_reported() -> None:
 
     provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
     request = synthesis_request()
-    provider.conformance.activate_response(request.ref.response)
-    await provider.open_synthesis(request)
+    provider.conformance.activate_response(response_authority(request.ref.response))
+    await provider.open_synthesis(authorized_request(request))
     await provider.next_synthesis_event(request.ref, timeout_seconds=1)
     try:
         loop = asyncio.get_running_loop()
@@ -2158,8 +2195,8 @@ async def test_synthesis_timeout_is_visible_and_bounded() -> None:
         config(), sse_factory=sse_factory, degradation_sink=facts.append
     )
     request = synthesis_request(event_timeout_seconds=0.05)
-    provider.conformance.activate_response(request.ref.response)
-    await provider.open_synthesis(request)
+    provider.conformance.activate_response(response_authority(request.ref.response))
+    await provider.open_synthesis(authorized_request(request))
     await provider.next_synthesis_event(request.ref, timeout_seconds=1)
     await asyncio.wait_for(stream.closed_event.wait(), timeout=1)
     assert stream.closed is True
@@ -2189,8 +2226,8 @@ async def test_synthesis_process_control_cleans_up_and_rethrows() -> None:
         config(), sse_factory=sse_factory, degradation_sink=facts.append
     )
     request = synthesis_request()
-    provider.conformance.activate_response(request.ref.response)
-    await provider.open_synthesis(request)
+    provider.conformance.activate_response(response_authority(request.ref.response))
+    await provider.open_synthesis(authorized_request(request))
     session = provider._require_synthesis(request.ref)
     assert session.task is not None
     synthesis_task = session.task
@@ -2229,10 +2266,12 @@ async def test_provider_close_bounds_active_transport_cleanup_and_is_idempotent(
     provider = OpenAIStreamingSpeechProvider(
         config(), socket_factory=socket_factory, sse_factory=sse_factory
     )
-    await provider.open_recognition(recognition_ref(), timeout_seconds=2)
+    await provider.open_recognition(
+        authorized_request(recognition_ref()), timeout_seconds=2
+    )
     request = synthesis_request()
-    provider.conformance.activate_response(request.ref.response)
-    await provider.open_synthesis(request)
+    provider.conformance.activate_response(response_authority(request.ref.response))
+    await provider.open_synthesis(authorized_request(request))
     await provider.next_synthesis_event(request.ref, timeout_seconds=1)
 
     await asyncio.wait_for(provider.close(), timeout=1)
@@ -2261,7 +2300,9 @@ async def test_provider_close_cancels_pending_recognition_connect() -> None:
         config(), socket_factory=blocking_socket_factory
     )
     open_task = asyncio.create_task(
-        provider.open_recognition(recognition_ref(), timeout_seconds=2)
+        provider.open_recognition(
+            authorized_request(recognition_ref()), timeout_seconds=2
+        )
     )
     await asyncio.wait_for(entered.wait(), timeout=1)
     await asyncio.wait_for(provider.close(), timeout=1)
@@ -2273,7 +2314,7 @@ async def test_provider_close_cancels_pending_recognition_connect() -> None:
     assert snapshot.closed is True
     assert snapshot.active_recognition == 0
     assert snapshot.retained_recognition == 0
-    assert snapshot.retained_identity_tombstones == 1
+    assert snapshot.retained_identity_tombstones == 0
     assert_zero_business_effects(provider)
 
 
@@ -2287,7 +2328,9 @@ async def test_provider_close_rethrows_worker_process_control_after_finalization
         return socket
 
     provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
-    await provider.open_recognition(recognition_ref(), timeout_seconds=1)
+    await provider.open_recognition(
+        authorized_request(recognition_ref()), timeout_seconds=1
+    )
     await asyncio.wait_for(socket.receive_waiting.wait(), timeout=1)
 
     with pytest.raises(GeneratorExit):
@@ -2321,7 +2364,9 @@ async def test_transport_close_process_control_retries_before_rethrow(
         return socket
 
     provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
-    await provider.open_recognition(recognition_ref(), timeout_seconds=1)
+    await provider.open_recognition(
+        authorized_request(recognition_ref()), timeout_seconds=1
+    )
 
     with pytest.raises(process_control_type):
         await provider.close()
@@ -2450,7 +2495,9 @@ async def test_selector_binds_runtime_failure_directly_to_text_without_batch() -
     assert selected.provider is not None
     assert selected.provider.fallback_tier is SpeechRouteTier.TEXT
     with pytest.raises(OpenAIStreamingSpeechError) as unavailable:
-        await selected.provider.open_recognition(recognition_ref(), timeout_seconds=1)
+        await selected.provider.open_recognition(
+            authorized_request(recognition_ref()), timeout_seconds=1
+        )
     assert unavailable.value.reason == "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE"
     assert facts[-1].from_tier is SpeechRouteTier.STREAMING
     assert facts[-1].to_tier is SpeechRouteTier.TEXT
@@ -2500,7 +2547,9 @@ async def test_ga_transcription_item_lifecycle_events_do_not_fail_the_stream() -
     provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
     ref = recognition_ref()
     await provider.open_recognition(
-        RecognitionStreamRequest(ref, RecognitionTurnDetection.manual()),
+        authorized_request(
+            RecognitionStreamRequest(ref, RecognitionTurnDetection.manual())
+        ),
         timeout_seconds=2,
     )
     await provider.send_recognition_audio(recognition_frame(ref))

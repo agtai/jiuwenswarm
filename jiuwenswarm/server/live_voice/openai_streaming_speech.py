@@ -76,6 +76,7 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
     StreamingProviderCapability,
     StreamingRecognitionEvent,
     StreamingSpeechConformance,
+    require_stream_authority,
     StreamingSpeechViolation,
     StreamingSynthesisEvent,
     SynthesisProviderSupport,
@@ -139,6 +140,9 @@ class SpeechDegradationReason(StrEnum):
     PROVIDER_TIMEOUT = "STREAMING_SPEECH_PROVIDER_TIMEOUT"
     PROVIDER_CANCEL_UNACKNOWLEDGED = "STREAMING_SPEECH_CANCEL_UNACKNOWLEDGED"
     BOUNDED_QUEUE_EXHAUSTED = "STREAMING_SPEECH_EVENT_QUEUE_EXHAUSTED"
+    RESOURCE_CAPACITY = "STREAMING_SPEECH_RESOURCE_CAPACITY"
+    CLEANUP_INCOMPLETE = "STREAMING_SPEECH_CLEANUP_INCOMPLETE"
+    AUTHORITY_EXPIRED = "STREAMING_SPEECH_AUTHORITY_EXPIRED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -918,7 +922,6 @@ class OpenAIStreamingSpeechProvider:
     ) -> None:
         started_at = self._monotonic()
         self._require_open()
-        self._require_cleanup_capacity()
         if isinstance(request, RecognitionStreamRef):
             request = RecognitionStreamRequest(
                 request, RecognitionTurnDetection.manual()
@@ -936,6 +939,7 @@ class OpenAIStreamingSpeechProvider:
             raise RuntimeError("recognition open requires an asyncio task")
         self._opening_recognition_tasks.add(opening_task)
         try:
+            self._require_cleanup_capacity()
             self._conformance.start_recognition(
                 request, timeout_seconds=timeout_seconds
             )
@@ -949,6 +953,7 @@ class OpenAIStreamingSpeechProvider:
             socket = await self._open_recognition_socket(
                 url=url, timeout_seconds=connect_budget
             )
+            require_stream_authority(request)
             loop = asyncio.get_running_loop()
             session = _RecognitionSession(
                 request=request,
@@ -1648,8 +1653,10 @@ class OpenAIStreamingSpeechProvider:
         failure: BaseException | None = None
         tail: bytes | None = None
         try:
+            require_stream_authority(session.request)
             async with asyncio.timeout(session.request.event_timeout_seconds):
                 session.stream = await self._open_synthesis_stream(session)
+            require_stream_authority(session.request)
             await self._publish_synthesis(session, SynthesisEventKind.STARTED)
             done = await self._consume_synthesis_stream(session)
             if not done:
@@ -1968,7 +1975,7 @@ class OpenAIStreamingSpeechProvider:
         if conformance_started:
             with suppress(StreamingSpeechViolation):
                 self._conformance.provider_closed_recognition(ref)
-            self._conformance.reap_terminal()
+            self._conformance.reap_terminal(recognition_ref=ref)
 
     async def _rollback_failed_synthesis(
         self,
@@ -1993,7 +2000,7 @@ class OpenAIStreamingSpeechProvider:
         if conformance_started:
             with suppress(StreamingSpeechViolation):
                 self._conformance.provider_closed_synthesis(ref)
-            self._conformance.reap_terminal()
+            self._conformance.reap_terminal(synthesis_ref=ref)
 
     async def _fail_recognition_transport(
         self, session: _RecognitionSession, exc: BaseException
@@ -2061,14 +2068,14 @@ class OpenAIStreamingSpeechProvider:
         async with self._lock:
             if self._recognition.get(key) is session:
                 del self._recognition[key]
-        self._conformance.reap_terminal()
+        self._conformance.reap_terminal(recognition_ref=session.ref)
 
     async def _retire_synthesis(self, session: _SynthesisSession) -> None:
         key = _synthesis_key(session.request.ref)
         async with self._lock:
             if self._synthesis.get(key) is session:
                 del self._synthesis[key]
-        self._conformance.reap_terminal()
+        self._conformance.reap_terminal(synthesis_ref=session.request.ref)
 
     async def _emit_failure(
         self,
@@ -2136,7 +2143,7 @@ class OpenAIStreamingSpeechProvider:
     def _require_cleanup_capacity(self) -> None:
         snapshot = self._conformance.snapshot()
         cleanup = self.cleanup_snapshot
-        active_sessions = snapshot.active_recognition + snapshot.active_synthesis
+        active_sessions = snapshot.retained_recognition + snapshot.retained_synthesis
         if (
             cleanup.retained_task_count
             + cleanup.failed_resource_count
@@ -2436,6 +2443,24 @@ def _reason_for_exception(exc: BaseException) -> SpeechDegradationReason:
         raise TypeError("process-control exceptions cannot be degradation reasons")
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException)):
         return SpeechDegradationReason.PROVIDER_TIMEOUT
+    if isinstance(exc, (OpenAIStreamingSpeechError, StreamingSpeechViolation)):
+        if exc.reason in {
+            "RECOGNITION_CAPACITY_EXHAUSTED",
+            "SYNTHESIS_CAPACITY_EXHAUSTED",
+            "RESPONSE_CAPACITY_EXHAUSTED",
+        }:
+            return SpeechDegradationReason.RESOURCE_CAPACITY
+        if exc.reason in {
+            "SPEECH_PROVIDER_CLEANUP_CAPACITY",
+            "SPEECH_PROVIDER_CLEANUP_INCOMPLETE",
+        }:
+            return SpeechDegradationReason.CLEANUP_INCOMPLETE
+        if exc.reason in {
+            "SPEECH_AUTHORITY_REQUIRED",
+            "SPEECH_AUTHORITY_EXPIRED",
+            "SPEECH_AUTHORITY_CONSUMED",
+        }:
+            return SpeechDegradationReason.AUTHORITY_EXPIRED
     if isinstance(exc, OpenAIStreamingSpeechError):
         if exc.reason == "SPEECH_EVENT_QUEUE_EXHAUSTED":
             return SpeechDegradationReason.BOUNDED_QUEUE_EXHAUSTED

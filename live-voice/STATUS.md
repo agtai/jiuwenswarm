@@ -56,7 +56,7 @@ repeat the old whole-project audit solely to resume a bounded task.
 | Capability / module | Implemented boundary | Remaining / dependency |
 |---|---|---|
 | Audio Device & browser I/O | Capture/playout, dedicated media wiring, exact-owner lifecycle fencing; project-home listening/transcription observed | Stable physical listening/recovery and heard playback; permission/device coverage; AEC/NS/AGC, double-talk, loss/stop targets |
-| Speech Recognition | Streaming/batch recognition, committed finals, typed stream failure and bounded capture-only retry | OPEN cumulative 64-identity exhaustion blocks new capture; lifecycle repair and truthful diagnostics required. Long/paused speech, fallback/cancel and device/network evidence remain open |
+| Speech Recognition | Streaming/batch recognition, committed finals, typed stream failure, bounded capture-only retry and scoped authority/resource lifetime repair | Lifetime repair passes focused tests and independent review but is not deployed. Long/paused speech, fallback/cancel and device/network evidence remain open |
 | Speech Synthesis | Streaming/batch TTS, response ownership and playback ACK | Current interrupted-answer/long-answer stability; first-audio, underrun, pronunciation and stale-output proof |
 | Realtime Media | Dedicated transport, registration, rotation and bounded P2 notification pull | Backpressure/load, loss/reordering/corruption/reconnect and truthful recovery diagnostics |
 | Conversation Runtime | Committed-input/generation fencing, Stop/Exit, playback/generation interruption, unanswered-input continuity, presentation/ACK ownership | Combined listening/notification/Task races on current source; no old audio revival or accidental detached-Task control |
@@ -73,80 +73,54 @@ repeat the old whole-project audit solely to resume a bounded task.
 
 ## Current execution packet
 
-### Production semantic hardcode retirement
+### Streaming Speech lifetime repair
 
-The product objective remains: final committed speech reaches the real
-JiuwenSwarm Agent/tools and authoritative Task results through one semantic
-implementation. The current bounded repair addresses direct modification and
-truthful application/status queries; broader business/audio gates remain open.
+The user's active scope is the cumulative 64-identity failure, following D-113.
+The source repair passes 376 scoped tests and independent review. It is not deployed.
+See [bounded lifecycle evidence](evidence/SPEECH_LIFECYCLE_REPAIR_20260904.md)
+for the exact baseline, owned surfaces, checks and exclusions; the earlier
+[capacity diagnosis](evidence/CAPTURE_IDENTITY_CAPACITY_20260903.md) remains
+historical evidence of the running-service defect.
 
-- **Intended behavior:** model semantics propose; Bridge/Registry/Core validate
-  exact scope, targets, capabilities, replay and effects. Clear authorized local
-  delegation creates or modifies its exact Task without another confirmation round. Analysis-only
-  input has zero Task effects. Internal semantic correction is not a user prompt.
-- **Continuity:** preserve unmodified user requirements and interrupted unanswered
-  input. Do not infer Task identity from recency, convert old delegation into new
-  foreground work, or treat “received/pending” adjustment as applied.
-- **Retirement:** keyword fallback, fixture names/answers, current-Task guesses,
-  Demo checkpoints and bypasses must have no production decision authority.
-  Protocol constants and legitimate bounds are not business hardcode.
-- **Owned surfaces:** semantic resolver/journal and Registry/Bridge; Direct
-  adjustment/execution and formal Agent adapters; P1/P2/Gateway/Web lifecycle and
-  Task projection; their existing tests and explicit test-only audio tooling.
-  Scope/tier each changed boundary under root TESTING before implementation.
-- **Verification mode:** smallest meaningful positive/negative/affected checks;
-  one recorded real-path check when needed for the changed seam. Do not repeatedly
-  run the full Demo or full suites to chase a PASS. Candidate-level requirements
-  stay open until actually performed; self-review is not independent review.
-- **Single semantic decision:** D-111 removes the repeated local-create model
-  review; D-112 also removes the adjustment rewrite that replaced an explicit
-  Task instruction with an earlier foreground correction. Bounded structural
-  retry and existing Registry/Core authority remain. The earlier
-  [real Demo audit](evidence/DEMO_SESSION_AUDIT_20260903.md) observed two created
-  Tasks, but overlapping scope, unconsumed modifications/cancellation narrated
-  as applied, wrong-target status, and an A2 request misrouted to terminal adjust.
-  Later A2 creation succeeded with the user's wording and is excluded from this
-  repair; this does not prove the complete A2 preservation journey.
-- **Direct modification and truth repair:** current exact local modifications
-  use existing durable consent and final authority reread without another user
-  confirmation. Queries distinguish pending/applied/rejected from canonical
-  Task/Attempt events; dialogue receives fresh scoped Task facts. Focused tests
-  and bounded configured-model probes pass, including ambiguous-target checks.
-  Full real execution/audio acceptance remains open. This source change is not
-  deployed, per the user's instruction.
-  See [bounded repair evidence](evidence/TASK_ADJUSTMENT_TRUTH_REPAIR_20260904.md).
-  Cancellation policy, capture capacity and artifact arithmetic are excluded.
-- **Current limits:** focused latency fixes have been authorized; performance
-  redesign and optional buffer/Native experiments are not prerequisites for this
-  repair packet. No new classifier/policy/schema, Executor/positive unsupported
-  operation, projectless authority, provider/account change or broader platform
-  expansion is implied. Re-scope before such work under root AGENTS/TESTING.
-- **Execution authority:** the user's task-scoped minimum-intervention instruction
-  remains subject to root AGENTS and its separate remote-update gate. Old dated
-  review-only windows and superseded latency deferrals are not current instructions.
+- **Intended behavior:** long-lived Provider clients accept continued authorized
+  capture and synthesis without a cumulative usage quota. Existing Media/Runtime
+  authority issues exact one-use stream grants; current activation/response
+  fences remain authoritative after historical Provider records are reclaimed.
+- **Resource ownership:** keep real bounds on live/opening streams, unconsumed
+  terminal queues and unfinished cleanup. Retire only the exact consumed stream;
+  delayed successful cleanup releases capacity. Revoked response authority also
+  fences queued audio. Local capacity/cleanup/authority errors remain distinct.
+- **Owned surfaces:** streaming Speech port/conformance, OpenAI Adapter,
+  recognition/synthesis Gateway routes and their existing Media Registry seam;
+  affected tests and documentation. The local authority contract is Tier 3;
+  cleanup and diagnostics are Tier 2. No browser wire or Store migration.
+- **Exclusions:** Task semantics, arithmetic/artifacts, Provider/account settings,
+  project/workspace cleanup, service restart/deployment and remote updates. No
+  larger history cap, timed clearing, adapter reset or business hardcode.
+- **Verification:** bounded positive, replay/revocation, concurrent capacity,
+  late-open, deferred-cleanup and isolation checks pass; independent review found
+  no actionable defects in the owned boundary.
+  Simulated wire tests do not grant real Provider, microphone/speaker, full Demo
+  or production acceptance. The project judgement remains PARTIAL.
 
-### Reopened terminal Task notification presentation repair
+### Retained consequences of earlier repairs
 
-The implemented Tier-1 wording repair uses authoritative Task names in notifications
-and the existing text fallback, without changing Task matching, ACK or protocol.
-Focused checks and the frontend build pass; existing fallback ACK and stale UI
-assertion failures remain open. Named physical playback has not been accepted.
-Scope and bounded evidence: [named notifications](evidence/NAMED_TASK_NOTIFICATIONS_20260903.md).
-The [cumulative capture identity defect](evidence/CAPTURE_IDENTITY_CAPACITY_20260903.md)
-is recorded as OPEN and excluded from this wording repair; restart only mitigates it.
+D-111/D-112 leave one model semantic decision, direct exact local modification
+and canonical pending/applied/rejected Task status. Focused tests and bounded
+configured-model probes pass; full execution/audio acceptance remains open.
+The change is not deployed, per user instruction. Read only the implicated
+[Task adjustment evidence](evidence/TASK_ADJUSTMENT_TRUTH_REPAIR_20260904.md)
+or [real Demo audit](evidence/DEMO_SESSION_AUDIT_20260903.md). Successful later
+A2 creation does not prove the complete preservation journey.
 
-Recognition/media-start and Gateway exact-ID replay have scoped repairs. Later
-Web fixes address interrupted-answer context, notification priority, empty-fetch
-listening recovery and per-Task/Chinese presentation. Initial accepted no longer
-duplicates the direct receipt in integrated product notifications; each Task
-notification keeps its own time and cannot extend foreground elapsed time.
-Focused Store/ACK/fallback and result-location checks are recorded in the
-[notification repair](evidence/TASK_NOTIFICATION_PRESENTATION_REPAIR_20260903.md).
-Existing retry/recovery failures, combined physical recovery and independent
-review remain open. Read only the implicated
-[query/interruption repair](evidence/REHEARSAL_QUERY_INTERRUPTION_REPAIR_20260903.md),
-[six-defect repair](evidence/REHEARSAL_SIX_DEFECT_REPAIR_20260903.md) or
-[Gateway replay evidence](evidence/P3_TERMINAL_RPC_REPLAY_REPAIR_20260902.md).
+Named Task notification wording and independent timestamps are implemented;
+initial accepted no longer duplicates the direct receipt. Existing fallback
+ACK/stale UI failures, combined physical recovery and cumulative review remain
+open. Conditional evidence: [named notifications](evidence/NAMED_TASK_NOTIFICATIONS_20260903.md)
+and [presentation repair](evidence/TASK_NOTIFICATION_PRESENTATION_REPAIR_20260903.md).
+Keyword/fixture decisions, current-Task guesses and Demo bypasses must remain
+outside production authority; protocol constants and live resource bounds are
+not business hardcode. Wider reachability/retirement acceptance remains open.
 
 ### Current acceptance gates
 

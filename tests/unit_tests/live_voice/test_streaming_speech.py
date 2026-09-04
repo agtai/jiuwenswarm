@@ -5,6 +5,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from tests.unit_tests.live_voice.speech_authority_support import (
+    authorized_request,
+    response_authority,
+    begin_recognition,
+    speech_test_issuer,
+)
+
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
 from jiuwenswarm.server.live_voice.speech_ports import (
     ProviderRef,
@@ -275,7 +282,9 @@ def test_server_vad_boundaries_require_same_item_and_cursorless_final() -> None:
     runtime = StreamingSpeechConformance(capability, enabled=True)
     ref = recognition_ref()
     runtime.start_recognition(
-        RecognitionStreamRequest(ref, RecognitionTurnDetection.server_vad_default()),
+        authorized_request(
+            RecognitionStreamRequest(ref, RecognitionTurnDetection.server_vad_default())
+        ),
         timeout_seconds=5,
     )
     runtime.accept_audio_frame(frame(ref, seq=0, cursor=0))
@@ -327,8 +336,10 @@ def test_server_vad_request_requires_exact_provider_capability_before_allocation
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     with pytest.raises(StreamingSpeechViolation) as unavailable:
         runtime.start_recognition(
-            RecognitionStreamRequest(
-                recognition_ref(), RecognitionTurnDetection.server_vad_default()
+            authorized_request(
+                RecognitionStreamRequest(
+                    recognition_ref(), RecognitionTurnDetection.server_vad_default()
+                )
             ),
             timeout_seconds=5,
         )
@@ -348,7 +359,9 @@ def test_server_vad_wrong_item_fails_closed_and_fences_input() -> None:
     runtime = StreamingSpeechConformance(capability, enabled=True)
     ref = recognition_ref()
     runtime.start_recognition(
-        RecognitionStreamRequest(ref, RecognitionTurnDetection.server_vad_default()),
+        authorized_request(
+            RecognitionStreamRequest(ref, RecognitionTurnDetection.server_vad_default())
+        ),
         timeout_seconds=5,
     )
     runtime.accept_recognition_boundary(
@@ -454,7 +467,7 @@ def test_unavailable_optional_provenance_remains_an_explicit_streaming_gap() -> 
     )
     runtime = StreamingSpeechConformance(capability, enabled=True)
     ref = recognition_ref()
-    runtime.start_recognition(ref, timeout_seconds=1)
+    runtime.start_recognition(authorized_request(ref), timeout_seconds=1)
     runtime.accept_audio_frame(frame(ref, seq=0, cursor=0))
     runtime.request_recognition_cancel(ref)
     with pytest.raises(StreamingSpeechViolation) as unavailable_ack:
@@ -470,8 +483,8 @@ def test_unavailable_optional_provenance_remains_an_explicit_streaming_gap() -> 
     runtime.provider_closed_recognition(ref)
 
     request = synthesis_request()
-    runtime.activate_response(request.ref.response)
-    runtime.start_synthesis(request)
+    runtime.activate_response(response_authority(request.ref.response))
+    runtime.start_synthesis(authorized_request(request))
     runtime.accept_synthesis_event(
         synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
     )
@@ -526,11 +539,13 @@ def test_unsupported_provider_cannot_advertise_available_stream_modes() -> None:
 def test_batch_only_capability_is_not_upgraded_to_streaming() -> None:
     runtime = StreamingSpeechConformance(batch_capability(), enabled=True)
     with pytest.raises(StreamingSpeechViolation) as recognition_error:
-        runtime.start_recognition(recognition_ref(), timeout_seconds=1)
+        runtime.start_recognition(
+            authorized_request(recognition_ref()), timeout_seconds=1
+        )
     assert recognition_error.value.reason == "STREAMING_RECOGNITION_UNSUPPORTED"
 
     with pytest.raises(StreamingSpeechViolation) as synthesis_error:
-        runtime.start_synthesis(synthesis_request())
+        runtime.start_synthesis(authorized_request(synthesis_request()))
     assert synthesis_error.value.reason == "STREAMING_SYNTHESIS_UNSUPPORTED"
     assert runtime.snapshot().retained_recognition == 0
     assert runtime.snapshot().retained_synthesis == 0
@@ -540,10 +555,12 @@ def test_batch_only_capability_is_not_upgraded_to_streaming() -> None:
 def test_flag_off_rejects_before_allocating_response_or_sessions() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=False)
     with pytest.raises(StreamingSpeechViolation) as activation:
-        runtime.activate_response(response())
+        runtime.activate_response(response_authority(response()))
     assert activation.value.reason == "STREAMING_SPEECH_DISABLED"
     with pytest.raises(StreamingSpeechViolation) as recognition:
-        runtime.start_recognition(recognition_ref(), timeout_seconds=1)
+        runtime.start_recognition(
+            authorized_request(recognition_ref()), timeout_seconds=1
+        )
     assert recognition.value.reason == "STREAMING_SPEECH_DISABLED"
     snapshot = runtime.snapshot()
     assert snapshot.active_recognition == snapshot.retained_recognition == 0
@@ -554,26 +571,17 @@ def test_flag_off_rejects_before_allocating_response_or_sessions() -> None:
     assert_zero_authority_effects(runtime)
 
 
-def test_retained_tombstones_count_every_never_evicted_identity_ledger() -> None:
-    """Response interaction identities are retained, so they must be reported.
-
-    Omitting a ledger lets a capacity monitor under-report retention and reach
-    RESPONSE_IDENTITY_CAPACITY_EXHAUSTED without warning.
-    """
-
+def test_response_activation_retains_only_bounded_live_authority():
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
-    assert runtime.snapshot().retained_identity_tombstones == 0
-
-    runtime.activate_response(
-        response(interaction_id="interaction-1", response_id="response-1")
-    )
-    # One interaction generation ledger entry plus one response id ledger entry.
-    assert runtime.snapshot().retained_identity_tombstones == 2
-
-    runtime.activate_response(
-        response(interaction_id="interaction-2", response_id="response-2")
-    )
-    assert runtime.snapshot().retained_identity_tombstones == 4
+    for index in range(512):
+        runtime.activate_response(
+            response_authority(
+                response(interaction_id=f"i-{index}", response_id=f"r-{index}")
+            )
+        )
+        assert runtime.snapshot().retained_identity_tombstones == 0
+        assert len(runtime._active_responses) <= 1
+    assert_zero_authority_effects(runtime)
 
 
 def test_unavailable_provider_rejects_without_session_side_effects() -> None:
@@ -581,7 +589,9 @@ def test_unavailable_provider_rejects_without_session_side_effects() -> None:
         native_capability(available=False), enabled=True
     )
     with pytest.raises(StreamingSpeechViolation) as raised:
-        runtime.start_recognition(recognition_ref(), timeout_seconds=1)
+        runtime.start_recognition(
+            authorized_request(recognition_ref()), timeout_seconds=1
+        )
     assert raised.value.reason == "STREAMING_PROVIDER_UNAVAILABLE"
     assert runtime.snapshot().retained_recognition == 0
     assert_zero_authority_effects(runtime)
@@ -590,7 +600,7 @@ def test_unavailable_provider_rejects_without_session_side_effects() -> None:
 def test_recognition_positive_order_exact_capture_cursor_final_and_reuse() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     ref = recognition_ref()
-    runtime.start_recognition(ref, timeout_seconds=5)
+    runtime.start_recognition(authorized_request(ref), timeout_seconds=5)
     runtime.accept_audio_frame(frame(ref, seq=0, cursor=0))
     runtime.accept_audio_frame(frame(ref, seq=1, cursor=4))
 
@@ -623,10 +633,10 @@ def test_recognition_positive_order_exact_capture_cursor_final_and_reuse() -> No
     assert runtime.reap_terminal() == (1, 0)
 
     with pytest.raises(StreamingSpeechViolation) as stale:
-        runtime.start_recognition(ref, timeout_seconds=5)
-    assert stale.value.reason == "STALE_RECOGNITION_GENERATION"
+        runtime.start_recognition(authorized_request(ref), timeout_seconds=5)
+    assert stale.value.reason == "SPEECH_AUTHORITY_EXPIRED"
     replacement = recognition_ref(session_generation=1, capture_generation=1)
-    runtime.start_recognition(replacement, timeout_seconds=5)
+    runtime.start_recognition(authorized_request(replacement), timeout_seconds=5)
     assert runtime.snapshot().active_recognition == 1
     with pytest.raises(StreamingSpeechViolation) as late_old_generation:
         runtime.accept_recognition_event(
@@ -663,7 +673,7 @@ def test_bad_capture_frames_fail_close_and_only_request_provider_cancel(
 ) -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     ref = recognition_ref()
-    runtime.start_recognition(ref, timeout_seconds=5)
+    runtime.start_recognition(authorized_request(ref), timeout_seconds=5)
     with pytest.raises(StreamingSpeechViolation) as raised:
         runtime.accept_audio_frame(bad_frame(ref))
     assert raised.value.reason == reason
@@ -681,7 +691,7 @@ def test_bad_capture_frames_fail_close_and_only_request_provider_cancel(
 def test_capture_identity_mismatch_fails_exact_retained_session() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     ref = recognition_ref()
-    runtime.start_recognition(ref, timeout_seconds=5)
+    runtime.start_recognition(authorized_request(ref), timeout_seconds=5)
     wrong = recognition_ref(capture_id="foreign-capture")
     with pytest.raises(StreamingSpeechViolation) as raised:
         runtime.accept_audio_frame(frame(wrong, seq=0, cursor=0))
@@ -697,7 +707,7 @@ def test_capture_identity_mismatch_fails_exact_retained_session() -> None:
 def test_duplicate_audio_frame_fails_close_after_one_accepted_frame() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     ref = recognition_ref()
-    runtime.start_recognition(ref, timeout_seconds=5)
+    runtime.start_recognition(authorized_request(ref), timeout_seconds=5)
     accepted = frame(ref, seq=0, cursor=0)
     runtime.accept_audio_frame(accepted)
     with pytest.raises(StreamingSpeechViolation) as raised:
@@ -714,7 +724,7 @@ def test_duplicate_audio_frame_fails_close_after_one_accepted_frame() -> None:
 def test_concurrent_duplicate_audio_frame_is_linearized_and_fails_closed() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     ref = recognition_ref()
-    runtime.start_recognition(ref, timeout_seconds=5)
+    runtime.start_recognition(authorized_request(ref), timeout_seconds=5)
     duplicate = frame(ref, seq=0, cursor=0)
 
     def submit() -> str:
@@ -778,7 +788,7 @@ def test_recognition_provider_gap_cursor_and_provider_mismatch_fail_close(
 ) -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     ref = recognition_ref()
-    runtime.start_recognition(ref, timeout_seconds=5)
+    runtime.start_recognition(authorized_request(ref), timeout_seconds=5)
     runtime.accept_audio_frame(frame(ref, seq=0, cursor=0))
     with pytest.raises(StreamingSpeechViolation) as raised:
         runtime.accept_recognition_event(bad_event(ref))
@@ -794,7 +804,7 @@ def test_recognition_provider_gap_cursor_and_provider_mismatch_fail_close(
 def test_duplicate_recognition_event_fails_close_without_committing_partial() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     ref = recognition_ref()
-    runtime.start_recognition(ref, timeout_seconds=5)
+    runtime.start_recognition(authorized_request(ref), timeout_seconds=5)
     runtime.accept_audio_frame(frame(ref, seq=0, cursor=0))
     partial = recognition_event(
         ref,
@@ -818,7 +828,7 @@ def test_duplicate_recognition_event_fails_close_without_committing_partial() ->
 def test_invalid_recognition_hypothesis_fails_close() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     ref = recognition_ref()
-    runtime.start_recognition(ref, timeout_seconds=5)
+    runtime.start_recognition(authorized_request(ref), timeout_seconds=5)
     runtime.accept_audio_frame(frame(ref, seq=0, cursor=0))
     invalid = RecognitionHypothesis((RecognitionAlternative("raw", "display", True),))
     with pytest.raises(StreamingSpeechViolation) as raised:
@@ -843,7 +853,7 @@ def test_invalid_recognition_hypothesis_fails_close() -> None:
 def test_recognition_cancel_fences_late_output_and_accepts_exact_cancel_ack() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     ref = recognition_ref()
-    runtime.start_recognition(ref, timeout_seconds=5)
+    runtime.start_recognition(authorized_request(ref), timeout_seconds=5)
     runtime.accept_audio_frame(frame(ref, seq=0, cursor=0))
     runtime.request_recognition_cancel(ref, reason="local_stop")
     assert_one_provider_cancel(
@@ -883,7 +893,7 @@ def test_recognition_timeout_fences_output_but_accepts_exact_provider_cancel_ack
         native_capability(), enabled=True, monotonic=lambda: now[0]
     )
     ref = recognition_ref()
-    runtime.start_recognition(ref, timeout_seconds=1)
+    runtime.start_recognition(authorized_request(ref), timeout_seconds=1)
     now[0] = 11.0
     assert runtime.expire() == 1
     assert_one_provider_cancel(
@@ -916,18 +926,18 @@ def test_recognition_capacity_is_bounded_and_released_only_after_terminal_cleanu
     )
     first = recognition_ref()
     second = recognition_ref(session_id="recognition-2")
-    runtime.start_recognition(first, timeout_seconds=5)
+    runtime.start_recognition(authorized_request(first), timeout_seconds=5)
     with pytest.raises(StreamingSpeechViolation) as raised:
-        runtime.start_recognition(second, timeout_seconds=5)
+        runtime.start_recognition(authorized_request(second), timeout_seconds=5)
     assert raised.value.reason == "RECOGNITION_CAPACITY_EXHAUSTED"
     runtime.request_recognition_cancel(first)
     runtime.take_provider_controls()
     with pytest.raises(StreamingSpeechViolation) as retained:
-        runtime.start_recognition(second, timeout_seconds=5)
+        runtime.start_recognition(authorized_request(second), timeout_seconds=5)
     assert retained.value.reason == "RECOGNITION_CAPACITY_EXHAUSTED"
     runtime.provider_closed_recognition(first)
     runtime.reap_terminal()
-    runtime.start_recognition(second, timeout_seconds=5)
+    runtime.start_recognition(authorized_request(second), timeout_seconds=5)
     assert runtime.snapshot().active_recognition == 1
     assert_zero_authority_effects(runtime)
 
@@ -938,8 +948,8 @@ def test_synthesis_positive_chunks_preserve_exact_response_unit_and_text_spans()
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     response_ref = response()
     request = synthesis_request(response_ref=response_ref)
-    runtime.activate_response(response_ref)
-    runtime.start_synthesis(request)
+    runtime.activate_response(response_authority(response_ref))
+    runtime.start_synthesis(authorized_request(request))
 
     started = runtime.accept_synthesis_event(
         synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
@@ -995,9 +1005,9 @@ def test_synthesis_positive_chunks_preserve_exact_response_unit_and_text_spans()
 def test_synthesis_units_require_exact_contiguous_sequence_and_unique_id() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     response_ref = response()
-    runtime.activate_response(response_ref)
+    runtime.activate_response(response_authority(response_ref))
     first = synthesis_request(response_ref=response_ref)
-    runtime.start_synthesis(first)
+    runtime.start_synthesis(authorized_request(first))
 
     skipped = synthesis_request(
         response_ref=response_ref,
@@ -1006,7 +1016,7 @@ def test_synthesis_units_require_exact_contiguous_sequence_and_unique_id() -> No
         unit_seq=2,
     )
     with pytest.raises(StreamingSpeechViolation) as gap:
-        runtime.start_synthesis(skipped)
+        runtime.start_synthesis(authorized_request(skipped))
     assert gap.value.reason == "SYNTHESIS_UNIT_SEQUENCE_GAP"
 
     reused = synthesis_request(
@@ -1016,11 +1026,11 @@ def test_synthesis_units_require_exact_contiguous_sequence_and_unique_id() -> No
         unit_seq=1,
     )
     with pytest.raises(StreamingSpeechViolation) as duplicate:
-        runtime.start_synthesis(reused)
+        runtime.start_synthesis(authorized_request(reused))
     assert duplicate.value.reason == "SYNTHESIS_UNIT_REUSED"
 
     second = replace(reused, ref=replace(reused.ref, unit_id="unit-2"))
-    runtime.start_synthesis(second)
+    runtime.start_synthesis(authorized_request(second))
     assert runtime.snapshot().active_synthesis == 2
     assert_zero_authority_effects(runtime)
 
@@ -1029,8 +1039,8 @@ def test_completed_synthesis_unit_id_cannot_be_reused_after_reap() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     response_ref = response()
     request = synthesis_request(response_ref=response_ref, unit_id="unit-retained")
-    runtime.activate_response(response_ref)
-    runtime.start_synthesis(request)
+    runtime.activate_response(response_authority(response_ref))
+    runtime.start_synthesis(authorized_request(request))
     runtime.accept_synthesis_event(
         synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
     )
@@ -1062,7 +1072,7 @@ def test_completed_synthesis_unit_id_cannot_be_reused_after_reap() -> None:
         unit_seq=1,
     )
     with pytest.raises(StreamingSpeechViolation) as raised:
-        runtime.start_synthesis(reused)
+        runtime.start_synthesis(authorized_request(reused))
     assert raised.value.reason == "SYNTHESIS_UNIT_REUSED"
     assert runtime.snapshot().retained_synthesis == 0
     assert runtime.snapshot().retained_synthesis_unit_identities == 1
@@ -1076,8 +1086,8 @@ def test_cancelled_or_closed_synthesis_unit_id_cannot_be_reused_after_reap(
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     response_ref = response()
     request = synthesis_request(response_ref=response_ref, unit_id="unit-retained")
-    runtime.activate_response(response_ref)
-    runtime.start_synthesis(request)
+    runtime.activate_response(response_authority(response_ref))
+    runtime.start_synthesis(authorized_request(request))
     if terminal_kind == "cancelled":
         runtime.accept_synthesis_event(
             synthesis_event(
@@ -1098,7 +1108,7 @@ def test_cancelled_or_closed_synthesis_unit_id_cannot_be_reused_after_reap(
         unit_seq=1,
     )
     with pytest.raises(StreamingSpeechViolation) as raised:
-        runtime.start_synthesis(reused)
+        runtime.start_synthesis(authorized_request(reused))
     assert raised.value.reason == "SYNTHESIS_UNIT_REUSED"
     assert runtime.snapshot().retained_synthesis == 0
     assert runtime.snapshot().retained_synthesis_unit_identities == 1
@@ -1112,7 +1122,7 @@ def test_synthesis_unit_identity_capacity_is_atomic_and_scoped_to_response() -> 
         max_synthesis_units_per_response=2,
     )
     response_ref = response()
-    runtime.activate_response(response_ref)
+    runtime.activate_response(response_authority(response_ref))
     for index in range(2):
         request = synthesis_request(
             response_ref=response_ref,
@@ -1120,7 +1130,7 @@ def test_synthesis_unit_identity_capacity_is_atomic_and_scoped_to_response() -> 
             unit_id=f"unit-{index}",
             unit_seq=index,
         )
-        runtime.start_synthesis(request)
+        runtime.start_synthesis(authorized_request(request))
         runtime.provider_closed_synthesis(request.ref)
         assert runtime.reap_terminal() == (0, 1)
 
@@ -1132,24 +1142,25 @@ def test_synthesis_unit_identity_capacity_is_atomic_and_scoped_to_response() -> 
         unit_seq=2,
     )
     with pytest.raises(StreamingSpeechViolation) as capacity:
-        runtime.start_synthesis(overflow)
+        runtime.start_synthesis(authorized_request(overflow))
     assert capacity.value.reason == "SYNTHESIS_UNIT_IDENTITY_CAPACITY_EXHAUSTED"
     after = runtime.snapshot()
     assert after.retained_synthesis == 0
     assert after.retained_identity_tombstones == before.retained_identity_tombstones
-    assert before.retained_synthesis_unit_identities == 2
+    assert before.retained_synthesis_unit_identities == 0
+    assert len(response_authority(response_ref)._used_units) == 2
     assert after.retained_synthesis_unit_identities == 2
     assert after.pending_provider_controls == 0
 
     replacement_response = response(response_id="response-2", generation=1)
-    runtime.activate_response(replacement_response)
+    runtime.activate_response(response_authority(replacement_response))
     replacement = synthesis_request(
         response_ref=replacement_response,
         stream_id="synthesis-replacement",
         unit_id="unit-0",
         unit_seq=0,
     )
-    runtime.start_synthesis(replacement)
+    runtime.start_synthesis(authorized_request(replacement))
     assert runtime.snapshot().active_synthesis == 1
     assert runtime.snapshot().retained_synthesis_unit_identities == 1
     assert_zero_authority_effects(runtime)
@@ -1215,8 +1226,8 @@ def test_synthesis_order_start_cursor_and_provider_faults_fail_close(
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     response_ref = response()
     request = synthesis_request(response_ref=response_ref)
-    runtime.activate_response(response_ref)
-    runtime.start_synthesis(request)
+    runtime.activate_response(response_authority(response_ref))
+    runtime.start_synthesis(authorized_request(request))
     with pytest.raises(StreamingSpeechViolation) as raised:
         runtime.accept_synthesis_event(bad_event(request))
     assert raised.value.reason == reason
@@ -1255,8 +1266,8 @@ def test_synthesis_chunk_payload_and_span_faults_fail_close(
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     response_ref = response()
     request = synthesis_request(response_ref=response_ref)
-    runtime.activate_response(response_ref)
-    runtime.start_synthesis(request)
+    runtime.activate_response(response_authority(response_ref))
+    runtime.start_synthesis(authorized_request(request))
     runtime.accept_synthesis_event(
         synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
     )
@@ -1284,8 +1295,8 @@ def test_duplicate_synthesis_event_fails_close_after_started() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     response_ref = response()
     request = synthesis_request(response_ref=response_ref)
-    runtime.activate_response(response_ref)
-    runtime.start_synthesis(request)
+    runtime.activate_response(response_authority(response_ref))
+    runtime.start_synthesis(authorized_request(request))
     started = synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
     runtime.accept_synthesis_event(started)
     with pytest.raises(StreamingSpeechViolation) as raised:
@@ -1303,8 +1314,8 @@ def test_incomplete_synthesis_completion_fails_closed() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     response_ref = response()
     request = synthesis_request(response_ref=response_ref)
-    runtime.activate_response(response_ref)
-    runtime.start_synthesis(request)
+    runtime.activate_response(response_authority(response_ref))
+    runtime.start_synthesis(authorized_request(request))
     runtime.accept_synthesis_event(
         synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
     )
@@ -1336,8 +1347,8 @@ def test_wrong_synthesis_response_unit_identity_fails_exact_stream() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     response_ref = response()
     request = synthesis_request(response_ref=response_ref)
-    runtime.activate_response(response_ref)
-    runtime.start_synthesis(request)
+    runtime.activate_response(response_authority(response_ref))
+    runtime.start_synthesis(authorized_request(request))
     foreign_ref = replace(request.ref, unit_id="foreign-unit")
     foreign_event = replace(
         synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED),
@@ -1358,8 +1369,8 @@ def test_stale_synthesis_generation_does_not_fence_current_generation() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     first_response = response()
     first = synthesis_request(response_ref=first_response)
-    runtime.activate_response(first_response)
-    runtime.start_synthesis(first)
+    runtime.activate_response(response_authority(first_response))
+    runtime.start_synthesis(authorized_request(first))
     runtime.provider_closed_synthesis(first.ref)
     runtime.reap_terminal()
 
@@ -1368,8 +1379,8 @@ def test_stale_synthesis_generation_does_not_fence_current_generation() -> None:
         response_ref=second_response,
         stream_generation=1,
     )
-    runtime.activate_response(second_response)
-    runtime.start_synthesis(second)
+    runtime.activate_response(response_authority(second_response))
+    runtime.start_synthesis(authorized_request(second))
     with pytest.raises(StreamingSpeechViolation) as raised:
         runtime.accept_synthesis_event(
             synthesis_event(first, seq=0, cursor=0, kind=SynthesisEventKind.CANCELLED)
@@ -1386,14 +1397,14 @@ def test_new_response_fences_old_chunks_but_not_new_stream() -> None:
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     first_response = response()
     first = synthesis_request(response_ref=first_response)
-    runtime.activate_response(first_response)
-    runtime.start_synthesis(first)
+    runtime.activate_response(response_authority(first_response))
+    runtime.start_synthesis(authorized_request(first))
     runtime.accept_synthesis_event(
         synthesis_event(first, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
     )
 
     second_response = response(response_id="response-2", generation=1)
-    runtime.activate_response(second_response)
+    runtime.activate_response(response_authority(second_response))
     assert_one_provider_cancel(
         runtime,
         kind=ProviderControlKind.CANCEL_SYNTHESIS,
@@ -1418,7 +1429,7 @@ def test_new_response_fences_old_chunks_but_not_new_stream() -> None:
         stream_id="synthesis-2",
         unit_id="unit-2",
     )
-    runtime.start_synthesis(second)
+    runtime.start_synthesis(authorized_request(second))
     runtime.accept_synthesis_event(
         synthesis_event(second, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
     )
@@ -1430,8 +1441,8 @@ def test_synthesis_cancel_and_noncooperative_provider_retained_cleanup() -> None
     runtime = StreamingSpeechConformance(native_capability(), enabled=True)
     response_ref = response()
     request = synthesis_request(response_ref=response_ref)
-    runtime.activate_response(response_ref)
-    runtime.start_synthesis(request)
+    runtime.activate_response(response_authority(response_ref))
+    runtime.start_synthesis(authorized_request(request))
     runtime.request_synthesis_cancel(request.ref, reason="local_hard_stop")
     assert_one_provider_cancel(
         runtime,
@@ -1457,8 +1468,8 @@ def test_synthesis_cancel_accepts_exact_provider_ack_after_deadline() -> None:
     )
     response_ref = response()
     request = synthesis_request(response_ref=response_ref, event_timeout_seconds=1)
-    runtime.activate_response(response_ref)
-    runtime.start_synthesis(request)
+    runtime.activate_response(response_authority(response_ref))
+    runtime.start_synthesis(authorized_request(request))
     runtime.request_synthesis_cancel(request.ref)
     assert_one_provider_cancel(
         runtime,
@@ -1487,8 +1498,8 @@ def test_synthesis_event_timeout_slides_after_each_valid_event() -> None:
     )
     response_ref = response()
     request = synthesis_request(response_ref=response_ref, event_timeout_seconds=1)
-    runtime.activate_response(response_ref)
-    runtime.start_synthesis(request)
+    runtime.activate_response(response_authority(response_ref))
+    runtime.start_synthesis(authorized_request(request))
 
     now[0] = 3.75
     runtime.accept_synthesis_event(
@@ -1530,15 +1541,17 @@ def test_synthesis_timeout_and_capacity_are_bounded() -> None:
     )
     first_response = response()
     first = synthesis_request(response_ref=first_response, event_timeout_seconds=1)
-    runtime.activate_response(first_response)
-    runtime.start_synthesis(first)
+    runtime.activate_response(response_authority(first_response))
+    runtime.start_synthesis(authorized_request(first))
     with pytest.raises(StreamingSpeechViolation) as capacity:
         runtime.start_synthesis(
-            synthesis_request(
-                response_ref=first_response,
-                stream_id="synthesis-2",
-                unit_id="unit-2",
-                unit_seq=1,
+            authorized_request(
+                synthesis_request(
+                    response_ref=first_response,
+                    stream_id="synthesis-2",
+                    unit_id="unit-2",
+                    unit_seq=1,
+                )
             )
         )
     assert capacity.value.reason == "SYNTHESIS_CAPACITY_EXHAUSTED"
@@ -1553,54 +1566,31 @@ def test_synthesis_timeout_and_capacity_are_bounded() -> None:
     runtime.provider_closed_synthesis(first.ref)
     runtime.reap_terminal()
     second_response = response(response_id="response-2", generation=1)
-    runtime.activate_response(second_response)
+    runtime.activate_response(response_authority(second_response))
     second = synthesis_request(
         response_ref=second_response,
         stream_id="synthesis-2",
         unit_id="unit-2",
     )
-    runtime.start_synthesis(second)
+    runtime.start_synthesis(authorized_request(second))
     assert runtime.snapshot().active_synthesis == 1
     assert_zero_authority_effects(runtime)
 
 
-def test_response_identity_capacity_fails_closed_without_evicting_prior_identity() -> (
-    None
-):
-    runtime = StreamingSpeechConformance(
-        native_capability(), enabled=True, max_identity_tombstones=2
-    )
-    unused = response()
-    runtime.activate_response(unused)
-    current = ResponseRef("interaction-2", "response-2", 0)
-    runtime.activate_response(current)
-
-    request = synthesis_request(response_ref=current)
-    runtime.start_synthesis(request)
-    next_current = ResponseRef("interaction-2", "response-3", 1)
-    with pytest.raises(StreamingSpeechViolation) as response_ids_full:
-        runtime.activate_response(next_current)
-    assert response_ids_full.value.reason == "RESPONSE_IDENTITY_CAPACITY_EXHAUSTED"
-
-    foreign = ResponseRef("interaction-3", "response-3", 0)
-    with pytest.raises(StreamingSpeechViolation) as interactions_full:
-        runtime.activate_response(foreign)
-    assert interactions_full.value.reason == "RESPONSE_IDENTITY_CAPACITY_EXHAUSTED"
-
-    reused = ResponseRef("interaction-1", "response-1", 1)
-    with pytest.raises(StreamingSpeechViolation) as reused_id:
-        runtime.activate_response(reused)
-    assert reused_id.value.reason == "RESPONSE_ID_REUSED"
-
-    prior = synthesis_request(
-        response_ref=unused,
-        stream_id="synthesis-prior",
-    )
-    runtime.start_synthesis(prior)
-    runtime.accept_synthesis_event(
-        synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
-    )
-    assert runtime.snapshot().active_synthesis == 2
+def test_response_reclamation_never_reactivates_revoked_authority():
+    runtime = StreamingSpeechConformance(native_capability(), enabled=True)
+    old = response_authority(response())
+    runtime.activate_response(old)
+    for index in range(1, 512):
+        current = response_authority(
+            response(response_id=f"r-{index}", generation=index)
+        )
+        runtime.activate_response(current)
+        assert len(runtime._active_responses) == 1
+    with pytest.raises(StreamingSpeechViolation) as denied:
+        runtime.activate_response(old)
+    assert denied.value.reason == "SPEECH_AUTHORITY_EXPIRED"
+    assert runtime.snapshot().active_synthesis == 0
     assert_zero_authority_effects(runtime)
 
 
@@ -1609,9 +1599,9 @@ def test_close_fences_new_work_and_retains_both_provider_sessions() -> None:
     recognition = recognition_ref()
     response_ref = response()
     synthesis = synthesis_request(response_ref=response_ref)
-    runtime.start_recognition(recognition, timeout_seconds=5)
-    runtime.activate_response(response_ref)
-    runtime.start_synthesis(synthesis)
+    runtime.start_recognition(authorized_request(recognition), timeout_seconds=5)
+    runtime.activate_response(response_authority(response_ref))
+    runtime.start_synthesis(authorized_request(synthesis))
 
     closed = runtime.close()
     assert closed.closed is True
@@ -1625,7 +1615,8 @@ def test_close_fences_new_work_and_retains_both_provider_sessions() -> None:
     assert all(control.business_cancel is False for control in controls)
     with pytest.raises(StreamingSpeechViolation) as after_close:
         runtime.start_recognition(
-            recognition_ref(session_id="recognition-2"), timeout_seconds=5
+            authorized_request(recognition_ref(session_id="recognition-2")),
+            timeout_seconds=5,
         )
     assert after_close.value.reason == "STREAMING_SPEECH_CLOSED"
 
@@ -1637,129 +1628,57 @@ def test_close_fences_new_work_and_retains_both_provider_sessions() -> None:
     assert_zero_authority_effects(runtime)
 
 
-def test_recognition_identity_capacity_never_evicts_or_allows_exact_aba() -> None:
+def test_recognition_retirement_allows_unbounded_sequential_use_but_no_replay():
     runtime = StreamingSpeechConformance(
-        native_capability(),
-        enabled=True,
-        max_identity_tombstones=2,
+        native_capability(), enabled=True, max_recognition_sessions=1
     )
-    admitted: list[RecognitionStreamRef] = []
-    for index in range(2):
-        ref = recognition_ref(session_id=f"recognition-{index}")
-        admitted.append(ref)
-        runtime.start_recognition(ref, timeout_seconds=5)
-        runtime.provider_closed_recognition(ref)
+    first = None
+    for index in range(512):
+        request = authorized_request(recognition_ref(session_id=f"capture-{index}"))
+        first = first or request
+        runtime.start_recognition(request, timeout_seconds=5)
+        runtime.provider_closed_recognition(request.ref)
         assert runtime.reap_terminal() == (1, 0)
-
-    assert runtime.snapshot().retained_identity_tombstones == 2
-    assert runtime.snapshot().retained_recognition == 0
-    with pytest.raises(StreamingSpeechViolation) as capacity:
-        runtime.start_recognition(
-            recognition_ref(session_id="recognition-new"), timeout_seconds=5
+        assert runtime.snapshot().retained_recognition == 0
+        assert runtime.snapshot().retained_identity_tombstones == 0
+    with pytest.raises(StreamingSpeechViolation) as denied:
+        runtime.start_recognition(first, timeout_seconds=5)
+    assert denied.value.reason == "SPEECH_AUTHORITY_EXPIRED"
+    replacement = authorized_request(
+        recognition_ref(
+            session_id=first.ref.session_id, session_generation=1, capture_generation=1
         )
-    assert capacity.value.reason == "RECOGNITION_IDENTITY_CAPACITY_EXHAUSTED"
-
-    exact_old = admitted[0]
-    with pytest.raises(StreamingSpeechViolation) as stale:
-        runtime.start_recognition(exact_old, timeout_seconds=5)
-    assert stale.value.reason == "STALE_RECOGNITION_GENERATION"
-
-    replacement = recognition_ref(
-        session_id=exact_old.session_id,
-        session_generation=1,
-        capture_id=exact_old.capture.capture_id,
-        capture_generation=1,
     )
     runtime.start_recognition(replacement, timeout_seconds=5)
-    with pytest.raises(StreamingSpeechViolation) as late_old:
-        runtime.provider_closed_recognition(exact_old)
-    assert late_old.value.reason == "STALE_RECOGNITION_SESSION"
-    runtime.accept_audio_frame(frame(replacement, seq=0, cursor=0))
+    with pytest.raises(StreamingSpeechViolation):
+        runtime.provider_closed_recognition(first.ref)
+    runtime.accept_audio_frame(frame(replacement.ref, seq=0, cursor=0))
     assert runtime.snapshot().active_recognition == 1
-    runtime.provider_closed_recognition(replacement)
-    assert runtime.reap_terminal() == (1, 0)
-    assert runtime.snapshot().retained_recognition == 0
-
-    with pytest.raises(StreamingSpeechViolation) as still_full:
-        runtime.start_recognition(
-            recognition_ref(session_id="recognition-new"), timeout_seconds=5
-        )
-    assert still_full.value.reason == "RECOGNITION_IDENTITY_CAPACITY_EXHAUSTED"
+    runtime.provider_closed_recognition(replacement.ref)
+    runtime.reap_terminal()
     assert_zero_authority_effects(runtime)
 
 
-def test_synthesis_identity_capacity_never_evicts_or_allows_exact_aba() -> None:
-    runtime = StreamingSpeechConformance(
-        native_capability(),
-        enabled=True,
-        max_identity_tombstones=2,
-    )
-    response_ref = response()
-    runtime.activate_response(response_ref)
 
-    admitted: list[SynthesisStreamRequest] = []
-    for index in range(2):
-        request = synthesis_request(
-            response_ref=response_ref,
-            stream_id=f"synthesis-{index}",
-            unit_id=f"unit-{index}",
-            unit_seq=index,
+def test_synthesis_retirement_allows_many_responses_but_never_replays_old_request():
+    runtime = StreamingSpeechConformance(native_capability(), enabled=True)
+    first = None
+    for index in range(512):
+        ref = response(response_id=f"reply-{index}", generation=index)
+        runtime.activate_response(response_authority(ref))
+        request = authorized_request(
+            synthesis_request(response_ref=ref, stream_id=f"speech-{index}")
         )
-        admitted.append(request)
+        first = first or request
         runtime.start_synthesis(request)
         runtime.provider_closed_synthesis(request.ref)
         assert runtime.reap_terminal() == (0, 1)
-
-    assert runtime.snapshot().retained_synthesis == 0
-    new_identity = synthesis_request(
-        response_ref=response_ref,
-        stream_id="synthesis-new",
-        unit_id="unit-new",
-        unit_seq=2,
-    )
-    with pytest.raises(StreamingSpeechViolation) as capacity:
-        runtime.start_synthesis(new_identity)
-    assert capacity.value.reason == "SYNTHESIS_IDENTITY_CAPACITY_EXHAUSTED"
-
-    exact_old = admitted[0]
-    replacement = synthesis_request(
-        response_ref=response_ref,
-        stream_id=exact_old.ref.stream_id,
-        stream_generation=1,
-        unit_id="unit-replacement",
-        unit_seq=2,
-    )
-    runtime.start_synthesis(replacement)
-    with pytest.raises(StreamingSpeechViolation) as late_old:
-        runtime.accept_synthesis_event(
-            synthesis_event(
-                exact_old,
-                seq=0,
-                cursor=0,
-                kind=SynthesisEventKind.CANCELLED,
-            )
-        )
-    assert late_old.value.reason == "STALE_SYNTHESIS_STREAM"
-    runtime.accept_synthesis_event(
-        synthesis_event(
-            replacement,
-            seq=0,
-            cursor=0,
-            kind=SynthesisEventKind.STARTED,
-        )
-    )
-    assert runtime.snapshot().active_synthesis == 1
-    runtime.provider_closed_synthesis(replacement.ref)
-    assert runtime.reap_terminal() == (0, 1)
-    assert runtime.snapshot().retained_synthesis == 0
-
-    still_new_identity = synthesis_request(
-        response_ref=response_ref,
-        stream_id="synthesis-new",
-        unit_id="unit-new",
-        unit_seq=3,
-    )
-    with pytest.raises(StreamingSpeechViolation) as still_full:
-        runtime.start_synthesis(still_new_identity)
-    assert still_full.value.reason == "SYNTHESIS_IDENTITY_CAPACITY_EXHAUSTED"
+        assert runtime.snapshot().retained_synthesis == 0
+        assert runtime.snapshot().retained_identity_tombstones == 0
+        assert runtime._active_responses == {}
+    with pytest.raises(StreamingSpeechViolation):
+        runtime.start_synthesis(first)
+    with pytest.raises(StreamingSpeechViolation):
+        runtime.provider_closed_synthesis(first.ref)
+    assert runtime.snapshot().active_synthesis == 0
     assert_zero_authority_effects(runtime)

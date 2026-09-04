@@ -14,6 +14,13 @@ from typing import Any
 
 import pytest
 
+from tests.unit_tests.live_voice.speech_authority_support import (
+    authorized_request,
+    response_authority,
+    begin_recognition,
+    speech_test_issuer,
+)
+
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance
 from jiuwenswarm.gateway.live_voice import dedicated_media_registration
 from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
@@ -106,7 +113,7 @@ class _Provider:
     async def open_synthesis(self, request: SynthesisStreamRequest) -> None:
         if self.fail_open:
             raise OSError("private provider open failure")
-        self._conformance.start_synthesis(request)
+        self._conformance.start_synthesis(authorized_request(request))
         self.requests.append(request)
         self.events.put_nowait(_event(request, 0, 0, SynthesisEventKind.STARTED))
         self.events.put_nowait(
@@ -180,7 +187,7 @@ class _DelayedFirstAudioProvider(_Provider):
         self._pending_request: SynthesisStreamRequest | None = None
 
     async def open_synthesis(self, request: SynthesisStreamRequest) -> None:
-        self._conformance.start_synthesis(request)
+        self._conformance.start_synthesis(authorized_request(request))
         self.requests.append(request)
         self._pending_request = request
         self.events.put_nowait(_event(request, 0, 0, SynthesisEventKind.STARTED))
@@ -1241,3 +1248,61 @@ async def test_success_emits_completion_xobs_but_cancel_is_not_degradation() -> 
     assert cancel_collector.metrics() == ()
     assert cancel_registry.close_streaming_diagnostics() is True
     await cancel_owner.close()
+
+
+@pytest.mark.asyncio
+async def test_activation_renewal_preserves_consumed_speech_authority_after_retirement():
+    provider = _Provider()
+    registry, owner, context, params = _authorized_registry(provider)
+    batch = _Batch()
+    result = await registry.try_streaming_synthesis(
+        "speech.synthesize.batch",
+        params,
+        context,
+        "session-1",
+        batch_service=batch,
+    )
+    audio = result["result"]["audio"]
+    downlink = registry.consume_ticket(
+        str(audio["media_ticket"]), request_origin=ORIGIN
+    )
+    source = downlink.downlink_stream_source
+    async for _frame in source:
+        pass
+    assert source.completed
+    assert owner._retained_bindings == owner._known_handles == {}
+    key = ("session-1", "connection-1", "interaction-1")
+    authority = registry._product_activations[key].streaming_response_authorities[0]
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "active",
+                "session_id": "session-1",
+                "correlation_id": "correlation-1",
+                "interaction_id": "interaction-1",
+                "activation_id": "activation-1",
+                "activation_generation": 1,
+            },
+            "product_composition": _product_manifest(),
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+        request_method="live_voice.composition.p2.activate",
+    )
+    assert (
+        registry._product_activations[key].streaming_response_authorities[0]
+        is authority
+    )
+    replay = await registry.try_streaming_synthesis(
+        "speech.synthesize.batch",
+        params,
+        context,
+        "session-1",
+        batch_service=batch,
+    )
+    assert replay["error"]["reason"] == "MEDIA_STREAMING_TTS_AUTHORITY_EXPIRED"
+    assert len(provider.requests) == 1 and batch.calls == 0
+    assert provider.conformance.snapshot().task_mutations == 0
+    await owner.close()

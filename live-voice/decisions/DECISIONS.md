@@ -1799,3 +1799,33 @@
   The user's latest instruction explicitly excludes restarting or redeploying
   services for this repair. Source verification is separate from real-model,
   microphone/speaker and full Demo acceptance.
+
+## D-113 Streaming Speech admission and resource lifetimes
+
+- Date: 2026-09-04. The user authorizes removing the process-lifetime cumulative
+  64-identity failure through lifecycle ownership, not a larger cap, periodic
+  reset, adapter recreation or unauthenticated eviction. Provider clients remain
+  reusable. New capture and synthesis allocation requires a content/exact-ref
+  bound local grant issued once by the existing Media authority; consuming or
+  revoking a grant cannot be undone by reclaiming Provider records.
+- This is a Tier-3 in-process port change. Current Media records and Runtime
+  activation/response generation remain the authority. The live activation owns
+  the current response fence; renewal preserves it. Exact response authorities
+  own unit ordering and bounded unit replay state. Closed stream IDs and past
+  responses no longer accumulate in the Provider or synthesis route. There is
+  no new browser wire schema, business policy, classifier or Store migration.
+- Tier-2 resource accounting includes opening/live streams, unconsumed terminal
+  queues and bounded unfinished transport/worker cleanup. One stream's retirement
+  cannot reap another consumer's result. Delayed cleanup completion releases
+  route capacity through its completion event. A failed cleanup remains counted;
+  caller cancellation is not proof of closure. Current response authority also
+  fences audio already queued before revocation.
+- Typed local capacity, cleanup and expired-authority reasons remain distinct
+  from Provider protocol failures. Expired authority cannot enable batch fallback.
+  No Agent/Tool/Task/history mutation authority is added. Tests exercise the real
+  local Registry/route/Adapter seam with simulated wire faults; this grants no
+  physical microphone, speaker, remote Provider or complete Demo acceptance.
+- Scope and exact verification belong to the
+  [bounded lifecycle evidence](../evidence/SPEECH_LIFECYCLE_REPAIR_20260904.md).
+  Deployment, Provider/account changes and remote updates remain excluded by the
+  user's instructions; source completion does not update the running service.

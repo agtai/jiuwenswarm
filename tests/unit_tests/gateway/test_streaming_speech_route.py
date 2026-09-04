@@ -11,6 +11,13 @@ import traceback
 
 import pytest
 
+from tests.unit_tests.live_voice.speech_authority_support import (
+    authorized_request,
+    response_authority,
+    begin_recognition,
+    speech_test_issuer,
+)
+
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MEDIA_END_OF_TURN_CAPABILITY,
     MediaAudioFrame,
@@ -344,7 +351,7 @@ async def test_streaming_owner_mirrors_exact_frames_and_returns_one_final() -> N
         )
     )
 
-    handle, fallback = await owner.begin(_binding())
+    handle, fallback = await begin_recognition(owner, _binding())
     assert handle is not None
     assert fallback is None
     owner.offer(handle, _frame(0))
@@ -370,8 +377,8 @@ async def test_server_vad_eot_fences_frames_and_finish_coalesces_provider_commit
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    handle, fallback = await owner.begin(
-        _binding(), turn_detection=RecognitionTurnDetection.server_vad_default()
+    handle, fallback = await begin_recognition(
+        owner, _binding(), turn_detection=RecognitionTurnDetection.server_vad_default()
     )
     assert handle is not None
     assert fallback is None
@@ -456,8 +463,8 @@ async def test_manual_finish_and_server_eot_coalesce_when_eot_cancels_the_pump()
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    handle, fallback = await owner.begin(
-        _binding(), turn_detection=RecognitionTurnDetection.server_vad_default()
+    handle, fallback = await begin_recognition(
+        owner, _binding(), turn_detection=RecognitionTurnDetection.server_vad_default()
     )
     assert handle is not None
     assert fallback is None
@@ -627,8 +634,8 @@ async def test_server_vad_request_fails_before_unsupported_provider_allocation()
         )
     )
 
-    handle, fallback = await owner.begin(
-        _binding(), turn_detection=RecognitionTurnDetection.server_vad_default()
+    handle, fallback = await begin_recognition(
+        owner, _binding(), turn_detection=RecognitionTurnDetection.server_vad_default()
     )
 
     assert handle is None
@@ -659,7 +666,7 @@ async def test_streaming_owner_feature_off_is_visible_and_has_zero_provider() ->
     )
 
     assert await owner.available() is False
-    handle, fallback = await owner.begin(_binding())
+    handle, fallback = await begin_recognition(owner, _binding())
     assert handle is None
     assert fallback is not None
     assert fallback.fallback_tier is SpeechRouteTier.BATCH
@@ -735,7 +742,7 @@ async def test_streaming_owner_queue_exhaustion_falls_back_without_dropping_capt
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    handle, _ = await owner.begin(_binding())
+    handle, _ = await begin_recognition(owner, _binding())
     assert handle is not None
 
     overflow_frame_count = streaming_speech_route._MAX_PENDING_PROVIDER_FRAMES + 2
@@ -763,7 +770,7 @@ async def test_streaming_owner_rejects_non_exact_provider_final(defect: str) -> 
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    handle, _ = await owner.begin(_binding())
+    handle, _ = await begin_recognition(owner, _binding())
     assert handle is not None
     owner.offer(handle, _frame(0))
 
@@ -804,7 +811,7 @@ async def test_invalid_provider_event_traceback_does_not_retain_transcript() -> 
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    handle, _ = await owner.begin(_binding())
+    handle, _ = await begin_recognition(owner, _binding())
     assert handle is not None
     owner.offer(handle, _frame(0))
 
@@ -849,7 +856,7 @@ async def test_streaming_owner_rejects_non_contiguous_product_frame_before_wire(
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    handle, _ = await owner.begin(_binding())
+    handle, _ = await begin_recognition(owner, _binding())
     assert handle is not None
     owner.offer(handle, _frame(1))
     outcome = await owner.finish(handle)
@@ -878,7 +885,7 @@ async def test_streaming_owner_revoke_cancels_a_finish_waiting_on_provider_commi
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    handle, _ = await owner.begin(_binding())
+    handle, _ = await begin_recognition(owner, _binding())
     assert handle is not None
     owner.offer(handle, _frame(0))
     finishing = asyncio.create_task(owner.finish(handle))
@@ -910,7 +917,7 @@ async def test_streaming_owner_caller_cancel_retires_exact_provider_stream() -> 
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    handle, _ = await owner.begin(_binding())
+    handle, _ = await begin_recognition(owner, _binding())
     assert handle is not None
     owner.offer(handle, _frame(0))
     finishing = asyncio.create_task(owner.finish(handle))
@@ -940,7 +947,7 @@ async def test_precommit_event_wait_outlives_short_final_deadline(
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    handle, _ = await owner.begin(_binding())
+    handle, _ = await begin_recognition(owner, _binding())
     assert handle is not None
 
     await asyncio.sleep(0.1)
@@ -962,8 +969,8 @@ async def test_server_vad_final_may_arrive_before_browser_finish() -> None:
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    handle, fallback = await owner.begin(
-        _binding(), turn_detection=RecognitionTurnDetection.server_vad_default()
+    handle, fallback = await begin_recognition(
+        owner, _binding(), turn_detection=RecognitionTurnDetection.server_vad_default()
     )
     assert handle is not None
     assert fallback is None
@@ -1049,7 +1056,7 @@ async def test_provider_session_budget_covers_precommit_and_final_windows(
         )
     )
 
-    handle, fallback = await owner.begin(_binding())
+    handle, fallback = await begin_recognition(owner, _binding())
 
     assert handle is not None
     assert fallback is None
@@ -1084,7 +1091,7 @@ async def test_streaming_owner_capacity_rejects_before_second_provider_allocatio
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    first, first_fallback = await owner.begin(_binding())
+    first, first_fallback = await begin_recognition(owner, _binding())
     assert first is not None
     assert first_fallback is None
     second_binding = replace(
@@ -1093,7 +1100,7 @@ async def test_streaming_owner_capacity_rejects_before_second_provider_allocatio
         generation=MediaGenerationBinding(MediaGenerationKind.CAPTURE, "capture-2", 0),
     )
 
-    second, second_fallback = await owner.begin(second_binding)
+    second, second_fallback = await begin_recognition(owner, second_binding)
 
     assert second is None
     assert second_fallback is not None
@@ -1113,7 +1120,7 @@ async def test_streaming_owner_close_aborts_every_exact_active_stream() -> None:
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    handle, fallback = await owner.begin(_binding())
+    handle, fallback = await begin_recognition(owner, _binding())
     assert handle is not None
     assert fallback is None
     owner.offer(handle, _frame(0))
@@ -1135,7 +1142,7 @@ async def test_streaming_owner_close_settles_cooperative_open_reservation() -> N
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    beginning = asyncio.create_task(owner.begin(_binding()))
+    beginning = asyncio.create_task(begin_recognition(owner, _binding()))
     await provider.open_started.wait()
 
     await owner.close()
@@ -1182,7 +1189,7 @@ async def test_streaming_owner_close_reports_cancellation_hostile_open_until_set
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    beginning = asyncio.create_task(owner.begin(_binding()))
+    beginning = asyncio.create_task(begin_recognition(owner, _binding()))
     await open_started.wait()
 
     with pytest.raises(RuntimeError, match="cleanup is incomplete"):
@@ -1242,7 +1249,7 @@ async def test_streaming_owner_hard_bounds_provider_send_that_swallows_cancel(
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    handle, _ = await owner.begin(_binding())
+    handle, _ = await begin_recognition(owner, _binding())
     assert handle is not None
     owner.offer(handle, _frame(0))
 
@@ -1679,7 +1686,7 @@ async def test_streaming_owner_close_rethrows_process_control_after_active_clean
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    handle, fallback = await owner.begin(_binding())
+    handle, fallback = await begin_recognition(owner, _binding())
     assert handle is not None
     assert fallback is None
 
@@ -1756,14 +1763,16 @@ async def test_streaming_owner_open_process_control_releases_reserved_identity()
     )
 
     with pytest.raises(GeneratorExit) as raised:
-        await owner.begin(_binding())
+        await begin_recognition(owner, _binding())
     assert raised.value.args == ()
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
     assert owner._handles == {}
     assert owner._provider_task_capacity_in_use == 0
 
-    handle, fallback = await owner.begin(_binding())
+    handle, fallback = await begin_recognition(
+        owner, replace(_binding(), media_session_id="replacement-media")
+    )
     assert handle is not None
     assert fallback is None
     await owner.abort(handle)
@@ -1784,7 +1793,7 @@ async def test_streaming_owner_finish_process_control_retires_exact_stream() -> 
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    handle, fallback = await owner.begin(_binding())
+    handle, fallback = await begin_recognition(owner, _binding())
     assert handle is not None
     assert fallback is None
     owner.offer(handle, _frame(0))
@@ -3106,3 +3115,26 @@ def test_streaming_outcome_repr_never_contains_transcript() -> None:
         reason=None,
     )
     assert "PRIVATE_TRANSCRIPT" not in repr(outcome)
+
+
+@pytest.mark.asyncio
+async def test_expired_stream_authority_never_advertises_batch_replay_even_with_sealed_audio():
+    registry = DedicatedMediaProductRegistry(enabled=True)
+    registry.set_provider_available(True)
+    params = _prepare_fallback_result_authority(registry, index=1)
+    record = registry._records[registry._subjects[("session-1", params["subject_id"])]]
+    assert record.route_completed and record.accepted_frames > 0
+    assert record.recognition_content_sha256 is not None
+    record.streaming_recognition_outcome = registry._streaming_fallback(
+        StreamingRecognitionFallbackReason.AUTHORITY_EXPIRED
+    )
+    result = await registry.streaming_recognition_result(
+        params=params,
+        routed_session_id="session-1",
+        connection_id="connection-1",
+        request_origin="https://voice.example.test",
+    )
+    assert result["fallback_tier"] == "text"
+    assert result["reason_id"] == "STREAMING_SPEECH_AUTHORITY_EXPIRED"
+    assert record.streaming_voice_commit_receipt is None
+    registry.close_streaming_observability()

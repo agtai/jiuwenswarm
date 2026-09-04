@@ -16,6 +16,7 @@ import inspect
 import logging
 import math
 import struct
+import weakref
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -46,6 +47,8 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
     ProviderTransport,
     StreamingProviderCapability,
     StreamingSpeechViolation,
+    SpeechResponseAuthority,
+    require_stream_authority,
     StreamingSynthesisEvent,
     SynthesisStreamRef,
     SynthesisStreamRequest,
@@ -60,7 +63,6 @@ _DEFAULT_OPEN_TIMEOUT_SECONDS = 15.0
 _DEFAULT_EVENT_TIMEOUT_SECONDS = 20.0
 _DEFAULT_QUEUE_WAIT_SECONDS = 2.0
 _PROVIDER_CLEANUP_TIMEOUT_SECONDS = 5.0
-_MAX_ROUTE_IDENTITIES = 256
 _DEFAULT_MAX_RETAINED_TASKS = 32
 _CLEANUP_TASK_RESERVE = 4
 _PROCESS_CONTROL = (KeyboardInterrupt, SystemExit, GeneratorExit)
@@ -299,6 +301,9 @@ class StreamingSynthesisReason(StrEnum):
     ROUTE_ABORTED = "STREAMING_SYNTHESIS_ROUTE_ABORTED"
     RESPONSE_SUPERSEDED = "STREAMING_SYNTHESIS_RESPONSE_SUPERSEDED"
     OWNER_CLOSED = "STREAMING_SYNTHESIS_OWNER_CLOSED"
+    RESOURCE_CAPACITY = "STREAMING_SPEECH_RESOURCE_CAPACITY"
+    CLEANUP_INCOMPLETE = "STREAMING_SPEECH_CLEANUP_INCOMPLETE"
+    AUTHORITY_EXPIRED = "STREAMING_SPEECH_AUTHORITY_EXPIRED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,7 +475,7 @@ class _CloseResult:
 _QueueValue = StreamingSynthesisChunk | _TerminalSignal
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, weakref_slot=True)
 class StreamingSynthesisHandle:
     ref: SynthesisStreamRef
     request_binding_ref: str
@@ -498,6 +503,17 @@ class StreamingSynthesisHandle:
     terminal_delivered: bool = False
     fenced: bool = False
     outcome: StreamingSynthesisOutcome | None = None
+    _ownership: (
+        tuple[object, StreamingSynthesisScopeIdentity, SynthesisStreamRef, str] | None
+    ) = field(default=None, init=False, repr=False, compare=False)
+    _owned_instance: weakref.ReferenceType[StreamingSynthesisHandle] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    response_authority: SpeechResponseAuthority | None = field(default=None, repr=False)
+    _retirement_watch: tuple[object, object] | None = field(
+        default=None, init=False, repr=False
+    )
+    _retirement_provider_required: bool = field(default=False, init=False, repr=False)
     cleanup_complete: bool = False
     cleanup_done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     terminal_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -554,6 +570,7 @@ class StreamingSynthesisRouteOwner:
         self._active: dict[_ScopedStreamKey, StreamingSynthesisHandle] = {}
         self._opening: dict[_ScopedStreamKey, asyncio.Task[object]] = {}
         self._opening_responses: dict[_ScopedStreamKey, ResponseRef] = {}
+        self._handle_owner_token = object()
         self._current_responses: dict[_ScopedResponseKey, ResponseRef] = {}
         self._retained_bindings: dict[_ScopedStreamKey, str] = {}
         self._known_handles: dict[_ScopedStreamKey, StreamingSynthesisHandle] = {}
@@ -620,7 +637,15 @@ class StreamingSynthesisRouteOwner:
         if prepared is None:
             assert validation_failure is not None
             raise StreamingSynthesisRouteViolation(*validation_failure) from None
-        return await self._begin_prepared(prepared, scope)
+        failure = None
+        try:
+            return await self._begin_prepared(prepared, scope)
+        except StreamingSpeechViolation as error:
+            failure = (
+                error.reason,
+                "streaming synthesis authority or conformance rejected the request",
+            )
+        raise StreamingSynthesisRouteViolation(*failure) from None
 
     async def _begin_prepared(
         self,
@@ -714,6 +739,7 @@ class StreamingSynthesisRouteOwner:
             raise RuntimeError("streaming synthesis begin requires an asyncio task")
 
         opening_registered = False
+        open_succeeded = False
         open_reservation: _TaskReservation | None = None
         try:
             async with self._begin_lock:
@@ -733,11 +759,6 @@ class StreamingSynthesisRouteOwner:
                         "a synthesis stream generation cannot be reused",
                     )
                 self._preflight_response(ref.response, scope_identity)
-                if len(self._retained_bindings) >= _MAX_ROUTE_IDENTITIES:
-                    raise StreamingSynthesisRouteViolation(
-                        "SYNTHESIS_IDENTITY_CAPACITY_EXHAUSTED",
-                        "synthesis route identity ledger is exhausted",
-                    )
                 if len(self._active) + len(self._opening) >= self._max_active_streams:
                     return None, self._failure_outcome(
                         binding_ref,
@@ -758,13 +779,19 @@ class StreamingSynthesisRouteOwner:
                         capability=capability,
                     )
                 # A hard task slot precedes identity, response, Provider-open,
-                # and cleanup effects.  Once response activation may mutate,
-                # retain the binding as an anti-replay tombstone.
+                # and cleanup effects. The binding tracks current allocation;
+                # the issuer's consumed permit fences replay after retirement.
+                require_stream_authority(prepared._payload, stage="route")
                 self._retained_bindings[key] = binding_ref
                 self._opening[key] = current_task
                 self._opening_responses[key] = ref.response
                 opening_registered = True
-                await self._activate_response(provider, ref.response, scope_identity)
+                await self._activate_response(
+                    provider,
+                    ref.response,
+                    scope_identity,
+                    prepared._payload.response_authority,
+                )
                 if self._closed:
                     return None, self._failure_outcome(
                         binding_ref,
@@ -785,6 +812,7 @@ class StreamingSynthesisRouteOwner:
                     operation="provider-open",
                     reservation=open_reservation,
                 )
+                open_succeeded = True
             except asyncio.CancelledError as caller_cancel:
                 if prepared.open_attempted:
                     try:
@@ -832,6 +860,20 @@ class StreamingSynthesisRouteOwner:
             if opening_registered and self._opening.get(key) is current_task:
                 del self._opening[key]
                 self._opening_responses.pop(key, None)
+                if not open_succeeded:
+                    self._retained_bindings.pop(key, None)
+                    if not any(
+                        k[0] == scope_identity
+                        and r.interaction_id == ref.response.interaction_id
+                        for k, r in self._opening_responses.items()
+                    ) and not any(
+                        h.scope_identity == scope_identity
+                        and h.ref.response.interaction_id == ref.response.interaction_id
+                        for h in self._active.values()
+                    ):
+                        self._current_responses.pop(
+                            (scope_identity, ref.response.interaction_id), None
+                        )
 
         handle: StreamingSynthesisHandle | None = None
         try:
@@ -857,6 +899,14 @@ class StreamingSynthesisRouteOwner:
                 provider=provider,
                 queue=asyncio.Queue(self._max_pending_frames),
             )
+            handle._ownership = (
+                self._handle_owner_token,
+                scope_identity,
+                ref,
+                binding_ref,
+            )
+            handle._owned_instance = weakref.ref(handle)
+            handle.response_authority = prepared._payload.response_authority
             async with self._lifecycle_lock:
                 closed_after_open = self._closed
                 if not closed_after_open:
@@ -1010,6 +1060,21 @@ class StreamingSynthesisRouteOwner:
                     _drain_queue(handle.queue)
             await self._retire(handle)
             return StreamingSynthesisPull(None, item.outcome)
+
+        try:
+            if handle.response_authority is None:
+                raise StreamingSpeechViolation(
+                    "SPEECH_AUTHORITY_REQUIRED", "response authority absent"
+                )
+            handle.response_authority.check()
+        except StreamingSpeechViolation:
+            outcome = await self._terminate(
+                handle,
+                StreamingSynthesisReason.AUTHORITY_EXPIRED,
+                allow_batch=False,
+                cancel_provider=True,
+            )
+            return StreamingSynthesisPull(None, outcome)
 
         async with handle.state_lock:
             if handle.outcome is not None and not handle.outcome.completed:
@@ -1317,10 +1382,20 @@ class StreamingSynthesisRouteOwner:
         provider: NativeStreamingSpeechProvider,
         response: ResponseRef,
         scope_identity: StreamingSynthesisScopeIdentity = _LEGACY_SYNTHESIS_SCOPE,
+        authority: SpeechResponseAuthority | None = None,
     ) -> None:
+        if (
+            not isinstance(authority, SpeechResponseAuthority)
+            or authority.response != response
+        ):
+            raise StreamingSynthesisRouteViolation(
+                "SPEECH_AUTHORITY_REQUIRED", "exact response authority required"
+            )
+        authority.check()
         response_key = (scope_identity, response.interaction_id)
         current = self._current_responses.get(response_key)
         if current == response:
+            provider.conformance.activate_response(authority)
             return
         if current is not None and (
             response.response_generation <= current.response_generation
@@ -1373,7 +1448,7 @@ class StreamingSynthesisRouteOwner:
                     process_control = exc
         if process_control is not None:
             raise process_control
-        provider.conformance.activate_response(response)
+        provider.conformance.activate_response(authority)
         self._current_responses[response_key] = response
 
     def _preflight_response(
@@ -1781,6 +1856,8 @@ class StreamingSynthesisRouteOwner:
                 handle.cleanup_done.set()
             _drain_queue(handle.queue)
             handle.queue.put_nowait(_TerminalSignal(outcome))
+        if not cleanup_complete:
+            self._watch_retirement(handle, require_provider=cancel_provider)
         if process_control is not None:
             raise process_control
         return outcome
@@ -1851,10 +1928,73 @@ class StreamingSynthesisRouteOwner:
             return process_control
 
     async def _retire(self, handle: StreamingSynthesisHandle) -> None:
-        key = _scoped_stream_key(handle.scope_identity, handle.ref)
         async with self._lifecycle_lock:
-            if self._active.get(key) is handle:
-                del self._active[key]
+            self._forget_retired_handle(handle)
+
+    def _forget_retired_handle(self, handle: StreamingSynthesisHandle) -> None:
+        """Event-loop-only, non-suspending removal of exact owned tracking."""
+        key = _scoped_stream_key(handle.scope_identity, handle.ref)
+        if (
+            self._active.get(key) is not handle
+            and self._known_handles.get(key) is not handle
+        ):
+            return
+        if self._active.get(key) is handle:
+            del self._active[key]
+        if self._known_handles.get(key) is handle:
+            del self._known_handles[key]
+        self._retained_bindings.pop(key, None)
+        response_key = (handle.scope_identity, handle.ref.response.interaction_id)
+        if not any(
+            k[0] == handle.scope_identity
+            and r.interaction_id == handle.ref.response.interaction_id
+            for k, r in self._opening_responses.items()
+        ) and not any(
+            h.scope_identity == handle.scope_identity
+            and h.ref.response.interaction_id == handle.ref.response.interaction_id
+            for h in self._active.values()
+        ):
+            self._current_responses.pop(response_key, None)
+
+    def _watch_retirement(
+        self, handle: StreamingSynthesisHandle, *, require_provider: bool
+    ) -> None:
+        """Release capacity when retained cleanup really settles, without polling."""
+        handle._retirement_provider_required |= require_provider
+        pair = (handle.provider_cancel_completion, handle.producer_task)
+        if handle._retirement_watch == pair:
+            return
+        handle._retirement_watch = pair
+
+        def settled(_completed: object = None) -> None:
+            completion = handle.provider_cancel_completion
+            if (
+                handle._retirement_provider_required
+                and not handle.provider_cleanup_complete
+            ):
+                if (
+                    completion is None
+                    or not completion.done()
+                    or completion.cancelled()
+                ):
+                    return
+                if (
+                    completion.exception() is not None
+                    or completion.result() is not True
+                ):
+                    return
+                handle.provider_cleanup_complete = True
+            producer = handle.producer_task
+            if producer is not None and not producer.done():
+                return
+            handle.cleanup_complete = True
+            handle.cleanup_done.set()
+            self._forget_retired_handle(handle)
+
+        for future in pair:
+            if future is not None:
+                future.add_done_callback(settled)
+        settled()
 
     async def _discard_unstarted(
         self,
@@ -1874,10 +2014,17 @@ class StreamingSynthesisRouteOwner:
             raise StreamingSynthesisRouteViolation(
                 "INVALID_SYNTHESIS_HANDLE", "synthesis handle has the wrong type"
             )
-        key = _scoped_stream_key(handle.scope_identity, handle.ref)
-        retained = self._retained_bindings.get(key)
-        known = self._known_handles.get(key)
-        if retained != handle.request_binding_ref or known is not handle:
+        if (
+            handle._owned_instance is None
+            or handle._owned_instance() is not handle
+            or handle._ownership
+            != (
+                self._handle_owner_token,
+                handle.scope_identity,
+                handle.ref,
+                handle.request_binding_ref,
+            )
+        ):
             raise StreamingSynthesisRouteViolation(
                 "SYNTHESIS_HANDLE_NOT_OWNED",
                 "synthesis handle is absent, stale, or belongs to another owner",
@@ -1906,6 +2053,8 @@ class StreamingSynthesisRouteOwner:
         capability: StreamingSynthesisCapabilityProvenance | None = None,
         provider_id: str = "unavailable",
     ) -> StreamingSynthesisOutcome:
+        if reason is StreamingSynthesisReason.AUTHORITY_EXPIRED:
+            allow_batch = False
         action = (
             StreamingSynthesisFallbackAction.NONE
             if not allow_fallback
@@ -2228,6 +2377,24 @@ def _drain_queue(queue: asyncio.Queue[_QueueValue]) -> None:
 def _reason_for_exception(exc: BaseException) -> StreamingSynthesisReason:
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
         return StreamingSynthesisReason.PROVIDER_TIMEOUT
+    reason = getattr(exc, "reason", None)
+    if reason in {
+        "SPEECH_AUTHORITY_REQUIRED",
+        "SPEECH_AUTHORITY_EXPIRED",
+        "SPEECH_AUTHORITY_CONSUMED",
+    }:
+        return StreamingSynthesisReason.AUTHORITY_EXPIRED
+    if reason in {
+        "RECOGNITION_CAPACITY_EXHAUSTED",
+        "SYNTHESIS_CAPACITY_EXHAUSTED",
+        "RESPONSE_CAPACITY_EXHAUSTED",
+    }:
+        return StreamingSynthesisReason.RESOURCE_CAPACITY
+    if reason in {
+        "SPEECH_PROVIDER_CLEANUP_CAPACITY",
+        "SPEECH_PROVIDER_CLEANUP_INCOMPLETE",
+    }:
+        return StreamingSynthesisReason.CLEANUP_INCOMPLETE
     if isinstance(exc, StreamingSpeechViolation):
         return StreamingSynthesisReason.PROVIDER_PROTOCOL
     reason = getattr(exc, "reason", None)

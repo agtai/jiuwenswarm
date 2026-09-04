@@ -93,6 +93,7 @@ from jiuwenswarm.gateway.live_voice.native_response_downlink import (
 from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
     StreamingSynthesisOutcome,
     StreamingSynthesisRouteOwner,
+    StreamingSynthesisRouteViolation,
 )
 from jiuwenswarm.server.live_voice.batch_speech import (
     CONTRACT_VERSION as SPEECH_CONTRACT_VERSION,
@@ -113,6 +114,13 @@ from jiuwenswarm.server.live_voice.latency_measurement import (
     register_runtime_l0_binding,
 )
 from jiuwenswarm.server.live_voice.streaming_speech import (
+    authorize_stream_request,
+    SpeechResponseAuthority,
+    SpeechStreamAuthority,
+    StreamingSpeechViolation,
+    CaptureRef,
+    RecognitionStreamRef,
+    RecognitionStreamRequest,
     RecognitionTurnDetection,
     SynthesisStreamRef,
     SynthesisStreamRequest,
@@ -828,6 +836,9 @@ class _MediaAuthority:
     first_uplink_ack_sent_diagnostic: bool = False
     pcm: bytearray = field(default_factory=bytearray, repr=False)
     recognition_content_sha256: str | None = None
+    streaming_recognition_authority: SpeechStreamAuthority | None = field(
+        default=None, repr=False
+    )
     streaming_recognition_handle: StreamingRecognitionHandle | None = field(
         default=None, repr=False
     )
@@ -916,6 +927,7 @@ class _SynthesisAuthorityTransfer:
     claimed_subject_id: str | None = None
     claimed_operation_id: str | None = None
     task_notification: bool = False
+    streaming_authority: SpeechStreamAuthority | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True)
@@ -946,6 +958,11 @@ class _ProductActivationAuthority:
     ] = field(default_factory=OrderedDict)
     notification_fence: _NativeNotificationSequenceFence = field(
         default_factory=_NativeNotificationSequenceFence,
+        repr=False,
+        compare=False,
+    )
+    streaming_response_authorities: list[SpeechResponseAuthority] = field(
+        default_factory=list,
         repr=False,
         compare=False,
     )
@@ -3759,8 +3776,49 @@ class DedicatedMediaProductRegistry:
                 ),
             )
             return
+        detection = (
+            (
+                RecognitionTurnDetection.server_vad_barge_in()
+                if record.barge_in_capture
+                else RecognitionTurnDetection.server_vad_default()
+            )
+            if record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
+            else RecognitionTurnDetection.manual()
+        )
+        request = authorize_stream_request(
+            RecognitionStreamRequest(
+                RecognitionStreamRef(
+                    record.binding.media_session_id,
+                    record.binding.generation.value,
+                    CaptureRef(
+                        record.binding.generation.id,
+                        record.binding.generation.value,
+                        record.binding.frame_format.sample_rate_hz,
+                    ),
+                ),
+                detection,
+            ),
+            is_current=lambda: self._streaming_capture_current(record),
+        )
+        with self._lock:
+            invalidated = (
+                self._records.get(record.record_id) is not record
+                or record.route_completed
+                or record.streaming_recognition_outcome is not None
+            )
+            if not invalidated:
+                record.streaming_recognition_authority = request.authority
+        if invalidated:
+            request.authority.revoke()
+            self._retain_streaming_outcome(
+                record,
+                self._streaming_fallback(
+                    StreamingRecognitionFallbackReason.ROUTE_ABORTED
+                ),
+            )
+            return
         task = loop.create_task(
-            self._open_streaming_recognition(record, owner),
+            self._open_streaming_recognition(record, owner, request),
             name=f"live-voice-streaming-stt-open-{record.record_id}",
         )
         with self._lock:
@@ -3784,23 +3842,28 @@ class DedicatedMediaProductRegistry:
         if task is not None:
             await asyncio.shield(task)
 
+    def _streaming_capture_current(self, record: _MediaAuthority) -> bool:
+        with self._lock:
+            now = self._monotonic()
+            return (
+                self._records.get(record.record_id) is record
+                and record.ticket_consumed
+                and record.streaming_recognition_outcome is None
+                and now <= record.authority_expires_at
+                and self._has_retained_product_activation(record, now)
+            )
+
     async def _open_streaming_recognition(
         self,
         record: _MediaAuthority,
         owner: StreamingRecognitionRouteOwner,
+        request: RecognitionStreamRequest,
     ) -> None:
         try:
             handle, fallback = await owner.begin(
                 record.binding,
-                turn_detection=(
-                    (
-                        RecognitionTurnDetection.server_vad_barge_in()
-                        if record.barge_in_capture
-                        else RecognitionTurnDetection.server_vad_default()
-                    )
-                    if record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
-                    else RecognitionTurnDetection.manual()
-                ),
+                turn_detection=request.turn_detection,
+                request=request,
             )
         except asyncio.CancelledError:
             self._retain_streaming_outcome(
@@ -3810,6 +3873,19 @@ class DedicatedMediaProductRegistry:
                 ),
             )
             raise
+        except StreamingSpeechViolation as error:
+            reason = (
+                StreamingRecognitionFallbackReason.AUTHORITY_EXPIRED
+                if error.reason
+                in {
+                    "SPEECH_AUTHORITY_REQUIRED",
+                    "SPEECH_AUTHORITY_EXPIRED",
+                    "SPEECH_AUTHORITY_CONSUMED",
+                }
+                else StreamingRecognitionFallbackReason.PROVIDER_PROTOCOL
+            )
+            self._retain_streaming_outcome(record, self._streaming_fallback(reason))
+            return
         except Exception:
             self._retain_streaming_outcome(
                 record,
@@ -4283,7 +4359,10 @@ class DedicatedMediaProductRegistry:
                 and record.accepted_frames > 0
                 and record.recognition_content_sha256 is not None
                 and immediate.reason
-                is not StreamingRecognitionFallbackReason.ROUTE_ABORTED
+                not in {
+                    StreamingRecognitionFallbackReason.ROUTE_ABORTED,
+                    StreamingRecognitionFallbackReason.AUTHORITY_EXPIRED,
+                }
             )
             else SpeechRouteTier.TEXT
         )
@@ -4510,7 +4589,11 @@ class DedicatedMediaProductRegistry:
             provider=None,
             fallback_tier=(
                 SpeechRouteTier.TEXT
-                if reason is StreamingRecognitionFallbackReason.ROUTE_ABORTED
+                if reason
+                in {
+                    StreamingRecognitionFallbackReason.ROUTE_ABORTED,
+                    StreamingRecognitionFallbackReason.AUTHORITY_EXPIRED,
+                }
                 else (
                     SpeechRouteTier.BATCH
                     if self._batch_provider_available
@@ -4933,6 +5016,11 @@ class DedicatedMediaProductRegistry:
                         if same_activation and existing is not None
                         else _NativeNotificationSequenceFence()
                     ),
+                    streaming_response_authorities=(
+                        existing.streaming_response_authorities
+                        if same_activation and existing is not None
+                        else []
+                    ),
                 )
                 if existing is not None and not same_activation:
                     self._revoke_media_for_product_activation(existing)
@@ -5185,6 +5273,7 @@ class DedicatedMediaProductRegistry:
                 expires_at=now + self._authority_ttl,
                 synthesis_content_sha256=retained_synthesis_content,
                 notification_fence=activation.notification_fence,
+                streaming_response_authorities=activation.streaming_response_authorities,
             )
             self._product_activations.move_to_end(activation_key)
 
@@ -5472,6 +5561,100 @@ class DedicatedMediaProductRegistry:
                 return binding
             return None
 
+    def _admit_streaming_synthesis(
+        self,
+        request: SynthesisBatchRequest,
+        session_id: str,
+        subject_id: str,
+        stream_id: str,
+    ) -> SynthesisStreamRequest | None:
+        """Consume the existing content-transfer authority, including RPC replay.
+
+        Only opaque bindings/grants are retained, not spoken text or a request.
+        The single response high-water belongs to this live activation; provider
+        history is neither an issuer nor an authorization fallback.
+        """
+        binding = _synthesis_authorization_binding(request)
+        with self._lock:
+            parent_id = self._subjects.get((session_id, subject_id))
+            parent = self._records.get(parent_id or "")
+            if parent is None:
+                return None
+            activation_key = (
+                session_id,
+                parent.binding.connection_id,
+                request.response.interaction_id,
+            )
+            activation = self._product_activations.get(activation_key)
+            transfer_key = (
+                request.response,
+                request.unit_id,
+                parent.locale,
+                request.required_sample_rate_hz,
+            )
+            transfer = (
+                activation.synthesis_content_sha256.get(transfer_key)
+                if activation
+                else None
+            )
+            if (
+                transfer is None
+                or transfer.content_sha256 != binding.content_sha256
+                or transfer.claimed_subject_id != subject_id
+                or transfer.claimed_operation_id != request.operation_id
+            ):
+                return None
+            response = request.response
+            evidence_id = parent.binding.authority_evidence_id
+
+            def current_synthesis() -> bool:
+                with self._lock:
+                    now = self._monotonic()
+                    record = self._records.get(parent_id)
+                    current = self._product_activations.get(activation_key)
+                    return bool(
+                        record is not None
+                        and record.binding.authority_evidence_id == evidence_id
+                        and now <= record.authority_expires_at
+                        and self._has_retained_product_activation(record, now)
+                        and now <= transfer.expires_at
+                        and current is not None
+                        and current.streaming_response_authorities
+                        and current.streaming_response_authorities[0].response
+                        == response
+                        and current.synthesis_content_sha256.get(transfer_key)
+                        is transfer
+                    )
+
+            authorities = activation.streaming_response_authorities
+            prior = authorities[0] if authorities else None
+            if prior is not None and prior.response != response:
+                if (
+                    response.response_generation <= prior.response.response_generation
+                    or response.response_id == prior.response.response_id
+                ):
+                    return None
+                # Publishing the new authority invalidates old response checks.
+                # Do not acquire a Speech lock while holding the Registry lock.
+                authorities.clear()
+            if not authorities:
+                authorities.append(SpeechResponseAuthority(response, current_synthesis))
+            stream_request = SynthesisStreamRequest(
+                ref=SynthesisStreamRef(stream_id, 0, response, request.unit_id, 0),
+                display_text=request.display_text,
+                spoken_text=request.spoken_text,
+                display_span=TextSpan(0, len(request.display_text)),
+                sample_rate_hz=request.required_sample_rate_hz,
+                event_timeout_seconds=request.timeout_ms / 1000,
+                response_authority=authorities[0],
+            )
+            if transfer.streaming_authority is None:
+                stream_request = authorize_stream_request(
+                    stream_request, is_current=current_synthesis
+                )
+                transfer.streaming_authority = stream_request.authority
+            return replace(stream_request, authority=transfer.streaming_authority)
+
     async def try_streaming_synthesis(
         self,
         operation_name: str,
@@ -5547,29 +5730,34 @@ class DedicatedMediaProductRegistry:
         def observe_outcome(outcome: StreamingSynthesisOutcome) -> None:
             self._schedule_streaming_outcome(observation_context, outcome)
 
-        start = await start_product_streaming_synthesis(
-            owner,
-            SynthesisStreamRequest(
-                ref=SynthesisStreamRef(
-                    stream_id=f"product-tts-{stream_identity}",
-                    stream_generation=0,
-                    response=request.response,
-                    unit_id=request.unit_id,
-                    unit_seq=0,
-                ),
-                display_text=request.display_text,
-                spoken_text=request.spoken_text,
-                display_span=TextSpan(0, len(request.display_text)),
-                sample_rate_hz=request.required_sample_rate_hz,
-                event_timeout_seconds=request.timeout_ms / 1000,
-            ),
-            scope_identity=(
-                session_id,
-                context.subject_id,
-                request.correlation_id,
-            ),
-            on_outcome=observe_outcome,
+        stream_request = self._admit_streaming_synthesis(
+            request, session_id, context.subject_id, f"product-tts-{stream_identity}"
         )
+        if stream_request is None:
+            return _streaming_error_envelope(
+                request, "MEDIA_STREAMING_TTS_AUTHORITY_EXPIRED"
+            )
+        try:
+            start = await start_product_streaming_synthesis(
+                owner,
+                stream_request,
+                scope_identity=(
+                    session_id,
+                    context.subject_id,
+                    request.correlation_id,
+                ),
+                on_outcome=observe_outcome,
+            )
+        except StreamingSynthesisRouteViolation as error:
+            if error.reason in {
+                "SPEECH_AUTHORITY_REQUIRED",
+                "SPEECH_AUTHORITY_EXPIRED",
+                "SPEECH_AUTHORITY_CONSUMED",
+            }:
+                return _streaming_error_envelope(
+                    request, "MEDIA_STREAMING_TTS_AUTHORITY_EXPIRED"
+                )
+            raise
         if start.source is None:
             outcome = start.outcome
             assert outcome is not None
@@ -6626,6 +6814,8 @@ class DedicatedMediaProductRegistry:
         task.add_done_callback(self._native_cleanup_tasks.discard)
 
     def _schedule_streaming_abort(self, record: _MediaAuthority) -> None:
+        if record.streaming_recognition_authority is not None:
+            record.streaming_recognition_authority.revoke()
         owner = self._streaming_recognition_owner
         begin_task = record.streaming_recognition_begin_task
         record.streaming_recognition_begin_task = None
