@@ -43,6 +43,22 @@ export interface CapturedAudioFrame {
   readonly samples: Float32Array;
 }
 
+export interface NearEndSpeechCandidate {
+  readonly kind: 'browser_audio.near_end_speech_candidate.v1';
+  readonly candidate_id: string;
+  readonly capture: Readonly<AudioCaptureRef>;
+  readonly response: Readonly<AudioResponseRef>;
+  readonly frame_seq: number;
+  readonly observed_at_monotonic_ms: number;
+  readonly detector: Readonly<{
+    readonly profile: 'verified_headset_aec_far_end_reference_v1';
+    readonly consecutive_voice_frames: number;
+    readonly far_end_playout_active: true;
+    readonly far_end_reference_windows: number;
+    readonly far_end_similarity_peak: number;
+  }>;
+}
+
 export interface AudioRenderTransform {
   readonly transform: string;
   readonly source_start: number;

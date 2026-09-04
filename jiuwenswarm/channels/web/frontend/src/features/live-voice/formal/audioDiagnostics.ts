@@ -8,8 +8,8 @@ import {
 const LIMIT = 2048;
 const ID_KEYS = new Set(['session_id', 'media_session_id', 'interaction_id', 'correlation_id', 'capture_id', 'response_id', 'lease_id']);
 const LABEL_KEYS = new Set(['status', 'reason', 'direction', 'outcome', 'context_state']);
-for (const key of ['request_id', 'operation_id', 'span_id', 'task_id', 'attempt_id', 'turn_id', 'commit_id', 'unit_id', 'activation_id']) ID_KEYS.add(key);
-for (const key of ['stage', 'rpc_method', 'error_type', 'error_code', 'error_reason', 'milestone']) LABEL_KEYS.add(key);
+for (const key of ['request_id', 'operation_id', 'span_id', 'task_id', 'attempt_id', 'turn_id', 'commit_id', 'unit_id', 'activation_id', 'candidate_id']) ID_KEYS.add(key);
+for (const key of ['stage', 'rpc_method', 'error_type', 'error_code', 'error_reason', 'milestone', 'detector_profile']) LABEL_KEYS.add(key);
 const VALUE_KEYS = new Set([
   'generation',
   'operation_generation',
@@ -65,6 +65,16 @@ const VALUE_KEYS = new Set([
   'activity_floor_sustained_age_ms',
   'activity_strong_first_age_ms',
   'activity_strong_sustained_age_ms',
+  'frame_seq',
+  'consecutive_voice_frames',
+  'confirmation_window_ms',
+  'confirmation_elapsed_ms',
+  'local_clock_frozen',
+  'paused_sources',
+  'resumed_sources',
+  'far_end_reference_windows',
+  'far_end_segments_retained',
+  'far_end_similarity_peak',
 ]);
 export interface AudioDiagnostic {
   readonly event: string;

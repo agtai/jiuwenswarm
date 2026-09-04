@@ -213,16 +213,26 @@ class FakeAudioBuffer {
   }
 }
 
+class FakeGainNode extends FakeNode {
+  gainEvents = [];
+  gain = {
+    setValueAtTime: (value, time) => this.gainEvents.push({ kind: 'set', value, time }),
+    linearRampToValueAtTime: (value, time) => this.gainEvents.push({ kind: 'ramp', value, time }),
+  };
+}
+
 class FakeBufferSource extends FakeNode {
   buffer = null;
   onended = null;
   starts = [];
+  offsets = [];
   stopCount = 0;
   stopThrows = false;
   startThrows = false;
 
-  start(when = 0) {
+  start(when = 0, offset = 0) {
     this.starts.push(when);
+    this.offsets.push(offset);
     if (this.startThrows) throw new Error('source start failed');
   }
 
@@ -246,6 +256,7 @@ class FakeAudioContext {
   sourceNode = new FakeNode();
   buffers = [];
   bufferSources = [];
+  gainNodes = [];
   resumeLeavesSuspended = false;
   resumeErrorName = null;
   closeCount = 0;
@@ -293,6 +304,12 @@ class FakeAudioContext {
     buffer.sampleRate = sampleRate;
     this.buffers.push(buffer);
     return buffer;
+  }
+
+  createGain() {
+    const gain = new FakeGainNode();
+    this.gainNodes.push(gain);
+    return gain;
   }
 
   createBufferSource() {
@@ -352,6 +369,26 @@ function pcmChunk(response, seq, overrides = {}) {
     provider,
     ...overrides,
   };
+}
+
+function voiceFrame(amplitude = 0.04, frequencyHz = 200) {
+  return Float32Array.from(
+    { length: 960 },
+    (_, index) => amplitude * Math.sin((2 * Math.PI * frequencyHz * index) / 48000),
+  );
+}
+
+function emitCaptureFrame(fake, metadata, seq, samples, contextTimeSeconds) {
+  const context = fake.contexts[0];
+  fake.worklets[0].port.emit({
+    kind: 'frame',
+    capture_generation: metadata.capture_generation,
+    seq,
+    sample_cursor: seq * 960,
+    context_time_s: contextTimeSeconds ?? Math.max(0, (context?.currentTime ?? 0.02) - 0.02),
+    sample_rate_hz: 48000,
+    samples,
+  });
 }
 
 function nextTask() {
@@ -685,6 +722,362 @@ test('capture requests explicit processing, reports actual settings, and emits c
   assert.equal(fake.contexts[0].state, 'closed');
   assert.equal(fake.document.listenerCount('visibilitychange'), 0);
   assert.equal(adapter.businessCancelCount(), 0);
+});
+
+test('processed near-end speech pauses only active far-end playout and resumes every unplayed sample without stopping capture', async () => {
+  const fake = fakeEnvironment();
+  fake.mediaDevices.stream.track.settings.noiseSuppression = true;
+  const candidates = [];
+  const playoutEvents = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    localBargeInProfile: 'verified_headset_aec_v1',
+    environment: fake.environment,
+    observer: {
+      onNearEndSpeechCandidate: candidate => (candidates.push(candidate), true),
+      onPlayoutState: event => playoutEvents.push(event),
+    },
+  });
+  await adapter.unlockPlayout();
+  const metadata = await adapter.startCapture();
+  adapter.beginPlayout(firstResponse);
+  for (let seq = 0; seq < 4; seq += 1) assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, seq)), true);
+  const context = fake.contexts[0];
+  context.currentTime += 0.26;
+
+  emitCaptureFrame(fake, metadata, 0, voiceFrame());
+  emitCaptureFrame(fake, metadata, 1, voiceFrame());
+  assert.equal(candidates.length, 0);
+  emitCaptureFrame(fake, metadata, 2, voiceFrame());
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].kind, 'browser_audio.near_end_speech_candidate.v1');
+  assert.deepEqual(candidates[0].capture, {
+    capture_id: metadata.capture_id,
+    capture_generation: metadata.capture_generation,
+    track_id: metadata.track_id,
+  });
+  assert.deepEqual(candidates[0].response, firstResponse);
+  assert.equal(candidates[0].detector.consecutive_voice_frames, 3);
+  assert.equal(candidates[0].detector.far_end_playout_active, true);
+  assert.equal(candidates[0].detector.profile, 'verified_headset_aec_far_end_reference_v1');
+  assert.ok(candidates[0].detector.far_end_reference_windows > 0);
+  assert.ok(candidates[0].detector.far_end_similarity_peak < 1e-9);
+
+  const originalSources = context.bufferSources.slice();
+  const paused = await adapter.pausePlayoutExact(candidates[0]);
+  assert.equal(paused.outcome, 'paused');
+  assert.equal(paused.local_clock_frozen, true);
+  assert.equal(paused.business_cancel_count_delta, 0);
+  assert.equal(context.state, 'running');
+  assert.equal(adapter.captureState(), 'active');
+  assert.equal(originalSources.every(source => source.stopCount === 1 && source.disconnectCount === 1), true);
+  assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 4)), true);
+  assert.equal(context.bufferSources.length, 4);
+
+  context.currentTime += 0.3;
+  const resumed = await adapter.resumePlayoutExact(firstResponse, candidates[0].candidate_id);
+  assert.equal(resumed.outcome, 'resumed');
+  assert.equal(resumed.local_clock_frozen, false);
+  const resumedSources = context.bufferSources.slice(4);
+  assert.equal(resumedSources.length, 5);
+  assert.ok(resumedSources[0].offsets[0] > 0);
+  assert.equal(resumedSources.slice(1).every(source => source.offsets[0] === 0), true);
+  assert.deepEqual(context.gainNodes[0].gainEvents.map(event => [event.kind, event.value]), [
+    ['set', 0],
+    ['ramp', 1],
+  ]);
+  assert.ok(context.gainNodes[0].gainEvents[1].time > context.gainNodes[0].gainEvents[0].time);
+  emitCaptureFrame(fake, metadata, 3, voiceFrame());
+  emitCaptureFrame(fake, metadata, 4, voiceFrame());
+  emitCaptureFrame(fake, metadata, 5, voiceFrame());
+  assert.equal(candidates.length, 1);
+  context.currentTime += 0.13;
+  emitCaptureFrame(fake, metadata, 6, voiceFrame());
+  emitCaptureFrame(fake, metadata, 7, voiceFrame());
+  emitCaptureFrame(fake, metadata, 8, voiceFrame());
+  assert.equal(candidates.length, 2);
+  for (const source of resumedSources) source.end();
+  assert.equal(playoutEvents.filter(event => event.reason === 'render_completed').at(-1).through_seq, 4);
+  assert.equal(adapter.businessCancelCount(), 0);
+  await adapter.close();
+});
+
+test('near-end pause stays off unless the verified headset profile is selected explicitly', async () => {
+  const fake = fakeEnvironment();
+  fake.mediaDevices.stream.track.settings.noiseSuppression = true;
+  const candidates = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: { onNearEndSpeechCandidate: candidate => (candidates.push(candidate), true) },
+  });
+  await adapter.unlockPlayout();
+  const metadata = await adapter.startCapture();
+  adapter.beginPlayout(firstResponse);
+  for (let seq = 0; seq < 4; seq += 1) adapter.enqueuePlayout(pcmChunk(firstResponse, seq));
+  fake.contexts[0].currentTime += 0.26;
+  for (let seq = 0; seq < 6; seq += 1) emitCaptureFrame(fake, metadata, seq, voiceFrame());
+  assert.equal(candidates.length, 0);
+  assert.equal((await adapter.pausePlayoutExact({
+    kind: 'browser_audio.near_end_speech_candidate.v1',
+    candidate_id: 'forged-disabled-candidate',
+    capture: { capture_id: metadata.capture_id, capture_generation: metadata.capture_generation, track_id: metadata.track_id },
+    response: firstResponse,
+    frame_seq: 5,
+    observed_at_monotonic_ms: performance.now(),
+    detector: {
+      profile: 'verified_headset_aec_far_end_reference_v1',
+      consecutive_voice_frames: 3,
+      far_end_playout_active: true,
+      far_end_reference_windows: 1,
+      far_end_similarity_peak: 0,
+    },
+  })).outcome, 'feature_disabled');
+  assert.equal(fake.contexts[0].bufferSources.every(source => source.stopCount === 0), true);
+  await adapter.close();
+});
+
+test('quiet microphone frames prune old far-end PCM before later echo comparison', async () => {
+  const previousInfo = console.info;
+  const records = [];
+  console.info = line => {
+    if (String(line).startsWith('live_voice_audio_diagnostic ')) records.push(JSON.parse(String(line).slice(28)));
+  };
+  try {
+    const fake = fakeEnvironment();
+    fake.mediaDevices.stream.track.settings.noiseSuppression = true;
+    const adapter = new BrowserAudioIOAdapter({
+      enabled: true,
+      localBargeInProfile: 'verified_headset_aec_v1',
+      environment: fake.environment,
+      observer: { onNearEndSpeechCandidate: () => true },
+    });
+    await adapter.unlockPlayout();
+    const metadata = await adapter.startCapture();
+    adapter.beginPlayout(firstResponse);
+    const tts = voiceFrame(0.04, 200);
+    for (let seq = 0; seq < 80; seq += 1) {
+      assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, seq, { samples: tts })), true);
+      fake.contexts[0].currentTime += 0.02;
+      emitCaptureFrame(fake, metadata, seq, new Float32Array(960));
+    }
+    emitCaptureFrame(fake, metadata, 80, tts);
+    emitCaptureFrame(fake, metadata, 81, tts);
+    emitCaptureFrame(fake, metadata, 82, tts);
+    const rejected = records.filter(record => record.event === 'near_end_echo_rejected').at(-1);
+    assert.ok(rejected);
+    assert.ok(rejected.fields.far_end_segments_retained <= 30);
+    await adapter.close();
+  } finally {
+    console.info = previousInfo;
+  }
+});
+
+test('known far-end TTS leakage is rejected while real double-talk remains eligible', async () => {
+  const previousInfo = console.info;
+  const records = [];
+  console.info = line => {
+    if (String(line).startsWith('live_voice_audio_diagnostic ')) records.push(JSON.parse(String(line).slice(28)));
+  };
+  try {
+    const fake = fakeEnvironment();
+    fake.mediaDevices.stream.track.settings.noiseSuppression = true;
+    const candidates = [];
+    const adapter = new BrowserAudioIOAdapter({
+      enabled: true,
+      localBargeInProfile: 'verified_headset_aec_v1',
+      environment: fake.environment,
+      observer: { onNearEndSpeechCandidate: candidate => (candidates.push(candidate), true) },
+    });
+    await adapter.unlockPlayout();
+    const metadata = await adapter.startCapture();
+    adapter.beginPlayout(firstResponse);
+    const tts = voiceFrame(0.04, 200);
+    for (let seq = 0; seq < 4; seq += 1) {
+      assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, seq, { samples: tts })), true);
+    }
+    fake.contexts[0].currentTime += 0.27;
+    emitCaptureFrame(fake, metadata, 0, tts);
+    emitCaptureFrame(fake, metadata, 1, tts);
+    emitCaptureFrame(fake, metadata, 2, tts);
+    assert.equal(candidates.length, 0);
+    const rejected = records.filter(record => record.event === 'near_end_echo_rejected');
+    assert.equal(rejected.length, 1);
+    assert.ok(rejected[0].fields.far_end_reference_windows > 0);
+    assert.ok(rejected[0].fields.far_end_similarity_peak >= 0.68);
+    assert.ok(rejected[0].fields.far_end_segments_retained <= 4);
+
+    const nearEnd = voiceFrame(0.04, 310);
+    emitCaptureFrame(fake, metadata, 3, nearEnd);
+    emitCaptureFrame(fake, metadata, 4, nearEnd);
+    emitCaptureFrame(fake, metadata, 5, nearEnd);
+    assert.equal(candidates.length, 1);
+    assert.ok(candidates[0].detector.far_end_similarity_peak < 0.68);
+    assert.equal(adapter.businessCancelCount(), 0);
+    await adapter.close();
+  } finally {
+    console.info = previousInfo;
+  }
+});
+
+test('delayed AudioWorklet delivery aligns echo rejection to the captured frame clock', async () => {
+  const fake = fakeEnvironment();
+  fake.mediaDevices.stream.track.settings.noiseSuppression = true;
+  const candidates = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    localBargeInProfile: 'verified_headset_aec_v1',
+    environment: fake.environment,
+    observer: { onNearEndSpeechCandidate: candidate => (candidates.push(candidate), true) },
+  });
+  await adapter.unlockPlayout();
+  const metadata = await adapter.startCapture();
+  adapter.beginPlayout(firstResponse);
+  const tts = voiceFrame(0.04, 200);
+  for (let seq = 0; seq < 4; seq += 1) {
+    assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, seq, { samples: tts })), true);
+  }
+  const capturedFrameStart = fake.contexts[0].currentTime + 0.25;
+  fake.contexts[0].currentTime += 1;
+  emitCaptureFrame(fake, metadata, 0, tts, capturedFrameStart);
+  emitCaptureFrame(fake, metadata, 1, tts, capturedFrameStart);
+  emitCaptureFrame(fake, metadata, 2, tts, capturedFrameStart);
+  assert.equal(candidates.length, 0);
+  const nearEnd = voiceFrame(0.04, 310);
+  emitCaptureFrame(fake, metadata, 3, nearEnd, capturedFrameStart);
+  emitCaptureFrame(fake, metadata, 4, nearEnd, capturedFrameStart);
+  emitCaptureFrame(fake, metadata, 5, nearEnd, capturedFrameStart);
+  assert.equal(candidates.length, 1);
+  await adapter.close();
+});
+
+test('an observer-rejected candidate rearms after the bounded cooldown', async () => {
+  const fake = fakeEnvironment();
+  fake.mediaDevices.stream.track.settings.noiseSuppression = true;
+  const candidates = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    localBargeInProfile: 'verified_headset_aec_v1',
+    environment: fake.environment,
+    observer: {
+      onNearEndSpeechCandidate: candidate => {
+        candidates.push(candidate);
+        return candidates.length > 1;
+      },
+    },
+  });
+  await adapter.unlockPlayout();
+  const metadata = await adapter.startCapture();
+  adapter.beginPlayout(firstResponse);
+  for (let seq = 0; seq < 8; seq += 1) {
+    assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, seq)), true);
+  }
+  fake.contexts[0].currentTime += 0.26;
+  for (let seq = 0; seq < 3; seq += 1) emitCaptureFrame(fake, metadata, seq, voiceFrame());
+  assert.equal(candidates.length, 1);
+  fake.contexts[0].currentTime += 0.14;
+  for (let seq = 3; seq < 6; seq += 1) emitCaptureFrame(fake, metadata, seq, voiceFrame());
+  assert.equal(candidates.length, 2);
+  await adapter.close();
+});
+
+test('silence, DC energy, isolated impulse and speech before audible playout cannot create a near-end candidate', async () => {
+  const fake = fakeEnvironment();
+  fake.mediaDevices.stream.track.settings.noiseSuppression = true;
+  const candidates = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    localBargeInProfile: 'verified_headset_aec_v1',
+    environment: fake.environment,
+    observer: { onNearEndSpeechCandidate: candidate => (candidates.push(candidate), true) },
+  });
+  await adapter.unlockPlayout();
+  const metadata = await adapter.startCapture();
+  adapter.beginPlayout(firstResponse);
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 0));
+  emitCaptureFrame(fake, metadata, 0, voiceFrame());
+  emitCaptureFrame(fake, metadata, 1, voiceFrame());
+  emitCaptureFrame(fake, metadata, 2, voiceFrame());
+  assert.equal(candidates.length, 0);
+  const context = fake.contexts[0];
+  context.currentTime += 0.26;
+  emitCaptureFrame(fake, metadata, 3, new Float32Array(960));
+  emitCaptureFrame(fake, metadata, 4, new Float32Array(960).fill(0.04));
+  const impulse = new Float32Array(960);
+  impulse[100] = 0.8;
+  emitCaptureFrame(fake, metadata, 5, impulse);
+  emitCaptureFrame(fake, metadata, 6, voiceFrame());
+  emitCaptureFrame(fake, metadata, 7, new Float32Array(960));
+  emitCaptureFrame(fake, metadata, 8, voiceFrame());
+  assert.equal(candidates.length, 0);
+  assert.equal(adapter.businessCancelCount(), 0);
+  await adapter.close();
+});
+
+test('tentative pause rejects stale identity and provider-confirmed stop cannot resume or revive buffered audio', async () => {
+  const fake = fakeEnvironment();
+  fake.mediaDevices.stream.track.settings.noiseSuppression = true;
+  const candidates = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    localBargeInProfile: 'verified_headset_aec_v1',
+    environment: fake.environment,
+    observer: { onNearEndSpeechCandidate: candidate => (candidates.push(candidate), true) },
+  });
+  await adapter.unlockPlayout();
+  const metadata = await adapter.startCapture();
+  adapter.beginPlayout(firstResponse);
+  for (let seq = 0; seq < 3; seq += 1) adapter.enqueuePlayout(pcmChunk(firstResponse, seq));
+  const context = fake.contexts[0];
+  context.currentTime += 0.26;
+  for (let seq = 0; seq < 3; seq += 1) emitCaptureFrame(fake, metadata, seq, voiceFrame());
+  assert.equal(candidates.length, 1);
+
+  const wrongCandidate = {
+    ...candidates[0],
+    candidate_id: 'near-end-wrong',
+    response: secondResponse,
+  };
+  assert.equal((await adapter.pausePlayoutExact(wrongCandidate)).outcome, 'target_mismatch');
+  assert.equal(context.bufferSources.every(source => source.stopCount === 0), true);
+
+  assert.equal((await adapter.pausePlayoutExact(candidates[0])).outcome, 'paused');
+  assert.equal((await adapter.pausePlayoutExact({ ...candidates[0], candidate_id: 'near-end-duplicate' })).outcome, 'candidate_mismatch');
+  const sourceCountAtPause = context.bufferSources.length;
+  assert.equal(adapter.stopPlayoutExact(firstResponse, 'provider_confirmed_barge_in').local_fence_established, true);
+  assert.equal((await adapter.resumePlayoutExact(firstResponse, candidates[0].candidate_id)).outcome, 'no_active_target');
+  assert.equal(context.bufferSources.length, sourceCountAtPause);
+  assert.equal(context.state, 'running');
+  assert.equal(adapter.captureState(), 'active');
+  assert.equal(adapter.businessCancelCount(), 0);
+  await adapter.close();
+});
+
+test('near-end pause authority stays disabled when browser processing is false or unverified', async () => {
+  for (const settings of [
+    { echoCancellation: true, noiseSuppression: false, autoGainControl: true },
+    { echoCancellation: undefined, noiseSuppression: undefined, autoGainControl: undefined },
+  ]) {
+    const fake = fakeEnvironment();
+    Object.assign(fake.mediaDevices.stream.track.settings, settings);
+    const candidates = [];
+    const adapter = new BrowserAudioIOAdapter({
+      enabled: true,
+      localBargeInProfile: 'verified_headset_aec_v1',
+      environment: fake.environment,
+      observer: { onNearEndSpeechCandidate: candidate => (candidates.push(candidate), true) },
+    });
+    await adapter.unlockPlayout();
+    const metadata = await adapter.startCapture();
+    adapter.beginPlayout(firstResponse);
+    adapter.enqueuePlayout(pcmChunk(firstResponse, 0));
+    fake.contexts[0].currentTime += 0.26;
+    for (let seq = 0; seq < 6; seq += 1) emitCaptureFrame(fake, metadata, seq, voiceFrame());
+    assert.equal(candidates.length, 0);
+    assert.equal(fake.contexts[0].bufferSources[0].stopCount, 0);
+    assert.equal(adapter.businessCancelCount(), 0);
+    await adapter.close();
+  }
 });
 
 test('capture handoff rejects an input track that is already muted and releases every resource', async () => {
@@ -2619,6 +3012,20 @@ test('exact local stop distinguishes mismatch, no target, disabled, and closed w
   const flagOff = disabled.stopPlayoutExact(firstResponse);
   assert.equal(flagOff.outcome, 'feature_disabled');
   assert.equal(flagOff.local_fence_established, false);
+  const disabledPause = await disabled.pausePlayoutExact({
+    kind: 'browser_audio.near_end_speech_candidate.v1',
+    candidate_id: 'near-end-disabled',
+    capture: { capture_id: 'capture-disabled', capture_generation: 1, track_id: 'track-disabled' },
+    response: firstResponse,
+    frame_seq: 0,
+    observed_monotonic_ms: 1,
+    detector: {
+      profile: 'verified_browser_processing_v1',
+      consecutive_voice_frames: 3,
+      far_end_playout_active: true,
+    },
+  });
+  assert.equal(disabledPause.outcome, 'feature_disabled');
   assert.equal(disabledFake.contexts.length, 0);
   assert.equal(disabledFake.mediaDevices.constraints.length, 0);
   assert.equal(disabled.businessCancelCount(), 0);

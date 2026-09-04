@@ -8,6 +8,7 @@ import {
   type AudioProviderRef,
   type AudioResponseRef,
   type CapturedAudioFrame,
+  type NearEndSpeechCandidate,
 } from '../audioPort.js';
 
 export type BrowserAudioCaptureState = 'idle' | 'starting' | 'active' | 'stopping' | 'stopped' | 'failed';
@@ -92,10 +93,17 @@ export interface BrowserAudioBufferLike {
   copyToChannel(source: Float32Array, channelNumber: number): void;
 }
 
+export interface BrowserAudioGainNodeLike extends BrowserAudioNodeLike {
+  readonly gain: Readonly<{
+    setValueAtTime(value: number, startTime: number): void;
+    linearRampToValueAtTime(value: number, endTime: number): void;
+  }>;
+}
+
 export interface BrowserAudioBufferSourceLike extends BrowserAudioNodeLike {
   buffer: BrowserAudioBufferLike | null;
   onended: BrowserEventListener | null;
-  start(when?: number): void;
+  start(when?: number, offset?: number): void;
   stop(): void;
 }
 
@@ -112,6 +120,7 @@ export interface BrowserAudioContextLike {
   createMediaStreamSource(stream: unknown): BrowserAudioNodeLike;
   createBuffer(numberOfChannels: number, length: number, sampleRate: number): BrowserAudioBufferLike;
   createBufferSource(): BrowserAudioBufferSourceLike;
+  createGain?(): BrowserAudioGainNodeLike;
 }
 
 export interface BrowserAudioEnvironment {
@@ -262,6 +271,7 @@ export interface BrowserAudioPlayoutScheduledEvent {
 
 export interface BrowserAudioObserver {
   onCaptureFrame?(frame: Readonly<CapturedAudioFrame>): void;
+  onNearEndSpeechCandidate?(candidate: Readonly<NearEndSpeechCandidate>): boolean | void;
   onCaptureState?(event: Readonly<BrowserAudioCaptureStateEvent>): void;
   onDeviceChange?(event: Readonly<BrowserAudioDeviceEvent>): void;
   onPlayoutState?(event: Readonly<BrowserAudioPlayoutEvent>): void;
@@ -276,6 +286,27 @@ export interface BrowserAudioPcmChunk {
   readonly channel_count: 1;
   readonly samples: Float32Array;
   readonly provider: Readonly<AudioProviderRef>;
+}
+
+export type BrowserAudioTentativePauseOutcome =
+  | 'paused'
+  | 'resumed'
+  | 'already_paused'
+  | 'candidate_mismatch'
+  | 'target_mismatch'
+  | 'no_active_target'
+  | 'feature_disabled'
+  | 'adapter_closed'
+  | 'context_unavailable'
+  | 'operation_failed';
+
+export interface BrowserAudioTentativePauseReceipt {
+  readonly kind: 'browser_audio.tentative_pause.v1';
+  readonly outcome: BrowserAudioTentativePauseOutcome;
+  readonly candidate_id: string;
+  readonly response: Readonly<AudioResponseRef>;
+  readonly local_clock_frozen: boolean;
+  readonly business_cancel_count_delta: 0;
 }
 
 export class BrowserAudioIOViolation extends Error {
@@ -350,8 +381,31 @@ interface PendingCaptureResources {
 interface PlaybackSourceRecord {
   readonly unitId: string;
   readonly seq: number;
+  readonly buffer: BrowserAudioBufferLike;
+  readonly samples: Float32Array;
+  readonly sampleRateHz: number;
+  readonly durationSeconds: number;
+  readonly scheduledStartTime: number;
+  readonly startOffsetSeconds: number;
   readonly source: BrowserAudioBufferSourceLike;
   stopped: boolean;
+}
+
+interface PausedPlaybackRecord {
+  readonly unitId: string;
+  readonly seq: number;
+  readonly buffer: BrowserAudioBufferLike;
+  readonly samples: Float32Array;
+  readonly sampleRateHz: number;
+  readonly durationSeconds: number;
+  readonly startOffsetSeconds: number;
+}
+
+interface FarEndPlaybackSegment {
+  readonly samples: Float32Array;
+  readonly sampleRateHz: number;
+  readonly scheduledStartTime: number;
+  readonly startOffsetSeconds: number;
 }
 
 interface PlaybackSession {
@@ -364,6 +418,18 @@ interface PlaybackSession {
   readonly acknowledged: Map<string, number>;
   readonly units: Set<string>;
   nextStartTime: number;
+  firstStartTime: number | null;
+  nearEndVoiceRunFrames: number;
+  nearEndEchoRunFrames: number;
+  nearEndCandidateEmitted: boolean;
+  nearEndRearmAtTime: number;
+  readonly farEndSegments: FarEndPlaybackSegment[];
+  tentativePause: {
+    readonly candidateId: string;
+    state: 'pausing' | 'paused' | 'resuming';
+    readonly records: PausedPlaybackRecord[];
+  } | null;
+  resumeGain: BrowserAudioGainNodeLike | null;
   stopped: boolean;
 }
 
@@ -386,6 +452,170 @@ const CAPTURE_PROCESSOR_NAME = 'jiuwenswarm-live-voice-capture-v1';
 export const PLAYOUT_STARTUP_LEAD_DEFAULT_MS = 250;
 export const PLAYOUT_STARTUP_LEAD_MIN_MS = 160;
 export const PLAYOUT_STARTUP_LEAD_MAX_MS = 1000;
+
+export const LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS = 300;
+export type LocalBargeInProfile = 'off' | 'verified_headset_aec_v1';
+export const VERIFIED_HEADSET_LOCAL_BARGE_IN_PROFILE: LocalBargeInProfile = 'verified_headset_aec_v1';
+const NEAR_END_MIN_RMS = 0.012;
+const NEAR_END_MIN_PEAK = 0.025;
+const NEAR_END_NOISE_MULTIPLIER = 2.5;
+const NEAR_END_REQUIRED_VOICE_FRAMES = 3;
+const NEAR_END_FAR_END_TAIL_SECONDS = 0.1;
+const NEAR_END_ECHO_LOOKBACK_SECONDS = 0.24;
+const NEAR_END_ECHO_LAG_STEP_SECONDS = 0.02;
+const NEAR_END_ECHO_SIMILARITY_THRESHOLD = 0.68;
+const NEAR_END_REARM_COOLDOWN_SECONDS = 0.12;
+const TENTATIVE_RESUME_RAMP_SECONDS = 0.008;
+
+function resolveLocalBargeInPauseEnabled(): boolean {
+  const env = (import.meta as { env?: Record<string, string | undefined> }).env;
+  const profile = env?.VITE_LIVE_VOICE_LOCAL_BARGE_IN_PROFILE?.trim();
+  const raw = env?.VITE_LIVE_VOICE_LOCAL_BARGE_IN_PAUSE?.trim().toLowerCase();
+  const killSwitchEnabled = raw === undefined || raw === '' || raw === 'true' || raw === '1';
+  return profile === VERIFIED_HEADSET_LOCAL_BARGE_IN_PROFILE && killSwitchEnabled;
+}
+
+export const LOCAL_BARGE_IN_PAUSE_ENABLED = resolveLocalBargeInPauseEnabled();
+
+function nearEndVoiceFrame(
+  samples: Float32Array,
+  sampleRateHz: number,
+  noiseFloorRms: number,
+): Readonly<{ voice: boolean; rms: number }> {
+  let energy = 0;
+  let sum = 0;
+  let peak = 0;
+  let zeroCrossings = 0;
+  let prior = samples[0] ?? 0;
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = samples[index];
+    sum += sample;
+    energy += sample * sample;
+    peak = Math.max(peak, Math.abs(sample));
+    if (index > 0 && ((prior < 0 && sample >= 0) || (prior >= 0 && sample < 0))) zeroCrossings += 1;
+    prior = sample;
+  }
+  const rms = Math.sqrt(energy / Math.max(1, samples.length));
+  const mean = sum / Math.max(1, samples.length);
+  const zcr = zeroCrossings / Math.max(1, samples.length - 1);
+  const energyThreshold = Math.max(NEAR_END_MIN_RMS, noiseFloorRms * NEAR_END_NOISE_MULTIPLIER);
+  if (rms < energyThreshold || peak < NEAR_END_MIN_PEAK || zcr > 0.32) {
+    return Object.freeze({ voice: false, rms });
+  }
+  let periodicity = 0;
+  const minimumLag = Math.max(1, Math.floor(sampleRateHz / 400));
+  const maximumLag = Math.min(samples.length - 1, Math.ceil(sampleRateHz / 80));
+  const lagStep = Math.max(1, Math.floor(sampleRateHz / 2_000));
+  for (let lag = minimumLag; lag <= maximumLag; lag += lagStep) {
+    let correlation = 0;
+    let leftEnergy = 0;
+    let rightEnergy = 0;
+    for (let index = lag; index < samples.length; index += 1) {
+      const left = samples[index] - mean;
+      const right = samples[index - lag] - mean;
+      correlation += left * right;
+      leftEnergy += left * left;
+      rightEnergy += right * right;
+    }
+    const denominator = Math.sqrt(leftEnergy * rightEnergy);
+    if (denominator > 0) periodicity = Math.max(periodicity, correlation / denominator);
+  }
+  const crest = peak / Math.max(rms, Number.EPSILON);
+  const speechShape = periodicity >= 0.2 || (zcr >= 0.025 && zcr <= 0.22 && crest >= 1.7);
+  return Object.freeze({
+    voice: speechShape,
+    rms,
+  });
+}
+
+function frameRms(samples: Float32Array): number {
+  let energy = 0;
+  for (const sample of samples) energy += sample * sample;
+  return Math.sqrt(energy / Math.max(1, samples.length));
+}
+
+function normalizedSimilarity(samples: Float32Array, reference: Float32Array): number {
+  if (samples.length !== reference.length || samples.length === 0) return 0;
+  let sampleMean = 0;
+  let referenceMean = 0;
+  for (let index = 0; index < samples.length; index += 1) {
+    sampleMean += samples[index];
+    referenceMean += reference[index];
+  }
+  sampleMean /= samples.length;
+  referenceMean /= reference.length;
+  let product = 0;
+  let sampleEnergy = 0;
+  let referenceEnergy = 0;
+  for (let index = 0; index < samples.length; index += 1) {
+    const left = samples[index] - sampleMean;
+    const right = reference[index] - referenceMean;
+    product += left * right;
+    sampleEnergy += left * left;
+    referenceEnergy += right * right;
+  }
+  const denominator = Math.sqrt(sampleEnergy * referenceEnergy);
+  return denominator <= Number.EPSILON ? 0 : Math.min(1, Math.abs(product / denominator));
+}
+
+function farEndReferenceWindow(
+  segments: readonly FarEndPlaybackSegment[],
+  sampleRateHz: number,
+  endTime: number,
+  sampleCount: number,
+): Float32Array | null {
+  const windowStart = endTime - sampleCount / sampleRateHz;
+  const reference = new Float32Array(sampleCount);
+  let copiedSamples = 0;
+  for (const segment of segments) {
+    if (segment.sampleRateHz !== sampleRateHz) continue;
+    const segmentFirstSample = Math.min(
+      segment.samples.length,
+      Math.max(0, Math.round(segment.startOffsetSeconds * sampleRateHz)),
+    );
+    const segmentEnd = segment.scheduledStartTime + (segment.samples.length - segmentFirstSample) / sampleRateHz;
+    const overlapStart = Math.max(windowStart, segment.scheduledStartTime);
+    const overlapEnd = Math.min(endTime, segmentEnd);
+    if (overlapEnd <= overlapStart) continue;
+    const destinationStart = Math.max(0, Math.round((overlapStart - windowStart) * sampleRateHz));
+    const sourceStart = segmentFirstSample + Math.max(0, Math.round((overlapStart - segment.scheduledStartTime) * sampleRateHz));
+    const available = Math.min(
+      sampleCount - destinationStart,
+      segment.samples.length - sourceStart,
+      Math.round((overlapEnd - overlapStart) * sampleRateHz),
+    );
+    if (available <= 0) continue;
+    reference.set(segment.samples.subarray(sourceStart, sourceStart + available), destinationStart);
+    copiedSamples += available;
+  }
+  return copiedSamples >= sampleCount / 2 ? reference : null;
+}
+
+function farEndSimilarityEvidence(
+  samples: Float32Array,
+  sampleRateHz: number,
+  segments: readonly FarEndPlaybackSegment[],
+  observedAtPlayoutTime: number,
+): Readonly<{ referenceWindows: number; peak: number }> {
+  let referenceWindows = 0;
+  let peak = 0;
+  for (
+    let lagSeconds = 0;
+    lagSeconds <= NEAR_END_ECHO_LOOKBACK_SECONDS + Number.EPSILON;
+    lagSeconds += NEAR_END_ECHO_LAG_STEP_SECONDS
+  ) {
+    const reference = farEndReferenceWindow(
+      segments,
+      sampleRateHz,
+      observedAtPlayoutTime - lagSeconds,
+      samples.length,
+    );
+    if (reference === null) continue;
+    referenceWindows += 1;
+    peak = Math.max(peak, normalizedSimilarity(samples, reference));
+  }
+  return Object.freeze({ referenceWindows, peak });
+}
 
 function resolvePlayoutStartupLeadMs(): number {
   const env = (import.meta as { env?: Record<string, string | undefined> }).env;
@@ -606,6 +836,8 @@ export interface BrowserAudioIOAdapterOptions {
   readonly captureStreamFactory?: BrowserAudioCaptureStreamFactory;
   readonly captureWorkletModuleUrl?: string;
   readonly monotonicNowMs?: () => number;
+  /** Test/embedding override. Normal builds select this only through the controlled launcher. */
+  readonly localBargeInProfile?: LocalBargeInProfile;
 }
 
 export class BrowserAudioIOAdapter {
@@ -615,6 +847,7 @@ export class BrowserAudioIOAdapter {
   readonly #captureStreamFactory: BrowserAudioCaptureStreamFactory | null;
   readonly #captureWorkletModuleUrl: string;
   readonly #monotonicNowMs: () => number;
+  readonly #localBargeInEnabled: boolean;
   readonly #audioPort = new AudioPort();
   readonly #seenCaptureIds = new Set<string>();
   readonly #onVisibilityChange: BrowserEventListener;
@@ -638,6 +871,8 @@ export class BrowserAudioIOAdapter {
   #playoutDeviceListenerAttached = false;
   #playoutSinkExplicit = false;
   #playbackMutationToken = 0;
+  #nearEndNoiseFloorRms = 0.004;
+  #nearEndCandidateSequence = 0;
   #closed = false;
   #closePromise: Promise<void> | null = null;
   #visibilityListening = false;
@@ -649,6 +884,9 @@ export class BrowserAudioIOAdapter {
     this.#captureStreamFactory = this.#enabled ? (options.captureStreamFactory ?? null) : null;
     this.#captureWorkletModuleUrl = options.captureWorkletModuleUrl ?? new URL('./liveVoiceCaptureProcessor.js', import.meta.url).href;
     this.#monotonicNowMs = options.monotonicNowMs ?? defaultMonotonicNowMs;
+    this.#localBargeInEnabled = options.localBargeInProfile === undefined
+      ? LOCAL_BARGE_IN_PAUSE_ENABLED
+      : options.localBargeInProfile === VERIFIED_HEADSET_LOCAL_BARGE_IN_PROFILE;
     this.#onVisibilityChange = () => {
       if (this.#closed || this.#environment.document?.visibilityState !== 'hidden') return;
       if (this.#pendingPlayoutGeneration !== null) this.#pageHiddenPlayoutGeneration = this.#pendingPlayoutGeneration;
@@ -1211,6 +1449,14 @@ export class BrowserAudioIOAdapter {
       acknowledged: new Map(),
       units: new Set(),
       nextStartTime: context.currentTime + PLAYOUT_STARTUP_LEAD_SECONDS,
+      firstStartTime: null,
+      nearEndVoiceRunFrames: 0,
+      nearEndEchoRunFrames: 0,
+      nearEndCandidateEmitted: false,
+      nearEndRearmAtTime: 0,
+      farEndSegments: [],
+      tentativePause: null,
+      resumeGain: null,
       diagnosticLastMs: null,
       diagnosticMaxGapMs: 0,
       diagnosticStartTimer: null,
@@ -1233,7 +1479,12 @@ export class BrowserAudioIOAdapter {
     if (this.#closed || this.#playoutSourceCleanupFailure !== null) return false;
     const context = this.#playoutContext;
     const playback = this.#playback;
-    if (context === null || context.state !== 'running' || playback === null || playback.stopped) return false;
+    if (
+      context === null ||
+      playback === null ||
+      playback.stopped ||
+      context.state !== 'running'
+    ) return false;
     if (!sameResponse(playback.response, chunk.response)) return false;
     requiredText(chunk.unit_id, 'unit_id');
     if (chunk.channel_count !== 1 || !Number.isSafeInteger(chunk.sample_rate_hz) || chunk.sample_rate_hz <= 0) {
@@ -1271,6 +1522,20 @@ export class BrowserAudioIOAdapter {
     }
     if (!accepted) return false;
     playback.units.add(chunk.unit_id);
+    const durationSeconds = chunk.samples.length / chunk.sample_rate_hz;
+    if (playback.tentativePause !== null) {
+      playback.tentativePause.records.push({
+        unitId: chunk.unit_id,
+        seq: chunk.seq,
+        buffer,
+        samples: chunk.samples.slice(),
+        sampleRateHz: chunk.sample_rate_hz,
+        durationSeconds,
+        startOffsetSeconds: 0,
+      });
+      this.#emitPlayoutState('playing', 'chunk_scheduled', playback, chunk.unit_id, chunk.seq);
+      return true;
+    }
     const sourceKey = `${chunk.unit_id}\u0000${chunk.seq}`;
     let source: BrowserAudioBufferSourceLike | null = null;
     let sourceStartAttempted = false;
@@ -1278,10 +1543,22 @@ export class BrowserAudioIOAdapter {
       source = context.createBufferSource();
       source.buffer = buffer;
       source.connect(context.destination);
-      const record: PlaybackSourceRecord = { unitId: chunk.unit_id, seq: chunk.seq, source, stopped: false };
+      const startAt = Math.max(context.currentTime, playback.nextStartTime);
+      const record: PlaybackSourceRecord = {
+        unitId: chunk.unit_id,
+        seq: chunk.seq,
+        buffer,
+        samples: chunk.samples.slice(),
+        sampleRateHz: chunk.sample_rate_hz,
+        durationSeconds,
+        scheduledStartTime: startAt,
+        startOffsetSeconds: 0,
+        source,
+        stopped: false,
+      };
       playback.sources.set(sourceKey, record);
       source.onended = () => this.#handlePlaybackEnded(playback, record);
-      const startAt = Math.max(context.currentTime, playback.nextStartTime);
+      playback.firstStartTime ??= startAt;
       if (typeof this.#observer.onPlayoutScheduled === 'function') {
         const startDelayMs = Math.max(0, (startAt - context.currentTime) * 1_000);
         const scheduledFromMonotonic = readMonotonicNow(this.#monotonicNowMs);
@@ -1310,6 +1587,15 @@ export class BrowserAudioIOAdapter {
         sourceStartAttempted = true;
         source.start(startAt);
       }
+      if (this.#localBargeInEnabled && typeof this.#observer.onNearEndSpeechCandidate === 'function') {
+        playback.farEndSegments.push({
+          samples: record.samples,
+          sampleRateHz: record.sampleRateHz,
+          scheduledStartTime: record.scheduledStartTime,
+          startOffsetSeconds: record.startOffsetSeconds,
+        });
+        this.#pruneFarEndSegments(playback, context.currentTime, 0);
+      }
       const diagnosticNow = performance.now();
       playback.diagnosticMaxGapMs = Math.max(playback.diagnosticMaxGapMs, (context.currentTime - playback.nextStartTime) * 1000);
       if (playback.diagnosticLastMs === null || diagnosticNow - playback.diagnosticLastMs >= 1000) {
@@ -1323,7 +1609,7 @@ export class BrowserAudioIOAdapter {
         playback.diagnosticLastMs = diagnosticNow;
         playback.diagnosticMaxGapMs = 0;
       }
-      playback.nextStartTime = startAt + chunk.samples.length / chunk.sample_rate_hz;
+      playback.nextStartTime = startAt + durationSeconds;
     } catch {
       playback.sources.delete(sourceKey);
       if (source !== null) {
@@ -1369,6 +1655,159 @@ export class BrowserAudioIOAdapter {
 
   stopPlayout(response: Readonly<AudioResponseRef>, reason = 'requested'): boolean {
     return this.stopPlayoutExact(response, reason).local_fence_established;
+  }
+
+  async pausePlayoutExact(candidate: Readonly<NearEndSpeechCandidate>): Promise<Readonly<BrowserAudioTentativePauseReceipt>> {
+    const response = normalizeResponse(candidate.response);
+    const candidateId = requiredText(candidate.candidate_id, 'candidate_id');
+    if (this.#closed) return this.#tentativePauseReceipt('adapter_closed', candidateId, response, false);
+    if (!this.#enabled || !this.#localBargeInEnabled) {
+      return this.#tentativePauseReceipt('feature_disabled', candidateId, response, false);
+    }
+    const playback = this.#playback;
+    if (playback === null) return this.#tentativePauseReceipt('no_active_target', candidateId, response, false);
+    if (!sameResponse(playback.response, response) || playback.stopped) {
+      return this.#tentativePauseReceipt('target_mismatch', candidateId, response, false);
+    }
+    if (playback.tentativePause !== null) {
+      return this.#tentativePauseReceipt(
+        playback.tentativePause.candidateId === candidateId ? 'already_paused' : 'candidate_mismatch',
+        candidateId,
+        response,
+        playback.tentativePause.state === 'paused',
+      );
+    }
+    const context = this.#playoutContext;
+    if (context === null || context.state !== 'running') {
+      return this.#tentativePauseReceipt('context_unavailable', candidateId, response, false);
+    }
+    const pause: {
+      readonly candidateId: string;
+      state: 'pausing' | 'paused' | 'resuming';
+      readonly records: PausedPlaybackRecord[];
+    } = {
+      candidateId,
+      state: 'pausing',
+      records: [],
+    };
+    playback.tentativePause = pause;
+    const requestedAt = readMonotonicNow(this.#monotonicNowMs);
+    const pauseAt = context.currentTime;
+    for (const [sourceKey, record] of playback.sources) {
+      const elapsed = Math.max(0, pauseAt - record.scheduledStartTime);
+      const offset = Math.min(
+        Math.max(0, record.durationSeconds - 1 / record.sampleRateHz),
+        record.startOffsetSeconds + elapsed,
+      );
+      record.stopped = true;
+      record.source.onended = null;
+      try {
+        record.source.stop();
+        record.source.disconnect();
+      } catch {
+        playback.tentativePause = null;
+        this.stopPlayout(playback.response, 'tentative_pause_source_unknown');
+        return this.#tentativePauseReceipt('operation_failed', candidateId, response, false);
+      }
+      playback.sources.delete(sourceKey);
+      pause.records.push({
+        unitId: record.unitId,
+        seq: record.seq,
+        buffer: record.buffer,
+        samples: record.samples,
+        sampleRateHz: record.sampleRateHz,
+        durationSeconds: record.durationSeconds,
+        startOffsetSeconds: offset,
+      });
+    }
+    playback.farEndSegments.length = 0;
+    playback.nextStartTime = pauseAt;
+    pause.state = 'paused';
+    recordAudioDiagnostic('playout_tentative_paused', {
+      ...response,
+      candidate_id: candidateId,
+      paused_sources: pause.records.length,
+      elapsed_ms: requestedAt === null ? null : Math.max(0, (readMonotonicNow(this.#monotonicNowMs) ?? requestedAt) - requestedAt),
+    });
+    this.#emitPlayoutState('playing', 'local_candidate_paused', playback);
+    return this.#tentativePauseReceipt('paused', candidateId, response, true);
+  }
+
+  async resumePlayoutExact(
+    responseInput: Readonly<AudioResponseRef>,
+    candidateIdInput: string,
+  ): Promise<Readonly<BrowserAudioTentativePauseReceipt>> {
+    const response = normalizeResponse(responseInput);
+    const candidateId = requiredText(candidateIdInput, 'candidate_id');
+    if (this.#closed) return this.#tentativePauseReceipt('adapter_closed', candidateId, response, false);
+    if (!this.#enabled || !this.#localBargeInEnabled) {
+      return this.#tentativePauseReceipt('feature_disabled', candidateId, response, false);
+    }
+    const playback = this.#playback;
+    if (playback === null) return this.#tentativePauseReceipt('no_active_target', candidateId, response, false);
+    if (!sameResponse(playback.response, response) || playback.stopped) {
+      return this.#tentativePauseReceipt('target_mismatch', candidateId, response, false);
+    }
+    const pause = playback.tentativePause;
+    if (pause === null || pause.candidateId !== candidateId) {
+      return this.#tentativePauseReceipt('candidate_mismatch', candidateId, response, false);
+    }
+    const context = this.#playoutContext;
+    if (context === null || context.state !== 'running') {
+      return this.#tentativePauseReceipt('context_unavailable', candidateId, response, true);
+    }
+    pause.state = 'resuming';
+    try {
+      let nextStartTime = context.currentTime;
+      playback.resumeGain?.disconnect();
+      playback.resumeGain = typeof context.createGain === 'function' ? context.createGain() : null;
+      if (playback.resumeGain !== null) {
+        playback.resumeGain.gain.setValueAtTime(0, nextStartTime);
+        playback.resumeGain.gain.linearRampToValueAtTime(1, nextStartTime + TENTATIVE_RESUME_RAMP_SECONDS);
+        playback.resumeGain.connect(context.destination);
+      }
+      for (const pending of pause.records) {
+        const source = context.createBufferSource();
+        source.buffer = pending.buffer;
+        source.connect(playback.resumeGain ?? context.destination);
+        const record: PlaybackSourceRecord = {
+          ...pending,
+          scheduledStartTime: nextStartTime,
+          source,
+          stopped: false,
+        };
+        playback.sources.set(`${pending.unitId}\u0000${pending.seq}`, record);
+        source.onended = () => this.#handlePlaybackEnded(playback, record);
+        source.start(nextStartTime, pending.startOffsetSeconds);
+        if (this.#localBargeInEnabled && typeof this.#observer.onNearEndSpeechCandidate === 'function') {
+          playback.farEndSegments.push({
+            samples: pending.samples,
+            sampleRateHz: pending.sampleRateHz,
+            scheduledStartTime: nextStartTime,
+            startOffsetSeconds: pending.startOffsetSeconds,
+          });
+        }
+        nextStartTime += Math.max(0, pending.durationSeconds - pending.startOffsetSeconds);
+      }
+      playback.nextStartTime = nextStartTime;
+      playback.tentativePause = null;
+      playback.nearEndVoiceRunFrames = 0;
+      playback.nearEndEchoRunFrames = 0;
+      playback.nearEndCandidateEmitted = false;
+      playback.nearEndRearmAtTime = context.currentTime + NEAR_END_REARM_COOLDOWN_SECONDS;
+      recordAudioDiagnostic('playout_tentative_resumed', {
+        ...response,
+        candidate_id: candidateId,
+        resumed_sources: pause.records.length,
+      });
+      this.#emitPlayoutState('playing', 'local_candidate_resumed', playback);
+      return this.#tentativePauseReceipt('resumed', candidateId, response, false);
+    } catch {
+      if (this.#playback === playback && playback.tentativePause === pause) {
+        this.stopPlayout(playback.response, 'tentative_resume_source_failed');
+      }
+      return this.#tentativePauseReceipt('operation_failed', candidateId, response, false);
+    }
   }
 
   stopPlayoutExact(response: Readonly<AudioResponseRef>, reason = 'requested'): Readonly<BrowserAudioLocalStopReceipt> {
@@ -1420,7 +1859,24 @@ export class BrowserAudioIOAdapter {
     );
   }
 
+  #tentativePauseReceipt(
+    outcome: BrowserAudioTentativePauseOutcome,
+    candidateId: string,
+    response: Readonly<AudioResponseRef>,
+    frozen: boolean,
+  ): Readonly<BrowserAudioTentativePauseReceipt> {
+    return Object.freeze({
+      kind: 'browser_audio.tentative_pause.v1',
+      outcome,
+      candidate_id: candidateId,
+      response,
+      local_clock_frozen: frozen,
+      business_cancel_count_delta: 0,
+    });
+  }
+
   #stopPlaybackSources(playback: PlaybackSession, reason: string, emitState = true): Readonly<PlaybackSourceCleanupSummary> {
+    playback.tentativePause = null;
     playback.stopped = true;
     if (playback.diagnosticStartTimer !== null) clearTimeout(playback.diagnosticStartTimer);
     playback.diagnosticStartTimer = null;
@@ -1447,6 +1903,13 @@ export class BrowserAudioIOAdapter {
       }
     }
     playback.sources.clear();
+    try {
+      playback.resumeGain?.disconnect();
+    } catch {
+      // Every source is already stopped and disconnected; an empty ramp node
+      // cannot revive audio or widen the exact-response fence.
+    }
+    playback.resumeGain = null;
     const summary = Object.freeze({
       sourceCount,
       stopCompletedCount,
@@ -1695,6 +2158,7 @@ export class BrowserAudioIOAdapter {
       } catch {
         throw new BrowserAudioIOViolation('AUDIO_FRAME_CONSUMER_FAILED', 'the capture frame consumer rejected a frame');
       }
+      this.#observeNearEndSpeech(frame);
     } catch (error) {
       const mapped = mapBrowserFailure(error, 'AUDIO_WORKLET_PROTOCOL_VIOLATION');
       this.#stopCaptureFromBrowser(mapped.reason.toLowerCase());
@@ -2165,6 +2629,153 @@ export class BrowserAudioIOAdapter {
       } catch { /* Clock observation never starts, stops or acknowledges audio. */ }
     };
     try { playback.diagnosticStartTimer = setTimeout(observe, 16); } catch { /* Passive. */ }
+  }
+
+  #observeNearEndSpeech(frame: Readonly<CapturedAudioFrame>): void {
+    if (!this.#localBargeInEnabled || typeof this.#observer.onNearEndSpeechCandidate !== 'function') return;
+    const playback = this.#playback;
+    const context = this.#playoutContext;
+    const frameEndTime = frame.context_time_s + frame.samples.length / frame.format.sample_rate_hz;
+    const captureSharesPlayoutClock = this.#capture?.context === context;
+    if (playback !== null && context !== null && captureSharesPlayoutClock) {
+      this.#pruneFarEndSegments(
+        playback,
+        frameEndTime,
+        frame.samples.length / frame.format.sample_rate_hz,
+      );
+    }
+    const processing = this.#capture?.metadata.actual_processing;
+    const supportedProcessing =
+      processing?.echo_cancellation === true &&
+      processing.noise_suppression === true &&
+      processing.auto_gain_control === true;
+    const firstStartTime = playback?.firstStartTime ?? null;
+    const farEndActive =
+      supportedProcessing &&
+      playback !== null &&
+      !playback.stopped &&
+      playback.tentativePause === null &&
+      !playback.nearEndCandidateEmitted &&
+      context !== null &&
+      captureSharesPlayoutClock &&
+      context.state === 'running' &&
+      frameEndTime >= playback.nearEndRearmAtTime &&
+      firstStartTime !== null &&
+      frameEndTime >= firstStartTime &&
+      frameEndTime <= playback.nextStartTime + NEAR_END_FAR_END_TAIL_SECONDS;
+    if (!farEndActive) {
+      if (playback !== null) {
+        playback.nearEndVoiceRunFrames = 0;
+        playback.nearEndEchoRunFrames = 0;
+      }
+      this.#updateNearEndNoiseFloor(frameRms(frame.samples));
+      return;
+    }
+    const evidence = nearEndVoiceFrame(frame.samples, frame.format.sample_rate_hz, this.#nearEndNoiseFloorRms);
+    if (!evidence.voice) {
+      playback.nearEndVoiceRunFrames = 0;
+      playback.nearEndEchoRunFrames = 0;
+      this.#updateNearEndNoiseFloor(evidence.rms);
+      return;
+    }
+    const farEndEvidence = farEndSimilarityEvidence(
+      frame.samples,
+      frame.format.sample_rate_hz,
+      playback.farEndSegments,
+      frameEndTime,
+    );
+    if (farEndEvidence.referenceWindows === 0) {
+      playback.nearEndVoiceRunFrames = 0;
+      playback.nearEndEchoRunFrames = 0;
+      return;
+    }
+    if (farEndEvidence.peak >= NEAR_END_ECHO_SIMILARITY_THRESHOLD) {
+      playback.nearEndVoiceRunFrames = 0;
+      playback.nearEndEchoRunFrames += 1;
+      if (playback.nearEndEchoRunFrames === NEAR_END_REQUIRED_VOICE_FRAMES) {
+        recordAudioDiagnostic('near_end_echo_rejected', {
+          ...playback.response,
+          frame_seq: frame.seq,
+          consecutive_voice_frames: playback.nearEndEchoRunFrames,
+          far_end_reference_windows: farEndEvidence.referenceWindows,
+          far_end_similarity_peak: farEndEvidence.peak,
+          far_end_segments_retained: playback.farEndSegments.length,
+        });
+      }
+      return;
+    }
+    playback.nearEndEchoRunFrames = 0;
+    playback.nearEndVoiceRunFrames += 1;
+    if (playback.nearEndVoiceRunFrames < NEAR_END_REQUIRED_VOICE_FRAMES) return;
+    const observedAt = readMonotonicNow(this.#monotonicNowMs);
+    if (observedAt === null) return;
+    playback.nearEndCandidateEmitted = true;
+    this.#nearEndCandidateSequence += 1;
+    const candidate = Object.freeze({
+      kind: 'browser_audio.near_end_speech_candidate.v1' as const,
+      candidate_id: `near-end-${this.#playoutGeneration}-${frame.capture.capture_generation}-${this.#nearEndCandidateSequence}`,
+      capture: Object.freeze({ ...frame.capture }),
+      response: playback.response,
+      frame_seq: frame.seq,
+      observed_at_monotonic_ms: observedAt,
+      detector: Object.freeze({
+        profile: 'verified_headset_aec_far_end_reference_v1' as const,
+        consecutive_voice_frames: playback.nearEndVoiceRunFrames,
+        far_end_playout_active: true as const,
+        far_end_reference_windows: farEndEvidence.referenceWindows,
+        far_end_similarity_peak: farEndEvidence.peak,
+      }),
+    });
+    recordAudioDiagnostic('near_end_speech_candidate', {
+      ...playback.response,
+      candidate_id: candidate.candidate_id,
+      capture_id: candidate.capture.capture_id,
+      capture_generation: candidate.capture.capture_generation,
+      frame_seq: candidate.frame_seq,
+      detector_profile: candidate.detector.profile,
+      consecutive_voice_frames: candidate.detector.consecutive_voice_frames,
+      far_end_reference_windows: candidate.detector.far_end_reference_windows,
+      far_end_similarity_peak: candidate.detector.far_end_similarity_peak,
+      far_end_segments_retained: playback.farEndSegments.length,
+    });
+    let accepted = false;
+    try {
+      accepted = this.#observer.onNearEndSpeechCandidate?.(candidate) === true;
+    } catch {
+      // A candidate observer has no capture, playback, cancel or commit authority.
+    }
+    if (!accepted && this.#playback === playback && !playback.stopped && playback.tentativePause === null) {
+      playback.nearEndCandidateEmitted = false;
+      playback.nearEndVoiceRunFrames = 0;
+      playback.nearEndEchoRunFrames = 0;
+      playback.nearEndRearmAtTime = frameEndTime + NEAR_END_REARM_COOLDOWN_SECONDS;
+      recordAudioDiagnostic('near_end_candidate_rejected_by_observer', {
+        ...playback.response,
+        candidate_id: candidate.candidate_id,
+        frame_seq: candidate.frame_seq,
+      });
+    }
+  }
+
+  #pruneFarEndSegments(
+    playback: PlaybackSession,
+    currentTime: number,
+    frameDurationSeconds: number,
+  ): void {
+    const staleBefore = currentTime - NEAR_END_ECHO_LOOKBACK_SECONDS - Math.max(0, frameDurationSeconds);
+    let staleCount = 0;
+    for (const segment of playback.farEndSegments) {
+      const segmentEnd = segment.scheduledStartTime
+        + Math.max(0, segment.samples.length / segment.sampleRateHz - segment.startOffsetSeconds);
+      if (segmentEnd >= staleBefore) break;
+      staleCount += 1;
+    }
+    if (staleCount > 0) playback.farEndSegments.splice(0, staleCount);
+  }
+
+  #updateNearEndNoiseFloor(rms: number): void {
+    if (rms > Math.max(NEAR_END_MIN_RMS, this.#nearEndNoiseFloorRms * 1.5)) return;
+    this.#nearEndNoiseFloorRms = Math.max(0.001, this.#nearEndNoiseFloorRms * 0.98 + rms * 0.02);
   }
 
   #emitCaptureState(

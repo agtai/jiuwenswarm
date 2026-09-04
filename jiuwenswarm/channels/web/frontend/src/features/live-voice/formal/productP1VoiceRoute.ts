@@ -1,7 +1,14 @@
-import { LIVE_VOICE_AUDIO_FRAME_DURATION_MS, createAudioRenderPlan, type AudioResponseRef, type CapturedAudioFrame } from './audioPort.js';
+import {
+  LIVE_VOICE_AUDIO_FRAME_DURATION_MS,
+  createAudioRenderPlan,
+  type AudioResponseRef,
+  type CapturedAudioFrame,
+  type NearEndSpeechCandidate,
+} from './audioPort.js';
 import { recordAudioDiagnostic } from './audioDiagnostics.js';
 import {
   BrowserAudioIOAdapter,
+  LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS,
   type BrowserAudioCaptureStreamFactory,
   type BrowserAudioEnvironment,
   type BrowserAudioPcmChunk,
@@ -85,6 +92,12 @@ const L0_WEBAUDIO_START_CONFIRMATION_RETRIES = 20;
 const NATIVE_AUDIO_MAX_BYTES = 8 * 1024 * 1024;
 
 type ProductP1SuccessorCaptureReadiness = 'not_started' | 'pending' | 'ready' | 'degraded';
+
+interface TentativeBargeInPause {
+  readonly candidate: Readonly<NearEndSpeechCandidate>;
+  confirmationTimer: ReturnType<typeof setTimeout> | null;
+  providerConfirmed: boolean;
+}
 
 export type ProductP1VoiceStatus = 'idle' | 'starting' | 'capturing' | 'recognizing' | 'recognized' | 'playing' | 'cleanup_pending' | 'failed' | 'closed';
 
@@ -588,6 +601,7 @@ export class ProductP1VoiceRouteOwner {
   #pendingMediaActivation: Promise<unknown> | null = null;
   #endOfTurnNegotiated = false;
   #pendingSpeechStart: Readonly<MediaSpeechStart> | null = null;
+  #providerSpeechStartObservedAtMonotonicMs: number | null = null;
   #pendingEndOfTurn: Readonly<MediaEndOfTurn> | null = null;
   #endOfTurnHandler: (() => void) | null = null;
   #endOfTurnDelivered = false;
@@ -600,6 +614,7 @@ export class ProductP1VoiceRouteOwner {
   #captureRotationPromise: Promise<void> | null = null;
   #captureRotationSourceId: string | null = null;
   #idleCapturePausePromise: Promise<'paused' | 'speech_active'> | null = null;
+  #tentativeBargeInPause: TentativeBargeInPause | null = null;
   #captureStopExpected = false;
   #l0Available: boolean;
   #l0PlayoutStartedAtMs: number | null = null;
@@ -623,6 +638,7 @@ export class ProductP1VoiceRouteOwner {
       socket_factory?: DedicatedMediaSocketFactory;
       audio_environment?: BrowserAudioEnvironment;
       capture_stream_factory?: BrowserAudioCaptureStreamFactory;
+      local_barge_in_profile?: 'off' | 'verified_headset_aec_v1';
       on_status?: (status: ProductP1VoiceStatus, reason: string | null) => void;
       on_concurrent_capture_started?: () => void;
       on_capture_activity_settled?: () => void;
@@ -652,8 +668,10 @@ export class ProductP1VoiceRouteOwner {
       enabled: this.#enabled,
       ...(input.audio_environment === undefined ? {} : { environment: input.audio_environment }),
       ...(input.capture_stream_factory === undefined ? {} : { captureStreamFactory: input.capture_stream_factory }),
+      ...(input.local_barge_in_profile === undefined ? {} : { localBargeInProfile: input.local_barge_in_profile }),
       observer: {
         onCaptureFrame: frame => this.#acceptCaptureFrame(frame),
+        onNearEndSpeechCandidate: candidate => this.#acceptNearEndSpeechCandidate(candidate),
         onCaptureState: event => {
           let failure: (Error & { readonly reason: string }) | null = null;
           if (event.state === 'failed' && (!this.#captureReadinessPending || this.#captureStartupAudioReady)) {
@@ -783,6 +801,7 @@ export class ProductP1VoiceRouteOwner {
     if (this.#closeRequested) throw new Error('formal P1 cleanup is in progress');
     if (this.#closePromise !== null) throw new Error('formal P1 cleanup is in progress');
     if (!['idle', 'recognized'].includes(this.#status)) throw new Error('formal P1 capture is already active');
+    this.#discardNearEndCandidate();
     const sessionId = requiredText(input.session_id, 'session_id');
     const interactionId = requiredText(input.interaction_id, 'interaction_id');
     const correlationId = requiredText(input.correlation_id, 'correlation_id');
@@ -825,6 +844,7 @@ export class ProductP1VoiceRouteOwner {
     this.#nativeCaptureSendPaused = false;
     this.#endOfTurnNegotiated = false;
     this.#pendingSpeechStart = null;
+    this.#providerSpeechStartObservedAtMonotonicMs = null;
     this.#pendingEndOfTurn = null;
     this.#endOfTurnHandler = null;
     this.#endOfTurnDelivered = false;
@@ -1183,6 +1203,7 @@ export class ProductP1VoiceRouteOwner {
       // to be spoken depends on, exactly as an empty recognition does not.
       this.#endOfTurnNegotiated = false;
       this.#pendingSpeechStart = null;
+      this.#providerSpeechStartObservedAtMonotonicMs = null;
       this.#pendingEndOfTurn = null;
       // Keep the current P1 loop listener through a silent release. The next
       // overlap capture has its own exact route/generation and negotiates EOT
@@ -1255,6 +1276,7 @@ export class ProductP1VoiceRouteOwner {
       if (this.#route === route) this.#route = null;
       this.#endOfTurnHandler = null;
       this.#pendingSpeechStart = null;
+      this.#providerSpeechStartObservedAtMonotonicMs = null;
       this.#pendingEndOfTurn = null;
       this.#setStatus('recognized', null);
       return 'paused';
@@ -1723,6 +1745,7 @@ export class ProductP1VoiceRouteOwner {
         if (this.#settlingPlayout === pendingPlayout) this.#settlingPlayout = null;
         if (continuousNative) {
           this.#pendingSpeechStart = null;
+          this.#providerSpeechStartObservedAtMonotonicMs = null;
           this.#bargeInSpeechStartDelivered = false;
           this.#setStatus('capturing', null);
         } else if (captureReadiness?.ready === true) {
@@ -1787,6 +1810,161 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
+  #acceptNearEndSpeechCandidate(candidate: Readonly<NearEndSpeechCandidate>): boolean {
+    const pending = this.#pendingPlayout;
+    const route = this.#route;
+    const current =
+      pending !== null &&
+      route !== null &&
+      this.#status === 'playing' &&
+      this.#nativeTaskNotification === null &&
+      candidate.capture.capture_id === route.binding.generation.id &&
+      candidate.capture.capture_generation === route.binding.generation.value &&
+      l0ResponseKey(candidate.response) === l0ResponseKey(pending.response);
+    this.#diagnose('near_end_candidate_gate', {
+      ...candidate.response,
+      candidate_id: candidate.candidate_id,
+      callback_current: current,
+      confirmation_window_ms: LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS,
+    });
+    if (!current || this.#tentativeBargeInPause !== null) return false;
+    const retained: TentativeBargeInPause = { candidate, confirmationTimer: null, providerConfirmed: false };
+    this.#tentativeBargeInPause = retained;
+    void this.#pauseForNearEndCandidate(retained);
+    if (this.#pendingSpeechStart !== null && this.#providerSpeechStartObservedAtMonotonicMs !== null) {
+      this.#confirmNearEndCandidate(candidate.response, this.#providerSpeechStartObservedAtMonotonicMs);
+    }
+    return true;
+  }
+
+  async #pauseForNearEndCandidate(retained: TentativeBargeInPause): Promise<void> {
+    const receipt = await this.#audio.pausePlayoutExact(retained.candidate);
+    this.#diagnose('near_end_candidate_pause_result', {
+      ...retained.candidate.response,
+      candidate_id: retained.candidate.candidate_id,
+      outcome: receipt.outcome,
+      local_clock_frozen: receipt.local_clock_frozen,
+    });
+    if (this.#tentativeBargeInPause !== retained) return;
+    if (receipt.outcome !== 'paused' && receipt.outcome !== 'already_paused') {
+      this.#tentativeBargeInPause = null;
+      return;
+    }
+    const remainingMs = LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS
+      - (monotonicNowMs() - retained.candidate.observed_at_monotonic_ms);
+    if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+      if (retained.providerConfirmed) {
+        this.#stopProviderConfirmedNearEndCandidate(retained);
+        return;
+      }
+      this.#diagnose('near_end_candidate_confirmation_expired', {
+        ...retained.candidate.response,
+        candidate_id: retained.candidate.candidate_id,
+        confirmation_window_ms: LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS,
+        confirmation_elapsed_ms: monotonicNowMs() - retained.candidate.observed_at_monotonic_ms,
+      });
+      void this.#rollbackNearEndCandidate(retained);
+      return;
+    }
+    retained.confirmationTimer = setTimeout(() => {
+      if (retained.providerConfirmed) {
+        this.#stopProviderConfirmedNearEndCandidate(retained);
+        return;
+      }
+      void this.#rollbackNearEndCandidate(retained);
+    }, remainingMs);
+    (retained.confirmationTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  #stopProviderConfirmedNearEndCandidate(retained: TentativeBargeInPause): void {
+    if (this.#tentativeBargeInPause !== retained || !retained.providerConfirmed) return;
+    this.#diagnose('near_end_candidate_confirmed_stop_timeout', {
+      ...retained.candidate.response,
+      candidate_id: retained.candidate.candidate_id,
+      confirmation_window_ms: LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS,
+    });
+    const stopped = this.stopAgentPlayout(retained.candidate.response);
+    if (!stopped && this.#tentativeBargeInPause === retained) {
+      this.#discardNearEndCandidate();
+      void this.#fail(Object.assign(new Error('Provider-confirmed local playout could not be stopped'), {
+        reason: 'LOCAL_BARGE_IN_CONFIRMED_STOP_FAILED',
+      }));
+    }
+  }
+
+  async #rollbackNearEndCandidate(retained: TentativeBargeInPause): Promise<void> {
+    if (this.#tentativeBargeInPause !== retained) return;
+    this.#tentativeBargeInPause = null;
+    retained.confirmationTimer = null;
+    const receipt = await this.#audio.resumePlayoutExact(
+      retained.candidate.response,
+      retained.candidate.candidate_id,
+    );
+    this.#diagnose('near_end_candidate_rollback', {
+      ...retained.candidate.response,
+      candidate_id: retained.candidate.candidate_id,
+      outcome: receipt.outcome,
+      local_clock_frozen: receipt.local_clock_frozen,
+    });
+    if (receipt.local_clock_frozen && ['playing', 'capturing'].includes(this.#status)) {
+      void this.#fail(Object.assign(new Error('tentative local playout pause could not be resumed'), {
+        reason: 'LOCAL_BARGE_IN_RESUME_FAILED',
+      }));
+    }
+  }
+
+  #consumeNearEndCandidate(response: Readonly<AudioResponseRef>): void {
+    const retained = this.#tentativeBargeInPause;
+    if (retained === null || l0ResponseKey(retained.candidate.response) !== l0ResponseKey(response)) return;
+    if (retained.confirmationTimer !== null) clearTimeout(retained.confirmationTimer);
+    retained.confirmationTimer = null;
+    this.#tentativeBargeInPause = null;
+  }
+
+  #confirmNearEndCandidate(
+    response: Readonly<AudioResponseRef>,
+    providerObservedAtMonotonicMs = monotonicNowMs(),
+  ): void {
+    const retained = this.#tentativeBargeInPause;
+    if (retained === null || l0ResponseKey(retained.candidate.response) !== l0ResponseKey(response)) return;
+    if (retained.providerConfirmed) {
+      this.#diagnose('near_end_candidate_confirmation_duplicate', {
+        ...response,
+        candidate_id: retained.candidate.candidate_id,
+      });
+      return;
+    }
+    const elapsedMs = providerObservedAtMonotonicMs - retained.candidate.observed_at_monotonic_ms;
+    if (!Number.isFinite(elapsedMs) || Math.abs(elapsedMs) > LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS) {
+      if (retained.confirmationTimer !== null) clearTimeout(retained.confirmationTimer);
+      retained.confirmationTimer = null;
+      this.#diagnose('near_end_candidate_confirmation_expired', {
+        ...response,
+        candidate_id: retained.candidate.candidate_id,
+        confirmation_window_ms: LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS,
+        confirmation_elapsed_ms: elapsedMs,
+      });
+      queueMicrotask(() => {
+        if (this.#tentativeBargeInPause === retained) void this.#rollbackNearEndCandidate(retained);
+      });
+      return;
+    }
+    retained.providerConfirmed = true;
+    this.#diagnose('near_end_candidate_confirmed', {
+      ...response,
+      candidate_id: retained.candidate.candidate_id,
+      confirmation_elapsed_ms: elapsedMs,
+    });
+  }
+
+  #discardNearEndCandidate(): void {
+    const retained = this.#tentativeBargeInPause;
+    if (retained?.confirmationTimer !== null && retained?.confirmationTimer !== undefined) {
+      clearTimeout(retained.confirmationTimer);
+    }
+    this.#tentativeBargeInPause = null;
+  }
+
   stopAgentPlayout(response: Readonly<AudioResponseRef>): boolean {
     this.#diagnose('p1_stop_requested', { ...response });
     const pending = this.#pendingPlayout;
@@ -1808,6 +1986,7 @@ export class ProductP1VoiceRouteOwner {
       this.#pendingPlayout = pending;
       return false;
     }
+    this.#consumeNearEndCandidate(response);
     if (requestedClock !== null) {
       const confirmedMonotonicMs = stopReceipt.timing.confirmed_at_monotonic_ms;
       const confirmedClock =
@@ -1993,6 +2172,7 @@ export class ProductP1VoiceRouteOwner {
     this.#captureFramesAcked = 0;
     this.#endOfTurnNegotiated = false;
     this.#pendingSpeechStart = null;
+    this.#providerSpeechStartObservedAtMonotonicMs = null;
     this.#pendingEndOfTurn = null;
     this.#endOfTurnDelivered = false;
     this.#bargeInSpeechStartDelivered = false;
@@ -2059,6 +2239,7 @@ export class ProductP1VoiceRouteOwner {
     this.#speech = null;
     this.#endOfTurnNegotiated = false;
     this.#pendingSpeechStart = null;
+    this.#providerSpeechStartObservedAtMonotonicMs = null;
     this.#pendingEndOfTurn = null;
     this.#endOfTurnDelivered = false;
     this.#bargeInSpeechStartDelivered = false;
@@ -3433,6 +3614,7 @@ export class ProductP1VoiceRouteOwner {
     startedRecognitionFence: Promise<void> | null = null,
     startedAuthorityCleanup: Promise<readonly PromiseSettledResult<void>[]> | null = null,
   ): Promise<void> {
+    this.#discardNearEndCandidate();
     this.#operationGeneration += 1;
     const recognitionFence = startedRecognitionFence ?? this.#fenceRecognitionForRelease();
     // Starting every exact revocation here, before browser audio cleanup, also
@@ -3446,6 +3628,7 @@ export class ProductP1VoiceRouteOwner {
     this.#captureStartupFailure = null;
     this.#mediaTerminalFailure = null;
     this.#pendingSpeechStart = null;
+    this.#providerSpeechStartObservedAtMonotonicMs = null;
     this.#pendingEndOfTurn = null;
     this.#endOfTurnHandler = null;
     this.#endOfTurnDelivered = false;
@@ -3644,6 +3827,7 @@ export class ProductP1VoiceRouteOwner {
       throw new Error('speech-start control escaped its media authority');
     }
     this.#captureProviderSpeechStartObserved = true;
+    this.#providerSpeechStartObservedAtMonotonicMs = monotonicNowMs();
     if (this.#captureUtteranceStartFrameIndex === null) {
       // The authoritative utterance budget starts at the first provider
       // speech-start on this lease; capture-lease age alone never expires an
@@ -3655,9 +3839,16 @@ export class ProductP1VoiceRouteOwner {
       // this same input turn's EOT reaches the uplink control channel. Never
       // carry a pre-response speech-start into playout as a new barge-in.
       this.#pendingSpeechStart = null;
+      this.#providerSpeechStartObservedAtMonotonicMs = null;
       return;
     }
     this.#pendingSpeechStart = event;
+    if (this.#pendingPlayout !== null) {
+      this.#confirmNearEndCandidate(
+        this.#pendingPlayout.response,
+        this.#providerSpeechStartObservedAtMonotonicMs,
+      );
+    }
     this.#deliverBargeInSpeechStart(operationGeneration, route);
     this.#deliverGenerationSpeechStart(operationGeneration, route);
   }
@@ -3784,6 +3975,7 @@ export class ProductP1VoiceRouteOwner {
 
   #resetNativeTurnBoundary(): void {
     this.#pendingSpeechStart = null;
+    this.#providerSpeechStartObservedAtMonotonicMs = null;
     this.#pendingEndOfTurn = null;
     this.#captureProviderSpeechStartObserved = false;
     this.#captureSpeechObserved = false;

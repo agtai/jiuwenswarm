@@ -9,6 +9,8 @@ param(
     )]
     [string]$ExpectedSourceBranch = 'hx/0812_live_voice_w3',
     [switch]$GenerationInterruption,
+    [ValidateSet('off', 'verified-headset-aec-v1')]
+    [string]$LocalBargeInProfile = 'off',
     [string]$ProjectPath,
     [string]$ProjectId,
     [string]$DataDir,
@@ -682,6 +684,18 @@ try {
         if ([string]::IsNullOrWhiteSpace($ProjectId) -and $null -ne $savedConfig.project_id) {
             $ProjectId = [string]$savedConfig.project_id
         }
+        $savedLocalBargeInProperty = $savedConfig.PSObject.Properties['local_barge_in_profile']
+        if (-not $PSBoundParameters.ContainsKey('LocalBargeInProfile') -and $null -ne $savedLocalBargeInProperty -and $null -ne $savedLocalBargeInProperty.Value) {
+            $savedLocalBargeInProfile = [string]$savedLocalBargeInProperty.Value
+            if (@('off', 'verified-headset-aec-v1') -notcontains $savedLocalBargeInProfile) {
+                Fail "已保存的本地插话 profile 无效：$savedLocalBargeInProfile"
+            }
+            $LocalBargeInProfile = $savedLocalBargeInProfile
+        }
+    }
+    $localBargeInEnabled = $LocalBargeInProfile -eq 'verified-headset-aec-v1'
+    if ($localBargeInEnabled -and $RuntimeProfile -ne 'formal-web-validation') {
+        Fail '耳机本地插话暂停只允许 formal-web-validation profile。'
     }
     if ([string]::IsNullOrWhiteSpace($DataDir)) {
         $DataDir = Join-Path $env:USERPROFILE '.jiuwenswarm'
@@ -775,6 +789,7 @@ try {
             project_path   = $ProjectPath
             project_id     = $ProjectId
             data_dir       = $DataDir
+            local_barge_in_profile = $LocalBargeInProfile
         } | ConvertTo-Json | Set-Content -LiteralPath $DemoConfigPath -Encoding UTF8
         Write-Pass "已保存无密钥的机器私有 Demo 选择：$DemoConfigPath"
     }
@@ -918,13 +933,31 @@ try {
         'VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1',
         'VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION',
         'VITE_FEATURE_LIVE_VOICE_TASK_DEMO',
-        'VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH'
+        'VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH',
+        'VITE_LIVE_VOICE_LOCAL_BARGE_IN_PAUSE',
+        'VITE_LIVE_VOICE_LOCAL_BARGE_IN_PROFILE'
     )) {
         # Vite gives an existing process variable precedence over mode files.
         # SetEnvironmentVariable(..., $null, 'Process') becomes an empty value
         # in this PowerShell/.NET runtime, which would still override the
         # profile. Remove the process entry itself so .env.live-voice can load.
         Remove-Item -LiteralPath "Env:\$frontendOverride" -ErrorAction SilentlyContinue
+    }
+    $localBargeInBuildProfile = if ($localBargeInEnabled) { 'verified_headset_aec_v1' } else { 'off' }
+    [Environment]::SetEnvironmentVariable(
+        'VITE_LIVE_VOICE_LOCAL_BARGE_IN_PROFILE',
+        $localBargeInBuildProfile,
+        'Process'
+    )
+    [Environment]::SetEnvironmentVariable(
+        'VITE_LIVE_VOICE_LOCAL_BARGE_IN_PAUSE',
+        $(if ($localBargeInEnabled) { 'true' } else { 'false' }),
+        'Process'
+    )
+    if ($localBargeInEnabled) {
+        Write-Pass '已显式启用 verified-headset-aec-v1 本地插话暂停；其他设备 profile 仍关闭'
+    } else {
+        Write-Pass '本地插话暂停保持关闭'
     }
     $requiredRuntimeFlags = @(
         'JIUWENSWARM_ENABLE_ORIGIN_CHECK',
@@ -1015,10 +1048,12 @@ try {
             Fail 'L0 已验证前端构建合同的 bundle 路径越界。'
         }
         if (
-            $buildContract.schema_version -ne 1 -or
+            $buildContract.schema_version -ne 2 -or
             $buildContract.source_head -ne (& git rev-parse HEAD).Trim() -or
             $buildContract.frontend_tree -ne $frontendTree -or
             $buildContract.package_lock_sha256 -ne $packageLockSha256 -or
+            $buildContract.local_barge_in_profile -ne $localBargeInBuildProfile -or
+            $buildContract.local_barge_in_pause -ne $localBargeInEnabled -or
             -not (Test-Path -LiteralPath $builtAsset -PathType Leaf) -or
             (Get-FileHash -LiteralPath $builtAsset -Algorithm SHA256).Hash.ToLowerInvariant() -ne $buildContract.bundle_sha256
         ) {
@@ -1049,10 +1084,12 @@ try {
             $bundleRelativePath = ('dist/' + $distAssetMatch.Groups[1].Value.TrimStart('/')).Replace('/', '\')
             $bundleFile = Join-Path $FrontendRoot $bundleRelativePath
             [ordered]@{
-                schema_version = 1
+                schema_version = 2
                 source_head = (& git rev-parse HEAD).Trim()
                 frontend_tree = $frontendTree
                 package_lock_sha256 = $packageLockSha256
+                local_barge_in_profile = $localBargeInBuildProfile
+                local_barge_in_pause = $localBargeInEnabled
                 bundle_relative_path = $bundleRelativePath
                 bundle_sha256 = (Get-FileHash -LiteralPath $bundleFile -Algorithm SHA256).Hash.ToLowerInvariant()
             } | ConvertTo-Json | Set-Content -LiteralPath $l0BuildContractPath -Encoding UTF8
@@ -1082,6 +1119,9 @@ try {
     if ($null -eq $bundle) { Fail 'Live Voice 前端 bundle 未在启动时限内就绪。' }
     if (-not ([string]$bundle.Content).Contains('live_voice.composition.unified.submit')) {
         Fail '实际提供的前端 bundle 不包含 live_voice.composition.unified.submit；拒绝进入 Demo。'
+    }
+    if ($localBargeInEnabled -and -not ([string]$bundle.Content).Contains('near_end_speech_candidate')) {
+        Fail '实际提供的前端 bundle 不包含已选择的耳机本地插话暂停能力。'
     }
 
     $statePath = Join-Path $RepoRoot 'logs\debug_service.json'
@@ -1151,6 +1191,8 @@ try {
         required_flags            = $validatedFlags
         frontend_flags            = [ordered]@{
             VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION = $generationInterruptionEnabled
+            VITE_LIVE_VOICE_LOCAL_BARGE_IN_PAUSE = $localBargeInEnabled
+            VITE_LIVE_VOICE_LOCAL_BARGE_IN_PROFILE = $localBargeInBuildProfile
         }
         executor_profile          = $ExecutorProfile
         credential                = 'ephemeral-process-only'

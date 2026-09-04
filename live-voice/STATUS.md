@@ -114,14 +114,20 @@ offline timeline/report are implemented. Scope and verification are in the
   root cause is the remote-only interruption gate: playout remains active during
   the double-talk interval that weakens the leading stop phrase. The exact hidden
   DSP/transcription component causing that attenuation remains unassigned. A
-  passive two-band local activity observer is implemented, verified and
-  deployed from `a7688f3ab4` on the controlled 5173/18092/19000/19001 service;
-  the served frontend contains the new observer. It records bounded content-free
-  milestones and their age at remote speech-start without gaining stop, cancel
-  or commit authority. The next implementation is a separately scoped Tier-2
-  typed local double-talk candidate, reversible exact-cursor playout pause and
-  remote-confirmed cancellation across Audio I/O, Interaction Intelligence and
-  Conversation Runtime, plus device-processing/Provider A/B evidence. See the
+  passive two-band local activity observer first deployed from `a7688f3ab4` has
+  now been extended by the scoped Tier-2 headset repair. In the operator-selected
+  `verified-headset-aec-v1` profile, Audio I/O requires reported AEC, noise
+  suppression and gain control, compares microphone speech-shaped frames with
+  the known far-end PCM on the captured-frame AudioContext clock, and emits a
+  typed content-free near-end candidate after three consecutive 20 ms frames.
+  Conversation Runtime pauses only the exact active response at its unplayed
+  cursor, gives Provider speech-start 300 ms to confirm it, resumes false
+  candidates from that cursor with an 8 ms ramp, and never revives playback after
+  Provider confirmation. Local candidates cannot commit input or mutate Agent,
+  Tool or Task authority. The profile is off in ordinary builds and is enabled
+  only by the formal controlled launcher; speaker, Bluetooth and unverified
+  device paths retain the Provider-only behavior pending separate A/B evidence.
+  Physical headset acceptance remains open for the new candidate. See the
   earlier profiling
   [deployment evidence](evidence/DEMO_PROFILING_DEPLOYMENT_20260904.md).
   The scoped acceptance and diagnosis are in the

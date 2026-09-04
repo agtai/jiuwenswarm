@@ -271,3 +271,41 @@ question; it does not make the unrepaired interruption behavior pass.
 The raw same-tab browser export remains outside Git because it contains runtime
 telemetry and recognized user speech. The generated HTML profile is also local
 run output rather than source evidence.
+
+## Tier-2 verified-headset interruption implementation
+
+The bounded repair implements the interruption packet only for the explicit
+`verified-headset-aec-v1` controlled-launcher profile. Ordinary and unverified
+device builds keep the Provider-only interruption path. At runtime, candidate
+authority additionally requires the selected microphone track to report echo
+cancellation, noise suppression and automatic gain control as active. The name
+is an operator assertion for the tested headset setup; it is not browser device
+classification and must not be used as speaker or Bluetooth evidence.
+
+While an exact response is playing, Audio I/O retains a bounded window of the
+known far-end PCM. It evaluates speech-shaped microphone frames against that
+reference on the captured frame's shared AudioContext clock, including delayed
+AudioWorklet delivery, and requires three consecutive 20 ms eligible frames.
+Matching far-end correlation rejects playback echo. A typed candidate carries
+only capture/response/generation identity and scalar detector evidence; it has no
+transcript, commit, cancel, Agent, Tool or Task authority.
+
+Conversation Runtime accepts only the exact active response and capture
+generation, then pauses every scheduled source at its exact unplayed cursor.
+New downlink PCM remains queued while the capture and AudioContext stay active.
+A matching Provider speech-start received within 300 ms promotes the pause to a
+permanent exact-response hard stop. If the UI cancellation callback does not
+complete, the owner fails closed by stopping local playback rather than reviving
+the confirmed answer. Without Provider confirmation, playback resumes from the
+same cursor with an 8 ms gain ramp and a 120 ms candidate rearm delay.
+
+The changed boundary has automated evidence for feature-off compatibility,
+actual-processing rejection, silence/non-speech rejection, TTS echo rejection,
+real double-talk eligibility, delayed main-thread delivery, bounded far-end PCM,
+exact pause/resume, stale identity, cooldown, Provider-confirmed permanent stop,
+late confirmation, callback failure, manual stop and zero Task mutation. The
+focused results are 116/116 browser Audio I/O tests, 126/126 Product P1/native
+interaction tests, 7/7 diagnostic privacy tests and 3/3 controlled build-profile
+tests; the frontend build and PowerShell parser also pass. Physical one-second
+and five-second headset trials remain the acceptance boundary and must retain all
+false pauses, missed interruptions, recognition errors and old-audio revival.

@@ -534,7 +534,12 @@ async function sendFirstFrameToNextWorklet(environment, priorWorklet, overrides 
   });
 }
 
-function sendNextFrameFromCurrentWorklet(environment, seq = 1) {
+function sendNextFrameFromCurrentWorklet(
+  environment,
+  seq = 1,
+  samples = new Float32Array(960).fill(0.25),
+  contextTimeSeconds = seq * 0.02,
+) {
   const worklet = environment.worklet;
   const handler = worklet?.port.onmessage;
   assert.equal(typeof handler, 'function');
@@ -545,10 +550,17 @@ function sendNextFrameFromCurrentWorklet(environment, seq = 1) {
       seq,
       sample_rate_hz: 48_000,
       sample_cursor: seq * 960,
-      context_time_s: seq * 0.02,
-      samples: new Float32Array(960).fill(0.25),
+      context_time_s: contextTimeSeconds,
+      samples,
     },
   });
+}
+
+function processedHeadsetVoiceFrame(amplitude = 0.04, frequencyHz = 200) {
+  return Float32Array.from(
+    { length: 960 },
+    (_, index) => amplitude * Math.sin((2 * Math.PI * frequencyHz * index) / 48_000),
+  );
 }
 
 async function sendCaptureToDurationBoundary(
@@ -3770,6 +3782,8 @@ async function runConcurrentCaptureJourney(options = {}) {
   let bargeInSpeechStartCalls = 0;
   let bargeInEotCalls = 0;
   let bargeInStopped = null;
+  let localNearEndPauseSnapshot = null;
+  let localNearEndManualStopped = null;
   let captureRotationSnapshot = null;
   let overlapRotationRaceSnapshot = null;
   let staleSpeechStartSnapshot = null;
@@ -3973,13 +3987,16 @@ async function runConcurrentCaptureJourney(options = {}) {
         if (releaseNextAck !== null) queueMicrotask(releaseNextAck);
       }
     },
-    ...(options.triggerBargeInEot === true
+    ...((options.triggerBargeInEot === true || options.providerSpeechStartBeforeLocalCandidate === true) &&
+      options.omitBargeInSpeechStartCallback !== true
       ? {
           on_barge_in_speech_start: event => {
             bargeInSpeechStartCalls += 1;
             assert.equal(event.detector, 'server_vad');
             assert.equal(event.business_cancel_count_delta, 0);
-            bargeInStopped = owner.stopAgentPlayout(response);
+            if (options.skipStopInBargeInCallback !== true) {
+              bargeInStopped = owner.stopAgentPlayout(response);
+            }
           },
           on_barge_in_end_of_turn: event => {
             bargeInEotCalls += 1;
@@ -3987,6 +4004,9 @@ async function runConcurrentCaptureJourney(options = {}) {
             assert.equal(event.business_cancel_count_delta, 0);
           },
         }
+      : {}),
+    ...(options.localNearEndCandidateDuringPlayout === true
+      ? { local_barge_in_profile: 'verified_headset_aec_v1' }
       : {}),
     audio_environment: environment,
     socket_factory: (socketFactory = url => {
@@ -4364,6 +4384,87 @@ async function runConcurrentCaptureJourney(options = {}) {
     concurrentClosePromise = owner.close();
     concurrentCloseSnapshot = owner.status();
   }
+  if (options.providerSpeechStartBeforeLocalCandidate === true) {
+    for (let turn = 0; turn < 500; turn += 1) {
+      if (owner.status().status === 'playing' && concurrentCaptureStartedCalls === 1) break;
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    const uplinkSocket = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-2');
+    assert.ok(uplinkSocket);
+    uplinkSocket.onmessage?.({
+      data: serializeMediaControl({
+        type: 'media.speech_start',
+        capability_version: 'media.end_of_turn.v1',
+        lease_id: uplinkSocket.serverBinding.lease_id,
+        generation: uplinkSocket.serverBinding.generation.value,
+        detector: 'server_vad',
+        provider_start_ms: 100,
+        timing_basis: 'provider_time',
+        timing_provenance: 'adapter_derived',
+        create_response: false,
+        interrupt_response: false,
+        business_cancel_count_delta: 0,
+      }),
+    });
+    await Promise.resolve();
+    assert.equal(
+      bargeInSpeechStartCalls,
+      options.omitBargeInSpeechStartCallback === true ? 0 : 1,
+    );
+  }
+  if (options.localNearEndCandidateDuringPlayout === true) {
+    for (let turn = 0; turn < 500; turn += 1) {
+      if (owner.status().status === 'playing' && concurrentCaptureStartedCalls === 1 && environment.contexts[0].sourceStartCount > 0) break;
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    assert.equal(owner.status().status, 'playing');
+    environment.contexts[0].currentTime = Math.max(environment.contexts[0].currentTime, 0.26);
+    const voice = processedHeadsetVoiceFrame();
+    const capturedFrameStart = environment.contexts[0].currentTime - 0.02;
+    for (let seq = 1; seq <= 3; seq += 1) {
+      sendNextFrameFromCurrentWorklet(environment, seq, voice, capturedFrameStart);
+    }
+    if (options.providerSpeechStartDuringPendingPause === true) {
+      const uplinkSocket = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-2');
+      assert.ok(uplinkSocket);
+      uplinkSocket.onmessage?.({
+        data: serializeMediaControl({
+          type: 'media.speech_start',
+          capability_version: 'media.end_of_turn.v1',
+          lease_id: uplinkSocket.serverBinding.lease_id,
+          generation: uplinkSocket.serverBinding.generation.value,
+          detector: 'server_vad',
+          provider_start_ms: 100,
+          timing_basis: 'provider_time',
+          timing_provenance: 'adapter_derived',
+          create_response: false,
+          interrupt_response: false,
+          business_cancel_count_delta: 0,
+        }),
+      });
+      const blockedUntil = performance.now() + 320;
+      while (performance.now() < blockedUntil) {
+        // Keep the resolved pause Promise pending past its confirmation window.
+      }
+    }
+    await Promise.resolve();
+    await Promise.resolve();
+    localNearEndPauseSnapshot = {
+      status: owner.status(),
+      source_start_count: environment.contexts[0].sourceStartCount,
+      active_sources: environment.contexts[0].activeSources,
+    };
+    if (options.manualStopAfterLocalCandidate === true) {
+      localNearEndManualStopped = owner.stopAgentPlayout(response);
+    }
+    if (Number.isFinite(options.blockBeforeBargeInAfterLocalCandidateMs)) {
+      const blockedUntil = performance.now() + Math.max(0, options.blockBeforeBargeInAfterLocalCandidateMs);
+      while (performance.now() < blockedUntil) {
+        // Model a throttled browser main thread so the timer and Provider event
+        // become runnable only after the candidate's monotonic deadline.
+      }
+    }
+  }
   if (options.triggerBargeInEot === true) {
     const uplinkSocket = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-2');
     assert.ok(uplinkSocket);
@@ -4389,7 +4490,7 @@ async function runConcurrentCaptureJourney(options = {}) {
       await new Promise(resolve => setTimeout(resolve, 5));
     }
     assert.equal(bargeInSpeechStartCalls, 1);
-    assert.equal(bargeInStopped, true);
+    assert.equal(bargeInStopped, options.skipStopInBargeInCallback === true ? null : true);
     uplinkSocket.onmessage?.({
       data: serializeMediaControl({
         type: 'media.end_of_turn',
@@ -4838,6 +4939,8 @@ async function runConcurrentCaptureJourney(options = {}) {
     bargeInSpeechStartCalls,
     bargeInEotCalls,
     bargeInStopped,
+    localNearEndPauseSnapshot,
+    localNearEndManualStopped,
     captureRotationSnapshot,
     overlapRotationRaceSnapshot,
     staleSpeechStartSnapshot,
@@ -5129,6 +5232,212 @@ test('server speech-start/EOT during playout triggers barge-in without Task muta
     if (detach !== undefined) assert.equal(detach.business_cancel_count_delta, 0);
   }
   await journey.owner.close();
+});
+
+test('local near-end candidate pauses playout, keeps capture active, and rolls back without cancel when Provider does not confirm', async () => {
+  const previous = console.info;
+  console.info = () => undefined;
+  clearAudioDiagnostics();
+  let journey;
+  try {
+    journey = await runConcurrentCaptureJourney({
+      negotiatedEot: true,
+      localNearEndCandidateDuringPlayout: true,
+      downlinkFrameCount: 4,
+      deferSourceEndsUntilTransportAck: true,
+    });
+    assert.deepEqual(journey.localNearEndPauseSnapshot?.status, { status: 'playing', reason: null });
+    assert.equal(journey.localNearEndPauseSnapshot?.active_sources, 0);
+    assert.equal(journey.playError, null);
+    assert.equal(journey.owner.status().status, 'capturing');
+    assert.ok(journey.environment.contexts[0].sourceStartCount > 4);
+    const records = audioDiagnosticSnapshot();
+    assert.equal(records.filter(record => record.event === 'near_end_speech_candidate').length, 1);
+    assert.equal(records.filter(record => record.event === 'playout_tentative_paused').length, 1);
+    assert.equal(records.filter(record => record.event === 'playout_tentative_resumed').length, 1);
+    assert.equal(records.filter(record => record.event === 'near_end_candidate_confirmed').length, 0);
+    assert.equal(journey.calls.some(([method]) => method.includes('barge') || method.includes('task.cancel')), false);
+  } finally {
+    await journey?.owner.close();
+    console.info = previous;
+    clearAudioDiagnostics();
+  }
+});
+
+test('matching Provider speech-start promotes the exact local candidate to permanent stop without rollback revival', async () => {
+  const previous = console.info;
+  console.info = () => undefined;
+  clearAudioDiagnostics();
+  let journey;
+  try {
+    journey = await runConcurrentCaptureJourney({
+      negotiatedEot: true,
+      localNearEndCandidateDuringPlayout: true,
+      triggerBargeInEot: true,
+      holdDownlinkDetachAfterFinalRender: true,
+      deferSourceEndsUntilTransportAck: true,
+    });
+    assert.equal(journey.localNearEndPauseSnapshot?.active_sources, 0);
+    assert.equal(journey.bargeInStopped, true);
+    await new Promise(resolve => setTimeout(resolve, 350));
+    const records = audioDiagnosticSnapshot();
+    assert.equal(records.filter(record => record.event === 'near_end_candidate_confirmed').length, 1);
+    assert.equal(records.filter(record => record.event === 'playout_tentative_resumed').length, 0);
+    assert.equal(
+      journey.environment.contexts[0].sourceStartCount,
+      journey.localNearEndPauseSnapshot?.source_start_count,
+    );
+    assert.equal(journey.calls.some(([method]) => method.includes('task.cancel') || method.includes('task.mutate')), false);
+  } finally {
+    await journey?.owner.close();
+    console.info = previous;
+    clearAudioDiagnostics();
+  }
+});
+
+test('Provider confirmation fails closed when the UI callback does not complete the hard stop', async () => {
+  const previous = console.info;
+  console.info = () => undefined;
+  clearAudioDiagnostics();
+  let journey;
+  try {
+    journey = await runConcurrentCaptureJourney({
+      negotiatedEot: true,
+      localNearEndCandidateDuringPlayout: true,
+      triggerBargeInEot: true,
+      skipStopInBargeInCallback: true,
+      holdDownlinkDetachAfterFinalRender: true,
+      deferSourceEndsUntilTransportAck: true,
+    });
+    assert.equal(journey.localNearEndPauseSnapshot?.active_sources, 0);
+    assert.equal(journey.bargeInSpeechStartCalls, 1);
+    assert.equal(journey.bargeInStopped, null);
+    await new Promise(resolve => setTimeout(resolve, 350));
+    const records = audioDiagnosticSnapshot();
+    assert.equal(records.filter(record => record.event === 'near_end_candidate_confirmed').length, 1);
+    assert.equal(records.filter(record => record.event === 'near_end_candidate_confirmed_stop_timeout').length, 1);
+    assert.equal(records.filter(record => record.event === 'playout_tentative_resumed').length, 0);
+    assert.equal(records.filter(record => record.event === 'p1_stop_result').length, 1);
+    assert.equal(journey.environment.contexts[0].sourceStartCount, journey.localNearEndPauseSnapshot.source_start_count);
+    assert.equal(journey.calls.some(([method]) => method.includes('task.cancel') || method.includes('task.mutate')), false);
+  } finally {
+    await journey?.owner.close();
+    console.info = previous;
+    clearAudioDiagnostics();
+  }
+});
+
+test('Provider speech-start observed before a local candidate remains authoritative without a UI callback', async () => {
+  const previous = console.info;
+  console.info = () => undefined;
+  clearAudioDiagnostics();
+  let journey;
+  try {
+    journey = await runConcurrentCaptureJourney({
+      negotiatedEot: true,
+      providerSpeechStartBeforeLocalCandidate: true,
+      omitBargeInSpeechStartCallback: true,
+      localNearEndCandidateDuringPlayout: true,
+      holdDownlinkDetachAfterFinalRender: true,
+      deferSourceEndsUntilTransportAck: true,
+    });
+    assert.equal(journey.localNearEndPauseSnapshot?.active_sources, 0);
+    assert.equal(journey.bargeInSpeechStartCalls, 0);
+    const records = audioDiagnosticSnapshot();
+    assert.equal(records.filter(record => record.event === 'near_end_candidate_confirmed').length, 1);
+    assert.equal(records.filter(record => record.event === 'near_end_candidate_confirmed_stop_timeout').length, 1);
+    assert.equal(records.filter(record => record.event === 'playout_tentative_resumed').length, 0);
+    assert.equal(records.filter(record => record.event === 'p1_stop_result').length, 1);
+    assert.equal(journey.environment.contexts[0].sourceStartCount, journey.localNearEndPauseSnapshot.source_start_count);
+    assert.equal(journey.calls.some(([method]) => method.includes('task.cancel') || method.includes('task.mutate')), false);
+  } finally {
+    await journey?.owner.close();
+    console.info = previous;
+    clearAudioDiagnostics();
+  }
+});
+
+test('Provider confirmation during a delayed pause completion hard-stops instead of rolling back', async () => {
+  const previous = console.info;
+  console.info = () => undefined;
+  clearAudioDiagnostics();
+  let journey;
+  try {
+    journey = await runConcurrentCaptureJourney({
+      negotiatedEot: true,
+      providerSpeechStartDuringPendingPause: true,
+      omitBargeInSpeechStartCallback: true,
+      localNearEndCandidateDuringPlayout: true,
+      holdDownlinkDetachAfterFinalRender: true,
+      deferSourceEndsUntilTransportAck: true,
+    });
+    assert.equal(journey.localNearEndPauseSnapshot?.active_sources, 0);
+    const records = audioDiagnosticSnapshot();
+    assert.equal(records.filter(record => record.event === 'near_end_candidate_confirmed').length, 1);
+    assert.equal(records.filter(record => record.event === 'near_end_candidate_confirmed_stop_timeout').length, 1);
+    assert.equal(records.filter(record => record.event === 'near_end_candidate_confirmation_expired').length, 0);
+    assert.equal(records.filter(record => record.event === 'playout_tentative_resumed').length, 0);
+    assert.equal(records.filter(record => record.event === 'p1_stop_result').length, 1);
+    assert.equal(journey.environment.contexts[0].sourceStartCount, journey.localNearEndPauseSnapshot.source_start_count);
+    assert.equal(journey.calls.some(([method]) => method.includes('task.cancel') || method.includes('task.mutate')), false);
+  } finally {
+    await journey?.owner.close();
+    console.info = previous;
+    clearAudioDiagnostics();
+  }
+});
+
+test('Provider speech-start after the monotonic candidate deadline cannot confirm the stale local pause', async () => {
+  const previous = console.info;
+  console.info = () => undefined;
+  clearAudioDiagnostics();
+  let journey;
+  try {
+    journey = await runConcurrentCaptureJourney({
+      negotiatedEot: true,
+      localNearEndCandidateDuringPlayout: true,
+      blockBeforeBargeInAfterLocalCandidateMs: 320,
+      triggerBargeInEot: true,
+      holdDownlinkDetachAfterFinalRender: true,
+      deferSourceEndsUntilTransportAck: true,
+    });
+    assert.equal(journey.bargeInStopped, true);
+    const records = audioDiagnosticSnapshot();
+    assert.equal(records.filter(record => record.event === 'near_end_candidate_confirmation_expired').length, 1);
+    assert.equal(records.filter(record => record.event === 'near_end_candidate_confirmed').length, 0);
+    assert.ok(records.filter(record => record.event === 'playout_tentative_resumed').length <= 1);
+    assert.equal(journey.calls.some(([method]) => method.includes('task.cancel') || method.includes('task.mutate')), false);
+  } finally {
+    await journey?.owner.close();
+    console.info = previous;
+    clearAudioDiagnostics();
+  }
+});
+
+test('manual playback stop clears a local candidate without reporting Provider confirmation', async () => {
+  const previous = console.info;
+  console.info = () => undefined;
+  clearAudioDiagnostics();
+  let journey;
+  try {
+    journey = await runConcurrentCaptureJourney({
+      negotiatedEot: true,
+      localNearEndCandidateDuringPlayout: true,
+      manualStopAfterLocalCandidate: true,
+      holdDownlinkDetachAfterFinalRender: true,
+      deferSourceEndsUntilTransportAck: true,
+    });
+    assert.equal(journey.localNearEndManualStopped, true);
+    await new Promise(resolve => setTimeout(resolve, 350));
+    const records = audioDiagnosticSnapshot();
+    assert.equal(records.filter(record => record.event === 'playout_tentative_paused').length, 1);
+    assert.equal(records.filter(record => record.event === 'near_end_candidate_confirmed').length, 0);
+    assert.equal(records.filter(record => record.event === 'playout_tentative_resumed').length, 0);
+  } finally {
+    await journey?.owner.close();
+    console.info = previous;
+    clearAudioDiagnostics();
+  }
 });
 
 test('playout overlap diagnostics timestamp bounded local activity without gaining stop authority', async () => {
@@ -6550,6 +6859,7 @@ test('formal P1 duration expiry releases local capture before an exact authority
 });
 
 test('Native Task TTS keeps capture and suppresses echo until the exact presentation settles', async () => {
+  clearAudioDiagnostics();
   const environment = audioEnvironment();
   const socket = new FakeSocket();
   const binding = serverBinding();
@@ -6586,8 +6896,9 @@ test('Native Task TTS keeps capture and suppresses echo until the exact presenta
   const lease = owner.prepareNativeTaskNotification(response);
   assert.equal(lease.status, 'ready');
   const played = owner.playAgentText({ response, unit_id: 'task-unit', text: '设备核查完成。', capture_during_playout: false });
+  const taskSpeech = processedHeadsetVoiceFrame();
   for (let seq = 1; seq <= 1600; seq += 1) {
-    sendNextFrameFromCurrentWorklet(environment, seq);
+    sendNextFrameFromCurrentWorklet(environment, seq, seq <= 3 ? taskSpeech : undefined);
     await new Promise(resolve => setImmediate(resolve));
   }
   const frames = () => socket.sent.filter(value => typeof value !== 'string').map(value => decodeAudioFrame(binding, value));
@@ -6602,6 +6913,7 @@ test('Native Task TTS keeps capture and suppresses echo until the exact presenta
   assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length, 1);
   assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD).length, 0);
   assert.equal(calls.find(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD)[1].capture_frames_acked, 1601);
+  assert.equal(audioDiagnosticSnapshot().filter(record => record.event === 'playout_tentative_paused').length, 0);
   sendNextFrameFromCurrentWorklet(environment, 1601);
   await new Promise(resolve => setImmediate(resolve));
   assert.ok(frames().at(-1).samples.every(sample => sample === 0), 'playout return is not P2 presentation settlement');
@@ -6622,6 +6934,7 @@ test('Native Task TTS keeps capture and suppresses echo until the exact presenta
   nextLease.release();
   assert.equal(frames().length, count);
   assert.equal(calls.some(([method]) => method.includes('recognize') || method.includes('cancel')), false);
+  clearAudioDiagnostics();
 });
 
 test('formal P1 exposes recognition-stream failure only for negotiated uplink capture', () => {

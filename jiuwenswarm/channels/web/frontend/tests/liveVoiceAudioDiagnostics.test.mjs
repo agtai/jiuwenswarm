@@ -37,6 +37,26 @@ test('diagnostics contain only allowlisted scalars, freeze records and remain bo
     assert.ok(Object.isFrozen(first) && Object.isFrozen(first.fields));
     audioDiagnosticSnapshot().pop();
     assert.equal(audioDiagnosticSnapshot().length, 1);
+    recordAudioDiagnostic('near_end_speech_candidate', {
+      candidate_id: 'near-end-1',
+      detector_profile: 'verified_browser_processing_v1',
+      frame_seq: 12,
+      consecutive_voice_frames: 3,
+      confirmation_window_ms: 300,
+      local_clock_frozen: true,
+      transcript: 'PRIVATE_BARGE_IN_TEXT',
+      pcm: new Float32Array(960),
+    });
+    const candidate = audioDiagnosticSnapshot().at(-1);
+    assert.deepEqual(candidate.fields, {
+      candidate_id: 'near-end-1',
+      detector_profile: 'verified_browser_processing_v1',
+      frame_seq: 12,
+      consecutive_voice_frames: 3,
+      confirmation_window_ms: 300,
+      local_clock_frozen: true,
+    });
+    assert.equal(JSON.stringify(candidate).includes('PRIVATE'), false);
     for (let seq = 0; seq < 2200; seq++) recordAudioDiagnostic('capture_progress', { seq });
     assert.equal(audioDiagnosticSnapshot().length, 2048);
     assert.equal(audioDiagnosticSnapshot().at(-1).fields.seq, 2199);

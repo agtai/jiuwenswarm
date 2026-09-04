@@ -21,7 +21,6 @@ const controlledRuntimeFlags = [
   "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED",
   "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED",
   "JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABLED",
-  "JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED",
   "JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED",
   "JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED",
   "JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED",
@@ -58,6 +57,27 @@ test("ordinary production is flag-off and the explicit Live Voice profile is fla
     assert.equal(production[legacyFlag], undefined);
     assert.equal(liveVoice[legacyFlag], undefined);
   }
+  for (const deviceSpecificFlag of [
+    "VITE_LIVE_VOICE_LOCAL_BARGE_IN_PAUSE",
+    "VITE_LIVE_VOICE_LOCAL_BARGE_IN_PROFILE",
+  ]) {
+    assert.equal(production[deviceSpecificFlag], undefined);
+    assert.equal(liveVoice[deviceSpecificFlag], undefined);
+  }
+});
+
+test("the controlled launcher selects local barge-in only for the explicit verified headset profile", () => {
+  const launcher = readFileSync(
+    join(repoRoot, "scripts", "live_voice", "start_hands_free_demo.ps1"),
+    "utf8",
+  );
+  assert.match(launcher, /ValidateSet\('off', 'verified-headset-aec-v1'\)/u);
+  assert.match(launcher, /\[string\]\$LocalBargeInProfile = 'off'/u);
+  assert.match(launcher, /RuntimeProfile -ne 'formal-web-validation'/u);
+  assert.match(launcher, /VITE_LIVE_VOICE_LOCAL_BARGE_IN_PROFILE/u);
+  assert.match(launcher, /verified_headset_aec_v1/u);
+  assert.match(launcher, /VITE_LIVE_VOICE_LOCAL_BARGE_IN_PAUSE/u);
+  assert.match(launcher, /local_barge_in_profile\s+=\s+\$LocalBargeInProfile/u);
 });
 
 test("the controlled launcher builds the explicit profile and owns Demo-only runtime exceptions", () => {
@@ -135,6 +155,29 @@ test("the controlled launcher builds the explicit profile and owns Demo-only run
   assert.match(launcher, /executor_profile\s+=\s+\$ExecutorProfile/u);
   assert.match(launcher, /requiredRuntimeFlags/u);
   assert.match(launcher, /live_voice_runtime_contract\.json/u);
+  assert.match(
+    launcher,
+    /ValidateSet\('off', 'verified-headset-aec-v1'\)/u,
+  );
+  assert.match(
+    launcher,
+    /VITE_LIVE_VOICE_LOCAL_BARGE_IN_PROFILE[\s\S]*verified_headset_aec_v1/u,
+  );
+  assert.match(
+    launcher,
+    /VITE_LIVE_VOICE_LOCAL_BARGE_IN_PAUSE[\s\S]*\$localBargeInEnabled/u,
+  );
+  assert.match(
+    launcher,
+    /local_barge_in_profile\s+=\s+\$LocalBargeInProfile/u,
+  );
+  assert.match(launcher, /schema_version\s+=\s+2/u);
+  assert.match(launcher, /local_barge_in_profile\s+=\s+\$localBargeInBuildProfile/u);
+  assert.match(launcher, /local_barge_in_pause\s+=\s+\$localBargeInEnabled/u);
+  assert.match(
+    launcher,
+    /PSObject\.Properties\['local_barge_in_profile'\][\s\S]*savedLocalBargeInProperty\.Value/u,
+  );
   assert.match(launcher, /Formal Web 验证要求干净源码/u);
   assert.match(launcher, /Wait-HttpResponse/u);
   assert.match(launcher, /external_channels/u);
@@ -154,7 +197,7 @@ test("the controlled launcher builds the explicit profile and owns Demo-only run
     launcher,
     /Remove-Item -LiteralPath "Env:\\\$frontendOverride"/u,
   );
-  assert.match(
+  assert.doesNotMatch(
     launcher,
     /JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED\s*=\s*'1'/u,
   );
