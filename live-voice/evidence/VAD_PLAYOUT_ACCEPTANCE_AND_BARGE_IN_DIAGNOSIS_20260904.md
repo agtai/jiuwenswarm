@@ -46,6 +46,10 @@ The incorrect text is already present at the Speech final/commit boundary,
 before Agent submission. The dialogue model did not rewrite a correct
 interruption phrase into these strings.
 
+The user later confirmed that every attempt used headset output and a headset
+microphone. This materially weakens loudspeaker-to-microphone acoustic leakage
+as an explanation and supersedes the initial speaker/microphone assumption.
+
 ## Correlated timing
 
 Backend records and the same-tab browser export were analyzed together with:
@@ -96,8 +100,10 @@ upload and Provider detection time.
 
 The browser track confirms that `echoCancellation`, `noiseSuppression` and
 `autoGainControl` were all actually enabled. This rules out a disabled browser
-processing setting, but it does not guarantee reliable recognition during
-speaker/microphone double-talk. The captured energy supports that distinction:
+processing setting. With headset input/output, the retained data cannot
+separate browser/OS/device speech processing from Provider VAD/recognition
+behavior during concurrent playout. The captured energy only bounds the point
+at which local activity was observable:
 
 - during ML-1, the periodic browser diagnostic was already reporting
   speech-like energy at 20:32:25.640, while the remote event that authorized the
@@ -108,18 +114,19 @@ speaker/microphone double-talk. The captured energy supports that distinction:
   remote event and 21 frames / RMS 0.126 in the next interval after the stop.
 
 Periodic energy samples cannot establish exact physical mouth-open time and
-can contain residual playback, so they are not themselves safe interruption
-authority. They do show why the audible experience can lag: local speech-like
-energy exists before the remote gate opens, and the near-end voice becomes much
-clearer after playback stops. In this speaker/microphone double-talk condition,
-the provider then committed truncated or corrupted finals (`一句话` twice and
+can contain device processing or residual playback, so they are not themselves
+safe interruption authority. They show local speech-like energy before the
+remote gate opens, but the one-second summaries cannot prove whether processing
+suppressed the user's opening words or whether the Provider detected them late.
+The Provider committed truncated or corrupted finals (`一句话` twice and
 `九号到杭州。`) before Agent submission.
 
 ML-1 also had an incident-specific 420 ms Gateway audio backlog and an extra
 Provider speech item after stop, which forced a 3,460 ms whole-capture batch
 fallback. That worsened the first attempt but does not explain ML-2 or HZ, where
 the queue was empty or only 20 ms. The common cause is the remote Provider-only
-speech-start gate combined with double-talk recognition quality.
+speech-start gate. Concurrent-playout recognition failed, but the retained
+evidence does not identify one exact processing layer as its cause.
 
 This evidence rules out the following as primary causes:
 
@@ -133,9 +140,11 @@ This evidence rules out the following as primary causes:
 ## Follow-up boundary
 
 The retained browser and backend records are sufficient to locate this failure;
-another reproduction is not required for the diagnosis. A headset or lower
-speaker volume is the immediate operational mitigation because it reduces the
-double-talk load on AEC and the Provider.
+another reproduction is not required to show that the delay precedes the remote
+speech-start gate. Because the failed trials already used a headset, changing to
+a headset is not a mitigation supported by this evidence. A controlled rerun
+with finer local-onset observation is required before assigning the remaining
+delay to browser/OS/device processing or Provider VAD/recognition.
 
 An engineering repair should be scoped separately as a Tier-2 interruption
 packet. The candidate direction is an echo-aware local double-talk detector that
@@ -144,6 +153,13 @@ false-interruption tests. Local RMS crossing alone is not an acceptable policy:
 playback leakage can cross the same threshold, so promoting the existing
 diagnostic hint directly to cancellation authority would risk stopping answers
 when the user did not speak.
+
+Tentative local pre-muting also has product costs even if it does not immediately
+cancel TTS: false positives create audible dips, continued playout can skip
+content while muted, and rollback can introduce gaps, duplication or stale-audio
+revival. Any repair therefore needs a tentative/confirmed state, a bounded
+confirmation deadline and explicit no-speech, breath, keyboard, device-noise,
+false-trigger, rollback and old-audio-revival checks.
 
 ## Verification
 
