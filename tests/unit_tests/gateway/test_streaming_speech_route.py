@@ -367,10 +367,13 @@ async def test_streaming_owner_mirrors_exact_frames_and_returns_one_final() -> N
 
 
 @pytest.mark.asyncio
-async def test_server_vad_eot_fences_frames_and_finish_coalesces_provider_commit() -> (
+async def test_server_vad_eot_fences_frames_and_finish_coalesces_provider_commit(monkeypatch) -> (
     None
 ):
     provider = _ServerVadProvider()
+    from jiuwenswarm.gateway.live_voice import audio_diagnostics
+    diagnostic_lines = []
+    monkeypatch.setattr(audio_diagnostics._LOGGER, "info", lambda template, *args: diagnostic_lines.append(template % args))
     owner = StreamingRecognitionRouteOwner(
         lambda: asyncio.sleep(
             0,
@@ -450,6 +453,16 @@ async def test_server_vad_eot_fences_frames_and_finish_coalesces_provider_commit
     assert provider.commit_count == 1
     assert provider.cancel_count == 0
     await owner.close()
+    from jiuwenswarm.gateway.live_voice import audio_diagnostics
+    await asyncio.to_thread(audio_diagnostics._QUEUE.join)
+    facts = [json.loads(line.split(" ", 1)[1]) for line in diagnostic_lines
+             if line.startswith("live_voice_audio_diagnostic ")]
+    assert {"opened", "gateway_audio_received", "provider_send_started", "provider_audio_sent",
+            "provider_speech_started", "provider_speech_stopped", "final_available"} <= {fact["event"] for fact in facts}
+    assert all(fact["fields"]["media_session_id"] == "media-session-1" for fact in facts)
+    assert all(fact["fields"]["capture_id"] == "capture-1" for fact in facts)
+    assert next(fact for fact in facts if fact["event"] == "opened")["fields"]["vad_silence_ms"] == 800
+    assert "EOT final" not in "".join(json.dumps(fact) for fact in facts)
 
 
 @pytest.mark.asyncio

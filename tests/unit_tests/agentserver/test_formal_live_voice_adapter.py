@@ -212,6 +212,24 @@ class CallbackFormalInstance(FormalInstance):
 
 
 @pytest.mark.asyncio
+async def test_failed_spoken_preparation_is_one_truthful_final_without_reexecuting_agent() -> None:
+    from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import spoken_revision_unavailable_notice
+    draft = "PRIVATE_UNCHECKED_DRAFT " * 40
+    lease = OutputLease([RawChunk("answer", {"output": {"output": draft}})])
+    instance = FormalInstance(lease)
+    adapter = adapter_with(instance)
+    adapter._resolve_runtime_language = lambda: "en"
+    request, inputs = formal_request()
+    chunks = [chunk async for chunk in adapter.process_formal_live_voice_stream_impl(request, inputs)]
+    assert [chunk.payload for chunk in chunks] == [
+        {"event_type": "chat.final", "content": spoken_revision_unavailable_notice("en")}
+    ]
+    assert len(instance.sent) == 1
+    assert lease.closed_with == [False]
+    assert "PRIVATE_UNCHECKED_DRAFT" not in str([chunk.payload for chunk in chunks])
+
+
+@pytest.mark.asyncio
 async def test_formal_deep_seam_uses_narrow_dispatch_and_non_aborting_detach() -> None:
     lease = OutputLease([RawChunk("answer", {"output": {"output": "formal result"}})])
     instance = FormalInstance(lease)

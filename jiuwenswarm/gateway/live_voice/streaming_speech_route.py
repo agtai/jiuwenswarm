@@ -14,12 +14,14 @@ import asyncio
 import logging
 import struct
 import sys
+import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Awaitable, Callable, TypeVar
 
 from jiuwenswarm.common.live_voice_capture_limits import MAX_CAPTURE_DURATION_SECONDS
+from jiuwenswarm.gateway.live_voice.audio_diagnostics import record_audio_diagnostic
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAudioFrame,
     MediaAuthorityBinding,
@@ -161,6 +163,10 @@ class StreamingRecognitionHandle:
     last_event_cursor: int = 0
     speech_start_ms: int | None = None
     speech_stopped: bool = False
+    diagnostic_opened_at: float = field(default_factory=time.monotonic)
+    diagnostic_sent_frames: int = 0
+    diagnostic_send_peak_ms: float = 0
+    diagnostic_vad_silence_ms: int | None = None
 
 
 StreamingSpeechSelector = Callable[[], Awaitable[StreamingSpeechSelection]]
@@ -328,6 +334,7 @@ class StreamingRecognitionRouteOwner:
                 ref=ref,
                 provider=provider,
                 queue=queue,
+                diagnostic_vad_silence_ms=(detection.server_vad.silence_duration_ms if detection.server_vad is not None else None),
                 end_of_turn=(
                     asyncio.get_running_loop().create_future()
                     if detection.server_vad is not None
@@ -343,6 +350,7 @@ class StreamingRecognitionRouteOwner:
                 self._pump(handle),
                 name=f"live-voice-streaming-stt-pump-{ref.session_id}",
             )
+            self._diagnose(handle, "opened")
             handle.event_task = asyncio.create_task(
                 self._collect_final(handle),
                 name=f"live-voice-streaming-stt-events-{ref.session_id}",
@@ -422,6 +430,8 @@ class StreamingRecognitionRouteOwner:
             handle.queue.put_nowait(provider_frame)
             handle.next_frame_seq += 1
             handle.next_sample_cursor += len(frame.samples)
+            if frame.seq % 50 == 0:
+                self._diagnose(handle, "gateway_audio_received")
         except asyncio.QueueFull:
             handle.failure = StreamingRecognitionFallbackReason.QUEUE_EXHAUSTED
         except Exception:
@@ -927,6 +937,9 @@ class StreamingRecognitionRouteOwner:
                 handle.failure = StreamingRecognitionFallbackReason.PROVIDER_PROTOCOL
                 return
             try:
+                send_started = time.monotonic()
+                if item.seq % 50 == 0:
+                    self._diagnose(handle, "provider_send_started")
                 # Publish the product-side send boundary before awaiting the
                 # transport so a Provider delta that arrives reentrantly can
                 # still be checked against the exact submitted cursor.
@@ -938,10 +951,16 @@ class StreamingRecognitionRouteOwner:
                         f"live-voice-streaming-stt-send-{handle.ref.session_id}-{item.seq}"
                     ),
                 )
+                handle.diagnostic_sent_frames += 1
+                handle.diagnostic_send_peak_ms = max(handle.diagnostic_send_peak_ms, (time.monotonic() - send_started) * 1000)
+                if item.seq % 50 == 0:
+                    self._diagnose(handle, "provider_audio_sent")
+                    handle.diagnostic_send_peak_ms = 0
             except asyncio.CancelledError:
                 raise
             except Exception:
                 handle.failure = StreamingRecognitionFallbackReason.PROVIDER_UNAVAILABLE
+                self._diagnose(handle, "provider_send_failed")
                 return
 
     async def _collect_final(
@@ -1010,6 +1029,7 @@ class StreamingRecognitionRouteOwner:
                 ):
                     del event
                     raise RuntimeError("manual recognition cursor was not committed")
+                self._diagnose(handle, "final_available")
                 return event
             if event.kind is RecognitionEventKind.CANCELLED:
                 del event
@@ -1030,6 +1050,7 @@ class StreamingRecognitionRouteOwner:
             if handle.speech_start_ms is not None or event.provider_start_ms is None:
                 raise RuntimeError("speech start boundary was duplicated")
             handle.speech_start_ms = event.provider_start_ms
+            self._diagnose(handle, "provider_speech_started", event.provider_start_ms)
             future = handle.speech_start
             if future is None or future.done():
                 raise RuntimeError("speech-start boundary was not uniquely negotiated")
@@ -1049,6 +1070,7 @@ class StreamingRecognitionRouteOwner:
             ):
                 raise RuntimeError("speech stop boundary was invalid")
             handle.speech_stopped = True
+            self._diagnose(handle, "provider_speech_stopped", event.provider_end_ms)
             handle.input_fenced = True
             while True:
                 try:
@@ -1076,6 +1098,24 @@ class StreamingRecognitionRouteOwner:
                 raise RuntimeError("server commit preceded speech stop")
             return
         raise RuntimeError("turn boundary kind was unsupported")
+
+    @staticmethod
+    def _diagnose(handle: StreamingRecognitionHandle, stage: str, provider_ms: int | None = None) -> None:
+        """Rate-limited by caller; scalar diagnostics never retain audio/text."""
+        try:
+            record_audio_diagnostic(
+                stage, media_session_id=handle.ref.session_id, capture_id=handle.ref.capture.capture_id,
+                generation=handle.ref.capture.capture_generation,
+                elapsed_ms=(time.monotonic() - handle.diagnostic_opened_at) * 1000,
+                frame_count=handle.next_frame_seq, frames_sent=handle.diagnostic_sent_frames,
+                queue_frames=handle.queue.qsize(), received_samples=handle.next_sample_cursor,
+                sent_sample_end=handle.sent_sample_end, send_peak_ms=handle.diagnostic_send_peak_ms,
+                vad_silence_ms=handle.diagnostic_vad_silence_ms, provider_ms=provider_ms,
+                speech_started=handle.speech_start_ms is not None, input_fenced=handle.input_fenced,
+            )
+        except Exception:
+            # A diagnostic sink must not change media or Provider authority.
+            pass
 
     async def _bounded_provider_call(
         self,

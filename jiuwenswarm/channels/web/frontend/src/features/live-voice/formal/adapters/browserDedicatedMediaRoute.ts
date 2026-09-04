@@ -1,6 +1,7 @@
 /** Real WebSocket leaf for the closed Browser <-> Gateway Media contract. */
 
 import { createCapturedAudioFrame, type CapturedAudioFrame } from '../audioPort.js';
+import { recordAudioDiagnostic } from '../audioDiagnostics.js';
 import type { BrowserAudioLocalStopReceipt } from './browserAudioIOAdapter.js';
 import {
   boundedMediaConsumerFailureReason,
@@ -639,6 +640,7 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
 }
 
 export class BrowserDedicatedMediaSocketLeaf {
+  #diagnosticLastSentSeq = -1;
   readonly binding: MediaAuthorityBinding;
   readonly #activation: ActiveMediaActivation;
   readonly #socket: DedicatedMediaSocketLike;
@@ -759,6 +761,28 @@ export class BrowserDedicatedMediaSocketLeaf {
   }
   get closed(): boolean {
     return this.#closed || this.#pendingUplinkCompletion !== null;
+  }
+
+  diagnosticSnapshot(): Readonly<Record<string, number | boolean>> {
+    const state = this.#activation.owner.lifecycleSnapshot();
+    return Object.freeze({
+      pending_frames: state.sender_pending_frames, pending_bytes: state.sender_pending_bytes,
+      socket_buffered_bytes: this.#socket.bufferedAmount,
+      frames_acked: this.#lastUplinkAckNotified + 1, attached: this.attached, closed: this.closed,
+      frames_sent: this.#diagnosticLastSentSeq + 1,
+    });
+  }
+
+  #diagnose(event: string, fields: Readonly<Record<string, unknown>> = {}): void {
+    try {
+      recordAudioDiagnostic(event, {
+        session_id: this.binding.session_id, interaction_id: this.binding.interaction_id,
+        media_session_id: this.binding.media_session_id,
+        correlation_id: this.binding.correlation_id, lease_id: this.binding.lease_id,
+        generation: this.binding.generation.value, direction: this.binding.direction,
+        ...this.diagnosticSnapshot(), ...fields,
+      });
+    } catch { /* Never change media delivery because diagnostics failed. */ }
   }
 
   sendCaptureFrame(frame: Readonly<CapturedAudioFrame>): MediaEnqueueResult {
@@ -1145,6 +1169,7 @@ export class BrowserDedicatedMediaSocketLeaf {
   }
 
   #observeUplinkFrameSent(seq: number): void {
+    this.#diagnosticLastSentSeq = seq;
     try {
       this.#onUplinkFrameSent?.(seq);
     } catch {
@@ -1255,6 +1280,7 @@ export class BrowserDedicatedMediaSocketLeaf {
       return;
     }
     this.#speechStartSeen = true;
+    this.#diagnose('media_speech_start', { provider_start_ms: control.provider_start_ms });
     this.#speechStartProviderMs = control.provider_start_ms;
     this.#lastSpeechStartProviderMs = control.provider_start_ms;
     try {
@@ -1292,6 +1318,7 @@ export class BrowserDedicatedMediaSocketLeaf {
       return;
     }
     this.#endOfTurnSeen = true;
+    this.#diagnose('media_end_of_turn', { provider_start_ms: control.provider_start_ms, provider_end_ms: control.provider_end_ms });
     try {
       this.#onEndOfTurn(control);
       if (this.#continuousEndOfTurn) {

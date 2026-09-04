@@ -9558,6 +9558,7 @@ class JiuWenSwarmDeepAdapter:
                         parsed = {**parsed, "content": await finalize_spoken_answer(
                             getattr(self, "_model", None), envelope=str(inputs.get("query", "")),
                             candidate=parsed["content"], tool_results=spoken_tool_results,
+                            language=self._resolve_runtime_language(), request_id=rid,
                         )}
                     yield AgentResponseChunk(
                         request_id=rid,

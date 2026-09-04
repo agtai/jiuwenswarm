@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
 from jiuwenswarm.common.live_voice_capture_limits import MAX_CAPTURE_WAV_BYTES
+from jiuwenswarm.gateway.live_voice.audio_diagnostics import record_audio_diagnostic
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     ResponseRef,
@@ -3916,6 +3917,11 @@ class DedicatedMediaProductRegistry:
             )
             return
         if handle is not None:
+            record_audio_diagnostic("provider_open_ready", session_id=record.binding.session_id,
+                media_session_id=record.binding.media_session_id,
+                interaction_id=record.binding.interaction_id, correlation_id=record.binding.correlation_id,
+                capture_id=record.binding.generation.id, lease_id=record.binding.lease_id,
+                generation=record.binding.generation.value, preopen_frames=len(preopen_frames))
             for frame in preopen_frames:
                 owner.offer(handle, frame)
         if fallback is not None:
@@ -3952,6 +3958,12 @@ class DedicatedMediaProductRegistry:
                 "live_voice_end_of_turn_observed detector=server_vad "
                 "timing_basis=provider_time provenance=adapter_derived"
             )
+            record_audio_diagnostic("gateway_eot_ready", session_id=record.binding.session_id,
+                media_session_id=record.binding.media_session_id,
+                interaction_id=record.binding.interaction_id, correlation_id=record.binding.correlation_id,
+                capture_id=record.binding.generation.id, lease_id=record.binding.lease_id,
+                generation=record.binding.generation.value, provider_start_ms=observed.provider_start_ms,
+                provider_end_ms=observed.provider_end_ms)
             emit_runtime_l0_milestone(
                 component="gateway",
                 milestone=L0Milestone.PROVIDER_EOT,
@@ -4006,6 +4018,11 @@ class DedicatedMediaProductRegistry:
                     or record.streaming_recognition_handle is not handle
                 ):
                     raise RuntimeError("speech-start authority became stale")
+            record_audio_diagnostic("gateway_speech_start_ready", session_id=record.binding.session_id,
+                media_session_id=record.binding.media_session_id,
+                interaction_id=record.binding.interaction_id, correlation_id=record.binding.correlation_id,
+                capture_id=record.binding.generation.id, lease_id=record.binding.lease_id,
+                generation=record.binding.generation.value, provider_start_ms=observed.provider_start_ms)
             return MediaSpeechStart(
                 lease_id=record.binding.lease_id,
                 generation=record.binding.generation.value,
@@ -4697,6 +4714,13 @@ class DedicatedMediaProductRegistry:
                 observed_monotonic=observed_monotonic,
                 reason="MEDIA_ACK_SEND_SUCCEEDED",
             )
+        if acknowledgement.through_seq % 50 == 0:
+            record_audio_diagnostic("gateway_ack_sent", session_id=record.binding.session_id,
+                media_session_id=record.binding.media_session_id,
+                interaction_id=record.binding.interaction_id, correlation_id=record.binding.correlation_id,
+                capture_id=record.binding.generation.id, lease_id=record.binding.lease_id,
+                generation=record.binding.generation.value, frames_acked=acknowledgement.through_seq + 1,
+                frame_count=record.accepted_frames, preopen_frames=len(record.streaming_preopen_frames))
 
     @staticmethod
     def _first_frame_scope_sha256(record: _MediaAuthority) -> str:

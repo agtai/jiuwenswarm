@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
+import { audioDiagnosticSnapshot, clearAudioDiagnostics } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/audioDiagnostics.js';
 
 import {
   PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
@@ -5025,6 +5026,29 @@ test('formal P1 installs measurement hot-path hooks only on an L0 opt-in page', 
     [...productP1VoiceRouteSource.matchAll(/if \(this\.#l0Available && (?:frame|chunk)\.seq === 0\) \{\s*this\.#observeBrowserFirstFrame/g)].length,
     2,
   );
+});
+
+test('capture progress correlates current scope and its timer retires at close', async () => {
+  const previous = console.info;
+  console.info = () => undefined;
+  clearAudioDiagnostics();
+  let journey;
+  try {
+    journey = await runConcurrentCaptureJourney();
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    const progress = audioDiagnosticSnapshot().filter(fact => fact.event === 'capture_progress');
+    assert.ok(progress.length > 0);
+    assert.ok(progress.at(-1).fields.session_id);
+    assert.ok(progress.at(-1).fields.correlation_id);
+    assert.equal(typeof progress.at(-1).fields.frame_age_ms, 'number');
+    assert.equal(typeof progress.at(-1).fields.pending_frames, 'number');
+    assert.equal(JSON.stringify(progress).includes('samples'), false);
+    await journey.owner.close();
+    const count = audioDiagnosticSnapshot().filter(fact => fact.event === 'capture_progress').length;
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    assert.equal(audioDiagnosticSnapshot().filter(fact => fact.event === 'capture_progress').length, count);
+    assert.equal(journey.calls.some(([method]) => method.includes('task') || method.includes('history')), false);
+  } finally { await journey?.owner.close(); console.info = previous; clearAudioDiagnostics(); }
 });
 
 test('formal P1 L0 barge-in clocks bracket the exact local playout fence', () => {

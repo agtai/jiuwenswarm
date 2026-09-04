@@ -1,4 +1,5 @@
 """Focused boundaries from the recorded interrupted-context rehearsal."""
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ from jiuwenswarm.server.live_voice.product_composition_registry import AgentServ
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextEntry, FormalContextSnapshot, finalize_spoken_answer,
     spoken_revision_reason, spoken_revision_request_options,
+    spoken_revision_unavailable_notice,
 )
 
 
@@ -53,7 +55,7 @@ async def test_spoken_revision_is_tool_free_and_does_not_change_source():
 
 
 @pytest.mark.asyncio
-async def test_short_dialogue_skips_revision_and_bad_revision_does_not_lose_answer():
+async def test_short_dialogue_skips_revision_and_bad_revision_does_not_promote_unchecked_draft():
     calls = []
     async def invoke(**kwargs):
         calls.append(kwargs)
@@ -65,8 +67,61 @@ async def test_short_dialogue_skips_revision_and_bad_revision_does_not_lose_answ
     assert await finalize_spoken_answer(model, envelope="q", candidate="answer", tool_results=[{}]) == "answer"
     assert not calls
     # Numbers backed by tool results still go through the bounded verification.
-    assert await finalize_spoken_answer(model, envelope="q", candidate="共 3 天", tool_results=[{}]) == "共 3 天"
+    assert await finalize_spoken_answer(model, envelope="q", candidate="共 3 天", tool_results=[{}]) == spoken_revision_unavailable_notice()
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("candidate,results", [("PRIVATE_DRAFT " * 80, []), ("费用 120 元 PRIVATE_DRAFT", [{}])])
+@pytest.mark.parametrize("failure", ["timeout", "provider", "invalid", "empty", "oversize", "tools", "missing_model"])
+async def test_revision_failure_is_short_truthful_tool_free_and_content_free(candidate, results, failure, monkeypatch, caplog):
+    from jiuwenswarm.server.runtime.agent_adapter import formal_live_voice as module
+    monkeypatch.setattr(module, "LENGTH_REVISION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "ARITHMETIC_REVISION_TIMEOUT_SECONDS", 0.01)
+    calls = []
+    cancelled = []
+
+    async def invoke(**kwargs):
+        calls.append(kwargs)
+        if failure == "timeout":
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.append(True)
+        if failure == "provider":
+            raise RuntimeError("PRIVATE_PROVIDER_SECRET")
+        content = "bad json" if failure == "invalid" else json.dumps({
+            "text": "" if failure == "empty" else "x" * 201 if failure == "oversize" else "unchecked",
+            "detailed_requested": False,
+        })
+        return SimpleNamespace(content=content, tool_calls=[{"name": "write_file"}] if failure == "tools" else [])
+
+    output = await finalize_spoken_answer(None if failure == "missing_model" else SimpleNamespace(invoke=invoke),
+        envelope="PRIVATE_ENVELOPE", candidate=candidate, tool_results=results,
+        request_id="existing-request-1", language="en")
+    assert output == spoken_revision_unavailable_notice("en")
+    assert len(output) <= 200 and "PRIVATE" not in output
+    assert len(calls) == (0 if failure == "missing_model" else 1)
+    assert all(call["tools"] == [] for call in calls)
+    assert all("Independently recompute" in call["messages"][0].content for call in calls)
+    assert "PRIVATE" not in caplog.text
+    assert "existing-request-1" not in caplog.text
+    if failure == "timeout":
+        assert cancelled == [True]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_revision_never_returns_fallback_or_draft():
+    entered = asyncio.Event()
+    async def invoke(**kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+    task = asyncio.create_task(finalize_spoken_answer(SimpleNamespace(invoke=invoke),
+        envelope="q", candidate="long" * 100, tool_results=[]))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 def test_spoken_revision_reason_only_for_length_or_tool_backed_arithmetic():

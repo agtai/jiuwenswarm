@@ -1,4 +1,5 @@
 import { LIVE_VOICE_AUDIO_FRAME_DURATION_MS, createAudioRenderPlan, type AudioResponseRef, type CapturedAudioFrame } from './audioPort.js';
+import { recordAudioDiagnostic } from './audioDiagnostics.js';
 import {
   BrowserAudioIOAdapter,
   type BrowserAudioCaptureStreamFactory,
@@ -497,6 +498,12 @@ export interface ProductP1CaptureDiagnostics {
 }
 
 export class ProductP1VoiceRouteOwner {
+  #diagnosticTimer: ReturnType<typeof setInterval> | null = null;
+  #diagnosticLastTickMs = 0;
+  #diagnosticLastFrameMs: number | null = null;
+  #diagnosticCaptureId: string | null = null;
+  #diagnosticEnergyFrames = 0;
+  #diagnosticRmsPeak = 0;
   readonly #enabled: boolean;
   readonly #request: ProductP1Request;
   readonly #origin: string;
@@ -1761,6 +1768,7 @@ export class ProductP1VoiceRouteOwner {
   }
 
   stopAgentPlayout(response: Readonly<AudioResponseRef>): boolean {
+    this.#diagnose('p1_stop_requested', { ...response });
     const pending = this.#pendingPlayout;
     if (
       pending === null ||
@@ -1775,6 +1783,7 @@ export class ProductP1VoiceRouteOwner {
       response,
       'formal_product_barge_in'
     );
+    this.#diagnose('p1_stop_result', { ...response, outcome: stopReceipt.outcome, elapsed_ms: stopReceipt.timing.duration_ms });
     if (!stopReceipt.local_fence_established) {
       this.#pendingPlayout = pending;
       return false;
@@ -3065,10 +3074,19 @@ export class ProductP1VoiceRouteOwner {
       }
     }
     const captureDuringPlayout = this.#status === 'playing';
+    if (this.#diagnosticCaptureId !== frame.capture.capture_id) {
+      this.#diagnosticCaptureId = frame.capture.capture_id;
+      this.#diagnosticEnergyFrames = 0;
+      this.#diagnosticRmsPeak = 0;
+    }
+    let diagnosticEnergy = 0;
+    for (const sample of frame.samples) diagnosticEnergy += sample * sample;
+    const diagnosticRms = Math.sqrt(diagnosticEnergy / frame.samples.length);
+    this.#diagnosticLastFrameMs = performance.now();
+    this.#diagnosticRmsPeak = Math.max(this.#diagnosticRmsPeak, diagnosticRms);
+    if (diagnosticRms >= CAPTURE_SPEECH_ENERGY_FLOOR) this.#diagnosticEnergyFrames += 1;
     if (!captureDuringPlayout) {
-      let energy = 0;
-      for (const sample of frame.samples) energy += sample * sample;
-      if (Math.sqrt(energy / frame.samples.length) >= CAPTURE_SPEECH_ENERGY_FLOOR) {
+      if (diagnosticRms >= CAPTURE_SPEECH_ENERGY_FLOOR) {
         // Local energy is a decaying recency hint, never authoritative speech
         // state. The sticky observation below only guards the notification
         // pause path; rotation eligibility uses the decaying recency counter.
@@ -3580,6 +3598,7 @@ export class ProductP1VoiceRouteOwner {
         route === this.#route &&
         this.#status === 'capturing'
       ) {
+        this.#diagnose('eot_handler_delivered');
         handler();
       }
     });
@@ -3651,6 +3670,12 @@ export class ProductP1VoiceRouteOwner {
     route: ActiveBrowserDedicatedMediaRoute | null
   ): void {
     const event = this.#pendingSpeechStart;
+    if (event !== null && !this.#bargeInSpeechStartDelivered) {
+      this.#diagnose('barge_in_gate', {
+        handler_present: this.#onBargeInSpeechStart !== undefined,
+        callback_current: route !== null && route === this.#route && operationGeneration === this.#operationGeneration,
+      });
+    }
     if (
       event === null ||
       this.#onBargeInSpeechStart === undefined ||
@@ -3664,6 +3689,7 @@ export class ProductP1VoiceRouteOwner {
       return;
     }
     this.#bargeInSpeechStartDelivered = true;
+    this.#diagnose('barge_in_delivered');
     this.#onBargeInSpeechStart(event);
   }
 
@@ -3686,6 +3712,7 @@ export class ProductP1VoiceRouteOwner {
       throw new Error('end-of-turn control escaped its media authority');
     }
     this.#l0Record('browser_eot_receipt');
+    this.#diagnose('p1_end_of_turn', { provider_start_ms: event.provider_start_ms, provider_end_ms: event.provider_end_ms });
     if (
       this.#nativeInteraction !== null
       && (this.#status !== 'playing' || !this.#bargeInSpeechStartDelivered)
@@ -3747,6 +3774,51 @@ export class ProductP1VoiceRouteOwner {
   }
 
   #publish(): void {
+    this.#diagnose('p1_status');
+    const active = this.#enabled && !this.#closed && !this.#closeRequested
+      && ['starting', 'capturing', 'playing', 'recognizing'].includes(this.#status);
+    if (active && this.#diagnosticTimer === null) {
+      this.#diagnosticLastTickMs = performance.now();
+      this.#diagnosticTimer = setInterval(() => {
+        const now = performance.now();
+        this.#diagnose('capture_progress', { tick_delay_ms: Math.max(0, now - this.#diagnosticLastTickMs - 1000) });
+        this.#diagnosticLastTickMs = now;
+        this.#diagnosticEnergyFrames = 0;
+        this.#diagnosticRmsPeak = 0;
+      }, 1000);
+      // Node test timers must not keep the process alive after a failed test.
+      (this.#diagnosticTimer as unknown as { unref?: () => void }).unref?.();
+    } else if (!active && this.#diagnosticTimer !== null) {
+      clearInterval(this.#diagnosticTimer);
+      this.#diagnosticTimer = null;
+    }
     this.#onStatus?.(this.#status, this.#reason);
+  }
+
+  #diagnose(event: string, extra: Readonly<Record<string, unknown>> = {}): void {
+    if (!this.#enabled) return;
+    try {
+      const processing = this.#captureActualProcessing;
+      const currentCapture = this.#route?.binding.generation.id === this.#diagnosticCaptureId;
+      recordAudioDiagnostic(event, {
+        session_id: this.#sessionId, interaction_id: this.#interactionId, correlation_id: this.#correlationId,
+        media_session_id: this.#route?.binding.media_session_id ?? null,
+        capture_id: this.#route?.binding.generation.id ?? null, lease_id: this.#route?.binding.lease_id ?? null,
+        generation: this.#route?.binding.generation.value ?? null, operation_generation: this.#operationGeneration,
+        response_id: this.#pendingPlayout?.response.response_id ?? null,
+        response_generation: this.#pendingPlayout?.response.response_generation ?? null,
+        status: this.#status, reason: this.#reason,
+        frame_count: this.#frames.length, frames_sent: null, frames_acked: null,
+        energy_frames: currentCapture ? this.#diagnosticEnergyFrames : null, rms_peak: currentCapture ? this.#diagnosticRmsPeak : null,
+        frame_age_ms: !currentCapture || this.#diagnosticLastFrameMs === null ? null : Math.max(0, performance.now() - this.#diagnosticLastFrameMs),
+        provider_speech_started: this.#captureProviderSpeechStartObserved,
+        eot_pending: this.#pendingEndOfTurn !== null, eot_delivered: this.#endOfTurnDelivered,
+        handler_present: this.#endOfTurnHandler !== null, playout_pending: this.#pendingPlayout !== null,
+        rotation_in_flight: this.#captureRotationPromise !== null,
+        echo_cancellation: processing?.echo_cancellation ?? null, noise_suppression: processing?.noise_suppression ?? null,
+        auto_gain_control: processing?.auto_gain_control ?? null,
+        ...this.#route?.leaf.diagnosticSnapshot(), ...extra,
+      });
+    } catch { /* Diagnostic reads never own product state. */ }
   }
 }

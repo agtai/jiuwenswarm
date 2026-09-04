@@ -61,49 +61,52 @@ repeat the old whole-project audit solely to resume a bounded task.
 | Realtime Media | Dedicated transport, registration, rotation and bounded P2 notification pull | Backpressure/load, loss/reordering/corruption/reconnect and truthful recovery diagnostics |
 | Conversation Runtime | Committed-input/generation fencing, Stop/Exit, playback/generation interruption, unanswered-input continuity, presentation/ACK ownership | Combined listening/notification/Task races on current source; no old audio revival or accidental detached-Task control |
 | Interaction Intelligence | Model-based semantic route; opt-in Native engine source imported; Cascade remains the default route | Native through the current semantic business path, endpoint/false-interruption evaluation, broader language/device support |
-| Agent Bridge and dialogue truth | Real Agent/file tools; current-turn/requirement context; canonical control/status presentation and scoped dialogue Task facts | Real-model/physical verification of current truth repair; correct calculations, feasibility, literal filenames, result paths and concise speech |
+| Agent Bridge and dialogue truth | Real Agent/file tools; current-turn/requirement context; canonical control/status presentation and scoped dialogue Task facts; failed spoken revision returns an honest short notice, not the unchecked draft | Independent review and real-model/physical verification of current repair; correct calculations, feasibility, literal filenames, result paths and concise speech |
 | Task Control Core and Store | Canonical multi-Task authority, durable commands/replay, exact targets/CAS, bounded running-adjustment delivery | Current multi-Task/concurrency/restart integration and feature-complete operation coverage |
 | Executor & Durability | Direct D0/D2 v2 profiles, admission, reconciliation, sealed results and generic adjustment checkpoints; dedicated no-memory rail repair; retained v1 records cannot authorize new v2 dispatch | Required independent review and real result/control acceptance; scope broader file-tool access outside checkout separately. Additional Executor/D1 capability needs its own packet; no D1 or generic host-crash claim |
 | Voice–Task Bridge | Unified committed semantics, direct exact local creation/modification consent, scoped targets and requirement sources | Current modification/query real-model acceptance; full generalization and retirement audit; pause/resume/provide-input remain unsupported until a real primitive is accepted |
 | Integrated Web product experience | Scoped Registry Tasks in the right panel, no bottom manual form; project-home Session allocation through microphone transcription; recovery/notification repairs | Stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh journey; projectless startup requires backend authority design |
-| Observability, benchmark and latency | Correlated stage timings and historical bounded warm L0 evidence; several avoidable waits repaired | Current speech-end → first-audible baseline; causal optimization, cold/device/network coverage and declared SLO. Historical percentiles are not current gains |
+| Observability, benchmark and latency | Correlated stage timings; bounded content-free capture/upload/provider/VAD/playout/interruption diagnostics; historical bounded warm L0 evidence | Deploy and reproduce endpoint delay and ineffective voice interruption with the new trace; independent review, current first-audible baseline and declared SLO. Historical percentiles are not current gains |
 | Automated verification and product acceptance | Focused module/regression checks and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative independent review and final human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, production semantic cutover, bounded legacy removals and scoped prompt/config isolation | Complete production reachability/retirement audit; remaining manifest rows; keep artifacts/private runtime data out of integration |
 | Production operations | Privacy/preflight/observability foundations only | Authentication/tenancy, public deployment, operations, retention, security, compatibility and release support after separate scope |
 
 ## Current execution packet
 
-### Streaming Speech lifetime repair
+### Spoken fallback, audio diagnosis and local redeployment
 
-The user's active scope is the cumulative 64-identity failure, following D-113.
-The source repair passes 376 scoped tests and independent review. It is not deployed.
-See [bounded lifecycle evidence](evidence/SPEECH_LIFECYCLE_REPAIR_20260904.md)
-for the exact baseline, owned surfaces, checks and exclusions; the earlier
-[capacity diagnosis](evidence/CAPTURE_IDENTITY_CAPACITY_20260903.md) remains
-historical evidence of the running-service defect.
+The current user request repairs spoken-revision failure fallback and instruments
+the roughly ten-second endpoint delay and ineffective playback-time interruption,
+then redeploys the existing local rehearsal service. Both changed boundaries are
+Tier 2. See [scoped repair evidence](evidence/SPOKEN_FALLBACK_AND_AUDIO_DIAGNOSTICS_20260904.md)
+for the intended behavior, owned surfaces, exact checks and diagnosis limits.
 
-- **Intended behavior:** long-lived Provider clients accept continued authorized
-  capture and synthesis without a cumulative usage quota. Existing Media/Runtime
-  authority issues exact one-use stream grants; current activation/response
-  fences remain authoritative after historical Provider records are reclaimed.
-- **Resource ownership:** keep real bounds on live/opening streams, unconsumed
-  terminal queues and unfinished cleanup. Retire only the exact consumed stream;
-  delayed successful cleanup releases capacity. Revoked response authority also
-  fences queued audio. Local capacity/cleanup/authority errors remain distinct.
-- **Owned surfaces:** streaming Speech port/conformance, OpenAI Adapter,
-  recognition/synthesis Gateway routes and their existing Media Registry seam;
-  affected tests and documentation. The local authority contract is Tier 3;
-  cleanup and diagnostics are Tier 2. No browser wire or Store migration.
-- **Exclusions:** Task semantics, arithmetic/artifacts, Provider/account settings,
-  project/workspace cleanup, service restart/deployment and remote updates. No
-  larger history cap, timed clearing, adapter reset or business hardcode.
-- **Verification:** bounded positive, replay/revocation, concurrent capacity,
-  late-open, deferred-cleanup and isolation checks pass; independent review found
-  no actionable defects in the owned boundary.
-  Simulated wire tests do not grant real Provider, microphone/speaker, full Demo
-  or production acceptance. The project judgement remains PARTIAL.
+- Failed required revision now returns a truthful short localized notice. Keep
+  the existing fact-check, tool-free invocation and timeout budgets; do not retry
+  Agent/tools, truncate away qualifications or claim the draft was saved.
+- Bounded passive diagnostics join current media/capture/response identities
+  across capture energy/progress, send/ACK/queue, Provider speech events, playout
+  scheduling and interruption gates. They neither store content nor authorize
+  a new VAD/interruption path. Scheduling is not physical audibility evidence.
+- Focused regressions pass. Five selected mounted UI failures also occur on the
+  unchanged baseline; no new failure appeared in that comparison. Independent
+  review remains unavailable because of the local CLI/configuration mismatch;
+  complete manual diff review is a substitute with an explicit limitation.
+- Source is ready for the requested controlled local deployment, preserving
+  current project/data/configuration and importing the already committed
+  800 ms VAD / 250 ms startup changes. Actual deployment is pending.
+- Historical logs place the long wait before EOT and voice interruption failure
+  before the barge-in RPC. They cannot uniquely identify capture, transport,
+  Provider/acoustics or UI gating. New physical reproduction remains required.
+- No sentence-level TTS pipeline, Task policy, protocol/schema, arithmetic
+  algorithm, credential/provider change, public deployment or remote push.
 
 ### Retained consequences of earlier repairs
+
+The D-113 streaming Speech lifetime repair passes its scoped tests and independent
+review but is not yet deployed. It removes a cumulative identity quota while
+retaining live-resource and exact-authority fences. Conditional evidence:
+[bounded lifecycle repair](evidence/SPEECH_LIFECYCLE_REPAIR_20260904.md).
 
 D-111/D-112 leave one model semantic decision, direct exact local modification
 and canonical pending/applied/rejected Task status. Focused tests and bounded

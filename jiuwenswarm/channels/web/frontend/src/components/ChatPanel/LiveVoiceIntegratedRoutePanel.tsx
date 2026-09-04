@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { recordAudioDiagnostic } from '../../features/live-voice/formal/audioDiagnostics';
 import { parseEventEnvelope } from '../../features/live-voice/formal/liveVoiceContractV2';
 import { Activity, RefreshCw, ShieldAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -6783,6 +6784,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           }
         },
         on_barge_in_speech_start: () => {
+          recordAudioDiagnostic('barge_in_ui_received', {
+            session_id: binding.session_id, interaction_id: binding.interaction_id,
+            callback_current: voiceLoopEnabledRef.current && voiceLoopGenerationRef.current === loopGeneration && p1VoiceOwnerRef.current === owner,
+          });
           if (
             voiceLoopEnabledRef.current &&
             voiceLoopGenerationRef.current === loopGeneration &&
@@ -7254,6 +7259,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const p2Owner = activationOwnerRef.current;
     const p1Owner = p1VoiceOwnerRef.current;
     const response = activeVoiceResponseRef.current;
+    recordAudioDiagnostic('barge_in_ui_stop_gate', {
+      ...response, callback_current: p2Owner !== null && p1Owner !== null && response !== null && p1Owner.status().status === 'playing',
+      status: p1Owner?.status().status ?? null,
+    });
     if (p2Owner === null || p1Owner === null || response === null || p1Owner.status().status !== 'playing') return;
     bargeInSequenceRef.current += 1;
     const actionId = `product-barge-${bargeInSequenceRef.current}`;
@@ -7285,14 +7294,18 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // 应作为预期 stale 状态结算,而不是触发路由重建。
       const pendingPresentation = pendingPresentationAttemptRef.current;
       if (pendingPresentation !== null && pendingPresentation.owner === p2Owner) {
+        recordAudioDiagnostic('barge_in_wait_presentation', { ...response });
         await pendingPresentation.playoutSettlement;
         await settleProductPresentationAck(pendingPresentation);
       }
+      recordAudioDiagnostic('barge_in_rpc_requested', { ...response });
       await p2Owner.bargeIn(retained.input);
+      recordAudioDiagnostic('barge_in_rpc_settled', { ...response, outcome: 'completed' });
       if (pendingBargeInRef.current === retained) {
         pendingBargeInRef.current = null;
       }
     } catch (error) {
+      recordAudioDiagnostic('barge_in_rpc_settled', { ...response, outcome: 'failed_or_unknown' });
       if (!p2Owner.hasPendingBargeIn() && pendingBargeInRef.current === retained) {
         pendingBargeInRef.current = null;
       }

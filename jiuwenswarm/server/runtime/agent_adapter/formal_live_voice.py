@@ -9,6 +9,7 @@ import hashlib
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -144,16 +145,30 @@ def spoken_revision_request_options(model, reason: str) -> dict:
     return dict(supported)
 
 
-async def finalize_spoken_answer(model, *, envelope: str, candidate: str, tool_results: list[dict]) -> str:
+def spoken_revision_unavailable_notice(language: str = "zh") -> str:
+    """A presentation failure is not an answer, a Task failure or retry consent."""
+    if language in {"en", "en-US"}:
+        return "I couldn't finish checking and preparing this spoken answer. I won't read out the unchecked draft."
+    return "这次回答的口播整理与核对未能完成，我暂时不朗读未经核对的草稿。"
+
+
+async def finalize_spoken_answer(
+    model, *, envelope: str, candidate: str, tool_results: list[dict],
+    language: str = "zh", request_id: str = "",
+) -> str:
     """Bounded tool-free final revision; never dispatch work or change raw input."""
-    if model is None:
-        return candidate
     reason = spoken_revision_reason(candidate, tool_results)
     if reason is None:
         return candidate
+    # Hash only the existing request identity, never the user's content.
+    request_key = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:16] if request_id else "unavailable"
+    logger = logging.getLogger(__name__)
+    started = time.monotonic()
+    if model is None:
+        logger.warning("live_voice_spoken_revision stage=fallback request_key=%s reason=%s outcome=model_unavailable", request_key, reason)
+        return spoken_revision_unavailable_notice(language)
     from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
 
-    request_options = spoken_revision_request_options(model, reason)
     timeout_seconds = (
         ARITHMETIC_REVISION_TIMEOUT_SECONDS if reason == "arithmetic" else LENGTH_REVISION_TIMEOUT_SECONDS
     )
@@ -174,12 +189,13 @@ async def finalize_spoken_answer(model, *, envelope: str, candidate: str, tool_r
         "change, refund, sent message or completed artifact without evidence. Do not ask again "
         "whether to start already-delegated work. This revision has no tools or action authority."
     )
+    logger.info("live_voice_spoken_revision stage=start request_key=%s reason=%s timeout_s=%s draft_chars=%s", request_key, reason, timeout_seconds, len(candidate))
     try:
         async with asyncio.timeout(timeout_seconds):
             result = await model.invoke(messages=[SystemMessage(content=instructions), UserMessage(content=json.dumps({
                 "formal_envelope": envelope, "tool_results": tool_results,
                 "draft": candidate,
-            }, ensure_ascii=False))], tools=[], **request_options)
+            }, ensure_ascii=False))], tools=[], **spoken_revision_request_options(model, reason))
         if getattr(result, "tool_calls", None):
             raise ValueError("unexpected tools")
         value = json.loads(result.content)
@@ -188,14 +204,16 @@ async def finalize_spoken_answer(model, *, envelope: str, candidate: str, tool_r
                 or not value["text"].strip()
                 or len(value["text"]) > (6000 if value["detailed_requested"] else 200)):
             raise ValueError("invalid spoken revision")
+        logger.info("live_voice_spoken_revision stage=complete request_key=%s reason=%s elapsed_ms=%.3f", request_key, reason, (time.monotonic() - started) * 1000)
         return value["text"].strip()
     except asyncio.CancelledError:
+        logger.info("live_voice_spoken_revision stage=cancelled request_key=%s reason=%s elapsed_ms=%.3f", request_key, reason, (time.monotonic() - started) * 1000)
         raise
     except Exception as error:
-        # Do not turn a provider revision outage into lost dialogue or rerun
-        # the Agent/tools. Record the limitation without logging user content.
-        logging.getLogger(__name__).warning("live_voice_spoken_revision_failed kind=%s", type(error).__name__)
-        return candidate
+        # Never promote the failed revision's unchecked draft, truncate away
+        # caveats, rerun tools, or pretend a complete answer was saved elsewhere.
+        logger.warning("live_voice_spoken_revision stage=fallback request_key=%s reason=%s elapsed_ms=%.3f outcome=%s", request_key, reason, (time.monotonic() - started) * 1000, "timeout" if isinstance(error, TimeoutError) else "invalid_or_unavailable")
+        return spoken_revision_unavailable_notice(language)
 
 
 class FormalLiveVoiceViolation(ValueError):

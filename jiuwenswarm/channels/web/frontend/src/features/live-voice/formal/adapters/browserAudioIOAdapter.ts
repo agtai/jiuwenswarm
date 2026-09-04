@@ -1,3 +1,4 @@
+import { recordAudioDiagnostic } from '../audioDiagnostics.js';
 import {
   AudioPort,
   AudioPortViolation,
@@ -354,6 +355,8 @@ interface PlaybackSourceRecord {
 }
 
 interface PlaybackSession {
+  diagnosticLastMs: number | null;
+  diagnosticMaxGapMs: number;
   readonly response: Readonly<AudioResponseRef>;
   readonly sources: Map<string, PlaybackSourceRecord>;
   readonly completed: Map<string, Set<number>>;
@@ -1207,6 +1210,8 @@ export class BrowserAudioIOAdapter {
       acknowledged: new Map(),
       units: new Set(),
       nextStartTime: context.currentTime + PLAYOUT_STARTUP_LEAD_SECONDS,
+      diagnosticLastMs: null,
+      diagnosticMaxGapMs: 0,
       stopped: false,
     };
     this.#playback = playback;
@@ -1303,6 +1308,18 @@ export class BrowserAudioIOAdapter {
         sourceStartAttempted = true;
         source.start(startAt);
       }
+      const diagnosticNow = performance.now();
+      playback.diagnosticMaxGapMs = Math.max(playback.diagnosticMaxGapMs, (context.currentTime - playback.nextStartTime) * 1000);
+      if (playback.diagnosticLastMs === null || diagnosticNow - playback.diagnosticLastMs >= 1000) {
+        recordAudioDiagnostic(playback.diagnosticLastMs === null ? 'playout_first_scheduled' : 'playout_progress', {
+          ...playback.response, seq: chunk.seq, startup_lead_ms: PLAYOUT_STARTUP_LEAD_MS,
+          buffer_ahead_ms: Math.max(0, (startAt - context.currentTime) * 1000),
+          schedule_gap_ms: playback.diagnosticMaxGapMs, scheduled_sources: playback.sources.size,
+          context_state: context.state,
+        });
+        playback.diagnosticLastMs = diagnosticNow;
+        playback.diagnosticMaxGapMs = 0;
+      }
       playback.nextStartTime = startAt + chunk.samples.length / chunk.sample_rate_hz;
     } catch {
       playback.sources.delete(sourceKey);
@@ -1355,6 +1372,7 @@ export class BrowserAudioIOAdapter {
     const normalizedResponse = normalizeResponse(response);
     const normalizedReason = requiredText(reason, 'reason');
     const requestedAt = readMonotonicNow(this.#monotonicNowMs);
+    recordAudioDiagnostic('playout_stop_requested', { ...normalizedResponse });
     const businessCancelCountBefore = this.#audioPort.businessCancelCount();
     if (this.#closed) {
       return this.#localStopReceipt('adapter_closed', normalizedResponse, normalizedReason, requestedAt, businessCancelCountBefore);
@@ -1432,6 +1450,11 @@ export class BrowserAudioIOAdapter {
       disconnectFailedCount,
     });
     this.#latchPlayoutSourceCleanupFailure(summary);
+    recordAudioDiagnostic('playout_sources_stopped', {
+      ...playback.response, reason, scheduled_sources: sourceCount,
+      stopped_sources: stopCompletedCount, failed_sources: stopFailedCount,
+      schedule_gap_ms: playback.diagnosticMaxGapMs,
+    });
     if (emitState) {
       if (this.#playoutSourceCleanupFailure !== null) this.#emitPlayoutState('failed', `${reason}_source_unknown`, playback);
       else this.#emitPlayoutState('stopped', reason, playback);

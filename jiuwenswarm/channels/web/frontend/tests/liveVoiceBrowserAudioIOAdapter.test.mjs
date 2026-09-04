@@ -322,6 +322,37 @@ function nextTask() {
   return new Promise(resolve => setImmediate(resolve));
 }
 
+test('playout diagnostics report startup gap and exact stop without payload or sink authority', async () => {
+  const previous = console.info;
+  const facts = [];
+  console.info = message => {
+    if (message.startsWith('live_voice_audio_diagnostic ')) facts.push(JSON.parse(message.slice('live_voice_audio_diagnostic '.length)));
+  };
+  const fake = fakeEnvironment();
+  const adapter = new BrowserAudioIOAdapter({ enabled: true, environment: fake.environment });
+  try {
+    await adapter.unlockPlayout();
+    adapter.beginPlayout(firstResponse);
+    assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+    const first = facts.find(fact => fact.event === 'playout_first_scheduled');
+    assert.equal(first.fields.startup_lead_ms, 250);
+    assert.equal(first.fields.buffer_ahead_ms, 250);
+    assert.equal(first.fields.response_id, firstResponse.response_id);
+    fake.contexts[0].currentTime += 2;
+    assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 1)), true);
+    assert.equal(adapter.stopPlayoutExact(firstResponse).local_fence_established, true);
+    const stop = facts.find(fact => fact.event === 'playout_sources_stopped');
+    assert.equal(stop.fields.stopped_sources, 2);
+    assert.ok(stop.fields.schedule_gap_ms > 0);
+    assert.equal(JSON.stringify(facts).includes('private-device-id'), false);
+    assert.equal(JSON.stringify(facts).includes('samples'), false);
+    console.info = () => { throw new Error('diagnostic sink failed'); };
+    adapter.beginPlayout(secondResponse);
+    assert.equal(adapter.enqueuePlayout(pcmChunk(secondResponse, 0)), true);
+    assert.equal(adapter.stopPlayoutExact(secondResponse).local_fence_established, true);
+  } finally { await adapter.close(); console.info = previous; }
+});
+
 async function outcomeWithin(operation, timeoutMessage) {
   let timeoutHandle = null;
   try {
