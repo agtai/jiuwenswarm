@@ -174,6 +174,24 @@ revival. Any repair therefore needs a tentative/confirmed state, a bounded
 confirmation deadline and explicit no-speech, breath, keyboard, device-noise,
 false-trigger, rollback and old-audio-revival checks.
 
+## Passive-diagnostic deployment
+
+Commit `a7688f3ab4aa9efd0625b224dcb07a6c0fa30714` was deployed through the
+controlled `formal-web-validation` launcher with source branch
+`hx/0812_live_voice_w3`, generation interruption enabled, the saved isolated
+project/data directory and frontend port 5173. The project retained its one
+pre-existing untracked helper under the launcher's explicit dirty-project
+allowance; the deployment did not modify it.
+
+The launcher rebuilt the frontend and passed real Speech TTS-to-STT, formal
+receipt, identity-mismatch rejection and forged-claim rejection probes with
+zero business side effects. Runtime-contract source matched `a7688f3ab4`; ports
+5173, 18092, 19000 and 19001 were listening, the page returned HTTP 200, and
+the served `/assets/index-C1-6cszx.js` contained the
+`capture_playout_activity` diagnostic marker. The managed service remains
+available for one controlled headset reproduction. That physical result is
+pending and is not inferred from the deployment probes.
+
 ## Verification
 
 - server VAD focused regression: 62 passed;

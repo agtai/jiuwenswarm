@@ -108,10 +108,12 @@ offline timeline/report are implemented. Scope and verification are in the
   and cannot yet separate browser/OS/device processing from Provider VAD/
   recognition. Another reproduction is unnecessary to locate the delayed gate,
   but a finer controlled run is required to assign that remaining delay. A
-  passive two-band local activity observer is now implemented and verified; it
-  records bounded content-free milestones and their age at remote speech-start
-  without gaining stop, cancel or commit authority. Deploy the rebuilt frontend,
-  run one headset reproduction and export same-tab diagnostics. See the
+  passive two-band local activity observer is now implemented, verified and
+  deployed from `a7688f3ab4` on the controlled 5173/18092/19000/19001 service;
+  the served frontend contains the new observer. It records bounded content-free
+  milestones and their age at remote speech-start without gaining stop, cancel
+  or commit authority. Refresh the existing page, run one headset reproduction
+  and export same-tab diagnostics. See the earlier profiling
   [deployment evidence](evidence/DEMO_PROFILING_DEPLOYMENT_20260904.md).
   The scoped acceptance and diagnosis are in the
   [barge-in evidence](evidence/VAD_PLAYOUT_ACCEPTANCE_AND_BARGE_IN_DIAGNOSIS_20260904.md).
