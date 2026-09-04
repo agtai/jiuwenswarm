@@ -88,4 +88,32 @@ Before deployment: read-only Gateway/project query succeeds for `proj_ad135a77`,
 six Sessions and two Tasks. SQLite has two terminal Tasks and two terminal
 Attempts. Default remains `deepseek-v4-flash`; configuration SHA-256 remains
 `7017784bbf44dcf1fc1432fb91df05dc004f0dd1dd08b2dd1fb2628f68a22c57`.
-Deployment is pending and will be recorded after the controlled launcher runs.
+
+## Controlled local deployment
+
+Runtime source: `f76fde5199` (`feat(live-voice): correlate dialogue input and
+segmented speech diagnostics`), clean at launch. Existing private helper and
+controlled `formal-web-validation` launcher ran preflight then restart with
+process-only offline npm settings. TypeScript/Vite build passes (Vite 39.16 s);
+existing mixed-import/chunk-size warnings remain. No frontend behavior changed.
+
+New runtime log: `logs/swarm-20260904-174219.log`, parent PID 3448. The old
+`swarm-20260904-164927.log` remains. All four fixed ports and formal backend
+routes pass readiness. Required real TTS-to-STT, receipt, identity-mismatch and
+forged-claim rejection checks pass with zero business effects. The short batch
+readiness STT receives HTTP 200 in about 875 ms; this is not proof that the earlier
+long-capture timeout or streaming segmentation failure is solved.
+
+The original Session URL returns HTTP 200 and served
+`/assets/index-DsZyj0lX.js` equals the rebuilt local bundle. Its effective bundled
+`VITE_LIVE_VOICE_PLAYOUT_STARTUP_LEAD_MS` is `250`; runtime environments retain
+VAD `800` and exact private data/configuration paths. The dialogue model and
+configuration hash are unchanged. Read-only Gateway/project verification still
+finds six Sessions and two Tasks; SQLite retains two terminal Tasks and two
+terminal Attempts. No browser refresh, microphone operation, dialogue-model
+probe, Task mutation, data cleanup or remote update was performed.
+
+This deployment enables evidence collection, not VAD acceptance closure. The
+lossless split-versus-merge choice/successor capture scope remains awaiting user
+direction; wrong-answer causality and long-capture Provider timeout still need
+new correlated evidence. Independent review remains unavailable as recorded.

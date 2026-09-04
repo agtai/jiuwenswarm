@@ -96,7 +96,9 @@ its unresolved scope boundary are recorded in the
   and this source does not yet authorize a VAD acceptance PASS.
 - Preserve isolated `deepseek-v4-flash`, project/data, VAD 800 ms and startup
   250 ms. No timeout increase, model/history reset, protocol/schema changes,
-  public deployment or remote updates. Deployment evidence follows verification.
+  public deployment or remote updates. The diagnostic increment is locally
+  deployed; affected regressions, full build and real Speech/rejection readiness
+  pass. These checks do not close the remaining segmentation or model defects.
 - Existing passive Socket/queue diagnostics and their earlier physical evidence
   remain in the [backpressure report](evidence/SPEECH_BACKPRESSURE_DIAGNOSTICS_20260904.md).
   Independent review remains unavailable under the local CLI/model mismatch.
