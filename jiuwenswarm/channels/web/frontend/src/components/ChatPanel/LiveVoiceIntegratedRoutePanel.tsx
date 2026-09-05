@@ -8202,6 +8202,18 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
         return;
       }
+      // A restored selection does not change the notification's voice origin.
+      // Wait for authenticated P2 discovery before choosing a TEXT subscription;
+      // otherwise remount can allocate an unconsumed TEXT prefix in the same
+      // Runtime lane before Start restores the independent voice owner.
+      const recoveryOwner = activationOwnerRef.current;
+      const recoveryDiscovery = FEATURE_LIVE_VOICE_INTEGRATED_P1 ? recoveryOwner?.voiceTaskDiscovery() : null;
+      if (FEATURE_LIVE_VOICE_INTEGRATED_P1 &&
+          (recoveryOwner?.snapshot().status !== 'active' || recoveryDiscovery?.reason !== null)) return;
+      const recoveredVoiceTasks = recoveryDiscovery?.task_ids ?? [];
+      if (recoveredVoiceTasks.length > 0 && ownedProgressRoute === null) return;
+      const recoveredVoiceSelection = ownedProgressRoute !== null && recoveredVoiceTasks.includes(ownedProgressRoute.task_id);
+      if (recoveredVoiceSelection && !voiceLoopEnabledRef.current) return;
       // Voice subscriptions own independent, freshly authenticated inspection
       // leaves. Selecting B must not retire A's future terminal delivery.
       if (ownedProgressRoute !== null) {
@@ -8211,7 +8223,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           setP3Activation(retainedVoice.owner.snapshot());
           return;
         }
-        if (p2Binding !== null && (desiredVoiceProgressIsCurrent(ownedProgressRoute.task_id)
+        if (p2Binding !== null && (recoveredVoiceSelection || desiredVoiceProgressIsCurrent(ownedProgressRoute.task_id)
           || (ownedProgressOrigin?.kind === 'voice' && p2Binding.interaction_id === ownedProgressOrigin.id))) {
           try { await ensureVoiceTaskProgress(ownedProgressRoute.task_id, p2Binding); } catch { /* Exact owner retains cleanup/retry state. */ }
           return;
@@ -8346,7 +8358,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         })
         .catch(() => undefined);
     };
-  }, [correlationId, createdProgressRoute, props.activeSessionId, props.isConnected]);
+  }, [correlationId, createdProgressRoute, props.activeSessionId, props.isConnected,
+    FEATURE_LIVE_VOICE_INTEGRATED_P1 ? p2Activation.status : null,
+    FEATURE_LIVE_VOICE_INTEGRATED_P1 ? p2Activation.binding?.activation_id : null]);
 
   const productTextTransportRetained = Boolean(
     pendingProductTurnRef.current ||

@@ -24,7 +24,15 @@ history, not acceptance of this candidate.
 
 ## Current execution packet
 
-### Accepted rehearsal repairs: deployed, physical rehearsal open
+### Rehearsal recovery follow-up: local verification, physical rehearsal open
+
+The [recovery follow-up](reviews/REHEARSAL_RECOVERY_FOLLOWUP_20260905.md) repairs
+restored selected voice Tasks acquiring a premature TEXT subscription and extends
+exact local consent to successors, including formal target clarification. Scoped
+automation and independent review pass; retained baseline failures and physical
+reopen/playback acceptance remain open. It also separates model generation,
+post-model stream draining and periodic Task-status ingestion in the new profile.
+Model replacement and performance tuning remain separate follow-up work.
 
 The [bounded repair packet](reviews/REHEARSAL_REPAIR_20260905.md) owns controlled
 build defaults, exact local cancellation consent, adjustment adoption between
@@ -70,7 +78,7 @@ deferred until the AgentModel is changed.
 | Profiling | Browser/RPC/media/Speech/Agent/Task/notification timing, bounded browser export and offline reports have scoped tests/build/review and deployed samples. Use [runbook §7.7](runbooks/E2E_RUNBOOK.md#77-普通-demo-的性能记录与故障报告) for a rehearsal; [deployment evidence](evidence/DEMO_PROFILING_DEPLOYMENT_20260904.md) retains chronology. No latency improvement/SLO claim. |
 | Speech lifetime | D-113 removes a cumulative identity quota while retaining exact authority/resource bounds; scoped tests/review and deployment are recorded in [lifecycle evidence](evidence/SPEECH_LIFECYCLE_REPAIR_20260904.md). Physical stability remains open. |
 | Local Task adjustment/control | D-116 extends direct exact local consent to cancellation and adopts adjustment constraints before the next model call, after the current tool/stage. Applied means adopted, not a completed revised file. Scoped real Executor/SDK and semantic evidence: [repair packet](reviews/REHEARSAL_REPAIR_20260905.md); physical A/B/A2 acceptance remains open. |
-| Notification | Adjusted histories rehydrate; fresh voice owners survive transient reads and deferred VOICE/TEXT routes drain on foreground release. Scoped reconnect/ACK/Exit checks pass; broader mounted baseline failures and physical journey remain open: [repair packet](reviews/REHEARSAL_REPAIR_20260905.md). |
+| Notification | Adjusted histories rehydrate; selected voice Tasks wait for authenticated discovery/Start rather than acquiring a TEXT prefix, with P1-off and discovery-failure behavior preserved. Scoped reconnect/playout/ACK/Exit checks pass; broader baseline failures and physical journey remain open: [follow-up](reviews/REHEARSAL_RECOVERY_FOLLOWUP_20260905.md). |
 | Segmentation/dialogue | One-capture/one-final rejects later Provider items; whole-capture fallback can time out. Lossless post-EOT continuation needs accepted split/merge semantics; repeated greeting causality still needs reproduction: [diagnostics](evidence/SEGMENT_AND_DIALOGUE_DIAGNOSTICS_20260904.md). |
 
 ## Completion boundaries
@@ -103,7 +111,7 @@ whole-project audit for every bounded task.
 | Agent Bridge and dialogue truth | Real Agent/file tools, current requirements, canonical status, faithful Agent answer delivery | Broader real-model/physical verification, arithmetic/feasibility reliability, literal names/paths and concise speech |
 | Task Control Core and Store | Canonical multi-Task state, durable commands/replay, exact targets/CAS, bounded adjustment delivery | Current concurrency/restart integration and full Task-operation coverage |
 | Executor & Durability | Direct D0/D2 v2 admission/reconciliation, sealed results/checkpoints, dedicated memory repair; v1 cannot dispatch v2 | Required review and real result/control acceptance; outside-checkout files or additional Executor/D1 capability need separate scope; no D1/host-crash claim |
-| Voice–Task Bridge | Unified committed semantics, direct exact local create/adjust consent, scoped targets/requirements | Real modification/query acceptance, generalization/retirement; pause/resume/provide-input remain unsupported |
+| Voice–Task Bridge | Unified committed semantics, direct exact local create/successor/adjust/cancel consent, scoped targets/requirements and target clarification | Real modification/query acceptance, generalization/retirement; update/reprioritize retain confirmation; pause/resume/provide-input remain unsupported |
 | Integrated Web product experience | Right-panel Registry Tasks, project-home Session startup, recovery/notification repairs | Stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh; projectless backend authority |
 | Observability, benchmark and latency | Scoped timing/error export, offline reports, tests/build/review and deployment samples | Current physical reproduction, interruption/first-audible baseline and SLOs; clock gaps/dropped data remain explicit |
 | Automated verification and acceptance | Focused regressions and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative review/human acceptance |

@@ -10203,27 +10203,27 @@ test('mounted terminal notification replays its exact P2 observation after Live 
           onProductVoiceStateChange: state => states.push(state),
         }),
       );
-      await waitForMounted(
-        () => states.at(-1)?.terminal_announcement_state === 'recovering',
-        'terminal notification was not retained while Live Voice was off',
-      );
-      assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 0);
-      assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 0);
-      void controlRef.current.start();
-      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'terminal recovery did not start a media owner');
-      await browser.emitFirstFrame(0);
-      await waitForMounted(
-        () => calls.filter(call => call.method === 'live_voice.composition.p2.notification.next' && call.requestId === notificationRequestId).length === 2,
-        'terminal recovery did not replay the exact notification request',
-      );
-      await waitForMounted(() => states.at(-1)?.p1_status === 'playing', 'authorized terminal announcement did not play');
-      await waitForMounted(() => browser.counts.sourceStarts === 1, 'terminal audio did not reach browser playout');
-      browser.endLatestSource();
-      await waitForMounted(
-        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length === 1,
-        'terminal presentation was not ACKed exactly once',
-      );
     });
+    await waitForMountedEffects(
+      () => states.at(-1)?.terminal_announcement_state === 'recovering',
+      'terminal notification was not retained while Live Voice was off',
+    );
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 0);
+    await act(async () => { void controlRef.current.start(); });
+    await waitForMountedEffects(() => states.at(-1)?.p1_status === 'starting', 'terminal recovery did not start a media owner');
+    await browser.emitFirstFrame(0);
+    await waitForMountedEffects(
+      () => calls.filter(call => call.method === 'live_voice.composition.p2.notification.next' && call.requestId === notificationRequestId).length === 2,
+      'terminal recovery did not replay the exact notification request',
+    );
+    await waitForMountedEffects(() => states.at(-1)?.p1_status === 'playing', 'authorized terminal announcement did not play');
+    await waitForMountedEffects(() => browser.counts.sourceStarts === 1, 'terminal audio did not reach browser playout');
+    await act(async () => browser.endLatestSource());
+    await waitForMountedEffects(
+      () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length === 1,
+      'terminal presentation was not ACKed exactly once',
+    );
 
     const exactNotificationCalls = calls.filter(
       call => call.method === 'live_voice.composition.p2.notification.next' && call.requestId === notificationRequestId,
@@ -12654,7 +12654,10 @@ test('mounted unified hands-free itinerary journey auto-submits and keeps one cu
   }
 });
 
-for (const [delayedMediaClose, transientRead] of [[false, false], [true, false], [false, true]]) test(`mounted recovered voice Tasks acquire independent fresh owners only after Live Voice starts and Exit closes both${delayedMediaClose ? ' before microphone cleanup settles' : ''}${transientRead ? ' after transient status failure and adjusted completion' : ''}`, async () => {
+for (const [delayedMediaClose, transientRead, selectedTask, discoveryFailure, voiceFlagOff] of [
+  [false, false, false], [true, false, false], [false, true, false], [false, false, true],
+  [false, false, true, true], [false, false, true, false, true],
+]) test(`mounted recovered voice Tasks acquire independent fresh owners only after Live Voice starts and Exit closes both${delayedMediaClose ? ' before microphone cleanup settles' : ''}${transientRead ? ' after transient status failure and adjusted completion' : ''}${selectedTask ? ' with a restored selected Task' : ''}${discoveryFailure ? ' after discovery failure' : ''}${voiceFlagOff ? ' with P1 disabled preserving TEXT fallback' : ''}`, async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-recovered-voice-tasks';
   const taskIds = ['recovered-a', 'recovered-b'];
@@ -12665,31 +12668,69 @@ for (const [delayedMediaClose, transientRead] of [[false, false], [true, false],
   const activations = new Map();
   let transientFailures = transientRead ? 1 : 0;
   let recoveryActivationCount = null;
+  let taskCompleted = false, completionAcknowledged = false, pendingNotification = null, notificationWaiter = null;
+  const notificationReplies = new Map();
   const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
   const activateP2 = createMountedP2ActivationResponder();
-  const request = async (method, params) => {
+  const request = async (method, params, options) => {
     calls.push({ method, params });
     if (method === 'live_voice.composition.p2.activate') {
       p2Binding = params;
       const response = await activateP2(params);
+      if (discoveryFailure && calls.filter(call => call.method === 'live_voice.composition.p2.activate').length === 1) {
+        return { ...response, result: { ...response.result, voice_task_ids: [], voice_task_discovery_reason: 'VOICE_TASK_DISCOVERY_UNAVAILABLE' } };
+      }
       return { ...response, result: { ...response.result, voice_task_ids: taskIds } };
     }
     if (method === 'live_voice.composition.p2.close' || method === 'live_voice.composition.p3.progress.close') return { ok: true, result: { status: 'closed', ...params } };
-    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
-    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.composition.p2.notification.next') {
+      if (notificationReplies.has(options?.requestId)) return notificationReplies.get(options?.requestId);
+      if (pendingNotification) {
+        const notification = pendingNotification; pendingNotification = null;
+        notification.result.notification_sequence = params.notification_sequence;
+        notificationReplies.set(options?.requestId, notification); return notification;
+      }
+      return new Promise(resolve => { notificationWaiter = notification => {
+        notification.result.notification_sequence = params.notification_sequence;
+        notificationReplies.set(options?.requestId, notification); resolve(notification);
+      }; });
+    }
     const taskBinding = { subject_id: 'recovered-subject', project_id: 'recovered-project', session_id: sessionId,
-      correlation_id: p2Binding?.correlation_id, generation: 1 };
+      correlation_id: selectedTask ? 'recovered-task-correlation' : p2Binding?.correlation_id, generation: 1 };
+    const taskMetadata = { spec: { name: 'Recovered report', instruction: 'Save the report.' },
+      revision: { number: 1, predecessor_task_id: null, create_command_id: 'create-a' },
+      cancel_requested: false, dispatch_fenced: false, queued: false, admission: null, reconciliation: null };
+    const completionState = taskCompleted ? { state: 'terminal', outcome: 'completed', eventHead: 2 } : {};
+    if (method === 'live_voice.task.list') return { request_id: options?.requestId, ok: true, error: null,
+      result: { tasks: selectedTask ? [{ ...mountedP3Status(taskBinding, { taskId: taskIds[0], ...completionState }).result.task, ...taskMetadata }] : [],
+        supported_operations: ['task.create'], has_more: false, cursor: null, next_cursor: null } };
+    if (method === 'live_voice.task.result') return { request_id: options?.requestId, ok: true, error: null,
+      result: taskCompleted ? { task_id: params.task_id, availability: 'available', reason: null,
+        task_result: { task_id: params.task_id, attempt_id: 'attempt-a', source_event_id: 'executor-a:2',
+          result_text: 'Recovered report.', artifacts: [], completed_at: '2026-08-10T10:00:02Z' } }
+        : { task_id: params.task_id, availability: 'not_ready', reason: 'TASK_RESULT_NOT_READY', task_result: null } };
     if (method === 'live_voice.task.status') {
       recoveryActivationCount ??= calls.filter(call => call.method === 'live_voice.composition.p2.activate').length;
       if (params.task_id === taskIds[0] && transientFailures > 0) {
         transientFailures -= 1;
         throw Object.assign(new Error('temporary authority snapshot race'), { code: 'REQUEST_TIMEOUT' });
       }
-      return mountedP3Status(taskBinding, { taskId: params.task_id,
-        ...(transientRead ? { state: 'terminal', outcome: 'completed', eventHead: 4 } : {}) });
+      const response = mountedP3Status(taskBinding, { taskId: params.task_id,
+        ...(transientRead ? { state: 'terminal', outcome: 'completed', eventHead: 4 } : params.task_id === taskIds[0] ? completionState : {}) });
+      if (selectedTask) {
+        Object.assign(response, { request_id: options?.requestId, error: null });
+        Object.assign(response.result.task, taskMetadata);
+        Object.assign(response.result.attempt, { state: taskCompleted && params.task_id === taskIds[0] ? 'terminal' : 'running',
+          outcome: taskCompleted && params.task_id === taskIds[0] ? 'completed' : null });
+      }
+      return response;
     }
     if (method === 'live_voice.task.events') {
-      const response = mountedP3Events(taskBinding, { taskId: params.task_id, terminalA: transientRead, terminalAOutcome: 'completed' });
+      const response = mountedP3Events(taskBinding, { taskId: params.task_id, terminalA: transientRead || taskCompleted && params.task_id === taskIds[0], terminalAOutcome: 'completed' });
+      if (selectedTask) {
+        Object.assign(response, { request_id: options?.requestId, error: null });
+        Object.assign(response.result, { has_more: false, next_after_seq: null });
+      }
       if (transientRead) {
         const events = response.result.events;
         const terminal = events.pop();
@@ -12703,7 +12744,24 @@ for (const [delayedMediaClose, transientRead] of [[false, false], [true, false],
       return response;
     }
     if (method === 'live_voice.composition.p3.progress.activate') {
+      if (voiceFlagOff) return { ok: true, result: mountedProgressActivation(params) };
+      if (selectedTask && activations.size === 0) recoveryActivationCount = calls.filter(call => call.method === 'live_voice.composition.p2.activate').length;
       activations.set(params.task_id, params);
+      if (taskCompleted && !completionAcknowledged && params.task_id === taskIds[0]) {
+        assert.equal(params.origin_kind, 'voice', 'reopened voice completion must not allocate a TEXT prefix');
+        const notification = { ok: true, result: { status: 'notification', ...p2Binding, kind: 'agent.output',
+          response: { interaction_id: p2Binding.interaction_id, response_id: 'recovered-completion', response_generation: 12 },
+          source_event: { ...taskNotificationSource(sessionId, taskIds[0]), seq: 2, correlation_id: taskBinding.correlation_id,
+            scope: { subject_id: taskBinding.subject_id, project_id: taskBinding.project_id, session_id: sessionId, assurance: 'authenticated' } },
+          agent_event: { event_type: 'chat.final', source_provenance: 'server.task_notification', text: 'The background report is complete.' },
+          presentation_unit: { surface: 'audio', unit_id: 'recovered-completion-unit', seq: 0, content_ref: `sha256:${'a'.repeat(64)}` } } };
+        pendingNotification = notification;
+        // The already pending poll predates subscription; its empty snapshot
+        // releases the pull owner, and the next pull reads the unread terminal.
+        if (notificationWaiter) { const resolve = notificationWaiter; notificationWaiter = null;
+          resolve({ ok: true, result: { status: 'notification', ...p2Binding, kind: 'transport.keepalive',
+            response: null, agent_event: null, progress_event: null, presentation_unit: null } }); }
+      }
       return { ok: true, result: mountedProgressActivation(params,
         { origin_kind: 'voice', requested_origin_kind: 'voice', voice_progress: 'available', voice_reason: null, fallback_reason: null }) };
     }
@@ -12719,13 +12777,36 @@ for (const [delayedMediaClose, transientRead] of [[false, false], [true, false],
       if (delayedMediaClose) return new Promise(resolve => { releaseMediaClose = () => resolve(result); });
       return result;
     }
+    if (method === 'live_voice.speech.synthesize_batch') return { contract_version: 'live-voice.contract.v2',
+      request_id: params.request_id, operation_id: params.operation_id, ok: true, error: null,
+      result: { operation: 'speech.synthesize.batch', response: params.response, unit_id: params.unit_id,
+        audio: { format: 'wav_pcm16_mono', sample_rate_hz: 48_000, channel_count: 1, data_base64: mountedWavBase64() },
+        provider: { provider_id: 'mounted-provider', implementation_class: 'formal', fallback_from: null, model: 'mounted-tts', voice: 'mounted-voice' }, presented: false } };
+    if (method === 'live_voice.media.playout_receipt') return { status: 'media_playout_acknowledged',
+      reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED', receipt_id: 'recovered-receipt', ...params, duplex_media_observed: false };
+    if (method === 'live_voice.composition.p2.presentation.ack') {
+      assert.equal(params.response_id, 'recovered-completion');
+      completionAcknowledged = true;
+      return { request_id: options?.requestId, ok: true, error: null, result: { status: 'presentation_acknowledged', ...params,
+        accepted: true, replayed: false, history_records_written: 1, history_pending: false } };
+    }
     throw new Error(`Unexpected recovery effect: ${method}`);
   };
   try {
-    await act(async () => { renderer = create(mountedFullyEnabledElement(i18n, sessionId, request, true,
-      { productVoiceControlRef: controlRef, onProductVoiceStateChange: state => states.push(state),
-        progressSubscribe: listener => { progressListener = listener; return () => { progressListener = null; }; } })); });
+    const extraProps = { productVoiceControlRef: controlRef, onProductVoiceStateChange: state => states.push(state),
+      progressSubscribe: listener => { progressListener = listener; return () => { progressListener = null; }; } };
+    await act(async () => { renderer = create(voiceFlagOff
+      ? mountedP3Element(i18n, sessionId, request, undefined, true, extraProps.progressSubscribe, extraProps)
+      : mountedFullyEnabledElement(i18n, sessionId, request, true, extraProps)); });
+    if (voiceFlagOff) {
+      await waitForMountedEffects(() => calls.some(call => call.method === 'live_voice.composition.p3.progress.activate' && call.params.task_id === taskIds[0]),
+        'P1 flag-off must preserve selected Task TEXT progress');
+      assert.ok(calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').every(call => call.params.origin_kind === 'text'));
+      assert.equal(calls.some(call => call.method.includes('media.') || call.method.includes('synthesize') || call.method.includes('unified.submit') || call.method.includes('mutate')), false);
+      return;
+    }
     await waitForMountedEffects(() => states.at(-1)?.available === true, 'recovered activation did not become available');
+    if (selectedTask) await waitForMountedEffects(() => calls.some(call => call.method === 'live_voice.task.result'), 'selected Task did not finish restoring');
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length, 0,
       'opening a text panel must not consume offline voice notifications');
     await act(async () => { void controlRef.current.start(); });
@@ -12733,8 +12814,8 @@ for (const [delayedMediaClose, transientRead] of [[false, false], [true, false],
     await waitForMountedEffects(() => calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length === 2,
       'restored A/B did not acquire separate authenticated progress owners');
     for (const taskId of taskIds) {
-      assert.equal(calls.filter(call => call.method === 'live_voice.task.status' && call.params.task_id === taskId).length, 2 + (transientRead && taskId === taskIds[0] ? 1 : 0));
-      assert.equal(calls.filter(call => call.method === 'live_voice.task.events' && call.params.task_id === taskId).length, 1);
+      assert.equal(calls.filter(call => call.method === 'live_voice.task.status' && call.params.task_id === taskId).length, 2 + ((transientRead || selectedTask) && taskId === taskIds[0] ? 1 : 0));
+      assert.equal(calls.filter(call => call.method === 'live_voice.task.events' && call.params.task_id === taskId).length, 1 + (selectedTask && taskId === taskIds[0] ? 1 : 0));
     }
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.activate').length, recoveryActivationCount);
     assert.ok(calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').every(call => call.params.origin_kind === 'voice'));
@@ -12756,6 +12837,33 @@ for (const [delayedMediaClose, transientRead] of [[false, false], [true, false],
     }
     assert.equal(calls.some(call => call.method.includes('unified.submit') || call.method.includes('synthesize') || call.method.includes('recognize') || call.method.includes('mutate')), false,
       'discovery must not synthesize an answer, replay a final or perform Task effects');
+    if (selectedTask) {
+      taskCompleted = true; // Executor finishes while Live Voice is closed.
+      for (const alreadyAcknowledged of [false, true]) {
+        await act(async () => renderer.unmount());
+        notificationWaiter = null;
+        const activationCount = calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length;
+        const resultReads = calls.filter(call => call.method === 'live_voice.task.result').length;
+        await act(async () => { renderer = create(mountedFullyEnabledElement(i18n, sessionId, request, true,
+          { productVoiceControlRef: controlRef, onProductVoiceStateChange: state => states.push(state) })); });
+        await waitForMountedEffects(() => calls.filter(call => call.method === 'live_voice.task.result').length > resultReads,
+          'refresh did not restore the completed selected Task');
+        assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length, activationCount);
+        await act(async () => { void controlRef.current.start(); });
+        await browser.emitFirstFrame(0);
+        await waitForMountedEffects(() => calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length === activationCount + 2,
+          'reopened voice owners did not recover');
+        if (!alreadyAcknowledged) {
+          await waitForMountedEffects(() => browser.counts.sourceStarts === 1, 'offline completion did not reach playout');
+          await act(async () => browser.endLatestSource());
+          await waitForMountedEffects(() => completionAcknowledged, 'played completion was not acknowledged');
+        }
+        assert.equal(browser.counts.sourceStarts, 1, 'refresh must not replay the acknowledged completion');
+        assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 1);
+        await act(async () => controlRef.current.close());
+      }
+      assert.equal(calls.some(call => call.method.includes('unified.submit') || call.method.includes('recognize') || call.method.includes('mutate')), false);
+    }
   } finally {
     releaseMediaClose?.();
     if (renderer) await act(async () => renderer.unmount());
