@@ -37,6 +37,7 @@
 | Code duplication and convergence timing | [2026-08-17 duplicate-code audit](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md) |
 | Removable branch content, re-homing and final-merge cleanup | [2026-08-17 branch-retirement audit](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) |
 | Removable/superseded documents and authority-preserving deletion batches | [2026-08-17 documentation-retirement audit](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) |
+| LiveVoice slimming / AgentCore downshift activation precheck | [2026-09-05 activation precheck](reviews/OPENJIUWEN_LIVEVOICE_SLIMMING_ACTIVATION_PRECHECK_2026-09-05.md): feature-complete verdict, blocking conditions and the `59998e2c..ebd2b4575` stable-symbol delta; the preparation audits stay on `codex/livevoice-agentcore-hermes-prep@b9dc8a5c` (remote `agtai`) and are not merged |
 
 The dated Alpha integration sequence is
 [first product integration](ALPHA_PRODUCT_INTEGRATION_REVIEW_2026-08-07.md) →
