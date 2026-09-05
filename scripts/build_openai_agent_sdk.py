@@ -10,7 +10,9 @@ from pathlib import Path
 import subprocess
 import sys
 
-BASE = "94e10cb6102c36fe78a64547957c0def97299273"
+from jiuwenswarm.common.openai_responses_dependency import SDK_BASE, SDK_VERSION
+
+BASE = SDK_BASE
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -40,7 +42,7 @@ def main():
     git("apply", "--unidiff-zero", str(patch))
     subprocess.run([sys.executable, "-c", "import setuptools.build_meta as b, sys; b.build_wheel(sys.argv[1])",
                     str(output)], cwd=source, check=True)
-    wheel = output / "openjiuwen-0.1.16+jiuwenswarm.responses2-py3-none-any.whl"
+    wheel = output / f"openjiuwen-{SDK_VERSION}-py3-none-any.whl"
     if not wheel.is_file():
         raise RuntimeError("Expected SDK wheel was not produced")
     print(wheel)

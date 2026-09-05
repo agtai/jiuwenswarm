@@ -37,6 +37,10 @@ def debug_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setattr(debug_launcher, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(debug_launcher, "WEB_DEV_DIR", frontend)
+    monkeypatch.setattr(debug_launcher.sys, "prefix", str(tmp_path / ".venv"))
+    monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+    installed_version = debug_launcher.metadata.version
+    monkeypatch.setattr(debug_launcher.metadata, "version", lambda package: "0.1.16" if package == "openjiuwen" else installed_version(package))
     return tmp_path
 
 
@@ -369,6 +373,27 @@ def test_run_debug_happy_path(debug_root: Path, caplog: pytest.LogCaptureFixture
     assert log_path.exists()
     assert log_path.name.startswith("swarm-")
     assert log_path.suffix == ".log"
+
+
+@pytest.mark.parametrize("sdk_version,target", [(debug_launcher.SDK_VERSION, ".venv"), ("0.1.16", ".venv"), ("0.2.0", ".venv"), (None, ".venv"), (debug_launcher.SDK_VERSION, "another-venv")])
+def test_debug_sync_preserves_only_verified_installed_sdk(debug_root, monkeypatch, sdk_version, target):
+    def installed(package):
+        if sdk_version is None:
+            raise debug_launcher.metadata.PackageNotFoundError(package)
+        return sdk_version
+    monkeypatch.setattr(debug_launcher.metadata, "version", installed)
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", target)
+    patches, calls = _patch_pipeline(run_codes=[0, 0, 0])
+    _enter(patches)
+    try:
+        assert run_debug() == 0
+    finally:
+        _exit(patches)
+    expected = ["/usr/bin/uv", "sync"]
+    if sdk_version == debug_launcher.SDK_VERSION and target == ".venv":
+        expected += ["--inexact", "--no-install-package", "openjiuwen"]
+    assert calls[2][0] == expected
+    assert calls[3][0] == [sys.executable, "-m", "jiuwenswarm.start_services", "all"]
 
 
 def test_run_debug_stops_when_npm_install_fails(debug_root: Path):

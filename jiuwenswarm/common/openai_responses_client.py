@@ -22,10 +22,11 @@ from openjiuwen.core.foundation.llm.utils.responses_utils import parse_response,
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 
+from jiuwenswarm.common.openai_responses_dependency import SDK_VERSION
+
 _PROVIDER = "JiuwenSwarmOpenAIResponses"
 _VERIFIED_MODELS = frozenset({"gpt-5.6", "gpt-5.6-sol"})
 _METADATA = "openai_responses_v1"
-_SDK_VERSION = "0.1.16+jiuwenswarm.responses2"
 _RESPONSE_ARGUMENTS = frozenset(signature(AsyncResponses.create).parameters)
 
 
@@ -284,7 +285,7 @@ class OpenAIResponsesClient(OpenAIModelClient):
 def openai_responses_client_config(client_config: ModelClientConfig, *, model_name: str) -> ModelClientConfig:
     provider = getattr(client_config.client_provider, "value", client_config.client_provider)
     if provider == "OpenAI" and model_name in _VERIFIED_MODELS and _official_endpoint(client_config.api_base):
-        if version("openjiuwen") != _SDK_VERSION:
+        if version("openjiuwen") != SDK_VERSION:
             raise RuntimeError("GPT-5.6 Responses requires the context-preserving SDK; "
                                "build/install it using scripts/sdk_patches/README.md")
         return client_config.model_copy(update={"client_provider": _PROVIDER})

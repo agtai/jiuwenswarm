@@ -41,9 +41,11 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib import metadata
 from pathlib import Path
 
 from jiuwenswarm.instance_manager import is_process_alive, stop_process_by_pid
+from jiuwenswarm.common.openai_responses_dependency import SDK_VERSION
 
 # Package source root: <repo>/jiuwenswarm in source mode.
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -586,7 +588,20 @@ def run_debug(skip_build: bool = False) -> int:
         logging.info("[debug] Install uv (https://docs.astral.sh/uv/), then retry.")
         return 1
 
-    code = _run_step("uv sync", [uv_path, "sync"], REPO_ROOT)
+    sync_command = [uv_path, "sync"]
+    try:
+        pinned_sdk_installed = metadata.version("openjiuwen") == SDK_VERSION
+    except metadata.PackageNotFoundError:
+        pinned_sdk_installed = False
+    project_environment = Path(os.environ.get("UV_PROJECT_ENVIRONMENT") or ".venv")
+    if not project_environment.is_absolute():
+        project_environment = REPO_ROOT / project_environment
+    if pinned_sdk_installed and Path(sys.prefix).resolve() == project_environment.resolve():
+        # This source-built dependency is installed explicitly by the SDK guide.
+        # A normal sync would replace it with the unpatched upstream VCS package.
+        # --inexact is also needed: exact sync otherwise uninstalls excluded packages.
+        sync_command.extend(["--inexact", "--no-install-package", "openjiuwen"])
+    code = _run_step("uv sync", sync_command, REPO_ROOT)
     if code != 0:
         return code
 

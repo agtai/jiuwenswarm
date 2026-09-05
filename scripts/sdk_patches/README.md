@@ -21,8 +21,9 @@ and Git required; the command fetches only the pinned public SDK source):
 uv pip install --python .venv/Scripts/python.exe --no-deps '.codex_tmp/openai-sdk-wheels/openjiuwen-0.1.16+jiuwenswarm.responses2-py3-none-any.whl'
 ```
 
-Use a new empty source directory for each build. Reinstall this wheel after a
-dependency sync that replaces it. The Responses adapter checks the dependency
+Use a new empty source directory for each build. The source debug launcher
+preserves this exact installed SDK during its dependency sync. A manual `uv sync`
+can still replace it; reinstall the wheel afterward. The Responses adapter checks the dependency
 version before creating a GPT-5.6 client and gives this installation route if it
 is missing. Other configured providers keep their existing path.
 

@@ -121,6 +121,27 @@ existing consumer regressions; and actual API/Agent seams are covered above.
 This change does not own Task scheduling/authorization, background adjustment,
 notification recovery, browser playback or service crash recovery.
 
+### Deployment dependency correction
+
+The first controlled restart exposed `debug_launcher.run_debug` replacing the
+installed repair wheel during its unconditional `uv sync`. This extends the
+owned deployment seam to dependency preservation: the adapter/build script and
+launcher share one pinned SDK identity; only that exact installed version in
+the actual sync target gets `uv sync --inexact --no-install-package openjiuwen`.
+The target honors `UV_PROJECT_ENVIRONMENT`; another interpreter cannot grant the
+exception. A real uv dry run proved that exclusion alone would uninstall the SDK;
+`--inexact` also retains explicitly installed extras in this pinned environment.
+Unpatched, absent or other versions
+retain ordinary synchronization. A fresh environment still installs the wheel
+explicitly using the SDK guide. No dependency installation is triggered by a
+model request. The first restart is not credited as a working GPT deployment.
+Actual `uv sync --inexact --no-install-package openjiuwen` completed and an
+immediate installed-version assertion confirmed `responses2` survived. The full
+launcher suite passed 47 tests (5 existing platform skips); the adapter/shared
+constant seam also passed in the preceding combined run. Independent review
+identified the exact-sync and environment-target hazards; both are addressed by
+the final behavior and real synchronization evidence.
+
 ### Configuration and scope
 
 The authorized local default entry is `gpt-5.6`, provider `OpenAI`, official
