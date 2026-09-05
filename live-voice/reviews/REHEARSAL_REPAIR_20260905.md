@@ -95,5 +95,35 @@ adjust received/applied, Task terminal and presentation ACK durations. Select an
 performance change from that fresh evidence; no artificial delay or answer
 postprocessing is included here.
 
-Build and local deployment evidence is recorded below when the controlled launcher
-has completed. This repair does not establish the full candidate journey.
+### Local deployment (2026-09-05)
+
+Committed implementation: `1d48af8e9` (controlled build default), `aadd84253`
+(Task/Executor/Agent/notification backend), `b30b8be2d` (frontend recovery/result UI
+and packet documentation). The launcher built and started clean source
+`b30b8be2dd` using the saved formal project and private data directory:
+
+```powershell
+.\scripts\live_voice\start_hands_free_demo.ps1 -RuntimeProfile formal-web-validation -AllowDirtyProject -PreflightOnly -NoBrowser
+.\scripts\live_voice\start_hands_free_demo.ps1 -RuntimeProfile formal-web-validation -AllowDirtyProject -RestartExisting -NoBrowser
+```
+
+`AllowDirtyProject` preserves the existing private fixture/result changes; the
+source repository was clean. Generation interruption was **true without an enable
+argument**. Cascade and the saved verified-headset profile remained selected;
+accepted VAD 800 ms / startup 250 ms defaults were unchanged. Ports 5173 / 18092 /
+19000 / 19001 and authenticated routes were ready. Real Speech TTS→STT, legitimate
+receipt and identity/forged-claim rejection probes passed with zero business
+side effects. Startup log: ignored `logs/swarm-20260905-175107.log`.
+
+HTTP `/assets/index-D7_vE1Sh.js` matched the deployed dist byte-for-byte:
+SHA-256 `62da266619b1a74dcb46cc1fd26261a7d16796eb7bf509811c6a56a71520f7ee`.
+Its generation-time capture function retained the actual listening body rather
+than compiling to an empty function. Runtime contract records clean source,
+generation interruption true and validated routes/bundle. The later evidence
+commit changes documentation only; it needs no service restart.
+
+Read-only pre/post checks found no nonterminal private Tasks and unchanged state
+counts (39 completed, 7 cancelled, 13 failed, 4 interrupted). Private USER.md
+SHA-256 was unchanged. No browser was opened, no private notification was ACKed,
+and existing result documents were not altered. Full physical A/B/A2 rehearsal
+acceptance remains open.

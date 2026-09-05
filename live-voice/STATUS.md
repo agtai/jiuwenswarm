@@ -24,15 +24,15 @@ history, not acceptance of this candidate.
 
 ## Current execution packet
 
-### Accepted rehearsal repairs: module verification complete, deployment pending
+### Accepted rehearsal repairs: deployed, physical rehearsal open
 
 The [bounded repair packet](reviews/REHEARSAL_REPAIR_20260905.md) owns controlled
 build defaults, exact local cancellation consent, adjustment adoption between
 tools/work stages, task/result UI separation, unread/deferred notification recovery
 and creation-receipt/current-state truth. Private demo self-drive costs are now
 1400. Focused module checks and independent review passed; the broader mounted
-suite retains documented baseline failures. Deployment is pending; physical
-acceptance is unproved. Model intent/arithmetic and performance tuning remain
+suite retains documented baseline failures. The controlled local deployment and
+real Speech probe passed; physical A/B/A2 acceptance is unproved. Model intent/arithmetic and performance tuning remain
 deferred until the AgentModel is changed.
 
 ### Verified-headset interruption: implemented, physical acceptance open
