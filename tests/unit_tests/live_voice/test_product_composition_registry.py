@@ -611,7 +611,7 @@ class _P3Composition(P3AuthenticatedComposition):
         self.fail_authority: FormalTaskViolation | None = None
         self.correlation_override: str | None = None
         self.subscription_event = True
-        self.subscription_event_type = "task.running"
+        self.subscription_event_type = "task.blocked"
         self.subscription_events: tuple[PersistentTaskEvent, ...] | None = None
         self.subscription_close_failures = 0
         self._presentation_store = presentation_store
@@ -991,7 +991,7 @@ class _P3Composition(P3AuthenticatedComposition):
                 state=(
                     "terminal"
                     if self.subscription_event_type == "task.terminal"
-                    else "running"
+                    else self.subscription_event_type.removeprefix("task.")
                 ),
                 outcome=(
                     "completed"
@@ -5716,11 +5716,11 @@ async def test_unified_voice_create_returns_task_id_and_retains_live_voice_origi
 
 
 @pytest.mark.asyncio
-async def test_unified_create_ack_releases_accepted_then_running_progress(
+async def test_unified_foreground_ack_keeps_running_progress_silent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The create receipt must not strand a later deferred running event."""
+    """Foreground ACK must not release a notice for an already-running Task."""
 
     monkeypatch.setattr(
         "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
@@ -5728,7 +5728,6 @@ async def test_unified_create_ack_releases_accepted_then_running_progress(
     )
     project, store, task_id, source_events = _running_presentation_store(tmp_path)
     composition = _UnifiedP3Composition(project, presentation_store=store)
-    composition.create_state = FormalTaskState.ACCEPTED
     registry, _composition, manager = _unified_registry(
         tmp_path,
         demo_policy_bypass=True,
@@ -5746,16 +5745,23 @@ async def test_unified_create_ack_releases_accepted_then_running_progress(
     created = await registry.handle_unified_submit(
         params=_unified_final_params(
             stem="unified-progress-create",
-            text="帮我根据这些要求制定三天的行程。",
+            text="简短解释一下行程规划要考虑哪些因素。",
         ),
         request_id="request-unified-progress-create",
         session_id=SCOPE.session_id,
         channel_id="web",
     )
     assert created.ok
-    assert manager.agent.calls == 0
+    assert manager.agent.calls == 1
 
-    origin = registry._voice_task_origins.pop("task-current-1")
+    origin = _VoiceTaskOrigin(
+        session_id=SCOPE.session_id,
+        interaction_id="interaction-1",
+        activation_id="activation-1",
+        activation_generation=1,
+        correlation_id="correlation-p2",
+        response_ref=ResponseRef("interaction-1", "response-origin", 0),
+    )
     registry._voice_task_origins[task_id] = origin
     activated = await registry.handle_p3_progress_activate(
         params=_progress_params(
@@ -5778,94 +5784,18 @@ async def test_unified_create_ack_releases_accepted_then_running_progress(
         await asyncio.sleep(0.01)
     assert retained_progress.progress_lease.snapshot().last_task_event_seq == 3
 
-    sequence = await _ack_unified_presentation(
+    await _ack_unified_presentation(
         registry,
         sequence=0,
         stem="unified-progress-create",
     )
-    accepted_presentation: TaskPresentationDelivery | None = None
-    for _ in range(200):
-        with registry._task_presentation_state_lock:
-            mapped = tuple(registry._task_presentation_deliveries.values())
-        if len(mapped) == 1 and mapped[0][1].event_seq == 0:
-            accepted_presentation = mapped[0][1]
-            break
-        await asyncio.sleep(0.01)
-    assert accepted_presentation is not None
-    accepted_notification: Mapping[str, object] | None = None
-    for _ in range(10):
-        sequence += 1
-        polled = await registry.handle_p2_notification_next(
-            params=_p2_params(notification_sequence=sequence),
-            request_id=f"request-unified-progress-accepted-{sequence}",
-            session_id=SCOPE.session_id,
-        )
-        assert polled.ok
-        candidate = cast(Mapping[str, object], polled.payload["result"])
-        response = candidate.get("response")
-        if (
-            isinstance(response, Mapping)
-            and response.get("response_id")
-            == accepted_presentation.response_ref.response_id
-        ):
-            accepted_notification = candidate
-            break
-    assert accepted_notification is not None
-    accepted_response = cast(Mapping[str, object], accepted_notification["response"])
-    accepted_unit = cast(
-        Mapping[str, object], accepted_notification["presentation_unit"]
-    )
-    accepted = await registry.handle_p2_presentation_ack(
-        params=_p2_params(
-            response_id=accepted_response["response_id"],
-            response_generation=accepted_response["response_generation"],
-            surface=accepted_unit["surface"],
-            unit_id=accepted_unit["unit_id"],
-            contiguous_cursor=accepted_unit["seq"],
-            presented_at=ACK_NOW,
-        ),
-        request_id="request-unified-progress-accepted-ack",
-        session_id=SCOPE.session_id,
-    )
-    assert accepted.ok
-
-    running_presentation: TaskPresentationDelivery | None = None
-    for _ in range(200):
-        with registry._task_presentation_state_lock:
-            mapped = tuple(registry._task_presentation_deliveries.values())
-        if len(mapped) == 1 and mapped[0][1].event_seq == 3:
-            running_presentation = mapped[0][1]
-            break
-        await asyncio.sleep(0.01)
-    assert running_presentation is not None, (
-        retained_progress.progress_lease.snapshot(),
-        tuple(retained_progress.pending_presentations),
-    )
-    running_notification: Mapping[str, object] | None = None
-    for _ in range(10):
-        sequence += 1
-        polled = await registry.handle_p2_notification_next(
-            params=_p2_params(notification_sequence=sequence),
-            request_id=f"request-unified-progress-running-{sequence}",
-            session_id=SCOPE.session_id,
-        )
-        assert polled.ok
-        candidate = cast(Mapping[str, object], polled.payload["result"])
-        response = candidate.get("response")
-        if (
-            isinstance(response, Mapping)
-            and response.get("response_id")
-            == running_presentation.response_ref.response_id
-        ):
-            running_notification = candidate
-            break
-    assert running_notification is not None
-    assert (
-        store.unread_events_page(
-            task_id, SCOPE, presentation_class="voice", limit=500
-        ).watermark
-        == 0
-    )
+    await retained_progress.progress_lease.drain_voice()
+    assert registry._task_presentation_deliveries == {}
+    assert retained_progress.pending_presentations == {}
+    assert store.get_task(task_id, SCOPE).state is FormalTaskState.RUNNING
+    assert store.unread_events_page(
+        task_id, SCOPE, presentation_class="voice", limit=500,
+    ).watermark == -1
     await registry.stop()
 
 
@@ -7266,7 +7196,7 @@ async def test_terminal_after_voice_playout_failure_replays_on_successor_p2(
     monkeypatch: pytest.MonkeyPatch,
     terminal_timing: str,
 ) -> None:
-    project, store, task_id, source_events = _running_presentation_store(tmp_path)
+    project, store, task_id, source_events = _blocked_presentation_store(tmp_path)
     task = store.get_task(task_id, SCOPE)
     attempt = store.get_attempt(task.attempt_id)
     assert attempt.executor_ref is not None
@@ -10470,11 +10400,30 @@ def _running_presentation_store(
     return project, store, task_id, source_events
 
 
+def _blocked_presentation_store(
+    root: Path,
+    *,
+    failpoint: Callable[[str], None] | None = None,
+) -> tuple[Path, SqliteTaskStore, str, tuple[PersistentTaskEvent, ...]]:
+    """A verifier-clean actionable notice after accepted/running lifecycle facts."""
+    project, store, task_id, _ = _running_presentation_store(root, failpoint=failpoint)
+    with store._transaction() as connection:
+        row = store._require_task_row_by_id(connection, task_id)
+        store._append_event(
+            connection, row, event_type="task.blocked", state="blocked", outcome=None,
+            producer="task_core", source_event_id=None, causation_id="fixture-blocked",
+            occurred_at=NOW, details={"summary": "A required input is unavailable"},
+            update_task=True,
+        )
+    store.consumer_progress_authority_page(task_id, SCOPE, presentation_class="voice", limit=1)
+    return project, store, task_id, store.events(task_id, SCOPE)
+
+
 def _failed_presentation_store(
     root: Path,
 ) -> tuple[Path, SqliteTaskStore, str, tuple[PersistentTaskEvent, ...]]:
-    """Two presentable facts (running/failure), plus the silent accepted prefix."""
-    project, store, task_id, _ = _running_presentation_store(root)
+    """Two actionable facts (blocked/failure), after the quiet lifecycle prefix."""
+    project, store, task_id, _ = _blocked_presentation_store(root)
     task = store.get_task(task_id, SCOPE)
     attempt = store.get_attempt(task.attempt_id)
     store.apply_observations(
@@ -11756,7 +11705,7 @@ async def test_real_store_audio_resumes_nonzero_watermark_in_fresh_registry(
         task_name = store.get_task(task_id, SCOPE).spec.name
         text = cast(dict[str, object], notification["agent_event"])["text"]
         assert text == (
-            f"“{task_name}”正在执行。" if expected_seq == 3
+            f"“{task_name}”受阻，等待所需条件。" if expected_seq == 4
             else f"“{task_name}”失败了。"
         )
         response = cast(dict[str, object], notification["response"])
@@ -11789,7 +11738,7 @@ async def test_real_store_audio_resumes_nonzero_watermark_in_fresh_registry(
         interaction_id=first_route[2],
         activation_id=first_route[3],
         correlation_id=first_route[4],
-        expected_seq=3,
+        expected_seq=4,
     )
     assert (
         store.unread_events_page(
@@ -11798,7 +11747,7 @@ async def test_real_store_audio_resumes_nonzero_watermark_in_fresh_registry(
             presentation_class="voice",
             limit=500,
         ).watermark
-        == 3
+        == 4
     )
     await first.stop()
 
@@ -11812,7 +11761,7 @@ async def test_real_store_audio_resumes_nonzero_watermark_in_fresh_registry(
         interaction_id=restarted_route[2],
         activation_id=restarted_route[3],
         correlation_id=restarted_route[4],
-        expected_seq=5,
+        expected_seq=6,
     )
     scope_b = ScopeRef(
         SCOPE.subject_id,
@@ -11827,7 +11776,7 @@ async def test_real_store_audio_resumes_nonzero_watermark_in_fresh_registry(
             presentation_class="voice",
             limit=500,
         ).watermark
-        == 5
+        == 6
     )
     assert (
         store.unread_events_page(
@@ -11899,12 +11848,12 @@ async def test_real_store_progress_drains_gap_and_recycles_one_slot_capacity(
         await asyncio.sleep(0.01)
     assert len(pushed) == 1
     first = cast(Mapping[str, object], pushed[0]["payload"])
-    assert cast(Mapping[str, object], first["source_event"])["seq"] == 3
+    assert cast(Mapping[str, object], first["source_event"])["seq"] == 4
     retained = next(iter(registry._progress_routes.values()))
     assert [
         pending.event.task_event.seq
         for pending in retained.pending_presentations.values()
-    ] == [5]
+    ] == [6]
     assert (
         store.unread_events_page(
             task_id, SCOPE, presentation_class="text", limit=500
@@ -11925,12 +11874,12 @@ async def test_real_store_progress_drains_gap_and_recycles_one_slot_capacity(
         await asyncio.sleep(0.01)
     assert len(pushed) == 2
     second = cast(Mapping[str, object], pushed[1]["payload"])
-    assert cast(Mapping[str, object], second["source_event"])["seq"] == 5
+    assert cast(Mapping[str, object], second["source_event"])["seq"] == 6
     assert (
         store.unread_events_page(
             task_id, SCOPE, presentation_class="text", limit=500
         ).watermark
-        == 3
+        == 4
     )
 
     second_ack = await registry.handle_p3_progress_ack(
@@ -11944,7 +11893,7 @@ async def test_real_store_progress_drains_gap_and_recycles_one_slot_capacity(
         store.unread_events_page(
             task_id, SCOPE, presentation_class="text", limit=500
         ).watermark
-        == 5
+        == 6
     )
     assert manager.agent.calls == 0
     await registry.stop()
@@ -11959,7 +11908,7 @@ async def test_real_store_progress_reconnects_in_fresh_session_and_fences_late_a
         "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
-    project, store, task_id, source_events = _running_presentation_store(tmp_path)
+    project, store, task_id, source_events = _blocked_presentation_store(tmp_path)
     composition = _P3Composition(project, presentation_store=store)
     composition.subscription_events = source_events
     manager = _AgentManager()
@@ -12017,7 +11966,7 @@ async def test_real_store_progress_reconnects_in_fresh_session_and_fences_late_a
     assert len(pushed) == 1
     event_a = cast(Mapping[str, object], pushed[0]["payload"])
     assert event_a["session_id"] == SCOPE.session_id
-    assert cast(Mapping[str, object], event_a["source_event"])["seq"] == 3
+    assert cast(Mapping[str, object], event_a["source_event"])["seq"] == 4
     late_ack_a = _presentation_progress_ack_params(event_a)
     assert (
         store.unread_events_page(
@@ -12093,7 +12042,7 @@ async def test_real_store_progress_reconnects_in_fresh_session_and_fences_late_a
     )
     event_b = cast(Mapping[str, object], pushed[1]["payload"])
     assert event_b["session_id"] == session_b
-    assert cast(Mapping[str, object], event_b["source_event"])["seq"] == 3
+    assert cast(Mapping[str, object], event_b["source_event"])["seq"] == 4
     scope_b = ScopeRef(
         SCOPE.subject_id,
         SCOPE.project_id,
@@ -12111,7 +12060,7 @@ async def test_real_store_progress_reconnects_in_fresh_session_and_fences_late_a
         store.unread_events_page(
             task_id, scope_b, presentation_class="text", limit=500
         ).watermark
-        == 3
+        == 4
     )
     assert manager.agent.calls == 0
     session_b_calls = [
@@ -12215,7 +12164,7 @@ async def test_real_store_progress_reconnect_skips_durably_consumed_prefix(
         await asyncio.sleep(0.01)
     assert len(pushed) == 1
     event_a = cast(Mapping[str, object], pushed[0]["payload"])
-    assert cast(Mapping[str, object], event_a["source_event"])["seq"] == 3
+    assert cast(Mapping[str, object], event_a["source_event"])["seq"] == 4
     late_ack_a = _presentation_progress_ack_params(event_a)
     acknowledged_a = await registry.handle_p3_progress_ack(
         params=late_ack_a,
@@ -12228,7 +12177,7 @@ async def test_real_store_progress_reconnect_skips_durably_consumed_prefix(
         store.unread_events_page(
             task_id, SCOPE, presentation_class="text", limit=500
         ).watermark
-        == 3
+        == 4
     )
     assert (
         await registry.handle_p3_progress_close(
@@ -12292,7 +12241,7 @@ async def test_real_store_progress_reconnect_skips_durably_consumed_prefix(
     ).progress_lease.snapshot()
     event_b = session_b_events[0]
     assert event_b["session_id"] == session_b
-    assert cast(Mapping[str, object], event_b["source_event"])["seq"] == 5
+    assert cast(Mapping[str, object], event_b["source_event"])["seq"] == 6
 
     replayed_a = await registry.handle_p3_progress_ack(
         params=late_ack_a,
@@ -12306,7 +12255,7 @@ async def test_real_store_progress_reconnect_skips_durably_consumed_prefix(
         store.unread_events_page(
             task_id, SCOPE, presentation_class="text", limit=500
         ).watermark
-        == 3
+        == 4
     )
     acknowledged_b = await registry.handle_p3_progress_ack(
         params=_presentation_progress_ack_params(event_b),
@@ -12325,7 +12274,7 @@ async def test_real_store_progress_reconnect_skips_durably_consumed_prefix(
         store.unread_events_page(
             task_id, scope_b, presentation_class="text", limit=500
         ).watermark
-        == 5
+        == 6
     )
     assert manager.agent.calls == 0
     await registry.stop()
@@ -12348,7 +12297,7 @@ async def test_text_runtime_ack_then_core_before_commit_failure_retries_exactly_
             failed_once = True
             raise RuntimeError("injected Task ACK before-commit failure")
 
-    project, store, task_id, source_events = _running_presentation_store(
+    project, store, task_id, source_events = _blocked_presentation_store(
         tmp_path,
         failpoint=failpoint,
     )
@@ -12443,7 +12392,7 @@ async def test_text_runtime_ack_then_core_before_commit_failure_retries_exactly_
         store.unread_events_page(
             task_id, SCOPE, presentation_class="text", limit=500
         ).watermark
-        == 3
+        == 4
     )
     assert failed_once
     assert manager.agent.calls == 0
@@ -12467,7 +12416,7 @@ async def test_audio_runtime_ack_then_core_before_commit_failure_rearms_retry(
             failed_once = True
             raise RuntimeError("injected Task voice ACK before-commit failure")
 
-    project, store, task_id, source_events = _running_presentation_store(
+    project, store, task_id, source_events = _blocked_presentation_store(
         tmp_path,
         failpoint=failpoint,
     )
@@ -12592,7 +12541,7 @@ async def test_audio_runtime_ack_then_core_before_commit_failure_rearms_retry(
         store.unread_events_page(
             task_id, SCOPE, presentation_class="voice", limit=500
         ).watermark
-        == 3
+        == 4
     )
     assert (
         store.unread_events_page(
@@ -12623,7 +12572,7 @@ async def test_audio_ack_wins_progress_close_race_and_consumes_once(
             if not release_ack.wait(5):
                 raise RuntimeError("timed out waiting to release Task ACK commit")
 
-    project, store, task_id, source_events = _running_presentation_store(
+    project, store, task_id, source_events = _blocked_presentation_store(
         tmp_path,
         failpoint=failpoint,
     )
@@ -12755,7 +12704,7 @@ async def test_audio_ack_wins_progress_close_race_and_consumes_once(
         store.unread_events_page(
             task_id, SCOPE, presentation_class="voice", limit=500
         ).watermark
-        == 3
+        == 4
     )
     assert (
         store.unread_events_page(
@@ -12783,7 +12732,7 @@ async def test_p2_close_settles_shared_task_presentation_before_progress_close(
     tmp_path: Path,
     close_capacity_blocked: bool,
 ) -> None:
-    project, store, task_id, source_events = _running_presentation_store(tmp_path)
+    project, store, task_id, source_events = _blocked_presentation_store(tmp_path)
     composition = _P3Composition(project, presentation_store=store)
     composition.subscription_events = source_events
     manager = _AgentManager()
@@ -12949,7 +12898,7 @@ async def test_agent_ack_drains_deferred_voice_task_presentation(
         "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
-    project, store, task_id, source_events = _running_presentation_store(tmp_path)
+    project, store, task_id, source_events = _blocked_presentation_store(tmp_path)
     composition = _P3Composition(project, presentation_store=store)
     composition.subscription_events = source_events
     manager = _AgentManager()
@@ -13060,7 +13009,7 @@ async def test_agent_ack_drains_deferred_voice_task_presentation(
         assert store.unread_events_page(task_id, SCOPE, presentation_class="text", limit=500).watermark == -1
         ack = await registry.handle_p3_progress_ack(params=_presentation_progress_ack_params(event), request_id="text-drain-ack", session_id=SCOPE.session_id, channel_id="web")
         assert ack.ok, ack.payload
-        assert store.unread_events_page(task_id, SCOPE, presentation_class="text", limit=500).watermark == 3
+        assert store.unread_events_page(task_id, SCOPE, presentation_class="text", limit=500).watermark == 4
         assert manager.agent.calls == 1
         await registry.stop()
         return
@@ -13082,7 +13031,7 @@ async def test_agent_ack_drains_deferred_voice_task_presentation(
         )
         assert presentation.task_id == task_id
         assert presentation.presentation_class == "voice"
-        assert presentation.event_seq == 3
+        assert presentation.event_seq == 4
     assert retained_progress.progress_lease.snapshot().pending_voice_intents == 1
     assert (
         store.unread_events_page(
@@ -13129,7 +13078,7 @@ async def test_agent_ack_drains_deferred_voice_task_presentation(
         store.unread_events_page(
             task_id, SCOPE, presentation_class="voice", limit=500
         ).watermark
-        == 3
+        == 4
     )
     assert retained_progress.progress_lease.snapshot().pending_voice_intents == 0
     assert not retained_progress.pending_presentations
@@ -13184,7 +13133,7 @@ async def test_audio_playout_failure_falls_back_to_text_without_voice_consumptio
         "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
-    project, store, task_id, source_events = _running_presentation_store(tmp_path)
+    project, store, task_id, source_events = _blocked_presentation_store(tmp_path)
     composition = _P3Composition(project, presentation_store=store)
     composition.subscription_events = source_events
     manager = _AgentManager()
@@ -13512,7 +13461,7 @@ async def test_audio_playout_failure_falls_back_to_text_without_voice_consumptio
         store.unread_events_page(
             task_id, SCOPE, presentation_class="text", limit=500
         ).watermark
-        == 3
+        == 4
     )
     assert (
         store.unread_events_page(
@@ -13535,7 +13484,7 @@ async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
         "jiuwenswarm.server.live_voice.product_composition_registry.utc_now",
         lambda: ACK_NOW,
     )
-    project, store, task_id, source_events = _running_presentation_store(tmp_path)
+    project, store, task_id, source_events = _blocked_presentation_store(tmp_path)
     task = store.get_task(task_id, SCOPE)
     attempt = store.get_attempt(task.attempt_id)
     assert attempt.executor_ref is not None
@@ -13563,7 +13512,7 @@ async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
         )
     )
     source_events = store.events(task_id, SCOPE)
-    assert [event.seq for event in source_events] == [0, 1, 2, 3, 4, 5]
+    assert [event.seq for event in source_events] == [0, 1, 2, 3, 4, 5, 6]
     composition = _P3Composition(project, presentation_store=store)
     composition.subscription_events = source_events
     pushed: list[dict[str, object]] = []
@@ -13629,7 +13578,7 @@ async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
         await asyncio.sleep(0.01)
 
     sequence = 0
-    running_notification: Mapping[str, object] | None = None
+    blocked_notification: Mapping[str, object] | None = None
     for _ in range(10):
         sequence += 1
         polled = await registry.handle_p2_notification_next(
@@ -13640,20 +13589,20 @@ async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
         assert polled.ok
         candidate = cast(Mapping[str, object], polled.payload["result"])
         if isinstance(candidate.get("presentation_unit"), Mapping):
-            running_notification = candidate
+            blocked_notification = candidate
             break
-    assert running_notification is not None
-    running_response = cast(Mapping[str, object], running_notification["response"])
-    running_unit = cast(
-        Mapping[str, object], running_notification["presentation_unit"]
+    assert blocked_notification is not None
+    blocked_response = cast(Mapping[str, object], blocked_notification["response"])
+    blocked_unit = cast(
+        Mapping[str, object], blocked_notification["presentation_unit"]
     )
     accepted = await registry.handle_p2_presentation_ack(
         params=_p2_params(
-            response_id=running_response["response_id"],
-            response_generation=running_response["response_generation"],
-            surface=running_unit["surface"],
-            unit_id=running_unit["unit_id"],
-            contiguous_cursor=running_unit["seq"],
+            response_id=blocked_response["response_id"],
+            response_generation=blocked_response["response_generation"],
+            surface=blocked_unit["surface"],
+            unit_id=blocked_unit["unit_id"],
+            contiguous_cursor=blocked_unit["seq"],
             presented_at=ACK_NOW,
         ),
         request_id="request-later-audio-fallback-accepted-ack",
@@ -13664,7 +13613,7 @@ async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
         store.unread_events_page(
             task_id, SCOPE, presentation_class="voice", limit=500
         ).watermark
-        == 3
+        == 4
     )
     assert (
         store.unread_events_page(
@@ -13677,7 +13626,7 @@ async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
     for _ in range(200):
         with registry._task_presentation_state_lock:
             mapped = tuple(registry._task_presentation_deliveries.values())
-        if len(mapped) == 1 and mapped[0][1].event_seq == 5:
+        if len(mapped) == 1 and mapped[0][1].event_seq == 6:
             terminal_presentation = mapped[0][1]
             break
         await asyncio.sleep(0.01)
@@ -13723,13 +13672,13 @@ async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
     replayed_source = cast(Mapping[str, object], replayed_prefix["source_event"])
     assert replayed_prefix["presentation_class"] == "text"
     assert replayed_prefix["fallback_reason"] == ("TASK_PROGRESS_AUDIO_PLAYOUT_FAILED")
-    assert replayed_source["seq"] == 3
-    assert replayed_source["event_id"] == source_events[3].event_id
+    assert replayed_source["seq"] == 4
+    assert replayed_source["event_id"] == source_events[4].event_id
     assert (
         store.unread_events_page(
             task_id, SCOPE, presentation_class="voice", limit=500
         ).watermark
-        == 3
+        == 4
     )
     assert (
         store.unread_events_page(
@@ -13780,7 +13729,7 @@ async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
     assert len(pushed) == 2
     terminal_fallback = cast(Mapping[str, object], pushed[1]["payload"])
     terminal_source = cast(Mapping[str, object], terminal_fallback["source_event"])
-    assert terminal_source["seq"] == 5
+    assert terminal_source["seq"] == 6
     assert terminal_fallback["state"] == "terminal"
     terminal_ack = await registry.handle_p3_progress_ack(
         params=_presentation_progress_ack_params(terminal_fallback),
@@ -13793,14 +13742,14 @@ async def test_later_audio_failure_replays_the_class_isolated_text_prefix(
         store.unread_events_page(
             task_id, SCOPE, presentation_class="text", limit=500
         ).watermark
-        == 5
+        == 6
     )
 
     assert (
         store.unread_events_page(
             task_id, SCOPE, presentation_class="voice", limit=500
         ).watermark
-        == 3
+        == 4
     )
     await registry.stop()
 
@@ -14099,7 +14048,7 @@ async def test_progress_delivery_capacity_never_evicts_unacknowledged_on_failed_
     route = registry._progress_routes[key]
     event = SimpleNamespace(
         origin=route.binding,
-        task_event=SimpleNamespace(attempt_id="attempt-1"),
+        task_event=SimpleNamespace(attempt_id="attempt-1", event_type="task.blocked"),
         source_event=SimpleNamespace(
             to_dict=lambda: {"event_id": "source-capacity", "seq": 1000}
         ),

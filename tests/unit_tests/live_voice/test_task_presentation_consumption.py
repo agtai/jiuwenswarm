@@ -23,6 +23,7 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskResultArtifact,
     TaskResultRecord,
     TaskUnreadPage,
+    TerminalOutcome,
 )
 from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
     PresentationAckResult,
@@ -108,8 +109,8 @@ def _owner(
 def _event(
     seq: int,
     *,
-    event_type: str = "task.running",
-    state: str = "running",
+    event_type: str = "task.blocked",
+    state: str = "blocked",
     outcome: str | None = None,
     source_event_id: str | None = "executor-event-1",
 ) -> PersistentTaskEvent:
@@ -271,7 +272,8 @@ def test_reservation_skips_only_a_closed_nonpresentable_prefix() -> None:
             state="running",
             source_event_id="executor-attempt-running",
         ),
-        _event(3, source_event_id="executor-task-running"),
+        _event(3, event_type="task.running", state="running", source_event_id="executor-task-running"),
+        _event(4, source_event_id="executor-task-blocked"),
     )
     delivery = owner.reserve_next(
         page,
@@ -280,8 +282,8 @@ def test_reservation_skips_only_a_closed_nonpresentable_prefix() -> None:
         delivery_id="delivery-after-nonpresentable-prefix",
         unit_id="unit-after-nonpresentable-prefix",
     )
-    assert delivery.event_seq == 3
-    assert delivery.event_id == "event-3"
+    assert delivery.event_seq == 4
+    assert delivery.event_id == "event-4"
     owner.mark_text_adopted(
         TextPresentationAdoptionAck.from_delivery(
             delivery,
@@ -504,7 +506,9 @@ def test_real_core_port_advances_only_the_exact_presented_text_prefix(
     assert dispatch is not None
     store.complete_outbox(
         dispatch, executor_ref=f"legacy:{dispatch.attempt_id}",
-        observations=tuple(replace(event, occurred_at=NOW) for event in _observations(dispatch)),
+        observations=tuple(replace(event, occurred_at=NOW) for event in _observations(
+            dispatch, outcome=TerminalOutcome.FAILED,
+        )),
     )
     page = store.unread_events_page(task_id, scope, presentation_class="text", limit=500)
     delivery = owner.reserve_next(
@@ -515,7 +519,7 @@ def test_real_core_port_advances_only_the_exact_presented_text_prefix(
         unit_id="unit-real",
     )
     command, _ = _ack_command(delivery, command_id="command-real-ack")
-    assert delivery.event_seq == 3
+    assert delivery.event_seq == 5
     grant = replace(
         _grant(
             "task.ack_events",

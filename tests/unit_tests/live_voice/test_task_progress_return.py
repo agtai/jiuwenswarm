@@ -1825,7 +1825,7 @@ async def test_consumer_bridge_projects_real_store_recovery_attempt_boundary(
     expected = [
         event.seq
         for event in store.events(task_id, task.scope)
-        if event.event_type in TASK_PROGRESS_PRESENTABLE_EVENTS
+        if event.event_type in {"task.running", *TASK_PROGRESS_PRESENTABLE_EVENTS}
     ]
     for _ in range(1000):
         delivered = delivered_voice or delivered_text
@@ -1889,7 +1889,7 @@ async def test_consumer_voice_rolls_more_than_256_presentable_store_events(
     activation = await bridge.activate()
     assert activation.active
     expected_count = sum(
-        event.event_type in TASK_PROGRESS_PRESENTABLE_EVENTS
+        event.event_type in {"task.running", *TASK_PROGRESS_PRESENTABLE_EVENTS}
         for event in store.events(task_id, _scope())
     )
     for _ in range(4000):
@@ -1928,7 +1928,7 @@ async def test_consumer_bridge_replays_unread_across_cancelled_retry_attempts(
     expected = [
         event.seq
         for event in authority_events
-        if event.event_type in TASK_PROGRESS_PRESENTABLE_EVENTS
+        if event.event_type in {"task.running", *TASK_PROGRESS_PRESENTABLE_EVENTS}
     ]
     assert len({event.attempt_id for event in authority_events}) == 2
     consumer_scope = _scope(session_id="session-consumer-retry-reconnect")

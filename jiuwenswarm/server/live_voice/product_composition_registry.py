@@ -229,6 +229,7 @@ from .production_task_intent import (
     build_production_origin_binding,
 )
 from .task_progress_return import (
+    TASK_PROGRESS_PRESENTABLE_EVENTS,
     TaskProgressNotificationIntent,
     TaskProgressOriginBinding,
     TaskProgressOriginKind,
@@ -2186,6 +2187,14 @@ class AgentServerProductCompositionRegistry:
         deliveries[delivery.delivery_id] = delivery
         return delivery
 
+    def _task_progress_presentable(self, event_type: str) -> bool:
+        # Legacy non-ledger routes retain their initial acceptance receipt.
+        # Running is always silent, while its canonical lifecycle stays intact.
+        return event_type in TASK_PROGRESS_PRESENTABLE_EVENTS or (
+            event_type == "task.accepted"
+            and not self._p3_presentation_consumption_available
+        )
+
     def _defer_progress_presentation(
         self,
         retained: _ProgressRoute,
@@ -2198,10 +2207,7 @@ class AgentServerProductCompositionRegistry:
             raise RuntimeError("Task progress pending class is invalid")
         if event.origin != retained.binding:
             raise RuntimeError("Task progress pending event changed route binding")
-        if (
-            self._p3_presentation_consumption_available
-            and event.task_event.event_type == "task.accepted"
-        ):
+        if not self._task_progress_presentable(event.task_event.event_type):
             return
         key = (presentation_class, event.task_event.event_id)
         pending = _PendingProgressPresentation(
@@ -2309,12 +2315,9 @@ class AgentServerProductCompositionRegistry:
         *,
         fallback_reason: str | None = None,
     ) -> None:
-        # Keep initial acceptance in the authoritative event stream, without a
-        # second receipt, presentation reservation or synthetic consumption ACK.
-        if (
-            self._p3_presentation_consumption_available
-            and event.task_event.event_type == "task.accepted"
-        ):
+        # Silent lifecycle events need neither a product presentation nor a
+        # synthetic consumption ACK; the next eligible event spans the prefix.
+        if not self._task_progress_presentable(event.task_event.event_type):
             return
         binding = event.origin
         key = (
@@ -3685,10 +3688,7 @@ class AgentServerProductCompositionRegistry:
     async def _emit_voice_progress(
         self, intent: TaskProgressNotificationIntent
     ) -> None:
-        if (
-            self._p3_presentation_consumption_available
-            and intent.task_event.event_type == "task.accepted"
-        ):
+        if not self._task_progress_presentable(intent.task_event.event_type):
             return
         binding = intent.origin
         origin = self._voice_task_origins.get(binding.task_id)

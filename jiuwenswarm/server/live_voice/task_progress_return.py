@@ -76,7 +76,6 @@ _EVENTS_CAPABILITY = frozenset({"task.events"})
 TASK_PROGRESS_PRESENTABLE_EVENTS = {
     "task.retry_accepted": "accepted",
     "task.recovery_accepted": "accepted",
-    "task.running": "running",
     "task.blocked": "blocked",
     "task.decision_required": "decision_required",
     "task.terminal": "terminal",
@@ -84,6 +83,7 @@ TASK_PROGRESS_PRESENTABLE_EVENTS = {
 TASK_PROGRESS_NON_PRESENTABLE_EVENTS = frozenset(
     {
         "task.accepted",
+        "task.running",
         "attempt.accepted",
         "attempt.running",
         "attempt.terminal",
@@ -97,10 +97,11 @@ TASK_PROGRESS_NON_PRESENTABLE_EVENTS = frozenset(
         "task.reprioritize_applied",
     }
 )
-# Initial acceptance still establishes the Arbiter lifecycle. The product's
-# direct command receipt already acknowledges it; it is not a second notification.
-_PROJECTABLE_EVENTS = {"task.accepted": "accepted", **TASK_PROGRESS_PRESENTABLE_EVENTS}
-_NO_PROJECTION_EVENTS = TASK_PROGRESS_NON_PRESENTABLE_EVENTS - {"task.accepted"}
+# Quiet lifecycle facts still establish the Arbiter's accepted/running state.
+# Product notification eligibility is separate from projection and Task queries.
+_QUIET_LIFECYCLE_EVENTS = {"task.accepted": "accepted", "task.running": "running"}
+_PROJECTABLE_EVENTS = {**_QUIET_LIFECYCLE_EVENTS, **TASK_PROGRESS_PRESENTABLE_EVENTS}
+_NO_PROJECTION_EVENTS = TASK_PROGRESS_NON_PRESENTABLE_EVENTS - _QUIET_LIFECYCLE_EVENTS.keys()
 _TASK_EVENT_PRODUCERS = {
     "task.accepted": frozenset({"task_core"}),
     "task.retry_accepted": frozenset({"task_core"}),
