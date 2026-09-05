@@ -1519,6 +1519,25 @@ class _DirectProjectAttemptJournal:
             ).fetchall()
         return tuple(self._from_row(row) for row in rows)
 
+    @staticmethod
+    def _project_has_unsettled_attempt(
+        connection: sqlite3.Connection, project_root: str | os.PathLike[str]
+    ) -> bool:
+        root_key = _path_key(project_root, strict=False)
+        rows = connection.execute(
+            f"""SELECT project_root FROM {_DIRECT_EXECUTOR_TABLE}
+                WHERE state<>? OR raw_status LIKE '%cleanup_pending'""",
+            (FormalAttemptState.TERMINAL.value,),
+        ).fetchall()
+        return any(_path_key(row["project_root"], strict=False) == root_key for row in rows)
+
+    def project_has_unsettled_attempt(
+        self, project_root: str | os.PathLike[str]
+    ) -> bool:
+        """Project ownership includes terminal attempts with retained cleanup."""
+        with self._connect() as connection:
+            return self._project_has_unsettled_attempt(connection, project_root)
+
     def latest_completed_project_effect(
         self, project_root: str | os.PathLike[str]
     ) -> _DirectAttempt | None:
@@ -1965,15 +1984,7 @@ class _DirectProjectAttemptJournal:
                     )
                 return False, existing
             canonical_root = str(Path(project_root).resolve(strict=True))
-            active_projects = connection.execute(
-                f"SELECT project_root FROM {_DIRECT_EXECUTOR_TABLE} WHERE state<>?",
-                (FormalAttemptState.TERMINAL.value,),
-            ).fetchall()
-            if any(
-                _path_key(row["project_root"], strict=False)
-                == _path_key(canonical_root, strict=False)
-                for row in active_projects
-            ):
+            if self._project_has_unsettled_attempt(connection, canonical_root):
                 raise FormalTaskViolation(
                     "EXECUTOR_PROJECT_BUSY",
                     "selected project already has an active formal mutation attempt",
@@ -2121,6 +2132,7 @@ class _DirectProjectAttemptJournal:
         error: str | None,
         now: str,
         require_owner: bool = True,
+        cleanup_pending: bool = False,
     ) -> _DirectAttempt:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2143,6 +2155,8 @@ class _DirectProjectAttemptJournal:
                     "direct Executor attempt is owned by another process",
                     ErrorCode.UNAVAILABLE,
                 )
+            if cleanup_pending and not raw_status.endswith("cleanup_pending"):
+                raw_status = f"{raw_status}_cleanup_pending"
             connection.execute(
                 f"""
                 UPDATE {_DIRECT_EXECUTOR_TABLE}
@@ -4629,6 +4643,47 @@ class DirectProjectCodeExecutorAdapter:
         async with self._lifecycle_lock:
             return await self._dispatch(item)
 
+    def _require_project_available(self, item: PersistentOutboxItem, root: Path) -> None:
+        """Defer before inspecting a project still owned by an earlier attempt.
+
+        This grants no baseline permission. Once ownership has settled, dispatch
+        still performs the complete binding, clean/managed-tree and drift checks.
+        The journal repeats its competing-create check inside its transaction.
+        """
+        busy = self._journal.project_has_unsettled_attempt(root)
+        if not busy and self._durability_store is not None:
+            record = self._journal.latest_completed_project_effect(root)
+            if record is not None:
+                try:
+                    task, attempt, _ = self._durability_store.task_read_snapshot(
+                        record.task_id, item.scope
+                    )
+                except FormalTaskViolation:
+                    # A missing/foreign canonical owner is not evidence for
+                    # deferral; the unchanged baseline guard must reject it.
+                    pass
+                else:
+                    bound = (
+                        task.attempt_id == record.attempt_id
+                        and attempt.attempt_id == record.attempt_id
+                        and task.spec.fingerprint_bytes() == record.spec_fingerprint
+                    )
+                    if bound:
+                        busy = (
+                            task.state is not FormalTaskState.TERMINAL
+                            and attempt.state is not FormalAttemptState.TERMINAL
+                        ) or (
+                            task.outcome is TerminalOutcome.COMPLETED
+                            and attempt.outcome is TerminalOutcome.COMPLETED
+                            and attempt.source_seq < record.source_seq
+                        )
+        if busy:
+            raise FormalTaskViolation(
+                "EXECUTOR_PROJECT_BUSY",
+                "selected project has an unsettled formal mutation attempt",
+                ErrorCode.UNAVAILABLE,
+            )
+
     async def _dispatch(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
         self._require_item(item, expected_kind=OutboxKind.ATTEMPT_DISPATCH)
         self._selection_binding(item.selection, require_current_profile=True)
@@ -4681,6 +4736,7 @@ class DirectProjectCodeExecutorAdapter:
                 ErrorCode.UNAVAILABLE,
             )
 
+        await asyncio.to_thread(self._require_project_available, item, root)
         before_tree = await asyncio.to_thread(_project_tree_fingerprint, root)
         before_content = await asyncio.to_thread(_project_content_fingerprint, root)
         before_head = await asyncio.to_thread(_git_head, root)
@@ -5264,6 +5320,7 @@ class DirectProjectCodeExecutorAdapter:
                     self._journal.finish,
                     item.attempt_id,
                     owner_id=self._owner_id,
+                    cleanup_pending=worktree is not None,
                     outcome=TerminalOutcome.INTERRUPTED,
                     raw_status=raw_status,
                     summary=None,
@@ -5308,6 +5365,7 @@ class DirectProjectCodeExecutorAdapter:
                     self._journal.finish,
                     item.attempt_id,
                     owner_id=self._owner_id,
+                    cleanup_pending=worktree is not None,
                     outcome=TerminalOutcome.CANCELLED,
                     raw_status="cancelled",
                     summary=None,
@@ -5361,6 +5419,7 @@ class DirectProjectCodeExecutorAdapter:
                 self._journal.finish,
                 item.attempt_id,
                 owner_id=self._owner_id,
+                cleanup_pending=worktree is not None,
                 outcome=(
                     TerminalOutcome.CANCELLED
                     if user_cancel
@@ -5378,6 +5437,7 @@ class DirectProjectCodeExecutorAdapter:
                     self._journal.finish,
                     item.attempt_id,
                     owner_id=self._owner_id,
+                    cleanup_pending=worktree is not None,
                     outcome=TerminalOutcome.INTERRUPTED,
                     raw_status="effect_ack_unknown",
                     summary=None,
@@ -5417,6 +5477,7 @@ class DirectProjectCodeExecutorAdapter:
                 self._journal.finish,
                 item.attempt_id,
                 owner_id=self._owner_id,
+                cleanup_pending=worktree is not None,
                 outcome=TerminalOutcome.FAILED,
                 raw_status="failed",
                 summary=None,

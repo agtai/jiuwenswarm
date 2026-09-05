@@ -1728,7 +1728,7 @@ def test_deadline_claim_settles_only_proven_pre_effect_or_requires_manual_action
         )
 
 
-def test_admission_timeout_suppresses_open_cancel_without_executor_or_result(
+def test_cancel_after_closed_deferral_wins_over_later_admission_deadline(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "timeout-open-cancel.sqlite"
@@ -1758,14 +1758,14 @@ def test_admission_timeout_suppresses_open_cancel_without_executor_or_result(
         now="2026-08-05T12:00:00.500000Z",
     )
     assert accepted.ok and accepted.result is not None
-    assert accepted.result["applied"] is False
+    assert accepted.result["applied"] is True
 
     assert (
         store.claim_outbox("timeout-after-cancel", observed_at="2026-08-05T12:00:02Z")
         is None
     )
 
-    assert store.get_task(task_id, _scope()).outcome is TerminalOutcome.FAILED
+    assert store.get_task(task_id, _scope()).outcome is TerminalOutcome.CANCELLED
     assert [event.event_type for event in store.events(task_id, _scope())] == [
         "task.accepted",
         "task.cancel_requested",
@@ -1776,8 +1776,7 @@ def test_admission_timeout_suppresses_open_cancel_without_executor_or_result(
         assert connection.execute(
             "SELECT kind, state, last_error FROM outbox ORDER BY kind"
         ).fetchall() == [
-            ("attempt.cancel", "suppressed", "EXECUTOR_ADMISSION_TIMEOUT"),
-            ("attempt.dispatch", "suppressed", "EXECUTOR_ADMISSION_TIMEOUT"),
+            ("attempt.dispatch", "suppressed", "EXECUTOR_PROJECT_BUSY"),
         ]
         assert connection.execute("SELECT COUNT(*) FROM task_results").fetchone() == (
             0,
@@ -1785,6 +1784,29 @@ def test_admission_timeout_suppresses_open_cancel_without_executor_or_result(
         assert connection.execute(
             "SELECT COUNT(*) FROM executor_events"
         ).fetchone() == (0,)
+    SqliteTaskStore(database)
+
+
+@pytest.mark.parametrize("release_unknown", [False, True])
+def test_cancel_does_not_claim_unproven_dispatch_is_still_queue_owned(
+    tmp_path: Path, release_unknown: bool,
+) -> None:
+    database = tmp_path / "uncertain-cancel.sqlite"
+    store = SqliteTaskStore(database)
+    core = PersistentTaskCore(store, _Executor())
+    task_id, attempt_id = _selected_create(store, tmp_path, suffix="-uncertain-cancel")
+    dispatch = store.claim_outbox("claimed", observed_at=NOW)
+    assert dispatch is not None
+    if release_unknown:
+        store.release_outbox(dispatch, "transport outcome unknown")
+    cancel = _cancel(task_id)
+    result = core.execute(cancel.envelope, cancel.authorization, now=NOW)
+    assert result.ok and result.result["applied"] is False
+    assert store.get_task(task_id, _scope()).outcome is None
+    assert store.get_attempt(attempt_id).executor_ref is None
+    assert [event.event_type for event in store.events(task_id, _scope())] == [
+        "task.accepted", "task.cancel_requested",
+    ]
     SqliteTaskStore(database)
 
 

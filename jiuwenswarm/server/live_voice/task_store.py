@@ -5246,6 +5246,68 @@ class SqliteTaskStore:
             )
             return result
 
+    def _settle_cancel_before_dispatch(
+        self, connection: sqlite3.Connection, *, task: sqlite3.Row,
+        dispatch: sqlite3.Row, command_id: str, scope: ScopeRef, now: str,
+    ) -> PersistentTaskEvent:
+        """Settle cancellation only after the caller proves queue ownership."""
+        task_id = task["task_id"]
+        connection.execute(
+            """
+            UPDATE outbox SET state=?, updated_at=?
+            WHERE outbox_id=? AND state=?
+            """,
+            (
+                OutboxState.SUPPRESSED.value,
+                now,
+                dispatch["outbox_id"],
+                OutboxState.PENDING.value,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE attempts SET state=?, outcome=?, updated_at=?
+            WHERE attempt_id=?
+            """,
+            (
+                FormalAttemptState.TERMINAL.value,
+                TerminalOutcome.CANCELLED.value,
+                now,
+                task["attempt_id"],
+            ),
+        )
+        self._append_event(
+            connection,
+            task,
+            event_type="attempt.terminal",
+            state=FormalAttemptState.TERMINAL.value,
+            outcome=TerminalOutcome.CANCELLED.value,
+            producer="task_core.reconciliation",
+            source_event_id=None,
+            causation_id=command_id,
+            occurred_at=now,
+            details={"reason": "CANCELLED_BEFORE_DISPATCH"},
+        )
+        task = self._require_task_row(connection, task_id, scope)
+        self._reject_open_adjustments_before_terminal(
+            connection,
+            task=task,
+            observed_at=now,
+        )
+        return self._append_event(
+            connection,
+            self._require_task_row(connection, task_id, scope),
+            event_type="task.terminal",
+            state=FormalTaskState.TERMINAL.value,
+            outcome=TerminalOutcome.CANCELLED.value,
+            producer="task_core",
+            source_event_id=None,
+            causation_id=command_id,
+            occurred_at=now,
+            details={"reason": "CANCELLED_BEFORE_DISPATCH"},
+            update_task=True,
+        )
+
     def cancel(
         self,
         command: CommandEnvelope,
@@ -5363,6 +5425,13 @@ class SqliteTaskStore:
                     "task has no durable dispatch record",
                     ErrorCode.INTERNAL,
                 )
+            attempt = connection.execute(
+                "SELECT * FROM attempts WHERE attempt_id=?", (task["attempt_id"],)
+            ).fetchone()
+            closed_queue = (
+                attempt is not None
+                and self._is_exact_unbound_queue(task, attempt, dispatch)
+            )
             now = observed_at
             connection.execute(
                 """
@@ -5389,64 +5458,13 @@ class SqliteTaskStore:
             terminal_before_dispatch = (
                 dispatch["state"] == OutboxState.PENDING.value
                 and int(dispatch["delivery_count"]) == 0
-            )
+            ) or closed_queue
             cancel_outbox_id: str | None = None
             settlement_event: PersistentTaskEvent | None = None
             if terminal_before_dispatch:
-                connection.execute(
-                    """
-                    UPDATE outbox SET state=?, updated_at=?
-                    WHERE outbox_id=? AND state=?
-                    """,
-                    (
-                        OutboxState.SUPPRESSED.value,
-                        now,
-                        dispatch["outbox_id"],
-                        OutboxState.PENDING.value,
-                    ),
-                )
-                connection.execute(
-                    """
-                    UPDATE attempts SET state=?, outcome=?, updated_at=?
-                    WHERE attempt_id=?
-                    """,
-                    (
-                        FormalAttemptState.TERMINAL.value,
-                        TerminalOutcome.CANCELLED.value,
-                        now,
-                        task["attempt_id"],
-                    ),
-                )
-                self._append_event(
-                    connection,
-                    task,
-                    event_type="attempt.terminal",
-                    state=FormalAttemptState.TERMINAL.value,
-                    outcome=TerminalOutcome.CANCELLED.value,
-                    producer="task_core.reconciliation",
-                    source_event_id=None,
-                    causation_id=command.command_id,
-                    occurred_at=now,
-                    details={"reason": "CANCELLED_BEFORE_DISPATCH"},
-                )
-                task = self._require_task_row(connection, task_id, command.scope)
-                self._reject_open_adjustments_before_terminal(
-                    connection,
-                    task=task,
-                    observed_at=now,
-                )
-                settlement_event = self._append_event(
-                    connection,
-                    self._require_task_row(connection, task_id, command.scope),
-                    event_type="task.terminal",
-                    state=FormalTaskState.TERMINAL.value,
-                    outcome=TerminalOutcome.CANCELLED.value,
-                    producer="task_core",
-                    source_event_id=None,
-                    causation_id=command.command_id,
-                    occurred_at=now,
-                    details={"reason": "CANCELLED_BEFORE_DISPATCH"},
-                    update_task=True,
+                settlement_event = self._settle_cancel_before_dispatch(
+                    connection, task=task, dispatch=dispatch,
+                    command_id=command.command_id, scope=command.scope, now=now,
                 )
             else:
                 cancel_outbox_id = f"outbox-{uuid.uuid4().hex}"
@@ -9969,9 +9987,25 @@ class SqliteTaskStore:
                                 and attempt.executor_ref is None
                                 and attempt.source_seq == -1
                                 and dispatch_state is OutboxState.SUPPRESSED
-                                and dispatch_delivery_count == 0
                                 and dispatch_claim_clear
-                                and dispatch_row["last_error"] is None
+                                and (
+                                    (
+                                        dispatch_delivery_count == 0
+                                        and dispatch_row["last_error"] is None
+                                    )
+                                    or (
+                                        attempt.selection is not None
+                                        and dispatch_delivery_count > 0
+                                        and dispatch_delivery_count
+                                        == attempt_row["admission_attempt_count"]
+                                        and attempt_row["admission_reason"] in {
+                                            "EXECUTOR_PROJECT_BUSY",
+                                            "EXECUTOR_CAPACITY_EXHAUSTED",
+                                        }
+                                        and dispatch_row["last_error"]
+                                        == attempt_row["admission_reason"]
+                                    )
+                                )
                                 and dispatch_row["updated_at"] == event.occurred_at
                             )
                             lost_reconciliation = (
@@ -11433,6 +11467,29 @@ class SqliteTaskStore:
                     "admission Store claim changed before defer commit",
                     ErrorCode.CONFLICT,
                 )
+            task = self._require_task_row_by_id(connection, item.task_id)
+            if bool(task["cancel_requested"]):
+                cancel = connection.execute(
+                    "SELECT * FROM outbox WHERE task_id=? AND attempt_id=? AND kind=?",
+                    (item.task_id, item.attempt_id, OutboxKind.ATTEMPT_CANCEL.value),
+                ).fetchone()
+                if cancel is None:
+                    raise self._corrupt("cancelled admission has no cancel delivery")
+                dispatch = connection.execute(
+                    "SELECT * FROM outbox WHERE outbox_id=?", (item.outbox_id,)
+                ).fetchone()
+                settlement = self._settle_cancel_before_dispatch(
+                    connection, task=task, dispatch=dispatch,
+                    command_id=cancel["command_id"], scope=item.scope, now=observed_at,
+                )
+                self._settle_cancel_command_results(
+                    connection, task_id=item.task_id, scope_key=task["scope_key"],
+                    settlement=settlement,
+                )
+                connection.execute(
+                    "UPDATE outbox SET state=?, updated_at=? WHERE outbox_id=?",
+                    (OutboxState.SUPPRESSED.value, observed_at, cancel["outbox_id"]),
+                )
             return AdmissionDisposition.DEFERRED
 
     def release_outbox(self, item: PersistentOutboxItem, error: str) -> bool:
@@ -12856,6 +12913,43 @@ class SqliteTaskStore:
                 connection, attempt, TaskMutationDisposition.APPLIED
             )
 
+    @staticmethod
+    def _is_exact_unbound_queue(
+        task: sqlite3.Row, attempt: sqlite3.Row, dispatch: sqlite3.Row | None,
+    ) -> bool:
+        """Prove Store ownership, including a closed pre-effect admission defer."""
+        attempt_count = int(attempt["admission_attempt_count"] or 0)
+        return bool(
+            task["state"] == FormalTaskState.ACCEPTED.value
+            and attempt["state"] == FormalAttemptState.ACCEPTED.value
+            and attempt["outcome"] is None
+            and attempt["executor_ref"] is None
+            and int(attempt["source_seq"]) == -1
+            and _selection_from_attempt_row(attempt) is not None
+            and dispatch is not None
+            and dispatch["state"] == OutboxState.PENDING.value
+            and dispatch["claimed_by"] is None
+            and dispatch["claimed_at"] is None
+            and dispatch["claim_token"] is None
+            and int(dispatch["delivery_count"]) == attempt_count
+            and (
+                (
+                    attempt_count == 0
+                    and attempt["admission_reason"] is None
+                    and dispatch["last_error"] is None
+                )
+                or (
+                    attempt_count > 0
+                    and attempt["admission_reason"]
+                    in {
+                        "EXECUTOR_PROJECT_BUSY",
+                        "EXECUTOR_CAPACITY_EXHAUSTED",
+                    }
+                    and dispatch["last_error"] == attempt["admission_reason"]
+                )
+            )
+        )
+
     def settle_unbound_queued_attempt(
         self,
         task_id: str,
@@ -12892,38 +12986,10 @@ class SqliteTaskStore:
                 (task_id, attempt_id, OutboxKind.ATTEMPT_DISPATCH.value),
             ).fetchall()
             dispatch = dispatches[0] if len(dispatches) == 1 else None
-            attempt_count = int(attempt["admission_attempt_count"] or 0)
-            exact_queue = bool(
-                task["state"] == FormalTaskState.ACCEPTED.value
-                and not bool(task["cancel_requested"])
+            exact_queue = (
+                not bool(task["cancel_requested"])
                 and not bool(task["dispatch_fenced"])
-                and attempt["state"] == FormalAttemptState.ACCEPTED.value
-                and attempt["outcome"] is None
-                and attempt["executor_ref"] is None
-                and int(attempt["source_seq"]) == -1
-                and _selection_from_attempt_row(attempt) is not None
-                and dispatch is not None
-                and dispatch["state"] == OutboxState.PENDING.value
-                and dispatch["claimed_by"] is None
-                and dispatch["claimed_at"] is None
-                and dispatch["claim_token"] is None
-                and int(dispatch["delivery_count"]) == attempt_count
-                and (
-                    (
-                        attempt_count == 0
-                        and attempt["admission_reason"] is None
-                        and dispatch["last_error"] is None
-                    )
-                    or (
-                        attempt_count > 0
-                        and attempt["admission_reason"]
-                        in {
-                            "EXECUTOR_PROJECT_BUSY",
-                            "EXECUTOR_CAPACITY_EXHAUSTED",
-                        }
-                        and dispatch["last_error"] == attempt["admission_reason"]
-                    )
-                )
+                and self._is_exact_unbound_queue(task, attempt, dispatch)
             )
             if not exact_queue:
                 return False

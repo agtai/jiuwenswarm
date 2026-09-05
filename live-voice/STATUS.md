@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-05 (Agent answer ownership and stream lifecycle; physical acceptance open).
+> Updated: 2026-09-05 (serial Task handoff and queue cancellation; physical acceptance open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -54,6 +54,7 @@ history, not acceptance of this candidate.
 |---|---|
 | Spoken analysis | D-115 removes output quotas and post-generation rewriting/checking. Live Voice delivers the configured Agent’s final answer unchanged; source interpretation, arithmetic and verbosity remain Agent quality concerns: [answer ownership evidence](reviews/SPOKEN_ANSWER_VERIFICATION_20260905.md). |
 | Agent stream lifetime | Admitted speculation releases consumed output and applies backpressure to unread data; same-context closure retains cleanup through cancellation. Long real-Agent/file-tool delivery and exact Web failure diagnostics have scoped evidence: [stream lifecycle repair](reviews/SPECULATIVE_STREAM_LIFECYCLE_20260905.md). Startup acquisition failures and long-running physical stability remain outside this repair. |
+| Serial project Tasks | Persisted project ownership gates baseline inspection through apply, cleanup and canonical ingestion. Closed admission deferrals remain cancellable without starting an Agent; unknown delivery retains reconciliation. Scoped tests/review: [Task handoff repair](reviews/PROJECT_TASK_HANDOFF_20260905.md). Physical A/B/A2 acceptance remains open. |
 | Profiling | Browser/RPC/media/Speech/Agent/Task/notification timing, bounded browser export and offline reports have scoped tests/build/review and deployed samples. Use [runbook §7.7](runbooks/E2E_RUNBOOK.md#77-普通-demo-的性能记录与故障报告) for a rehearsal; [deployment evidence](evidence/DEMO_PROFILING_DEPLOYMENT_20260904.md) retains chronology. No latency improvement/SLO claim. |
 | Speech lifetime | D-113 removes a cumulative identity quota while retaining exact authority/resource bounds; scoped tests/review and deployment are recorded in [lifecycle evidence](evidence/SPEECH_LIFECYCLE_REPAIR_20260904.md). Physical stability remains open. |
 | Local Task adjustment | D-111/D-112 preserve one semantic decision, direct exact local consent and pending/applied/rejected truth; focused tests and configured-model probes pass. Full execution/audio acceptance remains open: [adjustment evidence](evidence/TASK_ADJUSTMENT_TRUTH_REPAIR_20260904.md). |
