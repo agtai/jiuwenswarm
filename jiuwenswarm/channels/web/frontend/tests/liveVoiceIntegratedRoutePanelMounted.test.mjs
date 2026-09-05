@@ -12654,7 +12654,7 @@ test('mounted unified hands-free itinerary journey auto-submits and keeps one cu
   }
 });
 
-for (const delayedMediaClose of [false, true]) test(`mounted recovered voice Tasks acquire independent fresh owners only after Live Voice starts and Exit closes both${delayedMediaClose ? ' before microphone cleanup settles' : ''}`, async () => {
+for (const [delayedMediaClose, transientRead] of [[false, false], [true, false], [false, true]]) test(`mounted recovered voice Tasks acquire independent fresh owners only after Live Voice starts and Exit closes both${delayedMediaClose ? ' before microphone cleanup settles' : ''}${transientRead ? ' after transient status failure and adjusted completion' : ''}`, async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-recovered-voice-tasks';
   const taskIds = ['recovered-a', 'recovered-b'];
@@ -12663,6 +12663,8 @@ for (const delayedMediaClose of [false, true]) test(`mounted recovered voice Tas
   let p2Binding = null, activeMediaBinding = null, renderer;
   let releaseMediaClose = null, progressListener = null;
   const activations = new Map();
+  let transientFailures = transientRead ? 1 : 0;
+  let recoveryActivationCount = null;
   const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
   const activateP2 = createMountedP2ActivationResponder();
   const request = async (method, params) => {
@@ -12677,8 +12679,29 @@ for (const delayedMediaClose of [false, true]) test(`mounted recovered voice Tas
     if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
     const taskBinding = { subject_id: 'recovered-subject', project_id: 'recovered-project', session_id: sessionId,
       correlation_id: p2Binding?.correlation_id, generation: 1 };
-    if (method === 'live_voice.task.status') return mountedP3Status(taskBinding, { taskId: params.task_id });
-    if (method === 'live_voice.task.events') return mountedP3Events(taskBinding, { taskId: params.task_id });
+    if (method === 'live_voice.task.status') {
+      recoveryActivationCount ??= calls.filter(call => call.method === 'live_voice.composition.p2.activate').length;
+      if (params.task_id === taskIds[0] && transientFailures > 0) {
+        transientFailures -= 1;
+        throw Object.assign(new Error('temporary authority snapshot race'), { code: 'REQUEST_TIMEOUT' });
+      }
+      return mountedP3Status(taskBinding, { taskId: params.task_id,
+        ...(transientRead ? { state: 'terminal', outcome: 'completed', eventHead: 4 } : {}) });
+    }
+    if (method === 'live_voice.task.events') {
+      const response = mountedP3Events(taskBinding, { taskId: params.task_id, terminalA: transientRead, terminalAOutcome: 'completed' });
+      if (transientRead) {
+        const events = response.result.events;
+        const terminal = events.pop();
+        for (const [seq, event_type] of [[2, 'task.adjust_requested'], [3, 'task.adjust_applied']]) {
+          events.push({ ...events[1], seq, event_id: `${params.task_id}:event:${seq}`, event_type,
+            producer: 'task_core.control', source_event_id: null, causation_id: 'adjust-accepted', details: { command_id: 'adjust-accepted' } });
+        }
+        events.push({ ...terminal, seq: 4, event_id: `${params.task_id}:event:4` });
+        response.result.head_seq = 4;
+      }
+      return response;
+    }
     if (method === 'live_voice.composition.p3.progress.activate') {
       activations.set(params.task_id, params);
       return { ok: true, result: mountedProgressActivation(params,
@@ -12710,9 +12733,11 @@ for (const delayedMediaClose of [false, true]) test(`mounted recovered voice Tas
     await waitForMountedEffects(() => calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length === 2,
       'restored A/B did not acquire separate authenticated progress owners');
     for (const taskId of taskIds) {
-      assert.equal(calls.filter(call => call.method === 'live_voice.task.status' && call.params.task_id === taskId).length, 2);
+      assert.equal(calls.filter(call => call.method === 'live_voice.task.status' && call.params.task_id === taskId).length, 2 + (transientRead && taskId === taskIds[0] ? 1 : 0));
       assert.equal(calls.filter(call => call.method === 'live_voice.task.events' && call.params.task_id === taskId).length, 1);
     }
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.activate').length, recoveryActivationCount);
+    assert.ok(calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').every(call => call.params.origin_kind === 'voice'));
     let closing;
     await act(async () => { closing = controlRef.current.close(); if (!delayedMediaClose) await closing; });
     await waitForMountedEffects(() => calls.filter(call => call.method === 'live_voice.composition.p3.progress.close').length === 2,
@@ -12738,7 +12763,7 @@ for (const delayedMediaClose of [false, true]) test(`mounted recovered voice Tas
   }
 });
 
-for (const multipleVoiceTasks of [false, true]) test(`mounted foreground status query restarts an idle P2 poll after background terminal settlement${multipleVoiceTasks ? ' with independent A/B voice owners' : ''}`, async () => {
+for (const [multipleVoiceTasks, exhaustNewTaskReads] of [[false, false], [true, false], [true, true]]) test(`mounted foreground status query restarts an idle P2 poll after background terminal settlement${multipleVoiceTasks ? ' with independent A/B voice owners' : ''}${exhaustNewTaskReads ? ' after new task initialization exhausts retries' : ''}`, async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-terminal-dialogue-session';
   const taskId = 'mounted-terminal-dialogue-task';
@@ -12759,6 +12784,7 @@ for (const multipleVoiceTasks of [false, true]) test(`mounted foreground status 
   const taskProgressActivations = new Map();
   let taskControlBinding = null;
   let taskStatusBootstrapFailuresRemaining = 1;
+  let newTaskFailuresRemaining = exhaustNewTaskReads ? 4 : 0;
   let taskTerminal = false;
   let p2Binding = null;
   let activeMediaBinding = null;
@@ -12859,6 +12885,10 @@ for (const multipleVoiceTasks of [false, true]) test(`mounted foreground status 
     }
     if (method === 'live_voice.task.status') {
       assert.ok(taskControlBinding);
+      if (params.task_id === secondTaskId && newTaskFailuresRemaining > 0) {
+        newTaskFailuresRemaining -= 1;
+        throw Object.assign(new Error('new task status temporarily unavailable'), { code: 'REQUEST_TIMEOUT' });
+      }
       if (taskStatusBootstrapFailuresRemaining > 0) {
         taskStatusBootstrapFailuresRemaining -= 1;
         throw Object.assign(new Error('mounted first created-task bootstrap is unavailable'), {
@@ -13074,8 +13104,8 @@ for (const multipleVoiceTasks of [false, true]) test(`mounted foreground status 
         'a failed Task collection refresh must remain a fail-closed UI read',
       );
       assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 1);
-      assert.equal(calls.filter(call => call.method === 'live_voice.task.status').length, 5,
-        'the UI retry and independent voice leaf each require fresh status, without retrying create');
+      assert.equal(calls.filter(call => call.method === 'live_voice.task.status').length, 3,
+        'one failed read is followed by fresh status and event inspection without retrying create');
       await browser.emitSpeechEndOfTurn();
       await waitForMounted(
         () => calls.filter(call => call.method === 'live_voice.composition.unified.submit').length === 2,
@@ -13089,7 +13119,11 @@ for (const multipleVoiceTasks of [false, true]) test(`mounted foreground status 
       );
       for (let turn = 0; turn < 5; turn += 1) await new Promise(resolve => setImmediate(resolve));
       if (multipleVoiceTasks) {
-        await waitForMounted(() => taskProgressActivations.has(secondTaskId), 'B did not acquire an independent voice progress route');
+        if (exhaustNewTaskReads) {
+          await waitForMounted(() => newTaskFailuresRemaining === 0, 'B did not exhaust its bounded initialization reads');
+        } else {
+          await waitForMounted(() => taskProgressActivations.has(secondTaskId), 'B did not acquire an independent voice progress route');
+        }
         assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate' && call.params.task_id === taskId).length, 1);
         assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.close' && call.params.task_id === taskId).length, 0,
           'selecting B closed A before its terminal event');
@@ -13141,6 +13175,18 @@ for (const multipleVoiceTasks of [false, true]) test(`mounted foreground status 
         () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === 'mounted-terminal-dialogue-answer').length === 1,
         'intervening dialogue response was not ACKed exactly once',
       );
+    });
+    if (exhaustNewTaskReads) {
+      await waitForMountedEffects(() => taskProgressActivations.has(secondTaskId),
+        'new task voice ownership was lost after bounded retry exhaustion and foreground release');
+      assert.ok(calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate'
+        && call.params.task_id === secondTaskId).every(call => call.params.origin_kind === 'voice'));
+      assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 2,
+        'progress recovery must not replay task creation');
+    }
+    // Let the ACK's render and passive effects release foreground ownership
+    // before delivering the next transport response.
+    await act(async () => {
       await waitForMounted(() => notificationWaiters.length > 0, 'background terminal check did not retain its post-dialogue P2 poll');
       publishNotification(
         presentation(

@@ -89,6 +89,28 @@ function eventsResult(events, headSeq, taskId, afterSeq) {
   };
 }
 
+test('adjusted Task history recovers completion and rejects forged control provenance without adopting it', () => {
+  const controls = ['task.adjust_requested', 'task.adjust_applied', 'task.adjust_requested', 'task.adjust_rejected'];
+  const events = [event(0), event(1), ...controls.map((type, i) => event(i + 2, {
+    event_type: type, producer: 'task_core.control', source_event_id: null,
+    causation_id: `adjust-${Math.floor(i / 2)}`,
+    details: { command_id: `adjust-${Math.floor(i / 2)}`, ...(type.endsWith('rejected') ? { reason: 'ADJUSTMENT_CHECKPOINT_CLOSED' } : {}) },
+  })), event(6, { event_type: 'task.terminal', state: 'terminal', outcome: 'completed' })];
+  const read = (leaf, items) => leaf.adopt('task.events', { ok: true, result: eventsResult(items, 6, 'task-1', -1) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }));
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  read(leaf, events);
+  assert.equal(leaf.snapshot().tasks[0].outcome, 'completed');
+  assert.deepEqual(leaf.snapshot().mutation_receipts, []);
+  for (const forgery of [{ producer: 'untrusted' }, { state: 'terminal', outcome: 'completed' },
+    { source_event_id: 'fake' }, { details: { command_id: 'other' } }, { attempt_id: 'other-attempt' }]) {
+    const rejected = new FormalTaskControlLeaf({ enabled: true, binding });
+    const before = rejected.snapshot();
+    assert.throws(() => read(rejected, events.map((item, i) => i === 2 ? { ...item, ...forgery } : item)));
+    assert.deepEqual(rejected.snapshot(), before);
+  }
+});
+
 test('confirmation is exact and feature-off allocates zero mutation calls', async () => {
   const prepared = prepareFormalTaskMutation(binding, { operation: 'task.create', command_id: 'command-1', task_id: null }, confirmation());
   let calls = 0;

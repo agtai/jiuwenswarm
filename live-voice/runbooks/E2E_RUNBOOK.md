@@ -367,11 +367,11 @@ Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 使用正常工作量形成的真实非终态窗口，且只有 `task.adjust_applied` 已写入、seq
 早于 terminal/result 才能认定修改生效；窗口未命中必须记录，不能启用假等待。
 
-受控 `formal-web-validation` 启动入口默认开启 generation-time
-listening/interruption；`-DisableGenerationInterruption` 显式关闭，旧
+受控 `formal-web-validation` 启动入口与 `npm run build:live-voice`
+共同使用 `.env.live-voice` 中的 generation-time listening/interruption 默认值（开启）；`-DisableGenerationInterruption` 显式关闭，旧
 `-GenerationInterruption` 仍兼容，两者同时启用会在配置和服务操作前拒绝。
-`hands-free-demo` 默认关闭并拒绝显式开启。启动器按 profile/参数设置或清除继承的
-feature 环境值；该开关不保存在项目配置中。需要演示“已提交、
+`hands-free-demo` 默认关闭并拒绝显式开启。启动器按 profile/参数显式设置 feature 环境值，关闭时用 `false`
+覆盖 Vite 模式文件；普通 production 构建保持关闭；该开关不保存在项目配置中。需要演示“已提交、
 正在生成但尚未出声时改口”的样本必须先核对开启状态；已经出声的样本属于
 播报期打断，不能替代生成期样本。源码存在和配置开启也不代表物理验收已通过。
 

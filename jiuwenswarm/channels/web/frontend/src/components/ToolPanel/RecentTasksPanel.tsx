@@ -1,3 +1,4 @@
+import { useId } from 'react';
 import { useTranslation } from 'react-i18next';
 import { selectScopedLiveVoiceTasks, type LiveVoiceTaskEntry } from '../../stores/liveVoiceTaskStore';
 import type { TodoItem } from '../../types';
@@ -10,6 +11,7 @@ export function RecentTasksPanel({ entry, todos, sessionId, projectId }: {
   projectId?: string;
 }) {
   const { t } = useTranslation();
+  const detailId = useId();
   const { snapshot, owner } = entry;
   const tasks = selectScopedLiveVoiceTasks(snapshot, sessionId, projectId);
   const selected = tasks.find(task => task.task_id === snapshot.selected_task_id);
@@ -35,18 +37,24 @@ export function RecentTasksPanel({ entry, todos, sessionId, projectId }: {
         {counts.map(([state, count]) => <span key={state}>{statusLabel(state)} {count}</span>)}
       </div>
       {['failed', 'disconnected'].includes(snapshot.status) && <p role="status" className="text-warn">{t('liveVoice.formal.recentTasks.unavailable')}</p>}
+      <ul className="flex flex-col gap-2" aria-label={t('chat.recentTasks')}>
       {tasks.map(task => (
+        <li key={task.task_id}>
         <button type="button" key={task.task_id} disabled={busy} aria-pressed={selected?.task_id === task.task_id}
-          className="flex flex-col gap-1 rounded border border-border bg-card p-3 text-left text-text"
+          aria-controls={selected?.task_id === task.task_id ? detailId : undefined}
+          className={`flex w-full flex-col gap-1 rounded border bg-card p-3 text-left text-text ${selected?.task_id === task.task_id ? 'border-text-link ring-1 ring-text-link' : 'border-border'}`}
           onClick={() => { void owner.select(task.task_id).catch(() => undefined); }}>
           <strong>{task.name}</strong>
           <span>{statusLabel(task.display_state)}</span>
           <span className="break-all text-xs text-text-muted">{task.task_id}</span>
           {task.progress && <span>{task.progress}</span>}
         </button>
+        </li>
       ))}
-      {selected && <section className="rounded border border-border p-3" aria-label={t('liveVoice.formal.recentTasks.result')}>
-        <strong>{selected.name}</strong>
+      </ul>
+      {selected && <section id={detailId} className="min-w-0 border-t-2 border-border pt-4" aria-label={t('liveVoice.formal.recentTasks.result')} data-testid="selected-task-result">
+        <h3 className="mb-2 text-base font-semibold">{t('liveVoice.formal.recentTasks.result')}</h3>
+        <p className="mb-3 text-xs text-text-muted">{selected.name} · {statusLabel(selected.display_state)}</p>
         {selected.blocking_question && <p>{selected.blocking_question}</p>}
         {selected.result_availability === 'available' && selected.result_text
           ? <MarkdownRenderer content={selected.result_text} />

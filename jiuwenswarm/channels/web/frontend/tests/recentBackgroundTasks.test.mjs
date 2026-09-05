@@ -33,6 +33,10 @@ test('right recent-tasks view uses the exact Registry owner and filters session 
   const text = JSON.stringify(renderer.toJSON());
   assert.match(text, /后台 task-a/);
   assert.match(text, /结果 task-a/);
+  assert.equal(renderer.root.findAllByType('li').length, 1, 'only Tasks belong in the task list');
+  assert.equal(renderer.root.findByType('h3').children.join(''), '任务结果');
+  assert.equal(renderer.root.findByProps({ 'aria-pressed': true }).props['aria-controls'],
+    renderer.root.findByProps({ 'data-testid': 'selected-task-result' }).props.id);
   assert.doesNotMatch(text, /后台 foreign/);
   assert.doesNotMatch(text, /task\.create|签发控制|Registry 后端/);
   await act(async () => { renderer.update(React.createElement(I18nextProvider, { i18n: i18next },

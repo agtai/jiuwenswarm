@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-05 (serial Task handoff and queue cancellation; physical acceptance open).
+> Updated: 2026-09-05 (rehearsal repair module verification; physical acceptance open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -23,6 +23,17 @@ appear through the scoped Registry in the right panel. Old candidate PASS on
 history, not acceptance of this candidate.
 
 ## Current execution packet
+
+### Accepted rehearsal repairs: module verification complete, deployment pending
+
+The [bounded repair packet](reviews/REHEARSAL_REPAIR_20260905.md) owns controlled
+build defaults, exact local cancellation consent, adjustment adoption between
+tools/work stages, task/result UI separation, unread/deferred notification recovery
+and creation-receipt/current-state truth. Private demo self-drive costs are now
+1400. Focused module checks and independent review passed; the broader mounted
+suite retains documented baseline failures. Deployment is pending; physical
+acceptance is unproved. Model intent/arithmetic and performance tuning remain
+deferred until the AgentModel is changed.
 
 ### Verified-headset interruption: implemented, physical acceptance open
 
@@ -58,8 +69,8 @@ history, not acceptance of this candidate.
 | Serial project Tasks | Persisted project ownership gates baseline inspection through apply, cleanup and canonical ingestion. Closed admission deferrals remain cancellable without starting an Agent; unknown delivery retains reconciliation. Scoped tests/review: [Task handoff repair](reviews/PROJECT_TASK_HANDOFF_20260905.md). Physical A/B/A2 acceptance remains open. |
 | Profiling | Browser/RPC/media/Speech/Agent/Task/notification timing, bounded browser export and offline reports have scoped tests/build/review and deployed samples. Use [runbook §7.7](runbooks/E2E_RUNBOOK.md#77-普通-demo-的性能记录与故障报告) for a rehearsal; [deployment evidence](evidence/DEMO_PROFILING_DEPLOYMENT_20260904.md) retains chronology. No latency improvement/SLO claim. |
 | Speech lifetime | D-113 removes a cumulative identity quota while retaining exact authority/resource bounds; scoped tests/review and deployment are recorded in [lifecycle evidence](evidence/SPEECH_LIFECYCLE_REPAIR_20260904.md). Physical stability remains open. |
-| Local Task adjustment | D-111/D-112 preserve one semantic decision, direct exact local consent and pending/applied/rejected truth; focused tests and configured-model probes pass. Full execution/audio acceptance remains open: [adjustment evidence](evidence/TASK_ADJUSTMENT_TRUTH_REPAIR_20260904.md). |
-| Notification | Named Task wording/timestamps and presentation repairs exist; fallback ACK/stale UI and combined recovery remain open: [presentation evidence](evidence/TASK_NOTIFICATION_PRESENTATION_REPAIR_20260903.md). |
+| Local Task adjustment/control | D-116 extends direct exact local consent to cancellation and adopts adjustment constraints before the next model call, after the current tool/stage. Applied means adopted, not a completed revised file. Scoped real Executor/SDK and semantic evidence: [repair packet](reviews/REHEARSAL_REPAIR_20260905.md); physical A/B/A2 acceptance remains open. |
+| Notification | Adjusted histories rehydrate; fresh voice owners survive transient reads and deferred VOICE/TEXT routes drain on foreground release. Scoped reconnect/ACK/Exit checks pass; broader mounted baseline failures and physical journey remain open: [repair packet](reviews/REHEARSAL_REPAIR_20260905.md). |
 | Segmentation/dialogue | One-capture/one-final rejects later Provider items; whole-capture fallback can time out. Lossless post-EOT continuation needs accepted split/merge semantics; repeated greeting causality still needs reproduction: [diagnostics](evidence/SEGMENT_AND_DIALOGUE_DIAGNOSTICS_20260904.md). |
 
 ## Completion boundaries

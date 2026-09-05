@@ -1876,3 +1876,32 @@
   than reverting the 124-file integration or rewriting history. Verification,
   rejected experiments and local deployment belong to the
   [answer ownership evidence](../reviews/SPOKEN_ANSWER_VERIFICATION_20260905.md).
+
+## D-116 Rehearsal Task control and recovery corrections
+
+- Date: 2026-09-05. The user accepted the bounded rehearsal repair and explicitly
+  extended adjustment delivery to boundaries between tools/work stages. The next
+  model invocation uses constraints accepted before its admission checkpoint;
+  an already running model/tool need not be forcibly interrupted. Applied means
+  the execution owner adopted the requirements, not that a revised deliverable
+  already exists. Core admission, outbox ownership and durable settlement remain
+  authoritative; terminal sealing must not drop accepted updates.
+- Exact committed local cancellation, like local creation/adjustment, supplies
+  consent for that operation through the existing confirmation consumer. Ambiguous
+  targets clarify. Capability, authorization, scope, immutable origin, CAS and
+  replay checks remain; there is no general confirmation bypass or phrase rule.
+- Controlled `.env.live-voice` owns the generation-interruption default for both
+  direct builds and the formal launcher. Explicit off overrides it. This extends
+  D-114's launcher-only default; ordinary production and hands-free Demo remain
+  off. Cascade, VAD 800 ms, startup 250 ms and explicit device policy are retained.
+- Task creation receipts preserve historical admission truth; current queue or
+  running claims use a fresh authenticated snapshot. This changes Agent input
+  facts, not its generated answer. Model verbosity, intent and arithmetic are
+  excluded, as is performance tuning before the user changes AgentModel.
+- Task UI distinguishes selection from result detail. Unread notification recovery
+  must accept canonical adjustment history, retain exact desired voice ownership
+  through transient initialization failure, and retry pending presentation after
+  foreground release without inventing ACK or duplicating Tasks/audio.
+- Owners, risk tiers, exclusions and verification are recorded in the
+  [repair evidence](../reviews/REHEARSAL_REPAIR_20260905.md). Private demo costs may
+  be revised consistently; prior result files remain historical artifacts.

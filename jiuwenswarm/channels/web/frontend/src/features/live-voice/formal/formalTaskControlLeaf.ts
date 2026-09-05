@@ -203,13 +203,15 @@ function validateEventProvenance(
   const causationId = text(event.causation_id, 'event.causation_id');
   const expectedState = EVENT_TYPE_STATE[eventType as keyof typeof EVENT_TYPE_STATE];
   const cancelRequested = eventType === 'task.cancel_requested';
+  const adjustment = ['task.adjust_requested', 'task.adjust_applied', 'task.adjust_rejected'].includes(eventType);
+  const statePreserving = cancelRequested || adjustment;
   const retryAccepted = eventType === 'task.retry_accepted';
-  if (expectedState === undefined && !cancelRequested) {
+  if (expectedState === undefined && !statePreserving) {
     throw new Error('task event type is outside the closed lifecycle vocabulary');
   }
   if (
     (expectedState !== undefined && state !== expectedState)
-    || (cancelRequested && (previousState === null || state !== previousState || outcome !== previousOutcome))
+    || (statePreserving && (previousState === null || state !== previousState || outcome !== previousOutcome))
     || !validTaskStateTransition(previousState, state, retryAccepted)
     || (previousState === 'terminal' && !retryAccepted && outcome !== previousOutcome)
     || (seq === 0 && eventType !== 'task.accepted')
@@ -219,7 +221,7 @@ function validateEventProvenance(
   const taskProducerValid = (
     ((eventType === 'task.accepted' || eventType === 'task.retry_accepted') && producer === 'task_core')
     || (['task.running', 'task.blocked', 'task.decision_required'].includes(eventType) && producer === 'task_core')
-    || (eventType === 'task.cancel_requested' && producer === 'task_core.control')
+    || (statePreserving && producer === 'task_core.control')
     || (eventType === 'task.terminal' && ['task_core', 'task_core.delivery', 'task_core.reconciliation'].includes(producer))
   );
   const internalAttemptTerminal = eventType === 'attempt.terminal'
@@ -230,7 +232,7 @@ function validateEventProvenance(
     throw new Error('task event producer is not authoritative for its event type');
   }
   if (
-    ((eventType === 'task.accepted' || eventType === 'task.retry_accepted' || eventType === 'task.cancel_requested') && sourceEventId !== null)
+    ((eventType === 'task.accepted' || eventType === 'task.retry_accepted' || statePreserving) && sourceEventId !== null)
     || (sourceEventId !== null && causationId !== sourceEventId)
     || (
       sourceEventId === null
@@ -245,6 +247,15 @@ function validateEventProvenance(
   }
   const details = objectValue(event.details);
   if (details === null) throw new Error('task event details are invalid');
+  if (adjustment) {
+    const rejected = eventType === 'task.adjust_rejected';
+    if (previousState === 'terminal'
+      || Object.keys(details).sort().join(',') !== (rejected ? 'command_id,reason' : 'command_id')
+      || text(details.command_id, 'adjustment.command_id') !== causationId
+      || (rejected && (typeof details.reason !== 'string' || !/^[A-Z0-9_]{1,128}$/.test(details.reason)))) {
+      throw new Error('task adjustment authority evidence is invalid');
+    }
+  }
   if (!retryAccepted) return previousAttemptNumber ?? 1;
   const attemptId = text(event.attempt_id, 'event.attempt_id');
   const retryOfAttemptId = text(details.retry_of_attempt_id, 'event.details.retry_of_attempt_id');
