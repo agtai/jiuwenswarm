@@ -70,7 +70,7 @@ python3 ../scripts/prepare_evidence.py . --used reasoningbank-architecture
 - 根据图注、尺寸和页面核心信息选择，不按置信度机械排序；
 - 先确认可读性，再决定使用 1–3 张或改为自绘；
 - 原图保持比例和内部视觉，外围使用本 deck 模板语言；
-- 在 `evidence-plan.json` 中记录论文来源；**不在幻灯片上画来源行**，除非用户明确要求。
+- 在 `evidence-plan.json` 中记录论文来源，并按实际 `audit_pptx.py` 契约在使用原图的页面保留简洁来源注记；不要让默认版式偏好抹去证据。
 
 ### web
 
@@ -103,7 +103,7 @@ python3 ../scripts/prepare_evidence.py . --used reasoningbank-architecture
 
 - 允许没有图形组件；
 - 通过字号、位置、分隔和对齐建立层级；
-- 文字仍需填满内容区，不得靠空白撑版面；
+- 用适当留白保持可读性，不为填满内容区添加空话；
 - 不添加装饰图标或无证据视觉充数。
 
 ## 决策问题

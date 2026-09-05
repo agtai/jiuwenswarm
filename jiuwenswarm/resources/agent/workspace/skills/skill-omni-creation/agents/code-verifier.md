@@ -58,14 +58,18 @@
 
 验证结束后，只把通过第 1、2 层且未在第 3 层失败的脚本放入 `--keep`：
 
+`--skills-dir` 必须与本次 `save_images.py` 的已核实输出根一致；执行前核对
+解析后的 `<output-root>/<slug>/scripts` 只含本次允许清理的生成物。未知同名
+技能不得成为清理目标，不能因省略参数而退回默认运行时目录。
+
 ```bash
-{python} "{skill_directory}/scripts/finalize_scripts.py" <slug> --keep scripts/a.py scripts/b.py
+{python} "{skill_directory}/scripts/finalize_scripts.py" <slug> --skills-dir <verified-output-root> --keep scripts/a.py scripts/b.py
 ```
 
 若没有脚本通过，仍必须执行：
 
 ```bash
-{python} "{skill_directory}/scripts/finalize_scripts.py" <slug> --keep
+{python} "{skill_directory}/scripts/finalize_scripts.py" <slug> --skills-dir <verified-output-root> --keep
 ```
 
 `finalize_scripts.py` 会删除所有未列入通过名单的生成脚本，并输出：

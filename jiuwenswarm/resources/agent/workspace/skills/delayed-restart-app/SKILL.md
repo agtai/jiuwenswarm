@@ -1,38 +1,26 @@
 ---
 name: delayed-restart-app
-description: 安排延迟重启本 Agent 所在的服务（JiuwenSwarm app）。执行后当前 Agent 进程会被终止并重新启动，当前会话会断开。用于用户要求重启、配置更新需生效、或服务异常需重载时。使用 bash 调用脚本。
+description: 在用户要求或已接受重启 JiuwenSwarm 服务时，使用 detached launcher 安排延迟重启；当前会话会断开。
 ---
 
-# 重启本 Agent 所在的服务
+# 延迟重启 JiuwenSwarm
 
-本 skill 会**重启 Agent 自身所在的服务进程**（JiuwenSwarm app）。执行后 Agent 进程将被终止并重新拉起，当前会话会断开，新连接将连到新进程。
+此操作终止并重新拉起当前 Agent 所在服务。先说明当前连接会断开，确认目标是本次授权的 JiuwenSwarm app 进程；不要仅凭端口、进程名或历史 PID 结束其他服务。普通配置查询或故障诊断不自动授权重启。
 
-当用户要求「重启服务」「重启 app」「重启 Agent」「配置已更新需重启」或类似需求时，使用 `bash` 执行本 skill 下的脚本。
+使用本目录 [launch_delayed_restart.py](launch_delayed_restart.py)，它以 detached 方式启动 `jiuwenswarm.scripts.delayed_restart_app`，避免随被重启进程一起终止。使用已核实的 app PID：
 
-## 脚本位置
+Windows PowerShell：
 
-本 skill 目录下包含 `launch_delayed_restart.py`，以 detached 方式启动 `jiuwenswarm.scripts.delayed_restart_app`。
-
-## 执行命令
-
-使用 `bash` 工具执行（必须使用 launcher，否则重启时会连同脚本一起被终止）：
-
-```bash
-python %USERPROFILE%\.jiuwenswarm\agent\skills\delayed-restart-app\launch_delayed_restart.py --pid <当前 app 的 PID> --delay 5
+```powershell
+python "$env:USERPROFILE\.jiuwenswarm\agent\workspace\skills\delayed-restart-app\launch_delayed_restart.py" --pid <PID> --delay 5
 ```
 
-（Unix/macOS 使用：`python ~/.jiuwenswarm/agent/workspace/skills/delayed-restart-app/launch_delayed_restart.py --pid <PID> --delay 5`）
+Unix/macOS：
 
-- `--pid`：必填，当前 JiuwenSwarm app 进程的 PID（执行前需先获取，如从 config 或通过 `tasklist`/`pgrep` 等命令）
-- `--delay 5`：延迟 5 秒后重启（可改为 3、10 等）
+```bash
+python ~/.jiuwenswarm/agent/workspace/skills/delayed-restart-app/launch_delayed_restart.py --pid <PID> --delay 5
+```
 
-## When to Use
+技能实际安装位置不同则使用本目录的绝对路径。不要在 PowerShell 中使用 cmd 的 `%USERPROFILE%` 语法。延迟可按需求调整，默认 5 秒用于返回响应。
 
-- 用户明确要求「重启 app」「重启服务」「重启 Agent」
-- 配置已通过 config.set 等修改，用户询问或要求重启以生效
-- 用户反馈服务异常，建议重启
-
-## 注意事项
-
-- 重启后当前会话会断开，新连接将使用新进程
-- 默认 5 秒延迟，便于先返回响应再重启
+只在 launcher 成功后声明“已安排重启”。服务真正恢复需要后续连接/健康证据；当前连接断开不是恢复成功的证明。

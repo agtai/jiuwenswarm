@@ -1,61 +1,20 @@
 ---
 name: harmonyos-dev-suite
-description: Unified HarmonyOS development entry skill for ArkTS, ArkUI, DevEco CLI, build/run/debug, device logs, testing, multi-device adaptation, atomic services, native development, stability diagnosis, and optional HarmonyOS atomic Skill routing. Use when the user mentions HarmonyOS, OpenHarmony, HongMeng, 鸿蒙, ArkTS, ArkUI, DevEco, .ets, oh-package.json5, build-profile.json5, HAP/HAR/App, emulator, hilog, hdc, hvigor, or HarmonyOS app development.
+description: 为 HarmonyOS/OpenHarmony 项目提供 ArkTS、ArkUI、构建、设备调试和专项技能路由。
 ---
 
 # HarmonyOS Dev Suite
 
-Use this skill as the default HarmonyOS development entrypoint. Keep the suite lightweight: route the task, prefer `devecocli` for tool operations, load only the reference needed for the current task, and install optional atomic Skills only when the user explicitly needs deeper specialization.
+用于实际 HarmonyOS/OpenHarmony 开发任务；普通 app、日志、模拟器或测试请求不会仅凭关键词进入此技能。
 
-## Quick Triage
+从用户路径和 `build-profile.json5`、`oh-package.json5`、`module.json5`、`.ets` 等识别目标工程。仅解释问题可直接回答；构建、修改、设备操作前需确定目标，复用已有上下文而不重复询问。
 
-1. Detect project context before acting:
-   - HarmonyOS project markers: `build-profile.json5`, `oh-package.json5`, `module.json5`, `.ets`, `.hml`, `.har`, `.hap`.
-   - If no project is present, answer as guidance or ask for the target project path before running build/device commands.
-2. Prefer `devecocli` over direct `hvigor`, `hdc`, emulator, or DevEco internals when a command is needed.
-3. For documentation or API uncertainty, prefer the official HarmonyOS Developer Knowledge MCP when `searchDocuments` and `getDocumentsById` are available. Search first, then fetch only the specific full documents needed. Fall back to `devecocli docs search` or `devecocli docs read` when the remote MCP is unavailable.
-4. For broad HarmonyOS tasks, read `references/workflows.md` and choose the smallest workflow that fits.
-5. For a specialized area, read `references/atomic-skills-catalog.md` to identify an optional atomic Skill. Do not install optional atomic Skills silently.
+- 普通开发、构建或排障：按 [workflows.md](references/workflows.md) 选择相关段落。
+- 只有需要专项能力时，搜索 [原子技能目录](references/atomic-skills-catalog.md) 的相关项；不默认通读或安装全目录。
+- API 不确定时，优先使用可用的官方 `searchDocuments` / `getDocumentsById`；后者每次最多 10 篇，只取相关文档。缺失时用现有 `devecocli docs search/read`，并说明无法验证的部分。
 
-## Routing
+构建、设备、模拟器和日志命令优先使用 `devecocli`，具体参数先查当前 help。长时间跟踪日志、启动模拟器和安装应用须在任务范围内。缺少 CLI 时可继续源码分析和文档工作；改用直接 hvigor/hdc 的实际执行沿用用户已有授权，否则明确所需替代步骤。
 
-Use these routes:
+可选原子技能仅在用户请求安装该专项技能时安装。安装器为 [install_atomic_skill.py](scripts/install_atomic_skill.py)，其 `--source` 是已有技能源目录，`--target` 为实际技能根，`--skill` 为目录中的确切名称。源必须包含 SKILL.md，目标必须留在技能根内；不静默覆盖其他技能。安装后只在运行时不自动刷新时刷新索引。
 
-- ArkUI UI/component/page work: use the ArkUI workflow in `references/workflows.md`; consult atomic Skills such as `hmos-arkui-develop-skill`, `hmos-arkui-knowledge-retriever`, `component_basic_ui`, `component_container`, `kits_ui`, or `hmos-design-visual-mobile` when specialization is needed.
-- ArkTS language/API work: use the official knowledge MCP when available, otherwise use `devecocli docs search`; consult `hmos-arkts-knowledge-retriever`, `hmos-arkts-syntax-checker`, `hmos-arkts-deprecated-interface-checker`, `kits_arkts`, or `lang-syntax`.
-- Build, run, emulator, log, or device tasks: prefer `devecocli build`, `devecocli run`, `devecocli device`, `devecocli emulator`, and `devecocli log`; consult DevEco atomic Skills only when the user needs their detailed workflow.
-- Multi-device adaptation: route through `hmos-multidevice-scenario-entry`, then choose screen/window size, fold state, avoid areas, natural orientation, interaction methods, or hardware access.
-- Stability and fault diagnosis: classify crash/freeze/leak/API fault first, then route to the matching DFX atomic Skill from the catalog.
-- Testing: use `hmos-local-test` for local unit tests and `hmos-instrument-test` for device/emulator instrument tests.
-- Atomic service or application service integration: consult catalog entries for ASCF, Atomic Service, Account Kit, Push Kit, Scan Kit, Live View Kit, and related kits.
-- Native/C++ work: consult `deveco-native-flow` and its native/kits references when the task involves NDK, C/C++, NAPI, native build, or native crash analysis.
-
-## Optional Atomic Skills
-
-This suite indexes optional atomic Skills from the HarmonyOS Skills repository:
-
-- Human-readable catalog: `references/atomic-skills-catalog.md`
-- Machine-readable manifest: `assets/atomic-skills.json`
-- Local installer helper: `scripts/install_atomic_skill.py`
-
-Use the catalog when the suite needs a more specific specialist. Install only when the user asks for that specialist or when a task clearly requires repeated deep use of that atomic Skill.
-
-Example local install:
-
-```bash
-python jiuwenswarm/resources/agent/workspace/skills/harmonyos-dev-suite/scripts/install_atomic_skill.py \
-  --source /path/to/harmonyos-agent-skills \
-  --target ~/.jiuwenswarm/agent/workspace/skills \
-  --skill hmos-arkui-develop-skill
-```
-
-After installing an optional atomic Skill, reload JiuwenSwarm skills if the current runtime does not auto-refresh.
-
-## Safety
-
-- Do not modify or build a HarmonyOS project before identifying the target project path.
-- Do not start emulators, install apps, follow logs, or run long build commands without clear user intent.
-- Do not bypass `devecocli` with direct `hvigor`, `hdc`, or emulator commands unless `devecocli` is unavailable and the user accepts the fallback.
-- Do not install all atomic Skills by default. The suite is the default entrypoint; atomic Skills remain optional.
-- When using the official knowledge MCP, send focused search terms and retrieve full documents only when snippets are insufficient; `getDocumentsById` supports at most 10 documents per call.
-- When installing from a local source, validate that the source directory contains a `SKILL.md` and that the destination remains under the configured skills directory.
+交付代码/命令结果和验证范围；源码检查不能冒充设备运行、应用安装或稳定性验证。

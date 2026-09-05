@@ -1,6 +1,9 @@
 # Project Maintainer Artifact Structure
 
-Create the delivery artifact at the target repository root:
+For an authorized artifact creation or update, use the structure below at the
+repository root. It describes available surfaces and complete-coverage contracts;
+a scoped update creates/changes only the requested slices. Reading context does
+not require initialization, inventory, signing or whole-artifact maintenance.
 
 ```text
 .doc_project_maintainer/
@@ -114,7 +117,7 @@ Use byte size as the enforceable limit. Token count varies by language and conte
 - `changes/by-*/*.md`: 10 KB each
 - `decisions/*.md`: 6 KB each
 
-When a file exceeds budget, split by topic, time period, or submodule. Leave a short summary and links in the parent file.
+When an affected file exceeds budget, split it by topic, time period, or submodule and repair parent links. Report unrelated oversized files without expanding a bounded edit; a requested full structural cleanup handles the whole artifact.
 
 ## Naming
 

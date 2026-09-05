@@ -1,59 +1,9 @@
 # 安装与认证
 
-## 版本要求
+仅在当前 CLI 缺失、版本或认证失败时使用。工程 pyproject.toml 声明 gitcode-api>=1.2.20；实际方法以当前 CLI --help 为准，旧文档中的 1.2.14/1.2.16 不作为升级目标。
 
-本技能只覆盖 `gitcode-api` CLI `1.2.16` 及以上版本。使用前先检查：
+优先复用已安装 CLI 与环境；安装/升级属于任务需要且当前授权允许时，可用 pip/uv 安装工程要求的版本，或用 uvx 临时运行。不要为只读说明任务安装软件。
 
-```bash
-gitcode-api --version
-```
+认证使用 GITCODE_ACCESS_TOKEN，位置由当前 host 的配置/secret 管理确定，不把历史 ~/.jiuwenclaw/config/.env 路径当成本机事实。用户在本机填写凭据；不打印 token、不通过命令行参数传明文、不自动创建令牌或提高权限。
 
-若命令不存在或版本过低，提示用户安装或升级。
-
-## 安装
-
-使用 pip：
-
-```bash
-pip install -U gitcode-api
-```
-
-使用 uv 安装到当前环境：
-
-```bash
-uv pip install -U gitcode-api
-```
-
-不想改动当前环境时，可以用 `uvx` 临时运行：
-
-```bash
-uvx gitcode-api --version
-```
-
-## 认证
-
-推荐用户在 `~/.jiuwenclaw/config/.env` 中配置 `GITCODE_ACCESS_TOKEN` 环境变量
-
-若用户坚持临时设置环境变量（Windows环境时）：
-
-```bat
-set GITCODE_ACCESS_TOKEN=<your-token>
-```
-
-若用户坚持临时设置环境变量（MacOS / Linux）：
-
-```bash
-export GITCODE_ACCESS_TOKEN=<your-token>
-```
-
-也可以在单次命令中传入：
-
-```bash
-gitcode-api users me --api-key "$GITCODE_ACCESS_TOKEN"
-```
-
-不要在回答中暴露用户 token。需要用户提供 token 时，提醒其使用环境变量或宿主平台的 secret 输入能力。
-
-## CLI 限制
-
-CLI 不暴露 Python SDK 的 `decrypt` 或自定义 `http_client` 能力。如果用户需要密文 token 解密、自定义 CA、代理或特殊 httpx client，应改用 Python SDK，而不是继续用 CLI 硬绕。
+企业证书可用 GITCODE_CA_BUNDLE / REQUESTS_CA_BUNDLE 指向有效 CA 文件。CLI 不暴露 Python SDK 的 decrypt 或自定义 http_client；特殊 SDK 用法需明确该调用能力，不虚构 CLI 参数。缺少权限时报告实际失败，继续不依赖权限的工作。

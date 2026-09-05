@@ -1,6 +1,6 @@
 # Compliance Checklist
 
-> Read in **Stage 6** after the validator script passes. The script catches structural / frontmatter / section-presence / cross-file errors. This checklist catches **judgment calls the script cannot automate** — the responsibility-attribution tests that decide whether new fields belong in the spec, plus content-quality checks.
+> Use the applicable checks after the validator passes. Full-role checks apply to full specifications; script-only outputs use the relevant execution/semantic checks. A focused edit need not repeat unrelated design analysis. The template owns executable constraints; this file reviews judgment the validator cannot supply.
 
 ## What the validator script catches (do not duplicate here)
 
@@ -149,11 +149,11 @@ The `purpose` field is shown to the user during pre-flight checks when a depende
 Read the `description` and ask:
 
 - Does it state **WHEN** to use? ("Use when: ...")
-- Does it state **WHEN NOT** to use? ("DO NOT use for: ...")
-- Does it list 1–3 **trigger phrases** that the agent should recognize?
-- Is it 1–5 lines (system prompts hard-cap descriptions)?
+- Does its NOT statement address likely confusion without excluding intended tasks?
+- Does it identify the intended task without a synonym catalog or unrelated keyword triggers?
+- Is it concise and within the validator character limit?
 
-A description that omits "when not to use" causes the skill to over-trigger. A description without trigger phrases causes the skill to under-trigger.
+Use a NOT statement where it prevents likely confusion; evaluate nearby positive and negative requests rather than assuming more trigger words improve routing.
 
 ### B9. SwarmFlow barriers are justified
 
@@ -225,7 +225,7 @@ When publishing a batch of Swarm Skills as a coherent set:
 
 - [ ] Naming convention: all Swarm Skills end with `-swarm` suffix
 - [ ] Frontmatter `version` consistent across the batch
-- [ ] Description structure follows the same template ("Use when..." / "DO NOT use for..." / "Triggers...")
+- [ ] Descriptions identify distinct intended tasks and relevant exclusions without synonym lists
 - [ ] No two Swarm Skills overlap in trigger conditions (they would compete in the trigger system)
 - [ ] All Swarm Skills produce structurally similar Final Reports (tiered, schema-based) so users learn one mental model
 
@@ -233,9 +233,9 @@ Cross-Swarm-Skill consistency is a usability concern, not a per-skill compliance
 
 ---
 
-## Final sign-off ritual
+## Completion evidence
 
-Once all above checks pass, write a 2-line sign-off in the conversation (not in any file):
+Report the actual applicable checks and outcome concisely. The following fields are a useful full-spec example; omit inapplicable fields and never claim a check ran when it did not:
 
 ```
 Swarm Skill: <name>
@@ -246,4 +246,4 @@ Manual checks: PASS (all responsibility-attribution and content-quality tests)
 Justification: <1-line Stage 0 reason this team beats single-agent>
 ```
 
-This forces a final articulation of the Swarm Skill's reason to exist.
+For script-only output, identify the script and validation limits. Package creation/validation does not establish an executed business outcome.

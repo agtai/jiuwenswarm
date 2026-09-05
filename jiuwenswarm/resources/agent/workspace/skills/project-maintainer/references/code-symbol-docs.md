@@ -1,5 +1,12 @@
 # Code Symbol Documentation
 
+Read the naming/template sections for an authorized symbol-documentation task.
+Complete-coverage requirements apply only to the requested coverage boundary.
+Audit promotion, signing and per-symbol review apply only when recording or
+refreshing a requested health audit; context lookup and ordinary documentation
+updates do not activate them. Preserve existing audit metadata without granting
+new credit from an inventory or prose edit.
+
 Use code symbol docs when a task requires source-level understanding, class, function, or method health review, or post-change artifact sync for touched code.
 
 Code symbol docs are the executable-detail view of the project. They mirror source paths and symbol ownership so the artifact tree itself explains where a file, class, function, or method lives. File and directory names are documentation signals. Do not hide primary symbol identity behind generic `README.md` files.
@@ -179,7 +186,7 @@ audit:
 
 Use `scripts/audit_integrity.py` for audit status transitions and integrity signing. The `promote` command records HMAC-SHA256 integrity metadata, source and entry-doc hashes, the script hash, git state, and an optional agent call signature batch. If the signature batch is missing, `promote` records `audit.status: script_assessed` plus `missing_agent_call_signature` instead of writing `agent_audited`.
 
-Use `PROJECT_MAINTAINER_AUDIT_SIGNING_KEY` as the HMAC key environment variable when it is already provided. During Project Maintainer preflight, run `scripts/audit_integrity.py ensure-key --repo-root <repo-root>` to create or validate `.doc_project_maintainer/project/audit-signing-key.json`. If the environment variable is absent, `scripts/audit_integrity.py` loads that artifact-local key file during promote, verify, report, and audit visualization refreshes. Treat the file's purpose as artifact-local agent workflow integrity, not a tamper-proof security boundary; it constrains controlled agent workflows but does not stop a user or process with artifact write access from re-signing records.
+Use `PROJECT_MAINTAINER_AUDIT_SIGNING_KEY` as the HMAC key environment variable when it is already provided. Before a requested controlled audit write or trust refresh, run `scripts/audit_integrity.py ensure-key --repo-root <repo-root>` to create or validate `.doc_project_maintainer/project/audit-signing-key.json`. If the environment variable is absent, `scripts/audit_integrity.py` loads that artifact-local key file during promote, verify, report, and audit visualization refreshes. Treat the file's purpose as artifact-local agent workflow integrity, not a tamper-proof security boundary; it constrains controlled agent workflows but does not stop a user or process with artifact write access from re-signing records.
 
 ```text
 closure_eligible =
