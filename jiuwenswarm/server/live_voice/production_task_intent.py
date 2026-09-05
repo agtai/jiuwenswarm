@@ -717,7 +717,6 @@ class ProductionTaskIntentProposal:
             raise ValueError("INVALID_ORIGIN_DEFERRED_FIELDS")
         allowed_deferred = {
             "task.provide_input": ("responds_to_event_id",),
-            "task.create_successor": ("name", "instruction"),
         }
         if self.origin_deferred_fields and (
             self.origin_deferred_fields != allowed_deferred.get(self.operation)
@@ -1719,20 +1718,6 @@ class ProductionMultiTaskResolver:
             if task.decision_required_event_id is None:
                 raise ValueError("TASK_INPUT_STATE_CONFLICT")
             resolved["responds_to_event_id"] = task.decision_required_event_id
-        elif proposal.operation == "task.create_successor":
-            predecessor = task.name.strip()
-            if predecessor.casefold().endswith("build report"):
-                name = predecessor[: -len("build report")] + "revised report"
-            else:
-                name = f"Revised {predecessor}"
-            article_name = predecessor[0].lower() + predecessor[1:]
-            instruction = f"Create a revised {article_name}."
-            if (
-                len(name.encode("utf-8")) > 256
-                or len(instruction.encode("utf-8")) > 4_096
-            ):
-                raise ValueError("SUCCESSOR_SPEC_DERIVATION_FAILED")
-            resolved.update({"name": name, "instruction": instruction})
         else:
             raise ValueError("AUTHORITY_DERIVED_ARGUMENT_UNSUPPORTED")
         return _canonical_mapping(resolved)

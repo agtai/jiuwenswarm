@@ -70,6 +70,8 @@ export interface Message {
   /** 前端渲染身份，避免业务 id 重复或历史 prepend 导致 React key 抖动 */
   renderKey?: string;
   audioBase64?: string;
+  /** Runtime-only auto-read identity; duplicate final events cannot restart playback. */
+  ttsRequestedText?: string;
   audioMime?: string;
   mediaItems?: MediaItem[];
   fileItems?: FileDownloadItem[];

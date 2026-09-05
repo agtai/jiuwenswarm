@@ -7198,9 +7198,10 @@ class AgentServerProductCompositionRegistry:
     @staticmethod
     def _reserve_task_result_context_slot(
         context: FormalContextSnapshot,
+        slots: int = 1,
     ) -> tuple[FormalContextEntry, ...]:
         entries = context.entries
-        if len(entries) > 8:
+        if len(entries) > 8 or not 1 <= slots <= 8:
             raise FormalTaskViolation(
                 "TASK_RESULT_CONTEXT_INVALID",
                 "formal dialogue context cannot reserve a TaskResult slot",
@@ -7224,7 +7225,7 @@ class AgentServerProductCompositionRegistry:
         # Interrupted questions have no presented assistant answer. They are
         # valid one-entry groups, not broken pairs. Reserve the receipt/result
         # slot by evicting whole oldest groups, never fabricate or split a reply.
-        while sum(map(len, groups)) >= 8:
+        while sum(map(len, groups)) + slots > 8:
             groups.pop(0)
         return tuple(entry for group in groups for entry in group)
 
@@ -7482,6 +7483,7 @@ class AgentServerProductCompositionRegistry:
         scope: ScopeRef,
         task_result: Mapping[str, object],
         artifact_snapshots: Sequence[Mapping[str, object]] = (),
+        result_text_offset: int | None = None,
     ) -> tuple[ContextRef, FormalContextEntry]:
         (
             result_text,
@@ -7547,6 +7549,18 @@ class AgentServerProductCompositionRegistry:
             "artifacts": [artifact.to_dict() for artifact in bounded_artifacts],
             "artifact_snapshots": normalized_snapshots,
         }
+        if result_text_offset is not None:
+            if not 0 <= result_text_offset < len(result_text):
+                raise FormalTaskViolation("TASK_RESULT_CONTEXT_INVALID", "invalid result page offset", ErrorCode.PROTOCOL_VIOLATION)
+            payload["result_text_range"] = {
+                "start": result_text_offset, "end": result_text_offset, "total": len(result_text),
+            }
+            payload["result_text_sha256"] = hashlib.sha256(result_text.encode("utf-8")).hexdigest()
+            payload["instruction_policy"] += (
+                " Read all result_text_range pages together before judging whether a fact is absent. "
+                "Only the complete contiguous range supports claims about the whole result. "
+                "Artifact snapshot statuses describe access limits, not absent facts in unread files."
+            )
         fixed = json.dumps(
             payload,
             ensure_ascii=False,
@@ -7574,7 +7588,7 @@ class AgentServerProductCompositionRegistry:
                 "available task result context exceeds its closed bound",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
-        encoded = result_text.encode("utf-8")
+        encoded = result_text[result_text_offset or 0:].encode("utf-8")
         bounded_source = encoded[: min(_TASK_RESULT_TEXT_MAX_BYTES, remaining)].decode(
             "utf-8", errors="ignore"
         )
@@ -7583,6 +7597,8 @@ class AgentServerProductCompositionRegistry:
         while low <= high:
             midpoint = (low + high) // 2
             payload["result_text"] = bounded_source[:midpoint]
+            if result_text_offset is not None:
+                payload["result_text_range"]["end"] = result_text_offset + midpoint
             candidate = json.dumps(
                 payload,
                 ensure_ascii=False,
@@ -7595,13 +7611,15 @@ class AgentServerProductCompositionRegistry:
             else:
                 high = midpoint - 1
         payload["result_text"] = bounded_source[:high]
+        if result_text_offset is not None:
+            payload["result_text_range"]["end"] = result_text_offset + high
         content = json.dumps(
             payload,
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
         )
-        if not str(payload["result_text"]).strip():
+        if not payload["result_text"]:
             raise FormalTaskViolation(
                 "TASK_RESULT_CONTEXT_INVALID",
                 "available task result has no bounded Agent-readable content",
@@ -7629,6 +7647,34 @@ class AgentServerProductCompositionRegistry:
             }
         )
         return ref, FormalContextEntry(ref=ref, content=content)
+
+    @classmethod
+    def _task_result_context_entries(
+        cls, *, scope: ScopeRef, task_result: Mapping[str, object],
+        artifact_snapshots: Sequence[Mapping[str, object]] = (),
+    ) -> tuple[FormalContextEntry, ...]:
+        """Deliver the complete stored result in bounded pages, or fail explicitly.
+
+        The source bound matches the executor's final result contract. Eight
+        context slots also bound JSON escaping overhead; no prefix is passed off
+        as a complete result. Native's single-entry adapter remains separate.
+        """
+        result_text, *_ = cls._validated_task_result_context_parts(task_result)
+        if len(result_text) > 32_768 or len(result_text.encode("utf-8")) > 131_072:
+            raise FormalTaskViolation("TASK_RESULT_CONTEXT_TOO_LARGE", "complete task result exceeds the supported source bound", ErrorCode.UNAVAILABLE)
+        entries: list[FormalContextEntry] = []
+        offset = 0
+        while offset < len(result_text):
+            if len(entries) == 8:
+                raise FormalTaskViolation("TASK_RESULT_CONTEXT_TOO_LARGE", "complete task result exceeds the context page bound", ErrorCode.UNAVAILABLE)
+            _, entry = cls._bounded_untrusted_result_context(
+                scope=scope, task_result=task_result,
+                artifact_snapshots=artifact_snapshots if not entries else (),
+                result_text_offset=offset,
+            )
+            offset = json.loads(entry.content)["result_text_range"]["end"]
+            entries.append(entry)
+        return tuple(entries)
 
     async def _present_unified_text(
         self,
@@ -8416,35 +8462,67 @@ class AgentServerProductCompositionRegistry:
                     task_id=business_task_id, native_authority=native_p3_authority,
                     adjustment_id=adjustment_id,
                 )
+                receipt["task_control_snapshot"] = facts
+                if not native_result_only and decision.proposal.operation == "task.status":
+                    # The Task may advance between the query and this fresh read.
+                    # Do not give the Agent two competing status authorities.
+                    receipt["formal_task_result"] = None
+                    l0_task_id, l0_attempt_id = facts["task_id"], facts["attempt_id"]
+                if adjustment_id is not None and task_result_payload.get("attempt_id") != facts["attempt_id"]:
+                    raise FormalTaskViolation("SEMANTIC_CONTROL_RESULT_INVALID", "adjustment receipt is not exact", ErrorCode.RESULT_UNKNOWN)
                 subject = task_subject(facts, chinese=chinese)
-                if receipt["confirmation_required"]:
+                if native_result_only and receipt["confirmation_required"]:
                     return await finish_text(
                         f"尚未修改{subject}。请确认是否按刚才的要求执行修改？" if chinese
                         else f"{subject} has not been modified. Confirm the proposed adjustment?"
                     )
-                if payload.get("status") != TaskIntentDisposition.DISPATCHED.value:
+                if native_result_only and payload.get("status") != TaskIntentDisposition.DISPATCHED.value:
                     return await finish_text(
                         f"{subject}的这次操作没有成功回执，目前不能确认是否生效。" if chinese
                         else f"There is no successful receipt for this operation on {subject}; its effects are unconfirmed."
                     )
-                if decision.proposal.operation == "task.adjust":
+                if native_result_only and decision.proposal.operation == "task.adjust":
                     if task_result_payload.get("attempt_id") != facts["attempt_id"]:
                         raise FormalTaskViolation("SEMANTIC_CONTROL_RESULT_INVALID", "adjustment receipt is not exact", ErrorCode.RESULT_UNKNOWN)
                     return await finish_text(subject + ("：" if chinese else ": ") + adjustment_status_text(
                         facts["requested_adjustment_state"], chinese=chinese,
                     ))
-                return await finish_text(task_status_text(facts, chinese=chinese))
+                if native_result_only:
+                    return await finish_text(task_status_text(facts, chinese=chinese))
+            entries: tuple[FormalContextEntry, ...] = ()
             if (
                 formal.ok
                 and decision.proposal.operation == "task.result"
                 and isinstance(task_result_payload, Mapping)
             ):
                 availability = task_result_payload.get("availability")
-                if availability != "available":
+                if not native_result_only and availability != "available":
+                    if business_task_id is None:
+                        raise FormalTaskViolation("TASK_RESULT_CONTEXT_INVALID", "exact result target unavailable", ErrorCode.RESULT_UNKNOWN)
+                    receipt["task_control_snapshot"] = await self._p3_composition.read_task_control_snapshot(
+                        bearer_token=auth_token, session_id=retained.binding.session_id,
+                        task_id=business_task_id,
+                    )
+                    # Unavailable result replies carry no attempt identity. A
+                    # later completion/retry must not inherit that old absence.
+                    receipt["result_observation"] = {
+                        "availability": availability,
+                        "reason": task_result_payload.get("reason"),
+                        "attempt_id": None,
+                        "observed_before_current_snapshot": True,
+                    }
+                    receipt["formal_task_result"] = None
+                if native_result_only and availability != "available":
                     # No Agent/tool access for absent results.
                     return await finish_text(
                         f"Task result: {availability or 'unavailable'}."
                     )
+            if (
+                formal.ok
+                and decision.proposal.operation == "task.result"
+                and isinstance(task_result_payload, Mapping)
+                and task_result_payload.get("availability") == "available"
+            ):
                 task_result = task_result_payload.get("task_result")
                 if not isinstance(task_result, Mapping) or business_task_id is None:
                     raise FormalTaskViolation(
@@ -8464,11 +8542,15 @@ class AgentServerProductCompositionRegistry:
                     task=current,
                     task_result=task_result,
                 )
-                ref, entry = self._bounded_untrusted_result_context(
-                    scope=commit.scope,
-                    task_result=task_result,
-                    artifact_snapshots=artifacts,
-                )
+                if native_result_only:
+                    _, entry = self._bounded_untrusted_result_context(
+                        scope=commit.scope, task_result=task_result, artifact_snapshots=artifacts,
+                    )
+                    entries = (entry,)
+                else:
+                    entries = self._task_result_context_entries(
+                        scope=commit.scope, task_result=task_result, artifact_snapshots=artifacts,
+                    )
                 selected_result = True
             else:
                 content = canonical_json_bytes(receipt).decode("utf-8")
@@ -8497,8 +8579,9 @@ class AgentServerProductCompositionRegistry:
                     }
                 )
                 entry = FormalContextEntry(ref, content)
-            dialogue = self._reserve_task_result_context_slot(context)
-            agent_context = FormalContextSnapshot(commit.scope, (*dialogue, entry))
+                entries = (entry,)
+            dialogue = self._reserve_task_result_context_slot(context, len(entries))
+            agent_context = FormalContextSnapshot(commit.scope, (*dialogue, *entries))
             agent_commit = TurnCommit.from_dict(
                 {
                     **commit.to_dict(),

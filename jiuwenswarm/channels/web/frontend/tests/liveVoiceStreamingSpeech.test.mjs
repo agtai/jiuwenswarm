@@ -72,7 +72,7 @@ test('handles an English sentence before lookahead without splitting its decimal
 
   assert.deepEqual(
     result.emissions.map(item => item.text),
-    ['Version 3 点 1 4 1 5 9 is stable.']
+    ['Version 3.14159 is stable.']
   );
 });
 
@@ -85,7 +85,7 @@ test('an unclosed code fence blocks early speech until it closes', () => {
   assert.equal(result.outcome, 'emitted');
   assert.deepEqual(
     result.emissions.map(item => item.text),
-    ['介绍已经完成。代码块已省略。']
+    ['介绍已经完成。```ts\nconst value = 1;\n```。']
   );
 });
 
@@ -101,7 +101,7 @@ test('a stream rewrite before any emission falls back to complete final speech',
   assert.equal(result.outcome, 'finalized');
   assert.deepEqual(
     result.emissions.map(item => item.text),
-    ['最终改写内容。最后一句']
+    ['最终改写内容。最后一句。']
   );
 });
 
@@ -130,8 +130,8 @@ test('an exact-prefix final emits only the unspoken suffix', () => {
 
   assert.equal(result.outcome, 'finalized');
   assert.equal(spokenPrefix, '第一句已经完成。');
-  assert.equal(spokenTail, '第二句最终完成');
-  assert.equal(spokenPrefix + spokenTail, '第一句已经完成。第二句最终完成');
+  assert.equal(spokenTail, '第二句最终完成。');
+  assert.equal(spokenPrefix + spokenTail, '第一句已经完成。第二句最终完成。');
   assert.deepEqual(
     result.emissions.map(item => item.key),
     ['assistant-1:final-tail:1']
@@ -228,7 +228,7 @@ test('a message change before emission uses the new message only at final', () =
   assert.equal(result.outcome, 'finalized');
   assert.deepEqual(
     result.emissions.map(item => item.text),
-    ['新消息的最终回答']
+    ['新消息的最终回答。']
   );
 });
 

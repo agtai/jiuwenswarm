@@ -325,9 +325,11 @@ async def test_spoken_presentation_is_generic_and_does_not_remove_task_authority
     assert prompt["presentation_contract"]["medium"] == "spoken_conversation"
     from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import FORMAL_VOICE_PRESENTATION_INSTRUCTIONS
     assert prompt["presentation_contract"]["required_behavior"] == "Follow the formal spoken-conversation system instructions."
-    assert "unless the user explicitly requests a detailed spoken" in FORMAL_VOICE_PRESENTATION_INSTRUCTIONS
-    assert "200 Unicode characters" in FORMAL_VOICE_PRESENTATION_INSTRUCTIONS
-    assert "Requested saved artifacts remain complete" in FORMAL_VOICE_PRESENTATION_INSTRUCTIONS
+    assert "Adapt explanation and detail to the current user's request" in FORMAL_VOICE_PRESENTATION_INSTRUCTIONS
+    assert "200 Unicode characters" not in FORMAL_VOICE_PRESENTATION_INSTRUCTIONS
+    assert "simulation clock" not in FORMAL_VOICE_PRESENTATION_INSTRUCTIONS
+    assert "work backwards" not in FORMAL_VOICE_PRESENTATION_INSTRUCTIONS
+    assert "offer a concrete complete objective" not in FORMAL_VOICE_PRESENTATION_INSTRUCTIONS
     assert (
         prompt["committed_turn"]["text"]
         == "Analyse the project material and explain the essential findings."
@@ -800,8 +802,118 @@ async def present_next(s, sequence):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["status", "status-advanced", "unavailable-result", "unavailable-result-advanced", "complete-result"])
+async def test_task_answers_use_current_facts_and_complete_results_without_tools(semantic_runtime, monkeypatch, query):
+    s = semantic_runtime
+    core = s.harness.composition._core
+    task_id = (await control_with_confirmation(s, "answer-facts", "task.create", {
+        "name": "设备核查", "instruction": "整理设备核查结果，不采购。",
+    }))["task_id"]
+    text = "材料。" * 10_000 + "TAIL_FACT: replacement is unnecessary."
+    if query == "complete-result" or query.endswith("-advanced"):
+        from jiuwenswarm.server.live_voice.formal_task_models import TerminalOutcome, TaskResultArtifact
+        s.harness.executor.dispatch_outcome = TerminalOutcome.COMPLETED
+        dispatch = s.harness.executor.dispatch
+
+        async def completed_dispatch(item):
+            delivery = await dispatch(item)
+            return replace(delivery, observations=tuple(
+                replace(observation, result_text=text, result_artifacts=(
+                    TaskResultArtifact("equipment.md", hashlib.sha256(text.encode()).hexdigest()),
+                )) if observation.attempt_outcome is TerminalOutcome.COMPLETED else observation
+                for observation in delivery.observations
+            ))
+
+        monkeypatch.setattr(s.harness.executor, "dispatch", completed_dispatch)
+        if query == "complete-result":
+            await core.drain_outbox()
+        else:
+            read = s.harness.composition.read_task_control_snapshot
+            async def advance_then_read(**kwargs):
+                await core.drain_outbox()
+                return await read(**kwargs)
+            monkeypatch.setattr(s.harness.composition, "read_task_control_snapshot", advance_then_read)
+    if query == "unavailable-result":
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        item = core.store.claim_outbox("answer-facts-defer", observed_at=now)
+        assert item is not None
+        core.store.defer_admission(item, reason="EXECUTOR_PROJECT_BUSY", policy=core._admission_policy, observed_at=now)
+    counts = core.store.counts()
+    before = core.store.get_task(task_id, _scope())
+    assert (await s.registry.handle_p2_activate(params=p2_params(), request_id="answer-facts-active", session_id="session-1", channel_id="web")).ok
+    sequence = 0
+    if query == 'complete-result':
+        s.program = lambda data: model_output(data)
+        for i in range(4):
+            dialogue = await s.registry.handle_unified_submit(
+                params=voice_final(f"answer-history-{i}", f"历史对话 {i}"),
+                request_id=f"answer-history-{i}", session_id="session-1", channel_id="web",
+            )
+            assert dialogue.ok, dialogue.payload
+            sequence = await present_next(s, sequence)
+    calls_before = s.manager.agent.calls
+    operation = "task.status" if query.startswith("status") else "task.result"
+    s.program = lambda data: model_output(data, operation=operation, arguments={"query_kind": operation.split('.')[1]}, target=task_id)
+    params = voice_final("answer-facts-query", "设备核查为什么还没开始？" if query.startswith("status") else "核查结果是否需要更换设备？")
+    submitted = await s.registry.handle_unified_submit(params=params, request_id="answer-facts-query", session_id="session-1", channel_id="web")
+    assert submitted.ok, submitted.payload
+    assert s.manager.agent.calls == calls_before + 1
+    execution = s.manager.agent.executions[-1]
+    assert not execution.allow_tools
+    assert execution.commit.text == params['text']
+    result_entries = [entry for entry in execution.context.entries if entry.ref.source == 'live_voice.task_result']
+    entries = [json.loads(entry.content) for entry in (result_entries or execution.context.entries)]
+    if query == "complete-result":
+        assert len(entries) > 1
+        history_entries = [entry for entry in execution.context.entries if entry.ref.source != 'live_voice.task_result']
+        pairs = (8 - len(entries)) // 2
+        assert [entry.content for entry in history_entries] == [
+            content for i in range(4 - pairs, 4) for content in (f"历史对话 {i}", "formal result")
+        ]
+        assert len(execution.context.entries) <= 8
+        assert ''.join(entry['result_text'] for entry in entries) == text
+        assert entries[-1]['result_text_range']['end'] == len(text)
+        assert all(len(entry.content.encode()) <= 32_768 for entry in execution.context.entries)
+        contract = json.loads(execution.prompt_content())['answer_contract']
+        assert 'unread file' in contract['unsupported_fact_behavior']
+    elif query.startswith("status"):
+        facts = entries[-1]['task_control_snapshot']
+        assert entries[-1]['formal_task_result'] is None
+        assert facts['task_id'] == task_id
+        assert facts['state'] == ('terminal' if query.endswith('-advanced') else 'accepted')
+        if query.endswith('-advanced'):
+            assert facts['execution_event']['event_type'] == 'task.terminal'
+        else:
+            assert facts['admission']['reason'] is None
+    else:
+        receipt = entries[-1]
+        assert receipt['formal_task_result'] is None
+        assert receipt['result_observation']['availability'] != 'available'
+        assert receipt['result_observation']['attempt_id'] is None
+        assert receipt['result_observation']['observed_before_current_snapshot'] is True
+        facts = receipt['task_control_snapshot']
+        assert facts['state'] == ('terminal' if query.endswith('-advanced') else 'accepted')
+        if query == 'unavailable-result':
+            assert facts['admission']['reason'] == 'EXECUTOR_PROJECT_BUSY'
+        else:
+            assert facts['outcome'] == 'completed'
+            assert 'Do not present its availability or reason as current' in json.loads(execution.prompt_content())['answer_contract']['required_behavior']
+        assert all(entry.ref.source != 'live_voice.task_result' for entry in execution.context.entries)
+    await present_next(s, sequence)
+    replay = await s.registry.handle_unified_submit(params=params, request_id="answer-facts-replay", session_id="session-1", channel_id="web")
+    assert replay.payload["result"] == submitted.payload["result"] and s.manager.agent.calls == calls_before + 1
+    if query.endswith('-advanced'):
+        assert core.store.get_task(task_id, _scope()).outcome.value == 'completed'
+        assert len(s.harness.executor.dispatches) == 1
+    else:
+        assert core.store.get_task(task_id, _scope()) == before
+        assert core.store.counts() == counts
+    assert not s.harness.executor.adjustments and not s.harness.executor.cancels
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("settled_before_receipt", ["pending", "applied", "rejected"])
-async def test_direct_adjustment_and_queries_report_real_application_without_agent_claims(semantic_runtime, monkeypatch, settled_before_receipt):
+async def test_direct_adjustment_and_queries_give_one_toolless_agent_current_application_facts(semantic_runtime, monkeypatch, settled_before_receipt):
     s = semantic_runtime
     a = (await control_with_confirmation(s, "truth-a", "task.create", {
         "name": "设备核查", "instruction": "整理设备核查报告，不采购。",
@@ -812,12 +924,13 @@ async def test_direct_adjustment_and_queries_report_real_application_without_age
     core = s.harness.composition._core
     await core.drain_outbox()
     b_before = core.store.get_task(b, _scope())
-    spoken = []
-    original = s.registry._present_unified_text
-    async def present(**kwargs):
-        spoken.append(kwargs["text"])
-        return await original(**kwargs)
-    monkeypatch.setattr(s.registry, "_present_unified_text", present)
+    def receipt_snapshot():
+        execution = s.manager.agent.executions[-1]
+        assert execution.allow_tools is False
+        assert execution.commit.text
+        receipt = json.loads(execution.context.entries[-1].content)
+        assert receipt['task_id'] == a
+        return receipt['task_control_snapshot']
     if settled_before_receipt != "pending":
         if settled_before_receipt == "rejected":
             from jiuwenswarm.server.live_voice.formal_task_models import TaskAdjustmentState
@@ -839,28 +952,30 @@ async def test_direct_adjustment_and_queries_report_real_application_without_age
     params = voice_final("truth-adjust", adjustment)
     done = await s.registry.handle_unified_submit(params=params, request_id="truth-adjust", session_id="session-1", channel_id="web")
     assert done.ok, done.payload
-    state_text = {"applied": "最近一次修改已应用。", "rejected": "最近一次修改未能应用。",
-                  "pending": "修改要求已提交，尚未确认应用。"}[settled_before_receipt]
-    assert spoken == ["“设备核查”：" + state_text]
+    assert s.manager.agent.calls == 1
+    assert receipt_snapshot()['requested_adjustment_state'] == settled_before_receipt
+    assert receipt_snapshot()['requested_adjustment_reason'] == ('CONTROLLED_REJECTION' if settled_before_receipt == 'rejected' else None)
     assert not await s.registry._semantic_continuity.pending(_scope())
     replay = await s.registry.handle_unified_submit(params=params, request_id="truth-adjust", session_id="session-1", channel_id="web")
-    assert replay.payload == done.payload and len(spoken) == 1
+    assert replay.payload == done.payload and s.manager.agent.calls == 1
     seq = await present_next(s, 0)
     snapshot = await s.harness.composition.read_task_control_snapshot(bearer_token=TOKEN, session_id="session-1", task_id=a)
     assert snapshot["adjustment_state"] == settled_before_receipt
+    assert snapshot["adjustment_reason"] == ("CONTROLLED_REJECTION" if settled_before_receipt == "rejected" else None)
     s.program = lambda data: model_output(data, operation="task.status", target=a, arguments={"query_kind": "status"})
     pending = await s.registry.handle_unified_submit(params=voice_final("truth-pending", "设备核查已经按要求改了吗？"), request_id="truth-pending", session_id="session-1", channel_id="web")
     assert pending.ok, pending.payload
-    assert spoken[-1] == "“设备核查”正在执行。" + state_text
+    assert s.manager.agent.calls == 2
+    assert receipt_snapshot()["adjustment_state"] == settled_before_receipt
     seq = await present_next(s, seq)
     await core.drain_outbox()
     await core.drain_inflight_adjustments()
     assert len(s.harness.executor.adjustments) == 1
     applied = await s.registry.handle_unified_submit(params=voice_final("truth-applied", "刚才的修改现在生效了吗？"), request_id="truth-applied", session_id="session-1", channel_id="web")
     assert applied.ok, applied.payload
-    assert spoken[-1] == "“设备核查”正在执行。" + ("最近一次修改未能应用。" if settled_before_receipt == "rejected" else "最近一次修改已应用。")
+    assert receipt_snapshot()["adjustment_state"] == ("rejected" if settled_before_receipt == "rejected" else "applied")
     assert core.store.get_task(b, _scope()) == b_before
-    assert s.manager.agent.calls == 0
+    assert s.manager.agent.calls == 3
     assert not s.harness.executor.cancels
     assert len([e for e in core.store.events(a, _scope()) if e.event_type == "task.adjust_requested"]) == 1
 

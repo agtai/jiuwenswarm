@@ -6,6 +6,8 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import i18n from '../i18n';
+import { onTtsStop, stopAllTts } from '../utils/tts';
+import { TtsPlaybackQueue } from '../utils/ttsPlaybackQueue';
 import {
   isSuccessfulSpeechTailNoSpeech,
   shouldContinueSpeechCaptureAfterNaturalEnd,
@@ -448,7 +450,8 @@ export function useSpeechSynthesis(
 
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const playbackRef = useRef(new TtsPlaybackQueue());
+  const generationRef = useRef(0);
 
   // 检查浏览器支持
   const isSupported =
@@ -478,51 +481,62 @@ export function useSpeechSynthesis(
         return;
       }
 
-      // 停止当前播放
-      window.speechSynthesis.cancel();
-
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = language;
-      utterance.rate = rate;
-      utterance.pitch = pitch;
-      utterance.volume = volume;
-
-      // 选择合适的中文语音
-      const chineseVoice = voices.find(
-        (v) => v.lang.includes('zh') || v.lang.includes('CN')
-      );
-      if (chineseVoice) {
-        utterance.voice = chineseVoice;
-      }
-
-      utterance.onstart = () => {
-        setIsSpeaking(true);
-        onStart?.();
-      };
-
-      utterance.onend = () => {
+      stopAllTts();
+      const generation = ++generationRef.current;
+      let started = false;
+      void playbackRef.current.play(text, (chunk, signal) => new Promise<boolean>((resolve) => {
+        const utterance = new SpeechSynthesisUtterance(chunk);
+        utterance.lang = language;
+        utterance.rate = rate;
+        utterance.pitch = pitch;
+        utterance.volume = volume;
+        const chineseVoice = voices.find(v => v.lang.includes('zh') || v.lang.includes('CN'));
+        if (chineseVoice) utterance.voice = chineseVoice;
+        let settled = false;
+        const finish = (completed: boolean) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener('abort', abort);
+          utterance.onstart = null;
+          utterance.onend = null;
+          utterance.onerror = null;
+          resolve(completed);
+        };
+        const abort = () => {
+          finish(false);
+          window.speechSynthesis.cancel();
+        };
+        signal.addEventListener('abort', abort, { once: true });
+        utterance.onstart = () => {
+          if (!started) {
+            started = true;
+            setIsSpeaking(true);
+            onStart?.();
+          }
+        };
+        utterance.onend = () => finish(true);
+        utterance.onerror = event => {
+          finish(false);
+          onError?.(i18n.t('speech.errors.synthesisGeneric', { error: event.error }));
+        };
+        window.speechSynthesis.speak(utterance);
+      })).then(completed => {
+        if (generation !== generationRef.current) return;
         setIsSpeaking(false);
-        onEnd?.();
-      };
-
-      utterance.onerror = (event) => {
-        console.error('Speech synthesis error:', event);
-        setIsSpeaking(false);
-        onError?.(i18n.t('speech.errors.synthesisGeneric', { error: event.error }));
-      };
-
-      utteranceRef.current = utterance;
-      window.speechSynthesis.speak(utterance);
+        if (completed) onEnd?.();
+      });
     },
     [isSupported, language, rate, pitch, volume, voices, onStart, onEnd, onError]
   );
 
   const stop = useCallback(() => {
-    if (isSupported) {
-      window.speechSynthesis.cancel();
-      setIsSpeaking(false);
-    }
+    generationRef.current += 1;
+    playbackRef.current.stop();
+    if (isSupported) window.speechSynthesis.cancel();
+    setIsSpeaking(false);
   }, [isSupported]);
+
+  useEffect(() => onTtsStop(stop), [stop]);
 
   const pause = useCallback(() => {
     if (isSupported) {
@@ -536,13 +550,10 @@ export function useSpeechSynthesis(
     }
   }, [isSupported]);
 
-  // 组件卸载时清理
-  useEffect(() => {
-    return () => {
-      if (isSupported) {
-        window.speechSynthesis.cancel();
-      }
-    };
+  useEffect(() => () => {
+    generationRef.current += 1;
+    playbackRef.current.stop();
+    if (isSupported) window.speechSynthesis.cancel();
   }, [isSupported]);
 
   return {

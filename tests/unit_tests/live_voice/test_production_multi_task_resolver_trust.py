@@ -966,7 +966,15 @@ def test_natural_input_binds_current_decision_identity_after_exact_reread() -> N
     _assert_no_effects(result, authority)
 
 
-def test_natural_successor_spec_is_derived_from_exact_predecessor_fact() -> None:
+def test_successor_rejects_deferred_business_spec() -> None:
+    with pytest.raises(ValueError, match="INVALID_ORIGIN_DEFERRED_FIELD_BINDING"):
+        ProductionTaskIntentProposal(
+            "task.create_successor", "task-a", {}, 1.0, True,
+            target_kind="task_id", origin_deferred_fields=("name", "instruction"),
+        )
+
+
+def test_successor_spec_remains_explicit_with_exact_predecessor_fact() -> None:
     digest = "b" * 64
     authority = RecordingAuthority(
         _fact(
@@ -985,15 +993,16 @@ def test_natural_successor_spec_is_derived_from_exact_predecessor_fact() -> None
     proposal = ProductionTaskIntentProposal(
         "task.create_successor",
         "task-a",
-        {},
+        {"name": "Equipment review", "instruction": "Review the equipment without purchasing."},
         1.0,
         True,
         target_kind="task_id",
         extractions=(
             ProductionFieldExtraction("operation", 7, 16),
             ProductionFieldExtraction("target", 21, len(text)),
+            ProductionFieldExtraction("arguments.name", 0, len(text)),
+            ProductionFieldExtraction("arguments.instruction", 0, len(text)),
         ),
-        origin_deferred_fields=("name", "instruction"),
     )
     request = _request(proposal, origin, text=text)
 
@@ -1002,16 +1011,16 @@ def test_natural_successor_spec_is_derived_from_exact_predecessor_fact() -> None
     assert result.outcome is ProductionTaskPolicyOutcome.PROPOSED
     assert result.confirmation == "required"
     assert dict(result.arguments) == {
-        "name": "Synthetic revised report",
-        "instruction": "Create a revised synthetic build report.",
+        "name": "Equipment review",
+        "instruction": "Review the equipment without purchasing.",
     }
     assert result.predecessor_result_digest == digest
     assert result.confirmation_binding is not None
     assert (
         result.confirmation_binding.arguments_sha256
         == hashlib.sha256(
-            b'{"instruction":"Create a revised synthetic build report.",'
-            b'"name":"Synthetic revised report"}'
+            b'{"instruction":"Review the equipment without purchasing.",'
+            b'"name":"Equipment review"}'
         ).hexdigest()
     )
     assert confirmation.calls == []

@@ -3,6 +3,7 @@
  */
 
 import { webRequest } from '../services/webClient';
+import { TtsPlaybackQueue } from './ttsPlaybackQueue';
 
 export {
   makeLiveVoiceTextSpeakable,
@@ -21,8 +22,17 @@ interface TtsResponse {
 const TTS_STOP_EVENT = 'jiuwen-tts-stop';
 // 全局音频实例，用于打断控制
 let globalAudio: HTMLAudioElement | null = null;
+let settleAudio: (() => void) | null = null;
+const playbackQueue = new TtsPlaybackQueue();
 
 export function stopGlobalAudio(): void {
+  playbackQueue.stop();
+  clearCurrentAudio();
+}
+
+function clearCurrentAudio(): void {
+  settleAudio?.();
+  settleAudio = null;
   if (globalAudio) {
     globalAudio.pause();
     globalAudio.currentTime = 0;
@@ -62,7 +72,7 @@ export async function fetchTtsAudio(
   }
 
   try {
-    const params: Record<string, unknown> = { text: trimmed };
+    const params: Record<string, unknown> = { text };
     if (sessionId) {
       params.session_id = sessionId;
     }
@@ -74,6 +84,42 @@ export async function fetchTtsAudio(
     console.warn('TTS 请求失败:', error);
     return null;
   }
+}
+
+/** Synthesize only the next chunk after the current audio ends. */
+export async function playTtsText(
+  text: string, sessionId?: string, isCurrent: () => boolean = () => true
+): Promise<boolean> {
+  stopAllTts();
+  return playbackQueue.play(text, async (chunk, signal) => {
+    if (!chunk.trim()) return true;
+    const response = await fetchTtsAudio(chunk, sessionId, signal);
+    if (signal.aborted || !isCurrent() || !response?.success || !response.audio_base64) return false;
+    return new Promise<boolean>((resolve) => {
+      const audio = new Audio(`data:${response.audio_mime || 'audio/mpeg'};base64,${response.audio_base64}`);
+      let settled = false;
+      const finish = (completed: boolean) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', abort);
+        audio.onended = null;
+        audio.onerror = null;
+        audio.pause();
+        if (globalAudio === audio) {
+          globalAudio = null;
+          settleAudio = null;
+        }
+        resolve(completed);
+      };
+      const abort = () => finish(false);
+      globalAudio = audio;
+      settleAudio = abort;
+      signal.addEventListener('abort', abort, { once: true });
+      audio.onended = () => finish(true);
+      audio.onerror = abort;
+      void audio.play().catch(abort);
+    });
+  }, isCurrent);
 }
 
 export async function playAudioBase64(

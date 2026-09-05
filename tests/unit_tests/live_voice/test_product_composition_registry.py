@@ -8400,6 +8400,37 @@ async def test_unified_stale_bindings_and_wrong_voice_claim_have_zero_effect(
     await registry.stop()
 
 
+@pytest.mark.parametrize("text", ["A" * 30_000 + "TAIL_FACT", "中" * 10_000 + "TAIL_FACT", chr(1) * 32_768], ids=["ascii", "unicode", "json-escapes"])
+def test_selected_result_pages_preserve_the_complete_result_with_closed_bounds(text: str) -> None:
+    entries = AgentServerProductCompositionRegistry._task_result_context_entries(
+        scope=SCOPE,
+        task_result={
+            "task_id": "task-current-1", "attempt_id": "attempt-current-1",
+            "source_event_id": "event-current-1", "result_text": text, "artifacts": [],
+        },
+    )
+    assert 1 < len(entries) <= 8
+    assert all(len(entry.content.encode("utf-8")) <= 32_768 for entry in entries)
+    pages = [json.loads(entry.content) for entry in entries]
+    assert "".join(page["result_text"] for page in pages) == text
+    assert pages[0]["result_text_range"]["start"] == 0
+    assert pages[-1]["result_text_range"]["end"] == len(text)
+    assert all(page["result_text_range"]["total"] == len(text) for page in pages)
+    assert all(entry.ref.scope == SCOPE for entry in entries)
+    assert all(page["authority"] == "none" for page in pages)
+
+
+def test_complete_result_rejects_oversized_source_instead_of_returning_prefix() -> None:
+    with pytest.raises(FormalTaskViolation) as raised:
+        AgentServerProductCompositionRegistry._task_result_context_entries(
+            scope=SCOPE, task_result={
+                "task_id": "task-1", "attempt_id": "attempt-1", "source_event_id": "event-1",
+                "result_text": "A" * 32_769, "artifacts": [],
+            },
+        )
+    assert raised.value.reason == "TASK_RESULT_CONTEXT_TOO_LARGE"
+
+
 def test_unified_task_result_context_is_bounded_and_rejects_unsafe_artifacts() -> None:
     with pytest.raises(FormalTaskViolation) as raised:
         AgentServerProductCompositionRegistry._bounded_untrusted_result_context(

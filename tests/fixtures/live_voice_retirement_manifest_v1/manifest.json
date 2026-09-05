@@ -414,16 +414,24 @@
       "paths": [
         "jiuwenswarm/channels/web/frontend/src/features/live-voice/useLiveVoiceDemo.ts",
         "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceCore.ts",
-        "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceStreamingSpeech.ts",
-        "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskAdapter.ts",
-        "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskBridge.ts",
-        "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskClient.ts",
-        "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskMonitor.ts"
+        "jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceStreamingSpeech.ts"
       ],
       "replacement_owner": "P3-7 formal panel route and task lifecycle owners",
-      "oracle_migration": ["Formal panel route owns committed-text submission, task projection and presentation acknowledgement; current ChatPanel/index.tsx and LiveVoiceDemoBar.tsx are retained formal carrier/composition surfaces, not members of this legacy lane."],
-      "delete_preconditions": ["P3-7 Gate PASS", "Mounted formal-route and physical browser/device evidence pass without the legacy bridge."],
-      "affected_tests": ["jiuwenswarm/channels/web/frontend/tests/liveVoiceCore.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceStreamingSpeech.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceTaskAdapter.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceTaskBridge.test.mjs", "jiuwenswarm/channels/web/frontend/tests/liveVoiceTaskClient.test.mjs"],
+      "oracle_migration": [
+        "Formal panel route owns committed-text submission, task projection and presentation acknowledgement; current ChatPanel/index.tsx and LiveVoiceDemoBar.tsx are retained formal carrier/composition surfaces, not members of this legacy lane.",
+        "2026-09-05: the user-authorized unreachable Task Bridge/Adapter/Client/Monitor cluster and its parser-specific tests were removed. Current unified input, formal control and semantic Registry/Store tests own committed-input, exact-target, confirmation, replay, cancellation and successor truth. The three remaining legacy speech sources stay deferred; see live-voice/reviews/ANSWER_HARDCODE_RETIREMENT_20260905.md."
+      ],
+      "delete_preconditions": [
+        "P3-7 Gate PASS",
+        "Mounted formal-route and physical browser/device evidence pass without the legacy bridge."
+      ],
+      "affected_tests": [
+        "jiuwenswarm/channels/web/frontend/tests/liveVoiceCore.test.mjs",
+        "jiuwenswarm/channels/web/frontend/tests/liveVoiceStreamingSpeech.test.mjs",
+        "jiuwenswarm/channels/web/frontend/tests/unifiedCommittedInputOwner.test.mjs",
+        "jiuwenswarm/channels/web/frontend/tests/formalTaskControlLeaf.test.mjs",
+        "tests/unit_tests/live_voice/test_semantic_registry.py"
+      ],
       "rollback": "Restore the retained files and disable the formal profile."
     },
     {

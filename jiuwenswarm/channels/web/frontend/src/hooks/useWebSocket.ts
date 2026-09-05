@@ -53,9 +53,6 @@ import {
   shouldBeginSupplementOutputQuarantine,
 } from '../services/supplementOutputQuarantine';
 import {
-  fetchTtsAudio,
-  playAudioBase64,
-  sanitizeTtsText,
   stopAllTts,
   collapseWs,
   findAssistantSegmentIdForFinal,
@@ -72,6 +69,7 @@ import {
   mergeFileDownloadItems,
 } from '../utils/fileDownloadDedup';
 import { beginServerTtsOutput, canCompleteServerTtsOutput } from '../utils/ttsOutputOwnership';
+import { playMessageTts } from '../services/messageTtsPlayback';
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
@@ -937,41 +935,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       if (outputTicket === null) {
         return;
       }
-      const sanitized = sanitizeTtsText(content);
-      if (!sanitized || sanitized.startsWith('[任务已中断]')) {
-        return;
-      }
-
-      const existing = useChatStore.getState().getRuntime(sessionId)?.messages.find((msg) => msg.id === messageId);
-      if (existing?.audioBase64) {
-        return;
-      }
-
-      void (async () => {
-        const versionAtStart = userInputVersionRef.current;
-        const ttsSessionId = sessionId;
-        const response = await fetchTtsAudio(
-          sanitized,
-          ttsSessionId && ttsSessionId !== 'new' ? ttsSessionId : undefined
-        );
-        if (!response?.success || !response.audio_base64 || !canCompleteServerTtsOutput(outputTicket)) {
-          return;
-        }
-
-        useChatStore.getState().updateMessage(sessionId, messageId, {
-          audioBase64: response.audio_base64,
-          audioMime: response.audio_mime,
-        });
-
-        if (versionAtStart !== userInputVersionRef.current) {
-          return;
-        }
-
-        await playAudioBase64(
-          response.audio_base64,
-          response.audio_mime || 'audio/mpeg'
-        );
-      })();
+      const versionAtStart = userInputVersionRef.current;
+      void playMessageTts(
+        sessionId, messageId, content,
+        () => versionAtStart === userInputVersionRef.current && canCompleteServerTtsOutput(outputTicket)
+      );
     },
     []
   );
