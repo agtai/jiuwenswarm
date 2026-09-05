@@ -1,5 +1,9 @@
 # OpenJiuwen LiveVoice 瘦身计划重适配（demo 冻结前提）— 2026-09-05
 
+> 2026-09-05 更新：本文 §3 规划区间与 §4 实施包由同日
+> [当前分支重分析与计划更新](OPENJIUWEN_LIVEVOICE_CURRENT_BRANCH_ANALYSIS_AND_PLAN_2026-09-05.md)
+> 修订（只列变化的行与包，未列出的继续以本文为准）；§2 前提核对、§5 A1 清单、§6 约束与 §7 决定清单继续有效。
+>
 > 状态：Integration Owner 的计划重适配提案（文档-only 批次；root `TESTING.md` Live Voice
 > risk tiers 与 D-046 的 Tier 0 口径）。前提由用户给出：`hx/0812_live_voice_w3` 已合入
 > 全部特性，正在准备 demo，代码基本不会大改。本文回答“原瘦身计划是否仍然成立、哪些
