@@ -367,9 +367,11 @@ Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 使用正常工作量形成的真实非终态窗口，且只有 `task.adjust_applied` 已写入、seq
 早于 terminal/result 才能认定修改生效；窗口未命中必须记录，不能启用假等待。
 
-默认启动配置关闭生成期打断。源码另有显式 opt-in 的 generation-time
-listening/interruption：只有 `formal-web-validation` 加 `-GenerationInterruption`
-才启用；省略该开关时启动器会清除继承的 feature 环境值。需要演示“已提交、
+受控 `formal-web-validation` 启动入口默认开启 generation-time
+listening/interruption；`-DisableGenerationInterruption` 显式关闭，旧
+`-GenerationInterruption` 仍兼容，两者同时启用会在配置和服务操作前拒绝。
+`hands-free-demo` 默认关闭并拒绝显式开启。启动器按 profile/参数设置或清除继承的
+feature 环境值；该开关不保存在项目配置中。需要演示“已提交、
 正在生成但尚未出声时改口”的样本必须先核对开启状态；已经出声的样本属于
 播报期打断，不能替代生成期样本。源码存在和配置开启也不代表物理验收已通过。
 
@@ -380,9 +382,10 @@ Formal Live Voice 显式禁用 interactive Agent tools；普通澄清由 Agent �
 
 当前受控启动器是本节的执行入口；不得再用临时 AgentServer/Gateway/Vite
 命令进入人工验收。无需生成期打断的固定订单 Journey 可用默认 `hands-free-demo`；
-完整 A/B/A2 脚本含生成期打断时使用 `formal-web-validation -GenerationInterruption`，
+完整 A/B/A2 脚本含生成期打断时使用 `formal-web-validation`，
 并把模拟资料放在所选授权项目中。普通 Formal Web 对话、Exit/立即重新启用和
-critical-token 验证也可使用此 profile；不展示生成期打断时省略该开关。
+critical-token 验证也可使用此 profile；需要关闭生成期打断时显式加
+`-DisableGenerationInterruption`。
 两种 profile 共享完整参数合同，分别保存项目选择；Formal Web 不强制固定订单文件：
 
 ```powershell
@@ -390,7 +393,6 @@ critical-token 验证也可使用此 profile；不展示生成期打断时省略
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File .\scripts\live_voice\start_hands_free_demo.ps1 `
   -RuntimeProfile formal-web-validation `
-  -GenerationInterruption `
   -ProjectPath '<已注册、可丢弃、无 remote 的 Git 项目>' `
   -DataDir '<隔离 JIUWENSWARM_DATA_DIR>' `
   -PreflightOnly -NoBrowser
@@ -399,7 +401,6 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File .\scripts\live_voice\start_hands_free_demo.ps1 `
   -RuntimeProfile formal-web-validation `
-  -GenerationInterruption `
   -ProjectPath '<同一项目>' -DataDir '<同一数据目录>' `
   -SaveConfiguration -RestartExisting -NoBrowser
 ```
@@ -422,6 +423,9 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 请求真实设备人工验收。
 
 ### 7.6 D-095 普通 Chrome 自动 cold/warm 序列（D-096）
+
+L0 已验证构建复用合同绑定生成期打断的实际布尔值；旧合同缺失该字段、类型错误
+或与本次开关不匹配时拒绝复用，必须重新构建，不能只修改运行记录来切换功能。
 
 只有在 7.5 的 `formal-web-validation` 项目选择已经保存、当前源码和该项目均
 干净时运行。该入口打开已安装的普通 Chrome profile；它不会创建隔离 profile，

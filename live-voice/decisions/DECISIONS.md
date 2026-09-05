@@ -1829,3 +1829,24 @@
   [bounded lifecycle evidence](../evidence/SPEECH_LIFECYCLE_REPAIR_20260904.md).
   Deployment, Provider/account changes and remote updates remain excluded by the
   user's instructions; source completion does not update the running service.
+
+## D-114 Controlled Formal generation-interruption default
+
+- Date: 2026-09-05. The user requests generation interruption by default and a
+  local redeployment for the A/B/A2 rehearsal. The controlled
+  `formal-web-validation` launcher defaults it on, supports explicit
+  `-DisableGenerationInterruption`, retains the old enable switch and rejects
+  contradictory switches before setup. This supersedes the earlier default-off
+  choice only for this controlled Formal entry point; ordinary production builds
+  and `hands-free-demo` remain off.
+- This is a Tier-2 launcher/build selection change. Reused L0 builds must bind
+  the resolved generation flag as an exact boolean; missing, mistyped or
+  mismatched cache contracts require rebuilding. Runtime response/Task authority,
+  wire protocols, VAD 800 ms, startup lead 250 ms and the saved headset profile
+  remain unchanged. No new classifier, Provider configuration or remote update
+  is included.
+- Verify real CLI selection/rejection, affected browser tests, independent
+  review and deployed assets through the existing controlled launcher. A saved
+  flag or successful startup cannot grant physical interruption or complete
+  A/B/A2 acceptance. Scope and executed results belong to the
+  [default-change evidence](../reviews/FORMAL_GENERATION_DEFAULT_20260905.md).

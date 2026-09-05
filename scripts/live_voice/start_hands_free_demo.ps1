@@ -9,6 +9,7 @@ param(
     )]
     [string]$ExpectedSourceBranch = 'hx/0812_live_voice_w3',
     [switch]$GenerationInterruption,
+    [switch]$DisableGenerationInterruption,
     [ValidateSet('off', 'verified-headset-aec-v1')]
     [string]$LocalBargeInProfile = 'off',
     [string]$ProjectPath,
@@ -109,6 +110,14 @@ function Write-Warn([string]$Text) {
 
 function Fail([string]$Text) {
     throw $Text
+}
+
+function Test-GenerationInterruptionBuildMatch($Contract, [bool]$Enabled) {
+    if ($null -eq $Contract) {
+        return $false
+    }
+    $flag = $Contract.PSObject.Properties['generation_interruption']
+    return ($null -ne $flag) -and ($flag.Value -is [bool]) -and ($flag.Value -eq $Enabled)
 }
 
 function ConvertFrom-WindowsCommandLine([string]$CommandLine) {
@@ -510,10 +519,20 @@ function Wait-LiveVoiceDeploymentLog([string]$Path, [DateTime]$Deadline) {
 
 $l0BatchProcess = $null
 try {
+    if ($GenerationInterruption -and $DisableGenerationInterruption) {
+        Fail 'GENERATION_INTERRUPTION_SWITCH_CONFLICT: 启用和关闭生成期打断的参数不能同时使用。'
+    }
     if ($GenerationInterruption -and $RuntimeProfile -ne 'formal-web-validation') {
         Fail 'GENERATION_INTERRUPTION_REQUIRES_FORMAL_WEB_VALIDATION: -GenerationInterruption 只允许 formal-web-validation profile。'
     }
-    $generationInterruptionEnabled = [bool]$GenerationInterruption
+    $generationInterruptionEnabled = if ($PSBoundParameters.ContainsKey('GenerationInterruption')) {
+        [bool]$GenerationInterruption
+    } else {
+        $RuntimeProfile -eq 'formal-web-validation'
+    }
+    if ($DisableGenerationInterruption) {
+        $generationInterruptionEnabled = $false
+    }
     if ($generationInterruptionEnabled) {
         [Environment]::SetEnvironmentVariable(
             'VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION',
@@ -1054,6 +1073,7 @@ try {
             $buildContract.package_lock_sha256 -ne $packageLockSha256 -or
             $buildContract.local_barge_in_profile -ne $localBargeInBuildProfile -or
             $buildContract.local_barge_in_pause -ne $localBargeInEnabled -or
+            -not (Test-GenerationInterruptionBuildMatch $buildContract $generationInterruptionEnabled) -or
             -not (Test-Path -LiteralPath $builtAsset -PathType Leaf) -or
             (Get-FileHash -LiteralPath $builtAsset -Algorithm SHA256).Hash.ToLowerInvariant() -ne $buildContract.bundle_sha256
         ) {
@@ -1090,6 +1110,7 @@ try {
                 package_lock_sha256 = $packageLockSha256
                 local_barge_in_profile = $localBargeInBuildProfile
                 local_barge_in_pause = $localBargeInEnabled
+                generation_interruption = $generationInterruptionEnabled
                 bundle_relative_path = $bundleRelativePath
                 bundle_sha256 = (Get-FileHash -LiteralPath $bundleFile -Algorithm SHA256).Hash.ToLowerInvariant()
             } | ConvertTo-Json | Set-Content -LiteralPath $l0BuildContractPath -Encoding UTF8

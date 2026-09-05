@@ -20,8 +20,9 @@ fallbacks, isolated data/project, persistent Session and enabled flags. Retain
 applicable automated/review results and accepted deviations without secrets.
 
 For generation-time interruption, verify the actual deployed assets and
-`formal-web-validation -GenerationInterruption` route. The default launcher
-route leaves it off. Playback-time interruption is a separate sample. A local
+`formal-web-validation` route, which defaults this feature on. Explicit
+`-DisableGenerationInterruption` turns it off; `hands-free-demo` remains off.
+Playback-time interruption is a separate sample. A local
 headset pause profile is also separate; use only the declared device/profile.
 
 If a required route/environment differs from the reviewed candidate, record the

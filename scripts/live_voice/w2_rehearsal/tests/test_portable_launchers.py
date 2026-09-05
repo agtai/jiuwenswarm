@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 from jiuwenswarm.server.live_voice import batch_speech
 from scripts.live_voice import formal_web_runtime_probe
 from scripts.live_voice.w2_rehearsal import w2_wav_speech_preflight
@@ -197,32 +199,119 @@ def test_generation_interruption_requires_formal_web_validation_profile() -> Non
     )
 
 
-def test_generation_interruption_frontend_flag_is_explicit_and_defaults_off() -> None:
+@pytest.mark.parametrize(
+    ("profile", "switches", "inherited", "expected"),
+    [
+        ("formal-web-validation", (), "false", "true"),
+        ("formal-web-validation", ("-DisableGenerationInterruption",), "true", "false"),
+        ("formal-web-validation", ("-GenerationInterruption",), "false", "true"),
+        ("hands-free-demo", (), "true", "false"),
+        ("hands-free-demo", ("-DisableGenerationInterruption",), "true", "false"),
+    ],
+    ids=[
+        "formal-default",
+        "formal-disable",
+        "formal-enable",
+        "demo-default",
+        "demo-disable",
+    ],
+)
+def test_generation_interruption_profile_default_and_explicit_override(
+    profile: str,
+    switches: tuple[str, ...],
+    inherited: str,
+    expected: str,
+) -> None:
     branch = _current_source_branch()
+    wrong_branch = next(
+        value for value in sorted(_FORMAL_SOURCE_BRANCHES) if value != branch
+    )
     contaminated_environment = os.environ.copy()
-    contaminated_environment["VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION"] = "true"
+    contaminated_environment["VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION"] = (
+        inherited
+    )
+    records = [
+        _REPO_ROOT / "logs" / name
+        for name in (
+            "debug_service.json",
+            "live_voice_runtime_contract.json",
+        )
+    ]
+    before = {path: path.read_bytes() if path.exists() else None for path in records}
 
-    disabled = _run_launcher(
+    result = _run_launcher(
         "-RuntimeProfile",
-        "formal-web-validation",
+        profile,
         "-ExpectedSourceBranch",
-        branch,
+        wrong_branch,
+        *switches,
         "-PreflightOnly",
         "-NoBrowser",
         environment=contaminated_environment,
     )
-    enabled = _run_launcher(
+
+    assert f"LIVE_VOICE_FRONTEND_GENERATION_INTERRUPTION={expected}" in result.stdout
+    assert result.returncode == 1
+    assert wrong_branch in result.stdout + result.stderr
+    assert {
+        path: path.read_bytes() if path.exists() else None for path in records
+    } == before
+
+
+def test_generation_interruption_conflicting_switches_reject_before_setup() -> None:
+    result = _run_launcher(
         "-RuntimeProfile",
         "formal-web-validation",
-        "-ExpectedSourceBranch",
-        branch,
         "-GenerationInterruption",
+        "-DisableGenerationInterruption",
         "-PreflightOnly",
         "-NoBrowser",
     )
 
-    assert "LIVE_VOICE_FRONTEND_GENERATION_INTERRUPTION=false" in disabled.stdout
-    assert "LIVE_VOICE_FRONTEND_GENERATION_INTERRUPTION=true" in enabled.stdout
+    assert result.returncode == 1
+    assert "GENERATION_INTERRUPTION_SWITCH_CONFLICT" in result.stdout + result.stderr
+    assert "LIVE_VOICE_FRONTEND_GENERATION_INTERRUPTION=" not in result.stdout
+
+
+def test_generation_interruption_build_reuse_requires_an_exact_boolean_flag() -> None:
+    launcher_path = str(_LIVE_VOICE_SCRIPTS / "start_hands_free_demo.ps1").replace(
+        "'", "''"
+    )
+    # Load only the production cache predicate: no launcher body, private config,
+    # provider calls or services are executed by these reuse decisions.
+    command = (
+        f"$ast = (Get-Command '{launcher_path}').ScriptBlock.Ast; "
+        "$definition = $ast.Find({ param($node) "
+        "$node -is [System.Management.Automation.Language.FunctionDefinitionAst] "
+        "-and $node.Name -eq 'Test-GenerationInterruptionBuildMatch' }, $true); "
+        "if ($null -eq $definition) { throw 'missing build flag predicate' }; "
+        ". ([scriptblock]::Create($definition.Extent.Text)); "
+        "$cases = @('{}', '{\"generation_interruption\":null}', "
+        '\'{"generation_interruption":"false"}\', \'{"generation_interruption":true}\', '
+        "'{\"generation_interruption\":false}'); "
+        "@($cases | ForEach-Object { "
+        "$contract = $_ | ConvertFrom-Json; "
+        "[ordered]@{ enabled = (Test-GenerationInterruptionBuildMatch $contract $true); "
+        "disabled = (Test-GenerationInterruptionBuildMatch $contract $false) } "
+        "}) | ConvertTo-Json -Compress"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", command],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        {"enabled": False, "disabled": False},
+        {"enabled": False, "disabled": False},
+        {"enabled": False, "disabled": False},
+        {"enabled": True, "disabled": False},
+        {"enabled": False, "disabled": True},
+    ]
 
 
 def test_formal_web_runtime_probe_binds_critical_receipt_and_rejects_forgery(

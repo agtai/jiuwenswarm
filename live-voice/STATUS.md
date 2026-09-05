@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-05 (instruction/document synchronization only).
+> Updated: 2026-09-05 (controlled Formal launcher default; physical acceptance open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -42,9 +42,11 @@ history, not acceptance of this candidate.
   changes; new Task authority or performance/SLO closure. Ordinary builds keep
   Provider-only interruption. VAD 800 ms / startup 250 ms are the accepted defaults.
 - **Preparation:** verify actual services/assets and use [runbook §7.5](runbooks/E2E_RUNBOOK.md#75-当前受控-live-voice-启动与预演).
-  Generation-time interruption is separately opt-in through
-  `formal-web-validation -GenerationInterruption`; its enabled source path does
-  not imply that the default Demo or the current running process enables it.
+  The controlled `formal-web-validation` launcher now defaults generation-time
+  interruption on; `-DisableGenerationInterruption` turns it off. The
+  `hands-free-demo` profile remains off. Verify the actual deployment against the
+  [default-change evidence](reviews/FORMAL_GENERATION_DEFAULT_20260905.md);
+  a source default does not establish the current process or physical acceptance.
 
 ### Retained repair consequences
 
@@ -81,7 +83,7 @@ whole-project audit for every bounded task.
 | Speech Recognition | Streaming/batch finals, typed failure, bounded capture retry and lifetime repair | Long/paused speech, fallback/cancel, device/network and physical lifetime evidence |
 | Speech Synthesis | Streaming/batch TTS, response ownership, playback ACK | Interrupted/long answers, first-audio, underrun, pronunciation and stale-output proof |
 | Realtime Media | Dedicated transport, registration/rotation, bounded P2 pull | Backpressure/load, loss/order/corruption/reconnect and truthful recovery |
-| Conversation Runtime | Commit/generation fencing, Stop/Exit, playout and opt-in generation interruption, continuity/ACK ownership | Combined listening/notification/Task races, no old-audio revival or detached-Task miscontrol |
+| Conversation Runtime | Commit/generation fencing, Stop/Exit, playout and flag-gated generation interruption, continuity/ACK ownership | Combined listening/notification/Task races, no old-audio revival or detached-Task miscontrol |
 | Interaction Intelligence | Model semantic routing; opt-in Native source; Cascade default | Native through current business path, endpoint/false-interruption evaluation, language/device scope |
 | Agent Bridge and dialogue truth | Real Agent/file tools, current requirements, canonical status, honest failed-revision notice | Required review/real-model/physical verification, arithmetic, feasibility, literal names/paths and concise speech |
 | Task Control Core and Store | Canonical multi-Task state, durable commands/replay, exact targets/CAS, bounded adjustment delivery | Current concurrency/restart integration and full Task-operation coverage |
