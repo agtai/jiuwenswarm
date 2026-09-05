@@ -92,5 +92,35 @@ removes the inappropriate output-processing boundary without reverting that
 - Before local deployment: 56 Tasks and 56 Attempts are all terminal; 34 result
   rows and 35 notification-consumption rows exist. Read-only row hashes and private
   configuration/input hashes were saved for preservation checks. No frontend
-  Session or completion notification was opened. Controlled deployment pending.
+  Session or completion notification was opened. Controlled deployment is recorded below.
 
+
+## Controlled local deployment
+
+- Deployed code: `33ce49d3e4d6079e9c0555dc7b1f3d695581d516`,
+  `fix(live-voice): preserve Agent answers without postprocessing`. Source was
+  clean at build/startup. This subsequent evidence update changes no runtime code.
+- Ran the bundled PowerShell 7 launcher with `-NoProfile -ExecutionPolicy Bypass
+  -File scripts/live_voice/start_hands_free_demo.ps1 -RuntimeProfile
+  formal-web-validation -RestartExisting -NoBrowser`; exit 0. Reused the existing
+  registered project/data/headset profile without saving new configuration.
+- TypeScript/Vite build and deployment checks passed. Frontend 5173, Agent 18092,
+  WebSocket 19000 and Gateway 19001 are listening in new processes. Runtime contract
+  binds source `33ce49d3e4`, dirty count 0, Formal/Cascade, D2 v2 Executor, generation
+  interruption=true and verified-headset local pause=true. No VAD/startup override
+  was added; the existing 800 ms / 0.5 / 250 ms settings are unchanged.
+- HTTP readback serves `/assets/index-CpghO1Bj.js`, SHA-256
+  `e90961407d26bf314d65e5a35ac1ba33add9aec41c81cefb6e09a7bcc2c87f72`.
+  This is the unchanged frontend bundle. The actual Agent backend was restarted
+  against the code above; a source-only edit was not mistaken for deployment.
+- Real Provider TTS→STT passed, the formal receipt is eligible, identity mismatch
+  and forged claims are rejected, and probe business effects are zero. This is
+  digital service evidence, not physical microphone/speaker acceptance.
+- Post-start read-only hashes match all pre-start Tasks, Attempts, results, events,
+  commands and notification-consumption rows. The selected saved model/Provider
+  configuration, runtime profile and original input also match. No existing
+  Session/notification was opened or acknowledged by the deployment checks.
+- Private logs: `logs/agent-answer-passthrough-deploy-20260905.txt`,
+  `logs/swarm-20260905-110805.log` and `logs/spoken-verification-20260905/`.
+  They and private input/configuration/outputs are excluded from Git. Existing
+  browser tabs should refresh and reactivate Cascade for the restarted service.
