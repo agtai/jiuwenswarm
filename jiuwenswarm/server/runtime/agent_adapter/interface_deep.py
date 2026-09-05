@@ -9360,20 +9360,13 @@ class JiuWenSwarmDeepAdapter:
                         supports_user_interaction=False,
                     )
                 )
-            # This validated formal adapter is isolated from ordinary chat and
-            # background execution. Keep spoken analysis and receipts responsive,
-            # including the model calls that select and consume real file tools.
-            # Clone request options, never mutate the saved/cached model config.
+            # Observe an isolated clone with the configured Agent options unchanged.
+            # The voice transport does not own answer reasoning or presentation policy.
             original_model = getattr(self, "_model", None)
             if original_model is not None:
-                from jiuwenswarm.common.reasoning_injector import bounded_semantic_request_options
-
-                options = bounded_semantic_request_options(
-                    original_model.model_client_config.model_dump(), original_model.model_config,
-                )
                 voice_model = Model(
                     model_client_config=original_model.model_client_config,
-                    model_config=original_model.model_config.model_copy(update=options or {}),
+                    model_config=original_model.model_config.model_copy(deep=True),
                 )
                 from jiuwenswarm.server.runtime.agent_adapter.formal_model_diagnostics import observe_formal_model
 
@@ -9387,7 +9380,6 @@ class JiuWenSwarmDeepAdapter:
             from openjiuwen.harness.prompts import PromptSection
             from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
                 FORMAL_VOICE_PRESENTATION_INSTRUCTIONS,
-                finalize_spoken_answer,
             )
 
             voice_prompt_builder = getattr(self._instance, "system_prompt_builder", None)
@@ -9398,30 +9390,16 @@ class JiuWenSwarmDeepAdapter:
                 name="output",
                 content={
                     "cn": (
-                        "# 语音回复\n本次仅输出用户会听到的简短回答。用用户的语言，直接说结论和必要依据。"
-                        "除非明确要求详细解释，否则只说三个短句、合计尽量不超过200字；任务回执最多两句。"
-                        "优先给一个最有用的结论，不逐一复述备选方案和资料背景。"
-                        "不要输出分析草稿、逐项推演、标题、表格或重复结论。"
-                        "有任务回执时只陈述服务器已经确认的事实；已受理不等于已完成，"
-                        "accepted/queued表示已受理、等待执行，不能说正在生成或处理中；"
-                        "只有running才表示执行中，terminal/completed才表示已完成。"
-                        "已创建的任务由后台继续，不要再次询问是否开始或索要创建信息。"
-                        "只在回执明确要求确认时请求确认。资料规定的场景时间优先于机器时间。"
-                        "核对资料给出的时刻、耗时和缓冲再判断可行性，不虚构当前位置或额外前置条件。"
+                        "# 当前对话形式\n这轮来自语音对话。依据用户本轮要求决定回答的详略和表达方式。"
+                        "用户要求简短时简短，要求详细时充分解释。你负责分析、事实核验及最终回答；"
+                        "最终回答会原样传递给用户。"
                         "用户询问模型时，依据 runtime.setting 中的当前模型或可用模型列表回答。"
                     ),
                     "en": (
-                        "# Spoken response\nReturn only the concise answer the user will hear, in their language. "
-                        "Lead with the conclusion and essential evidence. Unless detail is requested, use at most "
-                        "three short sentences, aiming for 200 characters, or two sentences for a Task receipt. "
-                        "Prioritize the most useful conclusion; omit a catalogue of alternatives and background. No draft "
-                        "analysis, step-by-step working, headings, tables or repeated conclusions. With a Task "
-                        "receipt, state only server-confirmed facts: accepted is not completed. Created work "
-                        "continues in the background; never ask again whether to start or for creation details. "
-                        "Request confirmation only when the receipt requires it. Material-defined scenario "
-                        "time takes precedence over machine time."
-                        " Check the documented times, durations and buffers before judging feasibility; "
-                        "do not invent the current location or extra prerequisites."
+                        "# Conversation setting\nThis turn comes from spoken conversation. "
+                        "Follow the user's requested depth and presentation. Be brief when asked "
+                        "for brevity and explain fully when asked for detail. You own the analysis, "
+                        "fact checking and final answer, which will be delivered unchanged."
                         " Answer model identity/availability questions from runtime.setting."
                     ),
                 },
@@ -9451,11 +9429,7 @@ class JiuWenSwarmDeepAdapter:
                 "chat.error",
             }
 
-            spoken_tool_results: list[dict] = []
-            spoken_tool_result_chars = 0
-
             def captured_response(raw_event: Any) -> AgentResponseChunk:
-                nonlocal spoken_tool_result_chars
                 parsed_capture = self._parse_stream_chunk(raw_event)
                 event_type = (
                     parsed_capture.get("event_type")
@@ -9468,11 +9442,6 @@ class JiuWenSwarmDeepAdapter:
                     "chat.tool_result",
                 }:
                     raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_INVALID")
-                if event_type == "chat.tool_result":
-                    size = len(json.dumps(parsed_capture, ensure_ascii=False))
-                    if spoken_tool_result_chars + size <= 32_000:
-                        spoken_tool_results.append(parsed_capture)
-                        spoken_tool_result_chars += size
                 from jiuwenswarm.common.live_voice_profiling import profile_tool_event
                 profile_tool_event(parsed_capture, request_id=rid, execution_session_id=session_id)
                 return AgentResponseChunk(
@@ -9573,12 +9542,6 @@ class JiuWenSwarmDeepAdapter:
                         tool_capture.has_pending_results
                     ):
                         raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_INCOMPLETE")
-                    if event_type == "chat.final" and isinstance(parsed.get("content"), str):
-                        parsed = {**parsed, "content": await finalize_spoken_answer(
-                            getattr(self, "_model", None), envelope=str(inputs.get("query", "")),
-                            candidate=parsed["content"], tool_results=spoken_tool_results,
-                            language=self._resolve_runtime_language(), request_id=rid,
-                        )}
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,

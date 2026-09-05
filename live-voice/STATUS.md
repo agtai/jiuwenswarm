@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-05 (controlled Formal launcher default; physical acceptance open).
+> Updated: 2026-09-05 (Agent answer ownership; physical acceptance open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -52,6 +52,7 @@ history, not acceptance of this candidate.
 
 | Boundary | Current consequence and conditional evidence |
 |---|---|
+| Spoken analysis | D-115 removes output quotas and post-generation rewriting/checking. Live Voice delivers the configured Agent’s final answer unchanged; source interpretation, arithmetic and verbosity remain Agent quality concerns: [answer ownership evidence](reviews/SPOKEN_ANSWER_VERIFICATION_20260905.md). |
 | Profiling | Browser/RPC/media/Speech/Agent/Task/notification timing, bounded browser export and offline reports have scoped tests/build/review and deployed samples. Use [runbook §7.7](runbooks/E2E_RUNBOOK.md#77-普通-demo-的性能记录与故障报告) for a rehearsal; [deployment evidence](evidence/DEMO_PROFILING_DEPLOYMENT_20260904.md) retains chronology. No latency improvement/SLO claim. |
 | Speech lifetime | D-113 removes a cumulative identity quota while retaining exact authority/resource bounds; scoped tests/review and deployment are recorded in [lifecycle evidence](evidence/SPEECH_LIFECYCLE_REPAIR_20260904.md). Physical stability remains open. |
 | Local Task adjustment | D-111/D-112 preserve one semantic decision, direct exact local consent and pending/applied/rejected truth; focused tests and configured-model probes pass. Full execution/audio acceptance remains open: [adjustment evidence](evidence/TASK_ADJUSTMENT_TRUTH_REPAIR_20260904.md). |
@@ -85,7 +86,7 @@ whole-project audit for every bounded task.
 | Realtime Media | Dedicated transport, registration/rotation, bounded P2 pull | Backpressure/load, loss/order/corruption/reconnect and truthful recovery |
 | Conversation Runtime | Commit/generation fencing, Stop/Exit, playout and flag-gated generation interruption, continuity/ACK ownership | Combined listening/notification/Task races, no old-audio revival or detached-Task miscontrol |
 | Interaction Intelligence | Model semantic routing; opt-in Native source; Cascade default | Native through current business path, endpoint/false-interruption evaluation, language/device scope |
-| Agent Bridge and dialogue truth | Real Agent/file tools, current requirements, canonical status, honest failed-revision notice | Required review/real-model/physical verification, arithmetic, feasibility, literal names/paths and concise speech |
+| Agent Bridge and dialogue truth | Real Agent/file tools, current requirements, canonical status, faithful Agent answer delivery | Broader real-model/physical verification, arithmetic/feasibility reliability, literal names/paths and concise speech |
 | Task Control Core and Store | Canonical multi-Task state, durable commands/replay, exact targets/CAS, bounded adjustment delivery | Current concurrency/restart integration and full Task-operation coverage |
 | Executor & Durability | Direct D0/D2 v2 admission/reconciliation, sealed results/checkpoints, dedicated memory repair; v1 cannot dispatch v2 | Required review and real result/control acceptance; outside-checkout files or additional Executor/D1 capability need separate scope; no D1/host-crash claim |
 | Voice–Task Bridge | Unified committed semantics, direct exact local create/adjust consent, scoped targets/requirements | Real modification/query acceptance, generalization/retirement; pause/resume/provide-input remain unsupported |

@@ -1850,3 +1850,29 @@
   flag or successful startup cannot grant physical interruption or complete
   A/B/A2 acceptance. Scope and executed results belong to the
   [default-change evidence](../reviews/FORMAL_GENERATION_DEFAULT_20260905.md).
+
+## D-115 Agent-owned answers and faithful voice delivery
+
+- Date: 2026-09-05. The user rejects Live Voice limiting or changing Agent model
+  output. This supersedes the post-generation spoken rewrite/checking behavior
+  introduced with the earlier integration and the subsequently proposed audit
+  optimization. Remove the second model call, three-sentence / 200-character
+  gate, quantity-triggered audit and replacement notice. Do not replace them
+  with a larger deadline or an unchecked/checked-answer classifier.
+- The Agent owns analysis, calculations, source interpretation and its final
+  answer. Live Voice passes that final text through. The Agent may receive soft
+  input guidance about the spoken setting and the user's requested depth; this
+  neither enforces a quota nor authorizes changing its completed answer.
+- The private model clone exists for per-invocation diagnostics and preserves
+  configured generation/reasoning options. Ordinary Agent behavior and saved
+  Provider configuration are not changed to satisfy voice presentation.
+- Agent Bridge owns this Tier-2 removal. Current-turn/context authority, truthful
+  Task receipts, Tool permissions, protocol/resource bounds, cancellation and
+  audio/history isolation remain enforced. No Task/Store/schema or business
+  classifier is added. Answer fidelity does not establish arithmetic correctness
+  or complete Demo acceptance; quality work belongs at the Agent/tool boundary.
+- Retain the independent semantic, Task, interruption, notification and entry
+  repairs from `c707c1e2d`; remove this boundary in a focused new commit rather
+  than reverting the 124-file integration or rewriting history. Verification,
+  rejected experiments and local deployment belong to the
+  [answer ownership evidence](../reviews/SPOKEN_ANSWER_VERIFICATION_20260905.md).

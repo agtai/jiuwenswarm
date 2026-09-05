@@ -212,21 +212,23 @@ class CallbackFormalInstance(FormalInstance):
 
 
 @pytest.mark.asyncio
-async def test_failed_spoken_preparation_is_one_truthful_final_without_reexecuting_agent() -> None:
-    from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import spoken_revision_unavailable_notice
-    draft = "PRIVATE_UNCHECKED_DRAFT " * 40
+async def test_long_numeric_agent_answer_is_delivered_without_reexecution() -> None:
+    draft = "费用 120 元 PRIVATE_UNCHECKED_DRAFT " * 20
     lease = OutputLease([RawChunk("answer", {"output": {"output": draft}})])
-    instance = FormalInstance(lease)
+    rail = interface_deep.JiuSwarmStreamEventRail()
+    instance = CallbackFormalInstance(lease, rail)
     adapter = adapter_with(instance)
+    adapter._stream_event_rail = rail
+    instance.registered_rails = [rail]
     adapter._resolve_runtime_language = lambda: "en"
     request, inputs = formal_request()
     chunks = [chunk async for chunk in adapter.process_formal_live_voice_stream_impl(request, inputs)]
-    assert [chunk.payload for chunk in chunks] == [
-        {"event_type": "chat.final", "content": spoken_revision_unavailable_notice("en")}
+    assert [chunk.payload for chunk in chunks if chunk.payload["event_type"] == "chat.final"] == [
+        {"event_type": "chat.final", "content": draft}
     ]
     assert len(instance.sent) == 1
     assert lease.closed_with == [False]
-    assert "PRIVATE_UNCHECKED_DRAFT" not in str([chunk.payload for chunk in chunks])
+    assert "PRIVATE_UNCHECKED_DRAFT" in chunks[-1].payload["content"]
 
 
 @pytest.mark.asyncio
@@ -739,14 +741,15 @@ async def test_failed_agent_cleanup_retains_no_history_guard(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tools_allowed", [False, True])
-async def test_formal_voice_model_options_are_isolated_and_restored(monkeypatch, tools_allowed):
+@pytest.mark.parametrize("provider", ["DeepSeek", "OpenAI"])
+async def test_formal_voice_model_options_are_isolated_and_restored(monkeypatch, tools_allowed, provider):
     from copy import deepcopy
 
     request_config = interface_deep.ModelRequestConfig(
         model="deepseek-v4-flash", extra_body={"thinking": {"type": "enabled"}, "provider_option": "keep"},
     )
     client_config = interface_deep.ModelClientConfig(
-        client_provider="DeepSeek", api_base="https://api.deepseek.com", api_key="test-only",
+        client_provider=provider, api_base="https://api.deepseek.com" if provider == "DeepSeek" else "https://unsupported.invalid", api_key="test-only",
     )
     original = SimpleNamespace(model_config=request_config, model_client_config=client_config)
     before = deepcopy(request_config.model_dump())
@@ -763,13 +766,78 @@ async def test_formal_voice_model_options_are_isolated_and_restored(monkeypatch,
     chunks = [chunk async for chunk in adapter.process_formal_live_voice_stream_impl(request, inputs)]
     assert chunks[-1].payload["content"] == "Completed."
     assert "Original written deliverable instructions" not in instance.observed_prompt
-    assert "Spoken response" in instance.observed_prompt
+    assert "Conversation setting" in instance.observed_prompt
     assert instance.system_prompt_builder.get_section("output") is original_output
     assert original.model_config.model_dump() == before and adapter._model is original
     assert len(applied) == 2 and applied[-1] is original
     assert applied[0] is not original
-    assert applied[0].model_config.extra_body == {"thinking": {"type": "disabled"}, "provider_option": "keep"}
+    assert applied[0].model_config.model_dump() == before
+    assert applied[0].model_config.extra_body is not original.model_config.extra_body
     assert applied[0].model_client_config is client_config
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during_generation", [False, True])
+@pytest.mark.parametrize("draft", ["费用120元。" * 80, "资料分析与后续建议。" * 80], ids=["numeric", "qualitative"])
+async def test_formal_final_is_agent_owned_without_a_second_model_call(monkeypatch, cancel_during_generation, draft):
+    from copy import deepcopy
+    from openjiuwen.core.foundation.llm import Model
+
+    calls, applied = [], []
+    entered = asyncio.Event()
+    config = interface_deep.ModelRequestConfig(
+        model="deepseek-v4-flash", extra_body={"thinking": {"type": "enabled"}},
+    )
+    client = interface_deep.ModelClientConfig(
+        client_provider="DeepSeek", api_base="https://api.deepseek.com", api_key="test-only",
+    )
+    original = SimpleNamespace(model_config=config, model_client_config=client)
+    before = deepcopy(config.model_dump())
+
+    async def unexpected_invoke(**kwargs):
+        calls.append(kwargs)
+        raise AssertionError("The delivered Agent answer must not trigger another model call")
+
+    def model_factory(**values):
+        model = object.__new__(Model)
+        model.model_config, model.model_client_config = values["model_config"], values["model_client_config"]
+        model._client = SimpleNamespace(invoke=unexpected_invoke)
+        return model
+
+    class WaitingLease(OutputLease):
+        async def __anext__(self):
+            entered.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(interface_deep, "Model", model_factory)
+    rail = interface_deep.JiuSwarmStreamEventRail()
+    lease = (WaitingLease([]) if cancel_during_generation else
+             OutputLease([RawChunk("answer", {"output": {"output": draft}})]))
+    instance = CallbackFormalInstance(lease, rail)
+    instance._react_agent = SimpleNamespace(set_llm=applied.append, _config=SimpleNamespace())
+    adapter = adapter_with(instance)
+    adapter._model, adapter._stream_event_rail = original, rail
+    instance.registered_rails = [rail]
+    request, inputs = formal_request()
+
+    async def consume():
+        return [c async for c in adapter.process_formal_live_voice_stream_impl(request, inputs)]
+
+    invocation = asyncio.create_task(consume())
+    if cancel_during_generation:
+        await asyncio.wait_for(entered.wait(), 2)
+        invocation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await invocation
+    else:
+        chunks = await invocation
+        assert chunks[-1].payload == {"event_type": "chat.final", "content": draft}
+    assert calls == []
+    assert config.model_dump() == before and adapter._model is original
+    assert applied[0].model_config.model_dump() == before
+    assert applied[-1] is original and len(instance.sent) == 1
+    assert rail._formal_tool_event_captures == {}
+    assert lease.closed_with == [cancel_during_generation]
 
 
 @pytest.mark.asyncio
