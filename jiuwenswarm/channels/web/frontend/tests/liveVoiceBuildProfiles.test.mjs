@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { loadEnv } from "vite";
 
 const frontendRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(frontendRoot, "..", "..", "..", "..");
@@ -11,7 +12,23 @@ const formalLiveVoiceFlags = [
   "VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB",
   "VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1",
   "VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION",
+  "VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION",
 ];
+
+test("direct controlled builds enable generation interruption and explicit environment off wins", () => {
+  const key = "VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION";
+  const original = process.env[key];
+  try {
+    delete process.env[key];
+    assert.equal(loadEnv("live-voice", frontendRoot)[key], "true");
+    assert.equal(loadEnv("production", frontendRoot)[key], "false");
+    process.env[key] = "false";
+    assert.equal(loadEnv("live-voice", frontendRoot)[key], "false");
+  } finally {
+    if (original === undefined) delete process.env[key];
+    else process.env[key] = original;
+  }
+});
 
 const controlledRuntimeFlags = [
   "JIUWENSWARM_ENABLE_ORIGIN_CHECK",

@@ -528,7 +528,10 @@ try {
     $generationInterruptionEnabled = if ($PSBoundParameters.ContainsKey('GenerationInterruption')) {
         [bool]$GenerationInterruption
     } else {
-        $RuntimeProfile -eq 'formal-web-validation'
+        $RuntimeProfile -eq 'formal-web-validation' -and (
+            (Get-Content -LiteralPath (Join-Path $FrontendRoot '.env.live-voice')) -contains
+                'VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION=true'
+        )
     }
     if ($DisableGenerationInterruption) {
         $generationInterruptionEnabled = $false
@@ -540,8 +543,10 @@ try {
             'Process'
         )
     } else {
-        Remove-Item -LiteralPath 'Env:\VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION' `
-            -ErrorAction SilentlyContinue
+        # An explicit false overrides the controlled Vite mode's true default.
+        [Environment]::SetEnvironmentVariable(
+            'VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION', 'false', 'Process'
+        )
     }
     $generationInterruptionFlagValue = (
         [Environment]::GetEnvironmentVariable(
