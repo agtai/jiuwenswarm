@@ -96,6 +96,7 @@ Verified against the scoped diff from `5948c957` (private logs below):
   change. A pre-existing cancellation/failure during session acquisition, before
   the Formal root try/finally, remains routed to Agent Bridge startup/recovery;
   it is not claimed fixed by this output-stream packet.
+  Its independent focused check completed with 21 passes and exit 0.
 
 Private evidence: `logs/speculative-lifecycle-*-20260905.txt` and
 `logs/speculative-lifecycle-20260905/`. These contain red/green outputs, baseline
@@ -119,9 +120,31 @@ Fixture and configuration hashes were unchanged.
 
 ## Controlled deployment
 
-Authorized local deployment is pending the clean-source launcher. Before restart,
-the preserved runtime has 56 Tasks and 56 Attempts, all terminal, plus 34 results,
-35 consumption records, 349 Task events and 141 commands. Table contents, saved
-profile, private configuration and the original fixture have read-only hash
-snapshots for post-start comparison. No full A/B/A2, physical, production or
-indefinite-uptime claim follows from this repair.
+Committed implementation: `618a6c6122` (`fix(live-voice): drain admitted streams
+and retain cleanup ownership`). At 11:45 (+02), the controlled launcher completed
+from that clean source, using the saved `formal-web-validation` profile. Its
+`-PreflightOnly -NoBrowser` check passed before
+`-RestartExisting -NoBrowser` rebuilt and restarted the services.
+
+The new runtime contract records Cascade, all required flags enabled, generation
+interruption enabled, `verified_headset_aec_v1` local pause, and the existing
+`live-voice.direct-project-code.d2.v2` Executor. Real Provider TTS→STT, formal
+receipt, identity-mismatch rejection and forged-claim rejection passed with zero
+business side effects. The deployed frontend was fetched over HTTP and is
+byte-identical to `/assets/index-BI5E3I1w.js` in the new build (SHA-256
+`8b532dcf8a4cf554bfa5317cfbb89028437b1a076109d457d196f121a6f35abe`).
+It contains the corrected terminal reason. Ports/PIDs after startup:
+5173/37956, 18092/4076, 19000/34036 and 19001/34036.
+
+Before and after restart the runtime retained 56 Tasks and 56 Attempts, all
+terminal, plus 34 results, 35 consumption records, 349 Task events and 141 commands.
+All six table content hashes, saved profile, private configuration and original
+fixture hashes match exactly. Product source hashes also match the actual-Agent
+probe's manifest. No startup ERROR/Traceback/foreign-Context/unsafe-cleanup entry
+was found in the new service log at verification time.
+
+Private evidence includes `preflight.log`, `deploy.log`, `runtime-contract.json`,
+`served-asset.json`, `predeploy.json` and `postdeploy.json` under the run directory.
+Refresh an existing page and re-enable Cascade to use the new browser code and
+activation. Full A/B/A2, microphone interruption, startup-acquisition failure,
+production and indefinite-uptime acceptance remain unclaimed.
