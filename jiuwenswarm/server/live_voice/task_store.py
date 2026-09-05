@@ -5125,6 +5125,21 @@ class SqliteTaskStore:
                 observed_at=observed_at,
             )
 
+    def has_pending_adjustments(self, task_id: str, attempt_id: str, scope: ScopeRef) -> bool:
+        """Read the exact live Attempt's admission fence without claiming work.
+
+        The Executor waits for normal Core outbox delivery. This read is the
+        model-boundary cutoff for adjustments accepted but not delivered yet.
+        """
+        with self._snapshot_reader() as connection:
+            task = self._require_task_row(connection, task_id, scope)
+            if task["attempt_id"] != attempt_id or task["state"] == FormalTaskState.TERMINAL.value:
+                raise FormalTaskViolation("TASK_ADJUSTMENT_STALE", "model boundary no longer owns the live Attempt", ErrorCode.STALE)
+            return connection.execute(
+                "SELECT 1 FROM outbox WHERE task_id=? AND attempt_id=? AND kind=? AND state IN (?, ?) LIMIT 1",
+                (task_id, attempt_id, OutboxKind.ATTEMPT_ADJUST.value, OutboxState.PENDING.value, OutboxState.CLAIMED.value),
+            ).fetchone() is not None
+
     def adjust(
         self,
         command: CommandEnvelope,

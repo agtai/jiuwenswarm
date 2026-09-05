@@ -182,7 +182,7 @@ async def control_with_confirmation(s, stem, operation, arguments=None, target=N
     proposed = await s.text(
         stem, f"Execute {operation} for the stated exact task and specification."
     )
-    if operation == "task.adjust":
+    if operation in {"task.adjust", "task.cancel"}:
         assert proposed.ok and proposed.payload["result"]["status"] == "dispatched", proposed.payload
         assert not await s.registry._semantic_continuity.pending(_scope())
         return proposed.payload["result"]
@@ -404,25 +404,19 @@ async def test_model_exact_multitask_control_uses_real_store_and_formal_confirma
     ] == ["task.adjust_requested", "task.adjust_applied"]
     assert store.get_task(b, _scope()) == b_before
     before = store.counts()
-    s.program = lambda data: model_output(data, operation="task.cancel", target=b)
-    proposal = await s.text("cancel-b", "只取消维护核查乙，设备核查甲继续。")
-    assert (
-        proposal.ok
-        and proposal.payload["result"]["reason"] == "TASK_CONFIRMATION_REQUIRED"
-    ), proposal.payload
-    assert (
-        not store.get_task(a, _scope()).cancel_requested
-        and not store.get_task(b, _scope()).cancel_requested
-    )
-    assert executor.cancels == [] and store.counts() == before
-    s.program = lambda data: model_output(
-        data, operation="task.cancel", target=b, reference=data["context"]["pending"][0]
-    )
+    s.program = lambda data: {**model_output(data, route="clarification"), "message": "Which task should be cancelled?"}
+    ambiguous = await s.text("cancel-ambiguous", "两件事取消一件。")
+    assert ambiguous.ok and ambiguous.payload["result"]["status"] == "clarification"
+    assert store.counts() == before and executor.cancels == []
     a_before = store.get_task(a, _scope())
-    confirmed = await s.text("cancel-b-confirm", "确认仅取消维护核查乙。")
-    assert confirmed.ok, confirmed.payload
+    s.program = lambda data: model_output(data, operation="task.cancel", target=b)
+    confirmed = await s.text("cancel-b", "只取消维护核查乙，设备核查甲继续。")
+    assert confirmed.ok and confirmed.payload["result"]["status"] == "dispatched", confirmed.payload
+    assert not await s.registry._semantic_continuity.pending(_scope())
     assert store.get_task(b, _scope()).cancel_requested
     assert store.get_task(a, _scope()) == a_before
+    replay = await s.text("cancel-b", "只取消维护核查乙，设备核查甲继续。")
+    assert replay.payload == confirmed.payload
     await core.drain_outbox()
     assert store.get_task(b, _scope()).outcome.value == "cancelled"
     assert store.get_task(a, _scope()) == a_before
@@ -1129,14 +1123,6 @@ async def test_unified_task_measurement_keeps_exact_receipt_and_admission_clock(
         target=task_id,
         reference=next(iter(data["context"]["pending"]), None),
     )
-    if operation == "task.cancel":
-        proposed = await s.text(
-            "l0-proposal", "Please perform the exact proposed control."
-        )
-        assert (
-            proposed.ok
-            and proposed.payload["result"]["reason"] == "TASK_CONFIRMATION_REQUIRED"
-        )
     records, handler_times = [], []
     original = s.harness.composition.handle_production_resolution
 
@@ -2411,3 +2397,43 @@ async def test_model_create_and_natural_confirmation_reach_real_store_once(
     finally:
         await registry.stop()
         await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observation", ["accepted", "running", "unavailable"])
+async def test_creation_receipt_is_historical_and_current_state_is_read_once(semantic_runtime, monkeypatch, observation):
+    s = semantic_runtime
+    core = s.harness.composition._core
+    reads = []
+    read = s.harness.composition.read_task_control_snapshot
+    async def observe(**kwargs):
+        reads.append(kwargs["task_id"])
+        if observation == "unavailable":
+            raise RuntimeError("controlled status unavailable")
+        if observation == "running":
+            await core.drain_outbox()
+        return await read(**kwargs)
+    monkeypatch.setattr(s.harness.composition, "read_task_control_snapshot", observe)
+    s.program = lambda data: {**model_output(data, operation="task.create", arguments={
+        "name": "Inventory report", "instruction": "Read inventory and save report.md."}), "requested_work": "local_artifacts"}
+    assert (await s.registry.handle_p2_activate(params=p2_params(), request_id="creation-active", session_id="session-1", channel_id="web")).ok
+    params = voice_final("creation-truth", "Prepare the inventory report in the background.")
+    done = await s.registry.handle_unified_submit(params=params, request_id="creation-truth", session_id="session-1", channel_id="web")
+    assert done.ok, done.payload
+    assert s.manager.agent.calls == 1
+    execution = s.manager.agent.executions[-1]
+    receipt = json.loads(execution.context.entries[-1].content)
+    assert execution.allow_tools is False
+    assert receipt["creation_receipt"]["state"] == "accepted"
+    assert receipt["formal_task_result"] is None
+    assert reads == [receipt["task_id"]]
+    if observation == "unavailable":
+        assert receipt["task_control_snapshot"] is None
+        assert receipt["current_state_availability"] == "unconfirmed"
+    else:
+        assert receipt["task_control_snapshot"]["state"] == observation
+    replay = await s.registry.handle_unified_submit(params=params, request_id="creation-replay", session_id="session-1", channel_id="web")
+    assert replay.payload["result"] == done.payload["result"]
+    assert len(reads) == 1 and s.manager.agent.calls == 1
+    assert core.store.counts()["tasks"] == 1
+    assert s.harness.executor.cancels == s.harness.executor.adjustments == []

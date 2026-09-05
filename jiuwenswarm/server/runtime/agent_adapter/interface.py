@@ -1099,13 +1099,39 @@ class JiuWenSwarm:
         )
         inputs, _memory_mode, _raw_query = self._build_inputs(background_request)
         await prepare_session(background_request.session_id)
+        checkpoint_rail = None
+        checkpoint_callback = None
         try:
+            from .background_task_checkpoint import current_background_task_checkpoint
+
+            checkpoint = current_background_task_checkpoint(background_request.session_id)
+            if checkpoint is not None:
+                child = adapter._get_cached_session_adapter(background_request.session_id)
+                checkpoint_rail = getattr(child, "_stream_event_rail", None)
+                instance = getattr(child, "_instance", None)
+                root_agent = getattr(instance, "_react_agent", None)
+                if checkpoint_rail is None or root_agent is None:
+                    raise RuntimeError("BACKGROUND_TASK_CHECKPOINT_UNAVAILABLE")
+
+                async def checkpoint_callback(ctx):
+                    if (checkpoint.closed or child._stream_event_rail is not checkpoint_rail
+                            or child._instance is not instance):
+                        raise RuntimeError("BACKGROUND_TASK_CHECKPOINT_STALE")
+                    if ctx.agent is root_agent:
+                        await checkpoint.adopt(ctx.context)
+
+                if getattr(checkpoint_rail, "background_model_checkpoint", None) is not None:
+                    raise RuntimeError("BACKGROUND_TASK_CHECKPOINT_ALREADY_BOUND")
+                checkpoint_rail.background_model_checkpoint = checkpoint_callback
             async for chunk in adapter.process_message_stream_impl(
                 background_request,
                 inputs,
             ):
                 yield chunk
         finally:
+            if (checkpoint_rail is not None and checkpoint_callback is not None
+                    and checkpoint_rail.background_model_checkpoint is checkpoint_callback):
+                checkpoint_rail.background_model_checkpoint = None
             cleanup_session = getattr(adapter, "cleanup_session_adapter", None)
             if callable(cleanup_session):
                 await cleanup_session(background_request.session_id)

@@ -12939,8 +12939,10 @@ async def test_p2_close_settles_shared_task_presentation_before_progress_close(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("origin_kind", ["voice", "text"])
 async def test_agent_ack_drains_deferred_voice_task_presentation(
     tmp_path: Path,
+    origin_kind: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -12952,7 +12954,9 @@ async def test_agent_ack_drains_deferred_voice_task_presentation(
     composition.subscription_events = source_events
     manager = _AgentManager()
 
+    pushed = []
     async def push(_message: dict[str, object]) -> bool:
+        pushed.append(_message)
         return True
 
     registry = AgentServerProductCompositionRegistry(
@@ -13014,7 +13018,7 @@ async def test_agent_ack_drains_deferred_voice_task_presentation(
             task_id=task_id,
             correlation_id="correlation-p2",
             origin_id="interaction-1",
-            origin_kind="voice",
+            origin_kind=origin_kind,
             generation_id="voice-progress-foreground",
         ),
         request_id="request-foreground-progress",
@@ -13024,10 +13028,12 @@ async def test_agent_ack_drains_deferred_voice_task_presentation(
     assert activated.ok
     retained_progress = next(iter(registry._progress_routes.values()))
     for _ in range(200):
-        if retained_progress.progress_lease.snapshot().pending_voice_intents == 1:
+        if (retained_progress.progress_lease.snapshot().pending_voice_intents == 1
+                or retained_progress.pending_presentations):
             break
         await asyncio.sleep(0.01)
-    assert retained_progress.progress_lease.snapshot().pending_voice_intents == 1
+    assert (retained_progress.progress_lease.snapshot().pending_voice_intents == 1
+            or retained_progress.pending_presentations)
     with registry._task_presentation_state_lock:
         assert registry._task_presentation_deliveries == {}
 
@@ -13047,6 +13053,17 @@ async def test_agent_ack_drains_deferred_voice_task_presentation(
     )
     assert acknowledged.ok
     assert cast(dict[str, object], acknowledged.payload["result"])["accepted"] is True
+    if origin_kind == "text":
+        assert pushed, "foreground ACK must immediately drain the pending TEXT Task event"
+        event = pushed[-1]["payload"]
+        assert event["task_id"] == task_id
+        assert store.unread_events_page(task_id, SCOPE, presentation_class="text", limit=500).watermark == -1
+        ack = await registry.handle_p3_progress_ack(params=_presentation_progress_ack_params(event), request_id="text-drain-ack", session_id=SCOPE.session_id, channel_id="web")
+        assert ack.ok, ack.payload
+        assert store.unread_events_page(task_id, SCOPE, presentation_class="text", limit=500).watermark == 3
+        assert manager.agent.calls == 1
+        await registry.stop()
+        return
     for _ in range(200):
         with registry._task_presentation_state_lock:
             if registry._task_presentation_deliveries:

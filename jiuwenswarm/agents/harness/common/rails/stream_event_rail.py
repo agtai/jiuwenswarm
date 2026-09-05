@@ -877,6 +877,17 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 strip_image_content_from_model_context(ctx.context)
             await self._fix_incomplete_tool_context(ctx)
 
+        checkpoint = getattr(self, "background_model_checkpoint", None)
+        if checkpoint is not None:
+            try:
+                await checkpoint(ctx)
+            except Exception as error:
+                # The SDK logs ordinary callback exceptions and continues. A
+                # failed constraint adoption must prevent the next model call.
+                from openjiuwen.core.runner.callback.errors import AbortError
+
+                raise AbortError("BACKGROUND_TASK_CHECKPOINT_FAILED", cause=error) from error
+
     @staticmethod
     def _inject_tool_call_goal_schema(ctx: AgentCallbackContext) -> None:
         """仅给送入 LLM 的 ToolInfo 注入 call_goal，且必须 deepcopy。

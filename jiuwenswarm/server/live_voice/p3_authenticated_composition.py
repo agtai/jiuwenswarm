@@ -2615,18 +2615,18 @@ class P3AuthenticatedComposition:
                 ErrorCode.PERMISSION_DENIED,
             )
 
-    def require_local_task_adjustment_capability(self, resolution: ProductionTaskResolution) -> None:
-        """Restrict direct modification consent to the existing project Executor."""
+    def require_local_task_control_capability(self, resolution: ProductionTaskResolution) -> None:
+        """Restrict exact local adjustment/cancellation consent to the project Executor."""
         binding = resolution.confirmation_binding
-        if (resolution.operation != "task.adjust" or binding is None
+        if (resolution.operation not in {"task.adjust", "task.cancel"} or binding is None
                 or resolution.confirmation != "required"
                 or binding.capability_profile_digest not in {
                     profile.digest_sha256()
                     for profile in DirectProjectCodeExecutorAdapter.construction_capability_profiles(store_backed=True)
                 }):
             raise FormalTaskViolation(
-                "LOCAL_TASK_ADJUSTMENT_CAPABILITY_REQUIRED",
-                "direct modification requires the exact project Executor", ErrorCode.PERMISSION_DENIED,
+                "LOCAL_TASK_CONTROL_CAPABILITY_REQUIRED",
+                "direct control requires the exact project Executor", ErrorCode.PERMISSION_DENIED,
             )
 
     def _resolve_retry_snapshot(

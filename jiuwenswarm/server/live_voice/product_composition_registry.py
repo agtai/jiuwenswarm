@@ -2988,20 +2988,14 @@ class AgentServerProductCompositionRegistry:
             routes = tuple(
                 (key, retained)
                 for key, retained in self._progress_routes.items()
-                if retained.binding.origin_kind is TaskProgressOriginKind.VOICE
-                and retained.binding.scope == binding.scope
-                and retained.binding.session_id == binding.session_id
-                and retained.binding.correlation_id == binding.correlation_id
-                and retained.binding.origin_id == binding.interaction_id
-                and (
-                    (origin := self._voice_task_origins.get(retained.binding.task_id))
-                    is not None
+                if (
+                    (route := (
+                        self._exact_voice_task_presentation_route(retained.binding)
+                        if retained.binding.origin_kind is TaskProgressOriginKind.VOICE
+                        else self._current_task_presentation_route(retained.binding)
+                    )) is not None
+                    and route.binding == binding
                 )
-                and origin.session_id == binding.session_id
-                and origin.interaction_id == binding.interaction_id
-                and origin.correlation_id == binding.correlation_id
-                and origin.activation_id == binding.activation_id
-                and origin.activation_generation == binding.activation_generation
             )
         for key, retained in routes:
             # A failed AUDIO presentation may have retained an exact TEXT
@@ -3011,7 +3005,7 @@ class AgentServerProductCompositionRegistry:
             # permanently pending and blocks browser capture recovery.
             await self._drain_progress_presentation(key, "text")
             await self._drain_progress_presentation(key, "voice")
-            if drain_return_lease:
+            if drain_return_lease and retained.binding.origin_kind is TaskProgressOriginKind.VOICE:
                 await retained.progress_lease.drain_voice()
 
     async def _defer_voice_progress(
@@ -8431,6 +8425,22 @@ class AgentServerProductCompositionRegistry:
                 l0_task_id, l0_attempt_id = self._formal_receipt_measurement_identity(
                     decision.proposal.operation, business_task_id, task_result_payload,
                 )
+            if (formal.ok and decision.proposal.operation == "task.create"
+                    and payload.get("status") == TaskIntentDisposition.DISPATCHED.value
+                    and business_task_id is not None):
+                # Creation is durable even if the subsequent read is unavailable.
+                # Preserve that immutable receipt separately from current state;
+                # never replay creation to recover a failed status read.
+                receipt["creation_receipt"] = receipt.pop("formal_task_result")
+                receipt["formal_task_result"] = None
+                try:
+                    receipt["task_control_snapshot"] = await self._p3_composition.read_task_control_snapshot(
+                        bearer_token=auth_token, session_id=retained.binding.session_id,
+                        task_id=business_task_id, native_authority=native_p3_authority,
+                    )
+                except Exception:  # noqa: BLE001 -- acknowledged creation stays known
+                    receipt["task_control_snapshot"] = None
+                    receipt["current_state_availability"] = "unconfirmed"
             if decision.proposal.operation in {"task.adjust", "task.status"}:
                 from .task_control_presentation import adjustment_status_text, task_status_text, task_subject
 
@@ -13415,15 +13425,15 @@ class AgentServerProductCompositionRegistry:
                     retained.intent_scope = authority.scope
 
             if (
-                pending is None
+                (pending is None or pending.kind == "clarification")
                 and semantic_decision is not None
                 and (semantic_decision.requests_local_artifacts
-                     or semantic_decision.proposal.operation == "task.adjust")
+                     or semantic_decision.proposal.operation in {"task.adjust", "task.cancel"})
                 and commit is not None
                 and source in {"voice", "text"}
                 and resolution.outcome is ProductionTaskPolicyOutcome.PROPOSED
             ):
-                # Current explicit local creation/modification supplies consent
+                # Current explicit local creation/control supplies consent
                 # for this exact operation, not a fabricated second utterance.
                 # Retain/consume the normal durable, origin-bound claim, then
                 # use the same final authority reread as a two-turn confirmation.
@@ -13433,7 +13443,7 @@ class AgentServerProductCompositionRegistry:
                     or resolution.origin_binding is None
                     or resolution.origin_binding.semantic_context_binding
                     != semantic_decision.origin_context_binding
-                    or resolution.operation not in {"task.create", "task.adjust"}
+                    or resolution.operation not in {"task.create", "task.adjust", "task.cancel"}
                     or resolution.operation != semantic_decision.proposal.operation
                     or dict(resolution.arguments) != dict(semantic_decision.proposal.arguments)
                 ):
@@ -13445,11 +13455,12 @@ class AgentServerProductCompositionRegistry:
                 if resolution.operation == "task.create":
                     self._p3_composition.require_local_artifact_delegation_capability(resolution)
                 else:
-                    self._p3_composition.require_local_task_adjustment_capability(resolution)
+                    self._p3_composition.require_local_task_control_capability(resolution)
                 token = await self._issue_production_confirmation_continuation(
                     clean=clean, request_id=request_id, proposal=proposal,
                     resolution=resolution, commit=commit, authority=authority,
-                    replacing_token=None, clarification_answer_fingerprint=None,
+                    replacing_token=None if pending is None else pending.token,
+                    clarification_answer_fingerprint=(None if clarification_answer is None else clarification_answer.fingerprint),
                 )
                 async with self._lock:
                     pending = self._pending_production_task_intents[token]

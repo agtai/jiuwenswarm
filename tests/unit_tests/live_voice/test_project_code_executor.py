@@ -3037,7 +3037,8 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
         _is_session_scoped_adapter = False
 
         def __init__(self) -> None:
-            self._instance = object()
+            self._instance = SimpleNamespace(_react_agent=object())
+            self._stream_event_rail = SimpleNamespace(background_model_checkpoint=None)
             self._project_dir = ""
             self.sessions: set[str] = set()
             self.sub_mode: str | None = "unset"
@@ -3066,7 +3067,25 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
         async def prepare_background_project_session(self, session_id: str) -> None:
             self.sessions.add(session_id)
 
+        def _get_cached_session_adapter(self, session_id):
+            return self if session_id in self.sessions else None
+
         async def process_message_stream_impl(self, request, inputs):
+            callback = self._stream_event_rail.background_model_checkpoint
+            assert callback is not None
+            from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
+            owner = current_background_task_checkpoint(request.session_id)
+            original_adopt = owner.adopt
+            adoptions = []
+            async def observed_adopt(context):
+                adoptions.append(context)
+                await original_adopt(context)
+            owner.adopt = observed_adopt
+            await callback(SimpleNamespace(agent=object(), context=None))
+            assert adoptions == [], "a subagent in the same session must not consume root adjustments"
+            await callback(SimpleNamespace(agent=self._instance._react_agent, context=SimpleNamespace()))
+            assert len(adoptions) == 1
+            self.retained_callback = callback
             requested = Path(request.params["project_dir"]).resolve()
             assert requested == Path(self._project_dir).resolve()
             assert Path(inputs["project_dir"]).resolve() == requested
@@ -3079,6 +3098,7 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
             )
 
         async def cleanup_session_adapter(self, session_id: str) -> bool:
+            assert self._stream_event_rail.background_model_checkpoint is None
             existed = session_id in self.sessions
             self.sessions.discard(session_id)
             return existed
@@ -3147,6 +3167,9 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
     assert isolated.sub_mode is None  # type: ignore[attr-defined]
     assert canonical.ensure_calls == 0  # type: ignore[attr-defined]
     assert isolated.ensure_calls == 0  # type: ignore[attr-defined]
+    assert isolated._stream_event_rail.background_model_checkpoint is None
+    with pytest.raises(RuntimeError, match="BACKGROUND_TASK_CHECKPOINT_STALE"):
+        await isolated.retained_callback(SimpleNamespace(agent=isolated._instance._react_agent, context=None))
     assert not (project / "root-agent-side-effect.txt").exists()
     assert manager._agent_pins == {}
     assert adapter.retained_cleanup_attempt_ids() == ()
@@ -5760,3 +5783,146 @@ async def test_missing_journal_stays_fail_closed_without_every_exact_fact(
             assert readiness.reason == "ATTEMPT_JOURNAL_MISSING", label
         assert _journal_dump(adapter) == before_journal, label
         assert _readiness_environment(project) == before_environment, label
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lose_settlement", [False, True])
+async def test_model_boundary_waits_for_admitted_adjustments_before_next_model(tmp_path, lose_settlement):
+    from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
+    from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
+    from tests.unit_tests.live_voice.test_persistent_task_core import NOW, _adjust, _create
+
+    class Store(SqliteTaskStore):
+        def complete_adjustment_outbox(self, item, delivery, **kwargs):
+            if lose_settlement:
+                assert self.release_outbox(item, "controlled-claim-loss")
+            return super().complete_adjustment_outbox(item, delivery, **kwargs)
+
+    class ModelBoundaryAgent(_DirectProjectExecutor):
+        def __init__(self, project):
+            super().__init__(project)
+            self.release_tool = asyncio.Event()
+            self.at_boundary = asyncio.Event()
+            self.next_model = asyncio.Event()
+            self.messages = []
+        async def add_messages(self, message):
+            self.messages.append(message.content)
+        async def process_background_code_task_stream(self, request):
+            self.requests.append(request)
+            self.started.set()
+            await self.release_tool.wait()
+            self.at_boundary.set()
+            checkpoint = current_background_task_checkpoint(request.session_id)
+            assert checkpoint is not None
+            await checkpoint.adopt(self)
+            self.next_model.set()
+            (Path(request.params["project_dir"]) / "measurements.md").write_text("\n".join(self.messages), encoding="utf-8")
+            yield AgentResponseChunk(request.request_id, request.channel_id,
+                payload={"event_type": "chat.final", "content": "Requirements used in measurements.md."}, is_complete=True)
+
+    project = tmp_path / "model-boundary"
+    _git_project(project)
+    agent = ModelBoundaryAgent(project)
+    store = Store(tmp_path / "core.sqlite3")
+    adapter = DirectProjectCodeExecutorAdapter(_Resolver(_direct_binding(project, agent)), tmp_path / "core.sqlite3", durability_store=store)
+    core = PersistentTaskCore(store, adapter)
+    try:
+        invocation = _create(project)
+        created = core.execute(invocation.envelope, invocation.authorization, context=invocation.context, now=NOW)
+        assert created.ok, created
+        task_id, attempt_id = created.result["task_id"], created.result["attempt_id"]
+        await core.drain_outbox_once()
+        await asyncio.wait_for(agent.started.wait(), 5)
+        command, grant = _adjust(task_id, "Use calibrated sensor measurements.", command_id="calibration-adjust", request_id="calibration-adjust-request")
+        assert core.execute(command, grant, now=NOW).ok
+        if not lose_settlement:
+            second, second_grant = _adjust(task_id, "Preserve original measurements.", command_id="preserve-adjust", request_id="preserve-adjust-request")
+            assert core.execute(second, second_grant, now=NOW).ok
+        assert store.has_pending_adjustments(task_id, attempt_id, _scope())
+        agent.release_tool.set()
+        await asyncio.wait_for(agent.at_boundary.wait(), 5)
+        await asyncio.sleep(0.05)
+        assert not agent.next_model.is_set() and agent.messages == [], "accepted-but-undelivered adjustment must fence the next call"
+        await core.reconcile()
+        if lose_settlement:
+            with pytest.raises(FormalTaskViolation):
+                await core.drain_inflight_adjustments(timeout=5)
+        else:
+            await core.drain_inflight_adjustments(timeout=5)
+            assert not agent.next_model.is_set(), "has_more must wait for the next accepted outbox delivery"
+            await core.reconcile()
+            await core.drain_inflight_adjustments(timeout=5)
+        await _wait_direct_settled(adapter)
+        await core.reconcile_status()
+        if lose_settlement:
+            assert not agent.next_model.is_set()
+            assert not (project / "measurements.md").exists()
+            assert store.get_task(task_id, _scope()).outcome is not TerminalOutcome.COMPLETED
+        else:
+            assert agent.next_model.is_set()
+            assert len(agent.messages) == 2
+            assert "Use calibrated sensor measurements." in (project / "measurements.md").read_text(encoding="utf-8")
+            assert len(agent.requests) == 1, "adjustment must not wait for another whole Agent round"
+            assert store.get_task(task_id, _scope()).outcome is TerminalOutcome.COMPLETED
+            events = store.events(task_id, _scope(), after_seq=-1)
+            assert [e.event_type for e in events if e.event_type.startswith("task.adjust_")] == ["task.adjust_requested", "task.adjust_requested", "task.adjust_applied", "task.adjust_applied"]
+    finally:
+        await adapter.close(interrupt_running=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_after_adoption", [False, True])
+async def test_cancel_at_model_checkpoint_prevents_next_model_and_result(tmp_path, cancel_after_adoption):
+    from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
+
+    class BoundaryAgent(_DirectProjectExecutor):
+        def __init__(self, project):
+            super().__init__(project)
+            self.release_tool = asyncio.Event()
+            self.messages = []
+            self.model_calls = 0
+        async def add_messages(self, message):
+            self.messages.append(message.content)
+        async def process_background_code_task_stream(self, request):
+            self.requests.append(request)
+            self.started.set()
+            await self.release_tool.wait()
+            await current_background_task_checkpoint(request.session_id).adopt(self)
+            self.model_calls += 1
+            (Path(request.params["project_dir"]) / "result.txt").write_text("forbidden", encoding="utf-8")
+            yield AgentResponseChunk(request.request_id, request.channel_id,
+                payload={"event_type": "chat.final", "content": "forbidden"}, is_complete=True)
+
+    project = tmp_path / "cancel-model-boundary"
+    _git_project(project)
+    agent = BoundaryAgent(project)
+    adapter = DirectProjectCodeExecutorAdapter(_Resolver(_direct_binding(project, agent)), tmp_path / "direct.sqlite3")
+    delivery_task = None
+    try:
+        dispatched = await adapter.dispatch(_item(project))
+        await asyncio.wait_for(agent.started.wait(), 5)
+        adjustment = _adjustment_item(project, command_id="adjust-cancel", adjustment="Use the new constraints.", requested_seq=4)
+        delivery_task = asyncio.create_task(adapter.adjust(adjustment))
+        await asyncio.wait_for(adapter._adjustment_checkpoints["attempt-1"].changed.wait(), 5)
+        if cancel_after_adoption:
+            agent.release_tool.set()
+            delivery = await asyncio.wait_for(asyncio.shield(delivery_task), 5)
+            assert delivery.state is TaskAdjustmentState.APPLIED
+            assert len(agent.messages) == 1
+        assert agent.model_calls == 0
+        await adapter.cancel(replace(_item(project, kind=OutboxKind.ATTEMPT_CANCEL, source_seq=5), executor_ref=dispatched.executor_ref))
+        agent.release_tool.set()
+        await _wait_direct_settled(adapter)
+        task, attempt = _direct_task_attempt(project)
+        terminal = await adapter.status(task, attempt)
+        assert terminal.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
+        delivery = await asyncio.wait_for(delivery_task, 5)
+        assert delivery.state is (TaskAdjustmentState.APPLIED if cancel_after_adoption else TaskAdjustmentState.REJECTED)
+        assert agent.model_calls == 0
+        assert len(agent.messages) == (1 if cancel_after_adoption else 0)
+        assert not (project / "result.txt").exists()
+        assert _git(project, "status", "--porcelain") == ""
+    finally:
+        await adapter.close(interrupt_running=True)
+        if delivery_task is not None:
+            await asyncio.gather(delivery_task, return_exceptions=True)
