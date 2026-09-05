@@ -70,6 +70,40 @@ microphone/speaker or complete A/B/A2 acceptance.
   privately for a post-deployment preservation check. The four target ports were
   not listening. No frontend Session or completion notification was opened.
 
-Local deployment is the next verification step after a clean source commit.
-The controlled runtime contract and served bundle must identify that commit;
-startup or a saved flag alone is not evidence of physical interruption.
+## Local deployment verification
+
+- Deployed source: `5ac3ea29ca1d37fec7b6a4ab8c5b192c6947dd3a`, clean at build
+  and after deployment. This later evidence update changes no runtime source.
+  Preflight passed without an explicit enable switch. The first attempt through
+  Windows PowerShell from a Python child failed to resolve `Get-FileHash` before
+  build/service startup. The available PowerShell 7 ran the unchanged launcher
+  successfully, matching the previously recorded machine-specific workaround.
+- Successful command: `pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/live_voice/start_hands_free_demo.ps1 -RuntimeProfile formal-web-validation -RestartExisting -NoBrowser`.
+  No explicit generation switch, saved-configuration write or browser launch.
+  Existing registered project/data/headset selection was reused. TypeScript/Vite
+  `build:live-voice` and the controlled launcher exited zero. Four listeners are
+  ready: frontend 5173, AgentServer 18092, WebSocket 19000 and Gateway 19001.
+- Actual HTTP index serves `/assets/index-CpghO1Bj.js`; its bytes equal the local
+  built asset, SHA-256
+  `e90961407d26bf314d65e5a35ac1ba33add9aec41c81cefb6e09a7bcc2c87f72`.
+  Inspection of compiled control flow confirms the generation-listening scheduler
+  is active and the generation-interrupt handler is bound; the feature was not
+  left behind a constant-off guard. The verified-headset local-pause path is
+  also present. These static served-asset checks do not simulate microphone use.
+- Runtime contract reports source `5ac3ea29ca`, zero dirty files, Formal/Cascade,
+  generation interruption `true`, local pause `true`, profile
+  `verified_headset_aec_v1`, validated bundle/routes and D2 v2 Executor. Real
+  Provider TTS→STT passed; receipt policy is `eligible`, identity mismatch and
+  forged claims are rejected, business effects are zero, and probe audio/text
+  are not retained. This probe does not exercise physical generation interruption.
+- Running AgentServer/Gateway/frontend process environments have no VAD-silence
+  or startup-lead override. Source retains VAD silence 800 ms / threshold 0.5;
+  the served bundle retains startup lead 250 ms. Post-deployment hashes of Tasks,
+  Attempts, result rows, notification-consumption rows and the selected private
+  configurations exactly match the pre-deployment snapshot. No notification was
+  opened/acknowledged and no Task was created, cancelled or retried by this work.
+- Private execution records remain under ignored `logs/`; no secrets, raw audio,
+  transcript, private configuration or project output were committed. Existing
+  tabs need a refresh and Cascade reactivation to load this bundle. Physical
+  generation/playback interruption and the full A/B/A2 rehearsal remain open,
+  including the existing already-settled boundary regression above.
