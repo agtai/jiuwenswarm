@@ -272,3 +272,17 @@ tests/ · scripts/ · validation/      L5：oracle、合成语音 journey、探�
 本文不改变 STATUS 判断，不宣告任何包已开始或完成，不把处置码当作已执行的迁移，不授予
 AgentCore 能力接受或安装信用，也不授权任何远端操作。A 期各包在用户接受 §7.1 与 §7.2
 后才进入实施。
+
+## 9. 增量（`7c7aad7b8`，2026-09-05 第二次 rebase）
+
+- **F1/F4 合同再增两条 invariant**：`task_store.py` 新增 `_settle_cancel_before_dispatch`（队列
+  派发前先结算已请求的取消）与 `_is_exact_unbound_queue`；`project_code_executor.py` 新增
+  `project_has_unsettled_attempt` 与 `_require_project_available`（同一项目存在未结算 Attempt
+  时拒绝新的派发）。它们分别落在 F4 的 settlement 与 F1 的 admission，不新增能力族；A2 的
+  decision record 与 adoption oracle 应包含这两条。
+- **Agent bridge 收缩**：`formal_live_voice.py` 的口语修订策略（8 个 symbol，142 行）被撤除，
+  §3.7/§5.2 中 Agent bridge 的规划中心可从 1,500 回落到约 1,300。
+- **legacy 旧 Task lane 已删**：§3.8 与 A1 清单中的 AR-075–078 变为自然退休。
+- **TTS 共享宿主段变化**：`ttsText.ts` 收缩到 113 行，新增播放队列与消息播放服务两个小文件；
+  它们属于 Channel Adapter 的 TTS 输出 segment，冻结后重算归因。
+- 其余：registry +83、`speculative_dialogue.py` +52、round harness −11；无新增路径。

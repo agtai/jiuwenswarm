@@ -220,3 +220,11 @@ G1–G4 判断；Native 的 contract/carrier 不计入 G4 的“三套 schema”
 本文不删除代码、不改变 STATUS 判断、不把 G1 的“可退休”当作已执行，不授予 AgentCore
 能力接受或安装信用，也不授权任何远端操作。A1 仍按 root `TESTING.md` 单独定级并在用户
 接受触发条件后实施。
+
+## 11. 增量更新（`7c7aad7b8`，2026-09-05 第二次 rebase）
+
+分支自身在 `7c7aad7b8` 删除了旧 Task lane 四个文件（AR-075/076/077/078，
+2,426 行）。§4.1 的 G1 整文件从 21 个 9,761 行变为 **17 个 7,335 行**，部分文件 1,946 行不变，
+G1 合计约 **9,281 行**；§5 中“整文件 retire 路径合计 15,755”变为 13,329。其余行的判断
+不变：`useLiveVoiceDemo` 集群仍被 ChatPanel 构造，`liveVoiceContractV2.ts` 仍被生产导入，
+`PersistentTaskCore` 仍是唯一 Task 编排 owner，AR-065 仍在运行时被消费。

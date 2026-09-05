@@ -307,3 +307,20 @@ AgentCore 能力接受，不是 LOC 目标，也不是远端更新授权。它�
 `ebd2b4575` 的预检事实与 delta；准备基线的五份审计（Hermes 对齐预算、AgentCore
 零基线审计、原子归属表、零基线模块审计、中文架构指南）继续作为
 `agtai/codex/livevoice-agentcore-hermes-prep@b9dc8a5c` 上的唯一入口与事实来源。
+
+## 9. 增量 `076065f1b..7c7aad7b8`（2026-09-05 第二次 rebase）
+
+执行分支已 rebase 到 `hx/0812_live_voice_w3@7c7aad7b8`。该区间 6 个提交，其中 2 个带生产代码
+（`cbb56e727` settle project ownership before queued task dispatch、`7c7aad7b8` retire answer
+hardcodes and preserve complete content）：`jiuwenswarm/` 非测试文件 23 个，+688/−3,089；测试
+20 个文件，+1,177/−2,591。STATUS 在该 tip 仍为 PARTIAL，`HUMAN_PHYSICAL_ACCEPTANCE` 行未变。
+
+| 变化 | 事实 | 对本文判断的影响 |
+|---|---|---|
+| 旧 Task lane 删除 | `liveVoiceTaskAdapter.ts`、`liveVoiceTaskBridge.ts`、`liveVoiceTaskClient.ts`、`liveVoiceTaskMonitor.ts` 共 2,426 行被分支自身删除（AR-075–078） | 四行按预算 §7 第 8 条记为自然退休；专属路径从 127 个变为 123 个 |
+| 口语修订策略撤除 | `formal_live_voice.py` 495→353，移除 `finalize_spoken_answer`、`spoken_revision_*`、`SPOKEN_ANSWER_BUDGET_CHARS` 等 8 个 symbol | AR-218 责任收缩；Agent bridge 规划中心可下调 |
+| TTS 共享宿主段 | `ttsText.ts` 254→113、`utils/tts.ts` 104→150（+`playTtsText`），新增 `utils/ttsPlaybackQueue.ts` 34 行与 `services/messageTtsPlayback.ts` 13 行 | 24 宿主之外又多两个小 segment；归因待冻结后重算 |
+| Task Store / Executor | `SqliteTaskStore._settle_cancel_before_dispatch`、`_is_exact_unbound_queue`；`_DirectProjectAttemptJournal.project_has_unsettled_attempt`、`DirectProjectCodeExecutorAdapter._require_project_available` | 13 个 AGENTCORE_PR locator 的 symbol 全部仍在；F1/F4 再增“派发前结算取消、项目占用 admission”两条 invariant |
+| 其他 | registry +83（`_task_result_context_entries`）、`speculative_dialogue.py` +52、`jiuwenswarm_round_harness.py` −11、`p3_authenticated_composition.py` +25、`production_task_intent.py` −15 | 无新增路径、无新增责任类；无新的 AgentCore 能力族 |
+
+本节之前的表格仍绑定 `ebd2b4575`；总计划以本节之后的数字为准。
