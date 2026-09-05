@@ -1,13 +1,19 @@
 # Live Voice 固定环境与真实 E2E 运行手册
 
-- 最近运行手册同步：2026-08-17
+- 当前入口同步：2026-09-05；历史环境和运行记录保留原日期。
 - 历史 V0 复现分支：`hx/0803_live_voice`；`d4c3e32a` 在 V0 Gate 3 FAIL，`ee2896a4afb186e693c720476b6de10797e66f72` 已完成 V0 Gate 0–6 并标记 `V0 Released / 已冻结`。当前开发分支和拉取命令只由 [README](../README.md) 与 Git 决定，不得从该历史分支行恢复当前 Alpha。
 - 最终脱敏证据：[evidence/V0_20260802_ee2896a4.md](../evidence/V0_20260802_ee2896a4.md)；本文仍是以后重建相同受控环境的操作手册
 - 当前交付解释：Integrated Web Alpha 已作为精确源码的历史产品基线验收；旧的编号交付计划和 W2/W3/W4 只保留为 Git 历史，不再定义当前任务、进度或优先级。当前能力完成度、阻塞和下一步只看 [STATUS](../STATUS.md)；当前候选按 [产品准备度验收](../validation/PRODUCT_READINESS_ACCEPTANCE.md) 与 [完整人工 Journey](../demo/PRODUCT_READINESS_SHOWCASE.md) 判定。下述 V0/稳定句/Task 三种旧模式仍按现有代码诚实记录；默认关闭的产品组合代码不等于当前能力闭环或可运行验收。
 
 本手册用于把“代码可以构建”推进到“固定演示机上真实可演示”。它固定可复现边界，但不会把密钥、个人配置或硬件状态写进 Git。
 
-本文是环境、依赖、服务启动和健康检查的权威入口。V0 的固定语料、分阶段打断、放行 Gate 和证据汇总以 [V0_ACCEPTANCE.md](../validation/V0_ACCEPTANCE.md) 为准；现场展示话术以 [DEMO_SHOWCASE.md](../demo/DEMO_SHOWCASE.md) 为准。
+本文是环境、依赖、服务启动和健康检查的权威入口。当前预演使用
+[§7.5](#75-当前受控-live-voice-启动与预演) 和 [当前人工旅程](../demo/PRODUCT_READINESS_SHOWCASE.md)；
+性能导出使用 [§7.7](#77-普通-demo-的性能记录与故障报告)。只读取本次所需段落。
+§2.1 保留当前候选的共享环境要求；§2 的 V0 基线、§§3–6、§§8–10 及明确标注
+V0/W2 的流程用于历史复现，不是当前预演步骤。
+V0 专属语料/验收和话术分别保留在 [V0_ACCEPTANCE](../validation/V0_ACCEPTANCE.md)
+与 [DEMO_SHOWCASE](../demo/DEMO_SHOWCASE.md)。
 
 ## 1. 为什么必须固定环境
 
@@ -352,7 +358,7 @@ Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 
 真实任务测试必须保存脱敏的 task ID、原始状态、请求顺序和目标环境说明；不能用 UI 反馈代替后台事实。已接受的 2026-08-05 样本格式见 [D-031 project-bound evidence](../evidence/D031_20260805_PROJECT_BOUND.md)。
 
-### 7.5 当前统一免手 Live Voice 产品候选验证（D118/D119）
+### 7.5 当前受控 Live Voice 启动与预演
 
 本节用于当前受控产品候选的准备和最终验证；它不倒写历史 Alpha 结果，也不取得生产化信用。2026-08-17 的完整 Journey 已作为缺陷发现执行结束，结果是 `COMPLETED — DEFECTS RECORDED`，不是 PASS；当前缺陷、运行环境和下一步只看 [STATUS](../STATUS.md)。修复完成后，只有在干净、不可变的候选源码上按 [产品准备度合同](../validation/PRODUCT_READINESS_ACCEPTANCE.md) 和 [完整人工 Journey](../demo/PRODUCT_READINESS_SHOWCASE.md) 成功执行，才能形成新的受控候选 PASS。
 
@@ -361,36 +367,49 @@ Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 使用正常工作量形成的真实非终态窗口，且只有 `task.adjust_applied` 已写入、seq
 早于 terminal/result 才能认定修改生效；窗口未命中必须记录，不能启用假等待。
 
-当前 Post-Alpha Demo 在前台 Agent 生成回答期间不保持 capture。页面显示
-“Understanding and answering”时不要继续说话；本节的插话验证只在回答已经开始
-播放后执行，不能据此声称支持 generation-time interruption。Formal Live Voice
-当前显式禁用 interactive Agent tools；普通澄清由 Agent 在正常回答中提问，用户
+默认启动配置关闭生成期打断。源码另有显式 opt-in 的 generation-time
+listening/interruption：只有 `formal-web-validation` 加 `-GenerationInterruption`
+才启用；省略该开关时启动器会清除继承的 feature 环境值。需要演示“已提交、
+正在生成但尚未出声时改口”的样本必须先核对开启状态；已经出声的样本属于
+播报期打断，不能替代生成期样本。源码存在和配置开启也不代表物理验收已通过。
+
+Formal Live Voice 显式禁用 interactive Agent tools；普通澄清由 Agent 在正常回答中提问，用户
 听到后用下一条 committed voice turn 回答。只有未来产品明确要求恢复同一个被
 挂起的 Agent/workflow 时，结构化 `ask_user` interrupt/resume 语音回路才作为
 可选兼容能力单独立项；当前候选不得把文字交互冒充该能力。
 
 当前受控启动器是本节的执行入口；不得再用临时 AgentServer/Gateway/Vite
-命令进入人工验收。固定订单 Journey 使用默认 `hands-free-demo` profile；普通
-Formal Web 对话、Exit/立即重新启用和 critical-token 语音验证使用独立的
-`formal-web-validation` profile。两者共享完整参数合同，但分别保存项目选择，
-普通 Formal Web profile 不要求固定订单输入文件：
+命令进入人工验收。无需生成期打断的固定订单 Journey 可用默认 `hands-free-demo`；
+完整 A/B/A2 脚本含生成期打断时使用 `formal-web-validation -GenerationInterruption`，
+并把模拟资料放在所选授权项目中。普通 Formal Web 对话、Exit/立即重新启用和
+critical-token 验证也可使用此 profile；不展示生成期打断时省略该开关。
+两种 profile 共享完整参数合同，分别保存项目选择；Formal Web 不强制固定订单文件：
 
 ```powershell
 # 只检查源码、项目、私有 Provider、完整参数合同和端口占用；不改动进程。
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File .\scripts\live_voice\start_hands_free_demo.ps1 `
   -RuntimeProfile formal-web-validation `
+  -GenerationInterruption `
   -ProjectPath '<已注册、可丢弃、无 remote 的 Git 项目>' `
   -DataDir '<隔离 JIUWENSWARM_DATA_DIR>' `
   -PreflightOnly -NoBrowser
 
-# 预检通过后才允许启动；也可双击 start_formal_web_validation.cmd。
+# 预检通过且本次允许重启专用服务后启动；保留同一组 profile/开关。
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File .\scripts\live_voice\start_hands_free_demo.ps1 `
   -RuntimeProfile formal-web-validation `
+  -GenerationInterruption `
   -ProjectPath '<同一项目>' -DataDir '<同一数据目录>' `
   -SaveConfiguration -RestartExisting -NoBrowser
 ```
+
+核对启动输出 `LIVE_VOICE_FRONTEND_GENERATION_INTERRUPTION=true` 和当前运行合同中
+`VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION` 的值，并确认实际 served assets
+属于该次构建。它使前台打断绑定 exact response/round，不取消 detached Task，
+也不是历史 V0 的 `chat.interrupt(intent=supplement)`。双击快捷入口、旧进程或
+单看页面状态不能证明该开关已开启。耳机本地暂停 profile 是独立选项，按当前
+接受包选择，不因开启生成期打断而自动获得耳机、扬声器或蓝牙验收信用。
 
 启动器必须在启动前拒绝脏源码、校验全部必需开关、拒绝无关外部 channel，并在启动后执行
 真实 Provider TTS→STT、critical receipt、身份错配拒绝和伪造 claim 拒绝探针，
@@ -619,7 +638,10 @@ project.create（首次注册时）
 
 如果文字冒烟都失败，先修后端、项目注册、模型或工具配置，不要把问题归咎于 Live Voice。
 
-## 9. 真实 Live Voice 验收
+## 9. 历史 V0 真实 Live Voice 验收
+
+以下是 V0 的历史复现步骤，不用于当前候选签收。当前预演和一次完整候选
+验收按 §7.5 与当前 showcase；不要从这里继承 supplement 语义或三次重复要求。
 
 1. 连接耳机，确认 Chrome 麦克风权限和默认输入设备。
 2. Agent 模式进入 Live Voice，状态必须变为 Listening。
@@ -694,7 +716,8 @@ project.create（首次注册时）
 
 ## 11. 产品验收记录模板
 
-只记录非敏感信息：
+只记录非敏感信息。按本次能力边界选取字段；其中 V0/P3alpha 示例项不自动成为
+当前候选要求，阈值和端口使用本次运行的实际值。
 
 ```text
 日期/时间：
@@ -717,7 +740,7 @@ Node/npm 版本：
 本次实际麦克风/耳机或输出设备标签（只用于复现，不限制型号）：
 Chrome 麦克风权限：允许 / 拒绝
 网络：固定网络标签
-端口：18092 / 19000 / 19001 / 5173
+端口：本次运行的已核实端口
 connection.ack：通过 / 失败
 文字 tool smoke：通过 / 失败
 真实语音 final：通过 / 失败
@@ -743,8 +766,11 @@ ASR 误识别样本：
 
 ## 12. 结束与恢复
 
+当前 A/B/A2 旅程的离线等待阶段不执行本节。保留的后台 Task 完成、结果和
+通知验收结束后，才清理本次拥有的专用测试环境；不停止其他会话或用户服务。
+
 - 退出 Live Voice，确认麦克风和声音均停止。
-- 停止 Vite、Gateway 和 AgentServer 进程。
+- 按本次环境的进程身份停止专用 Vite、Gateway 和 AgentServer 进程。
 - 若采用方案 A，恢复之前备份的用户 channel 配置。
 - 记录本次使用的 `JIUWENSWARM_DATA_DIR` 标签，停止所有引用它的进程后执行 `Remove-Item Env:JIUWENSWARM_DATA_DIR -ErrorAction SilentlyContinue`；不要自动删除证据目录。
 - 按所选 acceptance 合同保存脱敏结果，只在 [STATUS.md](../STATUS.md) 更新当前产品边界、能力/模块状态、通过项、失败项和下一步。按根 `AGENTS.md` 可为已授权工作形成 coherent 本地 commit；每次 push/远端 ref 更新仍须单独精确审批。`ee2896a4` 已冻结，后续只在独立 checkout/worktree 中复现或调查回归，`d4c3e32a` 只作失败历史，V0/W2/Alpha 结果不得混为同一能力结论。

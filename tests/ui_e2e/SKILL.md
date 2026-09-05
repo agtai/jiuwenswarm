@@ -1,11 +1,12 @@
 ---
 name: ui_e2e
-description: 运行 JiuwenSwarm Web UI 端到端测试并收集截图、日志、report.md、report.json。用于验证 Todo 和 Cron Web UI 流程、复现浏览器交互问题、选择运行解释器、准备 Playwright 环境，或返回可操作的失败证据时。
+description: 使用现成 Playwright 脚本验证 JiuwenSwarm 的 Todo 或 Cron Web UI，收集截图、日志和结果报告。适用于这些流程的验收与故障复现。
 ---
 
 # UI E2E
 
-复用本目录现成脚本，不要临时重写浏览器测试流程。
+复用本目录现成脚本，按改动选择 Todo 或 Cron 场景；两者都受影响时再跑合集。
+Live Voice 任务从其[项目入口](../../live-voice/README.md)选择测试路线。
 
 ## 使用脚本
 

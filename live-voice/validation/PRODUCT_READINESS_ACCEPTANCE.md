@@ -1,6 +1,6 @@
 # Live Voice product-readiness acceptance
 
-> Current state and exact candidate: [STATUS](../STATUS.md)
+> Current state and candidate evidence routes: [STATUS](../STATUS.md)
 > Human product journey: [PRODUCT_READINESS_SHOWCASE](../demo/PRODUCT_READINESS_SHOWCASE.md)
 > Environment/startup: [E2E runbook](../runbooks/E2E_RUNBOOK.md)
 > Verification/review policy: root [TESTING](../../TESTING.md)
@@ -37,7 +37,8 @@ compatibility, production-scale SLOs and release operations remain later.
 
 ## 1. Candidate entry
 
-- STATUS identifies the product boundary, current defects and exact source.
+- STATUS identifies the product boundary and current defects; Git and the
+  selected candidate evidence record supply the live and tested source identity.
 - Every changed capability/module has risk-proportional automated evidence and
   the required review under root TESTING.
 - The candidate composes formal product routes rather than crediting a fake,
@@ -65,9 +66,12 @@ compatibility, production-scale SLOs and release operations remain later.
 - Versioned identity, scope, authority and Command/Query/Result/Event envelopes
   bind exact session/project/interaction/turn/response/round/task/attempt and
   generation identities.
-- Only committed final input may reach Agent, Tool or Task mutation. Partial,
-  ambiguous, stale, wrong-scope and unconfirmed inputs cause zero forbidden
-  side effects.
+- Only committed final input with the required authority may reach Agent, Tool
+  or Task mutation. Partial, ambiguous, stale, wrong-scope or missing-consent
+  inputs cause zero forbidden effects. Under D-109/D-112, an explicit current
+  local create/adjust request supplies consent; internal durable confirmation
+  and exact binding checks do not require a second spoken yes. Other mutation
+  policies and genuinely missing authority remain unchanged.
 - ACK, accepted, queued, running, timeout and unknown never masquerade as
   applied, presented, terminal, successful or result-available.
 - Cancel/fence, WorkProgress, Context, capability/error/fallback and restart
@@ -125,8 +129,8 @@ playout` path:
 
 ## 7. Combined hands-free product journey
 
-Run foreground conversation and one detached background Task through a single
-real microphone/TTS journey:
+The stable minimum contract runs foreground conversation and one detached Task
+through a real microphone/TTS journey:
 
 1. create the Task from committed speech and verify the exact authoritative
    task/attempt;
@@ -142,6 +146,14 @@ real microphone/TTS journey:
 The journey fails if media becomes unresponsive, dialogue claims unproven Task
 truth, the adjustment does not reach the authoritative path, the result is lost
 or fabricated, or terminal speech targets the wrong response/task.
+
+For the current candidate, STATUS also requires the A/B/A2 extension in
+[showcase §4](../demo/PRODUCT_READINESS_SHOWCASE.md#4-current-aba2-journey):
+separate task control, offline completion, unread/ACK/refresh and preserved
+predecessor/new revision. Record that accepted extension in the candidate's
+scope before running it. A narrower module rehearsal does not require all
+candidate scenarios and cannot claim the full candidate. This extension does
+not invalidate historical acceptance of the earlier minimum contract.
 
 ## 8. Platform, degradation, privacy and recovery
 
@@ -178,26 +190,11 @@ observations, unresolved gaps and every accepted deviation. A pass remains
 bounded to this contract; it does not trigger `develop` integration or claim
 feature-complete, productized or RC/Production readiness.
 
-## 10. Current bounded result — 2026-09-02
+## 10. Historical candidate result — 2026-09-02
 
-**PASS — CONTROLLED PRODUCT-READINESS CANDIDATE** on exact product source
-`83fde562284e96df12f2e2546797c4703a75132b`.
-
-The ordinary-Chrome 8+2 microphone/Agent/Task/TTS journey passed on that clean
-source, and a separate Session completed the final Tier-3 changed-boundary
-review with `Critical 0 / Important 0` and `Assessment: Ready`. The review made
-no source change, so the source-, route- and environment-bound human evidence
-remains applicable. See the sanitized
-[human evidence](../evidence/P3_9_CUMULATIVE_PRODUCT_ACCEPTANCE_20260902.md) and
-[final review](../reviews/P3_9_FINAL_INDEPENDENT_TIER3_REVIEW_2026-09-02.md).
-
-Accepted deviations remain explicit: the broad frontend diagnostic is
-`493 passed / 5 failed / 1 skipped`, with the five mounted timing failures
-outside the P3-9 repair overlay and a representative failure reproduced on the
-comparison source. The final review therefore ran the focused changed-boundary
-candidate rather than relabelling or rerunning the broad diagnostic as a pass.
-
-This result grants only the controlled-candidate boundary. It does not trigger
-`develop` integration and does not claim feature completeness, productization,
-fixed-corpus latency/generalization, production authentication or tenancy,
-public deployment, SLOs, RC or Production readiness.
+The controlled-candidate PASS on `83fde562284e96df12f2e2546797c4703a75132b`
+is retained in the [human evidence](../evidence/P3_9_CUMULATIVE_PRODUCT_ACCEPTANCE_20260902.md)
+and [final review](../reviews/P3_9_FINAL_INDEPENDENT_TIER3_REVIEW_2026-09-02.md),
+including its scope, test counts and accepted deviations. It is not the current
+candidate outcome. Current judgement remains in [STATUS](../STATUS.md); no
+historical result grants later feature-complete, deployment or release credit.

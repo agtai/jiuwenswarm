@@ -1,8 +1,10 @@
 # JiuwenSwarm Live Voice router
 
-Root `AGENTS.md` owns Git authority. **Default Live Voice reading is this router
-and the concise [STATUS](STATUS.md).** Then select one route below. Read linked
-material only when needed for that task; do not recursively open every link.
+Root `AGENTS.md` owns work and Git authority. Start with this router and
+[STATUS](STATUS.md)'s judgement/current packet; read other status sections only
+for the relevant capability or planning scope. Choose a primary route below and
+add only sections required by touched boundaries. Reuse unchanged guidance already
+read in this session; links are conditional, not a recursive reading list.
 
 ## Task routing
 
@@ -11,7 +13,7 @@ material only when needed for that task; do not recursively open every link.
 | Current implementation packet | STATUS `Current execution packet`; affected source/tests; only the implicated contract/evidence and applicable root `TESTING.md` risk sections |
 | Another capability/module | That capability row and dependency route in STATUS; affected source/tests; only the relevant accepted design/ACG/decision sections |
 | Complete-project planning | STATUS completion boundaries, full capability matrix and dependency route; heading `D-084` in [decisions](decisions/DECISIONS.md); stable capability/contract sections (§§2, 4–5) of the [design snapshot](architecture/FULL_SOLUTION_2026-07-30.md) |
-| Candidate/product acceptance | Applicable acceptance contract; complete human journey; only required environment/start/cleanup sections of the runbook |
+| Rehearsal or candidate/product acceptance | [Human journey](demo/PRODUCT_READINESS_SHOWCASE.md), which separates rehearsal from full candidate acceptance; only the required [runbook](runbooks/E2E_RUNBOOK.md) startup/diagnosis/cleanup sections and applicable acceptance contract |
 | Documentation change | [Documentation rules](DOCUMENTATION_RULES.md), root `TESTING.md` documentation-only section and only the authorities changed by the edit |
 | Architecture/authority/protocol/security/durability change | Exact ACG and governing decision sections; full design only if the long-term boundary itself changes or is ambiguous |
 | Git/review/parallel work | Root `AGENTS.md`, applicable root `TESTING.md` sections and only the active packet named by STATUS |

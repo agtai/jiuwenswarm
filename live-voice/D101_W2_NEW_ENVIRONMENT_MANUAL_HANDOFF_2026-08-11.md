@@ -1,5 +1,9 @@
 # D101 W2 new-environment manual handoff — 2026-08-11
 
+> Historical handoff only. D-071/D-072 retired the signed W2 Gate and its tooling;
+> the execution/signing instructions below must not be used for current work.
+> Start from [README](README.md) and [STATUS](STATUS.md).
+
 ## Disposition
 
 The user will perform the remaining assisted/manual W2 validation in a new environment and a new Codex Session. The source implementation boundary remains `ebd95ba1e`; [D100](D100_P3_TERMINAL_REPLAY_VALIDATION_READY_2026-08-11.md) records the passing unsigned automatic validation-ready run on the original machine. That runtime is diagnostic only and creates no portable machine readiness, evidence or Gate credit.
@@ -19,7 +23,7 @@ The implementation commits that close the latest observed blockers are:
 
 ## New-environment execution boundary
 
-Before any signature, the new machine must repeat the unsigned [validation-ready lane](runbooks/E2E_RUNBOOK.md#validation-ready-before-signing) because machine-private readiness does not transfer with Git. At minimum it must prove:
+The historical handoff required repeating the unsigned [validation-ready lane](D100_P3_TERMINAL_REPLAY_VALIDATION_READY_2026-08-11.md) before signing because machine-private readiness did not transfer with Git. Its requirements were:
 
 1. clean exact source and disposable fixture roots, private-config schema/reference, persistent Session, registered project, selected Agent model and real Speech provider;
 2. two consecutive AgentServer epochs retain the same complete Agent configuration;

@@ -17,7 +17,7 @@
 >
 > D-071 supersedes Gate-era scoring and signed-evidence completion rules for W2 and later Live Voice milestones. Package identities, dependencies and product requirements remain; acceptance is automated verification plus one complete human product run.
 >
-> D-075 keeps every dated package/window row below unchanged but reclassifies `W1/W2/W3/W4` as historical delivery windows. Current sequential state uses S0–S9 and Alpha nodes A0–A3 in the roadmap/STATUS; P1/P2/P3alpha remain capability tracks.
+> D-075's S0–S9 and A0–A3 mapping below is historical. D-084 completion boundaries and STATUS's capability/dependency model now govern planning; dated windows and stage numbers do not activate work.
 
 In package rows, `Gate` means a contract or product-acceptance checkpoint. It does not refer to the removed signed-evidence evaluator, manifest or rehearsal system.
 
@@ -146,7 +146,7 @@ Source examples at the matrix freeze date are [useLiveVoiceDemo.ts](../../jiuwen
 
 ## 10. Milestones and product acceptance
 
-The `Window` column is historical. Its current D-075 mapping is V0→S0, W1→S1, bounded D-031→S2, W2→S3, develop rebaseline→S4, W3/W4→S5–S8, and Later→S9. Only STATUS reports the current stage or whether a module is Alpha-closed.
+The `Window` column and D-075 mapping are historical: V0→S0, W1→S1, bounded D-031→S2, W2→S3, develop rebaseline→S4, W3/W4→S5–S8, and Later→S9. STATUS reports current capability status and the active packet.
 
 | Window | Human-readable outcome | Required package relationship | Pass/fail authority | Current status |
 |---|---|---|---|---|
@@ -177,9 +177,12 @@ Week 2 acceptance: applicable automated verification + one complete human cumula
 Week 4 acceptance: real P1/P2/P3alpha verticals + Web platform and joint automated-plus-human acceptance
 ```
 
-## 12. Agent execution contract
+## 12. Historical Agent execution contract
 
-When an Agent uses this matrix to plan or implement work, it must:
+The recorded S5–S8 procedure follows. It does not activate those packets today.
+Current work starts at [README](../README.md), [STATUS](../STATUS.md) and the
+applicable root [TESTING](../../TESTING.md) sections; reuse only relevant package
+contracts from this historical matrix.
 
 1. read `README.md`, `STATUS.md` and the active S5–S8 execution plan, then select only an activated task/package whose real dependency state allows progress;
 2. preserve the canonical WP ID and parent-module authority shown here;

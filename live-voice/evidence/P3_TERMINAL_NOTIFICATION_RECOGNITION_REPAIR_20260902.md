@@ -1,7 +1,7 @@
 # Terminal Task notification recognition/recovery repair — 2026-09-02
 
 This is an immutable scoped source/test record, not physical acceptance.
-Current credit and next work remain in [STATUS](../STATUS.md#reopened-terminal-task-notification-presentation-repair).
+Current credit and next work remain in [STATUS](../STATUS.md); this historical record does not depend on a mutable packet heading.
 Risk/review authority is root [TESTING](../../TESTING.md).
 
 ## Source and scope

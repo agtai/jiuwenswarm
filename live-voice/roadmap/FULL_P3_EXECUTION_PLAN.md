@@ -29,6 +29,11 @@
 > defect still blocks a later controlled-candidate or feature-complete claim.
 > Mutable selection remains only in [STATUS](../STATUS.md).
 
+> Interpretation note (2026-09-05): this preparatory history is not the current
+> queue. Later D-093 admits only declared D0/D2 profiles; D1 is rejected. A D2
+> checkpoint/recovery detail does not establish a separate D1 capability. Use
+> STATUS and the relevant later decision before applying a recorded contract.
+
 ## 1. Purpose and required product outcome
 
 The objective is to move from the accepted P3alpha foundation boundary to
@@ -962,7 +967,7 @@ only a replaceable selection hint. It also freezes successor lineage as a new
 Task identity with predecessor/revision fields. D-087 now fixes the P3-2
 command, eligibility and atomic creation transaction on that lineage.
 
-| Question | Current accepted decision | Remaining block |
+| Question | Recorded preparatory decision | Remaining block at that snapshot |
 |---|---|---|
 | If pause/resume is supported, how is `paused` represented? | D-087 keeps it non-canonical and freezes pause/resume as zero-effect `unsupported`; never relabel blocked/accepted/decision-required | Scoped P3-3/P3-4 closure added no real primitive. Positive support requires a separately accepted capability/policy expansion and later P3-7 composition; it is not inherited from those package PASS results |
 | Does D1 resume the same Attempt? | D-089 preserves `task_id` and requires an explicit linked/new recovery `attempt_id` with immutable producer provenance | Settled for scoped Direct P3-4; later Executor generalization and P3-9 acceptance must preserve it |

@@ -1,57 +1,101 @@
 # Repository agent guidance
 
-## Git change and remote approval policy
+## Work scope and skills
 
-Ordinary local staging and commits are part of an authorized change/build/documentation task and do not require a separate per-commit approval. Before committing, inspect the relevant status and diff, run the risk-proportional checks/review required below, and preserve unrelated user changes. Prefer one reviewable commit per coherent module, bug-fix batch, integration batch, or documentation decision. Do not create tiny activity/checkpoint commits merely to show progress, and do not commit a knowingly broken or semantically incomplete state unless the user explicitly asks for a recoverable checkpoint.
+User instructions and newer accepted decisions take precedence over skills and
+older documents. Complete the authorized task through its required verification;
+an accepted request or execution packet does not need another design, execution
+method, worktree or local-commit approval. Ask only when missing information or
+a new scope/authority decision actually blocks the work, and continue independent
+authorized work while that issue is pending.
 
-At handoff, report the commit hash/message, relevant status, diff/test summary, and exclusions. Amending, squashing, rebasing, cherry-picking, merging, or otherwise rewriting/composing local history is allowed only when it is inherent in the user's requested integration/rebaseline task, an accepted execution packet, or the minimum-intervention mode below; otherwise request direction before changing existing history.
+Use skills for their actual task-specific value. Generic workflow skills,
+including Superpowers, do not impose probability-based activation, recursive
+reading, extra approval gates, per-function tests, full-suite runs, micro-commits
+or fixed review-loop counts on this repository. Root `TESTING.md` selects checks
+and review cadence by the coherent changed boundary. Current tool schemas and
+host permissions govern tool calls; skill examples do not authorize configuration,
+installation, external optimization, publishing or credential disclosure.
 
-Every remote-ref update remains separately gated. Before a push, force-push, remote branch/tag creation/update/deletion, or equivalent operation, state the exact remote, ref, commits, update mode, and whether history is rewritten, then obtain the user's explicit approval for that operation. Earlier commit approval, an earlier push, or a general instruction to continue does not authorize a later remote update.
+## Git authority
 
-### User-activated minimum-intervention exception
+Ordinary local staging and commits are authorized parts of change/build/documentation
+work. Inspect status and the scoped diff, complete applicable checks/review, and
+preserve unrelated user changes. Prefer one reviewable commit per coherent module,
+repair or documentation decision; do not commit broken/incomplete work unless
+the user explicitly requests a recovery checkpoint. At handoff report the commit
+hash/message, status, diff/check summary and exclusions.
 
-When the user explicitly requests minimum intervention, autonomous progression with questions only when required, or equivalent reduced-approval handling, Main may also perform the task-scoped local history/integration operations listed above without another per-operation approval. Ordinary requests to continue do not activate this broader authority. The activation persists across Session changes, context compaction, and task resume until the named task or candidate closes, work leaves the authorized scope, or the user revokes it.
+Amend, squash, rebase, cherry-pick or merge existing history only when inherent
+in the requested integration/rebaseline, an accepted execution packet, or the
+minimum-intervention authority below; otherwise request direction.
 
-Minimum-intervention mode reduces approval round trips; it does not expand product scope, waive required tests/reviews/acceptance, permit overwriting unrelated user changes, or authorize destructive or hard-to-recover operations. It also does not authorize credential disclosure or relocation, external account/provider/billing changes, public deployment, security-policy choices, or other external effects not already inherent in the approved task. If one of those boundaries or a material product decision requires the user, continue all unblocked work and report the exact issue, why it requires intervention, the exact action needed, and a recommendation.
+**Every remote-ref update requires explicit approval for that operation.** Before
+push/force-push or remote branch/tag creation, update or deletion, state the exact
+remote, ref, commits, update mode and whether history is rewritten. A previous
+push, local commit approval or instruction to continue does not authorize another
+update. A narrow advance grant must name the remote, ref, allowed mode, commits
+and validity window. Workers must never push.
 
-Remote refs are excluded unless the user separately grants a narrow remote authorization naming the exact remote, branch or tag, allowed update mode, commits, and validity window. Without that grant, every normal/force push and every remote branch/tag/ref creation, update, or deletion still requires separate exact approval. Worker Git authority remains further limited by the active packet and integration lease; a general minimum-intervention activation does not let a worker push or integrate its own return.
+### Minimum intervention
 
-### Bounded Live Voice adaptive parallel ownership
+An explicit request for minimum intervention or equivalent autonomous progression
+also permits task-scoped local history/integration operations without repeated
+approval. This persists across sessions/resume/compaction until the task closes,
+scope changes or the user revokes it; “continue” alone does not activate it.
+It does not expand product scope, waive checks, overwrite unrelated changes,
+permit destructive/hard-to-recover operations, or grant new credential,
+account/provider/billing, deployment or security-policy authority. Remote updates
+remain governed by the exact grant above. Report a real blocked boundary with
+the required action and recommendation while continuing unblocked work.
 
-When a routed Live Voice packet uses D-060/D-062 parallel execution, the number and form of workers are derived from the coherent batch; there is no fixed minimum or maximum beyond available tool capacity. Main may assign non-overlapping work to separate Sessions/worktrees, bounded subagents, or itself. Main remains the only Integration Owner, shared semantic owner, and integration-worktree history writer. These rules are dormant when no parallel packet is active; completed W2 lane assignments do not remain current Alpha assignments.
+### Parallel ownership
 
-Assigned workers in separate worktrees may stage and commit only their own task branch when the active packet grants that authority; they must not change the integration branch, rewrite shared history, or integrate their own return. A subagent sharing Main's worktree may edit only its explicitly assigned non-overlapping files while holding the sole active filesystem-writer lease for that worktree; it must not switch branches, stage, commit, rewrite history, or integrate. Main reviews and performs all Git operations for shared-worktree subagent changes. Semantic conflict resolution remains with Main and the owning module boundary.
+For an active D-060/D-062 parallel packet, Main assigns coherent non-overlapping
+work within tool capacity and remains the Integration Owner and shared semantic
+owner. Historical lane assignments are dormant without a current packet.
 
-Every operation that updates a remote ref still requires separate explicit user approval for the exact remote, branch or tag, commits, and update mode. This includes normal push, force/force-with-lease push, and remote branch/tag creation, update, or deletion. A Task worker must never push. Parallel workers must honor packet ownership and the single-writer integration lease; local Git freedom does not authorize semantic conflict resolution outside the assigned owner.
+Separate-worktree workers may commit only their task branch when their packet
+grants that authority; they cannot change the integration branch, rewrite shared
+history or integrate their own return. A shared-worktree subagent may edit only
+its assigned files while holding the sole active filesystem-writer lease, and
+cannot switch branches, stage, commit or integrate. Main reviews and performs
+shared-worktree Git operations; semantic conflicts stay with Main and the owning
+module. Generic worker templates do not override these limits.
 
-## Live Voice bootstrap
+## Live Voice routing and facts
 
-For every Live Voice task, first read `live-voice/README.md` and
-the concise `live-voice/STATUS.md`, then follow exactly one README route. Links
-are conditional routes, not instructions to recursively read their targets.
-Historical snapshots, closed packets and past run evidence are not default reads.
-Documentation structure/update work also reads `live-voice/DOCUMENTATION_RULES.md`. Do not
-load complete acceptance, runbooks, architecture or history unless the selected
-route requires them; numbered delivery plans are not the current queue.
+Start a Live Voice task with `live-voice/README.md` and the judgement/current
+packet in `live-voice/STATUS.md`; read capability rows and other sections only as
+the task requires. Choose one primary README route and add only sections needed
+by the touched boundaries. Reuse unchanged guidance already read in this session.
+Links are conditional; historical snapshots, closed packets, numbered plans and
+past runs are not a default reading list or current queue. Documentation structure
+work also uses `live-voice/DOCUMENTATION_RULES.md`.
 
-At resume, verify Git before trusting prose: run `git status --short --branch`, `git rev-parse HEAD`, and `git rev-list --left-right --count 'HEAD...@{upstream}'` (report an absent upstream instead of inventing one). If Git and `STATUS.md` disagree, Git is the implementation fact; report and repair the documentation rather than silently following stale text.
+At resume verify `git status --short --branch`, `git rev-parse HEAD`, and
+`git rev-list --left-right --count 'HEAD...@{upstream}'`; report an absent upstream.
+Git/source is implementation fact; accepted decisions own intended behavior.
+Record and repair document drift without treating existing code as final design.
+Private credentials, provider/model setup, project registration, device/browser
+state, runtime data and network availability are not restored by Git.
 
-The Demo must submit committed final speech text to the real JiuwenSwarm Agent and tools. It is not an ASR/TTS-only showcase, and shortcuts must never be described as production-complete capabilities. Credentials, model/provider configuration, project registration, browser permissions, audio-device selection, runtime data, and network availability are machine-private and are not restored by Git.
+The Demo must send committed final speech to the real JiuwenSwarm Agent/tools.
+ASR/TTS-only paths and other shortcuts cannot claim the full product boundary.
 
 ## Module and test closure
 
-Current planning follows the D-084 completion boundaries and the capability/
-dependency model in `live-voice/STATUS.md`. Every implementation packet names
-its capability/module, risk tier, dependencies, scope, exclusions and
-acceptance. Historical stages/windows cannot define current priority.
+Use STATUS's capability/dependency model and D-084 completion boundaries. Before
+implementation record intended behavior, owned product/test surfaces, risk,
+dependencies, exclusions and acceptance, scaled to the change. A new classifier
+or product policy, shared protocol/schema/migration, module owner or materially
+broader behavior needs explicit re-scoping and re-tiering before that expansion.
+Diff size is a warning signal, not a semantic acceptance criterion.
 
-Root `TESTING.md` is the complete authority for D-032/D-046/D-074 risk,
-scenario, review and evidence rules. Read only its applicable sections before
-changing code or tests. D-071/D-072 keep the signed W2 evidence Gate and its
-tooling retired; do not recreate them without an explicit new audit requirement.
-
-Positive business scenarios must succeed. Negative scenarios must be rejected or fail closed, and forbidden side effects must be asserted as zero for any path that can mutate Agent, Tool, Task, audio/history authority, protected state, or another scope. Test counts or line coverage alone do not prove closure. Missing required risk evidence leaves the affected scope `PARTIAL` or `BLOCKED`. Root `TESTING.md` assigns risk to each coherent changed boundary: an umbrella packet or candidate tier does not automatically propagate to every child repair, and inapplicable matrix dimensions are scoped out at every tier.
-
-Before implementation, record the intended behaviour, owned product/test surfaces and explicit exclusions. If the work would introduce a new classifier or product policy, shared protocol/schema/migration, another module owner or materially broader behaviour than the recorded acceptance, stop and explicitly re-scope and re-tier that expansion before implementing it. Diff size is a scope-warning signal, not a closure target or a substitute for semantic review.
-
-User instructions and newer accepted decisions take precedence. If code and documents disagree, record the gap instead of treating current code as the intended final design.
+Read only applicable `TESTING.md` sections before changing code/tests. Positive
+business scenarios must succeed; rejection/stale/wrong-scope paths must fail
+closed with zero forbidden Agent/Tool/Task/audio/history/protected-state effects.
+Missing required evidence leaves the affected scope PARTIAL/BLOCKED. Test counts
+and coverage alone do not close it. Review findings are triaged when received;
+only affected checks/reviews need repeating. D-071/D-072 keep signed W2 evidence
+Gate tooling retired unless the user explicitly requests a new audit requirement.

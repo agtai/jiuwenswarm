@@ -53,6 +53,10 @@ exact-source records. They cannot override the current authorities above.
 - STATUS is a current decision aid: one judgement, capability matrix, active
   scope, remaining gates and dependency order. Replace superseded statements;
   do not prepend another “latest” checkpoint while leaving the old one active.
+- Default bootstrap reads its judgement/current packet; capability, planning
+  and verification sections are selected by the task. Reuse unchanged guidance
+  within a session. A rehearsal may exercise a scoped part of the human journey;
+  only the accepted complete candidate scope can receive candidate credit.
 - Keep test counts, per-run timelines, closed module packets, old integration
   assignments and expired time windows in evidence or conditional history.
   STATUS keeps only their current consequence and a task-specific link.
