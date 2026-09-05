@@ -602,6 +602,59 @@ async def test_formal_output_cleanup_retains_ownership_across_bounded_waits(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["output", "session"])
+async def test_cancellation_during_formal_cleanup_waits_for_resource_release(monkeypatch, boundary):
+    release, started = asyncio.Event(), asyncio.Event()
+    released = []
+    lease = OutputLease(
+        [RawChunk("answer", {"output": {"output": "done"}})],
+        close_release=release if boundary == "output" else None,
+    )
+    child = adapter_with(FormalInstance(lease))
+    root = object.__new__(JiuWenSwarmDeepAdapter)
+    root._is_session_scoped_adapter = False
+
+    async def cleanup_child(_session_id):
+        started.set()
+        if boundary == "session":
+            await release.wait()
+        released.append(True)
+        return True
+
+    monkeypatch.setattr(root, "_get_or_create_session_adapter", AsyncMock(return_value=child))
+    monkeypatch.setattr(root, "cleanup_session_adapter", cleanup_child)
+    request, inputs = formal_request()
+
+    async def consume():
+        return [chunk async for chunk in root.process_formal_live_voice_stream_impl(request, inputs)]
+
+    consumer = asyncio.create_task(consume())
+    try:
+        if boundary == "output":
+            while not lease.closed_with:
+                await asyncio.sleep(0)
+        else:
+            await started.wait()
+        for _ in range(2):
+            consumer.cancel()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        assert not consumer.done(), "cleanup must retain ownership after cancellation"
+    finally:
+        release.set()
+        await asyncio.gather(consumer, return_exceptions=True)
+    assert consumer.cancelled()
+    assert released == [True]
+    assert lease.closed_with == [False]
+    assert not child._instance.system_prompt_builder.has_section("formal_live_voice_presentation")
+    assert not any(
+        task is not asyncio.current_task() and not task.done()
+        and task.get_name().startswith("formal-live-voice-")
+        for task in asyncio.all_tasks()
+    )
+
+
+@pytest.mark.asyncio
 async def test_formal_consumer_close_after_yield_aborts_active_round() -> None:
     lease = OutputLease(
         [
@@ -620,6 +673,60 @@ async def test_formal_consumer_close_after_yield_aborts_active_round() -> None:
 
     assert lease.closed_with == [True]
     assert not instance.system_prompt_builder.has_section("formal_live_voice_presentation")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("through_facade", [False, True])
+async def test_formal_delegation_closes_child_before_session_cleanup_in_same_context(monkeypatch, through_facade):
+    from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+    from tests.unit_tests.live_voice.test_speculative_dialogue import _execution
+
+    lease = OutputLease([
+        RawChunk("delta", {"content": "partial"}),
+        RawChunk("answer", {"output": {"output": "unreached final"}}),
+    ])
+    instance = FormalInstance(lease)
+    child = adapter_with(instance)
+    root = object.__new__(JiuWenSwarmDeepAdapter)
+    root._is_session_scoped_adapter = False
+    cleanup_order = []
+    children = []
+    original_child_stream = child.process_formal_live_voice_stream_impl
+
+    def retain_child_stream(*args):
+        result = original_child_stream(*args)
+        children.append(result)
+        return result
+
+    async def cleanup_child(_session_id):
+        cleanup_order.append(list(lease.closed_with))
+        return True
+
+    monkeypatch.setattr(child, "process_formal_live_voice_stream_impl", retain_child_stream)
+    monkeypatch.setattr(root, "_get_or_create_session_adapter", AsyncMock(return_value=child))
+    monkeypatch.setattr(root, "cleanup_session_adapter", cleanup_child)
+    request, inputs = formal_request()
+    if through_facade:
+        facade = JiuWenSwarm()
+        facade._adapter = root
+        facade._ensure_adapter = lambda **kwargs: root
+        facade._build_inputs = lambda request: ({**inputs, "conversation_id": request.session_id}, None, None)
+        stream = facade.process_formal_live_voice_stream(_execution())
+    else:
+        stream = root.process_formal_live_voice_stream_impl(request, inputs)
+    prior_channel = interface_deep.TOOL_PERMISSION_CHANNEL_ID.get()
+    try:
+        assert (await anext(stream)).payload["content"] == "partial"
+        await stream.aclose()
+        assert lease.closed_with == [True]
+        assert cleanup_order == [[True]]
+        assert interface_deep.TOOL_PERMISSION_CHANNEL_ID.get() == prior_channel
+        assert not instance.system_prompt_builder.has_section("formal_live_voice_presentation")
+    finally:
+        # Keep the failing baseline's child alive so test cleanup itself does
+        # not use async-generator GC (the production defect being reproduced).
+        for child_stream in children:
+            await child_stream.aclose()
 
 
 @pytest.mark.asyncio

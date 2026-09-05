@@ -3142,6 +3142,12 @@ async def test_no_consumer_lease_retains_critical_tail_without_blocking_close() 
     )
     handle = await dispatch(current, selected)
     await asyncio.wait_for(handle.completion, timeout=1)
+    # Bridge completion means the source terminal was observed, not that the
+    # separate Conversation consumer has already prepared presentation. Wait
+    # for this test's actual precondition without draining its notification lease.
+    async with asyncio.timeout(1):
+        while not current.snapshot().conversation.presentation.records:
+            await asyncio.sleep(0)
     presentation_before_close = next(
         record.unit for record in current.snapshot().conversation.presentation.records
     )
@@ -3842,6 +3848,55 @@ async def test_cancel_ack_does_not_precede_authoritative_cleanup_terminal() -> N
     assert (await current.close(timeout_seconds=1)).status is (
         AgentConversationShutdownStatus.CLOSED
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during_cleanup", [False, True])
+async def test_harness_rejection_closes_formal_stream_in_its_driving_context(cancel_during_cleanup) -> None:
+    from contextvars import ContextVar
+
+    marker = ContextVar("harness-stream-test", default=None)
+    closed = []
+    cleanup_started, cleanup_release = asyncio.Event(), asyncio.Event()
+
+    class InvalidProvenanceAdapter(LowerFormalAdapter):
+        async def process_formal_live_voice_stream_impl(self, request, inputs):
+            self.calls += 1
+            token = marker.set(request.session_id)
+            owner = asyncio.current_task()
+            try:
+                yield AgentResponseChunk(
+                    request_id="wrong-request", channel_id=request.channel_id,
+                    payload={"event_type": "chat.final", "content": "must not be presented"},
+                    is_complete=True,
+                )
+            finally:
+                cleanup_started.set()
+                await cleanup_release.wait()
+                closed.append(asyncio.current_task() is owner)
+                marker.reset(token)
+
+    lower = InvalidProvenanceAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    try:
+        selected = await prepare(current)
+        handle = await dispatch(current, selected)
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        if cancel_during_cleanup:
+            await current.close_interaction(cancel_command(handle, selected, command_id="cancel-during-cleanup"))
+            await asyncio.sleep(0)
+        assert not handle.completion.done()
+        cleanup_release.set()
+        completion = await asyncio.wait_for(handle.completion, timeout=1)
+        assert completion.terminal_outcome is TerminalOutcome.FAILED
+        assert completion.canonical_final_count == 0
+        assert closed == [True]
+        assert marker.get() is None
+        assert lower.calls == 1 and lower.legacy_calls == 0
+    finally:
+        cleanup_release.set()
+        assert (await current.close(timeout_seconds=1)).status is AgentConversationShutdownStatus.CLOSED
 
 
 @pytest.mark.asyncio

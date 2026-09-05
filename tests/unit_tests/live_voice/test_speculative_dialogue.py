@@ -220,6 +220,143 @@ async def test_closing_the_attached_stream_early_kills_the_candidate() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bounds", [{"max_chunks": 2}, {"max_bytes": 130}])
+async def test_attached_stream_backpressures_unread_data_and_releases_consumed_content(bounds) -> None:
+    # A fast producer and slow consumer must work for arbitrarily many buffer
+    # turnovers; neither total bytes nor total chunks is a response quota.
+    payloads = _payloads(4097)
+    facade = FakeFacade(payloads, hold_before=0)
+    execution = _execution()
+    candidate = SpeculativeDialogue(facade=facade, execution=execution, **bounds)
+    candidate.start()
+    await facade.started.wait()
+    stream = candidate.attach(execution)
+    facade.release.set()
+    received = []
+    async with asyncio.timeout(5):
+        async for chunk in stream:
+            received.append(chunk.payload)
+            await asyncio.sleep(0)
+            snapshot = candidate.snapshot()
+            assert snapshot["chunks"] <= bounds.get("max_chunks", 2048)
+            assert snapshot["bytes"] <= bounds.get("max_bytes", 262_144)
+            assert not snapshot["overflow"]
+    assert received == payloads
+    assert candidate.snapshot()["chunks"] == candidate.snapshot()["bytes"] == 0
+    assert facade.closed == 1 and facade.aborted == [] and facade.streams == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_backpressured_candidate_does_not_stop_another_candidate() -> None:
+    left, right = FakeFacade(_payloads(20), hold_before=0), FakeFacade(_payloads(4), hold_before=0)
+    a = SpeculativeDialogue(facade=left, execution=_execution(), max_chunks=2)
+    other_execution = _execution(request_id="other", internal_session_id=speculative_session_id("other"))
+    b = SpeculativeDialogue(facade=right, execution=other_execution, max_chunks=2)
+    a.start()
+    b.start()
+    sa, sb = a.attach(_execution()), b.attach(other_execution)
+    left.release.set()
+    right.release.set()
+    await anext(sa)
+    await asyncio.sleep(0)
+    assert not a.snapshot()["ended"], "a full unread buffer must wait, not stop the Agent"
+    await sa.aclose()
+    await sa.aclose()
+    assert a.snapshot()["chunks"] == a.snapshot()["bytes"] == 0
+    assert left.closed == 1 and left.aborted == [a.session_id]
+    assert await _collect(sb) == [p["content"] for p in right.payloads]
+    assert right.closed == 1 and right.aborted == []
+
+
+@pytest.mark.asyncio
+async def test_attached_oversize_chunk_fails_explicitly_and_releases_the_stream() -> None:
+    facade = FakeFacade([{"event_type": "chat.final", "content": "x" * 200}], hold_before=0)
+    candidate = SpeculativeDialogue(facade=facade, execution=_execution(), max_bytes=100)
+    candidate.start()
+    stream = candidate.attach(_execution())
+    facade.release.set()
+    with pytest.raises(SpeculativeDialogueViolation, match="chunk"):
+        await _collect(stream)
+    assert candidate.snapshot()["chunks"] == candidate.snapshot()["bytes"] == 0
+    assert facade.closed == 1 and facade.aborted == [candidate.session_id]
+
+
+@pytest.mark.asyncio
+async def test_repeated_admitted_failures_release_buffer_and_close_in_producer_context() -> None:
+    from contextvars import ContextVar
+
+    marker = ContextVar("speculative-test-context", default=None)
+    closed = []
+
+    class ContextFacade(FakeFacade):
+        async def process_formal_live_voice_stream(self, execution):
+            token = marker.set(execution.internal_session_id)
+            owner = asyncio.current_task()
+            try:
+                async for chunk in super().process_formal_live_voice_stream(execution):
+                    yield chunk
+            finally:
+                marker.reset(token)
+                closed.append(asyncio.current_task() is owner)
+
+    for index in range(20):
+        execution = _execution(internal_session_id=speculative_session_id(str(index)))
+        facade = ContextFacade(_payloads(3), hold_before=1, error=RuntimeError("provider failed"))
+        candidate = SpeculativeDialogue(facade=facade, execution=execution, max_chunks=2)
+        candidate.start()
+        await facade.started.wait()
+        stream = candidate.attach(execution)
+        facade.release.set()
+        with pytest.raises(RuntimeError, match="provider failed"):
+            await _collect(stream)
+        assert candidate.snapshot()["chunks"] == candidate.snapshot()["bytes"] == 0
+        assert facade.closed == 1
+        assert marker.get() is None
+    assert closed == [True] * 20
+
+
+@pytest.mark.asyncio
+async def test_concurrent_close_and_cancelled_discard_wait_for_producer_cleanup() -> None:
+    cleanup_started, cleanup_release = asyncio.Event(), asyncio.Event()
+    cleaned = []
+
+    class SlowCloseFacade(FakeFacade):
+        async def process_formal_live_voice_stream(self, execution):
+            try:
+                yield AgentResponseChunk(
+                    request_id=execution.request_id, channel_id=execution.channel_id,
+                    payload={"event_type": "chat.delta", "content": "first"},
+                    is_complete=False,
+                )
+                await asyncio.Event().wait()
+            finally:
+                cleanup_started.set()
+                await cleanup_release.wait()
+                cleaned.append(True)
+
+    facade = SlowCloseFacade([])
+    candidate = SpeculativeDialogue(facade=facade, execution=_execution())
+    candidate.start()
+    stream = candidate.attach(_execution())
+    await anext(stream)
+    closing = asyncio.create_task(stream.aclose())
+    await cleanup_started.wait()
+    discarding = asyncio.create_task(candidate.discard("runtime_closing"))
+    await asyncio.sleep(0)
+    discarding.cancel()
+    await asyncio.sleep(0)
+    assert not candidate.settled
+    cleanup_release.set()
+    results = await asyncio.gather(closing, discarding, return_exceptions=True)
+    assert cleaned == [True]
+    assert isinstance(results[1], asyncio.CancelledError)
+    await candidate.discard("again")
+    assert candidate.settled
+    assert candidate.snapshot()["chunks"] == candidate.snapshot()["bytes"] == 0
+    assert facade.aborted == [candidate.session_id]
+
+
+@pytest.mark.asyncio
 async def test_attached_facade_takes_the_candidate_or_falls_back() -> None:
     fallback = FakeFacade(_payloads(2))
     facade = FakeFacade(_payloads(3), hold_before=1)

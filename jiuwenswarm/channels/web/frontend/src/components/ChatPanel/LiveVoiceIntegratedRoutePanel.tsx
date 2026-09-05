@@ -1767,22 +1767,20 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
   const progressEvent = recordValue(notification.progress_event);
   const progressPayload = recordValue(progressEvent?.payload);
   if (notification.kind === 'work.progress' && progressPayload?.state === 'terminal') {
+    const outcome = progressPayload.outcome;
+    const reason = typeof outcome === 'string' && ['completed', 'failed', 'cancelled', 'unknown'].includes(outcome)
+      ? `PRODUCT_AGENT_TERMINAL_WITHOUT_FINAL_${outcome.toUpperCase()}`
+      : 'PRODUCT_AGENT_TERMINAL_WITHOUT_FINAL';
     return hasPresentedOutput
       ? { kind: 'continue' }
       : responseBinding === null
         ? {
           kind: 'failed',
-          reason:
-            typeof progressPayload.outcome === 'string'
-              ? `PRODUCT_AGENT_TERMINAL_WITHOUT_FINAL:${progressPayload.outcome}`
-              : 'PRODUCT_AGENT_TERMINAL_WITHOUT_FINAL',
+          reason,
           }
         : {
             kind: 'failed',
-            reason:
-              typeof progressPayload.outcome === 'string'
-                ? `PRODUCT_AGENT_TERMINAL_WITHOUT_FINAL:${progressPayload.outcome}`
-                : 'PRODUCT_AGENT_TERMINAL_WITHOUT_FINAL',
+            reason,
             response: responseBinding,
           };
   }

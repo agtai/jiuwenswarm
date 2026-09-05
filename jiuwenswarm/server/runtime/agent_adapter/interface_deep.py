@@ -9270,22 +9270,25 @@ class JiuWenSwarmDeepAdapter:
         """
 
         if not self._is_session_scoped_adapter:
+            from contextlib import aclosing
             from jiuwenswarm.common.live_voice_profiling import ProfileSpan
             with ProfileSpan("agent.session_acquire", request_id=request.request_id):
                 session_adapter = await self._get_or_create_session_adapter(
                     request.session_id
                 )
             try:
-                async for chunk in session_adapter.process_formal_live_voice_stream_impl(
+                async with aclosing(session_adapter.process_formal_live_voice_stream_impl(
                     request, inputs
-                ):
-                    yield chunk
+                )) as stream:
+                    async for chunk in stream:
+                        yield chunk
                 return
             finally:
                 cleanup = asyncio.create_task(
                     self.cleanup_session_adapter(request.session_id),
                     name=f"formal-live-voice-session-cleanup:{request.request_id}",
                 )
+                cleanup_cancelled = False
                 while not cleanup.done():
                     try:
                         await asyncio.wait_for(
@@ -9296,10 +9299,14 @@ class JiuWenSwarmDeepAdapter:
                         logger.warning(
                             "formal Live Voice session cleanup is still pending"
                         )
+                    except asyncio.CancelledError:
+                        cleanup_cancelled = True
                 if not await asyncio.shield(cleanup):
                     raise RuntimeError(
                         "FORMAL_EXECUTION_SESSION_CLEANUP_INCOMPLETE"
                     )
+                if cleanup_cancelled:
+                    raise asyncio.CancelledError
 
         if self._instance is None:
             raise RuntimeError("formal Live Voice Agent is not initialized")
@@ -9592,6 +9599,7 @@ class JiuWenSwarmDeepAdapter:
                             ),
                             name=f"formal-live-voice-output-close:{rid}",
                         )
+                        cleanup_cancelled = False
                         while not cleanup.done():
                             try:
                                 await asyncio.wait_for(
@@ -9605,8 +9613,15 @@ class JiuWenSwarmDeepAdapter:
                                 logger.warning(
                                     "formal Live Voice output cleanup is still pending"
                                 )
+                            except asyncio.CancelledError:
+                                # Cancellation may first arrive after natural
+                                # stream exhaustion. Retain the join so guards
+                                # and the owning session cannot be released early.
+                                cleanup_cancelled = True
                         await asyncio.shield(cleanup)
                         history_release_safe = True
+                        if cleanup_cancelled:
+                            raise asyncio.CancelledError
                     if tool_capture_close_error is not None:
                         raise tool_capture_close_error
                 finally:

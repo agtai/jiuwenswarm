@@ -1236,11 +1236,11 @@ class JiuWenSwarm:
             raise RuntimeError(
                 "FORMAL_EXECUTION_UNSUPPORTED: lower Agent adapter has no formal seam"
             )
-        async for chunk in formal_stream(
-            formal_request,
-            inputs,
-        ):
-            yield chunk
+        from contextlib import aclosing
+
+        async with aclosing(formal_stream(formal_request, inputs)) as stream:
+            async for chunk in stream:
+                yield chunk
 
     def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, UserTurn]:
         """构建 adapter 所需的 inputs 字典.

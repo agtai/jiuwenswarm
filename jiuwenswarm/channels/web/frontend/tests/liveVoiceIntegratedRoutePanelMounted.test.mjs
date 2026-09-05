@@ -9969,7 +9969,8 @@ test('mounted hands-free error stays separate from transcript, retries listening
   }
 });
 
-test('mounted response-generation failure projects exact terminal recovery identity with zero Task authority', async () => {
+for (const terminalOutcome of [null, 'unknown', 'failed', 'cancelled', 'completed']) test(`mounted response-generation failure ${terminalOutcome} projects exact terminal recovery identity with zero Task authority`, async () => {
+  const expectedReason = terminalOutcome === null ? 'AGENT_PROVIDER_FAILURE' : `PRODUCT_AGENT_TERMINAL_WITHOUT_FINAL_${terminalOutcome.toUpperCase()}`;
   const i18n = await createI18n('en');
   const sessionId = 'mounted-response-generation-failure-session';
   const states = [];
@@ -10001,12 +10002,13 @@ test('mounted response-generation failure projects exact terminal recovery ident
         result: {
           status: 'notification',
           ...binding,
-          kind: 'agent.error',
+          kind: terminalOutcome === null ? 'agent.error' : 'work.progress',
           response,
-          agent_event: {
+          agent_event: terminalOutcome === null ? {
             event_type: 'agent.failed',
             error_reason: 'AGENT_PROVIDER_FAILURE',
-          },
+          } : null,
+          progress_event: terminalOutcome === null ? null : { payload: { state: 'terminal', outcome: terminalOutcome } },
           presentation_unit: null,
         },
       };
@@ -10032,7 +10034,7 @@ test('mounted response-generation failure projects exact terminal recovery ident
     assert.deepEqual(diagnostic, {
       seam: 'response_generation',
       disposition: 'terminal',
-      reason: 'AGENT_PROVIDER_FAILURE',
+      reason: expectedReason,
       session_id: binding.session_id,
       correlation_id: binding.correlation_id,
       interaction_id: binding.interaction_id,

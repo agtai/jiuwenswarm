@@ -33,7 +33,6 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
 )
 
 
-_STREAM_CLOSE_WAIT_SLICE_SECONDS = 5.0
 _ROUND_CONTROL_QUEUE_RESERVE = 4
 _NO_TOOL_OUTPUT_BUFFER_MAX_BYTES = 32_768
 _NO_TOOL_DSML_MARKUP = re.compile(
@@ -181,6 +180,7 @@ class _RoundRecord:
     execution_error: BaseException | None = None
     cancel_requested: bool = False
     cancel_observed: bool = False
+    stream_closing: bool = False
     cancel_coordinator: asyncio.Task[None] | None = None
 
 
@@ -916,14 +916,14 @@ class JiuWenSwarmRoundHarness:
         finally:
             record.started.set()
             record.cancel_safe.set()
+            record.stream_closing = True
             close = getattr(source_stream, "aclose", None)
             if callable(close):
-                cleanup = asyncio.create_task(
-                    close(),
-                    name=f"live-voice-harness-stream-close:{handle.round_id}",
-                )
                 try:
-                    await self._await_retained_cleanup(cleanup)
+                    # Permission ContextVars span iterator yields. The driving
+                    # round retains cleanup ownership until its terminal event;
+                    # a separate task would reset tokens in a foreign context.
+                    await close()
                 except BaseException as error:  # noqa: BLE001
                     record.execution_error = error
                     outcome = TerminalOutcome.FAILED
@@ -953,22 +953,11 @@ class JiuWenSwarmRoundHarness:
         await record.cancel_safe.wait()
         if (
             not record.cancel_observed
+            and not record.stream_closing
             and record.terminal_event is None
             and not record.task.done()
         ):
             record.task.cancel()
-
-    @staticmethod
-    async def _await_retained_cleanup(cleanup: asyncio.Task[None]) -> None:
-        while not cleanup.done():
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(cleanup),
-                    timeout=_STREAM_CLOSE_WAIT_SLICE_SECONDS,
-                )
-            except TimeoutError:
-                continue
-        await asyncio.shield(cleanup)
 
     async def _close_coordinator(self) -> None:
         tasks = tuple(record.task for record in self._rounds.values())

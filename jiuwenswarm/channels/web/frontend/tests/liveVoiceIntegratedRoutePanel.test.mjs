@@ -885,7 +885,7 @@ test('P2 notification classification surfaces failures and treats transport keep
     }),
     {
       kind: 'failed',
-      reason: 'PRODUCT_AGENT_TERMINAL_WITHOUT_FINAL:completed',
+      reason: 'PRODUCT_AGENT_TERMINAL_WITHOUT_FINAL_COMPLETED',
     },
   );
   assert.deepEqual(

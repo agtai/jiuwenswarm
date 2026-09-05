@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Protocol
 
@@ -140,12 +141,16 @@ class SpeculativeDialogue:
         self._max_bytes = max_bytes
         self._on_settle = on_settle
         self._state = "created"
-        self._buffer: list[AgentResponseChunk] = []
+        self._buffer: deque[tuple[AgentResponseChunk, int]] = deque()
         self._bytes = 0
         self._ended = False
         self._overflow = False
         self._error: BaseException | None = None
         self._wakeup = asyncio.Event()
+        self._space_available = asyncio.Event()
+        self._tools_aborted = False
+        self._cancel_requested = False
+        self._stream_closing = False
         self._task: asyncio.Task[None] | None = None
         self._stream: AsyncIterator[AgentResponseChunk] | None = None
         self._started_at = time.monotonic()
@@ -168,7 +173,7 @@ class SpeculativeDialogue:
 
     @property
     def settled(self) -> bool:
-        return self._state == "discarded" or (self._state == "attached" and self._ended)
+        return self._state in {"discarded", "attached"} and self._ended and not self._buffer
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -212,27 +217,49 @@ class SpeculativeDialogue:
     async def _pump(self) -> None:
         stream = self._facade.process_formal_live_voice_stream(self._execution)
         self._stream = stream
+        exhausted = False
         try:
             async for chunk in stream:
                 if self._first_chunk_at is None:
                     self._first_chunk_at = time.monotonic()
                 size = _chunk_bytes(chunk)
-                if len(self._buffer) + 1 > self._max_chunks or self._bytes + size > self._max_bytes:
-                    self._overflow = True
+                if size > self._max_bytes:
+                    raise SpeculativeDialogueViolation(
+                        "SPECULATION_CHUNK_TOO_LARGE", "Agent chunk exceeds the buffer byte bound",
+                        ErrorCode.UNAVAILABLE,
+                    )
+                while len(self._buffer) >= self._max_chunks or self._bytes + size > self._max_bytes:
+                    if self._state != "attached":
+                        # An unadmitted candidate cannot wait for a consumer.
+                        # Reject it so the selected route can use its serial path.
+                        self._overflow = True
+                        break
+                    # Only unread data occupies this buffer. Wait for consumption
+                    # without changing or discarding the admitted Agent output.
+                    self._space_available.clear()
+                    await self._space_available.wait()
+                if self._overflow:
                     break
-                self._buffer.append(chunk)
+                self._buffer.append((chunk, size))
                 self._bytes += size
                 self._wakeup.set()
+            else:
+                exhausted = True
         except asyncio.CancelledError:
             raise
         except BaseException as error:  # noqa: BLE001 - retained for the attach decision
             self._error = error
         finally:
-            self._ended = True
-            self._wakeup.set()
-            if self._overflow:
+            # The task that drives the iterator must also close it: the formal
+            # adapter holds permission ContextVar tokens across its yields.
+            try:
+                self._stream_closing = True
                 await self._close_stream()
-                self._abort_tools()
+            finally:
+                if not exhausted:
+                    self._abort_tools()
+                self._ended = True
+                self._wakeup.set()
 
     async def _close_stream(self) -> None:
         stream, self._stream = self._stream, None
@@ -241,12 +268,17 @@ class SpeculativeDialogue:
             try:
                 await close()
             except BaseException as error:  # noqa: BLE001 - best effort cleanup
+                if self._error is None:
+                    self._error = error
                 _LOGGER.warning(
                     "live_voice_speculation_stream_close_failed request_id=%s kind=%s",
                     self.request_id, type(error).__name__,
                 )
 
     def _abort_tools(self) -> None:
+        if self._tools_aborted:
+            return
+        self._tools_aborted = True
         try:
             self._facade.abort_formal_tools(self.session_id)
         except Exception as error:  # noqa: BLE001 - best effort cleanup
@@ -305,55 +337,75 @@ class SpeculativeDialogue:
         return self._replay()
 
     async def _replay(self) -> AsyncIterator[AgentResponseChunk]:
-        index = 0
         try:
             while True:
-                while index < len(self._buffer):
-                    chunk = self._buffer[index]
-                    index += 1
+                while self._buffer:
+                    chunk, size = self._buffer.popleft()
+                    self._bytes -= size
+                    self._space_available.set()
                     yield chunk
                 if self._ended:
                     break
                 # No await sits between this check and the wait, so the pump
                 # cannot append a chunk that this consumer would then miss.
-                if index >= len(self._buffer) and not self._ended:
+                if not self._buffer and not self._ended:
                     self._wakeup.clear()
                     await self._wakeup.wait()
             if self._error is not None:
                 raise self._error
         finally:
-            if not self._ended:
-                # The admitted round closed early (cancel, interruption, failure):
-                # the candidate dies with it, tools included.
-                await self._cancel_pump()
-                self._abort_tools()
-            self._settle()
+            try:
+                if not self._ended:
+                    # The admitted round closed early (cancel, interruption,
+                    # failure); its producer retains stream cleanup ownership.
+                    await self._cancel_pump()
+                    self._abort_tools()
+            finally:
+                self._buffer.clear()
+                self._bytes = 0
+                self._settle()
 
     async def discard(self, reason: str) -> None:
-        if self._state == "discarded" or (self._state == "attached" and self._ended):
+        if self.settled:
             return
         previous = self._state
         self._state = "discarded"
-        self._settled_reason = reason
-        if previous != "created":
-            await self._cancel_pump()
-            self._abort_tools()
+        if previous != "discarded":
+            self._settled_reason = reason
+        try:
+            if previous != "created":
+                await self._cancel_pump()
+        finally:
+            if previous != "created":
+                self._abort_tools()
+            self._ended = True
+            self._buffer.clear()
+            self._bytes = 0
+            self._wakeup.set()
+            self._settle()
         _LOGGER.info(
             "live_voice_speculation_discarded request_id=%s reason=%s chunks=%d bytes=%d elapsed_ms=%.0f",
             self.request_id, reason, len(self._buffer), self._bytes,
             (time.monotonic() - self._started_at) * 1000.0,
         )
-        self._buffer.clear()
-        self._bytes = 0
-        self._settle()
 
     async def _cancel_pump(self) -> None:
         task = self._task
         if task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        if self._stream is not None:
-            await self._close_stream()
+            if not self._cancel_requested and not self._stream_closing:
+                self._cancel_requested = True
+                task.cancel()
+            # Concurrent close/discard and cancelled waiters must not deliver
+            # another cancellation into the producer's resource cleanup.
+            joined = asyncio.gather(task, return_exceptions=True)
+            cancelled = False
+            while not joined.done():
+                try:
+                    await asyncio.shield(joined)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
 
     def _settle(self) -> None:
         callback, self._on_settle = self._on_settle, None
