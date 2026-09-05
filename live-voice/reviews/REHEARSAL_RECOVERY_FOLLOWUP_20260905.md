@@ -159,4 +159,27 @@ this is not cumulative product acceptance.
 
 ### Deployment
 
-Pending final controlled local restart and read-only readiness verification.
+Local controlled deployment completed at 19:48 (UTC+2), using clean source
+`0650e7ef39` plus predecessor consent commit `017597309`:
+
+```powershell
+.\scripts\live_voice\start_hands_free_demo.ps1 -RuntimeProfile formal-web-validation -AllowDirtyProject -PreflightOnly -NoBrowser
+.\scripts\live_voice\start_hands_free_demo.ps1 -RuntimeProfile formal-web-validation -AllowDirtyProject -RestartExisting -NoBrowser
+```
+
+`AllowDirtyProject` preserved two existing changes in the private demo project;
+the source checkout was clean. Runtime contract verifies Cascade, generation
+interruption **true without an enable argument**, validated bundle/backend routes
+and real Speech TTS→STT/receipt/identity rejection probes with zero business
+side effects. Existing VAD/startup and AgentModel settings were not changed.
+Service log: ignored `logs/swarm-20260905-194833.log`.
+
+The served `/assets/index-DNnI6BSZ.js` matches the local controlled bundle:
+SHA-256 `a9b3e24f522a82a5c653773b98dc633b165c396efa9a7891d5ed525067feb31f`.
+Pre/post read-only checks found no nonterminal Tasks, identical Task/event/result/
+consumption row counts and identical outcome counts (41 completed, 8 cancelled,
+13 failed, 4 interrupted). Original rehearsal voice ACK watermarks remain A=3,
+B=3, A2=5 with their original timestamps. No rehearsal page was opened, result
+document edited or completion notification consumed. Physical reopen/listening
+acceptance remains for the user's next rehearsal. The subsequent evidence-only
+commit does not require another restart.

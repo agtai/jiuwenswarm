@@ -24,13 +24,14 @@ history, not acceptance of this candidate.
 
 ## Current execution packet
 
-### Rehearsal recovery follow-up: local verification, physical rehearsal open
+### Rehearsal recovery follow-up: deployed, physical rehearsal open
 
 The [recovery follow-up](reviews/REHEARSAL_RECOVERY_FOLLOWUP_20260905.md) repairs
 restored selected voice Tasks acquiring a premature TEXT subscription and extends
 exact local consent to successors, including formal target clarification. Scoped
 automation and independent review pass; retained baseline failures and physical
-reopen/playback acceptance remain open. It also separates model generation,
+reopen/playback acceptance remain open. Controlled local deployment and real
+Speech readiness probes passed. It also separates model generation,
 post-model stream draining and periodic Task-status ingestion in the new profile.
 Model replacement and performance tuning remain separate follow-up work.
 
