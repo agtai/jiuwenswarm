@@ -2597,7 +2597,7 @@ class P3AuthenticatedComposition:
         """
         selection = self._select_production_create_candidate()
         if (
-            resolution.operation != "task.create"
+            resolution.operation not in {"task.create", "task.create_successor"}
             or resolution.confirmation != "required"
             or resolution.confirmation_binding is None
             or resolution.confirmation_binding.capability_profile_digest

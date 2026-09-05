@@ -202,7 +202,7 @@ assistant IDs or unrelated requirements. Use [] for an independent objective or
 when no earlier user requirements apply. Never omit relevant earlier requirements
 just because this turn contains a detailed instruction. The server preserves the
 selected original texts; your instruction must also retain their meaning. Outside
-local task.create, requirement_source_ids must be [].
+local task.create or task.create_successor, requirement_source_ids must be [].
 Report requested_work as local_artifacts only when the CURRENT user explicitly
 delegates a complete background investigation, analysis or saved-file draft, with
 no requested external action. This describes the user's request, not authority.
@@ -757,8 +757,8 @@ def task_semantic_output_schema(
                 "if": {"required": ["requested_work"], "properties": {
                     "requested_work": {"const": "local_artifacts"}}},
                 "then": False if analysis_phase else {"properties": {
-                    "route": {"const": "task"}, "operation": {"const": "task.create"},
-                    "continuation_action": {"enum": [None, "accept_proposal"]},
+                    "route": {"const": "task"}, "operation": {"enum": ["task.create", "task.create_successor"]},
+                    "continuation_action": {"enum": [None, "accept_proposal", "answer_clarification"]},
                 }},
             },
             {
@@ -1069,8 +1069,8 @@ class TaskSemanticResolver:
             if requested_work not in (None, "local_artifacts") or (
                 requested_work is not None and (
                     phase != "committed_input" or route != "task"
-                    or operation != "task.create"
-                    or action not in (None, "accept_proposal")
+                    or operation not in {"task.create", "task.create_successor"}
+                    or action not in (None, "accept_proposal", "answer_clarification")
                 )
             ):
                 raise ValueError
@@ -1138,12 +1138,15 @@ class TaskSemanticResolver:
                 or any(s.source_end > len(commit.text) for s in extractions)
             ):
                 raise ValueError
-            if requested_work == "local_artifacts":
+            if requested_work == "local_artifacts" and action != "answer_clarification":
                 # Keep the actual user requirements with the executable work,
                 # not just the model's paraphrase. Sources must be exact selected
                 # user entries or the user input of the referenced analysis.
                 selected_sources = set(requirement_sources)
-                if reference is not None:
+                if action == "accept_proposal":
+                    # Only an analysis proposal identifies an assistant/source
+                    # pair. A target clarification retains the exact previously
+                    # bound instruction, including its original user requirements.
                     source_id = entry["source_id"]
                     history = context["history"]
                     for index, item in enumerate(history):

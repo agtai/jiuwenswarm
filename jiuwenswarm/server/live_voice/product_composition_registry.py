@@ -13059,7 +13059,15 @@ class AgentServerProductCompositionRegistry:
                 forwarder=forwarder,
                 now=authority.observed_at,
             )
-            confirmed_request = replace(request, confirmation_id=confirmation_id)
+            # Target clarification was consumed by the preliminary resolution.
+            # Retain its exact origin digest for the final authority reread;
+            # re-consuming the one-shot selection would reject valid consent.
+            confirmed_request = replace(
+                request, confirmation_id=confirmation_id,
+                clarification_answer=None,
+                clarification_answer_fingerprint=(request.clarification_answer.fingerprint
+                    if request.clarification_answer is not None else request.clarification_answer_fingerprint),
+            )
             confirmed = await asyncio.to_thread(
                 self._task_intent_bridge.resolve_production,
                 confirmed_request,
@@ -13443,7 +13451,7 @@ class AgentServerProductCompositionRegistry:
                     or resolution.origin_binding is None
                     or resolution.origin_binding.semantic_context_binding
                     != semantic_decision.origin_context_binding
-                    or resolution.operation not in {"task.create", "task.adjust", "task.cancel"}
+                    or resolution.operation not in {"task.create", "task.create_successor", "task.adjust", "task.cancel"}
                     or resolution.operation != semantic_decision.proposal.operation
                     or dict(resolution.arguments) != dict(semantic_decision.proposal.arguments)
                 ):
@@ -13452,7 +13460,7 @@ class AgentServerProductCompositionRegistry:
                         "local delegation lost its exact committed specification",
                         ErrorCode.PERMISSION_DENIED,
                     )
-                if resolution.operation == "task.create":
+                if resolution.operation in {"task.create", "task.create_successor"}:
                     self._p3_composition.require_local_artifact_delegation_capability(resolution)
                 else:
                     self._p3_composition.require_local_task_control_capability(resolution)

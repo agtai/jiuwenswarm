@@ -226,6 +226,127 @@ async def test_explicit_local_delegation_creates_once_with_normal_authority(sema
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("voice, clarify", [(False, False), (True, False), (False, True), (True, True)])
+async def test_explicit_local_successor_preserves_predecessor_and_creates_once(semantic_runtime, monkeypatch, voice, clarify):
+    from jiuwenswarm.common.schema.live_voice_contract_v2 import TerminalOutcome
+    s = semantic_runtime
+    core = s.harness.composition._core
+    predecessor_id = (await control_with_confirmation(s, "revision-original", "task.create", {
+        "name": "Equipment report", "instruction": "Save the original equipment report.",
+    }))["task_id"]
+    s.harness.executor.dispatch_outcome = TerminalOutcome.COMPLETED
+    from jiuwenswarm.server.live_voice.formal_task_models import TaskResultArtifact
+    dispatch = s.harness.executor.dispatch
+    async def completed_dispatch(item):
+        delivery = await dispatch(item)
+        return replace(delivery, observations=tuple(
+            replace(observation, result_text="Original equipment report.", result_artifacts=(
+                TaskResultArtifact("equipment.md", hashlib.sha256(b"original report").hexdigest()),
+            )) if observation.attempt_outcome is TerminalOutcome.COMPLETED else observation
+            for observation in delivery.observations
+        ))
+    monkeypatch.setattr(s.harness.executor, "dispatch", completed_dispatch)
+    await core.drain_outbox()
+    predecessor = core.store.get_task(predecessor_id, _scope())
+    assert predecessor.outcome is TerminalOutcome.COMPLETED
+    original_events = core.store.events(predecessor_id, _scope())
+    original_counts = core.store.counts()
+    arguments = {"name": "Revised equipment report", "instruction": "Add the maintenance schedule and save another version."}
+    if clarify:
+        s.program = lambda data: {**model_output(data, operation="task.create_successor", arguments=arguments),
+                                  "requested_work": "local_artifacts"}
+        unclear_text = "Prepare another version of that report in the background."
+        if voice:
+            assert (await s.registry.handle_p2_activate(params=p2_params(), request_id="revision-clarify-activate",
+                                                      session_id="session-1", channel_id="web")).ok
+            ambiguous = await s.registry.handle_unified_submit(params=voice_final("revision-target-unclear", unclear_text),
+                request_id="revision-target-unclear", session_id="session-1", channel_id="web")
+            assert ambiguous.ok, ambiguous.payload
+        else:
+            ambiguous = await s.text("revision-target-unclear", unclear_text)
+            assert ambiguous.payload["result"]["reason"] == "TASK_TARGET_AMBIGUOUS", ambiguous.payload
+        assert len(await s.registry._semantic_continuity.pending(_scope())) == 1
+        assert core.store.counts()["tasks"] == original_counts["tasks"]
+    def successor_decision(data):
+        reference = next((entry for entry in data["context"]["pending"] if entry["kind"] == "clarification"), None)
+        assert (reference is not None) == clarify
+        return {**model_output(data, operation="task.create_successor", target=predecessor_id,
+                               arguments=reference["arguments"] if reference else arguments, reference=reference),
+                "continuation_action": "answer_clarification" if clarify else None,
+                "requested_work": "local_artifacts", "requirement_source_ids": []}
+    s.program = successor_decision
+    text = "Use the original equipment report to prepare another version in the background with the maintenance schedule; keep the original."
+    if voice:
+        assert (await s.registry.handle_p2_activate(params=p2_params(), request_id="revision-activate",
+                                                  session_id="session-1", channel_id="web")).ok
+        params = voice_final("revision-create", text)
+        async def submit():
+            return await s.registry.handle_unified_submit(params=params, request_id="revision-create",
+                                                          session_id="session-1", channel_id="web")
+    else:
+        async def submit():
+            return await s.text("revision-create", text)
+    result = await submit()
+    assert result.ok, result.payload
+    assert not await s.registry._semantic_continuity.pending(_scope()), result.payload
+    assert core.store.counts()["tasks"] == original_counts["tasks"] + 1, result.payload
+    successors = [task for task in core.store.list_tasks(_scope()) if task.task_id != predecessor_id]
+    assert len(successors) == 1
+    successor = successors[0]
+    assert successor.predecessor_task_id == predecessor_id
+    assert ("Prepare another version of that report in the background." if clarify else text) in successor.spec.instruction
+    assert core.store.get_task(predecessor_id, _scope()) == predecessor
+    assert core.store.events(predecessor_id, _scope()) == original_events
+    replay = await submit()
+    assert replay.payload == result.payload
+    assert core.store.counts()["tasks"] == original_counts["tasks"] + 1
+    assert not s.harness.executor.cancels and not s.harness.executor.adjustments
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["ambiguous", "unknown_target", "running", "external", "capability_drift"])
+async def test_local_successor_keeps_clarification_and_authority_fences(semantic_runtime, monkeypatch, case):
+    from jiuwenswarm.common.schema.live_voice_contract_v2 import TerminalOutcome
+    s = semantic_runtime
+    core = s.harness.composition._core
+    task_id = (await control_with_confirmation(s, "successor-fence-original", "task.create", {
+        "name": "Equipment report", "instruction": "Prepare the equipment report.",
+    }))["task_id"]
+    s.harness.executor.dispatch_outcome = None if case == "running" else TerminalOutcome.CANCELLED
+    await core.drain_outbox()
+    before = core.store.counts()
+    dispatches = list(s.harness.executor.dispatches)
+    if case == "capability_drift":
+        profiles = s.harness.composition._executor_profiles
+        monkeypatch.setattr(s.harness.composition, "_executor_profiles", tuple(
+            replace(profile, profile_id="unsupported-successor-executor") for profile in profiles
+        ))
+    s.program = lambda data: (
+        {**model_output(data, route="clarification"), "message": "Which original task should I revise?"}
+        if case == "ambiguous" else
+        {**model_output(data, operation="task.create_successor", target="unowned-task" if case == "unknown_target" else task_id,
+          arguments={"name": "Revised report", "instruction": "Save a revised report."}),
+         "requested_work": None if case == "external" else "local_artifacts"}
+    )
+    result = await s.text("successor-fence", "Prepare a revised report and send it." if case == "external"
+                          else "Prepare another version of the specified report in the background.")
+    if case == "ambiguous":
+        assert result.ok and result.payload["result"]["status"] == "clarification", result.payload
+    elif case == "external":
+        assert result.ok and result.payload["result"]["reason"] == "TASK_CONFIRMATION_REQUIRED", result.payload
+    else:
+        assert not result.ok or result.payload["result"]["status"] != "dispatched", result.payload
+    assert core.store.counts() == before
+    assert s.harness.executor.dispatches == dispatches
+    assert s.harness.executor.adjustments == s.harness.executor.cancels == []
+    assert s.manager.get_calls == [] and s.manager.agent.calls == 0
+    replay = await s.text("successor-fence", "Prepare a revised report and send it." if case == "external"
+                         else "Prepare another version of the specified report in the background.")
+    assert replay.payload == result.payload
+    assert core.store.counts() == before
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("route,text", [
     ("dialogue", "Read the project information and compare the options; do not create a task."),
     ("clarification", "Do that work in the background."),
