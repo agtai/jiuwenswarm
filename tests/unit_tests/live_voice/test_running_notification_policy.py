@@ -24,7 +24,10 @@ from tests.unit_tests.live_voice.test_product_composition_registry import (
 @pytest.mark.asyncio
 @pytest.mark.parametrize('origin_kind', ['text', 'voice'])
 @pytest.mark.parametrize('offline', [False, True])
-@pytest.mark.parametrize('outcome', [TerminalOutcome.COMPLETED, TerminalOutcome.FAILED])
+@pytest.mark.parametrize('outcome', [
+    TerminalOutcome.COMPLETED, TerminalOutcome.FAILED,
+    TerminalOutcome.CANCELLED, TerminalOutcome.INTERRUPTED,
+])
 async def test_running_silent_then_terminal_presented_and_acknowledged(
     tmp_path, monkeypatch, origin_kind, offline, outcome,
 ):
@@ -53,6 +56,14 @@ async def test_running_silent_then_terminal_presented_and_acknowledged(
             params=_p2_params(), request_id='activate',
             session_id=SCOPE.session_id, channel_id='web',
         )).ok
+        if outcome is TerminalOutcome.CANCELLED and origin_kind == 'voice' and not offline:
+            # Exercise the busy-foreground defer sink as well as offline replay.
+            runtime = registry._p2_routes[(SCOPE.session_id, 'interaction-1')].activation_lease._runtime
+            original_safe = type(runtime).task_notification_foreground_safe
+            monkeypatch.setattr(
+                type(runtime), 'task_notification_foreground_safe',
+                lambda current: False if current is runtime else original_safe(current),
+            )
         registry._voice_task_origins[task_id] = _VoiceTaskOrigin(
             session_id=SCOPE.session_id, interaction_id='interaction-1',
             activation_id='activation-1', activation_generation=1,
@@ -109,6 +120,20 @@ async def test_running_silent_then_terminal_presented_and_acknowledged(
         if offline:
             registry, retained, manager = await activate()
         await settle(retained, 5)
+        if outcome is TerminalOutcome.CANCELLED and origin_kind == 'voice':
+            assert pushed == []
+            assert registry._task_presentation_deliveries == {}
+            assert retained.pending_presentations == {}
+            assert registry._pending_terminal_notifications == {}
+            assert registry._terminal_notification_responses == {}
+            assert retained.orphaned_terminal is None
+            assert manager.agent.calls == 0
+            assert store.get_task(task_id, SCOPE).outcome is TerminalOutcome.CANCELLED
+            for presentation_class in ('text', 'voice'):
+                assert store.unread_events_page(
+                    task_id, SCOPE, presentation_class=presentation_class, limit=500,
+                ).watermark == -1
+            return
         for _ in range(300):
             if retained.progress_lease.snapshot().pending_voice_intents:
                 await retained.progress_lease.drain_voice()
@@ -120,6 +145,10 @@ async def test_running_silent_then_terminal_presented_and_acknowledged(
         delivery = mapped[0][1]
         assert delivery.event_seq == 5
         assert delivery.presentation_class == origin_kind
+        if outcome is TerminalOutcome.CANCELLED:
+            assert registry._pending_terminal_notifications == {}
+            assert registry._terminal_notification_responses == {}
+            assert not any(item.presentation_class == 'voice' for _, item in mapped)
         assert store.unread_events_page(
             task_id, SCOPE, presentation_class=origin_kind, limit=500,
         ).watermark == -1

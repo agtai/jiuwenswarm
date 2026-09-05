@@ -6371,15 +6371,17 @@ async def test_terminal_notification_claims_completion_only_with_exact_valid_res
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", [TerminalOutcome.COMPLETED, TerminalOutcome.CANCELLED])
 async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_replay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    outcome: TerminalOutcome,
 ) -> None:
     registry, composition, manager = _unified_registry(tmp_path)
     terminal = _background_task(
         tmp_path,
         state=FormalTaskState.TERMINAL,
-        outcome=TerminalOutcome.COMPLETED,
+        outcome=outcome,
     )
     composition.current = terminal
     composition.known_tasks[terminal.task_id] = terminal
@@ -6420,7 +6422,7 @@ async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_repla
         seq=terminal.event_head,
         event_type="task.terminal",
         state="terminal",
-        outcome="completed",
+        outcome=outcome.value,
         producer="task_core",
         source_event_id=None,
         causation_id="attempt-terminal-notification-1",
@@ -6438,7 +6440,16 @@ async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_repla
     )
     registry._remember_terminal_notification(pending)
     await registry._deliver_terminal_notification(pending, retained=None)
-    assert tuple(registry._pending_terminal_notifications) == (task_event.event_id,)
+    if outcome is TerminalOutcome.CANCELLED:
+        await registry._retain_terminal_after_voice_owner_loss(pending)
+        assert registry._pending_terminal_notifications == {}
+        assert registry._terminal_text_event(pending) is None
+        monkeypatch.setattr(
+            "jiuwenswarm.server.live_voice.product_composition_registry._P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS",
+            0.01,
+        )
+    else:
+        assert tuple(registry._pending_terminal_notifications) == (task_event.event_id,)
 
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
@@ -6455,6 +6466,16 @@ async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_repla
     )
     assert polled.ok
     notification = cast(dict[str, object], polled.payload["result"])
+    if outcome is TerminalOutcome.CANCELLED:
+        await registry._deliver_terminal_notification(pending, retained=None)
+        assert notification["kind"] == "transport.keepalive"
+        assert registry._terminal_notification_responses == {}
+        assert registry._pending_terminal_notifications == {}
+        assert manager.agent.calls == 0
+        assert composition.current is terminal
+        assert history.assistants == []
+        await registry.stop()
+        return
     response = cast(dict[str, object], notification["response"])
     agent_event = cast(dict[str, object], notification["agent_event"])
     unit = cast(dict[str, object], notification["presentation_unit"])

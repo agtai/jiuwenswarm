@@ -152,6 +152,20 @@ def _page(
     )
 
 
+@pytest.mark.parametrize("presentation_class,expected_seq", [("text", 0), ("voice", 1)])
+def test_cancelled_notification_is_text_only_and_does_not_block_voice_retry(
+    presentation_class, expected_seq,
+) -> None:
+    from jiuwenswarm.server.live_voice.presentation_ledger import next_task_presentation_event
+
+    page = _page(
+        _event(0, event_type="task.terminal", state="terminal", outcome="cancelled"),
+        _event(1, event_type="task.retry_accepted", state="accepted"),
+        presentation_class=presentation_class,
+    )
+    assert next_task_presentation_event(page).seq == expected_seq
+
+
 def _result(event: PersistentTaskEvent) -> TaskResultRecord:
     assert event.source_event_id is not None
     return TaskResultRecord(

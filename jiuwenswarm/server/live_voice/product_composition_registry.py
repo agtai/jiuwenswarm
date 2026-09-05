@@ -229,7 +229,7 @@ from .production_task_intent import (
     build_production_origin_binding,
 )
 from .task_progress_return import (
-    TASK_PROGRESS_PRESENTABLE_EVENTS,
+    task_progress_presentation_allowed,
     TaskProgressNotificationIntent,
     TaskProgressOriginBinding,
     TaskProgressOriginKind,
@@ -2187,11 +2187,15 @@ class AgentServerProductCompositionRegistry:
         deliveries[delivery.delivery_id] = delivery
         return delivery
 
-    def _task_progress_presentable(self, event_type: str) -> bool:
+    def _task_progress_presentable(
+        self, event: PersistentTaskEvent, *, presentation_class: str = "text",
+    ) -> bool:
         # Legacy non-ledger routes retain their initial acceptance receipt.
         # Running is always silent, while its canonical lifecycle stays intact.
-        return event_type in TASK_PROGRESS_PRESENTABLE_EVENTS or (
-            event_type == "task.accepted"
+        return task_progress_presentation_allowed(
+            event, presentation_class=presentation_class,
+        ) or (
+            event.event_type == "task.accepted"
             and not self._p3_presentation_consumption_available
         )
 
@@ -2207,7 +2211,9 @@ class AgentServerProductCompositionRegistry:
             raise RuntimeError("Task progress pending class is invalid")
         if event.origin != retained.binding:
             raise RuntimeError("Task progress pending event changed route binding")
-        if not self._task_progress_presentable(event.task_event.event_type):
+        if not self._task_progress_presentable(
+            event.task_event, presentation_class=presentation_class,
+        ):
             return
         key = (presentation_class, event.task_event.event_id)
         pending = _PendingProgressPresentation(
@@ -2317,7 +2323,7 @@ class AgentServerProductCompositionRegistry:
     ) -> None:
         # Silent lifecycle events need neither a product presentation nor a
         # synthetic consumption ACK; the next eligible event spans the prefix.
-        if not self._task_progress_presentable(event.task_event.event_type):
+        if not self._task_progress_presentable(event.task_event):
             return
         binding = event.origin
         key = (
@@ -2774,6 +2780,8 @@ class AgentServerProductCompositionRegistry:
         return reserved
 
     def _remember_terminal_notification(self, event: TaskProgressTextEvent) -> bool:
+        if not self._task_progress_presentable(event.task_event, presentation_class="voice"):
+            return False
         event_id = event.task_event.event_id
         if event_id in self._pending_terminal_notifications:
             return True
@@ -2793,7 +2801,10 @@ class AgentServerProductCompositionRegistry:
     def _terminal_text_event(
         event: TaskProgressTextEvent | TaskProgressNotificationIntent,
     ) -> TaskProgressTextEvent | None:
-        if event.task_event.event_type != "task.terminal":
+        """Retain only terminal facts eligible for detached voice replay."""
+        if event.task_event.event_type != "task.terminal" or not task_progress_presentation_allowed(
+            event.task_event, presentation_class="voice",
+        ):
             return None
         if isinstance(event, TaskProgressTextEvent):
             return event
@@ -3014,8 +3025,10 @@ class AgentServerProductCompositionRegistry:
     async def _defer_voice_progress(
         self, intent: TaskProgressNotificationIntent
     ) -> None:
-        """Retain every exact event while the P2 Runtime foreground is busy."""
+        """Retain eligible speech while the P2 Runtime foreground is busy."""
 
+        if not self._task_progress_presentable(intent.task_event, presentation_class="voice"):
+            return
         if not self._p3_presentation_consumption_available:
             return
         binding = intent.origin
@@ -3589,7 +3602,9 @@ class AgentServerProductCompositionRegistry:
         *,
         retained: _P2Route | None,
     ) -> None:
-        if self._stopped:
+        if self._stopped or not self._task_progress_presentable(
+            event.task_event, presentation_class="voice",
+        ):
             return
         selected = retained or self._current_terminal_notification_route(event)
         if (
@@ -3664,6 +3679,8 @@ class AgentServerProductCompositionRegistry:
         self,
         event: TaskProgressTextEvent,
     ) -> None:
+        if not self._task_progress_presentable(event.task_event, presentation_class="voice"):
+            return
         if self._remember_terminal_notification(event):
             # A current notification.next may already be waiting. Publishing
             # wakes that receive owner; the ledger retains the fact until ACK.
@@ -3688,7 +3705,7 @@ class AgentServerProductCompositionRegistry:
     async def _emit_voice_progress(
         self, intent: TaskProgressNotificationIntent
     ) -> None:
-        if not self._task_progress_presentable(intent.task_event.event_type):
+        if not self._task_progress_presentable(intent.task_event, presentation_class="voice"):
             return
         binding = intent.origin
         origin = self._voice_task_origins.get(binding.task_id)

@@ -30,6 +30,7 @@ from .formal_task_models import (
 from .task_progress_return import (
     TASK_PROGRESS_NON_PRESENTABLE_EVENTS,
     TASK_PROGRESS_PRESENTABLE_EVENTS,
+    task_progress_presentation_allowed,
 )
 
 
@@ -723,7 +724,11 @@ def next_task_presentation_event(page: TaskUnreadPage) -> PersistentTaskEvent:
         )
     for event in page.events:
         if event.event_type in TASK_PROGRESS_PRESENTABLE_EVENTS:
-            return event
+            if task_progress_presentation_allowed(
+                event, presentation_class=page.presentation_class,
+            ):
+                return event
+            continue
         if event.event_type not in TASK_PROGRESS_NON_PRESENTABLE_EVENTS:
             raise TaskPresentationViolation(
                 "PRESENTATION_EVENT_APPLICABILITY_UNKNOWN",

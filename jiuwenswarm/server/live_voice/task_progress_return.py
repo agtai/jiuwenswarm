@@ -117,6 +117,19 @@ _SOURCE_EXTENSION = "jiuwenswarm.task_progress_return"
 _PROGRESS_EVENT_PREFIX = "task-progress-return:"
 
 
+def task_progress_presentation_allowed(
+    event: PersistentTaskEvent, *, presentation_class: str,
+) -> bool:
+    """Select a notification surface without changing canonical Task facts."""
+    if presentation_class not in {"text", "voice"}:
+        raise ValueError("Unknown Task presentation class")
+    return event.event_type in TASK_PROGRESS_PRESENTABLE_EVENTS and not (
+        presentation_class == "voice"
+        and event.event_type == "task.terminal"
+        and event.outcome == "cancelled"
+    )
+
+
 class TaskProgressReturnViolation(ValueError):
     def __init__(self, reason: str, message: str, code: ErrorCode) -> None:
         super().__init__(message)
