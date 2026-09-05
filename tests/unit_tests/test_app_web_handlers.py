@@ -86,6 +86,52 @@ class FakeMessageHandler:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", ["gpt-5.6", "gpt-4o"])
+async def test_validate_model_uses_actual_compatible_sdk_request(monkeypatch, model_name):
+    import json
+    import httpx
+    from openai import AsyncOpenAI
+    from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
+
+    requests = []
+    def respond(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        if model_name == "gpt-5.6":
+            assert request.url.path == "/v1/responses"
+            return httpx.Response(200, json={"id": "resp_test", "created_at": 0, "object": "response",
+                "model": model_name, "status": "incomplete", "output": [],
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 4, "output_tokens": 3, "total_tokens": 7}})
+        return httpx.Response(200, json={"id": "test", "created": 0, "object": "chat.completion",
+            "model": model_name, "choices": [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7}})
+
+    async with AsyncOpenAI(api_key="test-key", http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond))) as client:
+        monkeypatch.setattr(OpenAIModelClient, "_create_async_openai_client", lambda self, timeout=None: client)
+        monkeypatch.setattr(app_web_handlers, "_resolve_model_config_obj_for_validate", lambda *args: {})
+        channel = FakeWebChannel()
+        _register_web_handlers(WebHandlersBindParams(channel=channel))
+        params = {"model_provider": "OpenAI", "model": model_name,
+                  "api_base": "https://api.openai.com/v1", "api_key": "test-key", "verify_ssl": True}
+        await channel.methods["config.validate_model"](object(), "probe", params, "test-session")
+        assert channel.responses[-1]["ok"] is True
+        assert channel.responses[-1]["payload"]["model_provider"] == "OpenAI"
+        assert len(requests) == 1
+        if model_name == "gpt-5.6":
+            assert requests[0]["max_output_tokens"] == 3
+            assert "temperature" not in requests[0]
+            assert "max_tokens" not in requests[0]
+        else:
+            assert requests[0]["max_tokens"] == 3
+            assert requests[0]["temperature"] == 0.95
+        await channel.methods["config.validate_model"](object(), "bad-key", {**params, "api_key": ""}, "test-session")
+        assert channel.responses[-1]["ok"] is False
+        assert channel.responses[-1]["code"] == "BAD_REQUEST"
+        assert len(requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_web_disconnect_unregisters_physical_subscriptions() -> None:
     channel = FakeWebChannel()
     message_handler = FakeMessageHandler()

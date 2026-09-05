@@ -820,7 +820,14 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
             model_name=name,
         )
     )
-    return Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
+    from jiuwenswarm.common.openai_responses_client import openai_responses_client_config
+
+    return Model(
+        model_client_config=openai_responses_client_config(
+            ModelClientConfig(**mcc_fields), model_name=m_config.model_name,
+        ),
+        model_config=m_config,
+    )
 
 
 def parse_int(value: Any, default: int) -> int:
