@@ -1363,11 +1363,12 @@ async def test_rapid_semantic_vad_commits_serialize_direct_response_creation() -
         assert second_commit.turn_commit.turn_id == engine._input_commits_by_item["user-item-2"].turn_id
         assert [event["type"] for event in socket.sent].count("response.create") == 1
 
-        first_speak = await engine.next_event()
-        assert first_speak.action is not None
-        assert action_payload(first_speak)["turn_id"] == engine._input_commits_by_item["user-item-1"].turn_id
-        await engine.admit_response("provider-response-1", response_ref(1))
-        assert (await engine.next_event()).provider_done is not None
+        # The first request was in flight when input 2 interrupted it. Keep its
+        # Provider identity until terminal, without allocating Runtime speech.
+        assert await engine.next_event() == NativeEngineEvent()
+        assert socket.sent[-1]["type"] == "response.cancel"
+        assert socket.sent[-1]["response_id"] == "provider-response-1"
+        assert await engine.next_event() == NativeEngineEvent()
         assert [event["type"] for event in socket.sent].count("response.create") == 2
 
         second_speak = await engine.next_event()
@@ -1375,6 +1376,145 @@ async def test_rapid_semantic_vad_commits_serialize_direct_response_creation() -
         assert action_payload(second_speak)["turn_id"] == engine._input_commits_by_item["user-item-2"].turn_id
         await engine.admit_response("provider-response-2", response_ref(2))
         assert (await engine.next_event()).provider_done is not None
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["before_created", "before_admission"])
+@pytest.mark.parametrize("late_kind", ["audio", "function", "transcript"])
+async def test_new_speech_retires_unadmitted_response_without_late_authority(
+    boundary: str, late_kind: str,
+) -> None:
+    engine, socket, _ = active_engine(
+        speech_started("start-1", "user-1", 0),
+        speech_stopped("stop-1", "user-1", 500),
+        input_committed("commit-1", "user-1"),
+    )
+    await engine.start()
+    try:
+        await accept_basic_turn(engine)
+        if boundary == "before_admission":
+            socket.push(response_created("created-1", "response-1"))
+            assert (await engine.next_event()).action.operation == "SPEAK"
+            socket.push(output_audio_delta("buffer-1", "response-1", "audio-1", 0))
+            assert await engine.next_event() == NativeEngineEvent()
+            assert engine.snapshot().pending_audio_count == 1
+
+        socket.push(speech_started("start-2", "user-2", 600))
+        assert (await engine.next_event()).action.operation == "LISTEN"
+        if boundary == "before_created":
+            assert not any(e["type"] == "response.cancel" for e in socket.sent)
+            socket.push(response_created("created-1", "response-1"))
+            assert await engine.next_event() == NativeEngineEvent()
+
+        sent = tuple(socket.sent)
+        with pytest.raises(OpenAIRealtimeNativeInteractionError):
+            await engine.admit_response("response-1", response_ref(1))
+        assert tuple(socket.sent) == sent
+        assert engine._responses["response-1"].runtime_ref is None
+        assert engine.snapshot().pending_audio_count == 0
+        before = engine.snapshot()
+        late = {
+            "audio": output_audio_delta("late-1", "response-1", "audio-1", 1),
+            "function": function_done("late-1", "response-1"),
+            "transcript": output_transcript_done("late-1", "response-1", "audio-1", "Obsolete"),
+        }[late_kind]
+        socket.push(late)
+        assert await engine.next_event() == NativeEngineEvent()
+        socket.push(late)  # Provider replay cannot restore speech/business effects.
+        assert await engine.next_event() == NativeEngineEvent()
+        assert engine.snapshot().released_audio_count == before.released_audio_count == 0
+        assert engine.snapshot().delegate_count == before.delegate_count == 0
+        assert engine.snapshot().retained_action_count == before.retained_action_count
+        assert engine._delegates == {}
+        assert engine._input_item_id == "user-2"
+
+        socket.push(speech_stopped("stop-2", "user-2", 900))
+        socket.push(input_committed("commit-2", "user-2"))
+        assert (await engine.next_event()).action.operation == "SILENCE"
+        commit = await engine.next_event()
+        assert sum(e["type"] == "response.create" for e in socket.sent) == 1
+        socket.push(response_done("done-1", "response-1", status="cancelled"))
+        assert await engine.next_event() == NativeEngineEvent()
+        assert sum(e["type"] == "response.create" for e in socket.sent) == 2
+        socket.push(response_created("created-2", "response-2"))
+        speak = await engine.next_event()
+        assert action_payload(speak)["turn_id"] == commit.turn_commit.turn_id
+        await engine.admit_response("response-2", response_ref(2))
+        socket.push(output_audio_delta("audio-2", "response-2", "audio-2", 0))
+        assert (await engine.next_event()).audio.response == response_ref(2)
+        assert [e["response_id"] for e in socket.sent if e["type"] == "response.cancel"] == ["response-1"]
+        assert not any(e["type"] == "conversation.item.truncate" for e in socket.sent)
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("done_first", [False, True])
+async def test_cursorless_foreground_stop_cancels_running_audio_once_then_accepts_late_cursor(
+    done_first: bool,
+) -> None:
+    engine, socket, _ = active_engine(
+        speech_started("start-1", "user-1", 0),
+        speech_stopped("stop-1", "user-1", 500),
+        input_committed("commit-1", "user-1"),
+        response_created("created-1", "response-1"),
+        output_audio_delta("audio-1", "response-1", "audio-1", 0),
+    )
+    await engine.start()
+    try:
+        await accept_basic_turn(engine)
+        await engine.next_event()
+        await engine.admit_response("response-1", response_ref(1))
+        assert (await engine.next_event()).audio is not None
+        if done_first:
+            socket.push(response_done("done-1", "response-1"))
+            assert (await engine.next_event()).provider_done is not None
+        socket.push(speech_started("start-2", "user-2", 600))
+        assert (await engine.next_event()).action.operation == "STOP"
+        await asyncio.gather(
+            engine.stop_foreground(response_ref(1)),
+            engine.stop_foreground(response_ref(1)),
+        )
+        cancel_ids = [e["response_id"] for e in socket.sent if e["type"] == "response.cancel"]
+        assert cancel_ids == ([] if done_first else ["response-1"])
+        assert not any(e["type"] == "conversation.item.truncate" for e in socket.sent)
+        assert not engine._responses["response-1"].presentation_acknowledged
+        socket.push(speech_stopped("stop-2", "user-2", 900))
+        socket.push(input_committed("commit-2", "user-2"))
+        await accept_basic_turn(engine)
+        if not done_first:
+            assert sum(e["type"] == "response.create" for e in socket.sent) == 1
+            socket.push(output_audio_delta("late-audio", "response-1", "audio-1", 1))
+            socket.push(function_done("late-function", "response-1"))
+            assert await engine.next_event() == NativeEngineEvent()
+            assert await engine.next_event() == NativeEngineEvent()
+            assert engine.snapshot().released_audio_count == 1
+            assert engine.snapshot().delegate_count == 0
+            socket.push(response_done("done-1", "response-1", status="cancelled"))
+            assert await engine.next_event() == NativeEngineEvent()
+        assert sum(e["type"] == "response.create" for e in socket.sent) == 2
+        socket.push(response_created("created-2", "response-2"))
+        assert (await engine.next_event()).action.operation == "SPEAK"
+        await engine.admit_response("response-2", response_ref(2))
+
+        before = tuple(socket.sent)
+        for wrong_ref in (response_ref(99), replace(response_ref(1), interaction_id="foreign")):
+            with pytest.raises(OpenAIRealtimeNativeInteractionError):
+                await engine.stop_foreground(wrong_ref)
+        assert tuple(socket.sent) == before
+        assert not engine._responses["response-2"].cancelled
+        await engine.stop_foreground(response_ref(1))
+        cursor = NativePresentationCursor(response_ref(1), "audio-1", 0, 10)
+        receipt = await engine.cancel_response(cursor)
+        assert await engine.cancel_response(cursor) == receipt
+        assert [e["type"] for e in socket.sent[len(before):]] == ["conversation.item.truncate"]
+        assert socket.sent[-1]["item_id"] == "audio-1"
+        assert socket.sent[-1]["audio_end_ms"] == 10
+        assert not engine._responses["response-2"].cancelled
+        socket.push(output_audio_delta("audio-2", "response-2", "audio-2", 0))
+        assert (await engine.next_event()).audio.response == response_ref(2)
     finally:
         await engine.close()
 
@@ -2178,7 +2318,7 @@ async def test_speech_interrupts_pending_delegate_after_function_response_done()
 
 
 @pytest.mark.asyncio
-async def test_delegate_successor_precedes_later_direct_request_without_overlap() -> (
+async def test_interrupted_inflight_delegate_successor_settles_before_later_direct_request() -> (
     None
 ):
     engine, socket, _ = active_engine(
@@ -2192,7 +2332,7 @@ async def test_delegate_successor_precedes_later_direct_request_without_overlap(
         speech_stopped("event-10", "user-item-2", 40),
         input_committed("event-11", "user-item-2"),
         response_created("event-12", "provider-response-2"),
-        response_done("event-13", "provider-response-2"),
+        response_done("event-13", "provider-response-2", status="cancelled"),
         response_created("event-14", "provider-response-3"),
     )
     await engine.start()
@@ -2203,23 +2343,24 @@ async def test_delegate_successor_precedes_later_direct_request_without_overlap(
         assert (await engine.next_event()).delegate is not None
         assert (await engine.next_event()).provider_done is not None
 
-        delegate_ref = response_ref(2)
         await engine.send_delegate_result("call-1", response_ref(1), "canonical result")
         assert [event["type"] for event in socket.sent].count("response.create") == 2
 
-        # This scheduler oracle intentionally does not apply Gateway STOP;
-        # foreground cancellation is covered by the send-boundary regression.
+        # Retirement must already hold at speech start, before Gateway STOP is
+        # processed. The function result stays settled while its speech retires.
         assert (await engine.next_event()).action.operation == "STOP"
         await accept_basic_turn(engine)
         assert [event["type"] for event in socket.sent].count("response.create") == 2
 
-        delegate_speak = await engine.next_event()
-        assert delegate_speak.action is not None
-        assert action_payload(delegate_speak)["turn_id"] == engine._input_commits_by_item["user-item-1"].turn_id
-        assert action_payload(delegate_speak)["provider_call_id"] == "call-1"
-        await engine.admit_response("provider-response-2", delegate_ref)
-        assert (await engine.next_event()).provider_done is not None
+        assert await engine.next_event() == NativeEngineEvent()
+        assert socket.sent[-1]["type"] == "response.cancel"
+        assert socket.sent[-1]["response_id"] == "provider-response-2"
+        assert engine._responses["provider-response-2"].runtime_ref is None
+        assert await engine.next_event() == NativeEngineEvent()
         assert [event["type"] for event in socket.sent].count("response.create") == 3
+        outputs = [event for event in socket.sent if event["type"] == "conversation.item.create"]
+        assert len(outputs) == 1
+        assert outputs[0]["item"]["output"] == "canonical result"
 
         direct_speak = await engine.next_event()
         assert direct_speak.action is not None

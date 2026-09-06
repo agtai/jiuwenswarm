@@ -757,6 +757,9 @@ class _FakeNativeEngine:
         self.playback_actions.append(("provider_fence", response))
         return True
 
+    async def stop_foreground(self, response: ResponseRef) -> None:
+        self.playback_actions.append(("provider_stop", response))
+
     async def acknowledge_presentation(self, response: ResponseRef) -> bool:
         self.presentation_acknowledgements.append(response)
         return True
@@ -767,10 +770,6 @@ class _FakeNativeEngine:
         self.delegate_results.append((call_id, response, output))
         self.delegate_result_sent.set()
         return ("provider-output-event-1", "provider-response-create-1")
-
-
-class _IncompleteNativeEngine(_FakeNativeEngine):
-    send_delegate_result = None
 
 
 class _RetainedCloseNativeEngine(_FakeNativeEngine):
@@ -820,10 +819,12 @@ def _native_activation() -> GatewayNativeActivation:
 
 
 @pytest.mark.asyncio
-async def test_native_engine_missing_delegate_result_is_rejected_before_start() -> None:
+@pytest.mark.parametrize("missing_method", ["send_delegate_result", "stop_foreground"])
+async def test_native_engine_missing_required_method_is_rejected_before_start(missing_method) -> None:
     activation_handle = _native_activation()
     client = _FakeNativeRuntimeClient(activation_handle)
-    engine = _IncompleteNativeEngine()
+    engine = _FakeNativeEngine()
+    setattr(engine, missing_method, None)
     registry = DedicatedMediaProductRegistry(
         enabled=True,
         native_runtime_client=client,
@@ -2879,7 +2880,7 @@ async def test_native_interruption_preserves_activation_input_and_notification_c
 
 
 @pytest.mark.asyncio
-async def test_native_playback_stop_without_cursor_fences_locally_without_provider_mutation() -> (
+async def test_native_playback_stop_without_cursor_stops_exact_provider_without_truncate() -> (
     None
 ):
     activation_handle = _native_activation()
@@ -2939,7 +2940,7 @@ async def test_native_playback_stop_without_cursor_fences_locally_without_provid
 
     assert shared_actions == [
         ("runtime_fence", response),
-        ("provider_fence", response),
+        ("provider_stop", response),
     ]
     assert all(kind != "provider" for kind, _value in shared_actions)
     source = downlink.downlink_stream_source

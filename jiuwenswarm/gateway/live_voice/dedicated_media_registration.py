@@ -1391,6 +1391,7 @@ class DedicatedMediaProductRegistry:
                     "acknowledge_presentation",
                     "cancel_response",
                     "fence_response",
+                    "stop_foreground",
                     "send_delegate_result",
                     "close",
                 )
@@ -3097,7 +3098,7 @@ class DedicatedMediaProductRegistry:
         record: _MediaAuthority,
         receipt: MediaPlaybackStopReceipt,
     ) -> bool:
-        """Admit an exact Browser played cursor before cancelling Provider output."""
+        """Admit an exact Browser fence, with optional played-cursor truncation."""
 
         exact = validate_playback_stop_receipt(record.binding, receipt)
         if exact.outcome is not MediaPlaybackStopOutcome.LOCAL_FENCE_ESTABLISHED:
@@ -3181,7 +3182,7 @@ class DedicatedMediaProductRegistry:
         self._retain_native_barge_fence(session, record.downlink_response)
         await source.aclose()
         if cursor is None:
-            await session.engine.fence_response(record.downlink_response)
+            await session.engine.stop_foreground(record.downlink_response)
         else:
             await session.engine.cancel_response(cursor)
         return True

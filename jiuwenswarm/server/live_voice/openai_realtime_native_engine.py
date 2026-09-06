@@ -249,6 +249,7 @@ class _ProviderResponseRequest:
     delegate_call_id: str | None
     payload: dict[str, object]
     sent: asyncio.Future[str] | None = field(default=None, repr=False)
+    retired: bool = False
 
 
 _EVENT_KEYS = {
@@ -975,7 +976,8 @@ class OpenAIRealtimeNativeInteractionEngine:
 
     async def _cancel_unpresented_response(self, provider_id: str) -> None:
         async with self._cancel_lock:
-            await self._send_provider_cancel_locked(provider_id)
+            if not self._responses[provider_id].done:
+                await self._send_provider_cancel_locked(provider_id)
 
     async def _send_provider_cancel_locked(self, provider_id: str) -> str:
         # Processing STOP and the later playback cursor share one Provider
@@ -989,10 +991,10 @@ class OpenAIRealtimeNativeInteractionEngine:
         return receipt
 
     async def stop_foreground(self, ref: ResponseRef) -> None:
-        """Fence processing/output, using Provider cancel where no cursor exists."""
+        """Stop exact generation; a later played cursor separately truncates it."""
         await self.fence_response(ref)
         response = self._find_response(ref)
-        if not response.done and not any(item.received_samples for item in response.audio_items.values()):
+        if not response.done:
             await self._cancel_unpresented_response(response.provider_response_id)
         for call_id, wait in self._delegates.items():
             if wait.response == ref or self._delegate_successors.get(call_id) == ref:
@@ -1354,6 +1356,22 @@ class OpenAIRealtimeNativeInteractionEngine:
             )
             for index, (operation, payload) in enumerate(operations)
         ]
+        # A request keeps its identity until response.created, even if speech
+        # supersedes it before a Provider or Runtime response has been allocated.
+        if self._inflight_response_request is not None:
+            self._inflight_response_request.retired = True
+        if current is not None and current.runtime_ref is None and not current.cancelled:
+            current.cancelled = True
+            self._locally_fenced.add(current.provider_response_id)
+            for audio_item in current.audio_items.values():
+                audio_item.audio_buffer.clear()
+                audio_item.audio_buffer_event_id = None
+            self._pending_audio = deque(
+                item for item in self._pending_audio
+                if item.provider_response_id != current.provider_response_id
+            )
+            if not current.done:
+                self._pending_unpresented_cancels.append(current.provider_response_id)
         self._input_item_id = item_id
         self._input_start_ms = start_ms
         self._input_end_ms = None
@@ -1788,7 +1806,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._responses[provider_id] = response
         self._current_response_id = provider_id
         self._state = NativeProviderState.RESPONSE_PENDING
-        if request.delegate_call_id in self._retired_delegate_calls:
+        if request.retired or request.delegate_call_id in self._retired_delegate_calls:
             response.cancelled = True
             self._locally_fenced.add(provider_id)
             self._pending_unpresented_cancels.append(provider_id)
