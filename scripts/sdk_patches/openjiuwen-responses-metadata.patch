@@ -1,0 +1,28 @@
+diff --git a/openjiuwen/core/foundation/llm/schema/message_chunk.py b/openjiuwen/core/foundation/llm/schema/message_chunk.py
+index 743f4d6..3dc41df 100644
+--- a/openjiuwen/core/foundation/llm/schema/message_chunk.py
++++ b/openjiuwen/core/foundation/llm/schema/message_chunk.py
+@@ -4,0 +5 @@ from typing import Any
++from copy import deepcopy
+@@ -219 +220 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
+-            metadata=other.metadata or self.metadata,
++            metadata=deepcopy(other.metadata or self.metadata),
+diff --git a/openjiuwen/core/single_agent/agents/react_agent.py b/openjiuwen/core/single_agent/agents/react_agent.py
+index f7cb028..379ca37 100644
+--- a/openjiuwen/core/single_agent/agents/react_agent.py
++++ b/openjiuwen/core/single_agent/agents/react_agent.py
+@@ -1733 +1733 @@ class ReActAgent(BaseAgent):
+-                metadata=accumulated_chunk.metadata,
++                metadata=copy.deepcopy(accumulated_chunk.metadata),
+@@ -2767,2 +2767,2 @@ class ReActAgent(BaseAgent):
+-                                metadata=ai_message.metadata,
+-                                tool_calls=ai_message.tool_calls,
++                                metadata=copy.deepcopy(ai_message.metadata),
++                                tool_calls=copy.deepcopy(ai_message.tool_calls),
+diff --git a/pyproject.toml b/pyproject.toml
+index 244090d..18921c8 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -7 +7 @@ name = "openjiuwen"
+-version = "0.1.17"
++version = "0.1.17+jiuwenswarm.responses1"

@@ -901,7 +901,14 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
         model_name=name,
     )
     m_config = ModelRequestConfig(**request_kwargs)
-    model = Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
+    from jiuwenswarm.common.openai_responses_client import openai_responses_client_config
+
+    model = Model(
+        model_client_config=openai_responses_client_config(
+            ModelClientConfig(**mcc_fields), model_name=m_config.model_name,
+        ),
+        model_config=m_config,
+    )
     return model
 
 

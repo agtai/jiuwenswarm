@@ -3520,7 +3520,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "[config.validate_model] skip budget floor from reasoning plan",
                 exc_info=True,
             )
-        llm = Model(model_config=model_request_config, model_client_config=model_client_config)
+        from jiuwenswarm.common.openai_responses_client import openai_responses_client_config
+
+        llm = Model(
+            model_config=model_request_config,
+            model_client_config=openai_responses_client_config(
+                model_client_config, model_name=model_request_config.model_name,
+            ),
+        )
 
         async def test_invoke(max_tokens: int):
             return await llm.invoke(
