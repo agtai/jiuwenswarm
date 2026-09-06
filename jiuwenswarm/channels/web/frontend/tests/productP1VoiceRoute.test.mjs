@@ -18,6 +18,7 @@ import {
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productP1VoiceRoute.js';
 import {
   decodeAudioFrame,
+  deserializeMediaControl,
   encodeAudioFrame,
   serializeMediaControl,
 } from '../node_modules/.cache/live-voice-browser-dedicated-media/browserDedicatedMediaRoute.mjs';
@@ -6858,9 +6859,11 @@ test('formal P1 duration expiry releases local capture before an exact authority
   assert.deepEqual(retriedCloses[1][1], retriedCloses[0][1]);
 });
 
-test('Native Task TTS keeps capture and suppresses echo until the exact presentation settles', async () => {
+for (const scenario of ['complete', 'speech_during_synthesis', 'speech_during_playout', 'native_response_during_synthesis']) {
+test(`Native Task TTS preserves input and exact unplayed settlement: ${scenario}`, async () => {
   clearAudioDiagnostics();
   const environment = audioEnvironment();
+  environment.deferSourceEnds = scenario === 'speech_during_playout';
   const socket = new FakeSocket();
   const binding = serverBinding();
   const calls = [];
@@ -6896,46 +6899,63 @@ test('Native Task TTS keeps capture and suppresses echo until the exact presenta
   const lease = owner.prepareNativeTaskNotification(response);
   assert.equal(lease.status, 'ready');
   const played = owner.playAgentText({ response, unit_id: 'task-unit', text: '设备核查完成。', capture_during_playout: false });
-  const taskSpeech = processedHeadsetVoiceFrame();
+  const outcome = played.then(value => ({ value }), error => ({ error }));
+  const frames = () => socket.sent.filter(value => typeof value !== 'string').map(value => decodeAudioFrame(binding, value));
   for (let seq = 1; seq <= 1600; seq += 1) {
-    sendNextFrameFromCurrentWorklet(environment, seq, seq <= 3 ? taskSpeech : undefined);
+    sendNextFrameFromCurrentWorklet(environment, seq, scenario === 'speech_during_synthesis' && seq === 1
+      ? processedHeadsetVoiceFrame() : new Float32Array(960));
     await new Promise(resolve => setImmediate(resolve));
   }
-  const frames = () => socket.sent.filter(value => typeof value !== 'string').map(value => decodeAudioFrame(binding, value));
   assert.equal(frames().length, 1601);
-  assert.ok(frames().every((frame, index) => frame.seq === index && frame.sample_cursor === index * 960 && frame.samples.every(sample => sample === 0)));
+  assert.ok(frames().every((frame, index) => frame.seq === index && frame.sample_cursor === index * 960));
+  if (scenario === 'speech_during_synthesis') assert.ok(frames()[1].samples.some(sample => sample !== 0));
+  assert.equal(owner.yieldNativeTaskNotification({ ...response, response_id: 'foreign' }), false);
+  if (scenario === 'native_response_during_synthesis') assert.equal(owner.yieldNativeTaskNotification(response), true);
   releaseSynthesis();
-  assert.equal(await played, null); // Ordinary Task receipt cannot invent Native chat.
-  assert.equal(environment.contexts[0].sourceEndCount, 3);
+  if (scenario === 'speech_during_playout') {
+    for (let i = 0; i < 20 && owner.status().status !== 'playing'; i += 1) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(owner.status().status, 'playing');
+    sendNextFrameFromCurrentWorklet(environment, 1601, processedHeadsetVoiceFrame());
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(frames().at(-1).samples.some(sample => sample !== 0));
+    assert.equal(owner.yieldNativeTaskNotification(response), true);
+  }
+  const result = await outcome;
+  if (scenario === 'complete') {
+    assert.equal(result.value, null);
+    assert.equal(environment.contexts[0].sourceEndCount, 3);
+    assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+    assert.equal(calls.find(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD)[1].capture_frames_acked, 1601);
+  } else {
+    assert.equal(result.error?.reason, 'FORMAL_PLAYOUT_BARGED');
+    assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 0);
+    assert.equal(environment.contexts[0].sourceEndCount, 0);
+    if (scenario !== 'speech_during_playout') assert.equal(environment.contexts[0].sourceStartCount, 0);
+  }
   assert.equal(owner.status().status, 'capturing');
   assert.equal(environment.worklet, worklet);
   assert.equal(socket.readyState, 1);
   assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length, 1);
   assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD).length, 0);
-  assert.equal(calls.find(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD)[1].capture_frames_acked, 1601);
-  assert.equal(audioDiagnosticSnapshot().filter(record => record.event === 'playout_tentative_paused').length, 0);
-  sendNextFrameFromCurrentWorklet(environment, 1601);
-  await new Promise(resolve => setImmediate(resolve));
-  assert.ok(frames().at(-1).samples.every(sample => sample === 0), 'playout return is not P2 presentation settlement');
+  assert.equal(calls.filter(([method]) => method === 'live_voice.media.playout_stop').length, 0);
   lease.release();
-  const nextLease = owner.prepareNativeTaskNotification({ ...response, response_id: 'task-next' });
-  assert.equal(nextLease.status, 'ready');
-  lease.release(); // An old late ACK cannot open the newer gate.
-  sendNextFrameFromCurrentWorklet(environment, 1602);
-  await new Promise(resolve => setImmediate(resolve));
-  assert.ok(frames().at(-1).samples.every(sample => sample === 0));
-  nextLease.release();
-  sendNextFrameFromCurrentWorklet(environment, 1603);
-  await new Promise(resolve => setImmediate(resolve));
-  assert.ok(frames().at(-1).samples.some(sample => sample !== 0), 'new user audio resumes on the same uplink');
-  assert.equal(owner.prepareNativeTaskNotification(response).status, 'speaker_active');
+  if (scenario === 'complete' || scenario === 'native_response_during_synthesis') {
+    const nextResponse = { ...response, response_id: 'task-next' };
+    const nextLease = owner.prepareNativeTaskNotification(nextResponse);
+    assert.equal(nextLease.status, 'ready');
+    lease.release();
+    assert.equal(owner.yieldNativeTaskNotification(nextResponse), true, 'old release preserves newer owner');
+    nextLease.release();
+  }
   const count = frames().length;
   await owner.close();
-  nextLease.release();
+  lease.release();
   assert.equal(frames().length, count);
   assert.equal(calls.some(([method]) => method.includes('recognize') || method.includes('cancel')), false);
   clearAudioDiagnostics();
 });
+
+}
 
 test('formal P1 exposes recognition-stream failure only for negotiated uplink capture', () => {
   const base = {
@@ -6959,7 +6979,8 @@ test('formal P1 exposes recognition-stream failure only for negotiated uplink ca
   );
 });
 
-test('formal P1 Native activation plays Provider audio while preserving the continuous uplink', async () => {
+for (const staleTask of ['none', 'success', 'failure']) {
+test(`formal P1 Native activation preserves continuous uplink against stale Task synthesis: ${staleTask}`, async () => {
   const calls = [];
   const sockets = [];
   const environment = audioEnvironment();
@@ -7054,6 +7075,10 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
     }
   }
 
+  let releaseTaskSynthesis;
+  let releaseNativeAck;
+  let taskOutcome;
+  let taskLease;
   let stopDelivery;
   let activeBargeResponse = null;
   let bargeStopped = null;
@@ -7094,11 +7119,22 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
     request: async (method, params) => {
       calls.push([method, params]);
       if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) return nativeMediaActivation(uplinkBinding);
+      if (method === 'live_voice.speech.synthesize_batch') {
+        await new Promise((resolve, reject) => { releaseTaskSynthesis = () => staleTask === 'failure' ? reject(new Error('late TTS failure')) : resolve(); });
+        return { contract_version: 'live-voice.contract.v2', request_id: params.request_id,
+          operation_id: params.operation_id, ok: true, error: null,
+          result: { operation: 'speech.synthesize.batch', response: params.response, unit_id: params.unit_id,
+            audio: { format: 'wav_pcm16_mono', sample_rate_hz: 48_000, channel_count: 1, data_base64: wavBase64(48_000, 960) },
+            provider: { provider_id: 'provider-test', implementation_class: 'formal', fallback_from: null, model: 'tts-test', voice: 'voice-test' }, presented: false } };
+      }
       if (method === 'live_voice.media.playout_stop') {
+        // Exercise the real wire decoder, not an echo of an internal object.
+        assert.equal(deserializeMediaControl(JSON.stringify(params.receipt)).type, 'media.playback_stop_receipt');
         await new Promise(resolve => { stopDelivery = resolve; });
         return { status: 'native_playout_stopped', receipt: params.receipt, applied: true };
       }
       if (method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD) {
+        if (staleTask !== 'none') await new Promise(resolve => { releaseNativeAck = resolve; });
         return {
           status: 'media_playout_acknowledged',
           reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
@@ -7138,11 +7174,21 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
     activation_id: 'activation-1',
     activation_generation: 7,
     locale: 'zh-CN',
-  });
+  }, { samples: new Float32Array(960) });
   assert.equal(owner.interactionEngine(), 'openai-realtime-native');
   const uplink = sockets.find(socket => socket.serverBinding?.direction === 'uplink');
   assert.ok(uplink);
   const uplinkFramesBeforePlayout = uplink.sent.filter(value => typeof value !== 'string').length;
+  if (staleTask !== 'none') {
+    const taskResponse = { ...response, response_id: 'task-synthesis-old', response_generation: 0 };
+    taskLease = owner.prepareNativeTaskNotification(taskResponse);
+    assert.equal(taskLease.status, 'ready');
+    taskOutcome = owner.playAgentText({ response: taskResponse, unit_id: 'task-old-unit', text: 'Task complete.' })
+      .then(value => ({ value }), error => ({ error }));
+    for (let i = 0; i < 20 && !releaseTaskSynthesis; i += 1) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(typeof releaseTaskSynthesis, 'function');
+    assert.equal(owner.yieldNativeTaskNotification(taskResponse), true);
+  }
   let forbiddenCascadeStopCalls = 0;
   assert.equal(
     owner.armEndOfTurn(() => {
@@ -7256,6 +7302,27 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
   assert.ok(uplink.sent.filter(value => typeof value !== 'string').length > uplinkFramesBeforePlayout);
   environment.contexts[0].deferSourceEnds = false;
   environment.contexts[0].releaseSourceEnds();
+  if (staleTask !== 'none') {
+    for (let i = 0; i < 500 && !releaseNativeAck; i += 1) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(typeof releaseNativeAck, 'function');
+    const beforeStatus = owner.status();
+    assert.equal(beforeStatus.status, 'playing');
+    const sentBefore = uplink.sent.filter(value => typeof value !== 'string').length;
+    releaseTaskSynthesis();
+    assert.equal((await taskOutcome).error?.reason, 'FORMAL_PLAYOUT_BARGED');
+    assert.deepEqual(owner.status(), beforeStatus, 'old Task cannot change the Native ACK wait');
+    sendNextFrameFromCurrentWorklet(environment, 1502, new Float32Array(960));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(uplink.sent.filter(value => typeof value !== 'string').length, sentBefore, 'Native receipt freeze remains intact');
+    assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD).length, 0);
+    releaseNativeAck();
+    await normalPlayout;
+    assert.equal(owner.status().status, 'capturing');
+    assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+    taskLease.release();
+    await owner.close();
+    return;
+  }
   assert.deepEqual(await normalPlayout, {
     id: 'live-voice:interaction-1:native-response-1:1:native-audio:digest',
     role: 'assistant',
@@ -7411,6 +7478,7 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
   assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
   await owner.close();
 });
+}
 
 test('formal P1 Native activation descriptor is exact and fail-closed', () => {
   assert.deepEqual(

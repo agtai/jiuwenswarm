@@ -12,6 +12,7 @@ import { isTeamMemberCollaborationMessage } from '../../components/ChatPanel/tea
 import { isGoalCompletedContent } from '../../components/GoalBar/goalCompletedMessage';
 import { isA2UIClientEventContent } from '../a2ui/a2uiContent';
 import { parseTimestampToMs } from '../../utils/timestamp';
+import { coalesceTaskNotifications } from '../live-voice/formal/taskNotificationIdentity';
 
 const legacyMessageKeyCache = new WeakMap<Message, string>();
 let legacyMessageKeyCounter = 0;
@@ -124,7 +125,7 @@ export function buildTimelineItems(
   executions: ToolExecution[],
   reasoningSegments: ReasoningSegment[]
 ): TimelineItem[] {
-  const messageItems: TimelineItem[] = messages
+  const messageItems: TimelineItem[] = coalesceTaskNotifications(messages)
     .filter((msg) => {
       if (msg.role === 'tool') return false;
       if (msg.role === 'user' && isA2UIClientEventContent(msg.content)) return false;
@@ -166,14 +167,31 @@ export function buildTimelineItems(
     const boundaryIndex = previousMessage ? items.indexOf(previousMessage) + 1 : 0;
     items.splice(boundaryIndex, 0, item);
   }
-  // Native input transcription can arrive after generated speech text. Use the
-  // exact turn identity for display order without changing observed timestamps.
-  for (const user of messageItems) {
-    if (user.type !== 'message' || user.message.role !== 'user' || !user.message.nativeTurnKey) continue;
-    const precedingReplies = items.slice(0, items.indexOf(user)).filter(item => item.type === 'message' &&
-      item.message.role === 'assistant' && item.message.nativeTurnKey === user.message.nativeTurnKey);
-    for (const reply of precedingReplies) items.splice(items.indexOf(reply), 1);
-    items.splice(items.indexOf(user) + 1, 0, ...precedingReplies);
+  // Transcription and playback ACK may arrive on either side of a later user
+  // message. Bind replies once, before moving anything. Historical engines reused
+  // turn counters after reconnect: an earlier dated user then owns its reply;
+  // a later same-key user must never steal that already established association.
+  const nativeUsers = new Map<string, TimelineItem[]>();
+  for (const item of items) {
+    if (item.type !== 'message' || item.message.role !== 'user' || !item.message.nativeTurnKey) continue;
+    const users = nativeUsers.get(item.message.nativeTurnKey) ?? [];
+    users.push(item);
+    nativeUsers.set(item.message.nativeTurnKey, users);
+  }
+  const repliesByUser = new Map<TimelineItem, TimelineItem[]>();
+  for (const reply of items) {
+    if (reply.type !== 'message' || reply.message.role !== 'assistant' || !reply.message.nativeTurnKey) continue;
+    const users = nativeUsers.get(reply.message.nativeTurnKey);
+    if (!users?.length) continue;
+    const user = users.length === 1 ? users[0] :
+      [...users].reverse().find(candidate => compareTimelineItems(candidate, reply) <= 0) ?? users[0];
+    const replies = repliesByUser.get(user) ?? [];
+    replies.push(reply);
+    repliesByUser.set(user, replies);
+  }
+  for (const [user, replies] of repliesByUser) {
+    for (const reply of replies) items.splice(items.indexOf(reply), 1);
+    items.splice(items.indexOf(user) + 1, 0, ...replies);
   }
   return items;
 }

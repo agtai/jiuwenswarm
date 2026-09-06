@@ -223,6 +223,7 @@ class NativeInteractionRuntimeOwner:
         *,
         runtime: ConversationRuntimeLoop,
         owns_runtime: bool = True,
+        admission_lock: asyncio.Lock | None = None,
     ) -> None:
         if not isinstance(binding, NativeInteractionBinding):
             raise TypeError("binding must use NativeInteractionBinding")
@@ -238,7 +239,7 @@ class NativeInteractionRuntimeOwner:
         self._binding = binding
         self._runtime = runtime
         self._owns_runtime = owns_runtime
-        self._lock = asyncio.Lock()
+        self._lock = admission_lock if admission_lock is not None else asyncio.Lock()
         self._started = False
         self._closed = False
         self._turns_by_id: dict[str, NativeTurnCommit] = {}
@@ -263,8 +264,47 @@ class NativeInteractionRuntimeOwner:
         ] = {}
         self._delegates_by_call: dict[str, NativeDelegateAdmission] = {}
         self._delegate_event_calls: dict[str, str] = {}
+        self._prepared_delegate_results: dict[str, NativeDelegateResult] = {}
         self._delegate_results: dict[str, NativeDelegateResult] = {}
+        self._delegate_holds: dict[str, ResponseRef] = {}
         self._interrupted_delegate_sources: set[ResponseRef] = set()
+
+    def foreground_busy(self) -> bool:
+        if self._closed:
+            return False
+        return bool(self._delegate_holds) or (
+            self._current_turn_id is not None and not any(
+                response.turn_id == self._current_turn_id
+                for response in self._responses_by_provider.values()
+            )
+        )
+
+    def reserved_delegate_source(self, call_id: str) -> ResponseRef | None:
+        return self._delegate_holds.get(call_id)
+
+    async def reserve_delegate(self, call_id: str, source: ResponseRef, *, turn_id: str | None = None) -> None:
+        """Keep semantic work busy before asynchronous context/Agent selection."""
+        async with self._lock:
+            self._require_open()
+            _identity(call_id, "provider_call_id")
+            prior = self._delegate_holds.get(call_id)
+            retained = self._responses_by_ref.get(source)
+            if (retained is None or (prior is None and retained is not self._current_response)
+                or (turn_id is not None and retained.turn_id != turn_id)):
+                raise NativeInteractionRuntimeError("NATIVE_DELEGATE_SOURCE_STALE", "Delegate requires its exact reserved source")
+            if source in self._interrupted_delegate_sources:
+                raise NativeInteractionRuntimeError("NATIVE_DELEGATE_INTERRUPTED", "Delegate source was interrupted")
+            prior = self._delegate_holds.get(call_id)
+            if prior is not None and prior != source:
+                raise NativeInteractionRuntimeError("NATIVE_DELEGATE_RESULT_CONFLICT", "Delegate hold cannot change source")
+            if prior is None:
+                self._require_record_capacity(len(self._delegate_holds), "NATIVE_DELEGATE_LEDGER_FULL")
+            self._delegate_holds[call_id] = source
+
+    async def release_failed_delegate(self, call_id: str) -> None:
+        async with self._lock:
+            if call_id not in self._prepared_delegate_results:
+                self._delegate_holds.pop(call_id, None)
 
     def delegate_source_response(self, response: ResponseRef) -> ResponseRef | None:
         return next((self._delegates_by_call[call_id].source_response
@@ -279,6 +319,7 @@ class NativeInteractionRuntimeOwner:
             if source not in self._responses_by_ref:
                 raise NativeInteractionRuntimeError("NATIVE_STOP_RESPONSE_STALE", "STOP requires a known exact response")
             self._interrupted_delegate_sources.add(source)
+            self._delegate_holds = {call: ref for call, ref in self._delegate_holds.items() if ref != source}
             for call_id, admission in self._delegates_by_call.items():
                 result = self._delegate_results.get(call_id)
                 if admission.source_response == source and result is not None:
@@ -475,13 +516,14 @@ class NativeInteractionRuntimeOwner:
                     "NATIVE_DELEGATE_CONTEXT_INVALID",
                     "delegate context must contain canonical ContextRef values",
                 )
-            retained_response = self._current_response
+            reserved = self._delegate_holds.get(proposal.provider_call_id)
+            retained_response = self._responses_by_ref.get(reserved) if reserved is not None else self._current_response
             if (
                 retained_response is None
                 or retained_response.cancelled
                 or (retained_response.done is not None and not retained_response.done.completed)
                 or retained_response.admission.response in self._interrupted_delegate_sources
-                or proposal.turn_id != self._current_turn_id
+                or proposal.turn_id != retained_response.turn_id
                 or proposal.turn_id not in self._turns_by_id
                 or proposal.response_generation
                 != retained_response.admission.response.response_generation
@@ -559,19 +601,20 @@ class NativeInteractionRuntimeOwner:
                 source_response=retained_response.admission.response,
             )
             self._delegates_by_call[proposal.provider_call_id] = admission
+            self._delegate_holds[proposal.provider_call_id] = admission.source_response
             self._delegate_event_calls[proposal.provider_event_id] = (
                 proposal.provider_call_id
             )
             return True, admission
 
-    async def accept_delegate_result(
+    async def prepare_delegate_result(
         self,
         admission: NativeDelegateAdmission,
         *,
         canonical_text: str,
         route: UnifiedCommittedInputRoute,
     ) -> NativeDelegateResult:
-        """Pre-admit the response generation used for a Jiuwen result."""
+        """Retain the result without fencing any current response or media."""
 
         async with self._lock:
             self._require_open()
@@ -594,7 +637,7 @@ class NativeInteractionRuntimeOwner:
                     "NATIVE_DELEGATE_ROUTE_INVALID",
                     "delegate result must retain the unified committed-input route",
                 )
-            prior = self._delegate_results.get(admission.proposal.provider_call_id)
+            prior = self._prepared_delegate_results.get(admission.proposal.provider_call_id)
             if prior is not None:
                 if (
                     prior.turn_commit == admission.turn_commit
@@ -606,50 +649,31 @@ class NativeInteractionRuntimeOwner:
                     "NATIVE_DELEGATE_RESULT_CONFLICT",
                     "delegate result cannot change its route or canonical text",
                 )
-            response_digest = hashlib.sha256(
-                canonical_json_bytes(
-                    {
-                        "provider_call_id": admission.proposal.provider_call_id,
-                        "turn_commit_id": admission.turn_commit.commit_id,
-                        "route": route.value,
-                        "result_sha256": hashlib.sha256(
-                            text.encode("utf-8")
-                        ).hexdigest(),
-                    }
-                )
-            ).hexdigest()
-            response_id = f"native-delegate-response-{response_digest}"
-            response, _event = await self._runtime.accept_response(
-                admission.proposal.turn_id,
-                response_id,
-                history_policy=HistorySurfacePolicy.NATIVE_AUDIO,
-                minimum_generation=admission.source_response.response_generation + 1,
-            )
-            await self._runtime.transition_response(response, ResponseState.GENERATING)
             result = NativeDelegateResult(
                 turn_commit=admission.turn_commit,
                 canonical_text=text,
                 route=route,
-                response=response,
+                response=admission.source_response,
             )
-            self._delegate_results[admission.proposal.provider_call_id] = result
+            self._prepared_delegate_results[admission.proposal.provider_call_id] = result
             return result
 
     async def accept_provider_response(
-        self, provider_response_id: str, response_id: str
+        self, provider_response_id: str, response_id: str, *, turn_id: str | None = None
     ) -> NativeResponseAdmission:
         async with self._lock:
             self._require_open()
             provider_id = _identity(provider_response_id, "provider_response_id")
             runtime_response_id = _identity(response_id, "response_id")
-            if self._current_turn_id is None:
+            target_turn = self._current_turn_id if turn_id is None else turn_id
+            if target_turn not in self._turns_by_id:
                 raise NativeInteractionRuntimeError(
                     "NATIVE_RESPONSE_BEFORE_TURN",
                     "Native response requires one accepted turn",
                 )
             prior = self._responses_by_provider.get(provider_id)
             if prior is not None:
-                if prior.admission.response.response_id == runtime_response_id:
+                if prior.admission.response.response_id == runtime_response_id and prior.turn_id == target_turn:
                     return prior.admission
                 raise NativeInteractionRuntimeError(
                     "NATIVE_PROVIDER_RESPONSE_CONFLICT",
@@ -665,7 +689,7 @@ class NativeInteractionRuntimeOwner:
                 len(self._responses_by_provider), "NATIVE_RESPONSE_LEDGER_FULL"
             )
             ref, _ = await self._runtime.accept_response(
-                self._current_turn_id,
+                target_turn,
                 runtime_response_id,
                 history_policy=HistorySurfacePolicy.NATIVE_AUDIO,
                 minimum_generation=1,
@@ -674,64 +698,64 @@ class NativeInteractionRuntimeOwner:
             await self._runtime.transition_response(ref, ResponseState.GENERATING)
             self._retire_terminal_predecessor_audio_locked()
             admission = NativeResponseAdmission(provider_id, ref)
-            retained = _RuntimeResponse(admission, self._current_turn_id)
+            retained = _RuntimeResponse(admission, target_turn)
             self._responses_by_provider[provider_id] = retained
             self._responses_by_ref[ref] = retained
             self._response_ids[runtime_response_id] = provider_id
             self._current_response = retained
             return admission
 
-    async def bind_delegate_provider_response(
-        self,
-        provider_response_id: str,
-        response: ResponseRef,
+    async def accept_delegate_provider_response(
+        self, provider_response_id: str, call_id: str, turn_id: str,
     ) -> NativeResponseAdmission:
-        """Bind Provider's post-function response to its pre-admitted Runtime ref."""
-
+        """Allocate a prepared result only when its ordered SPEAK is admitted."""
         async with self._lock:
             self._require_open()
             provider_id = _identity(provider_response_id, "provider_response_id")
-            if not isinstance(response, ResponseRef):
-                raise NativeInteractionRuntimeError(
-                    "NATIVE_DELEGATE_RESPONSE_INVALID",
-                    "delegate Provider response requires a canonical ResponseRef",
-                )
-            result = next(
-                (
-                    retained
-                    for retained in self._delegate_results.values()
-                    if retained.response == response
-                ),
-                None,
-            )
-            if result is None:
-                raise NativeInteractionRuntimeError(
-                    "NATIVE_DELEGATE_RESPONSE_UNKNOWN",
-                    "delegate Provider response was not pre-admitted by Runtime",
-                )
-            if self.delegate_source_response(response) in self._interrupted_delegate_sources:
-                raise NativeInteractionRuntimeError("NATIVE_DELEGATE_INTERRUPTED", "Interrupted successor cannot bind Provider output")
+            _identity(call_id, "provider_call_id")
+            result = self._prepared_delegate_results.get(call_id)
+            source = self._delegates_by_call.get(call_id)
+            if result is None or source is None:
+                raise NativeInteractionRuntimeError("NATIVE_DELEGATE_RESPONSE_UNKNOWN", "SPEAK requires a prepared result")
+            if source.proposal.turn_id != turn_id:
+                raise NativeInteractionRuntimeError("NATIVE_DELEGATE_RESPONSE_TURN_MISMATCH", "SPEAK must bind the exact source turn")
+            if source.source_response in self._interrupted_delegate_sources:
+                raise NativeInteractionRuntimeError("NATIVE_DELEGATE_INTERRUPTED", "Interrupted result cannot speak")
+            prior_result = self._delegate_results.get(call_id)
             prior = self._responses_by_provider.get(provider_id)
             if prior is not None:
-                if prior.admission.response == response:
+                if prior_result is not None and prior.admission.response == prior_result.response:
                     return prior.admission
-                raise NativeInteractionRuntimeError(
-                    "NATIVE_PROVIDER_RESPONSE_CONFLICT",
-                    "Provider response cannot change its Runtime response binding",
-                )
-            prior_provider = self._response_ids.get(response.response_id)
-            if prior_provider is not None:
-                raise NativeInteractionRuntimeError(
-                    "NATIVE_RUNTIME_RESPONSE_ID_CONFLICT",
-                    "Runtime response identity cannot bind another Provider response",
-                )
-            native_turn_id = _identity(
-                result.turn_commit.hypothesis_provenance.get("native_turn_id"),
-                "native_turn_id",
+                raise NativeInteractionRuntimeError("NATIVE_PROVIDER_RESPONSE_CONFLICT", "Provider response cannot change its binding")
+            if prior_result is not None:
+                raise NativeInteractionRuntimeError("NATIVE_RUNTIME_RESPONSE_ID_CONFLICT", "A delegate permits only one Provider response")
+            current = self._current_response
+            if current is not None and not current.cancelled and (
+                current.done is None or (current.done.completed and current.next_audio_sequence > 0 and not await self._runtime.presentation_complete(
+                    current.admission.response, PresentationSurface.AUDIO
+                ))
+            ):
+                raise NativeInteractionRuntimeError("NATIVE_RESPONSE_PRESENTATION_BUSY", "Prepared result must wait for exact predecessor settlement")
+            self._require_record_capacity(len(self._responses_by_provider), "NATIVE_RESPONSE_LEDGER_FULL")
+            digest = hashlib.sha256(canonical_json_bytes({
+                "provider_call_id": call_id, "turn_commit_id": result.turn_commit.commit_id,
+                "route": result.route.value,
+                "result_sha256": hashlib.sha256(result.canonical_text.encode("utf-8")).hexdigest(),
+            })).hexdigest()
+            response, _ = await self._runtime.accept_response(
+                turn_id, f"native-delegate-response-{digest}",
+                history_policy=HistorySurfacePolicy.NATIVE_AUDIO,
+                minimum_generation=source.source_response.response_generation + 1,
+                preserve_terminal_predecessor_presentation=True,
             )
+            await self._runtime.transition_response(response, ResponseState.GENERATING)
+            self._delegate_results[call_id] = NativeDelegateResult(
+                result.turn_commit, result.canonical_text, result.route, response,
+            )
+            self._delegate_holds.pop(call_id, None)
             self._retire_terminal_predecessor_audio_locked()
             admission = NativeResponseAdmission(provider_id, response)
-            retained_response = _RuntimeResponse(admission, native_turn_id)
+            retained_response = _RuntimeResponse(admission, turn_id)
             self._responses_by_provider[provider_id] = retained_response
             self._responses_by_ref[response] = retained_response
             self._response_ids[response.response_id] = provider_id
@@ -1044,14 +1068,6 @@ class NativeInteractionRuntimeOwner:
                 or retained.cancelled
             ):
                 return False
-            # Delegate handling is synchronous while Provider events remain queued.
-            # Accepting the exact Jiuwen result therefore fences the source audio
-            # before its already-issued response.done can reach this owner.  That
-            # source may become terminal, but its closed surface must not be
-            # reopened or credited as presentation-complete.
-            delegate_successor_fenced_source = (
-                self._delegate_successor_fenced_source_locked(observation.response)
-            )
             self._validate_done(observation)
             prior_event = self._done_event_ids.get(observation.provider_event_id)
             if retained.done is not None or prior_event is not None:
@@ -1061,12 +1077,10 @@ class NativeInteractionRuntimeOwner:
                     "NATIVE_PROVIDER_DONE_CONFLICT",
                     "Provider completion cannot change its retained meaning",
                 )
-            if not delegate_successor_fenced_source:
-                await self._runtime.seal_presentation(
-                    observation.response,
-                    PresentationSurface.AUDIO,
-                    unit_count=retained.next_audio_sequence,
-                )
+            await self._runtime.seal_presentation(
+                observation.response, PresentationSurface.AUDIO,
+                unit_count=retained.next_audio_sequence,
+            )
             await self._runtime.transition_response(
                 observation.response,
                 ResponseState.TERMINAL,
@@ -1078,8 +1092,7 @@ class NativeInteractionRuntimeOwner:
             )
             retained.done = observation
             self._done_event_ids[observation.provider_event_id] = observation
-            if not delegate_successor_fenced_source:
-                await self._reconcile_history_locked(retained)
+            await self._reconcile_history_locked(retained)
             return True
 
     async def acknowledge_audio(
@@ -1102,24 +1115,11 @@ class NativeInteractionRuntimeOwner:
                 or (retained is not self._current_response and retained.done is None)
             ):
                 return None
-            if self._delegate_successor_fenced_source_locked(ack.ref):
-                # The Browser may finish an already-issued source frame after the
-                # delegate result pre-admits its successor.  Observe that stale ACK
-                # with zero Runtime/history effect; the successor fence remains the
-                # presentation authority.
-                return None
             if retained.history is not None:
                 await self._runtime.acknowledge_presentation(ack)
                 return retained.history
             await self._runtime.acknowledge_presentation(ack)
             return await self._reconcile_history_locked(retained)
-
-    def _delegate_successor_fenced_source_locked(self, response: ResponseRef) -> bool:
-        return any(
-            admission.source_response == response
-            and provider_call_id in self._delegate_results
-            for provider_call_id, admission in self._delegates_by_call.items()
-        )
 
     async def presented_agent_analysis(
         self, response: ResponseRef
@@ -1131,7 +1131,6 @@ class NativeInteractionRuntimeOwner:
                 retained is None
                 or retained.cancelled
                 or retained.history is None
-                or self._delegate_successor_fenced_source_locked(response)
             ):
                 return None
             matches = [
@@ -1166,7 +1165,6 @@ class NativeInteractionRuntimeOwner:
             if (
                 retained is None
                 or retained.cancelled
-                or self._delegate_successor_fenced_source_locked(response)
             ):
                 return None
             return retained.history

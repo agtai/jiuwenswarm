@@ -27,6 +27,7 @@ import {
 } from './adapters/browserDedicatedMediaRoute.js';
 import {
   MEDIA_END_OF_TURN_CAPABILITY,
+  serializeMediaControl,
   type MediaAudioFrame,
   type MediaEndOfTurn,
   type MediaSpeechStart,
@@ -140,6 +141,7 @@ type ProductP1Request = (
 ) => Promise<unknown>;
 
 interface PendingProductPlayout {
+  readonly native: boolean;
   nativeStopping?: boolean;
   readonly response: Readonly<AudioResponseRef>;
   readonly unitId: string;
@@ -601,7 +603,7 @@ export class ProductP1VoiceRouteOwner {
   #pendingNativeAudio: Readonly<FormalBatchSynthesisResult> | null = null;
   #nativePlayoutFailureReason: string | null = null;
   #nativeCaptureSendPaused = false;
-  #nativeTaskNotification: Readonly<{ response: Readonly<AudioResponseRef> }> | null = null;
+  #nativeTaskNotification: { readonly response: Readonly<AudioResponseRef>; speechObserved: boolean } | null = null;
   #pendingMediaActivation: Promise<unknown> | null = null;
   #endOfTurnNegotiated = false;
   #pendingSpeechStart: Readonly<MediaSpeechStart> | null = null;
@@ -1493,13 +1495,25 @@ export class ProductP1VoiceRouteOwner {
     if (response.interaction_id !== this.#interactionId) {
       throw new Error('Task notification belongs to another Native interaction');
     }
-    const lease = Object.freeze({ response: Object.freeze({ ...response }) });
+    const lease = { response: Object.freeze({ ...response }), speechObserved: false };
     this.#nativeTaskNotification = lease;
     return Object.freeze({ status: 'ready', release: () => {
-      // A late ACK/finally cannot release a newer notification's input gate.
+      // A late ACK/finally cannot release a newer notification's ownership.
       if (this.#nativeTaskNotification !== lease) return;
       this.#nativeTaskNotification = null;
     } });
+  }
+
+  yieldNativeTaskNotification(response: Readonly<AudioResponseRef>): boolean {
+    const lease = this.#nativeTaskNotification;
+    if (lease === null || l0ResponseKey(lease.response) !== l0ResponseKey(response)) return false;
+    // Retain user priority even if speech ends before synthesis returns.
+    lease.speechObserved = true;
+    const pending = this.#pendingPlayout;
+    if (pending !== null && !pending.native && l0ResponseKey(pending.response) === l0ResponseKey(response)) {
+      return this.stopAgentPlayout(response);
+    }
+    return true;
   }
 
   async playAgentText(
@@ -1515,6 +1529,7 @@ export class ProductP1VoiceRouteOwner {
     const continuousNative = this.#nativeInteraction !== null;
     const taskNotification = continuousNative && !native && this.#nativeTaskNotification !== null &&
       l0ResponseKey(this.#nativeTaskNotification.response) === l0ResponseKey(input.response);
+    const taskLease = taskNotification ? this.#nativeTaskNotification : null;
     if (this.#speech === null || this.#playout === null || this.#closed || this.#closeRequested) {
       throw new Error('formal P1 synthesis authority is unavailable');
     }
@@ -1615,6 +1630,12 @@ export class ProductP1VoiceRouteOwner {
           }
         );
       }
+      if (taskLease !== null && (this.#nativeTaskNotification !== taskLease || taskLease.speechObserved)) {
+        // Close only the child TTS route. The continuous microphone and any
+        // newer Native response keep their own authority.
+        downlinkRoute?.leaf.close('MEDIA_LOCAL_CLOSE');
+        throw Object.assign(new Error('Task announcement yielded to the speaker'), { reason: 'FORMAL_PLAYOUT_BARGED' });
+      }
       const expected = new Map<string, number>();
       if (frameCount !== null) expected.set(result.unit_id, frameCount - 1);
       let resolvePlayout!: () => void;
@@ -1630,6 +1651,7 @@ export class ProductP1VoiceRouteOwner {
       void rendered.catch(() => undefined);
       playoutResponse = result.response;
       const pendingPlayout: PendingProductPlayout = {
+        native,
         response: result.response,
         unitId: requiredText(input.unit_id, 'unit_id'),
         chunks,
@@ -1773,11 +1795,21 @@ export class ProductP1VoiceRouteOwner {
       }
       return chatProjection;
     } catch (error) {
+      if (taskLease !== null && (this.#nativeTaskNotification !== taskLease || taskLease.speechObserved)) {
+        // This Task no longer owns playback. Its late synthesis result/error
+        // cannot unfreeze or close a newer Native response's capture receipt.
+        throw Object.assign(new Error('Task announcement yielded to the speaker'), { reason: 'FORMAL_PLAYOUT_BARGED' });
+      }
       this.#nativeCaptureSendPaused = false;
       if (continuousNative) this.#drainCaptureFrames();
       if (error !== null && typeof error === 'object' && (error as Record<string, unknown>).reason === 'FORMAL_PLAYOUT_BARGED') {
-        this.#setStatus(this.#route === null ? 'recognized' : 'capturing', null);
-        this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
+        if (this.#pendingPlayout === null) {
+          this.#setStatus(this.#route === null ? 'recognized' : 'capturing', null);
+          this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
+        }
+        // Task presentation must settle as unplayed; returning success here
+        // would let its owner acknowledge a partially heard announcement.
+        if (taskNotification) throw error;
         if (native && this.#pendingEndOfTurn !== null) {
           const settledEndOfTurn = this.#pendingEndOfTurn;
           Promise.resolve().then(() => {
@@ -1821,7 +1853,6 @@ export class ProductP1VoiceRouteOwner {
       pending !== null &&
       route !== null &&
       this.#status === 'playing' &&
-      this.#nativeTaskNotification === null &&
       candidate.capture.capture_id === route.binding.generation.id &&
       candidate.capture.capture_generation === route.binding.generation.value &&
       l0ResponseKey(candidate.response) === l0ResponseKey(pending.response);
@@ -2022,13 +2053,13 @@ export class ProductP1VoiceRouteOwner {
         confirmedClock,
       );
     }
-    if (pending.downlinkRoute !== null && this.#nativeInteraction !== null) {
+    if (pending.downlinkRoute !== null && pending.native) {
       pending.nativeStopping = true;
       const stoppedLeaf = pending.downlinkRoute.leaf;
       const stoppedRoute = pending.downlinkRoute;
       this.#nativeStoppingRoutes.add(stoppedRoute);
       try {
-        const receipt = pending.downlinkRoute.leaf.localPlaybackStopReceipt(stopReceipt);
+        const receipt = JSON.parse(serializeMediaControl(pending.downlinkRoute.leaf.localPlaybackStopReceipt(stopReceipt)));
         // The audio transport normally completes before buffered audio ends.
         // The authenticated Web control retains the same exact stop contract.
         void this.#request('live_voice.media.playout_stop', {
@@ -2063,6 +2094,10 @@ export class ProductP1VoiceRouteOwner {
       }
     } else {
       pending.downlinkRoute?.leaf.close('MEDIA_LOCAL_CLOSE');
+    }
+    if (this.#nativeInteraction !== null && !pending.native) {
+      if (this.#nativeTaskNotification !== null && l0ResponseKey(this.#nativeTaskNotification.response) === l0ResponseKey(response)) this.#nativeTaskNotification.speechObserved = true;
+      this.#setStatus('capturing', null);
     }
     pending.reject(
       Object.assign(new Error('formal playout was interrupted'), {
@@ -3292,11 +3327,6 @@ export class ProductP1VoiceRouteOwner {
 
   #acceptCaptureFrame(frame: Readonly<CapturedAudioFrame>): void {
     if (this.#closed || this.#closeRequested || this.#failureCleanupPromise !== null || ['cleanup_pending', 'failed', 'closed'].includes(this.#status)) return;
-    if (this.#nativeTaskNotification !== null) {
-      // Keep capture seq/cursor continuous, but never retain or replay speech
-      // or loudspeaker echo received during this exact Task announcement.
-      frame = Object.freeze({ ...frame, samples: new Float32Array(frame.samples.length) });
-    }
     if (this.#nativeInteraction !== null) {
       this.#compactNativeCaptureFrames();
       if (this.#frames.length >= MAX_CAPTURE_FRAMES) {
@@ -3341,6 +3371,7 @@ export class ProductP1VoiceRouteOwner {
         // state. The sticky observation below only guards the notification
         // pause path; rotation eligibility uses the decaying recency counter.
         this.#captureSpeechObserved = true;
+        if (this.#nativeTaskNotification !== null) this.#nativeTaskNotification.speechObserved = true;
         this.#captureLocalActivityRecencyFrames = CAPTURE_LOCAL_ACTIVITY_DECAY_FRAMES;
       } else if (this.#captureLocalActivityRecencyFrames > 0) {
         this.#captureLocalActivityRecencyFrames -= 1;
@@ -3875,6 +3906,7 @@ export class ProductP1VoiceRouteOwner {
       throw new Error('speech-start control escaped its media authority');
     }
     this.#captureProviderSpeechStartObserved = true;
+    if (this.#nativeTaskNotification !== null) this.#nativeTaskNotification.speechObserved = true;
     this.#providerSpeechStartObservedAtMonotonicMs = monotonicNowMs();
     if (this.#captureUtteranceStartFrameIndex === null) {
       // The authoritative utterance budget starts at the first provider

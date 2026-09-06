@@ -23,6 +23,28 @@ const notice = (seconds, suffix = 'a') =>
   msg(`live-voice:interaction-1:response-task-progress-${suffix.repeat(40)}:1:text:0:0:digest`, 'assistant', seconds, '后台任务正在执行。');
 const render = (messages, processing = false) => buildRenderItems(buildTimelineItems(messages, [], []), false, processing);
 
+test('Native recovery with legacy repeated turn counters never moves an answered turn to a later user', () => {
+  const turn = '["interaction","native-turn-00000001"]';
+  const messages = [
+    { ...msg('old-user', 'user', 1), nativeTurnKey: turn },
+    { ...msg('old-answer', 'assistant', 4), nativeTurnKey: turn },
+    { ...msg('recovered-user', 'user', 10), nativeTurnKey: turn },
+    { ...msg('recovered-answer', 'assistant', 15), nativeTurnKey: turn },
+  ];
+  assert.deepEqual(buildTimelineItems(messages, [], []).map(item => item.message.id), messages.map(item => item.id));
+});
+
+test('Native delayed playback acknowledgement keeps the answer with its own user turn', () => {
+  const messages = [
+    { ...msg('u1', 'user', 1), nativeTurnKey: '["interaction","turn-1"]' },
+    { ...msg('u2', 'user', 10), nativeTurnKey: '["interaction","turn-2"]' },
+    { ...msg('a1', 'assistant', 12), nativeTurnKey: '["interaction","turn-1"]' },
+    { ...msg('a2', 'assistant', 14), nativeTurnKey: '["interaction","turn-2"]' },
+  ];
+  assert.deepEqual(buildTimelineItems(messages, [], []).map(item => item.message.id), ['u1', 'a1', 'u2', 'a2']);
+  assert.equal(messages[2].timestamp, at(12));
+});
+
 test('each notification keeps its timestamp; foreground metadata and elapsed time end at its reply', () => {
   const input = [msg('user', 'user', 16), msg('reply', 'assistant', 19), notice(34), notice(55, 'b')];
   // JSON round trip exercises the persisted identity without a transient flag.
@@ -155,4 +177,19 @@ test('adjacent undated records preserve the replacement boundary in live and res
     assert.deepEqual(items.filter(item => item.type === 'message').map(item => item.message.id), input.map(message => message.id));
     assert.deepEqual(items.filter(item => item.type === 'turnSummary').map(completedWorkDurationMs), [0, 0]);
   }
+});
+
+
+test('history and FileViewer materialize one display per exact Task event without rewriting records', () => {
+  const binding = { scope: { subject_id: 'subject', project_id: 'project', session_id: 'session', assurance: 'authenticated' },
+    task_id: 'task', attempt_id: 'attempt', event_id: 'event' };
+  const records = [0, 1, 2].map(i => ({ ...msg(`notice-${i}`, 'assistant', i + 1, 'Complete'),
+    type: 'chat.final', task_event_binding: { ...binding, event_id: i === 2 ? 'other' : 'event' } }));
+  const restored = parseHistoryJsonFileToTimelinePreview(records, 'session');
+  assert.equal(restored.messages.length, 3);
+  assert.ok(restored.messages[0].taskNotification?.eventKey);
+  assert.deepEqual(buildTimelineItems(restored.messages, [], []).map(item => item.message.id), ['notice-0', 'notice-2']);
+  assert.equal(records.length, 3);
+  const foreign = parseHistoryJsonFileToTimelinePreview(records, 'foreign');
+  assert.equal(buildTimelineItems(foreign.messages, [], []).length, 3);
 });

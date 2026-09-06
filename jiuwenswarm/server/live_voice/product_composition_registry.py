@@ -2695,6 +2695,7 @@ class AgentServerProductCompositionRegistry:
                 "hypothesis_provenance": {
                     "source": "task_event",
                     "task_id": event.task_event.task_id,
+                    "attempt_id": event.task_event.attempt_id,
                     "event_id": event.task_event.event_id,
                 },
                 "scope": retained_p2.binding.scope.to_dict(),
@@ -3640,6 +3641,7 @@ class AgentServerProductCompositionRegistry:
                 "hypothesis_provenance": {
                     "source": "task_event",
                     "task_id": event.task_event.task_id,
+                    "attempt_id": event.task_event.attempt_id,
                     "event_id": event.task_event.event_id,
                 },
                 "scope": event.origin.scope.to_dict(),
@@ -5457,6 +5459,29 @@ class AgentServerProductCompositionRegistry:
             assert proposal is not None
             action_intent = None
             try:
+                if proposal.action is not None and proposal.action.operation == "DELEGATE":
+                    reservation = dict(proposal.action.payload)
+                    generation = reservation.get("response_generation")
+                    if (any(value is not None for value in (proposal.turn_commit, proposal.input_transcript,
+                            proposal.audio_observation, proposal.provider_done))
+                        or set(reservation) != {"provider_call_id", "turn_id", "response_generation"}
+                        or not isinstance(generation, str) or not generation.isascii() or not generation.isdecimal()
+                        or generation.startswith("0")):
+                        raise NativeInteractionRuntimeError("NATIVE_DELEGATE_RESERVATION_INVALID", "Delegate reservation requires exact source identity")
+                    call_id = _required_text(reservation.get("provider_call_id"), "provider_call_id")
+                    source = owner.reserved_delegate_source(call_id) or owner.snapshot().current_response
+                    if source is None or source.response_generation != int(generation):
+                        raise NativeInteractionRuntimeError("NATIVE_DELEGATE_SOURCE_STALE", "Reservation requires the exact source generation")
+                    await owner.reserve_delegate(call_id, source, turn_id=_required_text(reservation.get("turn_id"), "turn_id"))
+                if proposal.action is not None and proposal.action.operation == "SPEAK":
+                    speak_payload = dict(proposal.action.payload)
+                    if (any(value is not None for value in (proposal.turn_commit, proposal.input_transcript,
+                            proposal.delegate, proposal.audio_observation, proposal.provider_done))
+                        or set(speak_payload) not in ({"provider_response_id", "turn_id"},
+                                                    {"provider_response_id", "turn_id", "provider_call_id"})):
+                        raise NativeInteractionRuntimeError("NATIVE_PROVIDER_RESPONSE_BINDING_INVALID", "SPEAK requires exact source identity")
+                    for field in speak_payload:
+                        _required_text(speak_payload[field], field)
                 if proposal.action is not None and proposal.action.operation == "STOP":
                     stop_payload = dict(proposal.action.payload)
                     generation = stop_payload.get("response_generation")
@@ -5647,40 +5672,16 @@ class AgentServerProductCompositionRegistry:
                         payload.get("provider_response_id"),
                         "provider_response_id",
                     )
-                    runtime_response_id = payload.get("runtime_response_id")
-                    runtime_generation = payload.get("response_generation")
-                    if runtime_response_id is None and runtime_generation is None:
-                        response_id = (
-                            "native-response-"
-                            + hashlib.sha256(
-                                proposal.action.action_id.encode("utf-8")
-                            ).hexdigest()
-                        )
-                        admission = await owner.accept_provider_response(
-                            provider_response_id, response_id
-                        )
-                    elif (
-                        type(runtime_response_id) is str
-                        and type(runtime_generation) is str
-                        and runtime_generation.isascii()
-                        and runtime_generation.isdecimal()
-                        and (
-                            len(runtime_generation) == 1
-                            or not runtime_generation.startswith("0")
-                        )
-                    ):
-                        admission = await owner.bind_delegate_provider_response(
-                            provider_response_id,
-                            ResponseRef(
-                                binding.interaction_id,
-                                runtime_response_id,
-                                int(runtime_generation),
-                            ),
-                        )
+                    call_id = payload.get("provider_call_id")
+                    turn_id = _required_text(payload.get("turn_id"), "turn_id")
+                    if call_id is None:
+                        response_id = "native-response-" + hashlib.sha256(
+                            proposal.action.action_id.encode("utf-8")
+                        ).hexdigest()
+                        admission = await owner.accept_provider_response(provider_response_id, response_id, turn_id=turn_id)
                     else:
-                        raise NativeInteractionRuntimeError(
-                            "NATIVE_PROVIDER_RESPONSE_BINDING_INVALID",
-                            "Provider response carried an incomplete Runtime binding",
+                        admission = await owner.accept_delegate_provider_response(
+                            provider_response_id, call_id, turn_id,
                         )
                     result_payload = {
                         "kind": "response",
@@ -5809,12 +5810,13 @@ class AgentServerProductCompositionRegistry:
                 native_p3_authority = route.native_p3_authority
                 assert owner is not None
                 assert native_p3_authority is not None
-                source = owner.snapshot().current_response
+                source = owner.reserved_delegate_source(proposal.delegate.provider_call_id) or owner.snapshot().current_response
                 if source is None or source.response_generation != proposal.delegate.response_generation:
                     return _error_result(request_id, reason="NATIVE_DELEGATE_SOURCE_STALE", code=ErrorCode.STALE)
                 if (binding.activation_id, binding.activation_generation, routed_session,
                     source.response_id, source.response_generation) in self._native_interrupted_sources:
                     return _error_result(request_id, reason="NATIVE_DELEGATE_INTERRUPTED", code=ErrorCode.CANCELLED)
+                await owner.reserve_delegate(proposal.delegate.provider_call_id, source, turn_id=proposal.delegate.turn_id)
                 control = NativeForegroundControl(source, identity_fields(binding, source, {"request_id": request_id}))
                 task = asyncio.create_task(
                     control.run(self._run_native_delegate_propose(
@@ -6025,7 +6027,7 @@ class AgentServerProductCompositionRegistry:
             canonical_text = self._native_delegate_speech_text(canonical_text)
             if foreground is not None:
                 foreground.check()
-            delegate_result = await owner.accept_delegate_result(
+            delegate_result = await owner.prepare_delegate_result(
                 delegate_admission,
                 canonical_text=canonical_text,
                 route=semantic_route,
@@ -6051,7 +6053,7 @@ class AgentServerProductCompositionRegistry:
                         )
             result_payload: dict[str, object] = {
                 "kind": "delegate",
-                "status": "completed",
+                "status": "prepared",
                 "accepted": accepted,
                 "provider_call_id": delegate.provider_call_id,
                 "route": semantic_route.value,
@@ -6089,6 +6091,10 @@ class AgentServerProductCompositionRegistry:
                 message=str(exc),
                 manifest=retained_route.manifest,
             )
+        finally:
+            if delegate is not None:
+                await owner.release_failed_delegate(delegate.provider_call_id)
+
 
     async def handle_native_presentation_ack(
         self,
@@ -14157,18 +14163,45 @@ class AgentServerProductCompositionRegistry:
                         operation="task.status",
                         session_id=routed_session,
                     )
-                    retry_admission = (
-                        await self._p3_composition.read_product_status_retry_admission(
-                            bearer_token=params.get("auth_token"),
-                            session_id=routed_session,
-                            task_id=str(task_id or ""),
+                    for read_attempt in range(3):
+                        if read_attempt:
+                            await activate_query(ProductCompositionContext(routed_session, correlation_id))
+                            refreshed = getattr(holder.get("result"), "result", None)
+                            if refreshed is None or not refreshed.ok:
+                                raise FormalTaskViolation("PRODUCT_P3_QUERY_FAILED", "Task status reread failed", ErrorCode.STALE)
+                            envelope = refreshed
+                            payload = envelope.to_dict()
+                            result_payload = payload.get("result")
+                            if not isinstance(result_payload, dict):
+                                raise FormalTaskViolation("PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH", "Task status reread is malformed", ErrorCode.PROTOCOL_VIOLATION)
+                        retry_admission = await self._p3_composition.read_product_status_retry_admission(
+                            bearer_token=params.get("auth_token"), session_id=routed_session, task_id=str(task_id or ""),
                         )
-                    )
-                    authority_fact = await asyncio.to_thread(
-                        production_authority.reader.task_status,
-                        production_authority.scope,
-                        str(task_id or ""),
-                    )
+                        authority_fact = await asyncio.to_thread(
+                            production_authority.reader.task_status, production_authority.scope, str(task_id or ""),
+                        )
+                        raw_task = result_payload.get("task")
+                        raw_attempt = result_payload.get("attempt")
+                        if (type(authority_fact) is not AuthenticatedTaskFact
+                            or not isinstance(raw_task, Mapping)
+                            or not isinstance(raw_attempt, Mapping)
+                            or raw_attempt.get("task_id") != task_id
+                            or raw_attempt.get("attempt_id") != raw_task.get("attempt_id")
+                            or raw_task.get("scope") != production_authority.scope.to_dict()
+                            or raw_task.get("task_id") != task_id
+                            or authority_fact.task_id != task_id
+                            or type(raw_task.get("event_head")) is not int
+                            or raw_task["event_head"] < 0
+                            or raw_task["event_head"] >= authority_fact.event_head):
+                            # Stable snapshots still pass every strict projection
+                            # check below; mismatches never gain retry authority.
+                            break
+                        logger.info("[LiveVoiceProduct] Task status snapshot advanced; "
+                            "read_attempt=%s raw_head=%s authority_head=%s", read_attempt + 1,
+                            raw_task["event_head"], authority_fact.event_head)
+                        if read_attempt == 2:
+                            raise FormalTaskViolation("PRODUCTION_TASK_AUTHORITY_CHANGED",
+                                "Task advanced throughout the bounded status read", ErrorCode.STALE)
                 except FormalTaskViolation as exc:
                     return _error_result(
                         request_id,

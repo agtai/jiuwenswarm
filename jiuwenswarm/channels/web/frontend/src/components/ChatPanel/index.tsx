@@ -1254,6 +1254,7 @@ export function ChatPanel({
   const productVoiceControlRef = useRef<ProductLiveVoiceSurfaceControl | null>(null);
   const [productVoiceState, setProductVoiceState] = useState<Readonly<ProductLiveVoiceSurfaceState> | null>(null);
   const addMessageIfAbsent = useChatStore((state) => state.addMessageIfAbsent);
+  const settleNativeVoiceMessages = useChatStore((state) => state.settleNativeVoiceMessages);
   const adoptProductVoiceState = useCallback((next: Readonly<ProductLiveVoiceSurfaceState>) => {
     setProductVoiceState(previous => {
       if (
@@ -1600,6 +1601,7 @@ export function ChatPanel({
                 }
               : undefined
           }
+          onNativeVoiceDisplayEnded={formalProductVoiceEnabled ? settleNativeVoiceMessages : undefined}
         />
       )}
 

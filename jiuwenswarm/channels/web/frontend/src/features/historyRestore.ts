@@ -1,3 +1,4 @@
+import { taskNotificationBindingKey } from './live-voice/formal/taskNotificationIdentity';
 import { Message, MessageRole, UsageSummary, FileDownloadItem, MediaItem, WsEvent, ToolExecution } from '../types';
 import { webClient } from '../services/webClient';
 import { normalizeFinalContent } from '../utils/finalContent';
@@ -9,6 +10,15 @@ import {
   buildGoalCompletedContent,
   isGoalCompletedContent,
 } from '../components/GoalBar/goalCompletedMessage';
+
+function nativeHistoryTurn(record: Record<string, unknown>): { nativeTurnKey?: string } {
+  const value = record.formal_binding;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const binding = value as Record<string, unknown>;
+  if (binding.source !== 'openai_realtime_input_audio_transcription' && binding.surface !== 'native_audio') return {};
+  return typeof binding.interaction_id === 'string' && typeof binding.turn_id === 'string'
+    ? { nativeTurnKey: JSON.stringify([binding.interaction_id, binding.turn_id]) } : {};
+}
 
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
@@ -471,6 +481,7 @@ function parseHistoryTimelineEntry(
         role: 'user',
         content,
         timestamp: at,
+        ...nativeHistoryTurn(record),
         ...(mediaItems.length > 0 ? { mediaItems } : {}),
         ...(isGoalObjectiveMessage ? { isGoalObjectiveMessage: true } : {}),
       },
@@ -592,6 +603,9 @@ function parseHistoryTimelineEntry(
         role: 'assistant',
         content,
         timestamp: at,
+        ...nativeHistoryTurn(record),
+        ...(() => { const eventKey = taskNotificationBindingKey(record.task_event_binding, sessionId);
+          return eventKey ? { taskNotification: { eventKey, presentation: 'text' as const } } : {}; })(),
         ...(completedAt ? { completedAt } : {}),
         ...(isProactiveRecommendation ? { isProactiveRecommendation } : {}),
         ...(isProactiveRecommendation && histProactiveType

@@ -210,6 +210,7 @@ class _ProviderResponse:
     provider_response_id: str
     turn_id: str
     runtime_ref: ResponseRef | None = None
+    delegate_call_id: str | None = None
     audio_items: dict[int, _ProviderAudioItem] = field(default_factory=dict)
     next_audio_sequence: int = 0
     done: bool = False
@@ -245,7 +246,7 @@ class _DelegateResult:
 @dataclass(slots=True)
 class _ProviderResponseRequest:
     turn_id: str
-    runtime_ref: ResponseRef | None
+    delegate_call_id: str | None
     payload: dict[str, object]
     sent: asyncio.Future[str] | None = field(default=None, repr=False)
 
@@ -688,7 +689,6 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._retired_delegate_calls: set[str] = set()
         self._delegate_output_started: set[str] = set()
         self._delegate_successors: dict[str, ResponseRef] = {}
-        self._retired_successors: set[ResponseRef] = set()
         self._pending_unpresented_cancels: deque[str] = deque()
         self._provider_cancel_receipts: dict[str, str] = {}
         self._cancelled: dict[
@@ -786,7 +786,10 @@ class OpenAIRealtimeNativeInteractionEngine:
             if self._inflight_response_request is not None:
                 return
             current = self._current_response()
-            if current is not None and not current.done:
+            if current is not None and (not current.done or (
+                current.presentable and not current.cancelled and not current.presentation_acknowledged
+                and any(item.received_samples > 0 for item in current.audio_items.values())
+            )):
                 return
             if not self._response_request_queue:
                 return
@@ -847,7 +850,11 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_ENGINE_EVENT_QUEUE_FULL",
                 "admitted audio exceeds the bounded Native queue",
             )
+        if retained.cancelled or retained.delegate_call_id in self._retired_delegate_calls:
+            raise OpenAIRealtimeNativeInteractionError("NATIVE_DELEGATE_INTERRUPTED", "Cancelled output cannot be admitted")
         retained.runtime_ref = ref
+        if retained.delegate_call_id is not None:
+            self._delegate_successors[retained.delegate_call_id] = ref
         retained_audio = deque[_BufferedAudio]()
         for buffered in self._pending_audio:
             if buffered.provider_response_id == provider_id:
@@ -891,29 +898,17 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_DELEGATE_CALL_UNKNOWN",
                 "delegate result requires one retained proposal",
             )
-        if self._find_response(wait.response).cancelled:
+        if self._find_response(wait.response).cancelled or parsed_call_id in self._retired_delegate_calls:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_DELEGATE_INTERRUPTED", "Interrupted delegate cannot create a response",
             )
-        if ref.response_generation <= wait.response.response_generation:
+        if ref != wait.response:
             raise OpenAIRealtimeNativeInteractionError(
-                "NATIVE_DELEGATE_RESPONSE_NOT_NEW",
-                "delegate result requires a newer Runtime response generation",
-            )
-        if any(
-            request.runtime_ref is not None for request in self._response_request_queue
-        ) or (
-            self._inflight_response_request is not None
-            and self._inflight_response_request.runtime_ref is not None
-        ):
-            raise OpenAIRealtimeNativeInteractionError(
-                "NATIVE_DELEGATE_RESPONSE_CONFLICT",
-                "only one pre-admitted delegate response may be pending",
+                "NATIVE_DELEGATE_SOURCE_MISMATCH", "Prepared output requires the exact source response",
             )
         response_request: _ProviderResponseRequest | None = None
         try:
             self._delegate_output_started.add(parsed_call_id)
-            self._delegate_successors[parsed_call_id] = ref
             output_event_id = await self._session.send_event(
                 "conversation.item.create",
                 {
@@ -931,7 +926,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             response_sent = asyncio.get_running_loop().create_future()
             response_request = _ProviderResponseRequest(
                 turn_id=wait.proposal.turn_id,
-                runtime_ref=ref,
+                delegate_call_id=parsed_call_id,
                 payload={
                     "response": {
                         "instructions": _DELEGATE_SUCCESSOR_INSTRUCTIONS,
@@ -1009,28 +1004,28 @@ class OpenAIRealtimeNativeInteractionEngine:
         if wait is None:
             raise OpenAIRealtimeNativeInteractionError("NATIVE_DELEGATE_CALL_UNKNOWN", "No exact delegate to retire")
         await self.fence_response(wait.response)
-        successor = self._delegate_successors.get(call_id)
-        if successor is not None:
-            self._retired_successors.add(successor)
-            # Remove only unsent requests. An in-flight send must settle; its
-            # response.created is consumed and cancelled without SPEAK/audio.
-            for request in tuple(self._response_request_queue):
-                if request.runtime_ref == successor:
-                    self._response_request_queue.remove(request)
-                    if request.sent is not None and not request.sent.done():
-                        request.sent.set_exception(OpenAIRealtimeNativeInteractionError(
-                            "NATIVE_DELEGATE_INTERRUPTED", "Queued successor was interrupted",
-                        ))
-            for response in self._responses.values():
-                if response.runtime_ref == successor:
-                    await self.fence_response(successor)
-                    if not response.done:
-                        await self._cancel_unpresented_response(response.provider_response_id)
-        if call_id in self._retired_delegate_calls or call_id in self._delegate_output_started:
-            return
-        # This reports foreground delivery status, never rollback of a durable
-        # task/tool effect. Only the next committed user turn may create a reply.
+        already_retired = call_id in self._retired_delegate_calls
         self._retired_delegate_calls.add(call_id)
+        # An in-flight request retains its call identity until response.created;
+        # its output is then cancelled without a Runtime SPEAK or audio effect.
+        for request in tuple(self._response_request_queue):
+            if request.delegate_call_id == call_id:
+                self._response_request_queue.remove(request)
+                if request.sent is not None and not request.sent.done():
+                    request.sent.set_exception(OpenAIRealtimeNativeInteractionError(
+                        "NATIVE_DELEGATE_INTERRUPTED", "Queued successor was interrupted",
+                    ))
+        for response in self._responses.values():
+            if response.delegate_call_id == call_id:
+                if response.runtime_ref is not None:
+                    await self.fence_response(response.runtime_ref)
+                else:
+                    response.cancelled = True
+                    self._locally_fenced.add(response.provider_response_id)
+                if not response.done:
+                    await self._cancel_unpresented_response(response.provider_response_id)
+        if already_retired or call_id in self._delegate_output_started:
+            return
         await self._session.send_event("conversation.item.create", {
             "item": {"type": "function_call_output", "call_id": call_id,
                      "output": json.dumps({"foreground_status": "interrupted" if interrupted else "failed"})},
@@ -1150,6 +1145,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         if response.presentation_acknowledged:
             return False
         response.presentation_acknowledged = True
+        await self._request_pending_provider_response()
         return True
 
     def _discard_response_output(
@@ -1165,6 +1161,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             for item in self._pending_events
             if (item.audio is None or item.audio.response != ref)
             and (item.provider_done is None or item.provider_done.response != ref)
+            and (item.generated_transcript is None or item.generated_transcript.response != ref)
             and (
                 item.delegate is None
                 or item.delegate.response_generation != ref.response_generation
@@ -1311,26 +1308,16 @@ class OpenAIRealtimeNativeInteractionEngine:
             current is not None
             and current.runtime_ref is not None
             and not current.cancelled
-            and not current.presentation_acknowledged
             and (
                 not current.done
                 or any(
-                    wait.response == current.runtime_ref and (
-                        call_id not in self._delegate_results
-                        or (self._inflight_response_request is not None and
-                            self._inflight_response_request.runtime_ref == self._delegate_results[call_id].response)
-                        or any(request.runtime_ref == self._delegate_results[call_id].response
-                               for request in self._response_request_queue)
-                    )
+                    wait.response == current.runtime_ref
+                    and call_id not in self._retired_delegate_calls
+                    and call_id not in self._delegate_successors
                     for call_id, wait in self._delegates.items()
                 )
-                or (
-                    current.presentable
-                    and any(
-                        item.received_samples > 0
-                        for item in current.audio_items.values()
-                    )
-                )
+                or (current.presentable and not current.presentation_acknowledged
+                    and any(item.received_samples > 0 for item in current.audio_items.values()))
             )
         ):
             operations.insert(0,
@@ -1442,9 +1429,15 @@ class OpenAIRealtimeNativeInteractionEngine:
             )
         self._require_action_capacity(1)
         self._turn_count += 1
-        turn_id = f"native-turn-{self._turn_count:08d}"
         session_id = self._session.snapshot().provider_session_id
         assert session_id is not None
+        # A Provider reconnect can retain the product interaction. Counter-only
+        # turns collide with its earlier history and misbind later presentation.
+        turn_id = _digest_id("native-turn", {
+            "binding": self._binding.to_dict(),
+            "provider_session_id": session_id,
+            "provider_item_id": item_id,
+        })
         commit = NativeTurnCommit(
             contract_version=NATIVE_INTERACTION_CONTRACT_VERSION,
             commit_id=_digest_id(
@@ -1487,7 +1480,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._response_request_queue.append(
             _ProviderResponseRequest(
                 turn_id=turn_id,
-                runtime_ref=None,
+                delegate_call_id=None,
                 payload={},
             )
         )
@@ -1776,12 +1769,12 @@ class OpenAIRealtimeNativeInteractionEngine:
             response.turn_id == response_turn_id
             for response in self._responses.values()
         )
-        if prior_turn_response and request.runtime_ref is None:
+        if prior_turn_response and request.delegate_call_id is None:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_DIRECT_RESPONSE_ALREADY_CREATED",
                 "one Native turn permits only one direct Provider response",
             )
-        if not prior_turn_response and request.runtime_ref is not None:
+        if not prior_turn_response and request.delegate_call_id is not None:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_DELEGATE_RESPONSE_TURN_MISMATCH",
                 "delegate successor must bind the exact source Native turn",
@@ -1789,13 +1782,13 @@ class OpenAIRealtimeNativeInteractionEngine:
         response = _ProviderResponse(
             provider_response_id=provider_id,
             turn_id=response_turn_id,
-            runtime_ref=request.runtime_ref,
+            delegate_call_id=request.delegate_call_id,
         )
         self._inflight_response_request = None
         self._responses[provider_id] = response
         self._current_response_id = provider_id
         self._state = NativeProviderState.RESPONSE_PENDING
-        if request.runtime_ref in self._retired_successors:
+        if request.delegate_call_id in self._retired_delegate_calls:
             response.cancelled = True
             self._locally_fenced.add(provider_id)
             self._pending_unpresented_cancels.append(provider_id)
@@ -1804,16 +1797,8 @@ class OpenAIRealtimeNativeInteractionEngine:
             ("provider_response_id", provider_id),
             ("turn_id", response_turn_id),
         ]
-        if response.runtime_ref is not None:
-            payload.extend(
-                (
-                    ("runtime_response_id", response.runtime_ref.response_id),
-                    (
-                        "response_generation",
-                        str(response.runtime_ref.response_generation),
-                    ),
-                )
-            )
+        if request.delegate_call_id is not None:
+            payload.append(("provider_call_id", request.delegate_call_id))
         action = self._action(
             event.event_id,
             0,
@@ -2275,7 +2260,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             self._state = (
                 NativeProviderState.TURN_COMMITTED
                 if any(
-                    request.runtime_ref is None
+                    request.delegate_call_id is None
                     for request in self._response_request_queue
                 )
                 else NativeProviderState.READY

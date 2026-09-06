@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-06 (Native rehearsal text, Task UI, stop and ACK repairs verified within their modules; physical acceptance open).
+> Updated: 2026-09-06 (Native recovery, response and Task presentation lifecycle repair verified within its modules; physical acceptance open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -24,9 +24,23 @@ history, not acceptance of this candidate.
 
 ## Current execution packet
 
-### Native transcript metadata compatibility
+### Native recovery and presentation lifecycle
 
-The current [Native event compatibility repair](reviews/NATIVE_EVENT_SCHEMA_REPAIR_20260906.md)
+The current [Native lifecycle repair](reviews/NATIVE_SESSION_LIFECYCLE_REPAIR_20260906.md)
+fixes recovery turn collisions, stranded generated text, premature delegate response
+admission, and Task/Native playback ownership races. Exact Task-event identity now
+coalesces preview, text fallback and voice retry; Task playback retains input and
+yields to speech or a Native successor without false audio ACK. The existing Web
+STOP contract is serialized correctly, and Task status reads retry only a verified
+same-attempt event-head advance. Scoped checks, independent review, production
+build and separate real Provider/Engine and Agent/file-tool checks pass. The packet
+records five proven baseline test exclusions; full-suite and physical acceptance
+are not claimed. Deploy through the existing controlled launcher and bind the
+actual clean source, served assets, readiness and preserved data in local evidence.
+
+### Retained Native transcript metadata compatibility
+
+The [Native event compatibility repair](reviews/NATIVE_EVENT_SCHEMA_REPAIR_20260906.md)
 fixes the rehearsal's `NATIVE_PROVIDER_EVENT_NOT_CLOSED`: real `gpt-realtime-2`
 transcript deltas include optional `obfuscation` metadata omitted from the prior
 strict mapping. The narrow fix and content-free rejection diagnostics passed
@@ -37,8 +51,8 @@ actual source/readiness is bound by the local runtime contract.
 
 ### Native rehearsal repair: text, Task UI, stop and recovery
 
-The [Native rehearsal repair](reviews/NATIVE_REHEARSAL_REPAIR_20260906.md) is the
-current packet. It closes the diagnosed Agent-lock/ACK wait, generated text hidden
+The [Native rehearsal repair](reviews/NATIVE_REHEARSAL_REPAIR_20260906.md)
+closes the diagnosed Agent-lock/ACK wait, generated text hidden
 until full playback, missing Native Task-list refresh, completed-download stop and
 obsolete response-failure display. Scoped tests, build, real Agent/file-tool work
 and independent review pass; exact results and limits are in the packet.

@@ -989,6 +989,7 @@ class _NativeMediaSession:
     delegate_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict, repr=False)
     delegate_proposals: dict[str, NativeEngineEvent] = field(default_factory=dict, repr=False)
     foreground_turn_id: str | None = None
+    delivery_response: ResponseRef | None = None
     request_state_sequence: int = 0
     generated_text_revision: int = 0
     generated_text: OrderedDict[ResponseRef, dict[str, object]] = field(default_factory=OrderedDict, repr=False)
@@ -1984,6 +1985,9 @@ class DedicatedMediaProductRegistry:
             pending = None
             if event is None:
                 event = await session.delivery_queue.get()
+            session.delivery_response = event.audio.response if event.audio is not None else (
+                event.provider_done.response if event.provider_done is not None else None
+            )
             if event.audio is None:
                 try:
                     if event.delegate is not None:
@@ -1991,6 +1995,22 @@ class DedicatedMediaProductRegistry:
                         if call_id not in session.delegate_tasks:
                             if len(session.delegate_tasks) >= 8:
                                 raise MediaTransportViolation("MEDIA_NATIVE_DELEGATE_BACKPRESSURE", "Native foreground settlement capacity exceeded")
+                            # Reserve semantic ownership in delivery order before
+                            # allowing Provider done/ACK to expose an idle foreground.
+                            action = event.action
+                            assert action is not None
+                            reservation = NativeEngineEvent(action=InteractionAction(
+                                action_id=f"{action.action_id}:reserve", operation="DELEGATE",
+                                interaction_id=action.interaction_id, scope=action.scope,
+                                payload=(("provider_call_id", call_id), ("turn_id", event.delegate.turn_id),
+                                         ("response_generation", str(event.delegate.response_generation))),
+                            ))
+                            try:
+                                await self._handle_native_event(session, reservation)
+                            except NativeRuntimeClientError:
+                                if any(ref.response_generation == event.delegate.response_generation for ref in session.barge_fenced_responses):
+                                    continue
+                                raise
                             session.delegate_proposals[call_id] = event
                             task = asyncio.create_task(self._run_native_delegate_event(session, event))
                             session.delegate_tasks[call_id] = task
@@ -2509,7 +2529,7 @@ class DedicatedMediaProductRegistry:
         settled_task = result.get("status") in {"interrupted", "failed"}
         if (
             result.get("kind") != "delegate"
-            or result.get("status") not in {"completed", "interrupted", "failed"}
+            or result.get("status") not in {"prepared", "interrupted", "failed"}
             or type(result.get("accepted")) is not bool
             or result.get("provider_call_id") != delegate.provider_call_id
             or not isinstance(response_payload, Mapping)
@@ -2536,12 +2556,11 @@ class DedicatedMediaProductRegistry:
         )
         if (
             response.interaction_id != session.activation.binding.interaction_id
-            or (response.response_generation != delegate.response_generation if settled_task
-                else response.response_generation <= delegate.response_generation)
+            or response.response_generation != delegate.response_generation
         ):
             raise MediaTransportViolation(
                 "MEDIA_NATIVE_DELEGATE_RESULT_INVALID",
-                "Native delegate result response is not a newer exact generation",
+                "Native prepared result must retain its exact source generation",
             )
         task_id = None
         task_commit_id = None
@@ -3256,6 +3275,18 @@ class DedicatedMediaProductRegistry:
         except asyncio.CancelledError:
             return
         if error is not None:
+            reason = getattr(error, "reason_id", getattr(error, "reason", "UNKNOWN"))
+            key = self._native_session_keys_by_record.get(record.record_id)
+            session = self._native_sessions.get(key) if key is not None else None
+            if session is not None:
+                response = session.delivery_response if task is session.delivery_task else None
+                profile_event("native_media_failure", **identity_fields(session.activation.binding, response),
+                              stage="media.delivery" if task is session.delivery_task else "media.provider",
+                              reason=reason, turn_id=session.foreground_turn_id, outcome="failed")
+                for snapshot in session.generated_text.values():
+                    if snapshot["state"] == "generating":
+                        snapshot["state"] = "interrupted"
+                        self._revise_native_text(session, snapshot)
             _LOGGER.error(
                 "live_voice_native_media_task_failed reason=%s",
                 getattr(error, "reason_id", getattr(error, "reason", "UNKNOWN")),

@@ -1,4 +1,5 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { taskNotificationSourceKey, type TaskNotificationDisplay } from '../../features/live-voice/formal/taskNotificationIdentity';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { recordAudioDiagnostic } from '../../features/live-voice/formal/audioDiagnostics';
 import { parseNativeGeneratedText, type NativeGeneratedMessage } from '../../features/live-voice/formal/nativeGeneratedText';
 import { parseEventEnvelope } from '../../features/live-voice/formal/liveVoiceContractV2';
@@ -158,6 +159,7 @@ export interface LiveVoiceIntegratedRoutePanelProps {
   productVoiceControlRef?: { current: ProductLiveVoiceSurfaceControl | null };
   onProductVoiceStateChange?: (state: Readonly<ProductLiveVoiceSurfaceState>) => void;
   onProductVoiceMessage?: (event: Readonly<ProductLiveVoiceMessageEvent>) => void;
+  onNativeVoiceDisplayEnded?: (sessionId: string, responseKeys: readonly string[]) => void;
 }
 
 export type ProductLiveVoiceMessageEvent = Readonly<{
@@ -169,6 +171,7 @@ export type ProductLiveVoiceMessageEvent = Readonly<{
     timestamp: string;
     nativeVoice?: NativeGeneratedMessage['nativeVoice'];
     nativeTurnKey?: string;
+    taskNotification?: TaskNotificationDisplay;
   }>;
 }>;
 
@@ -811,6 +814,7 @@ export type ProductP2NotificationDisposition =
       }>;
       readonly unit_id: string;
       readonly history_message_id: string | null;
+      readonly task_notification_event_key?: string | null;
       readonly ack: ProductPresentationAckInput;
       readonly replayed: boolean;
       readonly task_notification: boolean;
@@ -898,6 +902,7 @@ type CapturedProductTaskNotification = Readonly<{
 }>;
 
 type PendingProductPresentationAttempt = {
+  native_foreground_epoch: number;
   owner: ProductWebP2ActivationOwner;
   input: ProductPresentationAckInput & { presented_at: string };
   response: Readonly<{
@@ -1104,6 +1109,8 @@ export async function terminalTextFallbackMessage(
       role: 'assistant',
       content: text,
       timestamp: new Date().toISOString(),
+      ...(() => { const eventKey = taskNotificationSourceKey(event.source_event.raw, event.session_id);
+        return eventKey ? { taskNotification: { eventKey, presentation: 'text' as const } } : {}; })(),
     }),
   });
 }
@@ -1788,6 +1795,7 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
           ? null
           : `live-voice:${response.interaction_id}:${response.response_id}:${response.response_generation}:${presentationSurface}:${unit.seq}:${unit.seq}:${contentDigest}`,
       replayed: hasPresentedOutput,
+      task_notification_event_key: taskNotification ? taskNotificationSourceKey(notification.source_event, String(notification.session_id)) : null,
       task_notification: taskNotification,
       task_id: notificationTaskId,
       task_notification_terminal: taskTerminal,
@@ -1943,9 +1951,18 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     'idle' | 'submitting' | 'waiting' | 'presented' | 'acknowledged' | 'failed'
   >('idle');
   const [productTextReason, setProductTextReason] = useState<string | null>(null);
+  const nativeForegroundEpochRef = useRef(0);
+  const nativePresentationQueueRef = useRef<{ key: string; owner: ProductWebP2ActivationOwner; notification: Readonly<Record<string, unknown>>; admission: ProductP2NotificationAdmission }[]>([]);
   const nativeRequestStateRef = useRef<{ binding: string; sequence: number } | null>(null);
   const nativeTextReadRef = useRef<{ owner: ProductWebP2ActivationOwner; voice: ProductP1VoiceRouteOwner;
-    binding: string; revision: number; visible: Set<string> } | null>(null);
+    binding: string; sessionId: string; revision: number; visible: Set<string>; ended: boolean;
+    onEnd: LiveVoiceIntegratedRoutePanelProps['onNativeVoiceDisplayEnded'] } | null>(null);
+  const endNativeTextDisplay = useCallback(() => {
+    const cursor = nativeTextReadRef.current;
+    if (!cursor || cursor.ended) return;
+    cursor.ended = true;
+    cursor.onEnd?.(cursor.sessionId, [...cursor.visible]);
+  }, []);
   const [replacementRecognitionFailure, setReplacementRecognitionFailure] = useState<{
     session_id: string; loop_generation: number;
   } | null>(null);
@@ -2548,6 +2565,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     retained: NonNullable<typeof pendingPresentationAttemptRef.current>,
     failureReason: ProductTaskPresentationFailureReason,
   ): Promise<void> => {
+    const ownsForeground = () => retained.native_foreground_epoch === nativeForegroundEpochRef.current;
+    const updateForegroundReason = (value: Parameters<typeof setProductTextReason>[0]) => { if (ownsForeground()) setProductTextReason(value); };
+    const updateForegroundStatus = (value: Parameters<typeof setProductTextStatus>[0]) => { if (ownsForeground()) setProductTextStatus(value); };
+    const publishForegroundDiagnostic = (value: Parameters<typeof publishProductRecoveryDiagnostic>[0]) => { if (ownsForeground()) publishProductRecoveryDiagnostic(value); };
     const taskNotification = retained.task_notification;
     if (taskNotification === null || retained.input.surface !== 'audio') {
       return Promise.reject(new Error('only Task AUDIO presentation can report playout failure'));
@@ -2589,9 +2610,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             } catch (error) {
               if (isCurrentOwner() && isRetriableProductOperationError(error)) {
                 const reason = stableProductTextReason(error, 'PRODUCT_TASK_AUDIO_FALLBACK_RECOVERY_REQUIRED');
-                setProductTextReason(reason);
-                setProductTextStatus('failed');
-                publishProductRecoveryDiagnostic({
+                updateForegroundReason(reason);
+                updateForegroundStatus('failed');
+                publishForegroundDiagnostic({
                   seam: 'tts',
                   disposition: 'retrying',
                   reason,
@@ -2613,8 +2634,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
         pendingPresentationAttemptRef.current = null;
         setPendingPresentationAck(null);
-        setProductTextReason(null);
-        setProductTextStatus(foregroundTextStatusAfterSettlement());
+        updateForegroundReason(null);
+        updateForegroundStatus(foregroundTextStatusAfterSettlement());
         // presentation.failed only proves that AUDIO was not delivered. Even
         // for a terminal event, notification completion belongs exclusively to
         // the subsequently rendered and ACKed TEXT fallback.
@@ -2645,17 +2666,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           terminalAnnouncementSpeechOwnerRef.current = null;
           updateTerminalAnnouncementState('idle', null);
           if (isStaleProductResponseError(error)) {
-            setProductTextReason(null);
-            setProductTextStatus(foregroundTextStatusAfterSettlement());
+            updateForegroundReason(null);
+            updateForegroundStatus(foregroundTextStatusAfterSettlement());
             clearProductRecoveryDiagnostic({
               seam: 'tts',
               binding: owner.snapshot().binding,
               response: retained.response,
             });
           } else {
-            setProductTextReason(reason);
-            setProductTextStatus('failed');
-            publishProductRecoveryDiagnostic({
+            updateForegroundReason(reason);
+            updateForegroundStatus('failed');
+            publishForegroundDiagnostic({
               seam: 'tts',
               disposition: 'terminal',
               reason,
@@ -2666,9 +2687,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           continueAfterSettlement();
           return;
         }
-        setProductTextReason(reason);
-        setProductTextStatus('failed');
-        publishProductRecoveryDiagnostic({
+        updateForegroundReason(reason);
+        updateForegroundStatus('failed');
+        publishForegroundDiagnostic({
           seam: 'tts',
           disposition: 'retrying',
           reason,
@@ -2764,6 +2785,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         presented_at: new Date().toISOString(),
       },
       response: disposition.response,
+      native_foreground_epoch: nativeForegroundEpochRef.current,
       playoutSettlement,
       markPlayoutSettled,
       task_notification: {
@@ -2871,6 +2893,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   };
 
   const settleProductPresentationAck = (retained: NonNullable<typeof pendingPresentationAttemptRef.current>): Promise<void> => {
+    const ownsForeground = () => retained.native_foreground_epoch === nativeForegroundEpochRef.current;
+    const updateForegroundReason = (value: Parameters<typeof setProductTextReason>[0]) => { if (ownsForeground()) setProductTextReason(value); };
+    const updateForegroundStatus = (value: Parameters<typeof setProductTextStatus>[0]) => { if (ownsForeground()) setProductTextStatus(value); };
+    const publishForegroundDiagnostic = (value: Parameters<typeof publishProductRecoveryDiagnostic>[0]) => { if (ownsForeground()) publishProductRecoveryDiagnostic(value); };
     if (retained.settlement) return retained.settlement;
     const owner = retained.owner;
     const ownerSession = owner.snapshot().binding?.session_id;
@@ -2898,9 +2924,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           } catch (error) {
             if (canMutateCurrentPresentationUi() && isRetriableProductOperationError(error)) {
               const reason = stableProductTextReason(error, 'PRODUCT_PRESENTATION_ACK_RECOVERY_REQUIRED');
-              setProductTextReason(reason);
-              setProductTextStatus('failed');
-              publishProductRecoveryDiagnostic({
+              updateForegroundReason(reason);
+              updateForegroundStatus('failed');
+              publishForegroundDiagnostic({
                 seam: 'presentation_ack',
                 disposition: 'retrying',
                 reason,
@@ -2969,8 +2995,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               updateTerminalAnnouncementState('idle', null);
             }
           }
-          setProductTextReason(null);
-          setProductTextStatus(foregroundTextStatusAfterSettlement());
+          updateForegroundReason(null);
+          updateForegroundStatus(foregroundTextStatusAfterSettlement());
           clearProductRecoveryDiagnostic({
             seam: 'presentation_ack',
             binding: owner.snapshot().binding,
@@ -3028,8 +3054,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               ) {
                 pendingForegroundPresentationRef.current = null;
               }
-              setProductTextReason(null);
-              setProductTextStatus(pendingForegroundPresentationRef.current !== null ? 'waiting' : 'acknowledged');
+              updateForegroundReason(null);
+              updateForegroundStatus(pendingForegroundPresentationRef.current !== null ? 'waiting' : 'acknowledged');
               clearProductRecoveryDiagnostic({
                 seam: 'presentation_ack',
                 binding: owner.snapshot().binding,
@@ -3040,9 +3066,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                 else scheduleProductVoiceLoopCapture();
               }
             } else {
-              setProductTextReason(reason);
-              setProductTextStatus('failed');
-              publishProductRecoveryDiagnostic({
+              updateForegroundReason(reason);
+              updateForegroundStatus('failed');
+              publishForegroundDiagnostic({
                 seam: 'presentation_ack',
                 disposition: 'terminal',
                 reason,
@@ -3051,9 +3077,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               });
             }
           } else if (mayMutateUi) {
-            setProductTextReason(reason);
-            setProductTextStatus('failed');
-            publishProductRecoveryDiagnostic({
+            updateForegroundReason(reason);
+            updateForegroundStatus('failed');
+            publishForegroundDiagnostic({
               seam: 'presentation_ack',
               disposition: 'retrying',
               reason,
@@ -3233,6 +3259,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       const prior = nativeRequestStateRef.current;
       if (prior?.binding === key && prior.sequence >= disposition.sequence) return disposition;
       nativeRequestStateRef.current = { binding: key, sequence: disposition.sequence };
+      nativeForegroundEpochRef.current += 1;
       if (disposition.response !== null) retainBoundedPresentedProductResponse(interruptedProductResponsesRef.current, productResponseGenerationIdentity(disposition.response));
       recordAudioDiagnostic('native_request_state', { ...presentationBinding, turn_id: disposition.turn_id, status: disposition.phase,
         reason: disposition.reason, seq: disposition.sequence });
@@ -3387,6 +3414,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
       if (ownsForegroundResponse) pendingForegroundPresentationRef.current = null;
       const voiceOwner = p1VoiceOwnerRef.current;
+      const taskAttempt = pendingPresentationAttemptRef.current;
+      if (voiceOwner !== null && voiceOwner.interactionEngine() === 'openai-realtime-native' &&
+          taskAttempt?.task_notification && taskAttempt.owner === owner &&
+          taskAttempt.input.surface === 'audio') {
+        // The exact local stop establishes its audio fence synchronously.
+        // Task failure/consumption settlement must not block the Native downlink.
+        voiceOwner.yieldNativeTaskNotification(taskAttempt.response);
+        if (!mountedRef.current || activationOwnerRef.current !== owner ||
+            p1VoiceOwnerRef.current !== voiceOwner || activeSessionRef.current !== presentationBinding?.session_id) return disposition;
+      }
       if (
         voiceOwner === null ||
         voiceOwner.interactionEngine() !== 'openai-realtime-native' ||
@@ -3405,6 +3442,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         setP2NotificationWakeEpoch(epoch => epoch + 1);
         return disposition;
       }
+      nativeForegroundEpochRef.current += 1;
       const playoutLoopGeneration = voiceLoopGenerationRef.current;
       const isCurrentNativePlayout = () =>
         mountedRef.current &&
@@ -3552,6 +3590,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             role: 'assistant',
             content: disposition.text,
             timestamp: presentedAt,
+            ...(disposition.task_notification_event_key ? { taskNotification: {
+              eventKey: disposition.task_notification_event_key,
+              presentation: disposition.ack.surface === 'text' ? 'text' as const : 'preview' as const,
+            } } : {}),
           }),
         }),
       );
@@ -3579,6 +3621,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           presented_at: presentedAt,
         },
         response: disposition.response,
+        native_foreground_epoch: nativeForegroundEpochRef.current,
         playoutSettlement,
         markPlayoutSettled,
         task_notification: disposition.task_notification
@@ -3750,6 +3793,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             if (!isCurrentPresentationAttempt()) return;
             if (activeVoiceResponseRef.current?.response_id === disposition.response_id) activeVoiceResponseRef.current = null;
             const reason = stableProductTextReason(error, 'PRODUCT_TASK_AUDIO_FALLBACK_RECOVERY_REQUIRED');
+            if (reason === 'FORMAL_PLAYOUT_BARGED') {
+              void settleTaskPresentationFailure(presentationAttempt, 'task_audio_playout_failed');
+              return;
+            }
             setProductTextReason(reason);
             setProductTextStatus('failed');
             publishProductRecoveryDiagnostic({
@@ -5279,6 +5326,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     terminalAnnouncementState,
   ]);
 
+  useEffect(() => () => endNativeTextDisplay(), [endNativeTextDisplay]);
+
+  useEffect(() => {
+    if (!props.isConnected || !voiceLoopEnabledRef.current || p2Activation.status !== 'active' ||
+        !['capturing', 'playing'].includes(p1VoiceStatus)) endNativeTextDisplay();
+  }, [props.isConnected, p2Activation, p1VoiceStatus, endNativeTextDisplay]);
+
   useEffect(() => {
     const owner = activationOwnerRef.current;
     const voice = p1VoiceOwnerRef.current;
@@ -5288,12 +5342,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     let cancelled = false;
     const bindingKey = JSON.stringify([binding.session_id, binding.interaction_id, binding.activation_id, binding.activation_generation]);
     if (nativeTextReadRef.current?.owner !== owner || nativeTextReadRef.current?.voice !== voice ||
-        nativeTextReadRef.current?.binding !== bindingKey) {
-      nativeTextReadRef.current = { owner, voice, binding: bindingKey, revision: 0, visible: new Set() };
+        nativeTextReadRef.current?.binding !== bindingKey || nativeTextReadRef.current.ended) {
+      endNativeTextDisplay();
+      nativeTextReadRef.current = { owner, voice, binding: bindingKey, sessionId: binding.session_id,
+        revision: 0, visible: new Set(), ended: false, onEnd: props.onNativeVoiceDisplayEnded };
     }
     const cursor = nativeTextReadRef.current;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const current = () => !cancelled && mountedRef.current && activationOwnerRef.current === owner &&
+    const current = () => !cancelled && !cursor.ended && mountedRef.current && activationOwnerRef.current === owner &&
       p1VoiceOwnerRef.current === voice && activeSessionRef.current === binding.session_id && voiceLoopEnabledRef.current;
     const poll = async () => {
       try {
@@ -5322,12 +5378,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     };
     void poll();
     return () => { cancelled = true; if (timer !== null) clearTimeout(timer); };
-  }, [props.isConnected, p2Activation, p1VoiceStatus, productRequest]);
+  }, [props.isConnected, p2Activation, p1VoiceStatus, productRequest, endNativeTextDisplay]);
 
   useEffect(() => {
     const owner = activationOwnerRef.current;
     const binding = p2Activation.binding;
     const journal = p2ActivationJournalRef.current;
+    const nativeTaskTransportOpen = () => p1VoiceOwnerRef.current?.interactionEngine() === 'openai-realtime-native' &&
+      voiceLoopEnabledRef.current && pendingPresentationAttemptRef.current?.owner === owner &&
+      pendingPresentationAttemptRef.current.task_notification !== null &&
+      ['capturing', 'playing'].includes(p1VoiceOwnerRef.current.status().status);
     if (
       !props.isConnected ||
       p2Activation.status !== 'active' ||
@@ -5339,13 +5399,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // pop-on-read poll in that interval can consume the response without an
       // owner that is allowed to present or ACK it.
       readPendingUnifiedFinal() !== null ||
-      pendingPresentationAck !== null ||
+      (!nativeTaskTransportOpen() && (pendingPresentationAck !== null ||
       pendingPresentationAttemptRef.current !== null ||
       activeVoiceResponseRef.current !== null ||
       voiceLoopP2RefreshAfterGenerationRef.current !== null ||
       (!['idle', 'fetching'].includes(terminalAnnouncementState) && !(terminalAnnouncementState === 'queued' && productTextStatus === 'waiting')) ||
-      (terminalAnnouncementState === 'fetching' && !voiceLoopEnabledRef.current) ||
-      (productP2NotificationTransportBlockedByP1({
+      (terminalAnnouncementState === 'fetching' && !voiceLoopEnabledRef.current))) ||
+      (!nativeTaskTransportOpen() && productP2NotificationTransportBlockedByP1({
         p1_status: p1VoiceStatus,
         terminal_notification_check_required: terminalNotificationCheckRequiredRef.current,
       }) &&
@@ -5422,8 +5482,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
         if (
           readPendingUnifiedFinal() !== null ||
-          activeVoiceResponseRef.current !== null ||
-          (productP2NotificationTransportBlockedByP1({
+          (!nativeTaskTransportOpen() && activeVoiceResponseRef.current !== null) ||
+          (!nativeTaskTransportOpen() && productP2NotificationTransportBlockedByP1({
             p1_status: currentP1Status,
             terminal_notification_check_required: terminalNotificationCheckRequiredRef.current,
           }) &&
@@ -5435,7 +5495,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         )
           return;
         try {
-          const outcome = await pollProductP2RouteWithRecovery({
+          nativePresentationQueueRef.current = nativePresentationQueueRef.current.filter(item => item.owner === owner);
+          const staged = pendingPresentationAttemptRef.current === null && activeVoiceResponseRef.current === null
+            ? nativePresentationQueueRef.current.shift() : undefined;
+          const outcome = staged ? { kind: 'notification' as const, notification: staged.notification } : await pollProductP2RouteWithRecovery({
             owner,
             is_current: () => !cancelled && activationOwnerRef.current === owner && activeSessionRef.current === binding.session_id,
             settle_retained_operations: async () => {
@@ -5613,7 +5676,19 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             }
             return;
           }
-          const disposition = adoptProductP2Notification(owner, outcome.notification, notificationAdmission);
+          if (p1VoiceOwnerRef.current?.interactionEngine() === 'openai-realtime-native' &&
+              previewDisposition.kind === 'presentation' &&
+              (pendingPresentationAttemptRef.current !== null || activeVoiceResponseRef.current !== null)) {
+            const queue = nativePresentationQueueRef.current;
+            const key = JSON.stringify([previewDisposition.response, previewDisposition.ack.surface, previewDisposition.unit_id]);
+            const same = (item: typeof queue[number]) => item.key === key;
+            if (!queue.some(same)) {
+              if (queue.length >= 32) throw new Error('PRODUCT_NATIVE_NOTIFICATION_BUFFER_FULL');
+              queue.push({ key, owner, notification: outcome.notification, admission: staged?.admission ?? notificationAdmission });
+            }
+            continue;
+          }
+          const disposition = adoptProductP2Notification(owner, outcome.notification, staged?.admission ?? notificationAdmission);
           if (
             cancelled ||
             voiceLoopGenerationRef.current !== notificationAdmission.voice_loop_generation ||
@@ -5647,9 +5722,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           // not let an immediately rejected TTS attempt race a successor
           // notification long-poll and strand that ACK behind it.
           if (
-            disposition.kind === 'presentation' ||
+            !nativeTaskTransportOpen() && (disposition.kind === 'presentation' ||
             disposition.kind === 'native_audio' ||
-            pendingPresentationAttemptRef.current?.owner === owner
+            pendingPresentationAttemptRef.current?.owner === owner)
           ) return;
           // A hands-free capture is admitted only after this exact poll has
           // settled. A committed foreground response keeps the P2 lane until
@@ -7212,6 +7287,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
       if (pendingPresentationAttemptRef.current === retained) {
         const reason = stableProductTextReason(error, 'PRODUCT_TERMINAL_ANNOUNCEMENT_AUDIO_FAILED');
+        if (reason === 'FORMAL_PLAYOUT_BARGED') {
+          void settleTaskPresentationFailure(retained, 'task_audio_playout_failed');
+          return;
+        }
         setProductTextReason(reason);
         setProductTextStatus('failed');
         publishProductRecoveryDiagnostic({
@@ -7321,6 +7400,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         // A resumed AUDIO failure uses the same Registry TEXT fallback as an
         // initial Task playout failure, not the retired local TTS retry path.
         const reason = stableProductTextReason(error, 'PRODUCT_TERMINAL_ANNOUNCEMENT_AUDIO_FAILED');
+        if (reason === 'FORMAL_PLAYOUT_BARGED') {
+          void settleTaskPresentationFailure(retained, 'task_audio_playout_failed');
+          return;
+        }
         setProductTextReason(reason);
         setProductTextStatus('failed');
         publishProductRecoveryDiagnostic({

@@ -1955,7 +1955,7 @@ def _native_speak_proposal(
                 operation="SPEAK",
                 interaction_id=binding.interaction_id,
                 scope=binding.scope,
-                payload=(("provider_response_id", "provider-response-1"),),
+                payload=(("provider_response_id", "provider-response-1"), ("turn_id", "native-turn-1")),
             )
         ),
     )
@@ -2670,7 +2670,7 @@ async def test_native_dialogue_delegate_uses_agent_bridge_and_returns_result(
     result = cast(dict[str, object], delegated.payload["result"])
     assert result == {
         "kind": "delegate",
-        "status": "completed",
+        "status": "prepared",
         "accepted": True,
         "provider_call_id": "provider-call-1",
         "route": "dialogue",
@@ -2678,17 +2678,23 @@ async def test_native_dialogue_delegate_uses_agent_bridge_and_returns_result(
         "canonical_text": "formal result",
         "response": result["response"],
     }
-    assert cast(dict, result["response"])["response_generation"] > (
+    assert cast(dict, result["response"])["response_generation"] == (
         source_response.response_generation
     )
     assert manager.agent.calls == 1
     assert composition.handle_calls == []
     route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
+    assert route.activation_lease.task_notification_foreground_safe(route.binding) is False
     runtime_snapshot = route.activation_lease._runtime.snapshot()
     assert runtime_snapshot.queued_notifications == 0
     assert runtime_snapshot.conversation.presentation.records == ()
     delegated_response = cast(dict[str, object], result["response"])
     response_count = len(runtime_snapshot.conversation.conversation.responses)
+    assert (await registry.handle_native_propose(
+        params=_native_propose_params(binding, capability, _native_done_proposal(binding, source_response)),
+        request_id="dialogue-source-done", session_id=SCOPE.session_id,
+    )).ok
+    assert route.activation_lease.task_notification_foreground_safe(route.binding) is False
     provider_response_id = "provider-response-after-delegate"
     rebound = await registry.handle_native_propose(
         params=_native_propose_params(
@@ -2705,14 +2711,7 @@ async def test_native_dialogue_delegate_uses_agent_bridge_and_returns_result(
                         payload=(
                             ("provider_response_id", provider_response_id),
                             ("turn_id", "native-turn-1"),
-                            (
-                                "runtime_response_id",
-                                cast(str, delegated_response["response_id"]),
-                            ),
-                            (
-                                "response_generation",
-                                str(delegated_response["response_generation"]),
-                            ),
+                            ("provider_call_id", "provider-call-1"),
                         ),
                     )
                 ),
@@ -2722,18 +2721,19 @@ async def test_native_dialogue_delegate_uses_agent_bridge_and_returns_result(
         session_id=SCOPE.session_id,
     )
     assert rebound.ok is True
+    assert rebound.payload["result"]["response"]["response_generation"] > delegated_response["response_generation"]
     assert rebound.payload["result"] == {
         "kind": "response",
         "status": "observed",
         "accepted": True,
         "provider_response_id": provider_response_id,
-        "response": delegated_response,
+        "response": rebound.payload["result"]["response"],
     }
     assert (
         len(
             route.activation_lease._runtime.snapshot().conversation.conversation.responses
         )
-        == response_count
+        == response_count + 1
     )
     await registry.stop()
 
@@ -3107,7 +3107,7 @@ async def test_unified_submit_rejects_unilateral_native_delegate_authority_witho
 
 
 @pytest.mark.asyncio
-async def test_native_delegate_late_done_and_ack_keep_successor_fence_authoritative(
+async def test_native_prepared_delegate_keeps_source_done_ack_presentable(
     tmp_path: Path,
 ) -> None:
     registry, composition, manager = _unified_registry(
@@ -3174,9 +3174,10 @@ async def test_native_delegate_late_done_and_ack_keep_successor_fence_authoritat
         "status": "observed",
         "history_eligible": False,
     }
-    assert manager.agent.calls == 0
-    assert composition.create_effects == 1
+    assert manager.agent.calls == 1
+    assert composition.create_effects == 0
     route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
+    assert route.activation_lease.task_notification_foreground_safe(route.binding) is False
     snapshot = route.activation_lease._runtime.snapshot()
     source_record = next(
         record
@@ -3190,7 +3191,7 @@ async def test_native_delegate_late_done_and_ack_keep_successor_fence_authoritat
         for record in snapshot.conversation.presentation.records
         if record.unit.ref == source_response
     )
-    assert source_presentation.state is PresentationState.INVALIDATED
+    assert source_presentation.state is PresentationState.PRESENTED
     assert snapshot.pending_history_intents == 0
     await registry.stop()
 
@@ -19251,8 +19252,9 @@ async def test_native_function_done_can_overtake_context_selection_without_losin
     assert manager.agent.calls == 1
     assert composition.handle_calls == []
     successor = ResponseRef(**result.payload["result"]["response"])
-    assert successor.response_generation > source.response_generation
-    # STOP may reach Runtime before Provider binds that allocated successor.
+    assert successor == source
+    assert route.activation_lease.task_notification_foreground_safe(route.binding) is False
+    # STOP retires prepared work before any successor can be allocated.
     stop = NativeInteractionProposal.from_engine_event(binding, NativeEngineEvent(action=InteractionAction(
         action_id="stop-allocated", operation="STOP", interaction_id=binding.interaction_id, scope=binding.scope,
         payload=(("provider_response_id", "successor-provider"), ("runtime_response_id", successor.response_id),
@@ -19260,7 +19262,7 @@ async def test_native_function_done_can_overtake_context_selection_without_losin
     assert (await registry.handle_native_propose(params=_native_propose_params(binding, capability, stop),
         request_id="stop-allocated", session_id=SCOPE.session_id)).ok
     with pytest.raises(Exception) as rejected:
-        await route.native_runtime_owner.bind_delegate_provider_response("successor-provider", successor)
+        await route.native_runtime_owner.accept_delegate_provider_response("successor-provider", "provider-call-1", "native-turn-1")
     assert rejected.value.reason == "NATIVE_DELEGATE_INTERRUPTED"
     assert manager.agent.calls == 1 and composition.handle_calls == []
     assert route.activation_lease._runtime.snapshot().conversation.presentation.records == ()
@@ -19307,3 +19309,42 @@ async def test_native_interrupt_after_task_admission_preserves_discovery_without
     route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
     assert route.activation_lease._runtime.snapshot().conversation.presentation.records == ()
     await registry.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["advance", "continuous", "same_version_corrupt", "foreign", "foreign_attempt", "negative_head"])
+async def test_p3_status_reads_a_coherent_task_version_without_relaxing_projection(tmp_path, monkeypatch, scenario):
+    registry, p3, manager, pushed = _registry(tmp_path)
+    original_query = p3.query
+    def query(request, *, now=None):
+        envelope = original_query(request, now=now)
+        data = envelope.to_dict()
+        raw = data["result"]["task"]
+        if scenario in {"advance", "continuous"}:
+            raw["event_head"] = 2 if scenario == "continuous" or len(p3.query_calls) == 1 else 3
+        elif scenario == "same_version_corrupt":
+            raw["spec"]["name"] = "Corrupt same-version name"
+        elif scenario == "foreign_attempt":
+            raw["event_head"] = 2
+            data["result"]["attempt"]["task_id"] = "foreign"
+        elif scenario == "negative_head":
+            raw["event_head"] = -1
+        else:
+            raw["scope"]["project_id"] = "foreign"
+            raw["event_head"] = 2
+        return ResultEnvelope.from_dict(data, owner=request.envelope)
+    monkeypatch.setattr(p3, "query", query)
+    result = await registry.handle_p3_query(operation="task.status",
+        params={"auth_token": "trusted-token", "session_id": "session-product", "task_id": "task-1"},
+        request_id="request-coherent-status", session_id="session-product")
+    if scenario == "advance":
+        assert result.ok is True
+        assert result.payload["result"]["task"]["event_head"] == 3
+        assert len(p3.query_calls) == len(p3.retry_admission_calls) == len(p3.production_reader_calls) == 2
+    else:
+        assert result.ok is False
+        expected = "PRODUCTION_TASK_AUTHORITY_CHANGED" if scenario == "continuous" else "PRODUCTION_TASK_AUTHORITY_PROJECTION_MISMATCH"
+        assert result.payload["error"]["reason"] == expected
+        assert len(p3.query_calls) == (3 if scenario == "continuous" else 1)
+    assert manager.get_calls == [] and pushed == []
+    assert list(tmp_path.iterdir()) == []

@@ -6,6 +6,7 @@
  */
 
 import { create } from 'zustand';
+import { coalesceTaskNotifications } from '../features/live-voice/formal/taskNotificationIdentity';
 import { subscribeWithSelector } from 'zustand/middleware';
 import {
   Message,
@@ -224,6 +225,7 @@ interface ChatState {
   addMessage: (sessionId: string, message: Message) => void;
   addMessageIfAbsent: (sessionId: string, message: Message) => void;
   replaceHistoryMessages: (sessionId: string, messages: Message[]) => void;
+  settleNativeVoiceMessages: (sessionId: string, responseKeys: readonly string[]) => void;
   updateMessage: (sessionId: string, id: string, updates: Partial<Message>) => void;
   appendStreamContent: (sessionId: string, content: string, streamKey?: string) => void;
   appendReasoning: (sessionId: string, content: string, options?: { atMs?: number }) => void;
@@ -351,6 +353,13 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
   addMessageIfAbsent: (sessionId, message) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
+      const priorTask = message.taskNotification ? runtime?.messages.find(item =>
+        item.taskNotification?.eventKey === message.taskNotification?.eventKey) : undefined;
+      if (runtime && priorTask) {
+        if (priorTask.taskNotification?.presentation === 'text' || message.taskNotification?.presentation === 'preview') return state;
+        return { runtimes: { ...state.runtimes, [sessionId]: { ...runtime,
+          messages: runtime.messages.map(item => item === priorTask ? { ...message, renderKey: item.renderKey } : item) } } };
+      }
       const voiceKey = nativeVoiceResponseKey(message);
       const priorVoice = voiceKey === null ? undefined : runtime?.messages.find(item => nativeVoiceResponseKey(item) === voiceKey);
       if (runtime && priorVoice) {
@@ -379,6 +388,17 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
+  settleNativeVoiceMessages: (sessionId, responseKeys) => {
+    const keys = new Set(responseKeys);
+    set(state => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || !runtime.messages.some(item => item.nativeVoice?.state === 'generating' && keys.has(item.nativeVoice.responseKey))) return state;
+      return { runtimes: { ...state.runtimes, [sessionId]: { ...runtime,
+        messages: runtime.messages.map(item => item.nativeVoice?.state === 'generating' && keys.has(item.nativeVoice.responseKey)
+          ? { ...item, nativeVoice: { ...item.nativeVoice, state: 'interrupted' as const } } : item) } } };
+    });
+  },
+
   replaceHistoryMessages: (sessionId, messages) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
@@ -393,11 +413,14 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
         item.id.startsWith('live-voice-failure:')) &&
         !messages.some(history => history.id === item.id));
       const existingTurnKeys = new Map(runtime.messages.filter(item => item.nativeTurnKey).map(item => [item.id, item.nativeTurnKey]));
-      const restored = messages.map(item => !item.nativeTurnKey && existingTurnKeys.has(item.id)
-        ? { ...item, nativeTurnKey: existingTurnKeys.get(item.id) } : item);
+      const existingTasks = new Map(runtime.messages.filter(item => item.taskNotification).map(item => [item.id, item.taskNotification]));
+      const restored = messages.map(item => ({ ...item,
+        ...(!item.nativeTurnKey && existingTurnKeys.has(item.id) ? { nativeTurnKey: existingTurnKeys.get(item.id) } : {}),
+        ...(!item.taskNotification && existingTasks.has(item.id) ? { taskNotification: existingTasks.get(item.id) } : {}),
+      }));
       const merged = generated.length === 0 ? restored : [...restored, ...generated].sort((left, right) =>
         Date.parse(left.timestamp) - Date.parse(right.timestamp));
-      const assigned = assignMessageRenderKeys(runtime, merged);
+      const assigned = assignMessageRenderKeys(runtime, coalesceTaskNotifications(merged));
       return {
         runtimes: {
           ...state.runtimes,

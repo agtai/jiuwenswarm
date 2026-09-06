@@ -73,6 +73,7 @@ export interface Message {
   nativeVoice?: { responseKey: string; responseId: string; responseGeneration: number; revision: number; state: 'generating' | 'generated' | 'interrupted' | 'played' };
   /** Exact Native interaction/turn identity for ordering late input text. */
   nativeTurnKey?: string;
+  taskNotification?: import('../features/live-voice/formal/taskNotificationIdentity').TaskNotificationDisplay;
   audioBase64?: string;
   /** Runtime-only auto-read identity; duplicate final events cannot restart playback. */
   ttsRequestedText?: string;

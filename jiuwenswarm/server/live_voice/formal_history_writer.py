@@ -71,6 +71,7 @@ class SessionFormalHistoryWriter:
         *,
         session_id: str,
         channel_id: str,
+        task_event_binding: dict[str, object] | None = None,
     ) -> tuple[bool, ...]:
         if not isinstance(intent, PresentationHistoryIntent):
             raise FormalHistoryWriterViolation(
@@ -82,6 +83,17 @@ class SessionFormalHistoryWriter:
                 "FORMAL_HISTORY_SURFACE_FORBIDDEN",
                 "Alpha formal history accepts only TEXT PresentationAck",
             )
+        if task_event_binding is not None:
+            from jiuwenswarm.common.schema.live_voice_contract_v2 import ScopeRef
+            if set(task_event_binding) != {"scope", "task_id", "attempt_id", "event_id"}:
+                raise FormalHistoryWriterViolation("INVALID_TASK_EVENT_HISTORY_BINDING", "Task history requires exact event identity")
+            scope = ScopeRef.from_dict(task_event_binding["scope"])
+            if scope.session_id != session_id or scope.assurance.value != "authenticated" or not all(
+                isinstance(task_event_binding[key], str) and task_event_binding[key].strip() == task_event_binding[key]
+                and 0 < len(task_event_binding[key]) <= 256
+                for key in ("task_id", "attempt_id", "event_id")
+            ):
+                raise FormalHistoryWriterViolation("INVALID_TASK_EVENT_HISTORY_BINDING", "Task history binding does not match its session")
         results: list[bool] = []
         for content in intent.contents:
             text = content.content_utf8.decode("utf-8")
@@ -102,6 +114,7 @@ class SessionFormalHistoryWriter:
                 ).timestamp(),
                 "content": text,
                 "event_type": "chat.final",
+                **({"task_event_binding": task_event_binding} if task_event_binding is not None else {}),
                 "formal_binding": {
                     "interaction_id": intent.ref.interaction_id,
                     "response_id": intent.ref.response_id,

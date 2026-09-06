@@ -462,7 +462,7 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
         if event.delegate is not None:
             return {
                 "kind": "delegate",
-                "status": "completed",
+                "status": "prepared",
                 "accepted": True,
                 "provider_call_id": event.delegate.provider_call_id,
                 "route": "dialogue",
@@ -471,7 +471,7 @@ class _FakeNativeRuntimeClient(_NativeActivationClient):
                 "response": {
                     "interaction_id": binding.interaction_id,
                     "response_id": "native-delegate-response-1",
-                    "response_generation": event.delegate.response_generation + 1,
+                    "response_generation": event.delegate.response_generation,
                 },
             }
         return {"kind": "action", "status": "observed", "accepted": True}
@@ -2246,7 +2246,7 @@ async def test_native_delegate_result_is_returned_to_provider_once(task_id) -> N
             ResponseRef(
                 activation_handle.binding.interaction_id,
                 "native-delegate-response-1",
-                2,
+                1,
             ),
             "Canonical Jiuwen result.",
         )
@@ -6985,4 +6985,56 @@ async def test_native_settled_task_projects_once_without_provider_answer(status)
         if status == "failed":
             assert any(note["kind"] == "native.request_state" and note["request_state"]["reason"] == "NATIVE_DELEGATE_AGENT_TIMEOUT" for note in notes)
     finally:
+        await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
+async def test_native_delegate_reservation_precedes_provider_done_and_slow_agent_work():
+    activation = _native_activation()
+    client, engine = _FakeNativeRuntimeClient(activation), _FakeNativeEngine()
+    reserving, reserved, executing, release_agent, done = (asyncio.Event() for _ in range(5))
+    calls = []
+    original = client.propose
+    async def propose(**kwargs):
+        event = kwargs["event"]
+        if event.action is not None and event.action.operation == "DELEGATE" and event.delegate is None:
+            calls.append("reserve")
+            assert dict(event.action.payload) == {"provider_call_id": "call-1", "turn_id": "turn-1", "response_generation": "1"}
+            reserving.set()
+            await reserved.wait()
+        elif event.delegate is not None:
+            assert reserved.is_set()
+            calls.append("agent")
+            executing.set()
+            await release_agent.wait()
+        elif event.provider_done is not None:
+            assert reserved.is_set()
+            calls.append("done")
+            done.set()
+        return await original(**kwargs)
+    client.propose = propose
+    registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=client, native_engine_factory=lambda _binding: engine)
+    activated = _activate(registry, params=_params(sample_rate_hz=24000), request_origin=ORIGIN, connection_id="connection-1")
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    await registry.begin_native_interaction(uplink)
+    binding = activation.binding
+    delegate = NativeDelegateProposal(binding=binding, turn_id="turn-1", response_generation=1,
+        provider_event_id="event-delegate", provider_call_id="call-1", provider_item_id="item-call-1", request_text="Read the project")
+    try:
+        await engine.events.put(NativeEngineEvent(action=InteractionAction(action_id="delegate", operation="DELEGATE",
+            interaction_id=binding.interaction_id, scope=binding.scope,
+            payload=(("provider_call_id", "call-1"), ("turn_id", "turn-1"))), delegate=delegate))
+        await asyncio.wait_for(reserving.wait(), 1)
+        await engine.events.put(NativeEngineEvent(provider_done=NativeProviderDone(provider_event_id="done-1",
+            provider_response_id="provider-1", response=ResponseRef(binding.interaction_id, "response-1", 1),
+            completed=True, transcript=None, transcript_event_id=None)))
+        await asyncio.sleep(0)
+        assert calls == ["reserve"] and client.proposals == [] and engine.delegate_results == []
+        reserved.set()
+        await asyncio.wait_for(done.wait(), 1)
+        await asyncio.wait_for(executing.wait(), 1)
+        assert calls[0] == "reserve" and engine.delegate_results == [] and client.close_calls == 0
+    finally:
+        reserved.set()
+        release_agent.set()
         await registry.close_native_interaction(uplink)

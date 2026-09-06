@@ -823,6 +823,12 @@ function installP1BrowserEnvironment({
         4_000,
       );
     },
+    async completeDownlink(throughSeq) {
+      const socket = sockets.filter(candidate => candidate.binding?.direction === 'downlink').at(-1);
+      socket.onmessage?.({ data: serializeMediaControl({ type: 'media.detach', lease_id: socket.binding.lease_id,
+        generation: socket.binding.generation.value, reason_id: 'MEDIA_LOCAL_CLOSE', through_seq: throughSeq, business_cancel_count_delta: 0 }) });
+      await new Promise(resolve => setImmediate(resolve));
+    },
     async emitDownlinkFrame(sequence = 0) {
       await waitForMounted(
         () => sockets.some(socket => socket.binding?.direction === 'downlink'),
@@ -16141,12 +16147,12 @@ for (const outcome of ['recovered', 'persistent', 'exit']) {
 }
 
 
-for (const verify of ['task', 'text']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
+for (const verify of ['task', 'text', 'barge_success', 'barge_failure']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
   const i18n = await createI18n();
-  const states = [], messages = [], calls = [], waiters = [];
-  let activeMediaBinding = null, binding = null, renderer, textSnapshot = null;
+  const states = [], messages = [], calls = [], waiters = [], ended = [], sources = [];
+  let activeMediaBinding = null, binding = null, renderer, textSnapshot = null, settleTaskFailure;
   const controlRef = { current: null };
-  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding, holdDownlinkDetach: true });
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding, holdDownlinkDetach: true, startAudioSource: ({ source }) => sources.push(source) });
   const activateP2 = createMountedP2ActivationResponder();
   const facts = mountedUnifiedTaskFixture('mounted-native-state-session');
   const request = async (method, params, options) => {
@@ -16169,6 +16175,20 @@ for (const verify of ['task', 'text']) test(`mounted Native request lifecycle an
         native_interaction: { contract_version: 'live-voice.native-interaction.v1', engine: 'openai-realtime-native', model: 'gpt-realtime-2' },
         binding: activeMediaBinding, privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true } };
     }
+    if (method === 'live_voice.speech.synthesize_batch') return {
+      contract_version: 'live-voice.contract.v2', request_id: params.request_id, operation_id: params.operation_id, ok: true, error: null,
+      result: { operation: 'speech.synthesize.batch', response: params.response, unit_id: params.unit_id,
+        audio: { format: 'wav_pcm16_mono', sample_rate_hz: 48000, channel_count: 1, data_base64: mountedWavBase64() },
+        provider: { provider_id: 'test', implementation_class: 'formal', fallback_from: null, model: 'tts', voice: 'voice' }, presented: false } };
+    if (method === 'live_voice.composition.p2.presentation.failed') return new Promise(resolve => {
+      settleTaskFailure = () => resolve(verify === 'barge_failure'
+        ? { ok: false, error: { code: 'PROTOCOL_VIOLATION', reason: 'TASK_PRESENTATION_NOT_FOUND', message: 'Task presentation retired' } }
+        : { ok: true, result: { status: 'presentation_failed_fallback_text', ...params, fallback: 'text', replayed: false } });
+    });
+    if (method === 'live_voice.media.playout_receipt') return { status: 'media_playout_acknowledged',
+      reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED', receipt_id: 'native-receipt', duplex_media_observed: true, ...params };
+    if (method === 'live_voice.composition.p2.presentation.ack') return { ok: true, result: {
+      status: 'presentation_acknowledged', ...params, accepted: true, replayed: false, history_records_written: 1, history_pending: false } };
     if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
     throw new Error(`forbidden Native lifecycle effect: ${method}`);
   };
@@ -16191,12 +16211,13 @@ for (const verify of ['task', 'text']) test(`mounted Native request lifecycle an
     await act(async () => {
       renderer = create(mountedFullyEnabledElement(i18n, 'mounted-native-state-session', request, true, {
         productVoiceControlRef: controlRef, onProductVoiceStateChange: state => states.push(state), onProductVoiceMessage: event => messages.push(event),
+        onNativeVoiceDisplayEnded: (sessionId, keys) => ended.push({ sessionId, keys }),
       }));
     });
     await waitForMountedEffects(() => controlRef.current !== null && !formalVoiceStartButton(renderer).props.disabled, 'Native panel activation missing');
     await act(async () => { void controlRef.current.start(); });
     await waitForMountedEffects(() => states.at(-1)?.p1_status === 'starting', 'Native capture did not start');
-    await act(async () => { await browser.emitFirstFrame(); });
+    await act(async () => { await browser.emitFirstFrame(0); });
     await waitForMountedEffects(() => states.at(-1)?.p1_status === 'capturing', 'Native capture not ready');
     await deliver(notification(1, 'processing'));
     assert.equal(states.at(-1).text_status, 'waiting');
@@ -16247,8 +16268,10 @@ for (const verify of ['task', 'text']) test(`mounted Native request lifecycle an
       await waitForMountedEffects(() => messages.some(event => event.message.content === textSnapshot.text), 'Generated text blocked behind playing audio');
       assert.equal(states.at(-1).p1_status, 'playing');
       assert.equal(calls.some(method => method === 'live_voice.media.playout_receipt'), false);
-      textSnapshot = { ...textSnapshot, state: 'interrupted', revision: 2 };
-      await waitForMountedEffects(() => messages.some(event => event.message.nativeVoice?.state === 'interrupted'), 'Interrupted text not retained');
+      await act(async () => renderer.unmount());
+      renderer = null;
+      assert.ok(ended.some(item => item.sessionId === binding.session_id && item.keys.includes(`live-voice:${response.interaction_id}:${response.response_id}:${response.response_generation}`)));
+      assert.equal(messages.filter(event => event.message.nativeVoice).at(-1).message.nativeVoice.state, 'generating'); // owner end callback settles this exact row
       assert.equal(calls.some(method => /unified.submit|speech.recognize|presentation.ack|task.create|task.cancel/u.test(method)), false);
       return;
     }
@@ -16263,6 +16286,61 @@ for (const verify of ['task', 'text']) test(`mounted Native request lifecycle an
       `Native Task absent from recent tasks: ${JSON.stringify({ calls, task: states.at(-1)?.task_experience, state: states.at(-1)?.text_status })}`);
     assert.equal(states.at(-1).task_experience.selected_task_id, facts.task.task_id);
     assert.ok(calls.filter(method => method === 'live_voice.task.list').length >= 2);
+    if (verify.startsWith('barge_')) {
+      const taskResponse = { interaction_id: binding.interaction_id, response_id: 'task-notice-audio', response_generation: 3 };
+      const source = taskNotificationSource(binding.session_id, facts.task.task_id);
+      source.extensions = { 'jiuwenswarm.task_progress_return': { persistent_attempt_id: 'attempt-native-notice' } };
+      await deliver({ status: 'notification', ...binding, kind: 'agent.output', request_id: 'task-notice-request',
+        response: taskResponse, source_event: source,
+        agent_event: { event_type: 'chat.final', text: 'Task complete.', source_provenance: 'server.task_notification' },
+        presentation_unit: { surface: 'audio', unit_id: 'task-notice-unit', seq: 0, content_ref: `sha256:${'c'.repeat(64)}` } });
+      await waitForMountedEffects(() => states.at(-1)?.p1_status === 'playing' && browser.counts.sourceStarts === 1, 'Task announcement did not play');
+      const next = { interaction_id: binding.interaction_id, response_id: 'native-after-task', response_generation: 4 };
+      const unitId = 'native-after-task-unit';
+      const native = notification(7, 'processing', { kind: 'native.audio', response: next,
+        presentation_unit: { response: next, surface: 'audio', unit_id: unitId, seq: 0, source_start_utf8: 0, source_end_utf8: 480, content_ref: `sha256:${'a'.repeat(64)}` },
+        audio: { format: 'pcm_f32_mono_20ms', sample_rate_hz: 48000, channel_count: 1, frame_count: null,
+          delivery: 'dedicated_media_downlink', endpoint_path: '/ws/live-voice/media', media_ticket: 'D'.repeat(43),
+          subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30000, binding: mountedDownlinkBinding(next, unitId, 4, activeMediaBinding),
+          max_pending_frames: 8, max_pending_bytes: 131072, streaming: true, degradation_reason: null } });
+      delete native.request_state;
+      await deliver(native); // Actual notification.next continues before any delayed speech-start or Task failure RPC.
+      await waitForMountedEffects(() => typeof settleTaskFailure === 'function', 'Exact Task failure settlement was not requested');
+      await act(async () => { for (let frame = 0; frame < 14; frame += 1) await browser.emitDownlinkFrame(frame); });
+      await waitForMountedEffects(() => states.at(-1)?.p1_status === 'playing' && browser.counts.sourceStarts > 1, 'Native audio blocked behind Task settlement');
+      const starts = browser.counts.sourceStarts;
+      assert.ok(browser.counts.sourceStops >= 1);
+      assert.equal(states.at(-1).text_status, 'waiting');
+      if (verify === 'barge_success') {
+        await deliver({ status: 'notification', ...binding, kind: 'agent.output', request_id: 'task-fallback-request',
+          response: { ...taskResponse, response_id: 'task-fallback-text', response_generation: 5 }, source_event: source,
+          agent_event: { event_type: 'chat.final', text: 'Task fallback complete.', source_provenance: 'server.task_notification' },
+          presentation_unit: { surface: 'text', unit_id: 'task-fallback-unit', seq: 0, content_ref: `sha256:${'d'.repeat(64)}` } });
+        assert.equal(messages.some(event => event.message.content === 'Task fallback complete.'), false);
+      }
+      await act(async () => { settleTaskFailure(); await new Promise(resolve => setTimeout(resolve, 25)); });
+      assert.equal(states.at(-1).p1_status, 'playing');
+      assert.equal(states.at(-1).text_status, 'waiting', 'Old Task settlement must not overwrite Native foreground');
+      assert.equal(states.at(-1).text_reason, null);
+      assert.equal(browser.counts.sourceStarts, starts);
+      assert.equal(calls.filter(method => method === 'live_voice.media.activate').length, 1);
+      assert.equal(calls.some(method => /playout_receipt|playout_stop|presentation.ack|unified.submit|task.cancel|task.create/.test(method)), false);
+      if (verify === 'barge_success') {
+        await act(async () => {
+          await browser.completeDownlink(13);
+          for (let i = 1; i < sources.length; i += 1) {
+            sources[i].onended?.();
+            await new Promise(resolve => setImmediate(resolve));
+          }
+        });
+        await waitForMountedEffects(() => calls.includes('live_voice.composition.p2.presentation.ack'), 'Staged fallback did not settle after Native playback');
+        assert.equal(messages.filter(event => event.message.content === 'Task fallback complete.').length, 1);
+        assert.equal(calls.filter(method => method === 'live_voice.speech.synthesize_batch').length, 1);
+        assert.equal(calls.filter(method => method === 'live_voice.media.playout_receipt').length, 1);
+      }
+
+    }
+
 
   } finally {
     if (renderer) await act(async () => { renderer.unmount(); await new Promise(resolve => setImmediate(resolve)); });

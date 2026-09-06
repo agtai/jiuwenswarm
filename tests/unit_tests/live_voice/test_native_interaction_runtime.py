@@ -266,7 +266,7 @@ async def test_delegate_converts_to_standard_commit_then_admits_new_response() -
     assert replay_accepted is False
     assert replay == admission
 
-    result = await owner.accept_delegate_result(
+    result = await owner.prepare_delegate_result(
         admission,
         canonical_text="The weather tool returned a canonical result.",
         route=UnifiedCommittedInputRoute.DIALOGUE,
@@ -276,28 +276,28 @@ async def test_delegate_converts_to_standard_commit_then_admits_new_response() -
     assert result.canonical_text == "The weather tool returned a canonical result."
     assert result.route is UnifiedCommittedInputRoute.DIALOGUE
     assert result.response.interaction_id == binding().interaction_id
-    assert result.response.response_generation > source.response.response_generation
+    assert result.response == source.response
+    assert owner.foreground_busy() is True
     assert runtime.snapshot().presentation.records == ()
-    assert [record.effect.effect_type for record in runtime.snapshot().effects] == [
-        "playback.stop"
-    ]
+    assert runtime.snapshot().effects == ()
     assert (
-        await owner.accept_delegate_result(
+        await owner.prepare_delegate_result(
             admission,
             canonical_text="The weather tool returned a canonical result.",
             route=UnifiedCommittedInputRoute.DIALOGUE,
         )
         == result
     )
-    bound = await owner.bind_delegate_provider_response(
-        "provider-response-delegate-result",
-        result.response,
+    await owner.accept_provider_done(done(source.response, source.provider_response_id))
+    bound = await owner.accept_delegate_provider_response(
+        "provider-response-delegate-result", proposal.provider_call_id, proposal.turn_id,
     )
-    assert bound.response == result.response
+    assert bound.response.response_generation > source.response.response_generation
+    assert owner.foreground_busy() is False
     assert (
         await owner.accept_audio(
             audio(
-                result.response,
+                bound.response,
                 "provider-response-delegate-result",
                 0,
             )
@@ -313,9 +313,10 @@ async def test_analysis_requires_actual_full_presentation_and_never_credits_unsa
     owner, runtime = await active_owner()
     source = await owner.accept_provider_response("provider-source", "source")
     _, admission = await owner.admit_delegate(delegate_proposal(source.response), committed_at="2026-09-03T00:00:00Z")
-    result = await owner.accept_delegate_result(admission, canonical_text="I can prepare an equipment report in the background.", route=route)
+    result = await owner.prepare_delegate_result(admission, canonical_text="I can prepare an equipment report in the background.", route=route)
     provider_id = "provider-result"
-    await owner.bind_delegate_provider_response(provider_id, result.response)
+    await owner.accept_provider_done(done(source.response, source.provider_response_id))
+    result = await owner.accept_delegate_provider_response(provider_id, admission.proposal.provider_call_id, admission.proposal.turn_id)
     assert await owner.presented_agent_analysis(result.response) is None
     await owner.accept_audio(audio(result.response, provider_id, 0))
     await owner.accept_audio(audio(result.response, provider_id, 1))
@@ -366,7 +367,7 @@ async def test_stale_or_changed_delegate_has_zero_runtime_effect() -> None:
     assert runtime.snapshot() == after_admission
 
     with pytest.raises(NativeInteractionRuntimeError) as unsafe_result:
-        await owner.accept_delegate_result(
+        await owner.prepare_delegate_result(
             admission,
             canonical_text="unsafe\nresult",
             route=UnifiedCommittedInputRoute.DIALOGUE,
@@ -375,7 +376,7 @@ async def test_stale_or_changed_delegate_has_zero_runtime_effect() -> None:
     assert runtime.snapshot() == after_admission
 
     with pytest.raises(NativeInteractionRuntimeError) as oversized_result:
-        await owner.accept_delegate_result(
+        await owner.prepare_delegate_result(
             admission,
             canonical_text="x" * 65_537,
             route=UnifiedCommittedInputRoute.DIALOGUE,
@@ -428,7 +429,7 @@ def ack_for(
 
 
 @pytest.mark.asyncio
-async def test_delegate_result_accepts_late_source_done_without_reopening_surface() -> (
+async def test_prepared_result_preserves_source_done_ack_and_history() -> (
     None
 ):
     owner, runtime = await active_owner()
@@ -443,7 +444,7 @@ async def test_delegate_result_accepts_late_source_done_without_reopening_surfac
         delegate_proposal(source.response), committed_at="2026-08-25T10:00:00Z"
     )
     assert accepted is True
-    result = await owner.accept_delegate_result(
+    result = await owner.prepare_delegate_result(
         admission,
         canonical_text="The task was accepted.",
         route=UnifiedCommittedInputRoute.BACKGROUND_CREATE,
@@ -465,7 +466,7 @@ async def test_delegate_result_accepts_late_source_done_without_reopening_surfac
     )
     assert source_record.state is ResponseState.TERMINAL
     assert source_record.outcome is TerminalOutcome.COMPLETED
-    assert source_record.fenced is True
+    assert source_record.fenced is True  # Terminal response; presentation still awaits its exact ACK.
     assert after_done.effects == before_done.effects
     assert (
         source.response,
@@ -474,8 +475,9 @@ async def test_delegate_result_accepts_late_source_done_without_reopening_surfac
     assert owner.snapshot().done_count == 1
 
     before_late_ack = runtime.snapshot()
-    assert await owner.acknowledge_audio(source_ack) is None
-    assert runtime.snapshot() == before_late_ack
+    assert await owner.acknowledge_audio(source_ack) is not None
+    assert len(runtime.snapshot().effects) == len(before_late_ack.effects)
+    assert owner.foreground_busy() is True
 
     replay_snapshot = runtime.snapshot()
     assert await owner.accept_provider_done(source_done) is False
@@ -487,8 +489,8 @@ async def test_delegate_result_accepts_late_source_done_without_reopening_surfac
     assert changed.value.reason == "NATIVE_PROVIDER_DONE_CONFLICT"
     assert runtime.snapshot() == replay_snapshot
 
-    successor = await owner.bind_delegate_provider_response(
-        "provider-response-delegate-result", result.response
+    successor = await owner.accept_delegate_provider_response(
+        "provider-response-delegate-result", admission.proposal.provider_call_id, admission.proposal.turn_id,
     )
     assert await owner.accept_audio(
         audio(successor.response, successor.provider_response_id, 0)
@@ -1228,4 +1230,50 @@ async def test_runtime_accepts_ordered_audio_items_and_barges_exact_presented_it
         "playback.stop",
         "response.cancel",
     ]
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_prepared_old_delegate_cannot_fence_newer_stream_and_interruption_retires_it():
+    owner, runtime = await active_owner()
+    source = await owner.accept_provider_response("provider-source", "source")
+    _, admission = await owner.admit_delegate(delegate_proposal(source.response), committed_at="2026-09-06T00:00:00Z")
+    newer = await owner.accept_provider_response("provider-newer", "newer")
+    await owner.accept_audio(audio(newer.response, newer.provider_response_id, 0))
+    before = runtime.snapshot()
+    await owner.prepare_delegate_result(admission, canonical_text="Canonical result", route=UnifiedCommittedInputRoute.DIALOGUE)
+    assert runtime.snapshot() == before
+    assert owner.snapshot().current_response == newer.response
+    assert await owner.accept_audio(audio(newer.response, newer.provider_response_id, 1))
+    await owner.interrupt_delegate_source(action_id="stop-source", response=source.response)
+    before = runtime.snapshot()
+    with pytest.raises(NativeInteractionRuntimeError, match="Interrupted"):
+        await owner.accept_delegate_provider_response("provider-result", admission.proposal.provider_call_id, admission.proposal.turn_id)
+    assert runtime.snapshot() == before
+    assert owner.foreground_busy() is False
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_audio_ack_without_transcript_can_admit_prepared_successor():
+    owner, runtime = await active_owner()
+    source = await owner.accept_provider_response("provider-source", "source")
+    _, admission = await owner.admit_delegate(delegate_proposal(source.response), committed_at="2026-09-06T00:00:00Z")
+    await owner.accept_audio(audio(source.response, source.provider_response_id, 0))
+    await owner.prepare_delegate_result(admission, canonical_text="Result", route=UnifiedCommittedInputRoute.DIALOGUE)
+    await owner.accept_provider_done(replace(done(source.response, source.provider_response_id), transcript=None, transcript_event_id=None))
+    before = runtime.snapshot()
+    with pytest.raises(NativeInteractionRuntimeError) as pending:
+        await owner.accept_delegate_provider_response("provider-result", admission.proposal.provider_call_id, admission.proposal.turn_id)
+    assert pending.value.reason == "NATIVE_RESPONSE_PRESENTATION_BUSY"
+    assert runtime.snapshot() == before
+    assert await owner.acknowledge_audio(ack_for(runtime, source.response, 0)) is None
+    before = runtime.snapshot()
+    for call, turn in [("foreign-call", admission.proposal.turn_id), (admission.proposal.provider_call_id, "foreign-turn")]:
+        with pytest.raises(NativeInteractionRuntimeError):
+            await owner.accept_delegate_provider_response("provider-result", call, turn)
+        assert runtime.snapshot() == before
+    result = await owner.accept_delegate_provider_response("provider-result", admission.proposal.provider_call_id, admission.proposal.turn_id)
+    assert result.response.response_generation > source.response.response_generation
+    assert owner.snapshot().history_count == 0
     await owner.close()

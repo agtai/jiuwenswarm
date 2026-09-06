@@ -530,6 +530,7 @@ class FormalHistoryWriter(Protocol):
         *,
         session_id: str,
         channel_id: str,
+        task_event_binding: dict[str, object] | None = None,
     ) -> tuple[bool, ...]: ...
 
     async def persist_native_assistant(
@@ -760,7 +761,7 @@ class AgentConversationRuntime:
         ] = {}
         self._pending_history: dict[
             tuple[ResponseRef, PresentationSurface, int],
-            tuple[PresentationHistoryIntent, str, str],
+            tuple[PresentationHistoryIntent, str, str, dict[str, Any]],
         ] = {}
         self._native_history_results: dict[
             ResponseRef, tuple[NativeHistoryAdmission, str, bool]
@@ -809,6 +810,8 @@ class AgentConversationRuntime:
         self._generation_interruptions: dict[str, AgentGenerationInterruption] = {}
         self._generation_interruption_order: deque[str] = deque()
         self._generation_interruption_lock = asyncio.Lock()
+        self._native_admission_lock = asyncio.Lock()
+        self._native_owner: NativeInteractionRuntimeOwner | None = None
         self._consumer: asyncio.Task[None] | None = None
         self._shutdown: asyncio.Task[AgentConversationShutdownResult] | None = None
         self._started = False
@@ -834,11 +837,12 @@ class AgentConversationRuntime:
                 "Native Runtime must match the exact facade scope",
                 ErrorCode.PERMISSION_DENIED,
             )
-        return NativeInteractionRuntimeOwner(
-            binding,
-            runtime=self._cr,
-            owns_runtime=False,
+        owner = NativeInteractionRuntimeOwner(
+            binding, runtime=self._cr, owns_runtime=False,
+            admission_lock=self._native_admission_lock,
         )
+        self._native_owner = owner
+        return owner
 
     async def execute_native_delegate(
         self,
@@ -1971,23 +1975,33 @@ class AgentConversationRuntime:
             claim = self._claim_product_identity(commit, request_id=request_id)
             response_ref: ResponseRef | None = None
             try:
-                await self._cr.start_turn(commit.interaction_id, commit.turn_id)
-                accepted, _event = await self._cr.commit_turn(commit)
-                if accepted is not True:
-                    raise AgentConversationRuntimeViolation(
-                        "AUTHORITATIVE_PRESENTATION_COMMIT_REJECTED",
-                        "authoritative presentation turn was not accepted",
-                        ErrorCode.CONFLICT,
+                # Same short lock as Native turn/result admission. The predicate
+                # and CR allocation are one transaction, before any TTS or ACK wait.
+                async with self._native_admission_lock:
+                    if (_source_provenance == "server.task_notification" and self._native_owner is not None
+                        and not self.task_notification_foreground_safe()):
+                        raise AgentConversationRuntimeViolation(
+                            "PRODUCT_TASK_NOTIFICATION_FOREGROUND_BUSY",
+                            "Task notification must wait for Native foreground work",
+                            ErrorCode.UNAVAILABLE,
+                        )
+                    await self._cr.start_turn(commit.interaction_id, commit.turn_id)
+                    accepted, _event = await self._cr.commit_turn(commit)
+                    if accepted is not True:
+                        raise AgentConversationRuntimeViolation(
+                            "AUTHORITATIVE_PRESENTATION_COMMIT_REJECTED",
+                            "authoritative presentation turn was not accepted",
+                            ErrorCode.CONFLICT,
+                        )
+                    response_ref, _event = await self._cr.accept_response(
+                        commit.turn_id,
+                        response_id,
+                        history_policy=HistorySurfacePolicy(_presentation_surface.value),
+                        response_generation=response_generation,
                     )
-                response_ref, _event = await self._cr.accept_response(
-                    commit.turn_id,
-                    response_id,
-                    history_policy=HistorySurfacePolicy(_presentation_surface.value),
-                    response_generation=response_generation,
-                )
-                await self._cr.transition_response(
-                    response_ref, ResponseState.GENERATING
-                )
+                    await self._cr.transition_response(
+                        response_ref, ResponseState.GENERATING
+                    )
                 digest = hashlib.sha256(content).hexdigest()
                 unit = PresentationUnit(
                     ref=response_ref,
@@ -2416,6 +2430,8 @@ class AgentConversationRuntime:
         enqueued presentation that has not reached its ACK checkpoint.
         """
 
+        if self._native_owner is not None and self._native_owner.foreground_busy():
+            return False
         if self._shutdown is not None:
             return False
         snapshot = self._cr.snapshot()
@@ -3220,6 +3236,18 @@ class AgentConversationRuntime:
             if not entry.outcome.done():
                 entry.outcome.set_result(None)
 
+    @staticmethod
+    def _task_history_metadata(state: _ResponseOutputState) -> dict[str, object]:
+        provenance = state.commit.hypothesis_provenance
+        if state.source_provenance != "server.task_notification" or provenance.get("source") != "task_event":
+            return {}
+        if not all(isinstance(provenance.get(key), str) and provenance[key] for key in ("task_id", "attempt_id", "event_id")):
+            return {}  # Legacy retained commits have no durable attempt binding.
+        return {"task_event_binding": {
+            "scope": state.commit.scope.to_dict(),
+            **{key: provenance[key] for key in ("task_id", "attempt_id", "event_id")},
+        }}
+
     async def _apply_presentation_ack(
         self,
         ack: PresentationAck,
@@ -3244,11 +3272,13 @@ class AgentConversationRuntime:
         if intent is not None:
             session_id = state.commit.scope.session_id
             assert isinstance(session_id, str)
+            history_metadata = self._task_history_metadata(state)
             try:
                 results = await self._history_writer.persist_assistant(
                     intent,
                     session_id=session_id,
                     channel_id=state.channel_id,
+                    **history_metadata,
                 )
                 written = sum(results)
             except BaseException:  # noqa: BLE001
@@ -3256,6 +3286,7 @@ class AgentConversationRuntime:
                     intent,
                     session_id,
                     state.channel_id,
+                    history_metadata,
                 )
                 history_pending = True
         result = PresentationAckResult(
@@ -3309,9 +3340,10 @@ class AgentConversationRuntime:
         pending = self._pending_history.get(key)
         if pending is None:
             return ()
-        intent, session_id, channel_id = pending
+        intent, session_id, channel_id, history_metadata = pending
         results = await self._history_writer.persist_assistant(
-            intent, session_id=session_id, channel_id=channel_id
+            intent, session_id=session_id, channel_id=channel_id,
+            **history_metadata,
         )
         self._pending_history.pop(key, None)
         prior = self._ack_results.get(key)

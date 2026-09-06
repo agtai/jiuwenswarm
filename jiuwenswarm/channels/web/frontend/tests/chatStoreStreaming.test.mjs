@@ -3,6 +3,24 @@ import test from 'node:test';
 
 import { useChatStore } from '../node_modules/.cache/chat-store-streaming/chatStore.mjs';
 
+test('retiring exact Native display responses settles only their generating text without inventing history', () => {
+  const store = useChatStore.getState(), session = 'native-end';
+  store.ensureRuntime(session);
+  try {
+    for (const [id, state] of [['old', 'generating'], ['complete', 'generated'], ['other', 'generating']]) {
+      const responseKey = `live-voice:interaction:${id}:1`;
+      store.addMessageIfAbsent(session, { id: `${responseKey}:native-generated`, role: 'assistant', content: id,
+        timestamp: '2026-09-06T12:00:00Z', nativeVoice: { responseKey, revision: 5, state } });
+    }
+    store.settleNativeVoiceMessages(session, ['live-voice:interaction:old:1', 'live-voice:interaction:complete:1']);
+    const rows = useChatStore.getState().getRuntime(session).messages;
+    assert.deepEqual(rows.map(item => item.nativeVoice.state), ['interrupted', 'generated', 'generating']);
+    assert.ok(rows.every(item => item.nativeVoice.revision === 5 && item.id.endsWith(':native-generated')));
+    store.addMessageIfAbsent(session, { ...rows[0], content: 'late', nativeVoice: { ...rows[0].nativeVoice, state: 'generating', revision: 6 } });
+    assert.equal(useChatStore.getState().getRuntime(session).messages[0].content, 'old');
+  } finally { store.removeRuntime(session); }
+});
+
 test('Native generated text updates during playback, freezes on interrupt and merges exact heard history', () => {
   const store = useChatStore.getState(), session = 'native-generated-chat';
   store.ensureRuntime(session);
@@ -177,4 +195,33 @@ test('markAssistantTurnFinal is a no-op after the turn is already marked', () =>
     unsubscribe();
     useChatStore.getState().removeRuntime(sessionId);
   }
+});
+
+
+test('one immutable Task event coalesces preview, fallback and retry without merging other events', () => {
+  const store = useChatStore.getState(), session = 'task-event-display';
+  store.ensureRuntime(session);
+  const rows = () => useChatStore.getState().getRuntime(session).messages;
+  const message = (id, presentation, eventKey = 'exact-event') => ({ id, role: 'assistant', content: 'Task complete',
+    timestamp: '2026-09-06T12:00:00Z', taskNotification: { eventKey, presentation } });
+  try {
+    store.addMessageIfAbsent(session, message('audio-1', 'preview'));
+    const renderKey = rows()[0].renderKey;
+    store.addMessageIfAbsent(session, message('text', 'text'));
+    store.addMessageIfAbsent(session, message('audio-2', 'preview'));
+    assert.equal(rows().length, 1);
+    assert.equal(rows()[0].id, 'text');
+    assert.equal(rows()[0].renderKey, renderKey);
+    store.replaceHistoryMessages(session, [{ id: 'text', role: 'assistant', content: 'Task complete', timestamp: '2026-09-06T12:00:00Z' }]);
+    store.addMessageIfAbsent(session, message('audio-3', 'preview'));
+    assert.equal(rows().length, 1);
+    assert.equal(rows()[0].taskNotification.presentation, 'text');
+    for (const key of ['different-event', 'different-attempt', 'different-scope']) store.addMessageIfAbsent(session, message(key, 'preview', key));
+    assert.equal(rows().length, 4);
+    store.addMessageIfAbsent(session, { id: 'legacy', role: 'assistant', content: 'Task complete', timestamp: '2026-09-06T12:00:00Z' });
+    assert.equal(rows().length, 5);
+    store.replaceHistoryMessages(session, [message('text', 'text'), message('audio-4', 'preview')]);
+    assert.equal(rows().length, 1);
+    assert.equal(rows()[0].id, 'text');
+  } finally { store.removeRuntime(session); }
 });

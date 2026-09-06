@@ -5592,3 +5592,52 @@ async def test_native_default_budget_allows_work_past_old_25_second_deadline():
         release.set()
         await owner.close()
         await current.close(timeout_seconds=0.2)
+
+
+@pytest.mark.asyncio
+async def test_task_notification_text_history_retains_exact_event_identity_across_write_retry(monkeypatch):
+    records = []
+    def append(*, session_id, record):
+        records.append((session_id, record))
+        if len(records) == 1:
+            raise OSError("transient history write")
+        return True
+    monkeypatch.setattr(history_writer_module, "append_formal_history_record_idempotent", append)
+    lower = LowerFormalAdapter()
+    current = runtime(lower, SessionFormalHistoryWriter(), max_requests=1)
+    await current.start()
+    await current.open_interaction("interaction-1")
+    terminal_commit = TurnCommit.from_dict({**commit().to_dict(), "hypothesis_provenance": {
+        "source": "task_event", "task_id": "task-1", "attempt_id": "attempt-1", "event_id": "event-1",
+    }})
+    handle = await current.present_authoritative_text(
+        request_id="task-notification", response_id="task-notification", correlation_id="correlation",
+        commit=terminal_commit, text="The task is complete.", channel_id="web",
+        _persist_user_history=False, _source_provenance="server.task_notification",
+    )
+    notification = await current.next_notification()
+    ack = PresentationAck(ref=handle.response_ref, surface=PresentationSurface.TEXT,
+        unit_id=notification.presentation_unit.unit_id, contiguous_cursor=0, presented_at="2026-08-05T08:00:02Z")
+    result = await current.acknowledge_presentation(ack)
+    assert result.history_pending is True
+    def close_reservation(ref):
+        reserved = current.task_presentation_runtime_authority(ref, None, "reserve")
+        current.task_presentation_runtime_authority(ref, reserved.reservation_id, "close")
+    close_reservation(handle.response_ref)
+    second_commit = TurnCommit.from_dict({**terminal_commit.to_dict(), "turn_id": "turn-2", "commit_id": "commit-2"})
+    second = await current.present_authoritative_text(request_id="task-second", response_id="task-second", correlation_id="correlation",
+        commit=second_commit, text="Another notification", channel_id="web", _persist_user_history=False,
+        _source_provenance="server.task_notification")
+    second_notification = await current.next_notification()
+    await current.acknowledge_presentation(PresentationAck(ref=second.response_ref, surface=PresentationSurface.TEXT,
+        unit_id=second_notification.presentation_unit.unit_id, contiguous_cursor=0, presented_at="2026-08-05T08:00:03Z"))
+    close_reservation(second.response_ref)
+    assert handle.response_ref not in current._outputs
+    assert current.snapshot().pending_history_intents == 1
+    await current.retry_history(handle.response_ref, contiguous_cursor=0)
+    assert len(records) == 3 and records[0] == records[2]
+    assert records[2][1]["task_event_binding"] == {"scope": scope().to_dict(),
+        "task_id": "task-1", "attempt_id": "attempt-1", "event_id": "event-1"}
+    assert records[2][1]["formal_binding"]["surface"] == "text"
+    assert lower.calls == 0
+    await current.close(timeout_seconds=1)
