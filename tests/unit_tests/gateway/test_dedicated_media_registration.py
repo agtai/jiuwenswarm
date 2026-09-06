@@ -819,6 +819,174 @@ def _native_activation() -> GatewayNativeActivation:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("context_failure", [False, True])
+async def test_native_business_context_before_start_poll_and_close(monkeypatch, context_failure):
+    from dataclasses import replace
+    from jiuwenswarm.server.live_voice.native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION
+    from jiuwenswarm.gateway.live_voice import dedicated_media_registration as module
+    activation = replace(_native_activation(), business_contract_version=NATIVE_BUSINESS_CONTRACT_VERSION)
+    order = []
+    context = {"context_id": "b" * 64, "history": [], "tasks": [], "works": [],
+               "model": {"model_identity": "agent", "model_config_version": "v1"}}
+    class Client(_FakeNativeRuntimeClient):
+        async def business_context(self, retained, *, request_id):
+            assert retained == activation and request_id
+            order.append("fetch")
+            if context_failure:
+                raise RuntimeError("context unavailable")
+            return {"context": context, "work_events": []}
+    class Engine(_FakeNativeEngine):
+        def configure_business_context(self, value, *, refresh, presentation_busy):
+            assert value == context and callable(refresh) and callable(presentation_busy)
+            order.append("configure")
+        async def start(self):
+            order.append("start")
+            await super().start()
+        async def update_business_context(self, value, events):
+            assert value == context and events == []
+            order.append("update")
+            return ()
+        async def acknowledge_business_turn(self, turn_id):
+            order.append("acknowledge")
+        async def acknowledge_business_stop(self, ref):
+            pass
+        async def defer_work_response(self, provider_id):
+            pass
+    monkeypatch.setattr(module, "_NATIVE_BUSINESS_POLL_SECONDS", .01, raising=False)
+    engine, client = Engine(), Client(activation)
+    registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=client,
+                                             native_engine_factory=lambda _: engine)
+    activated = _activate(registry, params=_params(sample_rate_hz=24_000), request_origin=ORIGIN, connection_id="connection-1")
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    try:
+        if context_failure:
+            with pytest.raises(MediaTransportViolation):
+                await registry.begin_native_interaction(uplink)
+            assert order == ["fetch"] and not engine.started
+        else:
+            await registry.begin_native_interaction(uplink)
+            for _ in range(50):
+                if order.count("update") > 1:
+                    break
+                await asyncio.sleep(.01)
+            assert order[:4] == ["fetch", "configure", "start", "update"]
+            assert order.count("fetch") >= 2 and order.count("update") >= 2
+            initial = registry.take_native_notification(session_id="session-1", interaction_id="interaction-1", connection_id="connection-1")
+            assert initial["kind"] == "native.work_state"
+            assert initial["sequence_effect"] == "neutral"
+            assert initial["work_state"] == {"contract_version": "live-voice.native-work-state.v1", "sequence": 1, "works": []}
+            key = registry._native_session_keys_by_record[uplink.record_id]
+            session = registry._native_sessions[key]
+            source = {"context": {**context, "works": [{"work_id": "work-1", "revision": 1,
+                "sequence": 2, "state": "running", "execution_settled": False,
+                "instruction": "PRIVATE request body", "result_text": "PRIVATE result"}]}}
+            registry._publish_native_work_state(session, source)
+            registry._publish_native_work_state(session, source)
+            snapshot = registry.take_native_notification(session_id="session-1", interaction_id="interaction-1", connection_id="connection-1")
+            assert snapshot["work_state"] == {"contract_version": "live-voice.native-work-state.v1", "sequence": 2,
+                "works": [{"work_id": "work-1", "revision": 1, "sequence": 2, "state": "running", "execution_settled": False}]}
+            assert "PRIVATE" not in json.dumps(snapshot)
+            assert all(snapshot[field] is None for field in ("round_id", "response", "audio", "presentation_unit", "agent_event", "source_event", "progress_event", "error_reason", "publish_seq"))
+            assert registry.take_native_notification(session_id="session-1", interaction_id="interaction-1", connection_id="connection-1") is None
+            session.closed = True
+            registry._publish_native_work_state(session, {"context": context})
+            assert session.business_work_state_sequence == 2
+            session.closed = False
+            # A new media lifetime on the same P2 activation must advance its
+            # existing snapshot sequence even when its first facts are equal.
+            session.business_work_state_digest = None
+            session.business_work_state_sequence = 0
+            registry._publish_native_work_state(session, source)
+            restarted = registry.take_native_notification(session_id="session-1", interaction_id="interaction-1", connection_id="connection-1")
+            assert restarted["work_state"]["sequence"] == 3
+            authority_key = ("session-1", "connection-1", "interaction-1")
+            authority = registry._product_activations[authority_key]
+            registry._product_activations[authority_key] = replace(authority, expires_at=registry._monotonic() - 1)
+            registry._publish_native_work_state(session, {"context": context})
+            assert session.business_work_state_sequence == 3
+            registry._product_activations[authority_key] = authority
+            diagnostics = []
+            monkeypatch.setattr(module, "profile_event", lambda name, **fields: diagnostics.append((name, fields)))
+            registry._profile_native_business_context(session, source)
+            registry._profile_native_business_context(session, source)
+            work_records = [fields for name, fields in diagnostics if name == "native_work_state"]
+            assert len(work_records) == 1 and work_records[0]["status"] == "running"
+            assert "PRIVATE" not in json.dumps(diagnostics)
+    finally:
+        await registry.close_native_interaction(uplink)
+    size = len(order)
+    await asyncio.sleep(.02)
+    assert len(order) == size
+
+
+@pytest.mark.asyncio
+async def test_native_business_late_prepared_output_keeps_real_receipt_and_accepts_no_successor():
+    from jiuwenswarm.server.live_voice.native_business_contract import (
+        NATIVE_BUSINESS_CONTRACT_VERSION, NativeBusinessProposal, NativeBusinessAction)
+    activation = replace(_native_activation(), business_contract_version=NATIVE_BUSINESS_CONTRACT_VERSION)
+    engine = _FakeNativeEngine()
+    async def send_result(call_id, response, output):
+        engine.delegate_results.append((call_id, response, output))
+        return ("real-output-receipt", None)
+    engine.send_delegate_result = send_result
+    response = ResponseRef(activation.binding.interaction_id, "source", 1)
+    session = SimpleNamespace(closed=False, activation=activation, engine=engine, barge_fenced_responses={response: None}, projected_task_associations=set())
+    delegate = NativeBusinessProposal(binding=activation.binding, turn_id="turn", response_generation=1,
+        provider_event_id="function", provider_call_id="call", provider_item_id="item", request_text="start analysis",
+        business=NativeBusinessAction("work.start", "a" * 64, None, None, None, "analyze", None))
+    event = NativeEngineEvent(delegate=delegate)
+    output = '{"receipt":{"work_id":"work-1","state":"running"},"context":{}}'
+    result = {"kind": "delegate", "status": "prepared", "accepted": True, "provider_call_id": "call",
+        "route": "dialogue", "turn_commit_id": "commit", "canonical_text": output,
+        "response": {"interaction_id": response.interaction_id, "response_id": response.response_id, "response_generation": 1}}
+    registry = DedicatedMediaProductRegistry(enabled=True)
+    await registry._return_native_delegate_result(session, event, result)
+    assert engine.delegate_results == [("call", response, output)]
+    session.activation = replace(activation, business_contract_version=None)
+    session.barge_fenced_responses = {}
+    with pytest.raises(MediaTransportViolation):
+        await registry._return_native_delegate_result(session, event, result)
+
+
+@pytest.mark.asyncio
+async def test_native_work_busy_runtime_defers_exact_provider_without_admission():
+    from jiuwenswarm.server.live_voice.native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION
+    activation = replace(_native_activation(), business_contract_version=NATIVE_BUSINESS_CONTRACT_VERSION)
+    class Client(_FakeNativeRuntimeClient):
+        async def propose(self, **kwargs):
+            raise NativeRuntimeClientError("NATIVE_RESPONSE_PRESENTATION_BUSY", "Task audio is active")
+    engine = _FakeNativeEngine()
+    deferred = []
+    async def defer(provider_id):
+        deferred.append(provider_id)
+    engine.defer_work_response = defer
+    session = SimpleNamespace(activation=activation, engine=engine, key=("s", "c", "i", "a", 1), request_ordinal=0)
+    event = NativeEngineEvent(action=InteractionAction("work-speak", "SPEAK", activation.binding.interaction_id,
+        activation.binding.scope, payload=(("provider_response_id", "provider-work"), ("turn_id", "turn"), ("work_event_id", "event-1"))))
+    registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=Client(activation))
+    await registry._handle_native_event(session, event)
+    assert deferred == ["provider-work"] and engine.admissions == [] and engine.delegate_results == []
+
+
+def test_native_work_busy_reads_existing_task_synthesis_reservation_and_playout():
+    activation = _native_activation()
+    registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=_FakeNativeRuntimeClient(activation))
+    activated = _activate(registry, params=_params(sample_rate_hz=24_000), request_origin=ORIGIN, connection_id="connection-1")
+    parent = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    session = SimpleNamespace(record_id=parent.record_id, closed=False)
+    assert registry._native_task_presentation_busy(session) is False
+    owner = registry._product_activations[(parent.binding.session_id, parent.binding.connection_id, parent.binding.interaction_id)]
+    response = ResponseRef(activation.binding.interaction_id, "task-notification", 10)
+    key = (response, "task-unit", parent.locale, parent.binding.frame_format.sample_rate_hz)
+    registry._retain_synthesis_transfer(owner.synthesis_content_sha256, key=key, content_sha256="a" * 64,
+        now=registry._monotonic(), expires_at=registry._monotonic() + 60, task_notification=True)
+    parent.synthesis_content_sha256[(response, "task-unit")] = "a" * 64
+    assert registry._native_task_presentation_busy(session) is True
+    parent.playout_receipts[(response, "task-unit")] = {"played": True}
+    assert registry._native_task_presentation_busy(session) is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("missing_method", ["send_delegate_result", "stop_foreground"])
 async def test_native_engine_missing_required_method_is_rejected_before_start(missing_method) -> None:
     activation_handle = _native_activation()

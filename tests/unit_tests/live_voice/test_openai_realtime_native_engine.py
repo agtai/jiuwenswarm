@@ -363,6 +363,389 @@ async def accept_basic_turn(
     return listen, silence, commit
 
 
+def business_context():
+    return {"context_id": "a" * 64, "history": [], "tasks": [], "works": [],
+            "model": {"model_identity": "agent-v1", "model_config_version": "v1"}}
+
+
+def work_event(revision=1):
+    return {"event_id": f"work-1:{revision}", "work_id": "work-1", "revision": revision,
+            "state": "completed", "result_text": "Exact server result", "reason": None}
+
+
+def business_function(event_id, response_id, call_id):
+    return function_done(event_id, response_id, call_id=call_id, item_id=f"item-{call_id}",
+        name="jiuwen_business", arguments=json.dumps({"request_text": "Read my current work",
+            "action": {"operation": "context.get", "context_id": None, "target_id": None,
+                       "expected_revision": None, "name": None, "instruction": None, "adjustment": None}}))
+
+
+async def started_business_engine(*events, refresh=None):
+    engine, socket, factory = active_engine(*events)
+    engine.configure_business_context(business_context(), refresh=refresh)
+    await engine.start()
+    return engine, socket, factory
+
+
+@pytest.mark.asyncio
+async def test_business_session_seeds_json_facts_and_only_explicit_tool():
+    engine, socket, _ = await started_business_engine()
+    try:
+        update = socket.sent[0]["session"]
+        assert [tool["name"] for tool in update["tools"]] == ["jiuwen_business"]
+        assert update["tool_choice"] == "auto"
+        seed = socket.sent[1]["item"]
+        assert json.loads(seed["content"][0]["text"]) == {"native_business_context": business_context()}
+        assert not any(item["type"] == "response.create" for item in socket.sent)
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("done_first", [True, False])
+async def test_business_group_waits_all_real_outputs_then_single_auto_successor(done_first):
+    engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
+        speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p1"),
+        business_function("f1", "p1", "call1"), business_function("f2", "p1", "call2"))
+    try:
+        _, _, commit = await accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        await engine.next_event()
+        await engine.admit_response("p1", response_ref(1))
+        first, second = await engine.next_event(), await engine.next_event()
+        assert first.delegate.business.operation == second.delegate.business.operation == "context.get"
+        if done_first:
+            socket.push(response_done("done", "p1"))
+            await engine.next_event()
+        output = '{"receipt":{"accepted":true},"context":{}}'
+        receipt = await asyncio.wait_for(engine.send_delegate_result("call2", response_ref(1), output), .5)
+        assert receipt[1] is None
+        assert len([i for i in socket.sent if i["type"] == "response.create"]) == 1
+        await engine.send_delegate_result("call1", response_ref(1), output)
+        if not done_first:
+            assert len([i for i in socket.sent if i["type"] == "response.create"]) == 1
+            socket.push(response_done("done", "p1"))
+            await engine.next_event()
+        requests = [i for i in socket.sent if i["type"] == "response.create"]
+        assert len(requests) == 2 and requests[-1]["response"]["tool_choice"] == "auto"
+        socket.push(response_created("r2", "p2"))
+        assert action_payload(await engine.next_event())["provider_call_id"] == "call1"
+        await engine.send_delegate_result("call2", response_ref(1), output)
+        assert len([i for i in socket.sent if i["type"] == "conversation.item.create" and i["item"]["type"] == "function_call_output"]) == 2
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_business_interrupted_source_keeps_real_output_without_successor_or_fake_receipt():
+    engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
+        speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p1"),
+        business_function("f1", "p1", "call1"), response_done("done", "p1"))
+    try:
+        _, _, commit = await accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        await engine.next_event()
+        await engine.admit_response("p1", response_ref(1))
+        await engine.next_event()
+        await engine.next_event()
+        await engine.stop_foreground(response_ref(1))
+        output = '{"receipt":{"state":"running","work_id":"work-1"}}'
+        receipt = await engine.send_delegate_result("call1", response_ref(1), output)
+        assert receipt[0] and receipt[1] is None
+        outputs = [i["item"]["output"] for i in socket.sent if i["type"] == "conversation.item.create" and i["item"]["type"] == "function_call_output"]
+        assert outputs == [output]
+        assert len([i for i in socket.sent if i["type"] == "response.create"]) == 1
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("still_current", [True, False])
+async def test_work_event_requires_accepted_turn_idle_and_fresh_membership(still_current):
+    refreshes = []
+    async def refresh():
+        refreshes.append(True)
+        return {"context": business_context(), "work_events": [work_event()] if still_current else []}
+    engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
+        speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p1"),
+        response_done("done", "p1"), refresh=refresh)
+    try:
+        await engine.update_business_context(business_context(), [work_event()])
+        assert not refreshes and not any(i["type"] == "response.create" for i in socket.sent)
+        _, _, commit = await accept_basic_turn(engine)
+        await engine.next_event()
+        await engine.admit_response("p1", response_ref(1))
+        await engine.next_event()
+        assert not refreshes
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        requests = [i for i in socket.sent if i["type"] == "response.create"]
+        assert refreshes == [True]
+        assert len(requests) == (2 if still_current else 1)
+        if still_current:
+            assert requests[-1]["response"]["metadata"] == {"work_event_id": "work-1:1"}
+            socket.push(response_created("wr", "work-provider"))
+            assert action_payload(await engine.next_event()) == {"provider_response_id": "work-provider",
+                "turn_id": commit.turn_commit.turn_id, "work_event_id": "work-1:1"}
+            await engine.admit_response("work-provider", response_ref(2))
+            stops = await engine.update_business_context(business_context(), [])
+            assert len(stops) == 1 and stops[0].action.operation == "STOP"
+            assert any(i["type"] == "response.cancel" and i["response_id"] == "work-provider" for i in socket.sent)
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_business_call_and_chain_limits_are_explicit_without_extra_provider_calls():
+    engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
+        speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p0"))
+    try:
+        _, _, commit = await accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        await engine.next_event()
+        await engine.admit_response("p0", response_ref(1))
+        for index in range(8):
+            socket.push(business_function(f"f{index}", "p0", f"call{index}"))
+            assert (await engine.next_event()).delegate is not None
+        socket.push(business_function("overflow", "p0", "overflow-call"))
+        with pytest.raises(OpenAIRealtimeNativeInteractionError) as error:
+            await engine.next_event()
+        assert error.value.reason == "NATIVE_BUSINESS_CALL_LIMIT"
+        assert engine.snapshot().delegate_count == 8
+    finally:
+        await engine.close()
+
+    engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
+        speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p0"))
+    try:
+        _, _, commit = await accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        await engine.next_event()
+        for index in range(17):
+            if index:
+                socket.push(response_created(f"r{index}", f"p{index}"))
+                await engine.next_event()
+            await engine.admit_response(f"p{index}", response_ref(index + 1))
+            socket.push(business_function(f"f{index}", f"p{index}", f"call{index}"))
+            await engine.next_event()
+            socket.push(response_done(f"d{index}", f"p{index}"))
+            await engine.next_event()
+            if index == 16:
+                with pytest.raises(OpenAIRealtimeNativeInteractionError) as error:
+                    await engine.send_delegate_result(f"call{index}", response_ref(index + 1), '{"receipt":"real"}')
+                assert error.value.reason == "NATIVE_BUSINESS_CHAIN_LIMIT"
+            else:
+                receipt = await engine.send_delegate_result(f"call{index}", response_ref(index + 1), '{"receipt":"real"}')
+                assert receipt[1]
+        assert len([i for i in socket.sent if i["type"] == "response.create"]) == 17
+        assert len([i for i in socket.sent if i["type"] == "conversation.item.create" and i["item"]["type"] == "function_call_output"]) == 17
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_work_event_limits_and_changed_identity_fail_closed():
+    engine, socket, _ = await started_business_engine()
+    try:
+        for index in range(32):
+            engine.enqueue_work_event({**work_event(), "event_id": f"work-{index}"})
+        before = list(socket.sent)
+        for candidate, reason in [({**work_event(), "event_id": "overflow"}, "NATIVE_WORK_EVENT_QUEUE_FULL"),
+                ({**work_event(), "event_id": "work-0", "revision": 2}, "NATIVE_WORK_EVENT_CONFLICT"),
+                ({**work_event(), "result_text": "x" * 131073}, "NATIVE_WORK_EVENT_INVALID")]:
+            with pytest.raises(OpenAIRealtimeNativeInteractionError) as error:
+                engine.enqueue_work_event(candidate)
+            assert error.value.reason == reason
+        assert socket.sent == before
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_business_large_real_output_is_preserved_and_wrong_source_has_zero_output():
+    engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
+        speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p1"),
+        business_function("f1", "p1", "call1"), response_done("done", "p1"))
+    try:
+        _, _, commit = await accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        await engine.next_event()
+        await engine.admit_response("p1", response_ref(1))
+        await engine.next_event()
+        await engine.next_event()
+        output = json.dumps({"result_text": "x" * 131072, "context": business_context()})
+        before = len(socket.sent)
+        with pytest.raises(OpenAIRealtimeNativeInteractionError):
+            await engine.send_delegate_result("call1", response_ref(2), output)
+        assert len(socket.sent) == before
+        await engine.send_delegate_result("call1", response_ref(1), output)
+        assert [i["item"]["output"] for i in socket.sent if i["type"] == "conversation.item.create" and i["item"]["type"] == "function_call_output"] == [output]
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_work_refresh_race_with_new_speech_creates_no_obsolete_response():
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def refresh():
+        entered.set()
+        await release.wait()
+        return {"context": business_context(), "work_events": [work_event()]}
+    engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
+        speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p1"),
+        response_done("done", "p1"), refresh=refresh)
+    pending = reader = None
+    try:
+        _, _, commit = await accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        await engine.next_event()
+        await engine.admit_response("p1", response_ref(1))
+        await engine.next_event()
+        pending = asyncio.create_task(engine.update_business_context(business_context(), [work_event()]))
+        await entered.wait()
+        socket.push(speech_started("new-speech", "u2", 500))
+        reader = asyncio.create_task(engine.next_event())
+        assert (await asyncio.wait_for(reader, .2)).action.operation == "LISTEN"
+        release.set()
+        await pending
+        await reader
+        assert len([i for i in socket.sent if i["type"] == "response.create"]) == 1
+    finally:
+        release.set()
+        for task in (pending, reader):
+            if task is not None and not task.done():
+                task.cancel()
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_work_speech_waits_playout_and_is_not_replayed_after_interrupt():
+    async def refresh():
+        return {"context": business_context(), "work_events": [work_event()]}
+    engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
+        speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p1"), refresh=refresh)
+    try:
+        _, _, commit = await accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        await engine.next_event()
+        await engine.admit_response("p1", response_ref(1))
+        socket.push(output_audio_delta("a", "p1", "audio-1", 0))
+        await engine.next_event()
+        socket.push(response_done("done", "p1"))
+        await engine.next_event()
+        await engine.update_business_context(business_context(), [work_event()])
+        assert len([i for i in socket.sent if i["type"] == "response.create"]) == 1
+        await engine.acknowledge_presentation(response_ref(1))
+        assert len([i for i in socket.sent if i["type"] == "response.create"]) == 2
+        socket.push(speech_started("s2", "u2", 500))
+        await engine.next_event()
+        socket.push(response_created("wr", "work-provider"))
+        assert (await engine.next_event()).action is None
+        socket.push(response_done("wd", "work-provider", status="cancelled"))
+        await engine.next_event()
+        await engine.update_business_context(business_context(), [work_event()])
+        assert len([i for i in socket.sent if i["type"] == "response.create"]) == 2
+        assert len([i for i in socket.sent if i["type"] == "response.cancel" and i["response_id"] == "work-provider"]) == 1
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_work_speech_respects_task_audio_owner_and_busy_runtime_retry():
+    busy = True
+    async def refresh():
+        return {"context": business_context(), "work_events": [work_event()]}
+    engine, socket, _ = active_engine(speech_started("s", "u", 0), speech_stopped("e", "u", 500),
+        input_committed("c", "u"), response_created("r", "p1"), response_done("done", "p1"))
+    engine.configure_business_context(business_context(), refresh=refresh, presentation_busy=lambda: busy)
+    try:
+        await engine.start()
+        _, _, commit = await accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        await engine.next_event()
+        await engine.admit_response("p1", response_ref(1))
+        await engine.next_event()
+        await engine.update_business_context(business_context(), [work_event()])
+        assert len([i for i in socket.sent if i["type"] == "response.create"]) == 1
+        busy = False
+        await engine.update_business_context(business_context(), [work_event()])
+        socket.push(response_created("wr", "work-provider"))
+        await engine.next_event()
+        await engine.defer_work_response("work-provider")
+        await engine.update_business_context(business_context(), [work_event()])
+        assert len([i for i in socket.sent if i["type"] == "response.create"]) == 2
+        socket.push(response_done("wd", "work-provider", status="cancelled"))
+        await engine.next_event()
+        assert len([i for i in socket.sent if i["type"] == "response.create"]) == 2
+        # Advance the explicit one-second retry deadline without wall-clock delay.
+        engine._work_retry_after = asyncio.get_running_loop().time() - .001
+        await engine.update_business_context(business_context(), [work_event()])
+        assert len([i for i in socket.sent if i["type"] == "response.create"]) == 3
+        socket.push(response_created("wr2", "work-provider-2"))
+        assert action_payload(await engine.next_event())["work_event_id"] == work_event()["event_id"]
+        await engine.admit_response("work-provider-2", response_ref(2))
+        with pytest.raises(OpenAIRealtimeNativeInteractionError):
+            await engine.defer_work_response("work-provider-2")
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["requested", "created", "admitted"])
+async def test_work_speech_interruption_retries_only_unadmitted_event_with_new_response(phase):
+    async def refresh():
+        return {"context": business_context(), "work_events": [work_event()]}
+    engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
+        speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p1"),
+        response_done("done", "p1"), refresh=refresh)
+    try:
+        _, _, commit = await accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        await engine.next_event()
+        await engine.admit_response("p1", response_ref(1))
+        await engine.next_event()
+        await engine.update_business_context(business_context(), [work_event()])
+        if phase != "requested":
+            socket.push(response_created("wr", "work-provider"))
+            assert action_payload(await engine.next_event())["work_event_id"] == work_event()["event_id"]
+            if phase == "admitted":
+                await engine.admit_response("work-provider", response_ref(2))
+        socket.push(speech_started("s2", "u2", 500))
+        boundary = await engine.next_event()
+        if phase == "admitted":
+            assert boundary.action.operation == "STOP"
+            await engine.stop_foreground(response_ref(2))
+            boundary = await engine.next_event()
+        assert boundary.action.operation == "LISTEN"
+        if phase == "requested":
+            socket.push(response_created("wr", "work-provider"))
+            assert (await engine.next_event()).action is None
+        socket.push(output_audio_delta("late", "work-provider", "work-audio", 0))
+        assert (await engine.next_event()).audio is None
+        assert engine.snapshot().released_audio_count == 0
+        socket.push(response_done("wd", "work-provider", status="cancelled"))
+        await engine.next_event()
+        socket.push(speech_stopped("e2", "u2", 1000))
+        await engine.next_event()
+        socket.push(input_committed("c2", "u2"))
+        second = await engine.next_event()
+        await engine.acknowledge_business_turn(second.turn_commit.turn_id)
+        socket.push(response_created("r2", "user-provider-2"))
+        await engine.next_event()
+        await engine.admit_response("user-provider-2", response_ref(3))
+        socket.push(response_done("d2", "user-provider-2"))
+        await engine.next_event()
+        await engine.update_business_context(business_context(), [work_event()])
+        creates = [item for item in socket.sent if item["type"] == "response.create"]
+        assert len(creates) == (3 if phase == "admitted" else 4)
+        if phase != "admitted":
+            socket.push(response_created("retry", "work-provider-new"))
+            assert action_payload(await engine.next_event()) == {"provider_response_id": "work-provider-new",
+                "turn_id": second.turn_commit.turn_id, "work_event_id": work_event()["event_id"]}
+        assert len([i for i in socket.sent if i["type"] == "response.cancel" and i["response_id"] == "work-provider"]) == 1
+    finally:
+        await engine.close()
+
+
 @pytest.mark.asyncio
 async def test_turn_identity_is_unique_across_recovered_provider_sessions() -> None:
     commits = []

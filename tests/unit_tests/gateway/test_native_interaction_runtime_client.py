@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from dataclasses import replace
 
 import pytest
 
 from jiuwenswarm.common.schema.agent import AgentResponse
+from jiuwenswarm.common.e2a.wire_codec import encode_agent_response_for_wire, parse_agent_server_wire_unary
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     ResponseRef,
@@ -33,6 +35,7 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NativeInteractionBinding,
     NativeInputTranscript,
 )
+from jiuwenswarm.server.live_voice.native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
     NativeAudioOutput,
     NativeEngineEvent,
@@ -235,6 +238,138 @@ def observed_client(*, timeout_seconds: float = 0.2):
         request_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value,
     )
     return client, agent, sanitized
+
+
+def business_context_result():
+    return {
+        "kind": "business_context", "contract_version": NATIVE_BUSINESS_CONTRACT_VERSION,
+        "context": {"context_id": "b" * 64, "history": [
+            {"role": "user", "content": "Read the report", "delivery": "committed"},
+            {"role": "assistant", "content": "Accepted", "delivery": "heard"},
+        ], "tasks": [], "works": [], "model": {
+            "model_identity": "agent-model#1", "model_config_version": "model-v1",
+        }},
+        "work_events": [{"event_id": "work-event-1", "work_id": "work-1", "revision": 1,
+                         "state": "completed", "result_text": "Complete result tail", "reason": None}],
+    }
+
+
+def observe_business_client(agent=None):
+    agent = agent or FakeAgentClient()
+    client = GatewayNativeInteractionRuntimeClient(agent, native_model="gpt-realtime-2", timeout_seconds=0.2)
+    payload = activation_payload()
+    payload["result"][NATIVE_GATEWAY_DESCRIPTOR_KEY]["business_contract_version"] = NATIVE_BUSINESS_CONTRACT_VERSION
+    sanitized = client.observe_activation_response(payload, routed_session_id=SCOPE.session_id,
+        connection_id="web-connection-1", request_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value)
+    activation = client.activation_for(session_id=SCOPE.session_id, interaction_id=BINDING.interaction_id,
+                                       connection_id="web-connection-1")
+    return client, agent, activation, sanitized
+
+
+@pytest.mark.asyncio
+async def test_business_context_uses_exact_private_capability_and_actual_serialization():
+    class SerializedAgent(FakeAgentClient):
+        async def send_request(self, envelope):
+            response = await super().send_request(envelope)
+            wire = encode_agent_response_for_wire(response, response_id=response.request_id)
+            return parse_agent_server_wire_unary(json.loads(json.dumps(wire)))
+
+    client, agent, activation, sanitized = observe_business_client(SerializedAgent())
+    assert activation.business_contract_version == NATIVE_BUSINESS_CONTRACT_VERSION
+    assert NATIVE_GATEWAY_DESCRIPTOR_KEY not in sanitized["result"]
+    assert CAPABILITY not in json.dumps(sanitized)
+    agent.result_override = business_context_result()
+    result = await client.business_context(activation, request_id="context-1")
+    assert result == business_context_result()
+    request = agent.requests[-1]
+    assert request.method == ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE.value
+    assert request.params == {"contract_version": NATIVE_BUSINESS_CONTRACT_VERSION,
+        "binding": BINDING.to_dict(), "capability": CAPABILITY, "context": True}
+
+
+@pytest.mark.asyncio
+async def test_business_context_legacy_and_changed_activation_have_zero_requests():
+    client, agent, _ = observed_client()
+    activation = client.activation_for(session_id=SCOPE.session_id, interaction_id=BINDING.interaction_id,
+                                       connection_id="web-connection-1")
+    with pytest.raises(NativeRuntimeClientError):
+        await client.business_context(activation, request_id="not-negotiated")
+    assert agent.requests == []
+    client, agent, activation, _ = observe_business_client()
+    with pytest.raises(NativeRuntimeClientError):
+        await client.business_context(replace(activation, connection_id="foreign"), request_id="foreign")
+    assert agent.requests == []
+
+
+@pytest.mark.parametrize("version", [None, "future.v2", True])
+def test_business_descriptor_rejects_unknown_or_null_capability(version):
+    client, _, _ = observed_client()
+    payload = activation_payload()
+    payload["result"][NATIVE_GATEWAY_DESCRIPTOR_KEY]["business_contract_version"] = version
+    before = client.snapshot()
+    with pytest.raises(NativeRuntimeClientError):
+        client.observe_activation_response(payload, routed_session_id=SCOPE.session_id,
+            connection_id="web-connection-1", request_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value)
+    assert client.snapshot() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defect", ["extra", "context_id", "model_extra", "work_revision", "work_extra", "oversize"])
+async def test_business_context_closed_result_and_bounds_reject_before_release(defect):
+    client, agent, activation, _ = observe_business_client()
+    result = business_context_result()
+    if defect == "extra": result["unexpected"] = True
+    elif defect == "context_id": result["context"]["context_id"] = "foreign"
+    elif defect == "model_extra": result["context"]["model"]["api_key"] = "private"
+    elif defect == "work_revision": result["work_events"][0]["revision"] = True
+    elif defect == "work_extra": result["work_events"][0]["authorized"] = True
+    else: result["context"]["tasks"] = [{"data": "x" * 524289}]
+    agent.result_override = result
+    with pytest.raises(NativeRuntimeClientError):
+        await client.business_context(activation, request_id="bad-context")
+
+
+@pytest.mark.asyncio
+async def test_business_proposal_real_wire_roundtrip_and_large_real_receipt():
+    from jiuwenswarm.server.live_voice.native_business_contract import NativeBusinessProposal, NativeBusinessAction
+    from jiuwenswarm.server.live_voice.native_interaction_carrier import NativeInteractionProposal
+    action = NativeBusinessAction("work.get", "a" * 64, "work-1", None, None, None, None)
+    legacy = delegate_event()
+    proposal = NativeBusinessProposal(**{key: getattr(legacy.delegate, key) for key in legacy.delegate.__dataclass_fields__}, business=action)
+    event = replace(legacy, delegate=proposal)
+    output = json.dumps({"receipt": {"state": "completed", "result_text": "x" * 131072}, "context": business_context_result()["context"]})
+    class SerializedAgent(FakeAgentClient):
+        async def send_request(self, envelope):
+            wire = json.loads(json.dumps(envelope.to_dict()))
+            parsed = NativeInteractionProposal.from_dict(wire["params"]["proposal"], business_capability=True)
+            assert parsed.to_dict()["delegate"]["business"]["action"] == action.to_dict()
+            response = await super().send_request(envelope)
+            response.payload["result"] = {"kind": "delegate", "status": "prepared", "accepted": True,
+                "provider_call_id": proposal.provider_call_id, "route": "dialogue", "turn_commit_id": "commit-1",
+                "canonical_text": output, "response": {"interaction_id": BINDING.interaction_id,
+                    "response_id": "source", "response_generation": proposal.response_generation}}
+            return parse_agent_server_wire_unary(json.loads(json.dumps(encode_agent_response_for_wire(response, response_id=envelope.request_id))))
+    client, _, activation, _ = observe_business_client(SerializedAgent())
+    result = await client.propose(binding=activation.binding, capability=activation.capability, event=event, request_id="business-get")
+    assert result["canonical_text"] == output
+    legacy_client, legacy_agent, _ = observed_client()
+    with pytest.raises(NativeRuntimeClientError):
+        await legacy_client.propose(binding=BINDING, capability=CAPABILITY, event=event, request_id="forbidden")
+    assert legacy_agent.requests == []
+    with pytest.raises(NativeRuntimeClientError):
+        await client.propose(binding=BINDING, capability=CAPABILITY, event=legacy, request_id="wrong-tool")
+
+
+@pytest.mark.asyncio
+async def test_business_context_128k_work_result_is_not_truncated():
+    client, agent, activation, _ = observe_business_client()
+    expected = business_context_result()
+    expected["work_events"][0]["result_text"] = "x" * 131072
+    agent.result_override = expected
+    assert await client.business_context(activation, request_id="large-work") == expected
+    agent.result_override["work_events"][0]["result_text"] += "!"
+    with pytest.raises(NativeRuntimeClientError):
+        await client.business_context(activation, request_id="too-large-work")
 
 
 def test_internal_native_methods_are_exact_and_absent_from_browser_allowlist() -> None:

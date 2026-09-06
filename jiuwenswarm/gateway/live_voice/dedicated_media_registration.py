@@ -178,6 +178,7 @@ _MAX_DOWNLINK_WAV_BYTES = 8 * 1024 * 1024
 _MAX_DOWNLINK_FRAMES = 9_000
 _PRODUCT_PLAYOUT_QUEUE_CAPACITY = 256
 _NATIVE_INPUT_QUEUE_CAPACITY = 800
+_NATIVE_BUSINESS_POLL_SECONDS = 1.0
 _NATIVE_NOTIFICATION_QUEUE_CAPACITY = 256
 _NATIVE_SPEECH_START_QUEUE_CAPACITY = 8
 _NATIVE_END_OF_TURN_QUEUE_CAPACITY = 8
@@ -940,6 +941,7 @@ class _NativeNotificationSequenceFence:
     """Bound one serialized Browser notification poll to its serving authority."""
 
     agent_high_water: int = 0
+    native_work_state_sequence: int = 0
     local_request_id: str | None = None
     local_sequence: int | None = None
     local_response: dict[str, object] | None = field(default=None, repr=False)
@@ -987,6 +989,12 @@ class _NativeMediaSession:
     input_task: asyncio.Task[None] | None = field(default=None, repr=False)
     event_task: asyncio.Task[None] | None = field(default=None, repr=False)
     delivery_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    business_poll_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    business_diagnostic_context_id: str | None = None
+    business_diagnostic_model: tuple[str, str] | None = None
+    business_diagnostic_works: dict[str, tuple[object, object, object]] = field(default_factory=dict, repr=False)
+    business_work_state_sequence: int = 0
+    business_work_state_digest: bytes | None = field(default=None, repr=False)
     delegate_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict, repr=False)
     delegate_proposals: dict[str, NativeEngineEvent] = field(default_factory=dict, repr=False)
     foreground_turn_id: str | None = None
@@ -1417,7 +1425,28 @@ class DedicatedMediaProductRegistry:
                 ),
             )
             try:
+                business_initial = None
+                if activation.business_contract_version is not None:
+                    if not all(callable(getattr(engine, method, None)) for method in (
+                        "configure_business_context", "update_business_context", "acknowledge_business_turn",
+                        "acknowledge_business_stop", "defer_work_response",
+                    )) or not callable(getattr(self._native_runtime_client, "business_context", None)):
+                        raise MediaTransportViolation("MEDIA_NATIVE_BUSINESS_UNAVAILABLE", "Negotiated business context is unavailable")
+                    async def refresh_business_context():
+                        if session.closed:
+                            raise MediaTransportViolation("MEDIA_NATIVE_SESSION_CLOSED", "Business context route is closed")
+                        result = await self._native_runtime_client.business_context(activation,
+                            request_id=self._native_request_id(session, "business-context"))
+                        self._profile_native_business_context(session, result)
+                        self._publish_native_work_state(session, result)
+                        return result
+                    business_initial = await refresh_business_context()
+                    self._native_work_state_rows(business_initial["context"]["works"])
+                    engine.configure_business_context(business_initial["context"], refresh=refresh_business_context,
+                        presentation_busy=lambda: self._native_task_presentation_busy(session))
                 await engine.start()
+                if business_initial is not None:
+                    await engine.update_business_context(business_initial["context"], business_initial["work_events"])
             except BaseException as error:
                 close_complete = False
                 with suppress(BaseException):
@@ -1443,6 +1472,8 @@ class DedicatedMediaProductRegistry:
             )
             self._native_sessions[key] = session
             self._native_session_keys_by_record[record.record_id] = key
+            if business_initial is not None:
+                self._publish_native_work_state(session, business_initial)
             session.input_task = asyncio.create_task(
                 self._run_native_input(session),
                 name="live-voice-native-media-input",
@@ -1455,16 +1486,19 @@ class DedicatedMediaProductRegistry:
                 self._run_native_events(session),
                 name="live-voice-native-media-events",
             )
+            if activation.business_contract_version is not None:
+                session.business_poll_task = asyncio.create_task(
+                    self._run_native_business_poll(session), name="live-voice-native-business-context")
             for task in (
                 session.input_task,
                 session.event_task,
                 session.delivery_task,
+                session.business_poll_task,
             ):
-                task.add_done_callback(
-                    lambda retained, owner=record: self._consume_native_task(
-                        owner, retained
+                if task is not None:
+                    task.add_done_callback(
+                        lambda retained, owner=record: self._consume_native_task(owner, retained)
                     )
-                )
             return True
 
     def accept_native_frame(
@@ -1863,6 +1897,7 @@ class DedicatedMediaProductRegistry:
                 session.input_task,
                 session.event_task,
                 session.delivery_task,
+                session.business_poll_task,
                 *session.delegate_tasks.values(),
             )
             if task is not None and task is not current
@@ -1913,6 +1948,114 @@ class DedicatedMediaProductRegistry:
             if self._native_session_keys_by_record.get(record.record_id) == key:
                 self._native_session_keys_by_record.pop(record.record_id, None)
         return True
+
+    async def _run_native_business_poll(self, session: _NativeMediaSession) -> None:
+        while not session.closed:
+            await asyncio.sleep(_NATIVE_BUSINESS_POLL_SECONDS)
+            result = await self._native_runtime_client.business_context(session.activation,
+                request_id=self._native_request_id(session, "business-context"))
+            if session.closed:
+                return
+            self._profile_native_business_context(session, result)
+            self._publish_native_work_state(session, result)
+            stops = await session.engine.update_business_context(result["context"], result["work_events"])
+            for event in stops:
+                await self._handle_native_event(session, event)
+
+    def _native_task_presentation_busy(self, session: _NativeMediaSession) -> bool:
+        """Read the existing Task synthesis handoff and media playout ownership."""
+        with self._lock:
+            parent = self._records.get(session.record_id)
+            if parent is None or session.closed:
+                return True
+            activation = self._product_activations.get((parent.binding.session_id,
+                parent.binding.connection_id, parent.binding.interaction_id))
+            if activation is None:
+                return True
+            now = self._monotonic()
+            return any(transfer.task_notification and now <= transfer.expires_at
+                and (response, unit_id) in parent.synthesis_content_sha256
+                and (response, unit_id) not in parent.playout_receipts
+                for (response, unit_id, _locale, _rate), transfer in activation.synthesis_content_sha256.items())
+
+    @staticmethod
+    def _native_work_state_rows(raw: object) -> list[dict[str, object]]:
+        if type(raw) is not list or len(raw) > 32:
+            raise MediaTransportViolation("MEDIA_NATIVE_WORK_STATE_INVALID", "Work state collection is not bounded")
+        works = []
+        for row in raw:
+            if (not isinstance(row, Mapping) or not {"work_id", "revision", "sequence", "state", "execution_settled"}.issubset(row)
+                    or type(row["work_id"]) is not str or not row["work_id"]
+                    or row["work_id"] != row["work_id"].strip()
+                    or len(row["work_id"].encode("utf-8", errors="replace")) > 256
+                    or type(row["revision"]) is not int or not 0 < row["revision"] <= 2**53 - 1
+                    or type(row["sequence"]) is not int or not 0 < row["sequence"] <= 2**53 - 1
+                    or type(row["state"]) is not str or row["state"] not in {
+                        "accepted", "running", "cancelling", "completed", "cancelled", "superseded", "failed", "unknown"}
+                    or type(row["execution_settled"]) is not bool):
+                raise MediaTransportViolation("MEDIA_NATIVE_WORK_STATE_INVALID", "Work state row is invalid")
+            _required_id(row["work_id"], "work_id")
+            works.append({key: row[key] for key in ("work_id", "revision", "sequence", "state", "execution_settled")})
+        if len({row["work_id"] for row in works}) != len(works):
+            raise MediaTransportViolation("MEDIA_NATIVE_WORK_STATE_INVALID", "Work identities are not unique")
+        return works
+
+    def _publish_native_work_state(self, session: _NativeMediaSession, result: Mapping[str, object]) -> None:
+        """Project only the accepted work lifecycle; no text/audio/history effects."""
+        if session.activation.business_contract_version is None:
+            return
+        with self._lock:
+            parent = self._records.get(session.record_id)
+            if (session.closed or self._native_sessions.get(session.key) is not session or parent is None
+                    or parent.route_completed or parent.native_activation != session.activation
+                    or not self._has_retained_product_activation(parent, self._monotonic())):
+                return
+            works = self._native_work_state_rows(result["context"]["works"])
+            digest = hashlib.sha256(canonical_json_bytes(works)).digest()
+            if digest == session.business_work_state_digest:
+                return
+            notifications = self._native_notifications.get((parent.binding.session_id,
+                parent.binding.interaction_id, parent.binding.connection_id))
+            authority = self._product_activations[(parent.binding.session_id,
+                parent.binding.connection_id, parent.binding.interaction_id)]
+            fence = authority.notification_fence
+            if notifications is None or notifications.full() or fence.native_work_state_sequence >= 2**53 - 1:
+                raise MediaTransportViolation("MEDIA_NATIVE_NOTIFICATION_BACKPRESSURE", "Work state notification unavailable")
+            sequence = fence.native_work_state_sequence + 1
+            notifications.put_nowait({
+                "status": "notification", "kind": "native.work_state", "sequence_effect": "neutral",
+                "request_id": self._native_request_id(session, "work-state"),
+                "work_state": {"contract_version": "live-voice.native-work-state.v1", "sequence": sequence, "works": works},
+                "round_id": None, "response": None, "agent_event": None, "source_event": None,
+                "progress_event": None, "presentation_unit": None, "audio": None, "error_reason": None, "publish_seq": None,
+                "session_id": parent.binding.session_id, "correlation_id": parent.binding.correlation_id,
+                "interaction_id": parent.binding.interaction_id, "activation_id": parent.product_activation_id,
+                "activation_generation": parent.product_activation_generation,
+            })
+            session.business_work_state_sequence = sequence
+            fence.native_work_state_sequence = sequence
+            session.business_work_state_digest = digest
+
+    @staticmethod
+    def _profile_native_business_context(session: _NativeMediaSession, result: Mapping[str, object]) -> None:
+        context = result["context"]
+        fields = identity_fields(session.activation.binding)
+        if context["context_id"] != session.business_diagnostic_context_id:
+            session.business_diagnostic_context_id = context["context_id"]
+            profile_event("native_context_selected", **fields, context_id=context["context_id"], status="current")
+        model = context["model"]
+        selection = (model["model_identity"], model["model_config_version"])
+        if selection != session.business_diagnostic_model:
+            session.business_diagnostic_model = selection
+            profile_event("native_model_confirmed", **fields, model_id=selection[0], model_config_version=selection[1], status="confirmed")
+        retained = {}
+        for work in context["works"]:
+            state = (work["revision"], work["state"], work["sequence"])
+            retained[work["work_id"]] = state
+            if session.business_diagnostic_works.get(work["work_id"]) != state:
+                profile_event("native_work_state", **fields, work_id=work["work_id"],
+                    revision_number=work["revision"], seq=work["sequence"], status=work["state"])
+        session.business_diagnostic_works = retained
 
     async def _run_native_input(self, session: _NativeMediaSession) -> None:
         while not session.closed:
@@ -2207,6 +2350,12 @@ class DedicatedMediaProductRegistry:
                 and self._native_response_is_barge_fenced(session, event.audio.response)
             ):
                 return
+            if (error.reason == "NATIVE_RESPONSE_PRESENTATION_BUSY"
+                    and session.activation.business_contract_version is not None
+                    and event.action is not None and event.action.operation == "SPEAK"
+                    and "work_event_id" in dict(event.action.payload)):
+                await session.engine.defer_work_response(dict(event.action.payload)["provider_response_id"])
+                return
             raise
         if event.delegate is not None:
             await self._return_native_delegate_result(session, event, result)
@@ -2221,6 +2370,8 @@ class DedicatedMediaProductRegistry:
                 self._retain_native_end_of_turn(session, event, result)
                 assert event.turn_commit is not None
                 session.foreground_turn_id = event.turn_commit.turn_id
+                if session.activation.business_contract_version is not None:
+                    await session.engine.acknowledge_business_turn(event.turn_commit.turn_id)
                 self._native_request_state(session, "processing", event.turn_commit.turn_id)
             elif event.action.operation == "STOP":
                 response = self._native_stop_response(event.action)
@@ -2229,6 +2380,8 @@ class DedicatedMediaProductRegistry:
                     await stop(response)
                 else:
                     await session.engine.fence_response(response)
+                if session.activation.business_contract_version is not None:
+                    await session.engine.acknowledge_business_stop(response)
                 if session.foreground_turn_id is not None:
                     self._native_request_state(session, "interrupted", session.foreground_turn_id, response=response)
         elif event.audio is not None:
@@ -2247,7 +2400,12 @@ class DedicatedMediaProductRegistry:
             await self._handle_native_event(session, event)
         except Exception as error:
             reason = getattr(error, "reason", "NATIVE_DELEGATE_FAILED")
-            if reason == "NATIVE_DELEGATE_INTERRUPTED" or any(
+            business = session.activation.business_contract_version is not None
+            if reason == "NATIVE_DELEGATE_INTERRUPTED":
+                if business:
+                    await session.engine.retire_delegate(delegate.provider_call_id, interrupted=True)
+                return
+            if not business and any(
                 ref.response_generation == delegate.response_generation for ref in session.barge_fenced_responses
             ):
                 return
@@ -2624,7 +2782,8 @@ class DedicatedMediaProductRegistry:
             if result["status"] == "failed":
                 self._native_request_state(session, "failed", delegate.turn_id, str(result["reason"]))
             return
-        if any(ref.response_generation == delegate.response_generation for ref in session.barge_fenced_responses):
+        business = session.activation.business_contract_version is not None
+        if not business and any(ref.response_generation == delegate.response_generation for ref in session.barge_fenced_responses):
             return
         event_ids = await session.engine.send_delegate_result(
             delegate.provider_call_id,
@@ -2634,7 +2793,9 @@ class DedicatedMediaProductRegistry:
         if (
             type(event_ids) is not tuple
             or len(event_ids) != 2
-            or any(type(event_id) is not str or not event_id for event_id in event_ids)
+            or type(event_ids[0]) is not str or not event_ids[0]
+            or (event_ids[1] is None and not business)
+            or (event_ids[1] is not None and (type(event_ids[1]) is not str or not event_ids[1]))
         ):
             raise MediaTransportViolation(
                 "MEDIA_NATIVE_DELEGATE_PROVIDER_SEND_INVALID",

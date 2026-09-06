@@ -8,6 +8,7 @@ import asyncio
 import copy
 import hashlib
 import hmac
+import json
 import math
 import unicodedata
 from dataclasses import dataclass
@@ -32,6 +33,10 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NATIVE_INTERACTION_CONTRACT_VERSION,
     NativeInteractionBinding,
     NativePresentationCursor,
+)
+from jiuwenswarm.server.live_voice.native_business_contract import (
+    NATIVE_BUSINESS_CONTRACT_VERSION,
+    NativeBusinessProposal,
 )
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
     MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES,
@@ -78,6 +83,7 @@ class GatewayNativeActivation:
     binding: NativeInteractionBinding
     capability: str
     connection_id: str
+    business_contract_version: str | None = None
 
 
 def _capability(value: object) -> str:
@@ -346,7 +352,7 @@ def _canonical_native_user_history(value: object) -> bool:
     )
 
 
-def _canonical_delegate_result(value: object) -> bool:
+def _canonical_delegate_result(value: object, *, maximum: int = MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES) -> bool:
     if (
         type(value) is not str
         or not value
@@ -358,17 +364,77 @@ def _canonical_delegate_result(value: object) -> bool:
     ):
         return False
     try:
-        return len(value.encode("utf-8")) <= MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES
+        return len(value.encode("utf-8")) <= maximum
     except UnicodeEncodeError:
         return False
 
 
+def _validate_business_context_result(result: dict[str, object]) -> dict[str, object]:
+    """Validate control identities; dynamic Task/Work facts remain bounded JSON data."""
+    try:
+        encoded = json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if len(encoded) > 524_288:
+            raise ValueError("context result exceeds its wire bound")
+        _closed_result(result, frozenset({"kind", "contract_version", "context", "work_events"}))
+        if result["kind"] != "business_context" or result["contract_version"] != NATIVE_BUSINESS_CONTRACT_VERSION:
+            raise ValueError("unsupported context version")
+        context = result["context"]
+        if type(context) is not dict or set(context) != {"context_id", "history", "tasks", "works", "model"}:
+            raise ValueError("context fields are not closed")
+        identity = context["context_id"]
+        if type(identity) is not str or len(identity) != 64 or any(char not in "0123456789abcdef" for char in identity):
+            raise ValueError("context identity is invalid")
+        model = context["model"]
+        if type(model) is not dict or set(model) != {"model_identity", "model_config_version"} or not all(
+            _canonical_result_identity(value) for value in model.values()
+        ):
+            raise ValueError("model facts are invalid")
+        for key in ("history", "tasks", "works"):
+            if type(context[key]) is not list or len(context[key]) > 256 or not all(type(row) is dict for row in context[key]):
+                raise ValueError("context collection is invalid")
+        for row in context["history"]:
+            if set(row) != {"role", "content", "delivery"} or row["role"] not in {"user", "assistant"} or not all(
+                type(row[key]) is str and row[key] for key in ("content", "delivery")
+            ):
+                raise ValueError("history fact is invalid")
+        events = result["work_events"]
+        if type(events) is not list or len(events) > 32:
+            raise ValueError("work event collection is invalid")
+        identities = set()
+        for event in events:
+            if type(event) is not dict or set(event) != {"event_id", "work_id", "revision", "state", "result_text", "reason"}:
+                raise ValueError("work event fields are not closed")
+            if not all(_canonical_result_identity(event[key]) for key in ("event_id", "work_id")):
+                raise ValueError("work identity is invalid")
+            if event["event_id"] in identities:
+                raise ValueError("duplicate work event")
+            identities.add(event["event_id"])
+            if type(event["revision"]) is not int or not 0 < event["revision"] <= MAX_SAFE_INTEGER:
+                raise ValueError("work revision is invalid")
+            if event["state"] not in {"completed", "failed", "cancelled", "unknown"}:
+                raise ValueError("work event is not terminal")
+            if event["result_text"] is not None and (
+                type(event["result_text"]) is not str
+                or len(event["result_text"].encode("utf-8")) > 131072
+            ):
+                raise ValueError("work result is invalid")
+            if event["reason"] is not None and not _canonical_result_identity(event["reason"]):
+                raise ValueError("work reason is invalid")
+        return json.loads(encoded)
+    except (TypeError, ValueError, KeyError, UnicodeError, RecursionError) as error:
+        raise NativeRuntimeClientError("NATIVE_BUSINESS_CONTEXT_INVALID", "Business context is not closed bounded data") from error
+
+
 def _validate_method_result(
-    method: ReqMethod, result: dict[str, object]
+    method: ReqMethod, result: dict[str, object], *, allow_business: bool = False,
 ) -> dict[str, object]:
     kind = result.get("kind")
     if method is ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE:
-        if kind in {"action", "turn", "done"}:
+        if kind == "business_context":
+            if not allow_business:
+                raise NativeRuntimeClientError("NATIVE_BUSINESS_CAPABILITY_REQUIRED", "Unnegotiated business result")
+            return _validate_business_context_result(result)
+        elif kind in {"action", "turn", "done"}:
             _closed_result(result, frozenset({"kind", "status", "accepted"}))
             valid = (
                 result.get("status") == "observed"
@@ -451,7 +517,8 @@ def _validate_method_result(
                 and (
                     (result.get("route") == "task" and _canonical_result_identity(result.get("reason"))
                      and (result.get("status") != "interrupted" or result.get("reason") == "NATIVE_DELEGATE_INTERRUPTED"))
-                    if settled_task else _canonical_delegate_result(result.get("canonical_text"))
+                    if settled_task else _canonical_delegate_result(result.get("canonical_text"),
+                        maximum=524288 if allow_business else MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES)
                 )
                 and _canonical_response_ref(result.get("response"))
                 and ("task_id" not in result or (
@@ -608,7 +675,12 @@ class GatewayNativeInteractionRuntimeClient:
             or payload.get("ok") is not True
             or result.get("status") != "active"
             or not isinstance(descriptor, dict)
-            or set(descriptor) != {"contract_version", "binding", "capability"}
+            or set(descriptor) not in (
+                {"contract_version", "binding", "capability"},
+                {"contract_version", "binding", "capability", "business_contract_version"},
+            )
+            or ("business_contract_version" in descriptor
+                and descriptor["business_contract_version"] != NATIVE_BUSINESS_CONTRACT_VERSION)
             or descriptor.get("contract_version") != NATIVE_INTERACTION_CONTRACT_VERSION
             or type(connection_id) is not str
             or not connection_id
@@ -647,7 +719,7 @@ class GatewayNativeInteractionRuntimeClient:
         return (
             sanitized,
             result,
-            GatewayNativeActivation(binding, capability, connection_id),
+            GatewayNativeActivation(binding, capability, connection_id, descriptor.get("business_contract_version")),
         )
 
     def observe_activation_response(
@@ -702,12 +774,18 @@ class GatewayNativeInteractionRuntimeClient:
     ) -> dict[str, object]:
         retained = self._authorize(binding, capability)
         proposal = NativeInteractionProposal.from_engine_event(binding, event)
+        if event.delegate is not None and (
+            isinstance(event.delegate, NativeBusinessProposal)
+            != (retained.business_contract_version == NATIVE_BUSINESS_CONTRACT_VERSION)
+        ):
+            raise NativeRuntimeClientError("NATIVE_BUSINESS_CAPABILITY_REQUIRED", "Business proposals require the negotiated capability")
         result = await self._request(
             method=ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE,
             binding=binding,
             capability=retained.capability,
             request_id=request_id,
             extra={"proposal": proposal.to_dict()},
+            allow_business=retained.business_contract_version == NATIVE_BUSINESS_CONTRACT_VERSION,
             timeout_seconds=(
                 NATIVE_DELEGATE_TRANSPORT_TIMEOUT_SECONDS
                 if event.delegate is not None
@@ -718,6 +796,25 @@ class GatewayNativeInteractionRuntimeClient:
         # Revalidate before releasing its result to the media/Provider owner.
         self._authorize(binding, capability)
         return result
+
+    async def business_context(
+        self, activation: GatewayNativeActivation, *, request_id: str,
+    ) -> dict[str, object]:
+        if not isinstance(activation, GatewayNativeActivation):
+            raise NativeRuntimeClientError("NATIVE_RUNTIME_ACTIVATION_INVALID", "An exact activation is required")
+        retained = self._authorize(activation.binding, activation.capability)
+        if retained != activation or retained.business_contract_version != NATIVE_BUSINESS_CONTRACT_VERSION:
+            raise NativeRuntimeClientError("NATIVE_BUSINESS_CAPABILITY_REQUIRED", "Business context requires the negotiated activation")
+        result = await self._request(
+            method=ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE,
+            binding=activation.binding, capability=activation.capability,
+            request_id=request_id,
+            extra={"contract_version": NATIVE_BUSINESS_CONTRACT_VERSION, "context": True},
+            allow_business=True,
+        )
+        if self._authorize(activation.binding, activation.capability) != activation:
+            raise NativeRuntimeClientError("NATIVE_RUNTIME_ACTIVATION_STALE", "Context owner was replaced")
+        return _validate_business_context_result(result)
 
     async def propose_audio_batch(
         self,
@@ -1015,6 +1112,7 @@ class GatewayNativeInteractionRuntimeClient:
         request_id: str,
         extra: dict[str, object],
         timeout_seconds: float | None = None,
+        allow_business: bool = False,
     ) -> dict[str, object]:
         request_id = _request_identity(request_id)
         params: dict[str, object] = {
@@ -1048,13 +1146,13 @@ class GatewayNativeInteractionRuntimeClient:
             raise NativeRuntimeClientError(
                 "NATIVE_RUNTIME_UNAVAILABLE", "AgentServer Native Runtime failed"
             ) from error
-        result = self._validate_response(response, request_id, method)
+        result = self._validate_response(response, request_id, method, allow_business=allow_business)
         self._completed_requests += 1
         return result
 
     @staticmethod
     def _validate_response(
-        response: object, request_id: str, method: ReqMethod
+        response: object, request_id: str, method: ReqMethod, *, allow_business: bool = False,
     ) -> dict[str, object]:
         if (
             not isinstance(response, AgentResponse)
@@ -1085,7 +1183,7 @@ class GatewayNativeInteractionRuntimeClient:
                 "NATIVE_RUNTIME_RESPONSE_INVALID",
                 "AgentServer Native success result is not canonical",
             )
-        return _validate_method_result(method, result)
+        return _validate_method_result(method, result, allow_business=allow_business)
 
 
 __all__ = [
