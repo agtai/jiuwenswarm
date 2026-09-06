@@ -16155,7 +16155,7 @@ for (const outcome of ['recovered', 'persistent', 'exit']) {
 }
 
 
-for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while_active', 'model_missing_confirmation', 'task', 'task_keep_selection', 'task_foreign', 'task_retry', 'task_repeated_failure', 'task_retired_read', 'text', 'barge_success', 'barge_failure', 'barge_fatal', 'fatal_before', 'fatal_after', 'fatal_overlap', 'fatal_audio']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
+for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while_active', 'model_missing_confirmation', 'task', 'task_keep_selection', 'task_foreign', 'task_retry', 'task_repeated_failure', 'task_retired_read', 'text', 'barge_success', 'barge_failure', 'barge_fatal', 'fatal_before', 'fatal_after', 'fatal_overlap', 'fatal_audio', 'fatal_unobserved', 'next_failure']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
   const i18n = await createI18n();
   const states = [], messages = [], calls = [], waiters = [], ended = [], sources = [];
   let activeMediaBinding = null, binding = null, renderer, textSnapshot = null, settleTaskFailure;
@@ -16346,10 +16346,12 @@ for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while
       return;
     }
 
-    await deliver(notification(1, 'processing'));
-    assert.equal(states.at(-1).text_status, 'waiting');
-    assert.equal(states.at(-1).p1_status, 'capturing');
-    assert.equal(formalProductVoiceActivity(states.at(-1)).status, 'thinking');
+    if (verify !== 'fatal_unobserved') {
+      await deliver(notification(1, 'processing'));
+      assert.equal(states.at(-1).text_status, 'waiting');
+      assert.equal(states.at(-1).p1_status, 'capturing');
+      assert.equal(formalProductVoiceActivity(states.at(-1)).status, 'thinking');
+    }
     if (verify.startsWith('fatal_')) {
       if (verify === 'fatal_audio') {
         const response = oldResponse(), unitId = 'failed-native-unit';
@@ -16373,9 +16375,9 @@ for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while
       } else if (verify === 'fatal_before') {
         await deliver(failure);
         await act(async () => { await browser.emitNativeConsumerFailure(); });
-      } else if (verify === 'fatal_after') {
+      } else if (verify === 'fatal_after' || verify === 'fatal_unobserved') {
         await act(async () => { await browser.emitNativeConsumerFailure(); });
-        assert.equal(states.at(-1).recovery_diagnostic.seam, 'response_generation');
+        assert.equal(messages.length, 0, 'transport fault must not guess a Native turn for chat');
         await deliver(failure);
       } else {
         await act(async () => {
@@ -16388,6 +16390,9 @@ for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while
       assert.equal(states.at(-1).recovery_diagnostic.seam, 'response_generation');
       assert.equal(states.at(-1).recovery_diagnostic.disposition, 'terminal');
       assert.equal(states.at(-1).text_reason, 'NATIVE_RUNTIME_RESPONSE_INVALID');
+      assert.equal(messages.length, 1,
+        'only the authoritative Native turn failure may insert the chat message');
+      assert.match(messages.at(-1).message.content, /NATIVE_RUNTIME_RESPONSE_INVALID/u);
       if (verify === 'fatal_audio') assert.ok(browser.counts.sourceStarts > 0);
       else assert.equal(browser.counts.sourceStarts, 0);
       assert.equal(calls.some(method => /unified.submit|speech.recognize|presentation.ack|task.create|task.cancel/u.test(method)), false);
@@ -16401,6 +16406,15 @@ for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while
     assert.equal(formalProductVoiceActivity(states.at(-1)).status, 'listening');
     assert.equal(messages.length, 1);
     assert.match(messages[0].message.id, /^live-voice-failure:/);
+    if (verify === 'next_failure') {
+      await deliver(notification(3, 'processing'));
+      await deliver(notification(4, 'failed'));
+      assert.equal(messages.length, 2);
+      assert.notEqual(messages[0].message.id, messages[1].message.id);
+      await deliver(notification(4, 'failed'));
+      assert.equal(messages.length, 2, 'replayed terminal cannot add a third failure');
+      return;
+    }
     await act(async () => { await controlRef.current.start(); });
     assert.equal(states.at(-1).recovery_diagnostic, null);
     assert.equal(states.at(-1).p1_status, 'capturing');

@@ -320,10 +320,12 @@ class NativeInteractionRuntimeOwner:
                 raise NativeInteractionRuntimeError("NATIVE_STOP_RESPONSE_STALE", "STOP requires a known exact response")
             self._interrupted_delegate_sources.add(source)
             self._delegate_holds = {call: ref for call, ref in self._delegate_holds.items() if ref != source}
+            successors: set[ResponseRef] = set()
             for call_id, admission in self._delegates_by_call.items():
                 result = self._delegate_results.get(call_id)
-                if admission.source_response == source and result is not None:
-                    await self._runtime.request_response_cancel(f"{action_id}:delegate:{call_id}", result.response)
+                if admission.source_response == source and result is not None and result.response not in successors:
+                    successors.add(result.response)
+                    await self._runtime.cancel_response_if_running(f"{action_id}:delegate:{call_id}", result.response)
 
     async def start(self) -> bool:
         async with self._lock:

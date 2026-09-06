@@ -398,6 +398,21 @@ _BUSINESS_INSTRUCTIONS = (
     "Report real receipts faithfully and concisely. Speech interruption stops speech; accepted work continues."
 )
 
+_BUSINESS_ARGUMENT_CORRECTION_INSTRUCTIONS = (
+    " One or more preceding calls were rejected locally as invalid_business_arguments; "
+    "those calls did not execute. Correct the rejected fields using the tool schema and "
+    "the user's unchanged intent, then issue the corrected call now. Do not merely announce "
+    "a parameter error. Never repeat a call that already has an accepted or successful receipt. "
+    "Use context.get for missing server IDs or revisions; never guess them. If the user's "
+    "intent or target remains ambiguous, ask a concise clarification instead of mutating work."
+)
+
+_BUSINESS_ARGUMENT_CORRECTION_EXHAUSTED = (
+    " Local argument correction attempts are exhausted for this turn. Do not issue more tools. "
+    "Briefly explain that the rejected operation was not applied and ask the user to clarify "
+    "or try again. Preserve the true receipts of any other accepted operations."
+)
+
 _WORK_NOTIFICATION_INSTRUCTIONS = (
     "Deliver a brief spoken update in one or two short sentences, consistent with the user's current request. "
     "Identify the analysis by its user-facing topic and state the most relevant verified conclusion "
@@ -737,6 +752,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._business_presentation_busy: Callable[[], bool] | None = None
         self._business_accepted_turn: str | None = None
         self._business_rounds: dict[str, int] = {}
+        self._business_argument_corrections: dict[str, int] = {}
         self._business_call_records: dict[str, _BusinessCallRecord] = {}
         self._pending_business_errors: deque[str] = deque()
         self._work_events: dict[str, dict[str, object]] = {}
@@ -1082,10 +1098,20 @@ class OpenAIRealtimeNativeInteractionEngine:
             source.business_successor_requested = True
             self._business_rounds[source.turn_id] = rounds + 1
             anchor = next((call for call in source.business_calls if call in self._delegates), None)
+            instructions = _BUSINESS_INSTRUCTIONS
+            tool_choice = "auto"
+            if any(self._business_call_records[call].error_output is not None for call in source.business_calls):
+                corrections = self._business_argument_corrections.get(source.turn_id, 0)
+                if corrections < 2:
+                    self._business_argument_corrections[source.turn_id] = corrections + 1
+                    instructions += _BUSINESS_ARGUMENT_CORRECTION_INSTRUCTIONS
+                else:
+                    instructions += _BUSINESS_ARGUMENT_CORRECTION_EXHAUSTED
+                    tool_choice = "none"
             self._response_request_queue.append(_ProviderResponseRequest(
                 turn_id=source.turn_id, delegate_call_id=anchor, business_recovery=anchor is None,
-                payload={"response": {"instructions": _BUSINESS_INSTRUCTIONS, "max_output_tokens": 1024,
-                                      "tool_choice": "auto"}},
+                payload={"response": {"instructions": instructions, "max_output_tokens": 1024,
+                                      "tool_choice": tool_choice}},
             ))
 
     async def _send_pending_business_errors(self) -> None:
@@ -2612,8 +2638,18 @@ class OpenAIRealtimeNativeInteractionEngine:
             )
         except (NativeInteractionContractViolation, NativeBusinessViolation) as exc:
             if business:
+                field = getattr(exc, "field", "request_text")
+                expected = getattr(exc, "expected", "The user's nonempty current request within the tool schema bounds")
+                operation = getattr(exc, "operation", None)
                 output = json.dumps({"kind": "invalid_business_arguments", "reason": exc.reason,
+                    "field": field, "expected": expected, "operation": operation, "execution_started": False,
                     "recovery": "reread_tool_schema_and_correct_arguments"}, separators=(",", ":"))
+                logger.warning(
+                    "native_business_arguments_rejected correlation_id=%s turn_id=%s response_id=%s call_id=%s "
+                    "operation=%s reason=%s field=%s expected=%s execution_started=false",
+                    self._binding.correlation_id, response.turn_id, response.provider_response_id,
+                    call_id, operation, exc.reason, field, expected,
+                )
                 self._business_call_records[call_id] = _BusinessCallRecord(fingerprint, error_output=output)
                 response.business_calls.append(call_id)
                 self._pending_business_errors.append(call_id)

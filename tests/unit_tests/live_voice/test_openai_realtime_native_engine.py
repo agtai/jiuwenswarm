@@ -494,7 +494,8 @@ async def test_business_invalid_arguments_return_exact_error_and_recover_without
         output = function_outputs(socket)
         assert len(output) == 1 and output[0]["call_id"] == "bad-call"
         error = json.loads(output[0]["output"])
-        assert set(error) == {"kind", "reason", "recovery"}
+        assert set(error) == {"kind", "reason", "recovery", "field", "expected", "operation", "execution_started"}
+        assert error["execution_started"] is False and error["field"] and error["expected"]
         assert error["kind"] == "invalid_business_arguments" and error["reason"].startswith("NATIVE_")
         assert error["recovery"] == "reread_tool_schema_and_correct_arguments"
         assert engine.snapshot().delegate_count == 0 and engine._delegates == {}
@@ -503,6 +504,9 @@ async def test_business_invalid_arguments_return_exact_error_and_recover_without
         assert sum(e["type"] == "response.create" for e in socket.sent) == 1
         await engine.next_event()
         assert sum(e["type"] == "response.create" for e in socket.sent) == 2
+        correction = [e for e in socket.sent if e["type"] == "response.create"][-1]["response"]
+        assert "issue the corrected call now" in correction["instructions"]
+        assert "Never repeat a call" in correction["instructions"]
         socket.push(response_created("recovery", "p2"))
         speak = await engine.next_event()
         assert dict(speak.action.payload) == {"provider_response_id": "p2", "turn_id": commit.turn_commit.turn_id}
@@ -535,6 +539,63 @@ async def test_business_invalid_mixed_group_waits_all_outputs_and_anchors_first_
         assert sum(e["type"] == "response.create" for e in socket.sent) == 2
         socket.push(response_created("successor", "p2"))
         assert dict((await engine.next_event()).action.payload)["provider_call_id"] == "valid-call"
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_adjustment_can_be_corrected_once_without_replaying_mutation(caplog, monkeypatch):
+    import logging
+    from tests.unit_tests.live_voice.test_native_business_contract import action
+    test_logger = logging.getLogger("jiuwenswarm.server.live_voice.openai_realtime_native_engine")
+    monkeypatch.setattr(test_logger, "handlers", [*test_logger.handlers, caplog.handler])
+    payload = {"request_text": "Leave no earlier than five and adjust the travel task",
+        "action": action("task.adjust", adjustment="Leave no earlier than five", expected_revision="4")}
+    invalid = business_function("bad", "p1", "bad-adjust")
+    invalid["arguments"] = json.dumps(payload)
+    engine, socket, _ = await admitted_business_engine(invalid, response_done("done", "p1"))
+    try:
+        assert (await engine.next_event()).delegate is None
+        error = json.loads(function_outputs(socket)[0]["output"])
+        assert error["field"] == "action.expected_revision"
+        assert error["operation"] == "task.adjust" and error["execution_started"] is False
+        assert "field=action.expected_revision" in caplog.text
+        assert payload["request_text"] not in caplog.text and payload["action"]["adjustment"] not in caplog.text
+        await engine.next_event()
+        socket.push(response_created("recovery", "p2")); await engine.next_event()
+        await engine.admit_response("p2", response_ref(2))
+        payload["action"]["expected_revision"] = 4
+        corrected = business_function("corrected", "p2", "valid-adjust")
+        corrected["arguments"] = json.dumps(payload)
+        socket.push(corrected)
+        proposal = (await engine.next_event()).delegate
+        assert proposal.business.task_proposal().observed_task_revision == 4
+        assert proposal.business.task_proposal().arguments["adjustment"] == "Leave no earlier than five"
+        socket.push(corrected)
+        assert (await engine.next_event()).delegate is None
+        assert engine.snapshot().delegate_count == 1
+        await engine.send_delegate_result("valid-adjust", response_ref(2), '{"operation":"task.adjust","accepted":true}')
+        assert len(function_outputs(socket)) == 2
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_repeated_invalid_arguments_stop_correcting_without_failing_voice_session():
+    engine, socket, _ = await admitted_business_engine()
+    try:
+        for index in range(1, 4):
+            if index > 1:
+                socket.push(response_created(f"created-{index}", f"p{index}")); await engine.next_event()
+                await engine.admit_response(f"p{index}", response_ref(index))
+            socket.push(invalid_business_function(f"bad-{index}", f"p{index}", f"call-{index}"))
+            assert (await engine.next_event()).delegate is None
+            socket.push(response_done(f"done-{index}", f"p{index}")); await engine.next_event()
+            continuation = [event for event in socket.sent if event["type"] == "response.create"][-1]["response"]
+            assert continuation["tool_choice"] == ("auto" if index < 3 else "none")
+        assert "rejected operation was not applied" in continuation["instructions"]
+        assert engine.snapshot().delegate_count == 0
+        assert engine.snapshot().state is not NativeProviderState.FAILED
     finally:
         await engine.close()
 

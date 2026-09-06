@@ -39,20 +39,25 @@ _TEXT_ARGUMENTS = {
 
 
 class NativeBusinessViolation(ValueError):
-    def __init__(self, reason: str = "NATIVE_BUSINESS_ARGUMENT_INVALID", *, code=ErrorCode.INVALID_ARGUMENT):
+    def __init__(self, reason: str = "NATIVE_BUSINESS_ARGUMENT_INVALID", *, code=ErrorCode.INVALID_ARGUMENT,
+                 field: str = "arguments", expected: str = "A JSON object matching the closed tool schema"):
         super().__init__(reason)
         self.reason = reason
         self.code = code
+        self.field = field
+        self.expected = expected
+        self.operation: str | None = None
 
 
-def _text(value: object, *, maximum: int) -> str:
+def _text(value: object, *, maximum: int, field: str) -> str:
+    expected = f"A nonempty string without null characters, at most {maximum} UTF-8 bytes"
     if type(value) is not str or not value.strip() or "\x00" in value:
-        raise NativeBusinessViolation()
+        raise NativeBusinessViolation(field=field, expected=expected)
     try:
         if len(value.encode("utf-8")) > maximum:
-            raise NativeBusinessViolation()
+            raise NativeBusinessViolation(field=field, expected=expected)
     except UnicodeEncodeError:
-        raise NativeBusinessViolation() from None
+        raise NativeBusinessViolation(field=field, expected=expected) from None
     return value
 
 
@@ -68,35 +73,46 @@ class NativeBusinessAction:
 
     def __post_init__(self):
         if type(self.operation) is not str or self.operation not in NATIVE_BUSINESS_OPERATIONS:
-            raise NativeBusinessViolation("NATIVE_BUSINESS_OPERATION_UNSUPPORTED", code=ErrorCode.UNSUPPORTED)
+            raise NativeBusinessViolation("NATIVE_BUSINESS_OPERATION_UNSUPPORTED", code=ErrorCode.UNSUPPORTED,
+                field="action.operation", expected="One of: " + ", ".join(sorted(NATIVE_BUSINESS_OPERATIONS)))
         if self.operation != "context.get" or self.context_id is not None:
             if type(self.context_id) is not str or re.fullmatch(r"[0-9a-f]{64}", self.context_id) is None:
-                raise NativeBusinessViolation("NATIVE_BUSINESS_CONTEXT_REQUIRED")
+                raise NativeBusinessViolation("NATIVE_BUSINESS_CONTEXT_REQUIRED", field="action.context_id",
+                    expected="The 64-character context_id from server facts; call context.get if missing")
         if self.operation in _COLLECTION:
             if self.target_id is not None:
-                raise NativeBusinessViolation("NATIVE_BUSINESS_TARGET_FORBIDDEN")
+                raise NativeBusinessViolation("NATIVE_BUSINESS_TARGET_FORBIDDEN", field="action.target_id", expected="null")
         else:
-            _text(self.target_id, maximum=1024)
+            _text(self.target_id, maximum=1024, field="action.target_id")
             if len(self.target_id) > 256 or self.target_id.strip() != self.target_id:
-                raise NativeBusinessViolation("NATIVE_BUSINESS_TARGET_INVALID")
+                raise NativeBusinessViolation("NATIVE_BUSINESS_TARGET_INVALID", field="action.target_id",
+                    expected="The exact server target ID, at most 256 characters, without surrounding whitespace")
         if self.operation in _REVISION_REQUIRED:
             if type(self.expected_revision) is not int or not 0 < self.expected_revision < 2**53:
-                raise NativeBusinessViolation("NATIVE_BUSINESS_REVISION_REQUIRED")
+                raise NativeBusinessViolation("NATIVE_BUSINESS_REVISION_REQUIRED", field="action.expected_revision",
+                    expected="The target's observed server revision as a positive integer below 2**53, not a string")
         elif self.expected_revision is not None:
-            raise NativeBusinessViolation("NATIVE_BUSINESS_REVISION_FORBIDDEN")
+            raise NativeBusinessViolation("NATIVE_BUSINESS_REVISION_FORBIDDEN", field="action.expected_revision", expected="null")
         required = _TEXT_ARGUMENTS.get(self.operation, frozenset())
         for key in ("name", "instruction", "adjustment"):
             value = getattr(self, key)
             if key in required:
-                _text(value, maximum=256 if key == "name" else 4096)
+                _text(value, maximum=256 if key == "name" else 4096, field="action." + key)
             elif value is not None:
-                raise NativeBusinessViolation("NATIVE_BUSINESS_UNUSED_ARGUMENT")
+                raise NativeBusinessViolation("NATIVE_BUSINESS_UNUSED_ARGUMENT", field="action." + key, expected="null")
 
     @classmethod
     def from_dict(cls, value: object) -> NativeBusinessAction:
         if not isinstance(value, Mapping) or set(value) != _FIELDS:
-            raise NativeBusinessViolation("NATIVE_BUSINESS_FIELDS_NOT_CLOSED")
-        return cls(**value)
+            raise NativeBusinessViolation("NATIVE_BUSINESS_FIELDS_NOT_CLOSED", field="action",
+                expected="Exactly these fields (unused values must be null): " + ", ".join(sorted(_FIELDS)))
+        try:
+            return cls(**value)
+        except NativeBusinessViolation as exc:
+            operation = value["operation"]
+            if type(operation) is str and operation in NATIVE_BUSINESS_OPERATIONS:
+                exc.operation = operation
+            raise
 
     def to_dict(self) -> dict[str, object]:
         return {key: getattr(self, key) for key in sorted(_FIELDS)}

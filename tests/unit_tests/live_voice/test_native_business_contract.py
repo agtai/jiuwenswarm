@@ -38,6 +38,17 @@ def test_exact_adjustment_requires_observed_context_target_and_revision():
             NativeBusinessAction.from_dict({**command, field: None})
 
 
+@pytest.mark.parametrize("field,value", [("adjustment", None), ("instruction", "private instruction"),
+    ("expected_revision", "4"), ("target_id", None), ("context_id", None)])
+def test_adjustment_validation_identifies_field_without_exposing_values(field, value):
+    command = action("task.adjust", adjustment="new requirement", expected_revision=4)
+    with pytest.raises(NativeBusinessViolation) as rejected:
+        NativeBusinessAction.from_dict({**command, field: value})
+    assert rejected.value.field == "action." + field
+    assert rejected.value.expected
+    assert "private instruction" not in str(rejected.value)
+
+
 def test_operation_and_shape_are_closed_without_text_keyword_classification():
     for operation in ("task.pause", "shell", "task.delete"):
         with pytest.raises(NativeBusinessViolation):

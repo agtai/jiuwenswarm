@@ -2375,6 +2375,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     disposition: ProductLiveVoiceRecoveryDiagnostic['disposition'];
     reason: string;
     binding: ProductWebP2ActivationSnapshot['binding'];
+    nativeTurnId?: string;
     response?: Readonly<{
       interaction_id: string;
       response_id: string;
@@ -2400,9 +2401,19 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     recordAudioDiagnostic('voice_recovery_state', { ...diagnostic, stage: diagnostic.seam, status: diagnostic.disposition });
     recoveryDiagnosticRef.current = diagnostic;
     setRecoveryDiagnostic(diagnostic);
-    if (input.disposition === 'terminal' && input.seam === 'response_generation') {
+    const isNative = p1VoiceOwnerRef.current?.interactionEngine() === 'openai-realtime-native' ||
+      (input.binding != null && nativeRequestStateRef.current?.binding ===
+        JSON.stringify([sessionId, input.binding.activation_id, input.binding.activation_generation]));
+    if (input.disposition === 'terminal' && input.seam === 'response_generation' &&
+        (!isNative || input.nativeTurnId !== undefined)) {
+      // Only the authoritative Native request failure owns the chat message.
+      // Media errors can precede its turn notification; retain those diagnostics
+      // without guessing a turn or inserting a competing failure message.
+      const failureIdentity = input.nativeTurnId !== undefined
+        ? `native:${diagnostic.activation_generation}:${input.nativeTurnId}`
+        : `${diagnostic.response_id ?? diagnostic.reason}:${diagnostic.response_generation ?? 0}`;
       props.onProductVoiceMessage?.({ session_id: sessionId, message: {
-        id: `live-voice-failure:${diagnostic.activation_id}:${diagnostic.response_id ?? diagnostic.reason}:${diagnostic.response_generation ?? nativeRequestStateRef.current?.sequence ?? 0}`,
+        id: `live-voice-failure:${diagnostic.activation_id}:${failureIdentity}`,
         role: 'assistant', content: t('liveVoice.formal.requestFailed', { reason: input.reason }),
         timestamp: new Date().toISOString(),
       } });
@@ -3321,7 +3332,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         setProductTextReason(disposition.reason);
         setProductTextStatus('failed');
         publishProductRecoveryDiagnostic({ seam: 'response_generation', disposition: 'terminal',
-          reason: disposition.reason!, binding: presentationBinding });
+          reason: disposition.reason!, binding: presentationBinding, nativeTurnId: disposition.turn_id });
       } else {
         clearProductRecoveryDiagnostic();
         setProductTextReason(null);

@@ -468,6 +468,25 @@ class ConversationRuntimeLoop:
     ) -> ResponseCancelResult:
         return await self._await_future(self.post_response_cancel(command_id, ref))
 
+    async def cancel_response_if_running(
+        self, command_id: str, ref: ResponseRef
+    ) -> ResponseCancelResult | None:
+        """Cancel generation if necessary without consuming the playback stop.
+
+        Native STOP can arrive after generation ends but before audio finishes.
+        Serialize the state check with completion and other cancellation commands.
+        The strict cancellation API remains unchanged for other callers.
+        """
+        command_id = self._require_id(command_id, "command_id")
+
+        def apply() -> ResponseCancelResult | None:
+            record = self._response_record(ref)
+            if record.state is ResponseState.TERMINAL or record.cancel_state is not CancelState.NONE:
+                return None
+            return self._request_response_cancel(command_id, ref)
+
+        return await self._submit(apply, control=True)
+
     def post_response_cancel(
         self, command_id: str, ref: ResponseRef
     ) -> asyncio.Future[ResponseCancelResult]:

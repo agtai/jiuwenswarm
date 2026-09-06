@@ -5,6 +5,7 @@ import pytest
 from jiuwenswarm.server.live_voice.presentation_ledger import PresentationSurface
 from jiuwenswarm.server.live_voice.native_business_contract import NativeBusinessAction, NativeBusinessProposal
 from jiuwenswarm.server.live_voice.native_interaction_runtime import NativeInteractionRuntimeError
+from jiuwenswarm.server.live_voice.native_interaction_contract import NativePresentationCursor
 from jiuwenswarm.server.live_voice.voice_task_bridge import UnifiedCommittedInputRoute
 from tests.unit_tests.live_voice.test_native_interaction_runtime import (
     active_owner, delegate_proposal, done, audio, ack_for, turn_commit,
@@ -64,6 +65,40 @@ async def test_interrupted_business_settles_real_result_but_cannot_resume_source
         with pytest.raises(NativeInteractionRuntimeError, match="Interrupted"):
             await owner.accept_delegate_provider_response("old-result", "call", "native-turn-1")
         assert runtime.snapshot() == before
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completed", [True, False])
+async def test_stop_shared_delegate_successor_separates_generation_from_playback(completed):
+    owner, runtime = await active_owner()
+    try:
+        source = await owner.accept_provider_response("source", "runtime-source")
+        for call in ("call-a", "call-b"):
+            _, admission = await owner.admit_delegate(business(source.response, call), committed_at="2026-09-06T00:00:00Z")
+            await owner.prepare_delegate_result(admission, canonical_text='{"accepted":true}',
+                route=UnifiedCommittedInputRoute.DIALOGUE, allow_interrupted=True)
+        await owner.accept_provider_done(done(source.response, "source", transcript=None))
+        successor = await owner.accept_delegate_provider_response("successor", "call-a", "native-turn-1")
+        await owner.accept_delegate_provider_response("successor", "call-b", "native-turn-1")
+        chunk = audio(successor.response, "successor", 0)
+        await owner.accept_audio(chunk)
+        if completed:
+            await owner.accept_provider_done(done(successor.response, "successor"))
+        await owner.interrupt_delegate_source(action_id="stop", response=successor.response)
+        before = runtime.snapshot()
+        await owner.interrupt_delegate_source(action_id="second-stop", response=successor.response)
+        assert runtime.snapshot() == before
+        cancelled = [entry for entry in before.effects if entry.effect.effect_type == "response.cancel"]
+        assert len(cancelled) == (0 if completed else 1)
+        cursor = NativePresentationCursor(successor.response, chunk.provider_item_id, chunk.content_index, 0)
+        stopped = await owner.barge_in(action_id="playback-stop", response=successor.response, cursor=cursor)
+        assert stopped.applied  # cancellation must not consume the played-cursor stop
+        assert owner.snapshot().history_count == 0
+        await owner.accept_turn(turn_commit(2))
+        current = await owner.accept_provider_response("next", "runtime-next", turn_id="native-turn-2")
+        assert current.response != successor.response
     finally:
         await owner.close()
 
