@@ -136,19 +136,30 @@ async def test_formal_task_agent_uses_dedicated_clean_profile_and_closes(
 
 
 @pytest.mark.asyncio
-async def test_gateway_disconnect_never_cancels_formal_task_agent() -> None:
+async def test_gateway_disconnect_preserves_exact_service_owned_live_voice_agents() -> None:
     manager = AgentManager()
     interactive = _Agent()
     formal = _Agent()
+    native_work = _Agent()
+    other_channel = _Agent()
     manager.agents = {
         "web": {"agent": interactive},
         "live_voice_formal_task": {"formal": formal},
+        "live_voice_native_work": {"analysis": native_work},
+        "live_voice_native_work_other": {"ordinary": other_channel},
     }
+    for agent in (interactive, formal, native_work, other_channel):
+        manager.pin_agent(agent)
+    original_pins = dict(manager._agent_pins)
 
     await manager.cancel_all_inflight_work("gateway disconnected")
 
     assert interactive.cancel_calls == 1
+    assert other_channel.cancel_calls == 1
     assert formal.cancel_calls == 0
+    assert native_work.cancel_calls == 0
+    assert manager._agent_pins == original_pins
+    assert all(agent.cleanup_calls == 0 for agent in (interactive, formal, native_work, other_channel))
 
 
 @pytest.mark.asyncio

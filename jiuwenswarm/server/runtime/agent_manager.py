@@ -496,11 +496,11 @@ class AgentManager:
         return None
 
     async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
-        """Gateway 与 AgentServer 的 WebSocket 断开时：取消所有已创建 Agent 实例上的在途任务。"""
+        """Cancel transport-owned work when the Gateway WebSocket disconnects."""
         for channel_id, modes in list(self.agents.items()):
-            # Formal tasks are durable server-owned executions. A transport
-            # disconnect is not an authorized ``task.cancel`` command.
-            if channel_id == "live_voice_formal_task":
+            # These exact channels belong to service owners. Registry shutdown
+            # settles Native work; media disconnect grants no work/task cancel.
+            if channel_id in {"live_voice_formal_task", "live_voice_native_work"}:
                 continue
             for agent in list(modes.values()):
                 try:
