@@ -242,6 +242,29 @@ integrated Native business/Runtime/Engine/Gateway modules pass **385/385**
 (`cancel-integration.txt`); known correlated cancellation races receive safe
 content-free INFO diagnostics, rather than being silently ignored or fatal.
 
+The next `run-224408` proves the real conversational overlap on the integrated
+source: work accepted at 35.547 s; Agent execution 34.719–54.438 s; interjection
+began at 35.579 s; Provider VAD end at 40.297 s and the direct answer's first
+audio frame at 41.313 s. Actual OS playback completed and was ACKed at 42.688 s.
+The independently admitted result followed at 55.235 s, with first audio frame
+at 56.219 s. This is one synthetic question and received-frame timing, not a
+microphone or browser latency benchmark.
+
+That result response ended `incomplete` with the recorded Provider reason
+`max_output_tokens`. It had read internal work identity/revision metadata under
+the initial instruction to preserve work identity. The owned correction makes
+autonomous completion speech a short verified conclusion, keeps identity in
+routing data, preserves the complete queried result, and logs safe unsuccessful
+Provider status/reason. It does not increase the existing 1024 shared audio/text
+output-token budget. Unbounded or long spoken-result delivery is not claimed;
+incomplete speech cannot earn full-playback or history credit.
+Five diagnostic cases and the actual scheduled-notification contract are checked
+in the Engine suite (**160 passes**). On the integrated source, Engine, business
+Registry, audio diagnostics and profiling pass **202/202** (`delivery-final.txt`).
+The same-input real completion/OS-ACK result and its exact source hashes are
+recorded in `logs/native-conversation-execution/real-provider-business-evidence/`;
+the original incomplete run remains a failed sample.
+
 Deployment uses the existing controlled launcher, Native voice model/profile,
 registered project and data, without consuming notifications in a browser.
 `logs/live_voice_runtime_contract.json` and the packet's private

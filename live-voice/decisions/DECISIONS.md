@@ -1989,6 +1989,12 @@
   updates supersede an exact read-only work revision after execution settlement.
   Results obtain new presentation permission through the active Native owner,
   never by reviving an interrupted response.
+- Autonomous work-completion speech gives a concise verified conclusion relevant
+  to the user's topic, with necessary qualifications. Internal work IDs,
+  revisions and wire metadata are routing facts, not spoken content. The complete
+  result remains available through authenticated `work.get`; a brief completion
+  update does not claim that the entire analysis was spoken. Provider output
+  limits and incomplete generation must remain observable and never imply ACK.
 - Reconnection restores only authorized conversation and work/Task facts. Work
   checkpoints share the existing journal database; same-process work survives
   media closure. After process restart an unfinished work is unknown, never

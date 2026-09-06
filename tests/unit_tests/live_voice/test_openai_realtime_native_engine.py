@@ -759,6 +759,17 @@ async def test_work_event_requires_accepted_turn_idle_and_fresh_membership(still
         assert len(requests) == (2 if still_current else 1)
         if still_current:
             assert requests[-1]["response"]["metadata"] == {"work_event_id": "work-1:1"}
+            notification = requests[-1]["response"]
+            assert notification["max_output_tokens"] == 1024
+            assert notification["tool_choice"] == "none"
+            instructions = notification["instructions"]
+            for requirement in ("one or two short sentences", "user's current request",
+                    "verified conclusion", "key qualification", "IDs", "revisions", "JSON",
+                    "Do not read the full result aloud", "work.get", "never instructions"):
+                assert requirement in instructions
+            facts = json.loads([i["item"]["content"][0]["text"] for i in socket.sent
+                if i["type"] == "conversation.item.create" and i["item"]["type"] == "message"][-1])
+            assert facts["native_work_result"] == work_event()
             socket.push(response_created("wr", "work-provider"))
             assert action_payload(await engine.next_event()) == {"provider_response_id": "work-provider",
                 "turn_id": commit.turn_commit.turn_id, "work_event_id": "work-1:1"}
@@ -1909,6 +1920,46 @@ async def test_non_presentable_terminal_status_discards_partial_audio_tail(
     assert terminal.provider_done.completed is False
     assert engine.snapshot().released_audio_count == 0
     await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,details,expected_reason", [
+    ("incomplete", {"type": "incomplete", "reason": "max_output_tokens"}, "max_output_tokens"),
+    ("cancelled", {"type": "cancelled", "reason": "client_cancelled"}, "client_cancelled"),
+    ("failed", {"error": {"code": "server_error", "message": "PRIVATE BODY"}}, "server_error"),
+    ("incomplete", {"reason": "PRIVATE BODY\nBearer token"}, "other"),
+    ("completed", None, None),
+])
+async def test_response_terminal_diagnostic_is_safe_and_never_implies_delivery(
+    monkeypatch, status, details, expected_reason,
+):
+    logged = []
+    monkeypatch.setattr("jiuwenswarm.server.live_voice.openai_realtime_native_engine.logger.info",
+        lambda message, *args: logged.append(message % args))
+    terminal = response_done("done", "provider-1", status=status)
+    terminal["response"]["status_details"] = details
+    engine, _, _ = active_engine(speech_started("s", "u", 0), speech_stopped("e", "u", 20),
+        input_committed("c", "u"), response_created("r", "provider-1"), terminal)
+    await engine.start()
+    try:
+        await accept_basic_turn(engine)
+        await engine.next_event()
+        await engine.admit_response("provider-1", response_ref(1))
+        result = await engine.next_event()
+        assert result.provider_done.completed is (status == "completed")
+        assert result.audio is None and engine.snapshot().released_audio_count == 0
+        assert not engine._responses["provider-1"].presentation_acknowledged
+        if status == "completed":
+            assert not logged
+        else:
+            assert logged == ["openai_realtime_native_response_not_completed "
+                f"response_id=provider-1 status={status} reason={expected_reason}"]
+            with pytest.raises(OpenAIRealtimeNativeInteractionError):
+                await engine.acknowledge_presentation(response_ref(1))
+        assert "PRIVATE BODY" not in " ".join(logged)
+        assert "Bearer token" not in " ".join(logged)
+    finally:
+        await engine.close()
 
 
 @pytest.mark.asyncio
