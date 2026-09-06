@@ -227,6 +227,21 @@ The model/turn-segmentation failure is distinct from that fixed scheduler bug;
 a later shorter-input probe cannot erase or close it. Neither sample measures
 browser first-audible latency because the OS sink buffers each response.
 
+`run-223811` reached real work acceptance and exposed a separate cancellation
+race: STOP sent an exact Provider cancel, `response.done(completed)` arrived, and
+Provider then returned `response_cancel_not_active`, which the Engine treated as
+fatal. The correction recognizes only that error type/code linked to the exact
+locally sent cancel for an already fenced response. It does not invent a terminal
+event: error-before-done still blocks replacement until real done; error-after-
+done and duplicate old errors cannot affect a newer response. Unknown, missing,
+non-cancel or unfenced identities and other error codes/types still fail closed.
+The initial failed probe did not preserve the error's client event ID; subsequent
+connected evidence must retain it before claiming real correlation coverage.
+Eight exact/mismatched/reordered cancellation-error cases pass. The same seven
+integrated Native business/Runtime/Engine/Gateway modules pass **385/385**
+(`cancel-integration.txt`); known correlated cancellation races receive safe
+content-free INFO diagnostics, rather than being silently ignored or fatal.
+
 Deployment uses the existing controlled launcher, Native voice model/profile,
 registered project and data, without consuming notifications in a browser.
 `logs/live_voice_runtime_contract.json` and the packet's private

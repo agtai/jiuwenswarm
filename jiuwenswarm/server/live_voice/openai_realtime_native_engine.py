@@ -1535,6 +1535,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             return []
         if event_type == "error":
             self._provider_error(data)
+            return []
         if event_type == "input_audio_buffer.speech_started":
             return self._speech_started(event, data)
         if event_type == "input_audio_buffer.speech_stopped":
@@ -1582,6 +1583,18 @@ class OpenAIRealtimeNativeInteractionEngine:
                     "NATIVE_PROVIDER_EVENT_NOT_CLOSED",
                     "Provider error optional fields must be strings or null",
                 )
+        if error["type"] == "invalid_request_error" and error["code"] == "response_cancel_not_active":
+            targets = [provider_id for provider_id, receipt in self._provider_cancel_receipts.items()
+                       if receipt == error["event_id"]]
+            if (len(targets) == 1 and targets[0] in self._locally_fenced
+                    and self._responses[targets[0]].cancelled):
+                # Cancellation may lose to completion at the Provider. Only our
+                # exact fenced cancel is harmless; response.done still settles
+                # generation and alone permits the queued replacement to start.
+                logger.info("openai_realtime_native_cancel_completion_race response_id=%s cancel_event_id=%s terminal=%s",
+                    _provider_error_label(targets[0]), _provider_error_label(error["event_id"]),
+                    self._responses[targets[0]].done)
+                return
         logger.error(
             "openai_realtime_native_provider_error type=%s code=%s param=%s "
             "event_id_present=%s",

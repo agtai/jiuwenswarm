@@ -413,6 +413,77 @@ def function_outputs(socket):
             if item["type"] == "conversation.item.create" and item["item"]["type"] == "function_call_output"]
 
 
+def cancel_not_active(event_id, cancel_event_id, **changes):
+    return provider_event("error", event_id, error={"type": "invalid_request_error",
+        "code": "response_cancel_not_active", "message": "Cancellation lost the completion race",
+        "param": None, "event_id": cancel_event_id, **changes})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("done_first", [False, True])
+async def test_exact_cancel_completion_race_waits_real_done_and_never_changes_new_response(done_first):
+    engine, socket, _ = await admitted_business_engine()
+    try:
+        await engine.stop_foreground(response_ref(1))
+        cancel = next(item for item in socket.sent if item["type"] == "response.cancel")
+        assert cancel["response_id"] == "p1"
+        socket.push(speech_started("s2", "u2", 600)); socket.push(speech_stopped("e2", "u2", 800))
+        socket.push(input_committed("c2", "u2"))
+        _, _, commit = await accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        if done_first:
+            socket.push(response_done("done", "p1")); assert await engine.next_event() == NativeEngineEvent()
+        error = cancel_not_active("cancel-race", cancel["event_id"])
+        socket.push(error)
+        assert await engine.next_event() == NativeEngineEvent()
+        if not done_first:
+            assert not engine._responses["p1"].done
+            assert sum(item["type"] == "response.create" for item in socket.sent) == 1
+            socket.push(response_done("done", "p1")); assert await engine.next_event() == NativeEngineEvent()
+        assert sum(item["type"] == "response.create" for item in socket.sent) == 2
+        socket.push(response_created("r2", "p2")); assert (await engine.next_event()).action.operation == "SPEAK"
+        await engine.admit_response("p2", response_ref(2))
+        before = tuple(socket.sent)
+        socket.push(error); assert await engine.next_event() == NativeEngineEvent()
+        socket.push(cancel_not_active("repeat-error", cancel["event_id"]))
+        assert await engine.next_event() == NativeEngineEvent()
+        socket.push(output_audio_delta("old-late", "p1", "old-item", 0))
+        assert await engine.next_event() == NativeEngineEvent()
+        assert tuple(socket.sent) == before
+        assert not engine._responses["p2"].done and not engine._responses["p2"].cancelled
+        assert not engine._responses["p1"].presentation_acknowledged
+        assert engine.snapshot().released_audio_count == 0
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch", ["missing", "unknown", "non_cancel", "not_fenced", "other_code", "other_type"])
+async def test_unmatched_cancel_error_remains_fatal_without_new_effect(mismatch):
+    engine, socket, _ = await admitted_business_engine()
+    try:
+        if mismatch == "not_fenced":
+            await engine._send_provider_cancel_locked("p1")
+        else:
+            await engine.stop_foreground(response_ref(1))
+        cancel = next(item for item in socket.sent if item["type"] == "response.cancel")
+        correlation = cancel["event_id"]
+        changes = {}
+        if mismatch == "missing": correlation = None
+        elif mismatch == "unknown": correlation = "another-response-cancel"
+        elif mismatch == "non_cancel": correlation = next(item["event_id"] for item in socket.sent if item["type"] == "response.create")
+        elif mismatch == "other_code": changes["code"] = "invalid_value"
+        elif mismatch == "other_type": changes["type"] = "server_error"
+        before = tuple(socket.sent)
+        socket.push(cancel_not_active("error", correlation, **changes))
+        with pytest.raises(OpenAIRealtimeNativeInteractionError) as error: await engine.next_event()
+        assert error.value.reason == "NATIVE_PROVIDER_ERROR"
+        assert tuple(socket.sent) == before and not engine._responses["p1"].done
+        assert engine.snapshot().released_audio_count == 0
+    finally:
+        await engine.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("defect", ["unused", "missing", "type", "operation", "json", "raw_type"])
 async def test_business_invalid_arguments_return_exact_error_and_recover_without_proposal(defect):
@@ -2772,7 +2843,6 @@ async def test_concurrent_exact_delegate_result_sends_one_provider_pair() -> Non
     await engine.next_event()
     assert (await engine.next_event()).provider_done is not None
     before = len(socket.sent)
-    ref = response_ref(2)
 
     results = await asyncio.gather(
         engine.send_delegate_result("call-1", response_ref(1), "canonical result"),
@@ -2832,7 +2902,6 @@ async def test_direct_request_precedes_late_delegate_successor_without_overlap()
         assert (await engine.next_event()).action.operation == "STOP"
         await accept_basic_turn(engine)
         assert [event["type"] for event in socket.sent].count("response.create") == 2
-        delegate_ref = response_ref(3)
         delegate_task = asyncio.create_task(
             engine.send_delegate_result("call-1", response_ref(1), "canonical result")
         )
@@ -3059,7 +3128,6 @@ async def test_delegate_successor_binds_if_created_before_send_returns() -> None
     await engine.admit_response("provider-response-1", response_ref(1))
     await engine.next_event()
     assert (await engine.next_event()).provider_done is not None
-    result_ref = response_ref(2)
     socket.block_send_at = socket.send_calls + 2
 
     result_task = asyncio.create_task(
