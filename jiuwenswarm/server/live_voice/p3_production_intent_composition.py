@@ -315,7 +315,7 @@ class StoreProductionTaskAuthorityReader:
             raise ValueError("PRODUCTION_TASK_AUTHORITY_SCOPE_MISMATCH")
         if (
             type(visible_task_capacity) is not int
-            or not 1 <= visible_task_capacity <= 32
+            or not 1 <= visible_task_capacity <= 100
         ):
             raise ValueError("INVALID_PRODUCTION_TASK_AUTHORITY_CAPACITY")
         if (

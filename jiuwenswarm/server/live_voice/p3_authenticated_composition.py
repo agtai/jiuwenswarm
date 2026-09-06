@@ -464,6 +464,8 @@ class NativeP3ActivationAuthority:
     context: ResolvedTaskContext = field(repr=False)
     model_identity: str | None = None
     model_config_version: str | None = None
+    # Selected by the server composition; never accepted from browser arguments.
+    task_read_capacity: int = 32
 
     def __post_init__(self) -> None:
         if (
@@ -487,6 +489,8 @@ class NativeP3ActivationAuthority:
                     or not self.model_config_version.strip()
                 )
             )
+            or type(self.task_read_capacity) is not int
+            or not 1 <= self.task_read_capacity <= 100
         ):
             raise FormalTaskViolation(
                 "INVALID_NATIVE_P3_ACTIVATION_AUTHORITY",
@@ -1717,6 +1721,11 @@ class P3AuthenticatedComposition:
             "store": store,
             "principal_id": principal.principal_id,
             "scope": authority.scope,
+            "visible_task_capacity": (
+                native_authority.task_read_capacity
+                if native_authority is not None
+                else 32
+            ),
             "authority_context_fingerprint": production_context_fingerprint(
                 authority.context
             ),
@@ -3978,6 +3987,11 @@ class P3AuthenticatedComposition:
                 "store": store,
                 "principal_id": principal.principal_id,
                 "scope": authority.scope,
+                "visible_task_capacity": (
+                    native_authority.task_read_capacity
+                    if native_authority is not None
+                    else 32
+                ),
                 "authority_context_fingerprint": production_context_fingerprint(
                     authority.context
                 ),
