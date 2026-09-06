@@ -187,6 +187,7 @@ test('Native user transcript is an exact current-binding chat projection', () =>
         role: 'user',
         content: '介绍你自己',
         timestamp: '2026-08-31T00:00:00.125Z',
+        nativeTurnKey: '["interaction-native-1","turn-native-1"]',
       },
       following_assistant: [],
     },
@@ -232,6 +233,7 @@ test('Native user transcript is an exact current-binding chat projection', () =>
         role: 'user',
         content: '介绍你自己',
         timestamp: '2026-08-31T00:00:00.125Z',
+        nativeTurnKey: '["interaction-native-1","turn-native-1"]',
       },
       following_assistant: [
         {

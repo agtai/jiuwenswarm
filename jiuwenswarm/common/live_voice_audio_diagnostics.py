@@ -52,7 +52,7 @@ def _encode_record(value: dict) -> str:
 
 _IDS = frozenset({"session_id", "media_session_id", "capture_id", "lease_id", "interaction_id", "correlation_id", "response_id", "operation_id", "request_id"})
 _IDS = _IDS | frozenset({"span_id", "model_call_id", "parent_span_id", "turn_id", "commit_id", "round_id", "task_id", "attempt_id", "command_id", "outbox_id", "tool_call_id", "unit_id", "activation_id", "project_id", "execution_session_id"})
-_TOKENS = frozenset({"stage", "rpc_method", "error_type", "error_location", "error_code", "error_reason", "result_state", "milestone", "tool_name"})
+_TOKENS = frozenset({"stage", "rpc_method", "error_type", "error_location", "error_code", "error_reason", "result_state", "milestone", "tool_name", "status", "reason", "reason_id"})
 _VALUES = frozenset({"generation", "frame_count", "frames_sent", "frames_acked", "queue_frames", "received_samples", "sent_sample_end", "send_peak_ms", "vad_silence_ms", "provider_ms", "provider_start_ms", "provider_end_ms", "speech_started", "input_fenced", "elapsed_ms", "preopen_frames"})
 _VALUES = _VALUES | frozenset({
     "frame_seq", "lock_wait_ms", "encode_ms", "socket_send_ms", "wire_seq", "remaining_ms",
@@ -70,7 +70,7 @@ _VALUES = _VALUES | frozenset({
     "channels", "sample_width_bytes",
     "duration_ms", "response_generation", "activation_generation", "capture_generation",
     "first_output_ms", "chunk_count", "max_chunk_gap_ms", "attempt_number", "tool_seq",
-    "source_line", "diagnostic_sequence", "queue_wait_ms", "event_count",
+    "source_line", "diagnostic_sequence", "queue_wait_ms", "event_count", "seq",
 })
 WIRE_EVENTS = frozenset({
     "session.updated", "transcription_session.updated", "session.created",

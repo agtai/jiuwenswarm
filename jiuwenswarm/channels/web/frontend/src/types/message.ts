@@ -69,6 +69,10 @@ export interface Message {
   completedAt?: string;
   /** 前端渲染身份，避免业务 id 重复或历史 prepend 导致 React key 抖动 */
   renderKey?: string;
+  /** Generated voice display only; it is not heard history or an Agent result. */
+  nativeVoice?: { responseKey: string; responseId: string; responseGeneration: number; revision: number; state: 'generating' | 'generated' | 'interrupted' | 'played' };
+  /** Exact Native interaction/turn identity for ordering late input text. */
+  nativeTurnKey?: string;
   audioBase64?: string;
   /** Runtime-only auto-read identity; duplicate final events cannot restart playback. */
   ttsRequestedText?: string;

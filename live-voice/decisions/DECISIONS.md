@@ -1937,3 +1937,30 @@
   project content or credentials are added. The narrow Tier-3 internal route and
   Tier-2 execution repairs, validation and exclusions are recorded in the
   [Native foreground evidence](../reviews/NATIVE_FOREGROUND_REPAIR_20260906.md).
+
+## D-118 Native generated display and rehearsal control corrections
+
+- Date: 2026-09-06. The user authorized all six diagnosed rehearsal repairs and
+  local redeployment. Generated Native reply text must appear during audio and
+  remain marked when interrupted. This supersedes D-117's ACK-only chat display;
+  it does not change the exact played-audio/Agent-history acknowledgement contract.
+- Provider text becomes a read-only display snapshot only after exact Runtime
+  SPEAK admission. Current activation/connection/response and revision fences
+  govern projection. Canonical heard history replaces the exact preview; generated
+  text is current-page session state, including reconnect, without a new durable
+  store. Full page reload retains the existing heard-history restoration boundary.
+- Native stop carries the existing exact played cursor through authenticated Web
+  control after audio download closes. Local fence and server acknowledgement
+  remain distinct. Admission checks and post-await lifetime checks reject foreign
+  or retired work. Native's verified-headset tentative pause permits a bounded
+  1,000 ms Provider confirmation window; Cascade stays at 300 ms.
+- An Agent round must not hold the activation lock while waiting, blocking audio
+  history ACK or close. Native Task discovery refreshes existing authenticated UI;
+  recovered capture cannot be covered by a previous request failure, and listening
+  retry does not replay a business request. No new Task mutation authority,
+  classifier, model configuration or broad performance policy is introduced.
+- P2/Runtime, Native Engine/Gateway, browser P1 and integrated Task/chat UI own the
+  Tier-2 repairs and Tier-3 control/display seams. The
+  [rehearsal repair packet](../reviews/NATIVE_REHEARSAL_REPAIR_20260906.md) records
+  bounds, matrix, actual checks, review, diagnostics and deployment requirements.
+  Physical audio acceptance and comparable latency evidence remain separate.

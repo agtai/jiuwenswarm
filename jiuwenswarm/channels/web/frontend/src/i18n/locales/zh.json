@@ -2163,6 +2163,8 @@
       "replacementRecognitionFailed": "刚才的回答已被打断，但没有成功识别新的问题。请再说一次。",
       "processingListening": "正在处理，可随时打断",
       "preparingAudio": "正在准备语音播放",
+      "generatedText": {"generating": "正在生成语音文字", "generated": "语音文字", "interrupted": "已打断 · 已生成的文字", "played": "已播放"},
+      "requestFailed": "本次回复未完成（{{reason}}）。可以继续说话，或重新提出这个问题。",
       "recoveryFailedWithReason": "语音恢复失败（阶段：{{phase}}，原因：{{reason}}）",
       "interruptionDegraded": "本轮暂不支持插话；语音回答会继续，播放后将恢复监听（原因：{{reason}}）",
       "recoveryRetryingWithContext": "正在恢复（{{seam}}；关联：{{correlationId}}；代：{{generation}}；原因：{{reason}}）",

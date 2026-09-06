@@ -7054,6 +7054,7 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
     }
   }
 
+  let stopDelivery;
   let activeBargeResponse = null;
   let bargeStopped = null;
   let unexpectedBargeStarts = 0;
@@ -7061,6 +7062,7 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
   owner = new ProductP1VoiceRouteOwner({
     enabled: true,
     expected_origin: 'https://voice.example.test',
+    local_barge_in_profile: 'verified_headset_aec_v1',
     audio_environment: environment,
     on_barge_in_speech_start: () => {
       if (activeBargeResponse === null) {
@@ -7092,6 +7094,10 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
     request: async (method, params) => {
       calls.push([method, params]);
       if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) return nativeMediaActivation(uplinkBinding);
+      if (method === 'live_voice.media.playout_stop') {
+        await new Promise(resolve => { stopDelivery = resolve; });
+        return { status: 'native_playout_stopped', receipt: params.receipt, applied: true };
+      }
       if (method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD) {
         return {
           status: 'media_playout_acknowledged',
@@ -7338,6 +7344,14 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
     await new Promise(resolve => setImmediate(resolve));
   }
   assert.equal(owner.status().status, 'playing');
+  clearAudioDiagnostics();
+  environment.contexts[0].currentTime += 0.3;
+  for (let seq = 1502; seq < 1505; seq += 1) {
+    sendNextFrameFromCurrentWorklet(environment, seq, processedHeadsetVoiceFrame(), environment.contexts[0].currentTime - 0.02);
+  }
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.equal(audioDiagnosticSnapshot().filter(record => record.event === 'playout_tentative_paused').length, 1);
+  assert.equal(audioDiagnosticSnapshot().filter(record => record.event === 'playout_tentative_resumed').length, 0);
   uplink.onmessage?.({
     data: serializeMediaControl({
       type: 'media.speech_start',
@@ -7370,9 +7384,18 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
       business_cancel_count_delta: 0,
     }),
   });
+  const stoppingDownlink = sockets.find(socket => socket.serverBinding?.generation?.id === secondResponse.response_id);
+  // A late transport frame arrives before the independent stop RPC reaches the server.
+  stoppingDownlink.queueDownlinkFrame(8);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(owner.status().reason, null);
+  assert.ok(stopDelivery);
+  stopDelivery();
   environment.contexts[0].deferSourceEnds = false;
   environment.contexts[0].releaseSourceEnds();
   await bargedPlayout;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(audioDiagnosticSnapshot().filter(record => record.event === 'playout_tentative_resumed').length, 0);
   assert.equal(bargeStopped, true);
   assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
   assert.equal(owner.captureDiagnostics().provider_speech_start_observed, false);
@@ -7381,10 +7404,8 @@ test('formal P1 Native activation plays Provider audio while preserving the cont
     socket => socket.serverBinding?.generation?.id === secondResponse.response_id,
   );
   assert.ok(secondDownlink);
-  const playbackStops = secondDownlink.sent
-    .filter(value => typeof value === 'string')
-    .map(JSON.parse)
-    .filter(control => control.type === 'media.playback_stop_receipt');
+  const playbackStops = calls.filter(([method]) => method === 'live_voice.media.playout_stop')
+    .map(([, params]) => params.receipt);
   assert.equal(playbackStops.length, 1);
   assert.equal(playbackStops[0].business_cancel_count_delta, 0);
   assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);

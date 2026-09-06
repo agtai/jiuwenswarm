@@ -939,7 +939,7 @@ export class BrowserDedicatedMediaSocketLeaf {
     }
   }
 
-  sendLocalPlaybackStop(value: unknown): MediaPlaybackStopReceipt {
+  localPlaybackStopReceipt(value: unknown): MediaPlaybackStopReceipt {
     const receipt = validateBrowserAudioLocalStopReceipt(value);
     const playout = this.binding.playout;
     if (
@@ -957,7 +957,11 @@ export class BrowserDedicatedMediaSocketLeaf {
     if (confirmedThroughSeq !== null && (receivedThroughSeq === null || confirmedThroughSeq > receivedThroughSeq)) {
       throw new TypeError('local playback stop cannot confirm an unreceived media frame');
     }
-    const control = createPlaybackStopReceipt(this.binding, receipt.outcome, confirmedThroughSeq);
+    return createPlaybackStopReceipt(this.binding, receipt.outcome, confirmedThroughSeq);
+  }
+
+  sendLocalPlaybackStop(value: unknown): MediaPlaybackStopReceipt {
+    const control = this.localPlaybackStopReceipt(value);
     if (this.#closed) {
       throw new MediaTransportViolation('MEDIA_STOP_NOT_DELIVERED', 'local playback stop was not delivered because the media leaf is closed');
     }

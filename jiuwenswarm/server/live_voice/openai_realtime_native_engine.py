@@ -157,6 +157,14 @@ class NativeProviderDone:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeGeneratedTranscript:
+    """Generated display text, never proof of presentation or Agent history."""
+    provider_response_id: str
+    response: ResponseRef
+    text: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class NativeEngineEvent:
     action: InteractionAction | None = None
     turn_commit: NativeTurnCommit | None = None
@@ -164,6 +172,7 @@ class NativeEngineEvent:
     audio: NativeAudioOutput | None = field(default=None, repr=False)
     delegate: NativeDelegateProposal | None = field(default=None, repr=False)
     provider_done: NativeProviderDone | None = None
+    generated_transcript: NativeGeneratedTranscript | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +199,7 @@ class _ProviderAudioItem:
     transcript: str | None = None
     transcript_event_id: str | None = None
     transcript_done: bool = False
+    generated_transcript: str = field(default="", repr=False)
     done: bool = False
     audio_buffer: bytearray = field(default_factory=bytearray, repr=False)
     audio_buffer_event_id: str | None = None
@@ -293,6 +303,9 @@ _EVENT_KEYS = {
             "transcript",
         }
     ),
+    "response.output_audio_transcript.delta": frozenset(
+        {"type", "event_id", "response_id", "item_id", "output_index", "content_index", "delta"}
+    ),
     "response.function_call_arguments.done": frozenset(
         {
             "type",
@@ -338,7 +351,6 @@ _HARMLESS_EVENT_TYPES = frozenset(
         "response.content_part.added",
         "response.content_part.done",
         "response.function_call_arguments.delta",
-        "response.output_audio_transcript.delta",
         "response.output_item.added",
         "response.output_item.done",
         "response.text.delta",
@@ -819,7 +831,8 @@ class OpenAIRealtimeNativeInteractionEngine:
             for buffered in self._pending_audio
             if buffered.provider_response_id == provider_id
         ]
-        if len(self._pending_events) + len(releases) > self._event_queue_capacity:
+        generated_pending = any(item.generated_transcript.strip() for item in retained.audio_items.values())
+        if len(self._pending_events) + len(releases) + int(generated_pending) > self._event_queue_capacity:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_ENGINE_EVENT_QUEUE_FULL",
                 "admitted audio exceeds the bounded Native queue",
@@ -832,6 +845,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             else:
                 retained_audio.append(buffered)
         self._pending_audio = retained_audio
+        self._pending_events.extend(self._generated_transcript_events(retained))
         self._state = NativeProviderState.SPEAKING
         return True
 
@@ -1210,6 +1224,8 @@ class OpenAIRealtimeNativeInteractionEngine:
             return self._output_audio_done(event, data)
         if event_type == "response.output_audio_transcript.done":
             return self._output_transcript(event, data)
+        if event_type == "response.output_audio_transcript.delta":
+            return self._output_transcript(event, data, partial=True)
         if event_type == "response.function_call_arguments.done":
             return self._function_done(event, data)
         if event_type == "response.done":
@@ -2066,7 +2082,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         return audio_events
 
     def _output_transcript(
-        self, event: OpenAIRealtimeEvent, data: dict[str, object]
+        self, event: OpenAIRealtimeEvent, data: dict[str, object], *, partial: bool = False
     ) -> list[NativeEngineEvent]:
         response = self._require_response(data["response_id"])
         if response.cancelled:
@@ -2099,14 +2115,21 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_PROVIDER_TRANSCRIPT_CONFLICT",
                 "Provider audio transcript cannot complete twice",
             )
-        transcript = data["transcript"]
+        transcript = data["delta" if partial else "transcript"]
         if type(transcript) is not str:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_PROVIDER_TRANSCRIPT_INVALID",
                 "complete transcript must be canonical text",
             )
-        canonical = transcript.strip().replace("\r\n", "\n").replace("\r", "\n")
+        raw = (audio_item.generated_transcript + transcript) if partial else transcript
+        normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
+        canonical = normalized.strip()
         if not canonical:
+            if partial:
+                if len(normalized.encode("utf-8")) > 65_536:
+                    raise OpenAIRealtimeNativeInteractionError("NATIVE_PROVIDER_TRANSCRIPT_INVALID", "transcript is oversized")
+                audio_item.generated_transcript = normalized
+                return []
             # OpenAI also emits transcript.done for interrupted, incomplete,
             # and cancelled responses.  A semantically empty transcript is
             # absence of optional history text, not a Native session failure.
@@ -2139,15 +2162,29 @@ class OpenAIRealtimeNativeInteractionEngine:
             transcript_bytes = canonical.encode("utf-8")
         except UnicodeEncodeError:
             transcript_bytes = b"x" * 65_537
-        if len(transcript_bytes) > 65_536:
+        total_bytes = sum(len(item.generated_transcript.encode("utf-8"))
+                          for item in response.audio_items.values() if item is not audio_item)
+        total_bytes += max(0, len(response.audio_items) - 1)  # inter-item display newlines
+        if total_bytes + len(normalized.encode("utf-8", errors="replace")) > 65_536 or len(transcript_bytes) > 65_536:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_PROVIDER_TRANSCRIPT_INVALID",
                 "complete transcript is oversized",
             )
-        audio_item.transcript = canonical
-        audio_item.transcript_event_id = event.event_id
-        audio_item.transcript_done = True
-        return []
+        audio_item.generated_transcript = normalized if partial else canonical
+        if not partial:
+            audio_item.transcript = canonical
+            audio_item.transcript_event_id = event.event_id
+            audio_item.transcript_done = True
+        return self._generated_transcript_events(response)
+
+    @staticmethod
+    def _generated_transcript_events(response: _ProviderResponse) -> list[NativeEngineEvent]:
+        text = "\n".join(item.generated_transcript.strip() for _, item in sorted(response.audio_items.items())
+                         if item.generated_transcript.strip())
+        if response.runtime_ref is None or response.cancelled or not text:
+            return []
+        return [NativeEngineEvent(generated_transcript=NativeGeneratedTranscript(
+            response.provider_response_id, response.runtime_ref, text))]
 
     def _function_done(
         self, event: OpenAIRealtimeEvent, data: dict[str, object]

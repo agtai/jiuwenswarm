@@ -3,6 +3,61 @@ import test from 'node:test';
 
 import { useChatStore } from '../node_modules/.cache/chat-store-streaming/chatStore.mjs';
 
+test('Native generated text updates during playback, freezes on interrupt and merges exact heard history', () => {
+  const store = useChatStore.getState(), session = 'native-generated-chat';
+  store.ensureRuntime(session);
+  const responseKey = 'live-voice:interaction:response:1';
+  const message = (content, revision, state = 'generating') => ({ id: `${responseKey}:native-generated`,
+    role: 'assistant', content, timestamp: '2026-09-06T12:00:00.000Z', nativeVoice: { responseKey, revision, state } });
+  const rows = () => useChatStore.getState().getRuntime(session).messages;
+  try {
+    store.addMessageIfAbsent(session, message('Hello', 1));
+    const renderKey = rows()[0].renderKey;
+    store.addMessageIfAbsent(session, message('Hello world', 2));
+    assert.equal(rows().length, 1);
+    assert.equal(rows()[0].content, 'Hello world');
+    assert.equal(rows()[0].renderKey, renderKey);
+    store.addMessageIfAbsent(session, message('Hello world', 3, 'interrupted'));
+    store.addMessageIfAbsent(session, message('late overwrite', 4));
+    store.replaceHistoryMessages(session, []);
+    assert.equal(rows().length, 1);
+    assert.equal(rows()[0].nativeVoice.state, 'interrupted');
+    assert.equal(rows()[0].content, 'Hello world');
+    const heard = { id: `${responseKey}:native-audio:digest`, role: 'assistant', content: 'Hello world', timestamp: message('', 0).timestamp };
+    store.addMessageIfAbsent(session, heard);
+    store.addMessageIfAbsent(session, message('late generated', 5));
+    store.addMessageIfAbsent(session, heard); // late following_assistant replay
+    assert.equal(rows().length, 1);
+    assert.equal(rows()[0].id, heard.id);
+    assert.equal(rows()[0].renderKey, renderKey);
+    assert.equal(rows()[0].nativeVoice, undefined);
+    store.replaceHistoryMessages(session, [heard]);
+    assert.equal(rows().length, 1);
+  } finally { store.removeRuntime(session); }
+});
+
+test('same-session history refresh retains Native turn ordering and previous reply failure', () => {
+  const store = useChatStore.getState(), session = 'native-reconnect-order';
+  store.ensureRuntime(session);
+  const nativeTurnKey = '["interaction","turn"]';
+  const user = { id: 'live-voice:commit:native-user', role: 'user', content: 'Question', timestamp: '2026-09-06T12:00:02Z' };
+  const responseKey = 'live-voice:interaction:response:1';
+  const generated = { id: `${responseKey}:native-generated`, role: 'assistant', content: 'Answer',
+    timestamp: '2026-09-06T12:00:01Z', nativeTurnKey, nativeVoice: { responseKey, revision: 1, state: 'interrupted' } };
+  const failure = { id: 'live-voice-failure:activation:reason:1', role: 'assistant', content: 'Reply failed', timestamp: '2026-09-06T12:00:03Z' };
+  try {
+    store.addMessageIfAbsent(session, generated);
+    store.addMessageIfAbsent(session, { ...user, nativeTurnKey });
+    store.addMessageIfAbsent(session, failure);
+    store.replaceHistoryMessages(session, [user]);
+    const rows = useChatStore.getState().getRuntime(session).messages;
+    assert.equal(rows.length, 3);
+    assert.deepEqual(rows.find(item => item.id === user.id), { ...user, nativeTurnKey, renderKey: rows.find(item => item.id === user.id).renderKey });
+    assert.equal(rows.find(item => item.id === generated.id).nativeTurnKey, nativeTurnKey);
+    assert.ok(rows.some(item => item.id === failure.id));
+  } finally { store.removeRuntime(session); }
+});
+
 test('addMessageIfAbsent projects one stable formal voice message exactly once', () => {
   const sessionId = 'live-voice-formal-message-projection';
   const store = useChatStore.getState();

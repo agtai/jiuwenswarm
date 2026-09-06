@@ -93,6 +93,8 @@ _LOCAL_HANDLER_ONLY_METHODS = frozenset(
         "live_voice.media.activate",
         "live_voice.media.close",
         "live_voice.media.playout_receipt",
+    "live_voice.media.playout_stop",
+    "live_voice.media.native_text",
     }
 )
 _HANDLER_BEFORE_CALLBACK_METHODS = frozenset(

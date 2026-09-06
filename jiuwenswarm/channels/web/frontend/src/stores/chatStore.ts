@@ -31,6 +31,7 @@ import {
 } from './toolResultLifecycle';
 import { mergeFileDownloadItems } from '../utils/fileDownloadDedup';
 import { parseTimestampToMs } from '../utils/timestamp';
+import { nativeVoiceResponseKey } from '../features/live-voice/formal/nativeGeneratedText';
 
 const TOOL_TIMEOUT_MS = 12_000_000;
 const EVOLUTION_STATUS_END_VISIBLE_MS = 3_000;
@@ -350,6 +351,16 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
   addMessageIfAbsent: (sessionId, message) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
+      const voiceKey = nativeVoiceResponseKey(message);
+      const priorVoice = voiceKey === null ? undefined : runtime?.messages.find(item => nativeVoiceResponseKey(item) === voiceKey);
+      if (runtime && priorVoice) {
+        if (message.nativeVoice && (!priorVoice.nativeVoice || priorVoice.nativeVoice.state === 'interrupted' ||
+            priorVoice.nativeVoice.revision >= message.nativeVoice.revision)) return state;
+        if (!message.nativeVoice && !priorVoice.nativeVoice) return state;
+        return { runtimes: { ...state.runtimes, [sessionId]: { ...runtime,
+          messages: runtime.messages.map(item => item === priorVoice ? {
+            ...message, nativeTurnKey: message.nativeTurnKey ?? item.nativeTurnKey, renderKey: item.renderKey } : item) } } };
+      }
       if (!runtime || runtime.messages.some(existing => existing.id === message.id)) {
         return state;
       }
@@ -375,7 +386,18 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
       if (runtime.evolutionStatusClearTimer) {
         clearTimeout(runtime.evolutionStatusClearTimer);
       }
-      const assigned = assignMessageRenderKeys(runtime, messages);
+      // Reconnect history is heard history. Keep generated/interrupted rows in
+      // this page's session, replacing one only with its exact canonical audio row.
+      const historyVoiceKeys = new Set(messages.map(nativeVoiceResponseKey).filter(key => key !== null));
+      const generated = runtime.messages.filter(item => (item.nativeVoice && !historyVoiceKeys.has(item.nativeVoice.responseKey) ||
+        item.id.startsWith('live-voice-failure:')) &&
+        !messages.some(history => history.id === item.id));
+      const existingTurnKeys = new Map(runtime.messages.filter(item => item.nativeTurnKey).map(item => [item.id, item.nativeTurnKey]));
+      const restored = messages.map(item => !item.nativeTurnKey && existingTurnKeys.has(item.id)
+        ? { ...item, nativeTurnKey: existingTurnKeys.get(item.id) } : item);
+      const merged = generated.length === 0 ? restored : [...restored, ...generated].sort((left, right) =>
+        Date.parse(left.timestamp) - Date.parse(right.timestamp));
+      const assigned = assignMessageRenderKeys(runtime, merged);
       return {
         runtimes: {
           ...state.runtimes,

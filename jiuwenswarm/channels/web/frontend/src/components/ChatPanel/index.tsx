@@ -17,6 +17,7 @@ import { ContextCompressionLines } from './MessageItem';
 import { InputArea, type InputAreaHandle } from './InputArea';
 import {
   FormalProductLiveVoiceDemoBar,
+  productVoiceInputAvailableAfterReplyFailure,
   formalProductVoiceActivity,
   LiveVoiceDemoBar,
   type LiveVoiceDemoBarProps,
@@ -1330,7 +1331,8 @@ export function ChatPanel({
   }, [activeSessionId]);
 
   const { status: formalVoiceVisualState, label_key: formalActivityLabel } = formalProductVoiceActivity(productVoiceState);
-  const recoveryDiagnostic = productVoiceState?.recovery_diagnostic ?? null;
+  const inputAvailableAfterReplyFailure = productVoiceInputAvailableAfterReplyFailure(productVoiceState);
+  const recoveryDiagnostic = inputAvailableAfterReplyFailure ? null : productVoiceState?.recovery_diagnostic ?? null;
   const recoveryGeneration = recoveryDiagnostic?.response_generation ?? recoveryDiagnostic?.activation_generation ?? '-';
   const formalStatusLabel = productVoiceState?.replacement_recognition_failed
     ? t('liveVoice.formal.replacementRecognitionFailed')
@@ -1352,7 +1354,7 @@ export function ChatPanel({
         })
     : t(formalActivityLabel);
   const formalVoiceErrorReason =
-    recoveryDiagnostic?.disposition === 'terminal'
+    inputAvailableAfterReplyFailure ? null : recoveryDiagnostic?.disposition === 'terminal'
       ? recoveryDiagnostic.reason
       : productVoiceState?.text_status === 'failed' && productVoiceState.text_reason
       ? productVoiceState.text_reason

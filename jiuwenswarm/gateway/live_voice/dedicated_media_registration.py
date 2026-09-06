@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import hmac
 import io
@@ -160,6 +161,8 @@ from jiuwenswarm.server.live_voice.observability import (
 MEDIA_ACTIVATE_METHOD = "live_voice.media.activate"
 MEDIA_CLOSE_METHOD = "live_voice.media.close"
 MEDIA_PLAYOUT_RECEIPT_METHOD = "live_voice.media.playout_receipt"
+MEDIA_PLAYOUT_STOP_METHOD = "live_voice.media.playout_stop"
+MEDIA_NATIVE_TEXT_METHOD = "live_voice.media.native_text"
 STREAMING_RECOGNITION_RESULT_METHOD = "live_voice.speech.recognize_streaming_result"
 MEDIA_ROUTE_PATH = "/ws/live-voice/media"
 MEDIA_SUBPROTOCOL = "live-voice.media.v1"
@@ -987,6 +990,8 @@ class _NativeMediaSession:
     delegate_proposals: dict[str, NativeEngineEvent] = field(default_factory=dict, repr=False)
     foreground_turn_id: str | None = None
     request_state_sequence: int = 0
+    generated_text_revision: int = 0
+    generated_text: OrderedDict[ResponseRef, dict[str, object]] = field(default_factory=OrderedDict, repr=False)
     next_media_sequence: int = 0
     next_media_sample_cursor: int = 0
     next_input_sequence: int = 0
@@ -1928,8 +1933,14 @@ class DedicatedMediaProductRegistry:
                     event.audio,
                     event.delegate,
                     event.provider_done,
+                    event.generated_transcript,
                 )
             ):
+                continue
+            if event.generated_transcript is not None:
+                # SPEAK admission is ordered above Provider output. Generated
+                # display can then bypass audio delivery without minting an ACK.
+                await self._handle_native_event(session, event)
                 continue
             if event.action is not None and event.action.operation == "STOP":
                 await self._handle_native_event(session, event)
@@ -2113,6 +2124,23 @@ class DedicatedMediaProductRegistry:
     async def _handle_native_event(
         self, session: _NativeMediaSession, event: NativeEngineEvent
     ) -> None:
+        if event.generated_transcript is not None:
+            observation = event.generated_transcript
+            with self._lock:
+                parent = self._records.get(session.record_id)
+                retained = session.generated_text.get(observation.response)
+                if (session.closed or self._native_sessions.get(session.key) is not session
+                    or parent is None or parent.route_completed
+                    or not self._has_retained_product_activation(parent, self._monotonic())
+                    or retained is None or not retained["turn_id"]
+                    or retained["provider_response_id"] != observation.provider_response_id
+                    or retained["state"] != "generating"
+                    or self._native_response_is_barge_fenced(session, observation.response)):
+                    return
+                if retained["text"] != observation.text:
+                    retained["text"] = observation.text
+                    self._revise_native_text(session, retained)
+            return
         client = self._native_runtime_client
         if client is None:
             raise MediaTransportViolation(
@@ -2180,6 +2208,10 @@ class DedicatedMediaProductRegistry:
             await self._allocate_native_downlink(session, event.audio, result)
         elif event.provider_done is not None:
             await self._seal_native_downlink(session, event.provider_done, result)
+            retained = session.generated_text.get(event.provider_done.response)
+            if retained is not None and retained["state"] == "generating":
+                retained["state"] = "generated" if event.provider_done.completed else "interrupted"
+                self._revise_native_text(session, retained)
 
     async def _run_native_delegate_event(self, session: _NativeMediaSession, event: NativeEngineEvent) -> None:
         delegate = event.delegate
@@ -2674,6 +2706,24 @@ class DedicatedMediaProductRegistry:
         await session.engine.admit_response(
             str(result["provider_response_id"]), response
         )
+        with self._lock:
+            parent = self._records.get(session.record_id)
+            if (session.closed or self._native_sessions.get(session.key) is not session
+                or parent is None or parent.route_completed
+                or not self._has_retained_product_activation(parent, self._monotonic())
+                or self._native_response_is_barge_fenced(session, response)):
+                return
+            if response not in session.generated_text:
+                session.generated_text[response] = {
+                    "provider_response_id": str(result["provider_response_id"]),
+                    "turn_id": payload.get("turn_id"),
+                    "response": {"interaction_id": response.interaction_id, "response_id": response.response_id,
+                                 "response_generation": response.response_generation},
+                    "text": "", "state": "generating", "revision": 0,
+                    "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                }
+                while len(session.generated_text) > min(self._capacity, 64):
+                    session.generated_text.popitem(last=False)
 
     async def _allocate_native_downlink(
         self,
@@ -3019,7 +3069,6 @@ class DedicatedMediaProductRegistry:
         if (
             session is None
             or session.closed
-            or record.route_completed
             or not record.ticket_consumed
             or record.native_activation != session.activation
             or parent is None
@@ -3099,6 +3148,10 @@ class DedicatedMediaProductRegistry:
         self, session: _NativeMediaSession, response: ResponseRef
     ) -> None:
         with self._lock:
+            retained = session.generated_text.get(response)
+            if retained is not None and retained["state"] not in {"interrupted", "played"}:
+                retained["state"] = "interrupted"
+                self._revise_native_text(session, retained)
             session.barge_fenced_responses[response] = None
             session.barge_fenced_responses.move_to_end(response)
             while len(session.barge_fenced_responses) > self._capacity:
@@ -6261,7 +6314,10 @@ class DedicatedMediaProductRegistry:
                 record.downlink_content_sha256 = native_source.content_sha256
             record.route_completed = True
             record.downlink_frames = ()
-            self._release_stream_source(record)
+            # Native playback may outlive its download. Retain the bounded
+            # frame-to-Provider cursor map until playback ACK/stop or teardown.
+            if native_source is None:
+                self._release_stream_source(record)
             response = record.downlink_response
             unit_id = record.downlink_unit_id
             content_sha256 = record.downlink_content_sha256
@@ -6321,6 +6377,7 @@ class DedicatedMediaProductRegistry:
                 "content_sha256": content_sha256,
             }
             if record.native_session_key is not None and not complete:
+                self._release_stream_source(record)
                 self._records.pop(record.record_id, None)
                 self._drop_pending_for_record_id(record.record_id)
                 parent.synthesis_content_sha256.pop(key, None)
@@ -6328,6 +6385,127 @@ class DedicatedMediaProductRegistry:
                 record.downlink_overlap_record_id = None
                 record.pcm.clear()
             return complete
+
+    @staticmethod
+    def _revise_native_text(session: _NativeMediaSession, snapshot: dict[str, object]) -> None:
+        session.generated_text_revision += 1
+        snapshot["revision"] = session.generated_text_revision
+        profile_event("native_generated_text", **identity_fields(session.activation.binding),
+                      response_id=snapshot["response"]["response_id"],
+                      response_generation=snapshot["response"]["response_generation"],
+                      status=snapshot["state"], seq=session.generated_text_revision,
+                      output_chars=len(snapshot["text"]))
+
+    def read_native_text(self, *, params: Mapping[str, object], routed_session_id: str,
+                         connection_id: str, request_origin: str | None) -> dict[str, object]:
+        """Authenticated, bounded generated-display snapshots; no presentation effect."""
+        binding_keys = {"session_id", "interaction_id", "correlation_id", "activation_id", "activation_generation"}
+        if set(params) != binding_keys | {"after_revision"}:
+            raise MediaTransportViolation("MEDIA_NATIVE_TEXT_INVALID", "Native text fields are not closed")
+        binding = {key: (_safe_uint(params[key], key) if key == "activation_generation"
+                         else _required_id(params[key], key)) for key in binding_keys}
+        after = _safe_uint(params["after_revision"], "after_revision")
+        with self._lock:
+            now = self._monotonic()
+            authority = self._product_activations.get((binding["session_id"], connection_id, binding["interaction_id"]))
+            session = next((item for item in self._native_sessions.values()
+                            if item.activation.binding.scope.session_id == binding["session_id"]
+                            and all(getattr(item.activation.binding, key) == binding[key]
+                                    for key in binding_keys - {"session_id"})
+                            and item.activation.connection_id == connection_id), None)
+            parent = self._records.get(session.record_id) if session is not None else None
+            if (binding["session_id"] != routed_session_id or authority is None or now > authority.expires_at
+                or authority.correlation_id != binding["correlation_id"]
+                or authority.activation_id != binding["activation_id"]
+                or authority.activation_generation != binding["activation_generation"]
+                or session is None or session.closed or parent is None or parent.route_completed
+                or parent.expected_origin != request_origin or not is_allowed_browser_origin(request_origin)
+                or not self._has_retained_product_activation(parent, now)
+                or after > session.generated_text_revision):
+                raise MediaTransportViolation("MEDIA_NATIVE_TEXT_UNTRUSTED", "Native text requires exact live Web authority")
+            candidates = sorted((item for item in session.generated_text.values() if item["revision"] > after and item["text"]),
+                                key=lambda item: item["revision"])
+            snapshots, snapshot_bytes = [], 0
+            for item in candidates:
+                snapshot = {key: value for key, value in item.items() if key != "provider_response_id"}
+                size = len(canonical_json_bytes(snapshot))
+                if len(snapshots) >= 8 or snapshot_bytes + size > 262_144:
+                    break
+                snapshots.append(snapshot)
+                snapshot_bytes += size
+            revision = snapshots[-1]["revision"] if len(snapshots) < len(candidates) else session.generated_text_revision
+            return {"status": "native_text", "binding": binding, "revision": revision,
+                    "snapshots": copy.deepcopy(snapshots)}
+
+    async def stop_native_playout(
+        self, *, params: Mapping[str, object], routed_session_id: str,
+        connection_id: str, request_origin: str | None,
+    ) -> dict[str, object]:
+        """Receive the existing exact stop receipt over the retained Web control."""
+        if set(params) != {"session_id", "subject_id", "receipt"}:
+            raise MediaTransportViolation("MEDIA_INVALID_CONTROL", "playback stop fields are not closed")
+        session_id = _required_id(params.get("session_id"), "session_id")
+        if session_id != routed_session_id:
+            raise MediaTransportViolation("MEDIA_SESSION_MISMATCH", "playback stop requires the routed session")
+        subject_id = _required_id(params.get("subject_id"), "subject_id")
+        receipt = deserialize_media_control(json.dumps(params.get("receipt")))
+        if not isinstance(receipt, MediaPlaybackStopReceipt):
+            raise MediaTransportViolation("MEDIA_INVALID_CONTROL", "playback stop receipt is required")
+        async with self._native_playout_lock:
+            with self._lock:
+                now = self._monotonic()
+                self._prune(now)
+                parent = self._records.get(self._subjects.get((session_id, subject_id), ""))
+                record = next((item for item in self._records.values()
+                               if item.binding.lease_id == receipt.lease_id), None)
+                if (parent is None or record is None or record is parent
+                    or parent.binding.connection_id != connection_id
+                    or record.binding.connection_id != connection_id
+                    or record.binding.session_id != session_id or record.subject_id != subject_id
+                    or parent.expected_origin != request_origin or record.expected_origin != request_origin
+                    or not is_allowed_browser_origin(request_origin)
+                    or now > parent.authority_expires_at or now > record.authority_expires_at
+                    or not self._has_retained_product_activation(parent, now)
+                    or record.native_activation != parent.native_activation):
+                    raise MediaTransportViolation("MEDIA_STOP_UNTRUSTED", "playback stop has no exact live Web authority")
+                validate_playback_stop_receipt(record.binding, receipt)
+                source = record.downlink_stream_source
+                if (receipt.confirmed_through_seq is not None
+                    and (not isinstance(source, NativeResponseDownlinkSource)
+                         or receipt.confirmed_through_seq >= source.emitted_frames)):
+                    raise MediaTransportViolation("MEDIA_NATIVE_PLAYBACK_CURSOR_INVALID", "playback stop cannot confirm unsent audio")
+                if record.route_completed:
+                    prior = parent.downlink_results.get((record.downlink_response, record.downlink_unit_id))
+                    if (prior is None or prior.get("complete") is not True
+                        or (receipt.confirmed_through_seq is not None
+                            and receipt.confirmed_through_seq > prior["acknowledged_through_seq"])):
+                        raise MediaTransportViolation("MEDIA_STOP_UNTRUSTED", "completed download has no exact received cursor")
+            expected_session = self._native_sessions.get(record.native_session_key)
+            applied = await self.accept_native_playback_stop(record, receipt)
+            with self._lock:
+                session = self._native_sessions.get(record.native_session_key)
+                retained_record = self._records.get(record.record_id)
+                # Closing a streaming source can retire its leaf before the
+                # Provider cancel returns. Its exact live parent still owns it.
+                if (session is None or session is not expected_session or session.closed
+                    or self._records.get(parent.record_id) is not parent
+                    or (retained_record is not None and retained_record is not record)
+                    or not self._has_retained_product_activation(parent, self._monotonic())):
+                    raise MediaTransportViolation("MEDIA_STOP_STALE", "playback stop authority retired during acknowledgement")
+            if record.route_completed:
+                with self._lock:
+                    self._records.pop(record.record_id, None)
+                    self._drop_pending_for_record_id(record.record_id)
+                    key = (record.downlink_response, record.downlink_unit_id)
+                    parent.synthesis_content_sha256.pop(key, None)
+                    parent.downlink_results.pop(key, None)
+                    parent.playout_receipts.pop(key, None)
+                    parent.playout_receipt_content_sha256.pop(key, None)
+                    session = self._native_sessions.get(record.native_session_key)
+                    if session is not None:
+                        session.downlink_record_ids.pop(record.downlink_response, None)
+                    self._release_stream_source(record)
+            return {"status": "native_playout_stopped", "receipt": dict(params["receipt"]), "applied": applied}
 
     def acknowledge_playout(
         self,
@@ -6630,6 +6808,8 @@ class DedicatedMediaProductRegistry:
                     "MEDIA_NATIVE_RUNTIME_UNAVAILABLE",
                     "Native Runtime presentation authority disappeared",
                 )
+            ack_started = self._monotonic()
+            profile_event("native_presentation_ack", **identity_fields(session.activation.binding, response), stage="runtime", outcome="started")
             try:
                 result = await presentation_ack(
                     binding=session.activation.binding,
@@ -6640,10 +6820,15 @@ class DedicatedMediaProductRegistry:
             except (KeyboardInterrupt, SystemExit, GeneratorExit):
                 raise
             except Exception as error:
+                profile_event("native_presentation_ack", **identity_fields(session.activation.binding, response),
+                              stage="runtime", outcome="failed", elapsed_ms=(self._monotonic() - ack_started) * 1000,
+                              error_reason=getattr(error, "reason", "NATIVE_ACK_FAILED"), error_type=type(error).__name__)
                 raise MediaTransportViolation(
                     "MEDIA_NATIVE_PRESENTATION_ACK_REJECTED",
                     "Native Runtime rejected the exact browser presentation ACK",
                 ) from error
+            profile_event("native_presentation_ack", **identity_fields(session.activation.binding, response),
+                          stage="runtime", outcome="complete", elapsed_ms=(self._monotonic() - ack_started) * 1000)
             if (
                 not isinstance(result, Mapping)
                 or result.get("kind") != "presentation_ack"
@@ -6771,6 +6956,10 @@ class DedicatedMediaProductRegistry:
                 self._release_stream_source(downlink)
                 downlink.downlink_overlap_record_id = None
                 downlink.pcm.clear()
+                retained_text = session.generated_text.get(response)
+                if retained_text is not None and retained_text["state"] != "interrupted":
+                    retained_text["state"] = "played"
+                    self._revise_native_text(session, retained_text)
             return projected_receipt
 
     def _drop_pending_for_record_id(self, record_id: str) -> None:
@@ -7074,6 +7263,32 @@ def register_dedicated_media_rpc_handlers(
                 ws, req_id, ok=False, error=str(exc), code=exc.reason_id
             )
 
+    async def playout_stop_handler(ws: Any, req_id: str, params: object,
+                                   session_id: str, user_id: str | None = None) -> None:
+        try:
+            if not isinstance(params, Mapping):
+                raise MediaTransportViolation("MEDIA_INVALID_CONTROL", "playback stop must be an object")
+            payload = await registry.stop_native_playout(
+                params=params, routed_session_id=session_id,
+                connection_id=str(getattr(ws, "_jiuwen_ws_id", "") or id(ws)),
+                request_origin=_request_origin(ws),
+            )
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except Exception as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc),
+                                        code=getattr(exc, "reason_id", getattr(exc, "reason", "MEDIA_STOP_FAILED")))
+
+    async def native_text_handler(ws: Any, req_id: str, params: object,
+                                  session_id: str, user_id: str | None = None) -> None:
+        try:
+            if not isinstance(params, Mapping):
+                raise MediaTransportViolation("MEDIA_NATIVE_TEXT_INVALID", "Native text request must be an object")
+            payload = registry.read_native_text(params=params, routed_session_id=session_id,
+                connection_id=str(getattr(ws, "_jiuwen_ws_id", "") or id(ws)), request_origin=_request_origin(ws))
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except MediaTransportViolation as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code=exc.reason_id)
+
     async def streaming_recognition_result_handler(
         ws: Any,
         req_id: str,
@@ -7103,6 +7318,8 @@ def register_dedicated_media_rpc_handlers(
     channel.register_method(MEDIA_ACTIVATE_METHOD, activation_handler)
     channel.register_method(MEDIA_CLOSE_METHOD, close_handler)
     channel.register_method(MEDIA_PLAYOUT_RECEIPT_METHOD, playout_receipt_handler)
+    channel.register_method(MEDIA_PLAYOUT_STOP_METHOD, playout_stop_handler)
+    channel.register_method(MEDIA_NATIVE_TEXT_METHOD, native_text_handler)
     channel.register_method(
         STREAMING_RECOGNITION_RESULT_METHOD,
         streaming_recognition_result_handler,

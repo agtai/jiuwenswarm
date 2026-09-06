@@ -867,9 +867,9 @@ async def test_one_response_preserves_two_ordered_audio_items() -> None:
         second.audio.pcm16,
     ) == (1, "assistant-item-2", 0, b"\x02\x00" * 480)
     assert await engine.next_event() == NativeEngineEvent()
+    assert (await engine.next_event()).generated_transcript.text == "第一段。"
     assert await engine.next_event() == NativeEngineEvent()
-    assert await engine.next_event() == NativeEngineEvent()
-    assert await engine.next_event() == NativeEngineEvent()
+    assert (await engine.next_event()).generated_transcript.text == "第一段。\n第二段。"
     done = await engine.next_event()
     assert done.provider_done is not None
     assert done.provider_done.transcript == "第一段。 第二段。"
@@ -1512,12 +1512,47 @@ async def test_complete_transcript_keeps_exact_provider_provenance() -> None:
     await engine.next_event()
     await engine.admit_response("provider-response-1", response_ref(1))
     assert (await engine.next_event()).audio is not None
-    assert await engine.next_event() == NativeEngineEvent()
+    assert (await engine.next_event()).generated_transcript.text == "Canonical answer."
     done = await engine.next_event()
 
     assert done.provider_done is not None
     assert done.provider_done.transcript == "Canonical answer."
     assert done.provider_done.transcript_event_id == "event-8"
+    await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("admit_first", [True, False])
+async def test_generated_transcript_preserves_delta_spaces_and_is_fenced_on_interrupt(admit_first: bool) -> None:
+    def delta(event_id: str, text: str) -> dict:
+        result = output_transcript_done(event_id, "provider-response-1", "assistant-item-1", text)
+        result["type"] = "response.output_audio_transcript.delta"
+        result["delta"] = result.pop("transcript")
+        return result
+
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0), speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"), response_created("event-6", "provider-response-1"),
+        delta("event-7", "Hello "), delta("event-8", "world"),
+        output_transcript_done("event-9", "provider-response-1", "assistant-item-1", "Hello world!"),
+    )
+    await engine.start()
+    await accept_basic_turn(engine)
+    await engine.next_event()
+    if admit_first:
+        await engine.admit_response("provider-response-1", response_ref(1))
+        assert (await engine.next_event()).generated_transcript.text == "Hello"
+    else:
+        assert await engine.next_event() == NativeEngineEvent()
+        await engine.admit_response("provider-response-1", response_ref(1))
+        assert (await engine.next_event()).generated_transcript.text == "Hello"
+    observation = await engine.next_event()
+    assert observation.generated_transcript.text == "Hello world"
+    assert observation.audio is None and observation.provider_done is None and observation.action is None
+    assert engine.snapshot().released_audio_count == 0
+    await engine.fence_response(response_ref(1))
+    assert await engine.next_event() == NativeEngineEvent()
+    assert not any(item["type"] == "conversation.item.truncate" for item in socket.sent)
     await engine.close()
 
 
@@ -1577,7 +1612,7 @@ async def test_complete_transcript_canonicalizes_provider_line_breaks_for_audit(
     await engine.admit_response("provider-response-1", response_ref(1))
     assert (await engine.next_event()).audio is not None
 
-    assert await engine.next_event() == NativeEngineEvent()
+    assert (await engine.next_event()).generated_transcript.text == "First paragraph.\nSecond paragraph."
     done = await engine.next_event()
 
     assert done.provider_done is not None

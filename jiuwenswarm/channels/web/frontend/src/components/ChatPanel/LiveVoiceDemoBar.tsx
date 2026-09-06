@@ -16,6 +16,11 @@ export type { LiveVoiceTaskActivity } from '../../features/live-voice/taskPresen
 
 export type LiveVoiceVisualState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'interrupted' | 'recovering' | 'error';
 
+export function productVoiceInputAvailableAfterReplyFailure(state: Readonly<ProductLiveVoiceSurfaceState> | null): boolean {
+  return state?.p1_status === 'capturing' && state.p1_reason === null &&
+    state.recovery_diagnostic?.seam === 'response_generation' && state.recovery_diagnostic.disposition === 'terminal';
+}
+
 export function formalProductVoiceActivity(state: Readonly<ProductLiveVoiceSurfaceState> | null): {
   status: LiveVoiceVisualState; label_key: string;
 } {
@@ -23,7 +28,8 @@ export function formalProductVoiceActivity(state: Readonly<ProductLiveVoiceSurfa
   const diagnostic = state?.recovery_diagnostic;
   const processing = state?.text_status === 'submitting' || state?.text_status === 'waiting';
   const preparingAudio = state?.text_status === 'presented' && state?.p1_status === 'recognized';
-  if (diagnostic) status = diagnostic.disposition === 'retrying' ? 'recovering' : 'error';
+  if (productVoiceInputAvailableAfterReplyFailure(state)) status = processing ? 'thinking' : 'listening';
+  else if (diagnostic) status = diagnostic.disposition === 'retrying' ? 'recovering' : 'error';
   else if (state?.text_status === 'failed') status = 'error';
   else if (state?.p1_status === 'playing') status = 'speaking';
   else if (processing) status = 'thinking';

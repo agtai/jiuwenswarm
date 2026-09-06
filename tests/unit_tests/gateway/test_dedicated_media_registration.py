@@ -2468,8 +2468,10 @@ async def test_native_turn_commit_becomes_exact_media_end_of_turn() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("browser_sample_rate", [24_000, 48_000])
+@pytest.mark.parametrize("completed_download", [False, True, "close_during_cancel"])
 async def test_native_playback_stop_admits_later_item_before_provider_cancel(
     browser_sample_rate: int,
+    completed_download: bool | str,
 ) -> None:
     activation_handle = _native_activation()
     client = _FakeNativeRuntimeClient(activation_handle)
@@ -2535,14 +2537,68 @@ async def test_native_playback_stop_admits_later_item_before_provider_cancel(
     downlink = registry.consume_ticket(_media_ticket(audio), request_origin=ORIGIN)
     assert downlink is not None
 
-    await registry.accept_native_playback_stop(
-        downlink,
-        create_playback_stop_receipt(
+    stop = create_playback_stop_receipt(
             downlink.binding,
             outcome=MediaPlaybackStopOutcome.LOCAL_FENCE_ESTABLISHED,
             confirmed_through_seq=1,
-        ),
     )
+    if completed_download:
+        source = downlink.downlink_stream_source
+        assert source is not None
+        await source.seal(response)
+        assert len([frame async for frame in source]) == 2
+        registry.mark_downlink_started(downlink)
+        assert registry.complete_downlink(downlink, DedicatedMediaSocketLeafResult(
+            activated=True, socket_touched=True, attach_sent=True, accepted_frames=0,
+            close_result=None, reason_id=MediaDetachReason.LOCAL_CLOSE, sent_frames=2,
+            acknowledged_through_seq=1, playback_stop_receipts=0,
+            configured_max_pending_frames=8, configured_max_pending_bytes=131_072,
+            peak_pending_frames=2, peak_pending_bytes=8_000,
+        ))
+        params = {"session_id": "session-1", "subject_id": activated["subject_id"],
+                  "receipt": json.loads(serialize_media_control(stop))}
+        for field, bad in (("connection_id", "foreign"), ("routed_session_id", "foreign"),
+                           ("request_origin", "https://foreign.example")):
+            args = dict(params=params, routed_session_id="session-1", connection_id="connection-1", request_origin=ORIGIN)
+            args[field] = bad
+            with pytest.raises(MediaTransportViolation):
+                await registry.stop_native_playout(**args)
+            assert shared_actions == []
+        invalid = {**params, "receipt": {**params["receipt"], "confirmed_through_seq": 2}}
+        with pytest.raises(MediaTransportViolation):
+            await registry.stop_native_playout(params=invalid, routed_session_id="session-1", connection_id="connection-1", request_origin=ORIGIN)
+        assert shared_actions == []
+        if completed_download == "close_during_cancel":
+            cancel_entered, cancel_release = asyncio.Event(), asyncio.Event()
+            original_cancel = engine.cancel_response
+
+            async def delayed_cancel(cursor):
+                cancel_entered.set()
+                await cancel_release.wait()
+                return await original_cancel(cursor)
+
+            engine.cancel_response = delayed_cancel
+            pending_stop = asyncio.create_task(registry.stop_native_playout(
+                params=params, routed_session_id="session-1",
+                connection_id="connection-1", request_origin=ORIGIN,
+            ))
+            await asyncio.wait_for(cancel_entered.wait(), 1.0)
+            assert await registry.close_native_interaction(uplink)
+            effects_after_close = len(client.proposals)
+            cancel_release.set()
+            with pytest.raises(MediaTransportViolation, match="retired during acknowledgement"):
+                await asyncio.wait_for(pending_stop, 1.0)
+            assert len(client.proposals) == effects_after_close
+            assert engine.presentation_acknowledgements == []
+            assert engine.delegate_results == []
+            assert not registry._native_sessions
+            return
+        result = await registry.stop_native_playout(params=params, routed_session_id="session-1", connection_id="connection-1", request_origin=ORIGIN)
+        assert result == {"status": "native_playout_stopped", "receipt": params["receipt"], "applied": True}
+        assert downlink.record_id not in registry._records
+        assert not next(iter(registry._native_sessions.values())).closed
+    else:
+        await registry.accept_native_playback_stop(downlink, stop)
 
     cursor = NativePresentationCursor(
         response=response,
@@ -2553,6 +2609,72 @@ async def test_native_playback_stop_admits_later_item_before_provider_cancel(
     assert shared_actions == [("runtime", cursor), ("provider", cursor)]
 
     await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
+async def test_native_generated_text_is_live_scoped_and_has_zero_presentation_effects() -> None:
+    from jiuwenswarm.server.live_voice.openai_realtime_native_engine import NativeGeneratedTranscript
+    activation = _native_activation()
+    client, engine = _FakeNativeRuntimeClient(activation), _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=client, native_engine_factory=lambda _: engine)
+    activated = _activate(registry, params=_params(sample_rate_hz=24_000), request_origin=ORIGIN, connection_id="connection-1")
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    await registry.begin_native_interaction(uplink)
+    session = next(iter(registry._native_sessions.values()))
+    params = {"session_id": "session-1", "interaction_id": "interaction-1", "correlation_id": "correlation-1",
+              "activation_id": "activation-1", "activation_generation": 1, "after_revision": 0}
+    args = dict(params=params, routed_session_id="session-1", connection_id="connection-1", request_origin=ORIGIN)
+    response = ResponseRef("interaction-1", "native-response-1", 1)
+    async def deliver(event: NativeEngineEvent) -> None:
+        consumed = asyncio.Event()
+        original = registry._handle_native_event
+        async def observed(owner, item):
+            await original(owner, item)
+            if item is event:
+                consumed.set()
+        registry._handle_native_event = observed
+        try:
+            await engine.events.put(event)
+            await asyncio.wait_for(consumed.wait(), 1.0)
+        finally:
+            registry._handle_native_event = original
+    def generated(text: str, ref=response, provider="provider-response-1") -> NativeEngineEvent:
+        return NativeEngineEvent(generated_transcript=NativeGeneratedTranscript(provider, ref, text))
+    await deliver(generated("unadmitted"))
+    assert registry.read_native_text(**args)["snapshots"] == []
+    assert client.proposals == []
+    await deliver(NativeEngineEvent(action=InteractionAction(
+        action_id="text-speak-1", operation="SPEAK", interaction_id="interaction-1", scope=activation.binding.scope,
+        payload=(("provider_response_id", "provider-response-1"), ("turn_id", "turn-1")))))
+    before = (len(client.proposals), len(client.playback_actions), len(registry._records))
+    await deliver(generated("Hello"))
+    first = registry.read_native_text(**args)
+    assert first["snapshots"][0]["text"] == "Hello"
+    assert first["snapshots"][0]["state"] == "generating"
+    await deliver(generated("Hello world"))
+    second = registry.read_native_text(**{**args, "params": {**params, "after_revision": first["revision"]}})
+    assert second["snapshots"][0]["text"] == "Hello world"
+    assert second["revision"] > first["revision"]
+    second["snapshots"][0]["text"] = "client cannot mutate retained text"
+    for field, value in (("connection_id", "foreign"), ("routed_session_id", "foreign"), ("request_origin", "https://foreign.example")):
+        with pytest.raises(MediaTransportViolation):
+            registry.read_native_text(**{**args, field: value})
+    for field in ("session_id", "interaction_id", "correlation_id", "activation_id", "activation_generation"):
+        with pytest.raises(MediaTransportViolation):
+            registry.read_native_text(**{**args, "params": {**params, field: 2 if field.endswith("generation") else "foreign"}})
+    await deliver(generated("wrong provider", provider="foreign"))
+    await deliver(generated("wrong response", ref=ResponseRef("interaction-1", "foreign", 2)))
+    registry._retain_native_barge_fence(session, response)
+    frozen = registry.read_native_text(**args)
+    assert frozen["snapshots"][0]["state"] == "interrupted"
+    assert frozen["snapshots"][0]["text"] == "Hello world"
+    await deliver(generated("late overwrite"))
+    assert registry.read_native_text(**args) == frozen
+    assert before == (len(client.proposals), len(client.playback_actions), len(registry._records))
+    assert registry.take_native_notification(session_id="session-1", interaction_id="interaction-1", connection_id="connection-1") is None
+    await registry.close_native_interaction(uplink)
+    with pytest.raises(MediaTransportViolation):
+        registry.read_native_text(**args)
 
 
 @pytest.mark.asyncio

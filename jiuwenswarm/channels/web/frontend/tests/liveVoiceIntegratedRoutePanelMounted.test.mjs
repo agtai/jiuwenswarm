@@ -823,7 +823,7 @@ function installP1BrowserEnvironment({
         4_000,
       );
     },
-    async emitDownlinkFrame() {
+    async emitDownlinkFrame(sequence = 0) {
       await waitForMounted(
         () => sockets.some(socket => socket.binding?.direction === 'downlink'),
         `dedicated downlink media route did not attach; sockets=${sockets.map(socket => socket.binding?.direction ?? 'unbound').join(',')}`,
@@ -832,8 +832,8 @@ function installP1BrowserEnvironment({
       const socket = sockets.find(candidate => candidate.binding?.direction === 'downlink');
       socket.onmessage?.({
         data: encodeAudioFrame(socket.binding, {
-          seq: 0,
-          sample_cursor: 0,
+          seq: sequence,
+          sample_cursor: sequence * 960,
           samples: new Float32Array(960).fill(0.125),
         }),
       });
@@ -16141,19 +16141,26 @@ for (const outcome of ['recovered', 'persistent', 'exit']) {
 }
 
 
-test('mounted Native request lifecycle keeps processing and failure truthful and fences obsolete audio', async () => {
+for (const verify of ['task', 'text']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
   const i18n = await createI18n();
   const states = [], messages = [], calls = [], waiters = [];
-  let activeMediaBinding = null, binding = null, renderer;
+  let activeMediaBinding = null, binding = null, renderer, textSnapshot = null;
   const controlRef = { current: null };
-  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding, holdDownlinkDetach: true });
   const activateP2 = createMountedP2ActivationResponder();
-  const request = async (method, params) => {
+  const facts = mountedUnifiedTaskFixture('mounted-native-state-session');
+  const request = async (method, params, options) => {
     calls.push(method);
     if (method === 'live_voice.composition.p2.activate') { binding = { ...params }; return activateP2(params); }
     if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
     if (method === 'live_voice.composition.p2.notification.next') return new Promise(resolve => waiters.push(resolve));
-    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method.startsWith('live_voice.task.')) return facts.read(method, params, options?.requestId);
+    if (method === 'live_voice.composition.p3.progress.activate') return { ok: true, result: mountedProgressActivation(params) };
+    if (method === 'live_voice.composition.p3.progress.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.media.native_text') return { status: 'native_text', binding: {
+      session_id: binding.session_id, correlation_id: binding.correlation_id, interaction_id: binding.interaction_id,
+      activation_id: binding.activation_id, activation_generation: binding.activation_generation,
+    }, revision: textSnapshot?.revision ?? 0, snapshots: textSnapshot && params.after_revision < textSnapshot.revision ? [textSnapshot] : [] };
     if (method === 'live_voice.media.activate') {
       activeMediaBinding = mountedMediaBinding(params, 1);
       return { status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED', subject_id: 'mounted-native-subject',
@@ -16200,6 +16207,12 @@ test('mounted Native request lifecycle keeps processing and failure truthful and
     assert.equal(states.at(-1).text_reason, 'NATIVE_DELEGATE_AGENT_TIMEOUT', JSON.stringify({ states: states.slice(-6).map(s => ({status:s.text_status,reason:s.text_reason,recovery:s.recovery_diagnostic})), calls }));
     assert.equal(states.at(-1).p1_status, 'capturing');
     assert.equal(states.at(-1).recovery_diagnostic.disposition, 'terminal');
+    assert.equal(formalProductVoiceActivity(states.at(-1)).status, 'listening');
+    assert.equal(messages.length, 1);
+    assert.match(messages[0].message.id, /^live-voice-failure:/);
+    await act(async () => { await controlRef.current.start(); });
+    assert.equal(states.at(-1).recovery_diagnostic, null);
+    assert.equal(states.at(-1).p1_status, 'capturing');
     await deliver(notification(3, 'processing'));
     assert.equal(states.at(-1).text_status, 'waiting');
     assert.equal(states.at(-1).recovery_diagnostic, null);
@@ -16214,9 +16227,43 @@ test('mounted Native request lifecycle keeps processing and failure truthful and
     await deliver(audio);
     assert.equal(states.at(-1).text_status, 'acknowledged');
     assert.equal(states.at(-1).p1_status, 'capturing');
-    assert.deepEqual(messages, []);
+    assert.equal(messages.length, 1); // failure remains visible; obsolete audio produced no reply
     assert.equal(calls.filter(method => method === 'live_voice.media.activate').length, 1);
     assert.equal(calls.some(method => /unified.submit|speech.recognize|presentation.ack|task.create|task.cancel/u.test(method)), false);
+    if (verify === 'text') {
+      const response = { interaction_id: binding.interaction_id, response_id: 'live-native-text-response', response_generation: 2 };
+      const unitId = 'live-native-unit';
+      const audioNotice = notification(6, 'processing', { kind: 'native.audio', response,
+        presentation_unit: { response, surface: 'audio', unit_id: unitId, seq: 0, source_start_utf8: 0, source_end_utf8: 480, content_ref: `sha256:${'a'.repeat(64)}` },
+        audio: { format: 'pcm_f32_mono_20ms', sample_rate_hz: 48000, channel_count: 1, frame_count: null,
+          delivery: 'dedicated_media_downlink', endpoint_path: '/ws/live-voice/media', media_ticket: 'D'.repeat(43),
+          subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30000, binding: mountedDownlinkBinding(response, unitId, 2, activeMediaBinding),
+          max_pending_frames: 8, max_pending_bytes: 131072, streaming: true, degradation_reason: null } });
+      delete audioNotice.request_state;
+      await act(async () => { waiters.shift()({ ok: true, result: audioNotice }); });
+      await act(async () => { for (let frame = 0; frame < 14; frame += 1) await browser.emitDownlinkFrame(frame); });
+      await waitForMountedEffects(() => states.at(-1)?.p1_status === 'playing' && browser.counts.sourceStarts > 0, 'Native audio did not start');
+      textSnapshot = { response, turn_id: 'live-turn', text: '这里是可行方案。', state: 'generating', revision: 1, timestamp: new Date().toISOString() };
+      await waitForMountedEffects(() => messages.some(event => event.message.content === textSnapshot.text), 'Generated text blocked behind playing audio');
+      assert.equal(states.at(-1).p1_status, 'playing');
+      assert.equal(calls.some(method => method === 'live_voice.media.playout_receipt'), false);
+      textSnapshot = { ...textSnapshot, state: 'interrupted', revision: 2 };
+      await waitForMountedEffects(() => messages.some(event => event.message.nativeVoice?.state === 'interrupted'), 'Interrupted text not retained');
+      assert.equal(calls.some(method => /unified.submit|speech.recognize|presentation.ack|task.create|task.cancel/u.test(method)), false);
+      return;
+    }
+    facts.visible = true;
+    const association = notification(6, 'processing', { kind: 'native.task_association', response: oldResponse(),
+      task_association: { task_id: facts.task.task_id, turn_commit_id: 'task-commit', provider_call_id: 'task-call' } });
+    delete association.request_state;
+    await deliver({ ...association, activation_id: 'foreign' });
+    assert.equal(states.at(-1).task_experience.tasks.length, 0);
+    await deliver(association);
+    await waitForMountedEffects(() => states.at(-1)?.task_experience.tasks.length === 1,
+      `Native Task absent from recent tasks: ${JSON.stringify({ calls, task: states.at(-1)?.task_experience, state: states.at(-1)?.text_status })}`);
+    assert.equal(states.at(-1).task_experience.selected_task_id, facts.task.task_id);
+    assert.ok(calls.filter(method => method === 'live_voice.task.list').length >= 2);
+
   } finally {
     if (renderer) await act(async () => { renderer.unmount(); await new Promise(resolve => setImmediate(resolve)); });
     browser.restore();

@@ -13,6 +13,7 @@ async def test_audio_diagnostics_allowlist_scalars_without_payload_or_secrets(mo
     monkeypatch.setattr(diagnostics._LOGGER, "info", lambda template, *args: lines.append(template % args))
     diagnostics.record_audio_diagnostic("capture_progress", session_id="session-a", capture_id="capture-a",
         generation=3, queue_frames=5, transcript="PRIVATE_TEXT", pcm=b"PRIVATE_AUDIO",
+        status="processing", reason="NATIVE_RUNTIME_TIMEOUT", seq=4,
         media_ticket="PRIVATE_TICKET", error="PRIVATE_SECRET", received_samples=float("nan"),
         response_id="bad\nPRIVATE_ID")
     diagnostics.record_audio_diagnostic("adapter_receive_failed",
@@ -21,7 +22,8 @@ async def test_audio_diagnostics_allowlist_scalars_without_payload_or_secrets(mo
     await asyncio.to_thread(diagnostics._QUEUE.join)
     record = next(line for line in lines if "live_voice_audio_diagnostic" in line)
     payload = json.loads(record.split(" ", 1)[1])
-    assert payload["fields"] == {"session_id": "session-a", "capture_id": "capture-a", "generation": 3, "queue_frames": 5}
+    assert payload["fields"] == {"session_id": "session-a", "capture_id": "capture-a", "generation": 3, "queue_frames": 5,
+                                  "status": "processing", "reason": "NATIVE_RUNTIME_TIMEOUT", "seq": 4}
     assert "PRIVATE" not in record
     assert payload["monotonic_ms"] > 0 and payload["observed_at"]
     assert "PRIVATE" not in "\n".join(lines)

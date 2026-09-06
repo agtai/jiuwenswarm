@@ -605,6 +605,11 @@ export const MessageItem = memo(function MessageItem({
             )}
             data-testid={!isUser ? 'thinking-panel' : undefined}
           >
+            {message.nativeVoice && (
+              <div className="text-xs text-text-tertiary mb-1" data-testid="native-voice-text-state">
+                {t(`liveVoice.formal.generatedText.${message.nativeVoice.state}`)}
+              </div>
+            )}
             {isStreaming ? (
               isUser ? (
                 <StreamingContent content={displayContent} />

@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-06 (Native foreground repairs verified within their modules; physical acceptance open).
+> Updated: 2026-09-06 (Native rehearsal text, Task UI, stop and ACK repairs verified within their modules; physical acceptance open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -23,6 +23,19 @@ appear through the scoped Registry in the right panel. Old candidate PASS on
 history, not acceptance of this candidate.
 
 ## Current execution packet
+
+### Native rehearsal repair: text, Task UI, stop and recovery
+
+The [Native rehearsal repair](reviews/NATIVE_REHEARSAL_REPAIR_20260906.md) is the
+current packet. It closes the diagnosed Agent-lock/ACK wait, generated text hidden
+until full playback, missing Native Task-list refresh, completed-download stop and
+obsolete response-failure display. Scoped tests, build, real Agent/file-tool work
+and independent review pass; exact results and limits are in the packet.
+Generated/interrupted text survives same-page reconnect, while a full page reload
+restores canonical heard history only. D-118 owns this display-only distinction.
+Use the same controlled Native deployment described below; the actual clean source,
+served assets and real Speech probe are recorded by the local runtime contract.
+This does not close physical headset or full A/B/A2 acceptance.
 
 ### Native foreground repair: controlled startup and physical rehearsal
 

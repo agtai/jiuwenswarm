@@ -166,6 +166,15 @@ export function buildTimelineItems(
     const boundaryIndex = previousMessage ? items.indexOf(previousMessage) + 1 : 0;
     items.splice(boundaryIndex, 0, item);
   }
+  // Native input transcription can arrive after generated speech text. Use the
+  // exact turn identity for display order without changing observed timestamps.
+  for (const user of messageItems) {
+    if (user.type !== 'message' || user.message.role !== 'user' || !user.message.nativeTurnKey) continue;
+    const precedingReplies = items.slice(0, items.indexOf(user)).filter(item => item.type === 'message' &&
+      item.message.role === 'assistant' && item.message.nativeTurnKey === user.message.nativeTurnKey);
+    for (const reply of precedingReplies) items.splice(items.indexOf(reply), 1);
+    items.splice(items.indexOf(user) + 1, 0, ...precedingReplies);
+  }
   return items;
 }
 

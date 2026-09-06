@@ -35,8 +35,10 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NativeInteractionBinding,
 )
 from jiuwenswarm.server.live_voice.native_interaction_runtime import (
+    NativeHistoryAdmission,
     NativeInteractionRuntimeOwner,
 )
+from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import FormalContextSnapshot
 from jiuwenswarm.server.live_voice.product_authority import (
     AuthorityRouteContext,
     AuthorityRoutingClaim,
@@ -1649,3 +1651,57 @@ def test_activation_result_rejects_contradictory_public_construction(factory) ->
     with pytest.raises(ProductP2AdapterViolation) as raised:
         factory()
     assert raised.value.reason == "INVALID_ACTIVATION_RESULT"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_during_delegate", [False, True])
+async def test_native_delegate_does_not_block_history_or_close(close_during_delegate) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+    history_calls = []
+
+    class NativeRuntime(FakeRuntime):
+        async def execute_native_delegate(self, **kwargs):
+            entered.set()
+            await release.wait()
+            return "canonical final"
+
+        async def schedule_native_assistant_history(self, admission, **kwargs):
+            history_calls.append(admission)
+            return True
+
+    runtime = NativeRuntime()
+    activated = await adapter_for(RecordingResolver((candidate(),)), lambda *_: runtime).activate(request())
+    lease = activated.lease
+    assert lease is not None
+    response = ResponseRef("interaction-1", "native-response-1", 1)
+    admission = NativeHistoryAdmission(response, "turn-1", "Already played prompt", "2030-01-01T00:00:00Z")
+    invocation = dict(request_id="delegate-1", source_response=response,
+                      correlation_id="correlation-1", commit=None,
+                      context=FormalContextSnapshot(SCOPE))
+    delegate = asyncio.create_task(lease.execute_native_delegate(lease.binding, **invocation))
+    await asyncio.wait_for(entered.wait(), 1)
+    try:
+        assert await asyncio.wait_for(lease.persist_native_assistant_history(lease.binding, admission), .2)
+        assert history_calls == [admission]
+        foreign = replace(lease.binding, activation_id="foreign-activation")
+        with pytest.raises(ProductP2AdapterViolation, match="exact retained"):
+            await lease.persist_native_assistant_history(foreign, admission)
+        assert history_calls == [admission]
+        assert not delegate.done()
+        if close_during_delegate:
+            closed = await lease.close(lease.binding, timeout_seconds=.2)
+            assert closed.status is P2LeaseCloseStatus.CLOSED
+            with pytest.raises(ProductP2AdapterViolation):
+                await lease.persist_native_assistant_history(lease.binding, admission)
+            assert history_calls == [admission]
+        release.set()
+        if close_during_delegate:
+            with pytest.raises(ProductP2AdapterViolation) as error:
+                await delegate
+            assert error.value.reason == "ACTIVATION_LEASE_NOT_OPEN"
+        else:
+            assert await delegate == "canonical final"
+    finally:
+        release.set()
+        await asyncio.gather(delegate, return_exceptions=True)
+        await lease.close(lease.binding, timeout_seconds=.5)

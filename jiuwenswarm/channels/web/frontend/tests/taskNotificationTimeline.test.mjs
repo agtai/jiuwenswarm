@@ -6,6 +6,18 @@ const { parseHistoryJsonFileToTimelinePreview } = await import(`data:text/javasc
 import { buildTimelineItems, buildRenderItems, completedWorkDurationMs, turnElapsedRangeMs } from '../node_modules/.cache/task-notification-timeline/buildTurnTimeline.mjs';
 
 const at = seconds => new Date(Date.UTC(2026, 8, 3, 18, 17, seconds)).toISOString();
+
+test('late Native user transcription orders its generated replies without changing observed timestamps', () => {
+  const turn = JSON.stringify(['interaction', 'turn']);
+  const preface = { id: 'preface', role: 'assistant', content: 'Checking', timestamp: at(1), nativeTurnKey: turn };
+  const answer = { id: 'answer', role: 'assistant', content: 'Three options', timestamp: at(3), nativeTurnKey: turn };
+  const user = { id: 'user', role: 'user', content: 'Read the project', timestamp: at(4), nativeTurnKey: turn };
+  const foreign = { id: 'other', role: 'assistant', content: 'Other response', timestamp: at(0), nativeTurnKey: '["other","turn"]' };
+  const items = buildTimelineItems([foreign, preface, answer, user], [], []);
+  assert.deepEqual(items.map(item => item.message.id), ['other', 'user', 'preface', 'answer']);
+  assert.equal(items[2].message.timestamp, at(1));
+  assert.equal(items[3].timestampMs, Date.parse(at(3)));
+});
 const msg = (id, role, seconds, content = 'text') => ({ id, role, timestamp: at(seconds), content });
 const notice = (seconds, suffix = 'a') =>
   msg(`live-voice:interaction-1:response-task-progress-${suffix.repeat(40)}:1:text:0:0:digest`, 'assistant', seconds, '后台任务正在执行。');

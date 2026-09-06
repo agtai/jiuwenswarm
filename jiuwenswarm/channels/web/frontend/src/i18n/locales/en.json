@@ -2165,6 +2165,8 @@
       "replacementRecognitionFailed": "The previous answer was interrupted, but the new question could not be recognized. Please say it again.",
       "processingListening": "Processing — you can interrupt",
       "preparingAudio": "Preparing audio playback",
+      "generatedText": {"generating": "Generating voice text", "generated": "Voice text", "interrupted": "Interrupted · generated text", "played": "Played"},
+      "requestFailed": "This reply did not complete ({{reason}}). You can continue speaking or ask the question again.",
       "recoveryFailedWithReason": "Voice recovery failed (phase: {{phase}}, reason: {{reason}})",
       "interruptionDegraded": "Interruption is unavailable for this response; audio is preserved and listening will restart (reason: {{reason}})",
       "recoveryRetryingWithContext": "Recovering ({{seam}}; correlation: {{correlationId}}; generation: {{generation}}; reason: {{reason}})",

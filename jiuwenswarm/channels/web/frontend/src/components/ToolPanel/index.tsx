@@ -234,8 +234,7 @@ export function ToolPanel({
   const backgroundTasks = backgroundEntry && activeSessionId
     ? selectScopedLiveVoiceTasks(backgroundEntry.snapshot, activeSessionId, project?.project_id)
     : [];
-  const recentTasks = backgroundEntry && activeSessionId &&
-    (backgroundTasks.length > 0 || backgroundEntry.snapshot.status === 'failed')
+  const recentTasks = backgroundEntry && activeSessionId
     ? <RecentTasksPanel entry={backgroundEntry} todos={todos} sessionId={activeSessionId} projectId={project?.project_id} />
     : undefined;
   const codeProject = project?.work_mode === 'code' && !project.is_default ? project : null;

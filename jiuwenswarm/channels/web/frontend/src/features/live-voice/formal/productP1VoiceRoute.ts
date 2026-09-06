@@ -140,6 +140,7 @@ type ProductP1Request = (
 ) => Promise<unknown>;
 
 interface PendingProductPlayout {
+  nativeStopping?: boolean;
   readonly response: Readonly<AudioResponseRef>;
   readonly unitId: string;
   readonly chunks: Readonly<BrowserAudioPcmChunk>[];
@@ -342,7 +343,7 @@ function oneUsePrivateText(value: string, field: string): () => string {
 
 function stableFailureReason(error: unknown): string {
   if (error !== null && typeof error === 'object') {
-    for (const field of ['reason', 'reason_id', 'code'] as const) {
+    for (const field of ['reason', 'reason_id', 'reasonId', 'code'] as const) {
       const candidate = (error as Record<string, unknown>)[field];
       if (typeof candidate === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(candidate)) return candidate;
     }
@@ -583,6 +584,7 @@ export class ProductP1VoiceRouteOwner {
   #failureCleanupReason: string | null = null;
   #pendingPlayout: PendingProductPlayout | null = null;
   #settlingPlayout: PendingProductPlayout | null = null;
+  #nativeStoppingRoutes = new Set<ActiveBrowserDedicatedMediaRoute>();
   #captureStartupAudioReady = false;
   #captureStartupFailure: (Error & { readonly reason: string }) | null = null;
   #mediaTerminalFailure: (Error & { readonly reason: string }) | null = null;
@@ -1827,7 +1829,7 @@ export class ProductP1VoiceRouteOwner {
       ...candidate.response,
       candidate_id: candidate.candidate_id,
       callback_current: current,
-      confirmation_window_ms: LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS,
+      confirmation_window_ms: this.#bargeInConfirmationWindowMs(),
     });
     if (!current || this.#tentativeBargeInPause !== null) return false;
     const retained: TentativeBargeInPause = { candidate, confirmationTimer: null, providerConfirmed: false };
@@ -1837,6 +1839,13 @@ export class ProductP1VoiceRouteOwner {
       this.#confirmNearEndCandidate(candidate.response, this.#providerSpeechStartObservedAtMonotonicMs);
     }
     return true;
+  }
+
+  #bargeInConfirmationWindowMs(): number {
+    // Native confirmation traverses the Provider connection. The 300ms Cascade
+    // window expired before the observed 367ms Native confirmation, reviving
+    // buffered speech during a real interruption. False pauses remain bounded.
+    return this.#nativeInteraction === null ? LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS : 1_000;
   }
 
   async #pauseForNearEndCandidate(retained: TentativeBargeInPause): Promise<void> {
@@ -1852,7 +1861,7 @@ export class ProductP1VoiceRouteOwner {
       this.#tentativeBargeInPause = null;
       return;
     }
-    const remainingMs = LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS
+    const remainingMs = this.#bargeInConfirmationWindowMs()
       - (monotonicNowMs() - retained.candidate.observed_at_monotonic_ms);
     if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
       if (retained.providerConfirmed) {
@@ -1862,7 +1871,7 @@ export class ProductP1VoiceRouteOwner {
       this.#diagnose('near_end_candidate_confirmation_expired', {
         ...retained.candidate.response,
         candidate_id: retained.candidate.candidate_id,
-        confirmation_window_ms: LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS,
+        confirmation_window_ms: this.#bargeInConfirmationWindowMs(),
         confirmation_elapsed_ms: monotonicNowMs() - retained.candidate.observed_at_monotonic_ms,
       });
       void this.#rollbackNearEndCandidate(retained);
@@ -1883,7 +1892,7 @@ export class ProductP1VoiceRouteOwner {
     this.#diagnose('near_end_candidate_confirmed_stop_timeout', {
       ...retained.candidate.response,
       candidate_id: retained.candidate.candidate_id,
-      confirmation_window_ms: LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS,
+      confirmation_window_ms: this.#bargeInConfirmationWindowMs(),
     });
     const stopped = this.stopAgentPlayout(retained.candidate.response);
     if (!stopped && this.#tentativeBargeInPause === retained) {
@@ -1937,13 +1946,13 @@ export class ProductP1VoiceRouteOwner {
       return;
     }
     const elapsedMs = providerObservedAtMonotonicMs - retained.candidate.observed_at_monotonic_ms;
-    if (!Number.isFinite(elapsedMs) || Math.abs(elapsedMs) > LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS) {
+    if (!Number.isFinite(elapsedMs) || Math.abs(elapsedMs) > this.#bargeInConfirmationWindowMs()) {
       if (retained.confirmationTimer !== null) clearTimeout(retained.confirmationTimer);
       retained.confirmationTimer = null;
       this.#diagnose('near_end_candidate_confirmation_expired', {
         ...response,
         candidate_id: retained.candidate.candidate_id,
-        confirmation_window_ms: LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS,
+        confirmation_window_ms: this.#bargeInConfirmationWindowMs(),
         confirmation_elapsed_ms: elapsedMs,
       });
       queueMicrotask(() => {
@@ -2014,9 +2023,40 @@ export class ProductP1VoiceRouteOwner {
       );
     }
     if (pending.downlinkRoute !== null && this.#nativeInteraction !== null) {
+      pending.nativeStopping = true;
+      const stoppedLeaf = pending.downlinkRoute.leaf;
+      const stoppedRoute = pending.downlinkRoute;
+      this.#nativeStoppingRoutes.add(stoppedRoute);
       try {
-        pending.downlinkRoute.leaf.sendLocalPlaybackStop(stopReceipt);
+        const receipt = pending.downlinkRoute.leaf.localPlaybackStopReceipt(stopReceipt);
+        // The audio transport normally completes before buffered audio ends.
+        // The authenticated Web control retains the same exact stop contract.
+        void this.#request('live_voice.media.playout_stop', {
+          session_id: pending.receiptAuthority.session_id,
+          subject_id: pending.receiptAuthority.subject_id,
+          receipt,
+        }).then(value => {
+          const result = exactObject(value, ['status', 'receipt', 'applied'], 'native_playout_stop');
+          const returned = objectValue(result.receipt, 'native_playout_stop.receipt');
+          if (result.status !== 'native_playout_stopped' || typeof result.applied !== 'boolean'
+              || Object.keys(returned).length !== Object.keys(receipt).length
+              || Object.entries(receipt).some(([key, field]) => returned[key] !== field)) {
+            throw Object.assign(new Error('Native stop acknowledgement is not exact'), { reason: 'MEDIA_STOP_ACK_INVALID' });
+          }
+          this.#diagnose('native_playout_stop_ack', { ...response, outcome: 'acknowledged' });
+          stoppedLeaf.close('MEDIA_LOCAL_CLOSE');
+          this.#nativeStoppingRoutes.delete(stoppedRoute);
+        }).catch(error => {
+          stoppedLeaf.close('MEDIA_LOCAL_CLOSE');
+          this.#nativeStoppingRoutes.delete(stoppedRoute);
+          this.#diagnose('native_playout_stop_failed', { ...response, reason: stableFailureReason(error) });
+          // The local fence succeeded. A late control failure belongs to this
+          // stopped response and cannot close a replacement request's input.
+          // Actual upstream retirement still follows the media terminal path.
+        });
       } catch (error) {
+        stoppedLeaf.close('MEDIA_LOCAL_CLOSE');
+        this.#nativeStoppingRoutes.delete(stoppedRoute);
         pending.reject(error instanceof Error ? error : new Error('Native playback stop was not delivered'));
         void this.#fail(error);
         return false;
@@ -2033,6 +2073,8 @@ export class ProductP1VoiceRouteOwner {
   }
 
   async close(): Promise<void> {
+    for (const route of this.#nativeStoppingRoutes) route.leaf.close('MEDIA_LOCAL_CLOSE');
+    this.#nativeStoppingRoutes.clear();
     this.#nativeTaskNotification = null;
     if (this.#closed) return;
     if (this.#closePromise !== null) return this.#closePromise;
@@ -2590,6 +2632,10 @@ export class ProductP1VoiceRouteOwner {
   }
 
   #acceptDownlinkFrame(pending: PendingProductPlayout, frame: Readonly<MediaAudioFrame>, provider: Readonly<GatewaySpeechProvider>): void {
+    // The local audio fence is already established. Keep receiving/discarding
+    // exact transport frames until the independent stop control is acknowledged;
+    // a consumer error here would retire its server authority before that RPC.
+    if (pending.nativeStopping) return;
     if (
       this.#failureCleanupPromise !== null ||
       this.#pendingPlayout !== pending ||

@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { recordAudioDiagnostic } from '../../features/live-voice/formal/audioDiagnostics';
+import { parseNativeGeneratedText, type NativeGeneratedMessage } from '../../features/live-voice/formal/nativeGeneratedText';
 import { parseEventEnvelope } from '../../features/live-voice/formal/liveVoiceContractV2';
 import { Activity, RefreshCw, ShieldAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -166,6 +167,8 @@ export type ProductLiveVoiceMessageEvent = Readonly<{
     role: 'user' | 'assistant';
     content: string;
     timestamp: string;
+    nativeVoice?: NativeGeneratedMessage['nativeVoice'];
+    nativeTurnKey?: string;
   }>;
 }>;
 
@@ -839,6 +842,7 @@ export type ProductP2NotificationDisposition =
         role: 'user';
         content: string;
         timestamp: string;
+        nativeTurnKey: string;
       }>;
       readonly following_assistant: readonly Readonly<{
         id: string;
@@ -1680,6 +1684,7 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
         role: 'user',
         content: message.content as string,
         timestamp: timestampDate!.toISOString(),
+        nativeTurnKey: JSON.stringify([notification.interaction_id, binding!.turn_id]),
       }),
       following_assistant: Object.freeze(parsedFollowing),
     };
@@ -1891,6 +1896,7 @@ function DiagnosticsFact({ label, value }: { label: string; value: string }) {
 }
 
 export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePanelProps) {
+  const { t } = useTranslation();
   const productRequest = props.request ?? defaultProductRequest;
   const reactId = useId();
   const fallbackCorrelationId = useMemo(() => `integrated-web-${reactId.replace(/[^A-Za-z0-9_-]/g, '') || 'route'}`, [reactId]);
@@ -1938,6 +1944,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   >('idle');
   const [productTextReason, setProductTextReason] = useState<string | null>(null);
   const nativeRequestStateRef = useRef<{ binding: string; sequence: number } | null>(null);
+  const nativeTextReadRef = useRef<{ owner: ProductWebP2ActivationOwner; voice: ProductP1VoiceRouteOwner;
+    binding: string; revision: number; visible: Set<string> } | null>(null);
   const [replacementRecognitionFailure, setReplacementRecognitionFailure] = useState<{
     session_id: string; loop_generation: number;
   } | null>(null);
@@ -2353,6 +2361,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     });
     recoveryDiagnosticRef.current = diagnostic;
     setRecoveryDiagnostic(diagnostic);
+    if (input.disposition === 'terminal' && input.seam === 'response_generation') {
+      props.onProductVoiceMessage?.({ session_id: sessionId, message: {
+        id: `live-voice-failure:${diagnostic.activation_id}:${diagnostic.response_id ?? diagnostic.reason}:${diagnostic.response_generation ?? nativeRequestStateRef.current?.sequence ?? 0}`,
+        role: 'assistant', content: t('liveVoice.formal.requestFailed', { reason: input.reason }),
+        timestamp: new Date().toISOString(),
+      } });
+    }
   };
   const clearProductRecoveryDiagnostic = (input?: Readonly<{
     seam: ProductLiveVoiceRecoveryDiagnostic['seam'];
@@ -3251,6 +3266,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       nativeTaskDiscoveryRef.current = nativeTaskDiscoveryRef.current.catch(() => undefined).then(async () => {
         if (!isCurrent()) return;
         try {
+          // The list owner reports its own read failure. Voice progress must
+          // still be discoverable when that independent list read fails.
+          await refreshUnifiedTaskProjection({ result: { task_id: disposition.task_id } }, disposition.session_id, isCurrent)
+            .catch(() => undefined);
+          if (!isCurrent()) return;
           await bootstrapCreatedP3ProgressRoute(disposition.task_id, presentationBinding, isCurrent);
         } catch {
           discoveredNativeTasksRef.current.delete(key);
@@ -4171,6 +4191,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             }
             const terminalStatus = productP3TerminalStatus(record);
             if (terminalStatus !== null) {
+              void taskExperienceOwnerRef.current?.refresh(ownedSessionId).catch(() => {});
               if (createdProgressRouteRef.current?.task_id === parsed.task_id) setP3MutationStatus(terminalStatus);
               const fallbackText = fallbackMessage?.message.content ?? null;
               if (fallbackText !== null) {
@@ -5260,6 +5281,51 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
 
   useEffect(() => {
     const owner = activationOwnerRef.current;
+    const voice = p1VoiceOwnerRef.current;
+    const binding = p2Activation.binding;
+    if (!props.isConnected || !voiceLoopEnabledRef.current || p2Activation.status !== 'active' || !binding || !owner ||
+        voice?.interactionEngine() !== 'openai-realtime-native' || !['capturing', 'playing'].includes(p1VoiceStatus)) return;
+    let cancelled = false;
+    const bindingKey = JSON.stringify([binding.session_id, binding.interaction_id, binding.activation_id, binding.activation_generation]);
+    if (nativeTextReadRef.current?.owner !== owner || nativeTextReadRef.current?.voice !== voice ||
+        nativeTextReadRef.current?.binding !== bindingKey) {
+      nativeTextReadRef.current = { owner, voice, binding: bindingKey, revision: 0, visible: new Set() };
+    }
+    const cursor = nativeTextReadRef.current;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const current = () => !cancelled && mountedRef.current && activationOwnerRef.current === owner &&
+      p1VoiceOwnerRef.current === voice && activeSessionRef.current === binding.session_id && voiceLoopEnabledRef.current;
+    const poll = async () => {
+      try {
+        const result = await productRequest('live_voice.media.native_text', {
+          session_id: binding.session_id, interaction_id: binding.interaction_id, correlation_id: binding.correlation_id,
+          activation_id: binding.activation_id, activation_generation: binding.activation_generation, after_revision: cursor.revision,
+        });
+        if (!current()) return;
+        const projection = parseNativeGeneratedText(result, binding, cursor.revision);
+        cursor.revision = projection.revision;
+        for (const message of projection.messages) {
+          props.onProductVoiceMessage?.({ session_id: binding.session_id, message });
+          const first = !cursor.visible.has(message.nativeVoice.responseKey);
+          cursor.visible.add(message.nativeVoice.responseKey);
+          if (cursor.visible.size > 64) cursor.visible.delete(cursor.visible.values().next().value!);
+          recordAudioDiagnostic(first ? 'native_text_first_visible' : 'native_text_updated', {
+            ...binding, response_id: message.nativeVoice.responseId, response_generation: message.nativeVoice.responseGeneration,
+            status: message.nativeVoice.state,
+            seq: message.nativeVoice.revision, output_chars: message.content.length });
+        }
+      } catch (error) {
+        if (current()) recordAudioDiagnostic('native_text_read_failed', { ...binding,
+          reason: stableProductTextReason(error, 'MEDIA_NATIVE_TEXT_READ_FAILED') });
+      }
+      if (current()) timer = setTimeout(() => void poll(), 200);
+    };
+    void poll();
+    return () => { cancelled = true; if (timer !== null) clearTimeout(timer); };
+  }, [props.isConnected, p2Activation, p1VoiceStatus, productRequest]);
+
+  useEffect(() => {
+    const owner = activationOwnerRef.current;
     const binding = p2Activation.binding;
     const journal = p2ActivationJournalRef.current;
     if (
@@ -5883,14 +5949,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
   }, [props.isConnected]);
 
-  const refreshUnifiedTaskProjection = async (value: Readonly<Record<string, unknown>>, sessionId: string): Promise<void> => {
+  const refreshUnifiedTaskProjection = async (value: Readonly<Record<string, unknown>>, sessionId: string, isCurrentActivation: () => boolean = () => true): Promise<void> => {
     const result = value.result;
     const taskId = result !== null && typeof result === 'object' && !Array.isArray(result)
       ? (result as Record<string, unknown>).task_id : undefined;
     if (typeof taskId !== 'string') return;
     const owner = taskExperienceOwnerRef.current;
     const isCurrent = () => owner !== null && taskExperienceOwnerRef.current === owner
-      && activeSessionRef.current === sessionId && isConnectedRef.current;
+      && activeSessionRef.current === sessionId && isConnectedRef.current && isCurrentActivation();
     if (!isCurrent() || owner === null) return;
     await owner.refresh(sessionId);
     if (!isCurrent()) return;
@@ -6808,7 +6874,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               diagnosticBinding.activation_generation === binding.activation_generation;
             if (ownsCurrentDiagnosticBinding) {
               const retiredFailure = recoveryDiagnosticRef.current;
-              if (publishedStatus === 'capturing' && retiredFailure?.seam === 'tts' &&
+              if (publishedStatus === 'capturing' && (retiredFailure?.seam === 'tts' || retiredFailure?.seam === 'response_generation') &&
                   retiredFailure.session_id === binding.session_id &&
                   retiredFailure.correlation_id === binding.correlation_id &&
                   retiredFailure.activation_generation !== null &&
@@ -8650,6 +8716,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   };
 
   const startProductVoiceLoop = async () => {
+    recordAudioDiagnostic('voice_listening_start', {
+      session_id: activeSessionRef.current,
+      status: p1VoiceOwnerRef.current?.status().status ?? 'idle',
+      reason: recoveryDiagnosticRef.current?.reason ?? null,
+    });
+    if (p1VoiceOwnerRef.current?.status().status === 'capturing'
+        && recoveryDiagnosticRef.current?.seam === 'response_generation') {
+      // Input is already available. The failed reply remains in the transcript;
+      // retry acknowledges that failure without replaying its business request.
+      clearProductRecoveryDiagnostic();
+      setProductTextReason(null);
+      setProductTextStatus('idle');
+      return;
+    }
     if (!voiceLoopEnabledRef.current) {
       voiceLoopGenerationRef.current += 1;
       voiceLoopEnabledRef.current = true;
