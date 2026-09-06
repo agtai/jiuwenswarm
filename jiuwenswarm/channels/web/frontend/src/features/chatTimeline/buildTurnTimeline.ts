@@ -154,7 +154,19 @@ export function buildTimelineItems(
     segment,
   }));
 
-  return [...messageItems, ...executionItems, ...reasoningItems].sort(compareTimelineItems);
+  const items = [...messageItems, ...executionItems, ...reasoningItems].sort(compareTimelineItems);
+  // An undated user still separates requests. Keep its source-message position
+  // instead of sorting it behind its answer and charging that answer to an older
+  // request. This supplies ordering only, never a fabricated event timestamp.
+  for (let index = 0; index < messageItems.length; index += 1) {
+    const item = messageItems[index];
+    if (item.type !== 'message' || Number.isFinite(item.timestampMs)) continue;
+    items.splice(items.indexOf(item), 1);
+    const previousMessage = messageItems[index - 1];
+    const boundaryIndex = previousMessage ? items.indexOf(previousMessage) + 1 : 0;
+    items.splice(boundaryIndex, 0, item);
+  }
+  return items;
 }
 
 const IMAGE_TOOL_FALLBACK_NOTICE_PREFIX = 'notice-image_tool_fallback-';
@@ -445,10 +457,6 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
   };
   const flush = (isLastTurn: boolean) => {
     const shouldShow = (isLastTurn && isProcessing) || hasActivity;
-    // 整段没有任何活动（goal 插队时「上一个提问」和「设目标」两条 user 消息紧挨着，中间
-    // 空窗）：不出耗时条，起止时刻也别丢，留给真正承载这段回答的那一轮当起点，否则那一轮
-    // 从首次思考才开始算，耗时显示成 0s。
-    const carryTimestamps = !hasActivity;
     if (shouldShow && Number.isFinite(startMs) && Number.isFinite(endMs)) {
       out.splice(summaryInsertIndex, 0, {
         type: 'turnSummary',
@@ -463,10 +471,11 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       });
       seq += 1;
     }
-    if (!carryTimestamps) {
-      startMs = Number.POSITIVE_INFINITY;
-      endMs = Number.NEGATIVE_INFINITY;
-    }
+    // Each user starts a new timing owner, even if the previous request never
+    // produced activity. A Goal display badge (also restored by text matching)
+    // does not establish that two messages belong to the same request.
+    startMs = Number.POSITIVE_INFINITY;
+    endMs = Number.NEGATIVE_INFINITY;
     workStartMs = Number.POSITIVE_INFINITY;
     workEndMs = Number.NEGATIVE_INFINITY;
     hasActivity = false;

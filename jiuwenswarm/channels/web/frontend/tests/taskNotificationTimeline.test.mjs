@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildTimelineItems, buildRenderItems } from '../node_modules/.cache/task-notification-timeline/buildTurnTimeline.mjs';
+import { build } from 'esbuild';
+const historyBundle = await build({ entryPoints: ['src/features/historyRestore.ts'], bundle: true, platform: 'node', format: 'esm', write: false, define: { 'import.meta.env': '{}' } });
+const { parseHistoryJsonFileToTimelinePreview } = await import(`data:text/javascript;base64,${Buffer.from(historyBundle.outputFiles[0].text).toString('base64')}`);
+import { buildTimelineItems, buildRenderItems, completedWorkDurationMs, turnElapsedRangeMs } from '../node_modules/.cache/task-notification-timeline/buildTurnTimeline.mjs';
 
 const at = seconds => new Date(Date.UTC(2026, 8, 3, 18, 17, seconds)).toISOString();
 const msg = (id, role, seconds, content = 'text') => ({ id, role, timestamp: at(seconds), content });
@@ -63,4 +66,81 @@ test('multiple turns and delayed background completion retain separate foregroun
     ],
   );
   assert.equal(items.at(-1).message.timestamp, at(40));
+});
+
+test('replacement request owns the recorded 12.360 seconds, including single-reply waiting', () => {
+  const input = [
+    { ...msg('old', 'user', 0), timestamp: '1788647997.210' },
+    { ...msg('new', 'user', 0), timestamp: '1788648005.003' },
+    { ...msg('reply', 'assistant', 0), timestamp: '1788648017.363' },
+  ];
+  for (const messages of [input, JSON.parse(JSON.stringify(input))]) {
+    const summaries = render(messages).filter(item => item.type === 'turnSummary');
+    assert.equal(summaries.length, 1);
+    assert.equal(completedWorkDurationMs(summaries[0]), 12360);
+  }
+});
+
+test('consecutive empty requests after cancellation, close or disconnect never carry their clocks', () => {
+  const messages = [msg('cancelled', 'user', 1), notice(4), msg('closed', 'user', 10), msg('latest', 'user', 20)];
+  const waiting = render(messages, true).find(item => item.type === 'turnSummary');
+  assert.equal(waiting.startMs, Date.parse(at(20)));
+  assert.deepEqual(turnElapsedRangeMs(waiting), { startMs: Date.parse(at(20)), endMs: Date.parse(at(20)) });
+  const final = render([...messages, { ...msg('a', 'assistant', 25), completedAt: at(30) }]).at(-1);
+  assert.equal(completedWorkDurationMs(final), 10000);
+});
+
+test('Goal objective badge and same-text ordinary message cannot establish shared timing', () => {
+  for (const isGoalObjectiveMessage of [false, true]) {
+    const goal = { ...msg('goal', 'user', 10, 'same objective'), isGoalObjectiveMessage };
+    const input = [msg('u', 'user', 1, 'same objective'), goal, msg('answer', 'assistant', 15)];
+    const items = render(input);
+    assert.equal(completedWorkDurationMs(items.at(-1)), 5000);
+    assert.equal(items.find(item => item.message?.id === 'goal').message.isGoalObjectiveMessage, isGoalObjectiveMessage);
+  }
+});
+
+test('work on either side of a new user retains its own request and completion span', () => {
+  const messages = [msg('u1', 'user', 1), msg('a1', 'assistant', 5), msg('u2', 'user', 10), msg('a2', 'assistant', 17)];
+  const executions = [{ toolCallId: 't', toolCall: { id: 't', name: 'read_file', arguments: {} }, status: 'completed', startedAt: at(12), updatedAt: at(14) }];
+  const reasoning = [{ id: 'r', content: 'thinking', startedAt: Date.parse(at(2)), closedAt: Date.parse(at(4)), closed: true }];
+  const items = buildRenderItems(buildTimelineItems(messages, executions, reasoning), false, false);
+  assert.deepEqual(items.filter(item => item.type === 'turnSummary').map(completedWorkDurationMs), [4000, 7000]);
+});
+
+test('an undated replacement stays before its answer without borrowing an older clock', () => {
+  for (const timestamp of ['', 'bad', '0']) {
+    const input = [msg('u1', 'user', 1), { ...msg('u2', 'user', 10), timestamp }, msg('a', 'assistant', 15)];
+    const items = render(input);
+    assert.deepEqual(items.filter(item => item.type === 'message').map(item => item.message.id), ['u1', 'u2', 'a']);
+    assert.equal(completedWorkDurationMs(items.at(-1)), 0);
+    assert.equal(render(input.slice(0, 2), true).filter(item => item.type === 'turnSummary').length, 0);
+  }
+});
+
+test('actual history/FileViewer restore preserves dated and undated replacement boundaries', () => {
+  for (const timestamp of [at(10), '', 'bad', '0']) {
+    const records = [msg('old', 'user', 1), { ...msg('new', 'user', 10), timestamp }, msg('answer', 'assistant', 15)];
+    const restored = parseHistoryJsonFileToTimelinePreview(records, 'session');
+    assert.deepEqual(restored.messages.map(message => message.id), records.map(message => message.id));
+    assert.deepEqual(render(restored.messages).filter(item => item.type === 'turnSummary').map(completedWorkDurationMs), [timestamp === at(10) ? 5000 : 0]);
+  }
+});
+
+test('undated user separates subsequent tools and reasoning from an older request', () => {
+  const input = [msg('old', 'user', 1), { ...msg('new', 'user', 10), timestamp: '' }, msg('answer', 'assistant', 15)];
+  const executions = [{ toolCallId: 't', toolCall: { id: 't', name: 'read_file', arguments: {} }, status: 'completed', startedAt: at(12), updatedAt: at(14) }];
+  const reasoning = [{ id: 'r', text: 'thinking', startedAt: Date.parse(at(11)), closedAt: Date.parse(at(12)), closed: true }];
+  const items = buildRenderItems(buildTimelineItems(input, executions, reasoning), false, false);
+  assert.ok(items.filter(item => ['toolGroup', 'reasoning', 'turnSummary'].includes(item.type)).every(item => item.turnId === 2));
+  assert.equal(completedWorkDurationMs(items.at(-1)), 4000); // Known work only; no invented request time.
+});
+
+test('adjacent undated records preserve the replacement boundary in live and restored history', () => {
+  const input = [msg('old', 'user', 1), { ...msg('old-answer', 'assistant', 3), timestamp: '' }, { ...msg('new', 'user', 10), timestamp: '' }, msg('new-answer', 'assistant', 15)];
+  for (const messages of [input, parseHistoryJsonFileToTimelinePreview(input, 'session').messages]) {
+    const items = render(messages);
+    assert.deepEqual(items.filter(item => item.type === 'message').map(item => item.message.id), input.map(message => message.id));
+    assert.deepEqual(items.filter(item => item.type === 'turnSummary').map(completedWorkDurationMs), [0, 0]);
+  }
 });

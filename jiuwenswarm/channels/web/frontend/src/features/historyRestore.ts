@@ -775,9 +775,28 @@ function sinkGoalCompletionCardsToTurnEnd(
   if (!changed) {
     return entries;
   }
-  return out.sort(
-    (a, b) => safeTimestampMs(entryTimestamp(a)) - safeTimestampMs(entryTimestamp(b))
-  );
+  return sortHistoryEntries(out);
+}
+
+function sortHistoryEntries(entries: HistoryTimelineEntry[]): HistoryTimelineEntry[] {
+  // An unknown timestamp is an ordering barrier, not epoch zero. Preserve the
+  // source boundary while sorting each run of known event times independently.
+  const sorted: HistoryTimelineEntry[] = [];
+  let run: HistoryTimelineEntry[] = [];
+  const flush = () => {
+    sorted.push(...run.sort((a, b) => parseTimestampToMs(entryTimestamp(a)) - parseTimestampToMs(entryTimestamp(b))));
+    run = [];
+  };
+  for (const entry of entries) {
+    if (Number.isFinite(parseTimestampToMs(entryTimestamp(entry)))) {
+      run.push(entry);
+    } else {
+      flush();
+      sorted.push(entry);
+    }
+  }
+  flush();
+  return sorted;
 }
 
 /** 将 history 条目折叠成消息/工具/思考，供 restore / page / 文件预览共用。入口统一升序。 */
@@ -785,9 +804,7 @@ function materializeHistoryTimeline(
   rawEntries: HistoryTimelineEntry[]
 ): MaterializedHistoryTimeline {
   // restore 用 unshift 倒序入列；sink / 折叠依赖时间升序，这里统一排一次。
-  const sortedEntries = [...rawEntries].sort(
-    (a, b) => safeTimestampMs(entryTimestamp(a)) - safeTimestampMs(entryTimestamp(b))
-  );
+  const sortedEntries = sortHistoryEntries(rawEntries);
   const entries = sinkGoalCompletionCardsToTurnEnd(sortedEntries);
   const messages: Message[] = [];
   const toolReplay: HistoryToolReplayItem[] = [];
@@ -910,13 +927,6 @@ export function parseHistoryJsonFileToTimelinePreview(
       entries.push({ kind: 'reasoning', at: recordTimestampIso(item) ?? '', text: reasoningText });
     }
   }
-
-  // 文件预览按记录原始顺序；同戳时 sourceIndex 由后续 timeline 排序兜底。
-  entries.sort((a, b) => {
-    const aAt = a.kind === 'message' ? a.message.timestamp : a.at;
-    const bAt = b.kind === 'message' ? b.message.timestamp : b.at;
-    return safeTimestampMs(aAt) - safeTimestampMs(bAt);
-  });
 
   const { messages, toolReplay, reasoningReplay } = materializeHistoryTimeline(entries);
   const executions = buildToolExecutionsFromReplay(toolReplay);
