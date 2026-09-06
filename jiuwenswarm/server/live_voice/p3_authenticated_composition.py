@@ -462,6 +462,8 @@ class NativeP3ActivationAuthority:
     correlation_id: str
     scope: ScopeRef
     context: ResolvedTaskContext = field(repr=False)
+    model_identity: str | None = None
+    model_config_version: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -475,6 +477,16 @@ class NativeP3ActivationAuthority:
             or self.scope != self.context.scope
             or self.scope.subject_id != self.principal.principal_id
             or self.scope.session_id != self.session_id
+            or (self.model_identity is None) != (self.model_config_version is None)
+            or (
+                self.model_identity is not None
+                and (
+                    type(self.model_identity) is not str
+                    or not self.model_identity.strip()
+                    or type(self.model_config_version) is not str
+                    or not self.model_config_version.strip()
+                )
+            )
         ):
             raise FormalTaskViolation(
                 "INVALID_NATIVE_P3_ACTIVATION_AUTHORITY",
@@ -1720,7 +1732,15 @@ class P3AuthenticatedComposition:
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                 )
             collection_model = self._model_resolver.resolve(
-                None,
+                None if native_authority is None else native_authority.model_identity,
+                **(
+                    {}
+                    if native_authority is None or native_authority.model_identity is None
+                    else {
+                        "expected_identity": native_authority.model_identity,
+                        "expected_config_version": native_authority.model_config_version,
+                    }
+                ),
                 instantiate=False,
             )
             reader_arguments["collection_model_binding_fingerprint"] = (
@@ -1766,6 +1786,8 @@ class P3AuthenticatedComposition:
         bearer_token: object,
         session_id: str,
         correlation_id: str,
+        model_identity: str | None = None,
+        model_config_version: str | None = None,
     ) -> NativeP3ActivationAuthority:
         """Authenticate once without retaining the Native activation's bearer."""
 
@@ -1799,6 +1821,8 @@ class P3AuthenticatedComposition:
             correlation_id=correlation_id,
             scope=resolved.scope,
             context=resolved.context,
+            model_identity=model_identity,
+            model_config_version=model_config_version,
         )
 
     def _resolve_native_activation_authority(
@@ -3970,7 +3994,15 @@ class P3AuthenticatedComposition:
                     )
                 current_create_model = await self._run_blocking(
                     self._model_resolver.resolve,
-                    None,
+                    None if native_authority is None else native_authority.model_identity,
+                    **(
+                        {}
+                        if native_authority is None or native_authority.model_identity is None
+                        else {
+                            "expected_identity": native_authority.model_identity,
+                            "expected_config_version": native_authority.model_config_version,
+                        }
+                    ),
                     instantiate=False,
                 )
                 reader_arguments["collection_model_binding_fingerprint"] = (
@@ -4663,9 +4695,23 @@ class P3AuthenticatedComposition:
                         "formal task model resolver is unavailable",
                         ErrorCode.CAPABILITY_UNAVAILABLE,
                     )
+                native_model = (
+                    _native_authority
+                    if _native_authority is not None and _native_authority.model_identity is not None
+                    else None
+                )
                 resolved_model = await self._run_blocking(
                     self._model_resolver.resolve,
-                    clean.get("model_intent"),
+                    clean.get("model_intent")
+                    or (None if native_model is None else native_model.model_identity),
+                    **(
+                        {}
+                        if native_model is None
+                        else {
+                            "expected_identity": native_model.model_identity,
+                            "expected_config_version": native_model.model_config_version,
+                        }
+                    ),
                     instantiate=False,
                 )
             if operation == "task.create":
