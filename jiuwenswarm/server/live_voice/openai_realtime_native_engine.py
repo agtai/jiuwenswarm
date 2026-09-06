@@ -251,6 +251,13 @@ class _DelegateResult:
 
 
 @dataclass(slots=True)
+class _BusinessCallRecord:
+    fingerprint: bytes
+    error_output: str | None = None
+    output_event_id: str | None = None
+
+
+@dataclass(slots=True)
 class _ProviderResponseRequest:
     turn_id: str
     delegate_call_id: str | None
@@ -258,6 +265,7 @@ class _ProviderResponseRequest:
     sent: asyncio.Future[str] | None = field(default=None, repr=False)
     retired: bool = False
     work_event_id: str | None = None
+    business_recovery: bool = False
 
 
 _EVENT_KEYS = {
@@ -720,6 +728,8 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._business_presentation_busy: Callable[[], bool] | None = None
         self._business_accepted_turn: str | None = None
         self._business_rounds: dict[str, int] = {}
+        self._business_call_records: dict[str, _BusinessCallRecord] = {}
+        self._pending_business_errors: deque[str] = deque()
         self._work_events: dict[str, dict[str, object]] = {}
         self._work_seen: dict[str, bytes] = {}
         self._work_stop_pending: set[str] = set()
@@ -936,6 +946,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                 return NativeEngineEvent()
             data = _closed_event(provider_event)
             results = self._map_event(provider_event, data)
+            await self._send_pending_business_errors()
             while self._pending_unpresented_cancels:
                 await self._cancel_unpresented_response(self._pending_unpresented_cancels.popleft())
             self._processed_event_ids.add(provider_event.event_id)
@@ -1053,18 +1064,31 @@ class OpenAIRealtimeNativeInteractionEngine:
             if (not source.business_calls or source.business_successor_requested or not source.done
                     or source.cancelled or source.turn_id != self._current_turn_id
                     or source.turn_id != self._business_accepted_turn
-                    or not all(call in self._delegate_results for call in source.business_calls)):
+                    or not all(call in self._delegate_results or self._business_call_records[call].output_event_id is not None
+                               for call in source.business_calls)):
                 continue
             rounds = self._business_rounds.get(source.turn_id, 0)
             if rounds >= 16:
                 raise OpenAIRealtimeNativeInteractionError("NATIVE_BUSINESS_CHAIN_LIMIT", "Business tool response chain is full")
             source.business_successor_requested = True
             self._business_rounds[source.turn_id] = rounds + 1
+            anchor = next((call for call in source.business_calls if call in self._delegates), None)
             self._response_request_queue.append(_ProviderResponseRequest(
-                turn_id=source.turn_id, delegate_call_id=source.business_calls[0],
+                turn_id=source.turn_id, delegate_call_id=anchor, business_recovery=anchor is None,
                 payload={"response": {"instructions": _BUSINESS_INSTRUCTIONS, "max_output_tokens": 1024,
                                       "tool_choice": "auto"}},
             ))
+
+    async def _send_pending_business_errors(self) -> None:
+        # These are exact local argument errors, never business admission or
+        # execution receipts. They settle Provider calls without minting proposals.
+        while self._pending_business_errors:
+            call_id = self._pending_business_errors.popleft()
+            record = self._business_call_records[call_id]
+            if record.output_event_id is None:
+                record.output_event_id = await self._session.send_event("conversation.item.create", {"item": {
+                    "type": "function_call_output", "call_id": call_id, "output": record.error_output,
+                }})
 
     async def admit_response(
         self, provider_response_id: str, response: ResponseRef
@@ -2092,7 +2116,8 @@ class OpenAIRealtimeNativeInteractionEngine:
             response.turn_id == response_turn_id
             for response in self._responses.values()
         )
-        if prior_turn_response and request.delegate_call_id is None and request.work_event_id is None:
+        if (prior_turn_response and request.delegate_call_id is None and request.work_event_id is None
+                and not request.business_recovery):
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_DIRECT_RESPONSE_ALREADY_CREATED",
                 "one Native turn permits only one direct Provider response",
@@ -2540,10 +2565,20 @@ class OpenAIRealtimeNativeInteractionEngine:
             reason="NATIVE_PROVIDER_ITEM_INVALID",
             field_name="function item id",
         )
-        try:
-            proposal_type = NativeBusinessProposal if self._business_context is not None else NativeDelegateProposal
-            if proposal_type is NativeBusinessProposal and len(response.business_calls) >= 8:
+        business = self._business_context is not None
+        if business:
+            fingerprint = hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=True).encode("ascii")).digest()
+            prior = self._business_call_records.get(call_id)
+            if prior is not None:
+                if prior.fingerprint != fingerprint:
+                    raise OpenAIRealtimeNativeInteractionError("NATIVE_DELEGATE_CALL_CONFLICT", "Provider call id cannot change its meaning")
+                return []
+            if len(response.business_calls) >= 8:
                 raise OpenAIRealtimeNativeInteractionError("NATIVE_BUSINESS_CALL_LIMIT", "A Provider response permits at most eight business calls")
+            if len(self._business_call_records) >= _MAX_ENGINE_CAPACITY:
+                raise OpenAIRealtimeNativeInteractionError("NATIVE_BUSINESS_CALL_LEDGER_FULL", "Business call ledger is full")
+        try:
+            proposal_type = NativeBusinessProposal if business else NativeDelegateProposal
             proposal = proposal_type.from_function_call(
                 binding=self._binding,
                 turn_id=response.turn_id,
@@ -2553,8 +2588,18 @@ class OpenAIRealtimeNativeInteractionEngine:
                 provider_item_id=item_id,
                 arguments=data["arguments"],
             )
-            accepted, retained = self._contract_ledger.accept_delegate(proposal)
         except (NativeInteractionContractViolation, NativeBusinessViolation) as exc:
+            if business:
+                output = json.dumps({"kind": "invalid_business_arguments", "reason": exc.reason,
+                    "recovery": "reread_tool_schema_and_correct_arguments"}, separators=(",", ":"))
+                self._business_call_records[call_id] = _BusinessCallRecord(fingerprint, error_output=output)
+                response.business_calls.append(call_id)
+                self._pending_business_errors.append(call_id)
+                return []
+            raise OpenAIRealtimeNativeInteractionError(exc.reason, str(exc)) from None
+        try:
+            accepted, retained = self._contract_ledger.accept_delegate(proposal)
+        except NativeInteractionContractViolation as exc:
             raise OpenAIRealtimeNativeInteractionError(exc.reason, str(exc)) from None
         existing = self._delegates.get(call_id)
         if existing is not None and existing.proposal != retained:
@@ -2566,6 +2611,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             self._delegates[call_id] = _DelegateWait(retained, response.runtime_ref)
             if isinstance(retained, NativeBusinessProposal):
                 response.business_calls.append(call_id)
+                self._business_call_records[call_id] = _BusinessCallRecord(fingerprint)
             self._delegate_count += 1
         self._state = NativeProviderState.DELEGATE_WAIT
         action = self._action(

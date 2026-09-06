@@ -387,6 +387,173 @@ async def started_business_engine(*events, refresh=None):
     return engine, socket, factory
 
 
+def invalid_business_function(event_id="bad", response_id="p1", call_id="bad-call", *, defect="unused"):
+    event = business_function(event_id, response_id, call_id)
+    arguments = json.loads(event["arguments"])
+    if defect == "unused": arguments["action"]["name"] = "context"
+    elif defect == "missing": arguments["action"].pop("context_id")
+    elif defect == "type": arguments["request_text"] = 123
+    elif defect == "operation": arguments["action"]["operation"] = "invented.operation"
+    event["arguments"] = ("{" if defect == "json" else 42 if defect == "raw_type" else json.dumps(arguments))
+    return event
+
+
+async def admitted_business_engine(*events):
+    engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
+        speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p1"), *events)
+    _, _, commit = await accept_basic_turn(engine)
+    await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+    await engine.next_event()
+    await engine.admit_response("p1", response_ref(1))
+    return engine, socket, commit
+
+
+def function_outputs(socket):
+    return [item["item"] for item in socket.sent
+            if item["type"] == "conversation.item.create" and item["item"]["type"] == "function_call_output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defect", ["unused", "missing", "type", "operation", "json", "raw_type"])
+async def test_business_invalid_arguments_return_exact_error_and_recover_without_proposal(defect):
+    invalid = invalid_business_function(defect=defect)
+    engine, socket, commit = await admitted_business_engine(invalid, invalid, response_done("done", "p1"))
+    try:
+        assert await engine.next_event() == NativeEngineEvent()
+        output = function_outputs(socket)
+        assert len(output) == 1 and output[0]["call_id"] == "bad-call"
+        error = json.loads(output[0]["output"])
+        assert set(error) == {"kind", "reason", "recovery"}
+        assert error["kind"] == "invalid_business_arguments" and error["reason"].startswith("NATIVE_")
+        assert error["recovery"] == "reread_tool_schema_and_correct_arguments"
+        assert engine.snapshot().delegate_count == 0 and engine._delegates == {}
+        assert await engine.next_event() == NativeEngineEvent()  # exact event replay
+        assert function_outputs(socket) == output
+        assert sum(e["type"] == "response.create" for e in socket.sent) == 1
+        await engine.next_event()
+        assert sum(e["type"] == "response.create" for e in socket.sent) == 2
+        socket.push(response_created("recovery", "p2"))
+        speak = await engine.next_event()
+        assert dict(speak.action.payload) == {"provider_response_id": "p2", "turn_id": commit.turn_commit.turn_id}
+        await engine.admit_response("p2", response_ref(2))
+        socket.push(business_function("valid", "p2", "valid-call"))
+        assert (await engine.next_event()).delegate.business.operation == "context.get"
+        assert engine.snapshot().state is not NativeProviderState.FAILED
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid_first", [False, True])
+@pytest.mark.parametrize("done_first", [False, True])
+async def test_business_invalid_mixed_group_waits_all_outputs_and_anchors_first_valid(valid_first, done_first):
+    calls = [invalid_business_function(), business_function("valid", "p1", "valid-call")]
+    if valid_first: calls.reverse()
+    engine, socket, _ = await admitted_business_engine(*calls)
+    try:
+        emitted = [await engine.next_event(), await engine.next_event()]
+        assert sum(item.delegate is not None for item in emitted) == 1
+        if done_first:
+            socket.push(response_done("done", "p1")); await engine.next_event()
+        assert sum(e["type"] == "response.create" for e in socket.sent) == 1
+        await engine.send_delegate_result("valid-call", response_ref(1), '{"actual_receipt":true}')
+        if not done_first:
+            assert sum(e["type"] == "response.create" for e in socket.sent) == 1
+            socket.push(response_done("done", "p1")); await engine.next_event()
+        assert len(function_outputs(socket)) == 2
+        assert sum(e["type"] == "response.create" for e in socket.sent) == 2
+        socket.push(response_created("successor", "p2"))
+        assert dict((await engine.next_event()).action.payload)["provider_call_id"] == "valid-call"
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conflict", ["arguments", "item_id", "response_id", "event_id"])
+async def test_business_invalid_call_identity_conflict_has_zero_second_output(conflict):
+    invalid = invalid_business_function()
+    engine, socket, _ = await admitted_business_engine(invalid)
+    try:
+        await engine.next_event()
+        changed = dict(invalid, event_id="conflict")
+        if conflict == "arguments": changed["arguments"] = "{}"
+        elif conflict == "item_id": changed["item_id"] = "different-item"
+        elif conflict == "response_id":
+            socket.push(response_done("done", "p1")); await engine.next_event()
+            socket.push(response_created("r2", "p2")); await engine.next_event()
+            await engine.admit_response("p2", response_ref(2))
+            changed["response_id"] = "p2"
+        before = tuple(socket.sent)
+        socket.push(changed)
+        with pytest.raises(OpenAIRealtimeNativeInteractionError) as error:
+            await engine.next_event()
+        assert error.value.reason == "NATIVE_DELEGATE_CALL_CONFLICT"
+        assert tuple(socket.sent) == before and engine.snapshot().delegate_count == 0
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("when", ["before_done", "before_created", "created_unadmitted"])
+async def test_business_invalid_recovery_speech_fence_never_revives_old_audio(when):
+    engine, socket, _ = await admitted_business_engine(invalid_business_function())
+    try:
+        await engine.next_event()
+        if when != "before_done":
+            socket.push(response_done("done", "p1")); await engine.next_event()
+        if when == "created_unadmitted":
+            socket.push(response_created("created", "p2")); await engine.next_event()
+        socket.push(speech_started("s2", "u2", 600))
+        event = await engine.next_event()
+        if event.action.operation == "STOP":
+            await engine.stop_foreground(response_ref(1))
+            await engine.next_event()
+        if when == "before_done":
+            socket.push(response_done("done", "p1", status="cancelled")); await engine.next_event()
+            assert sum(e["type"] == "response.create" for e in socket.sent) == 1
+        else:
+            if when == "before_created":
+                socket.push(response_created("created", "p2")); assert await engine.next_event() == NativeEngineEvent()
+            socket.push(output_audio_delta("late", "p2", "obsolete", 0))
+            assert await engine.next_event() == NativeEngineEvent()
+            assert sum(e["type"] == "response.cancel" and e["response_id"] == "p2" for e in socket.sent) == 1
+        assert engine.snapshot().released_audio_count == 0 and engine.snapshot().delegate_count == 0
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_business_invalid_recovery_waits_real_playout_and_enforces_call_and_round_bounds():
+    engine, socket, _ = await admitted_business_engine(output_audio_delta("audio", "p1", "a", 0), invalid_business_function())
+    try:
+        await engine.next_event(); await engine.next_event()
+        socket.push(response_done("done", "p1")); await engine.next_event()
+        assert sum(e["type"] == "response.create" for e in socket.sent) == 1
+        await engine.acknowledge_presentation(response_ref(1))
+        assert sum(e["type"] == "response.create" for e in socket.sent) == 2
+        socket.push(response_created("r2", "p2")); await engine.next_event()
+        await engine.admit_response("p2", response_ref(2))
+        for index in range(8):
+            socket.push(invalid_business_function(f"bad{index}", "p2", f"bad{index}")); await engine.next_event()
+        before = tuple(socket.sent)
+        socket.push(invalid_business_function("ninth", "p2", "ninth"))
+        with pytest.raises(OpenAIRealtimeNativeInteractionError, match="eight"):
+            await engine.next_event()
+        assert tuple(socket.sent) == before
+    finally:
+        await engine.close()
+    engine, socket, commit = await admitted_business_engine(invalid_business_function())
+    try:
+        await engine.next_event()
+        engine._business_rounds[commit.turn_commit.turn_id] = 16
+        before = tuple(socket.sent)
+        socket.push(response_done("done", "p1"))
+        with pytest.raises(OpenAIRealtimeNativeInteractionError) as error: await engine.next_event()
+        assert error.value.reason == "NATIVE_BUSINESS_CHAIN_LIMIT" and tuple(socket.sent) == before
+    finally:
+        await engine.close()
+
+
 @pytest.mark.asyncio
 async def test_business_session_seeds_json_facts_and_only_explicit_tool():
     engine, socket, _ = await started_business_engine()
