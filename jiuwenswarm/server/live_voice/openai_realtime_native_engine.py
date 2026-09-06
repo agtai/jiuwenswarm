@@ -511,10 +511,20 @@ def _closed_event(event: OpenAIRealtimeEvent) -> dict[str, object]:
     accepted_keys = {expected}
     if event.event_type == "conversation.item.input_audio_transcription.completed":
         accepted_keys.add(expected - {"usage"})
+    if event.event_type == "response.output_audio_transcript.delta" and "obfuscation" in data:
+        # Provider stream padding is opaque metadata, not generated text. The
+        # shared session already bounds the full wire message; admit only this
+        # observed optional string and strip it before semantic mapping.
+        if type(data.pop("obfuscation")) is not str:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_PROVIDER_EVENT_NOT_CLOSED",
+                f"Provider {event.event_type} obfuscation must be a string",
+            )
     if frozenset(data) not in accepted_keys:
         raise OpenAIRealtimeNativeInteractionError(
             "NATIVE_PROVIDER_EVENT_NOT_CLOSED",
-            "Provider event fields must match the closed Native mapping",
+            f"Provider {event.event_type} fields must match the closed Native mapping "
+            f"(missing={len(expected - data.keys())}, unexpected={len(data.keys() - expected)})",
         )
     return data
 

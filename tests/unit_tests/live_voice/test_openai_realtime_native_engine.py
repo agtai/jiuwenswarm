@@ -1523,11 +1523,14 @@ async def test_complete_transcript_keeps_exact_provider_provenance() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("admit_first", [True, False])
-async def test_generated_transcript_preserves_delta_spaces_and_is_fenced_on_interrupt(admit_first: bool) -> None:
+@pytest.mark.parametrize("padding", [None, "", "syntheticPadding123"])
+async def test_generated_transcript_preserves_delta_spaces_and_is_fenced_on_interrupt(admit_first: bool, padding: str | None) -> None:
     def delta(event_id: str, text: str) -> dict:
         result = output_transcript_done(event_id, "provider-response-1", "assistant-item-1", text)
         result["type"] = "response.output_audio_transcript.delta"
         result["delta"] = result.pop("transcript")
+        if padding is not None:
+            result["obfuscation"] = padding
         return result
 
     engine, socket, _ = active_engine(
@@ -1553,6 +1556,38 @@ async def test_generated_transcript_preserves_delta_spaces_and_is_fenced_on_inte
     await engine.fence_response(response_ref(1))
     assert await engine.next_event() == NativeEngineEvent()
     assert not any(item["type"] == "conversation.item.truncate" for item in socket.sent)
+    await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("malformation", ["unknown", "missing", "null_padding", "object_padding", "wrong_event"])
+async def test_native_transcript_padding_never_relaxes_closed_event_authority(malformation: str) -> None:
+    event = output_transcript_done("event-3", "provider-response-1", "assistant-item-1", "Private content")
+    event["obfuscation"] = "Private padding"
+    if malformation != "wrong_event":
+        event["type"] = "response.output_audio_transcript.delta"
+        event["delta"] = event.pop("transcript")
+    if malformation == "unknown":
+        event["private_unknown_field"] = "Private extra value"
+    elif malformation == "missing":
+        event.pop("response_id")
+    elif malformation == "null_padding":
+        event["obfuscation"] = None
+    elif malformation == "object_padding":
+        event["obfuscation"] = {"private": "value"}
+    engine, socket, _ = active_engine(event)
+    await engine.start()
+    before = engine.snapshot()
+    sent = len(socket.sent)
+    with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+        await engine.next_event()
+    assert raised.value.reason == "NATIVE_PROVIDER_EVENT_NOT_CLOSED"
+    assert event["type"] in str(raised.value)
+    assert "Private" not in str(raised.value) and "private_unknown_field" not in str(raised.value)
+    after = engine.snapshot()
+    assert after.emitted_event_count == before.emitted_event_count == 0
+    assert after.released_audio_count == after.delegate_count == after.retained_action_count == 0
+    assert len(socket.sent) == sent
     await engine.close()
 
 

@@ -24,6 +24,17 @@ history, not acceptance of this candidate.
 
 ## Current execution packet
 
+### Native transcript metadata compatibility
+
+The current [Native event compatibility repair](reviews/NATIVE_EVENT_SCHEMA_REPAIR_20260906.md)
+fixes the rehearsal's `NATIVE_PROVIDER_EVENT_NOT_CLOSED`: real `gpt-realtime-2`
+transcript deltas include optional `obfuscation` metadata omitted from the prior
+strict mapping. The narrow fix and content-free rejection diagnostics passed
+244 affected checks, independent review and real Provider-to-Engine text/audio
+completion. Model selection, Task and history authority are unchanged. Controlled
+redeployment follows the existing configuration and preservation requirements;
+actual source/readiness is bound by the local runtime contract.
+
 ### Native rehearsal repair: text, Task UI, stop and recovery
 
 The [Native rehearsal repair](reviews/NATIVE_REHEARSAL_REPAIR_20260906.md) is the
@@ -50,7 +61,7 @@ evidence; full Native business-audio and physical acceptance remain open.
 Use the controlled launcher after clean local commits; verify its new runtime
 contract, real Speech probe and live process before rehearsal. Keep NoBrowser so
 startup does not consume retained notifications. Use `openai-realtime-native`
-with `gpt-realtime-2`; preserve the configured GPT-5.6 Agent, registered project,
+with `gpt-realtime-2`; preserve the user's Agent model selection, registered project,
 headset profile and historical results/ACK. No new classifier, Task authority,
 model tuning or broad performance optimization is included. The
 [three earlier Demo repairs](reviews/DEMO_THREE_REPAIRS_20260906.md) retain scoped
