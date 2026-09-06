@@ -353,7 +353,7 @@ def runtime(
     max_requests: int = 256,
     notification_capacity: int = 64,
     bridge: AgentBridgeRuntime | None = None,
-    native_delegate_timeout_seconds: float = 25.0,
+    native_delegate_timeout_seconds: float | None = None,
 ) -> AgentConversationRuntime:
     harness = JiuWenSwarmRoundHarness(
         instance_id="real-harness-1",
@@ -371,7 +371,7 @@ def runtime(
         history_writer=history,
         harness=harness,
         bridge=bridge,
-        native_delegate_timeout_seconds=native_delegate_timeout_seconds,
+        **({} if native_delegate_timeout_seconds is None else {"native_delegate_timeout_seconds": native_delegate_timeout_seconds}),
     )
 
 
@@ -659,7 +659,7 @@ async def _prepare_native_delegate_execution(
     lower: LowerFormalAdapter,
     *,
     suffix: str,
-    native_delegate_timeout_seconds: float = 25.0,
+    native_delegate_timeout_seconds: float | None = None,
 ) -> tuple[
     AgentConversationRuntime,
     NativeInteractionRuntimeOwner,
@@ -948,6 +948,34 @@ async def test_native_delegate_server_deadline_cancels_once_and_closes_bounded()
     await owner.close()
     closed = await asyncio.wait_for(current.close(timeout_seconds=0.2), timeout=0.5)
     assert closed.status is AgentConversationShutdownStatus.CLOSED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("before_start", [False, True])
+async def test_native_foreground_interrupt_cancels_exact_round_without_replay(before_start) -> None:
+    from jiuwenswarm.server.live_voice.native_foreground import NativeForegroundControl
+    lower = LowerFormalAdapter(final="forbidden late result", release=asyncio.Event())
+    current, owner, binding, source, delegated, context = await _prepare_native_delegate_execution(lower, suffix="interrupt")
+    control = NativeForegroundControl(source, {})
+    invocation = dict(request_id="native-interrupted", source_response=source, correlation_id=binding.correlation_id,
+                      commit=delegated, context=context, channel_id="web", allow_tools=True)
+    if before_start:
+        control.interrupt()
+    caller = asyncio.create_task(control.run(current.execute_native_delegate(**invocation)))
+    if not before_start:
+        await asyncio.wait_for(lower.started.wait(), 1)
+        control.interrupt()
+    with pytest.raises(ValueError) as raised:
+        await asyncio.wait_for(caller, 1)
+    assert raised.value.reason == "NATIVE_DELEGATE_INTERRUPTED"
+    with pytest.raises(ValueError):
+        await current.execute_native_delegate(**invocation)
+    assert lower.calls == (0 if before_start else 1)
+    assert current._harness.snapshot().cancel_effects == (0 if before_start else 1)
+    assert current.snapshot().queued_notifications == 0
+    assert current.snapshot().conversation.presentation.records == ()
+    await owner.close()
+    assert (await current.close(timeout_seconds=0.2)).status is AgentConversationShutdownStatus.CLOSED
 
 
 async def prepare(
@@ -5543,3 +5571,24 @@ async def test_harness_capacity_failure_precedes_cr_mutation_and_agent_effect() 
     assert (await current.close(timeout_seconds=1)).status is (
         AgentConversationShutdownStatus.CLOSED
     )
+
+
+@pytest.mark.asyncio
+async def test_native_default_budget_allows_work_past_old_25_second_deadline():
+    release = asyncio.Event()
+    lower = LowerFormalAdapter(final="Long project read completed", release=release)
+    current, owner, binding, source, delegated, context = await _prepare_native_delegate_execution(lower, suffix="long-default")
+    assert current._native_delegate_timeout_seconds == 120.0
+    try:
+        pending = asyncio.create_task(current.execute_native_delegate(request_id="long-default", source_response=source,
+            correlation_id=binding.correlation_id, commit=delegated, context=context, channel_id="web", allow_tools=True))
+        await asyncio.wait_for(lower.started.wait(), 1)
+        await asyncio.sleep(26)
+        assert not pending.done()
+        release.set()
+        assert await asyncio.wait_for(pending, 2) == "Long project read completed"
+        assert lower.calls == 1 and current._harness.snapshot().cancel_effects == 0
+    finally:
+        release.set()
+        await owner.close()
+        await current.close(timeout_seconds=0.2)

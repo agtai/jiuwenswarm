@@ -10,7 +10,8 @@ routes are not selected, replaced, or reclassified by this module.
 
 from __future__ import annotations
 
-from jiuwenswarm.common.live_voice_profiling import profiled
+from jiuwenswarm.common.live_voice_profiling import profiled, identity_fields
+from jiuwenswarm.server.live_voice.native_foreground import NATIVE_FOREGROUND, NativeForegroundControl
 
 import asyncio
 import hashlib
@@ -604,6 +605,7 @@ class _RetainedProductOperation:
     intent_turn_id: str | None = None
     intent_commit_id: str | None = None
     intent_production: bool = False
+    native_control: NativeForegroundControl | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1124,6 +1126,7 @@ class AgentServerProductCompositionRegistry:
             str, _RetainedProductOperation
         ] = {}
         self._native_delegate_operations: dict[str, _RetainedProductOperation] = {}
+        self._native_interrupted_sources: set[tuple[str, int, str, str, int]] = set()
         self._native_propose_operations: dict[str, _NativeProductOperation] = {}
         self._native_ack_operations: dict[str, _RetainedProductOperation] = {}
         self._native_close_pending_operations: dict[str, _RetainedProductOperation] = {}
@@ -5454,10 +5457,46 @@ class AgentServerProductCompositionRegistry:
             assert proposal is not None
             action_intent = None
             try:
+                if proposal.action is not None and proposal.action.operation == "STOP":
+                    stop_payload = dict(proposal.action.payload)
+                    generation = stop_payload.get("response_generation")
+                    if (any(value is not None for value in (proposal.turn_commit, proposal.input_transcript,
+                            proposal.delegate, proposal.audio_observation, proposal.provider_done))
+                        or set(stop_payload) != {"provider_response_id", "runtime_response_id", "response_generation"}
+                        or not isinstance(generation, str) or not generation.isascii() or not generation.isdecimal()
+                        or generation.startswith("0")):
+                        raise NativeInteractionRuntimeError("NATIVE_STOP_PROPOSAL_INVALID", "STOP must contain only its exact response target")
+                    _required_text(stop_payload.get("provider_response_id"), "provider_response_id")
+                    _required_text(stop_payload.get("runtime_response_id"), "runtime_response_id")
                 if proposal.action is not None:
-                    action_intent = route.activation_lease.propose_action(
-                        route.binding, proposal.action
-                    )
+                    if proposal.action.operation == "STOP":
+                        stop_payload = dict(proposal.action.payload)
+                        stop_ref = ResponseRef(
+                            binding.interaction_id,
+                            _required_text(stop_payload.get("runtime_response_id"), "runtime_response_id"),
+                            int(stop_payload.get("response_generation", "-1")),
+                        )
+                        source_ref = owner.delegate_source_response(stop_ref) or stop_ref
+                        if source_ref != owner.snapshot().current_response and stop_ref != owner.snapshot().current_response and not any(
+                            operation.p2_binding == route.binding and operation.native_control is not None
+                            and operation.native_control.source_response == source_ref
+                            for operation in self._native_delegate_operations.values()
+                        ):
+                            raise NativeInteractionRuntimeError("NATIVE_STOP_RESPONSE_STALE", "STOP requires an exact known foreground response")
+                        source_key = (binding.activation_id, binding.activation_generation,
+                                      routed_session, source_ref.response_id, source_ref.response_generation)
+                        if source_key not in self._native_interrupted_sources and len(self._native_interrupted_sources) >= self._PRODUCT_OPERATION_CAPACITY:
+                            raise NativeInteractionRuntimeError("NATIVE_INTERRUPT_CAPACITY_EXCEEDED", "Native interrupt ledger full")
+                        action_intent = route.activation_lease.propose_action(route.binding, proposal.action)
+                        await owner.interrupt_delegate_source(action_id=proposal.action.action_id, response=stop_ref)
+                        self._native_interrupted_sources.add(source_key)
+                        for operation in self._native_delegate_operations.values():
+                            control = operation.native_control
+                            if (operation.p2_binding == route.binding and control is not None
+                                and control.source_response == source_ref):
+                                control.interrupt()
+                    else:
+                        action_intent = route.activation_lease.propose_action(route.binding, proposal.action)
                 if proposal.turn_commit is not None:
                     if (
                         proposal.action is None
@@ -5770,8 +5809,15 @@ class AgentServerProductCompositionRegistry:
                 native_p3_authority = route.native_p3_authority
                 assert owner is not None
                 assert native_p3_authority is not None
+                source = owner.snapshot().current_response
+                if source is None or source.response_generation != proposal.delegate.response_generation:
+                    return _error_result(request_id, reason="NATIVE_DELEGATE_SOURCE_STALE", code=ErrorCode.STALE)
+                if (binding.activation_id, binding.activation_generation, routed_session,
+                    source.response_id, source.response_generation) in self._native_interrupted_sources:
+                    return _error_result(request_id, reason="NATIVE_DELEGATE_INTERRUPTED", code=ErrorCode.CANCELLED)
+                control = NativeForegroundControl(source, identity_fields(binding, source, {"request_id": request_id}))
                 task = asyncio.create_task(
-                    self._run_native_delegate_propose(
+                    control.run(self._run_native_delegate_propose(
                         binding=binding,
                         fingerprint=fingerprint,
                         native_p3_authority=native_p3_authority,
@@ -5780,13 +5826,14 @@ class AgentServerProductCompositionRegistry:
                         request_id=request_id,
                         retained_route=route,
                         routed_session=routed_session,
-                    ),
+                    )),
                     name=f"live-voice-native-delegate:{parsed_request_id}",
                 )
                 retained = _RetainedProductOperation(
                     fingerprint_bytes,
                     task,
                     p2_binding=route.binding,
+                    native_control=control,
                 )
                 self._native_delegate_operations[parsed_request_id] = retained
         return await asyncio.shield(retained.task)
@@ -5804,7 +5851,26 @@ class AgentServerProductCompositionRegistry:
         routed_session: str,
     ) -> P3RouteResult:
         delegate = proposal.delegate
+        foreground = NATIVE_FOREGROUND.get()
+        delegate_admission = None
+
+        def task_settlement(reason: str) -> P3RouteResult | None:
+            if foreground is None or foreground.business_task_id is None or delegate_admission is None:
+                return None
+            ref = delegate_admission.source_response
+            return _success_result(request_id, {
+                "kind": "delegate", "status": "interrupted" if reason == "NATIVE_DELEGATE_INTERRUPTED" else "failed",
+                "accepted": True, "provider_call_id": delegate.provider_call_id,
+                "route": "task", "turn_commit_id": delegate_admission.turn_commit.commit_id,
+                "task_id": foreground.business_task_id, "reason": reason,
+                "response": {"interaction_id": ref.interaction_id, "response_id": ref.response_id,
+                             "response_generation": ref.response_generation},
+            }, retained_route.manifest)
+
         try:
+            if foreground is not None:
+                foreground.check()
+                foreground.observe("delegate_started", outcome="started")
             if (
                 delegate is None
                 or proposal.action is None
@@ -5917,7 +5983,11 @@ class AgentServerProductCompositionRegistry:
                                 voice_identity_sha256=voice_identity,
                                 fingerprint=input_fingerprint,
                             )
-                    outcome = await work
+                    try:
+                        outcome = await work
+                    except Exception as error:
+                        outcome = _error_result(request_id, reason=getattr(error, "reason", "NATIVE_DELEGATE_FAILED"),
+                                                code=getattr(error, "code", ErrorCode.UNAVAILABLE))
                     payload = await asyncio.to_thread(
                         journal.complete,
                         voice_identity_sha256=voice_identity,
@@ -5929,6 +5999,13 @@ class AgentServerProductCompositionRegistry:
                     if not work.done():
                         work.cancel()
                         await asyncio.gather(work, return_exceptions=True)
+            if payload.get("ok") is False:
+                error = payload.get("error", {})
+                reason = error.get("reason", "NATIVE_DELEGATE_FAILED")
+                settlement = task_settlement(reason)
+                if settlement is not None:
+                    return settlement
+                return P3RouteResult(False, {**payload, "request_id": request_id})
             result_data = payload.get("result") if payload.get("ok") else None
             if (
                 not isinstance(result_data, Mapping)
@@ -5946,6 +6023,8 @@ class AgentServerProductCompositionRegistry:
                 else UnifiedCommittedInputRoute.TASK
             )
             canonical_text = self._native_delegate_speech_text(canonical_text)
+            if foreground is not None:
+                foreground.check()
             delegate_result = await owner.accept_delegate_result(
                 delegate_admission,
                 canonical_text=canonical_text,
@@ -5985,8 +6064,13 @@ class AgentServerProductCompositionRegistry:
                     "response_generation": delegate_result.response.response_generation,
                 },
             }
+            if foreground is not None:
+                foreground.observe("delegate_completed", outcome="complete")
             return _success_result(request_id, result_payload, retained_route.manifest)
         except (FormalTaskViolation, NativeInteractionRuntimeError) as exc:
+            settlement = task_settlement(exc.reason)
+            if settlement is not None:
+                return settlement
             return _error_result(
                 request_id,
                 reason=exc.reason,
@@ -5995,6 +6079,9 @@ class AgentServerProductCompositionRegistry:
                 manifest=retained_route.manifest,
             )
         except Exception as exc:
+            settlement = task_settlement(getattr(exc, "reason", "NATIVE_DELEGATE_FAILED"))
+            if settlement is not None:
+                return settlement
             return _error_result(
                 request_id,
                 reason=getattr(exc, "reason", "NATIVE_RUNTIME_REJECTED"),
@@ -6490,6 +6577,9 @@ class AgentServerProductCompositionRegistry:
                 owner = route.native_runtime_owner
                 assert owner is not None
                 route.native_closed = True
+                for operation in self._native_delegate_operations.values():
+                    if operation.p2_binding == route.binding and operation.native_control is not None:
+                        operation.native_control.interrupt()
                 task = asyncio.create_task(
                     self._run_native_close(
                         fingerprint=fingerprint,
@@ -6565,6 +6655,10 @@ class AgentServerProductCompositionRegistry:
             )
             if route is retained_route and route.native_runtime_owner is owner:
                 if result.ok:
+                    self._native_interrupted_sources = {
+                        key for key in self._native_interrupted_sources
+                        if key[:3] != (route.binding.activation_id, route.binding.activation_generation, route.binding.session_id)
+                    }
                     route.native_runtime_owner = None
                     route.native_capability = None
                     route.native_close_retry = None
@@ -8287,12 +8381,19 @@ class AgentServerProductCompositionRegistry:
                 ErrorCode.UNAVAILABLE,
             )
         if semantic_binding is None:
-            decision = await self._resolve_semantic_input(
+            semantic_work = self._resolve_semantic_input(
                 commit=commit,
                 auth_token=auth_token,
                 session_id=retained.binding.session_id,
                 native_authority=native_p3_authority,
             )
+            foreground = NATIVE_FOREGROUND.get() if native_result_only else None
+            if foreground is None:
+                decision = await semantic_work
+            else:
+                foreground.observe("semantic_started", outcome="started")
+                decision = await foreground.read_only(semantic_work)
+                foreground.observe("semantic_completed", outcome="complete")
             await asyncio.to_thread(
                 journal.bind_semantic,
                 voice_identity_sha256=voice_identity,
@@ -8303,6 +8404,9 @@ class AgentServerProductCompositionRegistry:
             decision = TaskSemanticDecision.from_frozen_record(
                 semantic_binding, commit=commit
             )
+        foreground = NATIVE_FOREGROUND.get() if native_result_only else None
+        if foreground is not None:
+            foreground.check()
         recovered = await asyncio.to_thread(
             journal.read_foreground_effect,
             voice_identity_sha256=voice_identity,
@@ -8375,6 +8479,9 @@ class AgentServerProductCompositionRegistry:
         if decision.route == "clarification":
             return await finish_text(str(decision.message))
         if decision.route == "task":
+            if foreground is not None:
+                foreground.check()
+                foreground.observe("task_dispatch_started", outcome="started")
             if self._commit_ledger.accept(commit) is not True:
                 raise FormalTaskViolation(
                     "TURN_COMMIT_ALREADY_SUBMITTED",
@@ -8417,6 +8524,19 @@ class AgentServerProductCompositionRegistry:
             task_id = payload.get("task_id")
             if type(task_id) is str:
                 business_task_id = task_id
+                if foreground is not None and formal.ok:
+                    foreground.business_task_id = task_id
+                    # Task ownership must survive interruption of its spoken
+                    # acknowledgement, even before a successor response exists.
+                    async with self._lock:
+                        if task_id not in self._voice_task_origins and len(self._voice_task_origins) >= self._PRODUCT_OPERATION_CAPACITY:
+                            raise FormalTaskViolation("VOICE_TASK_DISCOVERY_CAPACITY", "voice Task origin capacity exceeded", ErrorCode.UNAVAILABLE)
+                        self._voice_task_origins[task_id] = _VoiceTaskOrigin(
+                            session_id=retained.binding.session_id, interaction_id=retained.binding.interaction_id,
+                            activation_id=retained.binding.activation_id, activation_generation=retained.binding.activation_generation,
+                            correlation_id=retained.binding.correlation_id, response_ref=None,
+                        )
+                    foreground.observe("task_dispatch_completed", outcome="complete", task_id=task_id)
             receipt = {
                 "ok": formal.ok,
                 "operation": payload.get("operation", decision.proposal.operation),
@@ -8656,6 +8776,8 @@ class AgentServerProductCompositionRegistry:
             await speculation.discard("context_changed")
             speculation = None
         if native_result_only:
+            if foreground is not None:
+                foreground.check()
             text = await retained.activation_lease.execute_native_delegate(
                 retained.binding,
                 request_id=f"native-semantic-agent-{voice_identity[:40]}",

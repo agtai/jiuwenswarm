@@ -846,6 +846,14 @@ export type ProductP2NotificationDisposition =
         content: string;
         timestamp: string;
       }>[];
+    }
+  | {
+      readonly kind: 'native_request_state';
+      readonly response: Readonly<{ interaction_id: string; response_id: string; response_generation: number }> | null;
+      readonly session_id: string; readonly correlation_id: string; readonly interaction_id: string;
+      readonly activation_id: string; readonly activation_generation: number;
+      readonly turn_id: string; readonly sequence: number;
+      readonly phase: 'processing' | 'interrupted' | 'failed'; readonly reason: string | null;
     };
 
 type PendingForegroundPresentationFence = Readonly<{
@@ -1489,6 +1497,30 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
           response_generation: response.response_generation as number,
         })
       : null;
+  if (notification.kind === 'native.request_state') {
+    const state = recordValue(notification.request_state);
+    const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 256 && value.trim() === value && !/[\u0000-\u001f\u007f]/u.test(value);
+    if (!hasExactFields(notification, ['status', 'kind', 'request_id', 'round_id', 'response', 'request_state',
+      'agent_event', 'source_event', 'progress_event', 'presentation_unit', 'audio', 'error_reason', 'publish_seq',
+      'session_id', 'correlation_id', 'interaction_id', 'activation_id', 'activation_generation', 'sequence_effect']) ||
+      notification.status !== 'notification' || notification.sequence_effect !== 'neutral' ||
+      !validId(notification.request_id) || !validId(notification.session_id) || !validId(notification.correlation_id) ||
+      !validId(notification.interaction_id) || !validId(notification.activation_id) ||
+      !Number.isSafeInteger(notification.activation_generation) || (notification.activation_generation as number) <= 0 ||
+      state === null || !hasExactFields(state, ['turn_id', 'sequence', 'phase', 'reason']) || !validId(state.turn_id) ||
+      !Number.isSafeInteger(state.sequence) || (state.sequence as number) <= 0 ||
+      !['processing', 'interrupted', 'failed'].includes(String(state.phase)) ||
+      (state.phase === 'failed' ? typeof state.reason !== 'string' || !/^[A-Z][A-Z0-9_]{1,119}$/u.test(state.reason) : state.reason !== null) ||
+      (state.phase === 'interrupted' ? (response === null || !hasExactFields(response, ['interaction_id', 'response_id', 'response_generation']) ||
+        responseBinding === null || responseBinding.interaction_id !== notification.interaction_id || !validId(responseBinding.response_id) || responseBinding.response_generation < 1) : notification.response !== null) ||
+      ['round_id', 'agent_event', 'source_event', 'progress_event', 'presentation_unit', 'audio', 'error_reason', 'publish_seq'].some(key => notification[key] !== null)) {
+      return { kind: 'failed', reason: 'PRODUCT_NATIVE_REQUEST_STATE_INVALID' };
+    }
+    return { kind: 'native_request_state', response: responseBinding, session_id: notification.session_id, correlation_id: notification.correlation_id,
+      interaction_id: notification.interaction_id, activation_id: notification.activation_id,
+      activation_generation: notification.activation_generation as number, turn_id: state.turn_id,
+      sequence: state.sequence as number, phase: state.phase as 'processing' | 'interrupted' | 'failed', reason: state.reason as string | null };
+  }
   if (notification.kind === 'native.task_association') {
     const association = recordValue(notification.task_association);
     const validId = (value: unknown): value is string => typeof value === 'string' && value.trim() === value && value.length > 0 &&
@@ -1905,6 +1937,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     'idle' | 'submitting' | 'waiting' | 'presented' | 'acknowledged' | 'failed'
   >('idle');
   const [productTextReason, setProductTextReason] = useState<string | null>(null);
+  const nativeRequestStateRef = useRef<{ binding: string; sequence: number } | null>(null);
   const [replacementRecognitionFailure, setReplacementRecognitionFailure] = useState<{
     session_id: string; loop_generation: number;
   } | null>(null);
@@ -3161,7 +3194,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const interruptedResponse =
       disposition.kind === 'failed'
         ? disposition.response ?? null
-        : disposition.kind === 'presentation' && !disposition.task_notification
+        : disposition.kind === 'native_audio' || (disposition.kind === 'presentation' && !disposition.task_notification)
           ? disposition.response
           : null;
     if (
@@ -3171,7 +3204,33 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // The speaker already interrupted this exact answer. Its expected
       // cancellation terminal and any late output belong to the predecessor,
       // so neither may fail, render, speak, acknowledge or reach history in
-      // the replacement turn.
+      // the replacement turn. Ignored Native audio still releases the poll.
+      if (disposition.kind === 'native_audio') setP2NotificationWakeEpoch(epoch => epoch + 1);
+      return disposition;
+    }
+    if (disposition.kind === 'native_request_state') {
+      if (p1VoiceOwnerRef.current?.interactionEngine() !== 'openai-realtime-native' ||
+        presentationBinding === null || activationOwnerRef.current !== owner || !voiceLoopEnabledRef.current ||
+        presentationBinding.session_id !== disposition.session_id || presentationBinding.correlation_id !== disposition.correlation_id ||
+        presentationBinding.interaction_id !== disposition.interaction_id || presentationBinding.activation_id !== disposition.activation_id ||
+        presentationBinding.activation_generation !== disposition.activation_generation) return disposition;
+      const key = JSON.stringify([disposition.session_id, disposition.activation_id, disposition.activation_generation]);
+      const prior = nativeRequestStateRef.current;
+      if (prior?.binding === key && prior.sequence >= disposition.sequence) return disposition;
+      nativeRequestStateRef.current = { binding: key, sequence: disposition.sequence };
+      if (disposition.response !== null) retainBoundedPresentedProductResponse(interruptedProductResponsesRef.current, productResponseGenerationIdentity(disposition.response));
+      recordAudioDiagnostic('native_request_state', { ...presentationBinding, turn_id: disposition.turn_id, status: disposition.phase,
+        reason: disposition.reason, seq: disposition.sequence });
+      if (disposition.phase === 'failed') {
+        setProductTextReason(disposition.reason);
+        setProductTextStatus('failed');
+        publishProductRecoveryDiagnostic({ seam: 'response_generation', disposition: 'terminal',
+          reason: disposition.reason!, binding: presentationBinding });
+      } else {
+        clearProductRecoveryDiagnostic();
+        setProductTextReason(null);
+        setProductTextStatus(disposition.phase === 'processing' ? 'waiting' : 'acknowledged');
+      }
       return disposition;
     }
     if (disposition.kind === 'native_task_association') {
@@ -3333,7 +3392,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         presentationBinding !== null &&
         activeSessionRef.current === presentationBinding.session_id &&
         voiceLoopGenerationRef.current === playoutLoopGeneration &&
-        p1VoiceOwnerRef.current === voiceOwner;
+        p1VoiceOwnerRef.current === voiceOwner &&
+        !interruptedProductResponsesRef.current.has(productResponseGenerationIdentity(disposition.response));
       activeVoiceResponseRef.current = disposition.response;
       setProductTextReason(null);
       setProductTextStatus('waiting');

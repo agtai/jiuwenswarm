@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-06 (three Demo repairs verified within their modules; physical acceptance open).
+> Updated: 2026-09-06 (Native foreground repairs verified within their modules; physical acceptance open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -24,22 +24,26 @@ history, not acceptance of this candidate.
 
 ## Current execution packet
 
-### Three Demo repairs: module checks complete, controlled startup and physical rehearsal
+### Native foreground repair: controlled startup and physical rehearsal
 
-The [three-repair evidence](reviews/DEMO_THREE_REPAIRS_20260906.md) owns independent
-user-turn elapsed time, exact Task notification selection/ownership transfer,
-and PCM-anchored startup lead with bounded starvation recovery. Scoped automation
-and independent review are complete; existing Bridge regression failures are
-reproduced at baseline and remain open. Actual headset continuity and same-session
-busy-to-idle terminal notification still need current-source physical evidence.
+The [Native foreground repair](reviews/NATIVE_FOREGROUND_REPAIR_20260906.md) owns
+Provider-confirmed interruption during semantic/Agent processing, late-output
+fencing, coordinated deadlines, truthful activity/failure and phase diagnostics.
+Scoped automation, real Agent/file-tool evidence and independent review are
+complete. An admitted durable Task and its discovery/voice origin survive
+foreground interruption. Existing wider regression failures retain their baseline
+evidence; full Native business-audio and physical acceptance remain open.
 
 Use the controlled launcher after clean local commits; verify its new runtime
 contract, real Speech probe and live process before rehearsal. Keep NoBrowser so
-startup does not consume retained notifications. Preserve GPT-5.6 low, Cascade,
-the registered project, headset profile, VAD 800 ms and historical results/ACK.
-No per-gap Provider attribution or full performance optimization is authorized.
-The recovery, cancellation and adjustment repairs below retain their own scoped
-credit; they do not establish a complete current A/B/A2 acceptance.
+startup does not consume retained notifications. Use `openai-realtime-native`
+with `gpt-realtime-2`; preserve the configured GPT-5.6 Agent, registered project,
+headset profile and historical results/ACK. No new classifier, Task authority,
+model tuning or broad performance optimization is included. The
+[three earlier Demo repairs](reviews/DEMO_THREE_REPAIRS_20260906.md) retain scoped
+credit for timers, Task notification ownership and PCM startup/continuity.
+Actual headset continuity and same-session busy-to-idle terminal notification
+still need current-source physical evidence; complete A/B/A2 remains unproved.
 
 ### Verified-headset interruption: implemented, physical acceptance open
 
@@ -105,14 +109,14 @@ whole-project audit for every bounded task.
 | Speech Recognition | Streaming/batch finals, typed failure, bounded capture retry and lifetime repair | Long/paused speech, fallback/cancel, device/network and physical lifetime evidence |
 | Speech Synthesis | Streaming/batch TTS, response ownership, playback ACK | Interrupted/long answers, first-audio, underrun, pronunciation and stale-output proof |
 | Realtime Media | Dedicated transport, registration/rotation, bounded P2 pull | Backpressure/load, loss/order/corruption/reconnect and truthful recovery |
-| Conversation Runtime | Commit/generation fencing, Stop/Exit, playout and flag-gated generation interruption, continuity/ACK ownership | Combined listening/notification/Task races, no old-audio revival or detached-Task miscontrol |
-| Interaction Intelligence | Model semantic routing; opt-in Native source; Cascade default | Native through current business path, endpoint/false-interruption evaluation, language/device scope |
+| Conversation Runtime | Commit/generation fencing, Stop/Exit, playout and Cascade generation interruption; exact Native processing interruption and late-output fencing, continuity/ACK ownership | Combined physical listening/notification/Task races, no old-audio revival or detached-Task miscontrol |
+| Interaction Intelligence | Model semantic routing; controlled Native Demo with Provider-confirmed interruption; Cascade remains an available route | Full Native business-audio journey, endpoint/false-interruption evaluation, language/device scope |
 | Agent Bridge and dialogue truth | Real Agent/file tools, current requirements, canonical status, faithful Agent answer delivery | Broader real-model/physical verification, arithmetic/feasibility reliability, literal names/paths and concise speech |
 | Task Control Core and Store | Canonical multi-Task state, durable commands/replay, exact targets/CAS, bounded adjustment delivery | Current concurrency/restart integration and full Task-operation coverage |
 | Executor & Durability | Direct D0/D2 v2 admission/reconciliation, sealed results/checkpoints, dedicated memory repair; v1 cannot dispatch v2 | Required review and real result/control acceptance; outside-checkout files or additional Executor/D1 capability need separate scope; no D1/host-crash claim |
 | Voice–Task Bridge | Unified committed semantics, direct exact local create/successor/adjust/cancel consent, scoped targets/requirements and target clarification | Real modification/query acceptance, generalization/retirement; update/reprioritize retain confirmation; pause/resume/provide-input remain unsupported |
-| Integrated Web product experience | Right-panel Registry Tasks, project-home Session startup, recovery/notification repairs; independent user timers and exact Task notification ownership | Current-source busy-to-idle terminal delivery, stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh; projectless backend authority |
-| Observability, benchmark and latency | Scoped timing/error export, offline reports, tests/build/review and deployment samples | Current physical reproduction, interruption/first-audible baseline and SLOs; clock gaps/dropped data remain explicit |
+| Integrated Web product experience | Right-panel Registry Tasks, project-home Session startup, recovery/notification repairs; independent timers, exact notification ownership and Native processing/failure state independent of capture | Current-source busy-to-idle terminal delivery, stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh; projectless backend authority |
+| Observability, benchmark and latency | Scoped timing/error export, Native phase/deadline and true terminal outcomes, offline reports, tests/build/review and deployment samples | Current physical reproduction, interruption/first-audible baseline and SLOs; clock gaps/dropped data remain explicit |
 | Automated verification and acceptance | Focused regressions and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative review/human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, semantic cutover, bounded removals and prompt/config isolation | Complete reachability/retirement audit and remaining manifest rows; keep private artifacts/runtime data out of integration |
 | Production operations | Privacy/preflight/observability foundations | Auth/tenancy, public deployment, operations, retention, security, compatibility and release support after separate scope |
@@ -133,9 +137,10 @@ whole-project audit for every bounded task.
    listening, interruption or notification failures; preserve failed evidence.
 2. Complete affected positive/rejection/stale/replay/isolation checks and review.
    Verify authoritative Task/Attempt state, files and actual audio as applicable;
-   classify remaining Registry/Web failures. For the three Demo repairs, module
-   evidence is recorded; the next trigger is controlled startup followed by
-   current-source busy-to-idle notification and headset continuity rehearsal.
+   classify remaining Registry/Web failures. For the Native foreground and three
+   earlier Demo repairs, module evidence is recorded; the next trigger is
+   controlled Native startup followed by processing/playback interruption,
+   busy-to-idle notification and headset continuity rehearsal.
 3. Prove the [current A/B/A2 journey](demo/PRODUCT_READINESS_SHOWCASE.md): analysis,
    separate delegation, adjustment/query/cancel, offline completion, unread/ACK/
    refresh and preserved A/new A2. Include bounded negatives, another domain and

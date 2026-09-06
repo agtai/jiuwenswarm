@@ -14,6 +14,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+from jiuwenswarm.common.live_voice_operation_budgets import (
+    NATIVE_DELEGATE_TRANSPORT_TIMEOUT_SECONDS,
+)
 from jiuwenswarm.common.schema.agent import AgentResponse
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     MAX_SAFE_INTEGER,
@@ -50,7 +53,6 @@ NATIVE_INTERNAL_REQ_METHODS = frozenset(
         ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_CLOSE.value,
     }
 )
-from jiuwenswarm.common.live_voice_operation_budgets import SEMANTIC_TRANSPORT_TIMEOUT_SECONDS
 
 _MAX_REQUEST_SECONDS = 30.0
 _MAX_REQUEST_ID_CHARS = 256
@@ -422,6 +424,7 @@ def _validate_method_result(
                 and all(_canonical_audio_result(item) for item in items)
             )
         elif kind == "delegate":
+            settled_task = result.get("status") in {"interrupted", "failed"}
             _closed_result(
                 result,
                 frozenset(
@@ -432,20 +435,24 @@ def _validate_method_result(
                         "provider_call_id",
                         "route",
                         "turn_commit_id",
-                        "canonical_text",
+                        *( {"reason", "task_id"} if settled_task else {"canonical_text"} ),
                         "response",
                         *({"task_id"} if "task_id" in result else set()),
                     }
                 ),
             )
             valid = (
-                result.get("status") == "completed"
+                (result.get("status") == "completed" or settled_task)
                 and type(result.get("accepted")) is bool
                 and _canonical_result_identity(result.get("provider_call_id"))
                 and result.get("route")
                 in {route.value for route in UnifiedCommittedInputRoute}
                 and _canonical_result_identity(result.get("turn_commit_id"))
-                and _canonical_delegate_result(result.get("canonical_text"))
+                and (
+                    (result.get("route") == "task" and _canonical_result_identity(result.get("reason"))
+                     and (result.get("status") != "interrupted" or result.get("reason") == "NATIVE_DELEGATE_INTERRUPTED"))
+                    if settled_task else _canonical_delegate_result(result.get("canonical_text"))
+                )
                 and _canonical_response_ref(result.get("response"))
                 and ("task_id" not in result or (
                     result.get("route") == UnifiedCommittedInputRoute.TASK.value
@@ -702,7 +709,7 @@ class GatewayNativeInteractionRuntimeClient:
             request_id=request_id,
             extra={"proposal": proposal.to_dict()},
             timeout_seconds=(
-                SEMANTIC_TRANSPORT_TIMEOUT_SECONDS
+                NATIVE_DELEGATE_TRANSPORT_TIMEOUT_SECONDS
                 if event.delegate is not None
                 else self._timeout_seconds
             ),

@@ -156,6 +156,10 @@ class ProfileSpan:
                         if isinstance(value, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,119}", value):
                             self.fields["error_" + name] = value
             status = get("status")
+            terminal = get("terminal_outcome")
+            terminal = terminal.value if isinstance(terminal, Enum) else terminal
+            if terminal in {"completed", "cancelled", "failed"}:
+                self.outcome = "complete" if terminal == "completed" else terminal
             if isinstance(status, Enum):
                 self.fields["result_state"] = status.name
             self.fields.update(identity_fields(result))

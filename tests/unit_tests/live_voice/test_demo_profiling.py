@@ -395,3 +395,15 @@ def test_report_includes_state_failures_and_fallback_milestones():
             row("capture_state", 4, 4, status="active"),
             row("p1_status", 5, 5, status="cleanup_pending")]
     assert report.build_report(rows)["failures"] == rows[:3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["completed", "failed", "cancelled"])
+async def test_agent_terminal_outcome_is_not_misreported_as_returned(records, terminal):
+    @profile.profiled("agent.execute")
+    async def execute():
+        return {"terminal_outcome": terminal}
+    await execute()
+    settled = [fields for event, fields in records if event == "profile_span_settled"]
+    assert len(settled) == 1
+    assert settled[0]["outcome"] == ("complete" if terminal == "completed" else terminal)

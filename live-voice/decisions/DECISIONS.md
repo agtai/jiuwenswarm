@@ -1905,3 +1905,35 @@
 - Owners, risk tiers, exclusions and verification are recorded in the
   [repair evidence](../reviews/REHEARSAL_REPAIR_20260905.md). Private demo costs may
   be revised consistently; prior result files remain historical artifacts.
+
+## D-117 Native foreground interruption, deadlines and truthful activity
+
+- Date: 2026-09-06. The user authorized Native Realtime repair and redeployment,
+  with interruption available during processing as well as playback. Native
+  uses Provider-confirmed speech starts and its existing response cancellation /
+  played-cursor truncation. Cascade's speculative generation classifier is not
+  copied into Native. This supersedes the previous packet's Cascade-only Demo
+  runtime choice; the configured Agent model and existing Task authority remain.
+- Semantic and Agent work must not block delivery of the next committed input.
+  Interruption cancels the exact foreground semantic work / Agent round and
+  fences its successor output. In-flight Provider sends settle; late response
+  creation is consumed and cancelled. Processing and playback cancellation share
+  one Provider receipt, while exact played-cursor truncation still occurs once.
+- Speech interruption never means cancellation of an admitted durable business
+  Task. Its receipt, discovery and voice origin survive cancellation or failure
+  of the foreground acknowledgement. Explicit Task cancellation continues to
+  require normal committed semantics, exact target and existing authorization.
+- Replace the entire-Agent 25-second cutoff with a 120-second default and a
+  supported 180-second ceiling. The Native delegate transport permits 300 seconds
+  for semantic admission, Agent execution and settlement. These are failure
+  ceilings, not latency targets; the user can interrupt throughout the wait.
+- Request processing, interruption and failure are projected independently of
+  microphone capture, with exact activation/response identity and monotonic
+  sequence. Agent/semantic failures preserve their original reason and do not
+  become STT errors or trigger replay of a committed business request. Native
+  spoken answers retain the existing transcript-to-chat presentation/ACK path.
+- Existing bounded diagnostics record phase, elapsed/remaining budget and actual
+  completion/cancellation/failure outcome with correlation IDs. No audio, prompts,
+  project content or credentials are added. The narrow Tier-3 internal route and
+  Tier-2 execution repairs, validation and exclusions are recorded in the
+  [Native foreground evidence](../reviews/NATIVE_FOREGROUND_REPAIR_20260906.md).

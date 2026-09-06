@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   parseProductP1NativeInteractionActivation,
+  productCaptureTerminalFailureReason,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productP1VoiceRoute.js';
 import {
   classifyProductP2Notification,
@@ -98,6 +99,33 @@ function nativeUserTranscriptNotification(overrides = {}) {
     ...overrides,
   };
 }
+
+test('Native request states preserve processing and exact failure without audio or history authority', () => {
+  for (const phase of ['processing', 'interrupted', 'failed']) {
+    const state = { turn_id: 'native-turn-1', sequence: 1, phase,
+      reason: phase === 'failed' ? 'NATIVE_DELEGATE_AGENT_TIMEOUT' : null };
+    const notification = nativeNotification({ kind: 'native.request_state', response: phase === 'interrupted' ? { interaction_id: 'interaction-native-1', response_id: 'old-response', response_generation: 1 } : null,
+      presentation_unit: null, audio: null, request_state: state });
+    const parsed = classifyProductP2Notification(notification);
+    assert.equal(parsed.kind, 'native_request_state');
+    assert.equal(parsed.phase, phase);
+    assert.equal(parsed.reason, state.reason);
+    assert.equal(parsed.ack, undefined);
+    assert.equal(parsed.message, undefined);
+    for (const extra of [{ request_state: { ...state, sequence: 0 } },
+      { request_state: { ...state, phase: 'completed' } }, { audio: { delivery: 'forbidden' } },
+      { activation_generation: -1 }, { response: { response_id: 'foreign' } }]) {
+      assert.equal(classifyProductP2Notification({ ...notification, ...extra }).kind, 'failed');
+    }
+  }
+});
+
+test('Native media termination is not misclassified as recognition failure', () => {
+  const event = { direction: 'uplink', source: 'server', reason_id: 'MEDIA_CONSUMER_FAILED' };
+  assert.equal(productCaptureTerminalFailureReason(event, true), 'SPEECH_RECOGNITION_STREAM_FAILED');
+  assert.equal(productCaptureTerminalFailureReason(event, true, true), 'ADAPTER_UPLINK_SERVER_MEDIA_CONSUMER_FAILED');
+  assert.equal(productCaptureTerminalFailureReason({ ...event, consumer_reason_id: 'NATIVE_RUNTIME_CLOSED' }, true, true), 'NATIVE_RUNTIME_CLOSED');
+});
 
 test('Native activation is a closed server-selected Engine descriptor', () => {
   assert.deepEqual(

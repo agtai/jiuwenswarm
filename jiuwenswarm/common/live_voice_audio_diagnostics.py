@@ -55,7 +55,7 @@ _IDS = _IDS | frozenset({"span_id", "model_call_id", "parent_span_id", "turn_id"
 _TOKENS = frozenset({"stage", "rpc_method", "error_type", "error_location", "error_code", "error_reason", "result_state", "milestone", "tool_name"})
 _VALUES = frozenset({"generation", "frame_count", "frames_sent", "frames_acked", "queue_frames", "received_samples", "sent_sample_end", "send_peak_ms", "vad_silence_ms", "provider_ms", "provider_start_ms", "provider_end_ms", "speech_started", "input_fenced", "elapsed_ms", "preopen_frames"})
 _VALUES = _VALUES | frozenset({
-    "frame_seq", "lock_wait_ms", "encode_ms", "socket_send_ms", "wire_seq",
+    "frame_seq", "lock_wait_ms", "encode_ms", "socket_send_ms", "wire_seq", "remaining_ms",
     "wire_bytes", "event_queue_frames", "event_seq", "committed", "closing",
     "terminal", "item_matches_speech", "item_matches_committed", "has_item",
     "speech_stopped", "timeout_ms", "status_code", "response_bytes", "phase_ms",

@@ -14,6 +14,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import json
 import logging
 import unicodedata
 from collections import deque
@@ -662,6 +663,12 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._current_response_id: str | None = None
         self._delegates: dict[str, _DelegateWait] = {}
         self._delegate_results: dict[str, _DelegateResult] = {}
+        self._retired_delegate_calls: set[str] = set()
+        self._delegate_output_started: set[str] = set()
+        self._delegate_successors: dict[str, ResponseRef] = {}
+        self._retired_successors: set[ResponseRef] = set()
+        self._pending_unpresented_cancels: deque[str] = deque()
+        self._provider_cancel_receipts: dict[str, str] = {}
         self._cancelled: dict[
             str, tuple[NativePresentationCursor, tuple[str | None, str]]
         ] = {}
@@ -728,6 +735,8 @@ class OpenAIRealtimeNativeInteractionEngine:
                 return NativeEngineEvent()
             data = _closed_event(provider_event)
             results = self._map_event(provider_event, data)
+            while self._pending_unpresented_cancels:
+                await self._cancel_unpresented_response(self._pending_unpresented_cancels.popleft())
             self._processed_event_ids.add(provider_event.event_id)
             await self._request_pending_provider_response()
             if not results:
@@ -858,6 +867,10 @@ class OpenAIRealtimeNativeInteractionEngine:
                 "NATIVE_DELEGATE_CALL_UNKNOWN",
                 "delegate result requires one retained proposal",
             )
+        if self._find_response(wait.response).cancelled:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_DELEGATE_INTERRUPTED", "Interrupted delegate cannot create a response",
+            )
         if ref.response_generation <= wait.response.response_generation:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_DELEGATE_RESPONSE_NOT_NEW",
@@ -875,6 +888,8 @@ class OpenAIRealtimeNativeInteractionEngine:
             )
         response_request: _ProviderResponseRequest | None = None
         try:
+            self._delegate_output_started.add(parsed_call_id)
+            self._delegate_successors[parsed_call_id] = ref
             output_event_id = await self._session.send_event(
                 "conversation.item.create",
                 {
@@ -885,6 +900,10 @@ class OpenAIRealtimeNativeInteractionEngine:
                     }
                 },
             )
+            if self._find_response(wait.response).cancelled:
+                raise OpenAIRealtimeNativeInteractionError(
+                    "NATIVE_DELEGATE_INTERRUPTED", "Interrupted output cannot start a successor",
+                )
             response_sent = asyncio.get_running_loop().create_future()
             response_request = _ProviderResponseRequest(
                 turn_id=wait.proposal.turn_id,
@@ -935,6 +954,64 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._state = NativeProviderState.RESPONSE_PENDING
         return event_ids
 
+    async def _cancel_unpresented_response(self, provider_id: str) -> None:
+        async with self._cancel_lock:
+            await self._send_provider_cancel_locked(provider_id)
+
+    async def _send_provider_cancel_locked(self, provider_id: str) -> str:
+        # Processing STOP and the later playback cursor share one Provider
+        # cancellation. The cursor still truncates exactly what was unplayed.
+        receipt = self._provider_cancel_receipts.get(provider_id)
+        if receipt is None:
+            receipt = await self._session.send_event(
+                "response.cancel", {"response_id": provider_id}
+            )
+            self._provider_cancel_receipts[provider_id] = receipt
+        return receipt
+
+    async def stop_foreground(self, ref: ResponseRef) -> None:
+        """Fence processing/output, using Provider cancel where no cursor exists."""
+        await self.fence_response(ref)
+        response = self._find_response(ref)
+        if not response.done and not any(item.received_samples for item in response.audio_items.values()):
+            await self._cancel_unpresented_response(response.provider_response_id)
+        for call_id, wait in self._delegates.items():
+            if wait.response == ref or self._delegate_successors.get(call_id) == ref:
+                await self.retire_delegate(call_id, interrupted=True)
+
+    async def retire_delegate(self, call_id: str, *, interrupted: bool) -> None:
+        """Settle a function wait without starting an obsolete spoken answer."""
+        wait = self._delegates.get(call_id)
+        if wait is None:
+            raise OpenAIRealtimeNativeInteractionError("NATIVE_DELEGATE_CALL_UNKNOWN", "No exact delegate to retire")
+        await self.fence_response(wait.response)
+        successor = self._delegate_successors.get(call_id)
+        if successor is not None:
+            self._retired_successors.add(successor)
+            # Remove only unsent requests. An in-flight send must settle; its
+            # response.created is consumed and cancelled without SPEAK/audio.
+            for request in tuple(self._response_request_queue):
+                if request.runtime_ref == successor:
+                    self._response_request_queue.remove(request)
+                    if request.sent is not None and not request.sent.done():
+                        request.sent.set_exception(OpenAIRealtimeNativeInteractionError(
+                            "NATIVE_DELEGATE_INTERRUPTED", "Queued successor was interrupted",
+                        ))
+            for response in self._responses.values():
+                if response.runtime_ref == successor:
+                    await self.fence_response(successor)
+                    if not response.done:
+                        await self._cancel_unpresented_response(response.provider_response_id)
+        if call_id in self._retired_delegate_calls or call_id in self._delegate_output_started:
+            return
+        # This reports foreground delivery status, never rollback of a durable
+        # task/tool effect. Only the next committed user turn may create a reply.
+        self._retired_delegate_calls.add(call_id)
+        await self._session.send_event("conversation.item.create", {
+            "item": {"type": "function_call_output", "call_id": call_id,
+                     "output": json.dumps({"foreground_status": "interrupted" if interrupted else "failed"})},
+        })
+
     async def cancel_response(
         self, cursor: NativePresentationCursor
     ) -> tuple[str | None, str]:
@@ -984,9 +1061,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             cancel_id = (
                 None
                 if response.done
-                else await self._session.send_event(
-                    "response.cancel", {"response_id": response.provider_response_id}
-                )
+                else await self._send_provider_cancel_locked(response.provider_response_id)
             )
             truncate_id = await self._session.send_event(
                 "conversation.item.truncate",
@@ -1213,6 +1288,16 @@ class OpenAIRealtimeNativeInteractionEngine:
             and not current.presentation_acknowledged
             and (
                 not current.done
+                or any(
+                    wait.response == current.runtime_ref and (
+                        call_id not in self._delegate_results
+                        or (self._inflight_response_request is not None and
+                            self._inflight_response_request.runtime_ref == self._delegate_results[call_id].response)
+                        or any(request.runtime_ref == self._delegate_results[call_id].response
+                               for request in self._response_request_queue)
+                    )
+                    for call_id, wait in self._delegates.items()
+                )
                 or (
                     current.presentable
                     and any(
@@ -1222,7 +1307,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                 )
             )
         ):
-            operations.append(
+            operations.insert(0,
                 (
                     "STOP",
                     (
@@ -1684,6 +1769,11 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._responses[provider_id] = response
         self._current_response_id = provider_id
         self._state = NativeProviderState.RESPONSE_PENDING
+        if request.runtime_ref in self._retired_successors:
+            response.cancelled = True
+            self._locally_fenced.add(provider_id)
+            self._pending_unpresented_cancels.append(provider_id)
+            return []
         payload = [
             ("provider_response_id", provider_id),
             ("turn_id", response_turn_id),

@@ -546,8 +546,8 @@ async def test_gateway_delegate_uses_composed_semantic_deadline(
     )
 
     assert result == agent.result_override
-    assert observed_deadlines == [client_module.SEMANTIC_TRANSPORT_TIMEOUT_SECONDS]
-    assert observed_deadlines[0] == 150.0
+    assert observed_deadlines == [client_module.NATIVE_DELEGATE_TRANSPORT_TIMEOUT_SECONDS]
+    assert observed_deadlines[0] == 300.0
 
 
 @pytest.mark.asyncio
@@ -916,3 +916,15 @@ async def test_gateway_accepts_exact_native_assistant_chat_projection_on_ack() -
     )
 
     assert result == agent.result_override
+
+
+@pytest.mark.parametrize("status", ["interrupted", "failed"])
+def test_native_settled_task_receipt_has_no_speech_authority(status):
+    result = {"kind": "delegate", "status": status, "accepted": True, "provider_call_id": "call-settled",
+        "route": "task", "turn_commit_id": "commit-settled", "task_id": "durable-task",
+        "reason": "NATIVE_DELEGATE_INTERRUPTED" if status == "interrupted" else "NATIVE_DELEGATE_AGENT_TIMEOUT",
+        "response": {"interaction_id": BINDING.interaction_id, "response_id": "source", "response_generation": 1}}
+    assert client_module._validate_method_result(ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE, result) == result
+    for changes in ({"canonical_text": "forbidden speech"}, {"route": "dialogue"}, {"task_id": ""}, {"reason": None}):
+        with pytest.raises(NativeRuntimeClientError):
+            client_module._validate_method_result(ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE, {**result, **changes})

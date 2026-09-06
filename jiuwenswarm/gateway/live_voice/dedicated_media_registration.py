@@ -30,6 +30,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable, Literal, Mapping
 
+from jiuwenswarm.common.live_voice_profiling import identity_fields, profile_event
 from jiuwenswarm.common.live_voice_capture_limits import MAX_CAPTURE_WAV_BYTES
 from jiuwenswarm.common.live_voice_audio_diagnostics import record_audio_diagnostic
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
@@ -982,6 +983,10 @@ class _NativeMediaSession:
     input_task: asyncio.Task[None] | None = field(default=None, repr=False)
     event_task: asyncio.Task[None] | None = field(default=None, repr=False)
     delivery_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    delegate_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict, repr=False)
+    delegate_proposals: dict[str, NativeEngineEvent] = field(default_factory=dict, repr=False)
+    foreground_turn_id: str | None = None
+    request_state_sequence: int = 0
     next_media_sequence: int = 0
     next_media_sample_cursor: int = 0
     next_input_sequence: int = 0
@@ -1845,6 +1850,7 @@ class DedicatedMediaProductRegistry:
                 session.input_task,
                 session.event_task,
                 session.delivery_task,
+                *session.delegate_tasks.values(),
             )
             if task is not None and task is not current
         )
@@ -1969,7 +1975,23 @@ class DedicatedMediaProductRegistry:
                 event = await session.delivery_queue.get()
             if event.audio is None:
                 try:
-                    await self._handle_native_event(session, event)
+                    if event.delegate is not None:
+                        call_id = event.delegate.provider_call_id
+                        if call_id not in session.delegate_tasks:
+                            if len(session.delegate_tasks) >= 8:
+                                raise MediaTransportViolation("MEDIA_NATIVE_DELEGATE_BACKPRESSURE", "Native foreground settlement capacity exceeded")
+                            session.delegate_proposals[call_id] = event
+                            task = asyncio.create_task(self._run_native_delegate_event(session, event))
+                            session.delegate_tasks[call_id] = task
+                            def settled(done, call=call_id, owner=session):
+                                owner.delegate_tasks.pop(call, None)
+                                owner.delegate_proposals.pop(call, None)
+                                record = self._records.get(owner.record_id)
+                                if record is not None:
+                                    self._consume_native_task(record, done)
+                            task.add_done_callback(settled)
+                    else:
+                        await self._handle_native_event(session, event)
                 finally:
                     session.delivery_queue.task_done()
                 continue
@@ -2106,6 +2128,8 @@ class DedicatedMediaProductRegistry:
                 else None
             )
         )
+        if event.action is not None and event.action.operation == "SPEAK" and "runtime_response_id" in dict(event.action.payload):
+            fenced_response = self._native_stop_response(event.action)
         if fenced_response is not None and self._native_response_is_barge_fenced(
             session, fenced_response
         ):
@@ -2140,10 +2164,69 @@ class DedicatedMediaProductRegistry:
                 self._retain_native_speech_start(session, event, result)
             elif event.action.operation == "TURN_COMMIT":
                 self._retain_native_end_of_turn(session, event, result)
+                assert event.turn_commit is not None
+                session.foreground_turn_id = event.turn_commit.turn_id
+                self._native_request_state(session, "processing", event.turn_commit.turn_id)
+            elif event.action.operation == "STOP":
+                response = self._native_stop_response(event.action)
+                stop = getattr(session.engine, "stop_foreground", None)
+                if callable(stop):
+                    await stop(response)
+                else:
+                    await session.engine.fence_response(response)
+                if session.foreground_turn_id is not None:
+                    self._native_request_state(session, "interrupted", session.foreground_turn_id, response=response)
         elif event.audio is not None:
             await self._allocate_native_downlink(session, event.audio, result)
         elif event.provider_done is not None:
             await self._seal_native_downlink(session, event.provider_done, result)
+
+    async def _run_native_delegate_event(self, session: _NativeMediaSession, event: NativeEngineEvent) -> None:
+        delegate = event.delegate
+        assert delegate is not None
+        try:
+            await self._handle_native_event(session, event)
+        except Exception as error:
+            reason = getattr(error, "reason", "NATIVE_DELEGATE_FAILED")
+            if reason == "NATIVE_DELEGATE_INTERRUPTED" or any(
+                ref.response_generation == delegate.response_generation for ref in session.barge_fenced_responses
+            ):
+                return
+            if isinstance(error, NativeRuntimeClientError) and reason.startswith(("NATIVE_DELEGATE_", "NATIVE_TASK_DELEGATE_", "SEMANTIC_")):
+                retire = getattr(session.engine, "retire_delegate", None)
+                if callable(retire):
+                    await retire(delegate.provider_call_id, interrupted=False)
+                self._native_request_state(session, "failed", delegate.turn_id, reason)
+                return
+            raise
+
+    def _native_request_state(self, session: _NativeMediaSession, phase: str, turn_id: str, reason: str | None = None, *, response: ResponseRef | None = None) -> None:
+        if session.closed or session.foreground_turn_id != turn_id:
+            return
+        parent = self._records.get(session.record_id)
+        if parent is None or parent.route_completed:
+            return
+        notifications = self._native_notifications.get((parent.binding.session_id,
+            parent.binding.interaction_id, parent.binding.connection_id))
+        if notifications is None or notifications.full():
+            raise MediaTransportViolation("MEDIA_NATIVE_NOTIFICATION_BACKPRESSURE", "Native request state unavailable")
+        session.request_state_sequence += 1
+        profile_event("native_request_state", **identity_fields(session.activation.binding, response),
+                      turn_id=turn_id, status=phase, reason=reason, seq=session.request_state_sequence)
+        notifications.put_nowait({
+            "status": "notification", "kind": "native.request_state",
+            "request_id": self._native_request_id(session, "request-state"),
+            "round_id": None, "response": None if response is None else {
+                "interaction_id": response.interaction_id, "response_id": response.response_id,
+                "response_generation": response.response_generation}, "agent_event": None, "source_event": None,
+            "progress_event": None, "presentation_unit": None, "audio": None,
+            "error_reason": None, "publish_seq": None,
+            "request_state": {"turn_id": turn_id, "phase": phase, "reason": reason,
+                              "sequence": session.request_state_sequence},
+            "session_id": parent.binding.session_id, "correlation_id": parent.binding.correlation_id,
+            "interaction_id": parent.binding.interaction_id, "activation_id": parent.product_activation_id,
+            "activation_generation": parent.product_activation_generation,
+        })
 
     def _queue_native_user_transcript(
         self,
@@ -2391,15 +2474,17 @@ class DedicatedMediaProductRegistry:
         delegate = event.delegate
         assert delegate is not None
         response_payload = result.get("response")
+        settled_task = result.get("status") in {"interrupted", "failed"}
         if (
             result.get("kind") != "delegate"
-            or result.get("status") != "completed"
+            or result.get("status") not in {"completed", "interrupted", "failed"}
             or type(result.get("accepted")) is not bool
             or result.get("provider_call_id") != delegate.provider_call_id
             or not isinstance(response_payload, Mapping)
             or set(response_payload)
             != {"interaction_id", "response_id", "response_generation"}
-            or type(result.get("canonical_text")) is not str
+            or (not settled_task and type(result.get("canonical_text")) is not str)
+            or (settled_task and (result.get("route") != "task" or "task_id" not in result or "reason" not in result or "canonical_text" in result))
         ):
             raise MediaTransportViolation(
                 "MEDIA_NATIVE_DELEGATE_RESULT_INVALID",
@@ -2419,7 +2504,8 @@ class DedicatedMediaProductRegistry:
         )
         if (
             response.interaction_id != session.activation.binding.interaction_id
-            or response.response_generation <= delegate.response_generation
+            or (response.response_generation != delegate.response_generation if settled_task
+                else response.response_generation <= delegate.response_generation)
         ):
             raise MediaTransportViolation(
                 "MEDIA_NATIVE_DELEGATE_RESULT_INVALID",
@@ -2432,23 +2518,7 @@ class DedicatedMediaProductRegistry:
             task_commit_id = _required_id(result.get("turn_commit_id"), "turn_commit_id")
             if result.get("route") != "task":
                 raise MediaTransportViolation("MEDIA_NATIVE_TASK_ASSOCIATION_INVALID", "task association requires formal Task route")
-        event_ids = await session.engine.send_delegate_result(
-            delegate.provider_call_id,
-            response,
-            str(result["canonical_text"]),
-        )
-        if (
-            type(event_ids) is not tuple
-            or len(event_ids) != 2
-            or any(type(event_id) is not str or not event_id for event_id in event_ids)
-        ):
-            raise MediaTransportViolation(
-                "MEDIA_NATIVE_DELEGATE_PROVIDER_SEND_INVALID",
-                "Native Engine returned no exact Provider delegate receipts",
-            )
-        if task_id is not None:
-            if delegate.provider_call_id in session.projected_task_associations:
-                return
+        if task_id is not None and delegate.provider_call_id not in session.projected_task_associations:
             parent = self._records.get(session.record_id)
             key = (session.activation.binding.scope.session_id or "",
                    session.activation.binding.interaction_id, session.activation.connection_id)
@@ -2471,6 +2541,30 @@ class DedicatedMediaProductRegistry:
                 "activation_generation": parent.product_activation_generation,
             })
             session.projected_task_associations.add(delegate.provider_call_id)
+
+        if settled_task:
+            retire = getattr(session.engine, "retire_delegate", None)
+            if callable(retire):
+                await retire(delegate.provider_call_id, interrupted=result["status"] == "interrupted")
+            if result["status"] == "failed":
+                self._native_request_state(session, "failed", delegate.turn_id, str(result["reason"]))
+            return
+        if any(ref.response_generation == delegate.response_generation for ref in session.barge_fenced_responses):
+            return
+        event_ids = await session.engine.send_delegate_result(
+            delegate.provider_call_id,
+            response,
+            str(result["canonical_text"]),
+        )
+        if (
+            type(event_ids) is not tuple
+            or len(event_ids) != 2
+            or any(type(event_id) is not str or not event_id for event_id in event_ids)
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_DELEGATE_PROVIDER_SEND_INVALID",
+                "Native Engine returned no exact Provider delegate receipts",
+            )
 
     def _retain_native_speech_start(
         self,

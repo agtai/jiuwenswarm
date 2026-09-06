@@ -2129,6 +2129,55 @@ async def test_native_unconsumed_downlink_saturation_closes_before_later_control
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("late_failure", [False, True])
+async def test_native_blocked_delegate_does_not_block_stop_or_next_input(late_failure):
+    activation = _native_activation()
+    client, engine = _FakeNativeRuntimeClient(activation), _FakeNativeEngine()
+    started, release, listened = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original = client.propose
+    async def propose(**kwargs):
+        event = kwargs["event"]
+        if event.delegate is not None:
+            started.set()
+            await release.wait()
+            if late_failure:
+                raise NativeRuntimeClientError("NATIVE_DELEGATE_AGENT_TIMEOUT", "late failure")
+        if event.action is not None and event.action.operation == "LISTEN":
+            listened.set()
+        return await original(**kwargs)
+    client.propose = propose
+    registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine)
+    activated = _activate(registry, params=_params(sample_rate_hz=24_000), request_origin=ORIGIN, connection_id="connection-1")
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    await registry.begin_native_interaction(uplink)
+    binding = activation.binding
+    delegate = NativeDelegateProposal(binding=binding, turn_id="native-turn-1", response_generation=1,
+        provider_event_id="delegate-event", provider_call_id="call-1", provider_item_id="function-1", request_text="Read project files")
+    def action(operation, payload):
+        return InteractionAction(action_id=f"action-{operation}", operation=operation,
+            interaction_id=binding.interaction_id, scope=binding.scope, payload=payload)
+    try:
+        await engine.events.put(NativeEngineEvent(action=action("DELEGATE", (("provider_call_id", "call-1"), ("turn_id", "native-turn-1"))), delegate=delegate))
+        await asyncio.wait_for(started.wait(), 1)
+        await engine.events.put(NativeEngineEvent(action=action("STOP", (("runtime_response_id", "native-source-1"),
+            ("response_generation", "1"), ("provider_response_id", "provider-response-1")))))
+        await engine.events.put(NativeEngineEvent(action=action("LISTEN", (("provider_item_id", "next-item"), ("provider_start_ms", "40")))))
+        await asyncio.wait_for(listened.wait(), 0.5)
+        assert engine.delegate_results == []
+        assert client.close_calls == 0
+        release.set()
+        session = next(iter(registry._native_sessions.values()))
+        await asyncio.gather(*tuple(session.delegate_tasks.values()))
+        assert engine.delegate_results == []
+        assert client.close_calls == 0
+        assert not session.closed
+    finally:
+        release.set()
+        await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("task_id", [None, "task-real-discovery"])
 async def test_native_delegate_result_is_returned_to_provider_once(task_id) -> None:
     activation_handle = _native_activation()
@@ -2406,14 +2455,13 @@ async def test_native_turn_commit_becomes_exact_media_end_of_turn() -> None:
     assert control.detector == "server_vad"
     assert control.create_response is False
     assert control.interrupt_response is False
-    assert (
-        registry.take_native_notification(
+    request_state = registry.take_native_notification(
             session_id="session-1",
             interaction_id="interaction-1",
             connection_id="connection-1",
         )
-        is None
-    )
+    assert request_state["kind"] == "native.request_state"
+    assert request_state["request_state"]["phase"] == "processing"
 
     await registry.close_native_interaction(uplink)
 
@@ -2655,6 +2703,11 @@ async def test_native_interruption_preserves_activation_input_and_notification_c
             await asyncio.sleep(0)
 
     await asyncio.wait_for(wait_for_continuous_input_and_transcript(), timeout=1.0)
+    state_response = registry.take_native_notification_response(
+        request_id="browser-native-state-1", notification_sequence=1, **notification_binding,
+    )
+    assert state_response["result"]["kind"] == "native.request_state"
+    assert state_response["result"]["sequence_effect"] == "neutral"
     transcript_response = registry.take_native_notification_response(
         request_id="browser-local-transcript-1",
         notification_sequence=1,
@@ -6778,3 +6831,36 @@ def test_replacing_p2_activation_revokes_old_media_before_new_provider_use() -> 
     assert record.pcm == bytearray()
     assert record.recognition_content_sha256 is None
     assert record.synthesis_content_sha256 == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["interrupted", "failed"])
+async def test_native_settled_task_projects_once_without_provider_answer(status):
+    activation = _native_activation()
+    client, engine = _FakeNativeRuntimeClient(activation), _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=client, native_engine_factory=lambda _binding: engine)
+    activated = _activate(registry, params=_params(sample_rate_hz=24_000), request_origin=ORIGIN, connection_id="connection-1")
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    await registry.begin_native_interaction(uplink)
+    session = next(iter(registry._native_sessions.values()))
+    session.foreground_turn_id = "native-task-turn"
+    delegate = NativeDelegateProposal(binding=activation.binding, turn_id="native-task-turn", response_generation=1,
+        provider_event_id="task-event", provider_call_id="task-call", provider_item_id="task-function", request_text="Create a task")
+    event = NativeEngineEvent(delegate=delegate)
+    result = {"kind": "delegate", "status": status, "accepted": True, "provider_call_id": "task-call",
+        "route": "task", "turn_commit_id": "task-commit", "task_id": "durable-task", "reason": "NATIVE_DELEGATE_INTERRUPTED" if status == "interrupted" else "NATIVE_DELEGATE_AGENT_TIMEOUT",
+        "response": {"interaction_id": activation.binding.interaction_id, "response_id": "native-source", "response_generation": 1}}
+    try:
+        await registry._return_native_delegate_result(session, event, result)
+        await registry._return_native_delegate_result(session, event, result)
+        queue = registry._native_notifications[("session-1", "interaction-1", "connection-1")]
+        notes = []
+        while not queue.empty(): notes.append(queue.get_nowait())
+        associations = [note for note in notes if note["kind"] == "native.task_association"]
+        assert len(associations) == 1 and associations[0]["task_association"]["task_id"] == "durable-task"
+        assert engine.delegate_results == [] and client.close_calls == 0
+        assert all(note.get("audio") is None and note.get("presentation_unit") is None for note in notes)
+        if status == "failed":
+            assert any(note["kind"] == "native.request_state" and note["request_state"]["reason"] == "NATIVE_DELEGATE_AGENT_TIMEOUT" for note in notes)
+    finally:
+        await registry.close_native_interaction(uplink)

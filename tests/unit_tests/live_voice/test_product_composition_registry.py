@@ -2739,6 +2739,65 @@ async def test_native_dialogue_delegate_uses_agent_bridge_and_returns_result(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["semantic", "agent"])
+async def test_native_stop_interrupts_foreground_and_replay_never_reexecutes(tmp_path, monkeypatch, stage):
+    registry, composition, manager = _unified_registry(tmp_path, interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE)
+    started, release = asyncio.Event(), asyncio.Event()
+    if stage == "semantic":
+        original = composition.resolve_production_semantics
+        async def blocked(*args, **kwargs):
+            started.set()
+            await release.wait()
+            return await original(*args, **kwargs)
+        monkeypatch.setattr(composition, "resolve_production_semantics", blocked)
+    else:
+        manager.agent = _BlockingFacade()
+        started, release = manager.agent.started, manager.agent.release
+    activation = await registry.handle_p2_activate(params=_p2_params(interaction_engine="openai-realtime-native"),
+        request_id="interrupt-activate", session_id=SCOPE.session_id, channel_id="web")
+    descriptor = activation.payload["result"]["_native_gateway"]
+    binding = NativeInteractionBinding.from_dict(descriptor["binding"])
+    capability = descriptor["capability"]
+    async def propose(proposal, request_id, cap=capability):
+        return await registry.handle_native_propose(params=_native_propose_params(binding, cap, proposal),
+            request_id=request_id, session_id=SCOPE.session_id)
+    assert (await propose(_native_turn_proposal(binding), "interrupt-turn")).ok
+    source = (await propose(_native_speak_proposal(binding), "interrupt-speak")).payload["result"]["response"]
+    ref = ResponseRef(**source)
+    delegate = _native_delegate_proposal(binding, ref, request_text="Read the project materials.")
+    waiting = asyncio.create_task(propose(delegate, "interrupt-delegate"))
+    await asyncio.wait_for(started.wait(), 2)
+    def stop(generation, action_id):
+        return NativeInteractionProposal.from_engine_event(binding, NativeEngineEvent(action=InteractionAction(
+            action_id=action_id, operation="STOP", interaction_id=binding.interaction_id, scope=binding.scope,
+            payload=(("provider_response_id", "provider-response-1"), ("runtime_response_id", ref.response_id),
+                     ("response_generation", str(generation))))))
+    exact = stop(ref.response_generation, "mixed-stop")
+    mixed = NativeInteractionProposal.from_engine_event(binding, NativeEngineEvent(
+        action=exact.action, provider_done=NativeProviderDone(provider_event_id="mixed-done", provider_response_id="provider-response-1",
+            response=ref, completed=True, transcript=None, transcript_event_id=None)))
+    before_interrupts = set(registry._native_interrupted_sources)
+    assert (await propose(mixed, "mixed-stop")).payload["error"]["reason"] == "NATIVE_STOP_PROPOSAL_INVALID"
+    assert not waiting.done() and registry._native_interrupted_sources == before_interrupts
+    wrong = await propose(stop(ref.response_generation, "wrong-cap"), "wrong-cap", "invalid-capability")
+    assert not wrong.ok and not waiting.done()
+    await propose(stop(ref.response_generation + 1, "wrong-generation"), "wrong-generation")
+    assert not waiting.done()
+    assert (await asyncio.wait_for(propose(stop(ref.response_generation, "exact-stop"), "exact-stop"), 0.5)).ok
+    result = await asyncio.wait_for(waiting, 2)
+    assert result.ok is False
+    assert result.payload["error"]["reason"] == "NATIVE_DELEGATE_INTERRUPTED"
+    assert (await propose(delegate, "interrupt-delegate")).payload == result.payload
+    assert composition.handle_calls == []
+    assert manager.agent.calls == (0 if stage == "semantic" else 1)
+    runtime = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)].activation_lease._runtime
+    assert runtime.snapshot().queued_notifications == 0
+    assert runtime.snapshot().conversation.presentation.records == ()
+    release.set()
+    await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_native_dialogue_delegate_is_drained_before_registry_close(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2860,7 +2919,8 @@ async def test_native_dialogue_delegate_is_drained_before_registry_close(
     close_result = await asyncio.wait_for(native_closing, timeout=1.0)
     await asyncio.wait_for(closing, timeout=1.0)
 
-    assert result.ok is True
+    assert result.ok is False
+    assert result.payload["error"]["reason"] == "NATIVE_DELEGATE_INTERRUPTED"
     assert close_result.ok is True
     assert unrelated_unblocked is True
     assert resolve_calls == 1
@@ -19163,3 +19223,87 @@ async def test_missing_bearer_stays_an_authentication_failure_for_every_mutation
     assert cast(dict, structural.payload["error"])["reason"] == (
         "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
     )
+
+
+@pytest.mark.asyncio
+async def test_native_function_done_can_overtake_context_selection_without_losing_delegate(tmp_path, monkeypatch):
+    registry, composition, manager = _unified_registry(tmp_path, interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE)
+    binding, capability, source = await _activate_native_delegate_source(registry, stem="done-order")
+    route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
+    selected, release = asyncio.Event(), asyncio.Event()
+    original = route.activation_lease.select_formal_context
+    async def select(*args):
+        selected.set()
+        await release.wait()
+        return await original(*args)
+    monkeypatch.setattr(route.activation_lease, "select_formal_context", select)
+    params = _native_propose_params(binding, capability, _native_delegate_proposal(binding, source, request_text="Read project materials"))
+    pending = asyncio.create_task(registry.handle_native_propose(params=params, request_id="done-order-delegate", session_id=SCOPE.session_id))
+    await asyncio.wait_for(selected.wait(), 1)
+    done = NativeInteractionProposal.from_engine_event(binding, NativeEngineEvent(provider_done=NativeProviderDone(
+        provider_event_id="done-order", provider_response_id="provider-response-1", response=source,
+        completed=True, transcript=None, transcript_event_id=None)))
+    assert (await registry.handle_native_propose(params=_native_propose_params(binding, capability, done),
+        request_id="done-order", session_id=SCOPE.session_id)).ok
+    release.set()
+    result = await asyncio.wait_for(pending, 2)
+    assert result.ok, result.payload
+    assert manager.agent.calls == 1
+    assert composition.handle_calls == []
+    successor = ResponseRef(**result.payload["result"]["response"])
+    assert successor.response_generation > source.response_generation
+    # STOP may reach Runtime before Provider binds that allocated successor.
+    stop = NativeInteractionProposal.from_engine_event(binding, NativeEngineEvent(action=InteractionAction(
+        action_id="stop-allocated", operation="STOP", interaction_id=binding.interaction_id, scope=binding.scope,
+        payload=(("provider_response_id", "successor-provider"), ("runtime_response_id", successor.response_id),
+                 ("response_generation", str(successor.response_generation))))))
+    assert (await registry.handle_native_propose(params=_native_propose_params(binding, capability, stop),
+        request_id="stop-allocated", session_id=SCOPE.session_id)).ok
+    with pytest.raises(Exception) as rejected:
+        await route.native_runtime_owner.bind_delegate_provider_response("successor-provider", successor)
+    assert rejected.value.reason == "NATIVE_DELEGATE_INTERRUPTED"
+    assert manager.agent.calls == 1 and composition.handle_calls == []
+    assert route.activation_lease._runtime.snapshot().conversation.presentation.records == ()
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_native_interrupt_after_task_admission_preserves_discovery_without_answer(tmp_path, monkeypatch):
+    from tests.support.live_voice.semantic_model import decision
+    registry, composition, manager = _unified_registry(tmp_path, interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE)
+    composition.semantic_program = lambda data: decision(data, "task.create", {"name": "Materials", "instruction": "Read materials"})
+    binding, capability, source = await _activate_native_delegate_source(registry, stem="task-interrupt")
+    admitted, release = asyncio.Event(), asyncio.Event()
+    effects = []
+    async def dispatch(**kwargs):
+        effects.append(kwargs["semantic_decision"].proposal.operation)
+        admitted.set()
+        await release.wait()
+        return P3RouteResult(True, {"ok": True, "result": {"status": "dispatched", "operation": "task.create",
+            "task_id": "task-durable-native", "reason": "TASK_CREATED", "formal_task_result": {}}, "error": None})
+    monkeypatch.setattr(registry, "_run_p3_production_intent", dispatch)
+    params = _native_propose_params(binding, capability, _native_delegate_proposal(binding, source, request_text="Create a background task to read materials"))
+    pending = asyncio.create_task(registry.handle_native_propose(params=params, request_id="task-interrupt-delegate", session_id=SCOPE.session_id))
+    await asyncio.wait_for(admitted.wait(), 1)
+    stop = NativeInteractionProposal.from_engine_event(binding, NativeEngineEvent(action=InteractionAction(
+        action_id="task-foreground-stop", operation="STOP", interaction_id=binding.interaction_id, scope=binding.scope,
+        payload=(("provider_response_id", "provider-response-1"), ("runtime_response_id", source.response_id),
+                 ("response_generation", str(source.response_generation))))))
+    assert (await registry.handle_native_propose(params=_native_propose_params(binding, capability, stop),
+        request_id="task-foreground-stop", session_id=SCOPE.session_id)).ok
+    assert not pending.done()  # admitted durable dispatch is never cancelled
+    release.set()
+    result = await asyncio.wait_for(pending, 2)
+    assert result.ok, result.payload
+    data = result.payload["result"]
+    assert data["status"] == "interrupted" and data["task_id"] == "task-durable-native"
+    assert "canonical_text" not in data and data["response"] == {
+        "interaction_id": source.interaction_id, "response_id": source.response_id, "response_generation": source.response_generation}
+    assert effects == ["task.create"] and manager.agent.calls == 0
+    origin = registry._voice_task_origins[data["task_id"]]
+    assert origin.activation_id == binding.activation_id and origin.response_ref is None
+    replay = await registry.handle_native_propose(params=params, request_id="task-interrupt-delegate", session_id=SCOPE.session_id)
+    assert replay.payload == result.payload and effects == ["task.create"]
+    route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
+    assert route.activation_lease._runtime.snapshot().conversation.presentation.records == ()
+    await registry.stop()

@@ -16139,3 +16139,86 @@ for (const outcome of ['recovered', 'persistent', 'exit']) {
     }
   });
 }
+
+
+test('mounted Native request lifecycle keeps processing and failure truthful and fences obsolete audio', async () => {
+  const i18n = await createI18n();
+  const states = [], messages = [], calls = [], waiters = [];
+  let activeMediaBinding = null, binding = null, renderer;
+  const controlRef = { current: null };
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const activateP2 = createMountedP2ActivationResponder();
+  const request = async (method, params) => {
+    calls.push(method);
+    if (method === 'live_voice.composition.p2.activate') { binding = { ...params }; return activateP2(params); }
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(resolve => waiters.push(resolve));
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.media.activate') {
+      activeMediaBinding = mountedMediaBinding(params, 1);
+      return { status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED', subject_id: 'mounted-native-subject',
+        endpoint_path: '/ws/live-voice/media', media_ticket: 'N'.repeat(43), subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30000,
+        end_of_turn: { status: 'fallback', requested_capability: 'media.end_of_turn.v1', reason_id: 'MEDIA_END_OF_TURN_FEATURE_OFF', fallback: 'manual', visible: true },
+        native_interaction: { contract_version: 'live-voice.native-interaction.v1', engine: 'openai-realtime-native', model: 'gpt-realtime-2' },
+        binding: activeMediaBinding, privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true } };
+    }
+    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    throw new Error(`forbidden Native lifecycle effect: ${method}`);
+  };
+  let serial = 0;
+  const oldResponse = () => ({ interaction_id: binding.interaction_id, response_id: 'old-native-response', response_generation: 1 });
+  const notification = (sequence, phase, overrides = {}) => ({
+    status: 'notification', kind: 'native.request_state', sequence_effect: 'neutral', request_id: `native-state-${++serial}`,
+    round_id: null, response: phase === 'interrupted' ? oldResponse() : null,
+    agent_event: null, source_event: null, progress_event: null, presentation_unit: null, audio: null, error_reason: null, publish_seq: null,
+    session_id: binding.session_id, correlation_id: binding.correlation_id, interaction_id: binding.interaction_id,
+    activation_id: binding.activation_id, activation_generation: binding.activation_generation,
+    request_state: { turn_id: sequence < 3 ? 'old-turn' : 'next-turn', phase, sequence, reason: phase === 'failed' ? 'NATIVE_DELEGATE_AGENT_TIMEOUT' : null }, ...overrides,
+  });
+  async function deliver(value) {
+    await waitForMountedEffects(() => waiters.length > 0, 'Native notification consumer did not remain live');
+    await act(async () => { waiters.shift()({ ok: true, result: value }); await new Promise(resolve => setImmediate(resolve)); });
+    await waitForMountedEffects(() => waiters.length > 0, 'Native notification did not settle');
+  }
+  try {
+    await act(async () => {
+      renderer = create(mountedFullyEnabledElement(i18n, 'mounted-native-state-session', request, true, {
+        productVoiceControlRef: controlRef, onProductVoiceStateChange: state => states.push(state), onProductVoiceMessage: event => messages.push(event),
+      }));
+    });
+    await waitForMountedEffects(() => controlRef.current !== null && !formalVoiceStartButton(renderer).props.disabled, 'Native panel activation missing');
+    await act(async () => { void controlRef.current.start(); });
+    await waitForMountedEffects(() => states.at(-1)?.p1_status === 'starting', 'Native capture did not start');
+    await act(async () => { await browser.emitFirstFrame(); });
+    await waitForMountedEffects(() => states.at(-1)?.p1_status === 'capturing', 'Native capture not ready');
+    await deliver(notification(1, 'processing'));
+    assert.equal(states.at(-1).text_status, 'waiting');
+    assert.equal(states.at(-1).p1_status, 'capturing');
+    assert.equal(formalProductVoiceActivity(states.at(-1)).status, 'thinking');
+    await deliver(notification(2, 'failed'));
+    assert.equal(states.at(-1).text_status, 'failed');
+    assert.equal(states.at(-1).text_reason, 'NATIVE_DELEGATE_AGENT_TIMEOUT', JSON.stringify({ states: states.slice(-6).map(s => ({status:s.text_status,reason:s.text_reason,recovery:s.recovery_diagnostic})), calls }));
+    assert.equal(states.at(-1).p1_status, 'capturing');
+    assert.equal(states.at(-1).recovery_diagnostic.disposition, 'terminal');
+    await deliver(notification(3, 'processing'));
+    assert.equal(states.at(-1).text_status, 'waiting');
+    assert.equal(states.at(-1).recovery_diagnostic, null);
+    await deliver(notification(2, 'failed'));
+    assert.equal(states.at(-1).text_status, 'waiting');
+    await deliver(notification(4, 'interrupted'));
+    assert.equal(states.at(-1).text_status, 'acknowledged');
+    const audio = notification(5, 'processing', { kind: 'native.audio', response: oldResponse(),
+      presentation_unit: { response: oldResponse(), surface: 'audio', unit_id: 'obsolete-native-unit', seq: 0, source_start_utf8: 0, source_end_utf8: 480, content_ref: `sha256:${'a'.repeat(64)}` },
+      audio: { delivery: 'dedicated_media_downlink', media_ticket: 'A'.repeat(43) } });
+    delete audio.request_state;
+    await deliver(audio);
+    assert.equal(states.at(-1).text_status, 'acknowledged');
+    assert.equal(states.at(-1).p1_status, 'capturing');
+    assert.deepEqual(messages, []);
+    assert.equal(calls.filter(method => method === 'live_voice.media.activate').length, 1);
+    assert.equal(calls.some(method => /unified.submit|speech.recognize|presentation.ack|task.create|task.cancel/u.test(method)), false);
+  } finally {
+    if (renderer) await act(async () => { renderer.unmount(); await new Promise(resolve => setImmediate(resolve)); });
+    browser.restore();
+  }
+});

@@ -848,7 +848,7 @@ class AgentBridgeRuntime:
             self._wake.set()
 
     @profiled('agent.round', 'pending.submission.request')
-    async def _run_request(self, pending: _PendingDispatch) -> None:
+    async def _run_request(self, pending: _PendingDispatch) -> dict[str, object]:
         submission = pending.submission
         request = submission.request
         tracker = EventSequenceTracker()
@@ -1085,7 +1085,7 @@ class AgentBridgeRuntime:
                         closing_stream = stream
                         stream = None
                         await self._best_effort_close_adapter_stream(closing_stream)
-                        return
+                        return {"terminal_outcome": terminal_outcome}
             unresolved = set(retained_sources) - projected_sources
             if unresolved:
                 raise AgentBridgeRuntimeViolation(
@@ -1109,12 +1109,14 @@ class AgentBridgeRuntime:
             closing_stream = stream
             stream = None
             await self._best_effort_close_adapter_stream(closing_stream)
+            return {"terminal_outcome": "failed"}
         except Exception as error:
             emit_measurement_failure()
             if not submission.completion.done():
                 submission.completion._set_exception(error)
             if stream is not None:
                 await self._best_effort_close_adapter_stream(stream)
+            return {"terminal_outcome": "failed"}
 
     async def _put_output(self, delivery: AgentBridgeDelivery) -> None:
         await self._outputs.put(delivery)

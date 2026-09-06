@@ -264,6 +264,25 @@ class NativeInteractionRuntimeOwner:
         self._delegates_by_call: dict[str, NativeDelegateAdmission] = {}
         self._delegate_event_calls: dict[str, str] = {}
         self._delegate_results: dict[str, NativeDelegateResult] = {}
+        self._interrupted_delegate_sources: set[ResponseRef] = set()
+
+    def delegate_source_response(self, response: ResponseRef) -> ResponseRef | None:
+        return next((self._delegates_by_call[call_id].source_response
+                     for call_id, result in self._delegate_results.items()
+                     if result.response == response), None)
+
+    async def interrupt_delegate_source(self, *, action_id: str, response: ResponseRef) -> None:
+        """Retire the exact delegate and any allocated successor, never a Task."""
+        async with self._lock:
+            self._require_open()
+            source = self.delegate_source_response(response) or response
+            if source not in self._responses_by_ref:
+                raise NativeInteractionRuntimeError("NATIVE_STOP_RESPONSE_STALE", "STOP requires a known exact response")
+            self._interrupted_delegate_sources.add(source)
+            for call_id, admission in self._delegates_by_call.items():
+                result = self._delegate_results.get(call_id)
+                if admission.source_response == source and result is not None:
+                    await self._runtime.request_response_cancel(f"{action_id}:delegate:{call_id}", result.response)
 
     async def start(self) -> bool:
         async with self._lock:
@@ -460,7 +479,8 @@ class NativeInteractionRuntimeOwner:
             if (
                 retained_response is None
                 or retained_response.cancelled
-                or retained_response.done is not None
+                or (retained_response.done is not None and not retained_response.done.completed)
+                or retained_response.admission.response in self._interrupted_delegate_sources
                 or proposal.turn_id != self._current_turn_id
                 or proposal.turn_id not in self._turns_by_id
                 or proposal.response_generation
@@ -566,6 +586,8 @@ class NativeInteractionRuntimeOwner:
                     "NATIVE_DELEGATE_ADMISSION_STALE",
                     "delegate result does not match retained Runtime authority",
                 )
+            if admission.source_response in self._interrupted_delegate_sources:
+                raise NativeInteractionRuntimeError("NATIVE_DELEGATE_INTERRUPTED", "Interrupted delegate result is not presentable")
             text = self._delegate_result_text(canonical_text)
             if not isinstance(route, UnifiedCommittedInputRoute):
                 raise NativeInteractionRuntimeError(
@@ -687,6 +709,8 @@ class NativeInteractionRuntimeOwner:
                     "NATIVE_DELEGATE_RESPONSE_UNKNOWN",
                     "delegate Provider response was not pre-admitted by Runtime",
                 )
+            if self.delegate_source_response(response) in self._interrupted_delegate_sources:
+                raise NativeInteractionRuntimeError("NATIVE_DELEGATE_INTERRUPTED", "Interrupted successor cannot bind Provider output")
             prior = self._responses_by_provider.get(provider_id)
             if prior is not None:
                 if prior.admission.response == response:

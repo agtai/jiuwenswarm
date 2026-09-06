@@ -2007,6 +2007,9 @@ async def test_direct_request_precedes_late_delegate_successor_without_overlap()
         assert (await engine.next_event()).delegate is not None
         assert (await engine.next_event()).provider_done is not None
 
+        # This queue-order unit deliberately leaves the proposed STOP unapplied;
+        # the Gateway integration owns its cancellation effect.
+        assert (await engine.next_event()).action.operation == "STOP"
         await accept_basic_turn(engine)
         assert [event["type"] for event in socket.sent].count("response.create") == 2
         delegate_ref = response_ref(3)
@@ -2048,6 +2051,42 @@ async def test_direct_request_precedes_late_delegate_successor_without_overlap()
 
 
 @pytest.mark.asyncio
+async def test_speech_interrupts_pending_delegate_after_function_response_done() -> None:
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        function_done("event-7", "provider-response-1"),
+        response_done("event-8", "provider-response-1"),
+        speech_started("event-9", "user-item-2", 20),
+    )
+    await engine.start()
+    try:
+        await accept_basic_turn(engine)
+        await engine.next_event()
+        await engine.admit_response("provider-response-1", response_ref(1))
+        assert (await engine.next_event()).delegate is not None
+        assert (await engine.next_event()).provider_done is not None
+        stop = await engine.next_event()
+        assert stop.action is not None and stop.action.operation == "STOP"
+        assert action_payload(stop)["runtime_response_id"] == response_ref(1).response_id
+        await engine.stop_foreground(response_ref(1))
+        retired = [item for item in socket.sent if item["type"] == "conversation.item.create"]
+        assert len(retired) == 1
+        assert json.loads(retired[0]["item"]["output"]) == {"foreground_status": "interrupted"}
+        await engine.stop_foreground(response_ref(1))
+        assert len([item for item in socket.sent if item["type"] == "conversation.item.create"]) == 1
+        before = len(socket.sent)
+        with pytest.raises(OpenAIRealtimeNativeInteractionError) as raised:
+            await engine.send_delegate_result("call-1", response_ref(2), "late result")
+        assert raised.value.reason == "NATIVE_DELEGATE_INTERRUPTED"
+        assert len(socket.sent) == before
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_delegate_successor_precedes_later_direct_request_without_overlap() -> (
     None
 ):
@@ -2077,6 +2116,9 @@ async def test_delegate_successor_precedes_later_direct_request_without_overlap(
         await engine.send_delegate_result("call-1", delegate_ref, "canonical result")
         assert [event["type"] for event in socket.sent].count("response.create") == 2
 
+        # This scheduler oracle intentionally does not apply Gateway STOP;
+        # foreground cancellation is covered by the send-boundary regression.
+        assert (await engine.next_event()).action.operation == "STOP"
         await accept_basic_turn(engine)
         assert [event["type"] for event in socket.sent].count("response.create") == 2
 
@@ -2119,6 +2161,7 @@ async def test_cancelled_queued_delegate_never_sends_late_response_create() -> N
         await engine.admit_response("provider-response-1", response_ref(1))
         assert (await engine.next_event()).delegate is not None
         assert (await engine.next_event()).provider_done is not None
+        assert (await engine.next_event()).action.operation == "STOP"
         await accept_basic_turn(engine)
 
         delegate_task = asyncio.create_task(
@@ -2815,3 +2858,122 @@ async def test_concurrent_duplicate_input_sequence_sends_only_one_frame() -> Non
     )
     assert engine.snapshot().next_input_sequence == 1
     await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["output_lock", "response_send", "before_created", "successor_bound"])
+async def test_foreground_stop_settles_provider_send_and_fences_successor(boundary):
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        function_done("event-7", "provider-response-1"),
+        response_done("event-8", "provider-response-1"),
+    )
+    await engine.start()
+    try:
+        await accept_basic_turn(engine)
+        await engine.next_event()
+        await engine.admit_response("provider-response-1", response_ref(1))
+        await engine.next_event()
+        await engine.next_event()
+        before = len(socket.sent)
+        if boundary == "output_lock":
+            await engine._session._send_lock.acquire()
+        elif boundary == "response_send":
+            socket.block_send_at = socket.send_calls + 2
+        send = asyncio.create_task(engine.send_delegate_result("call-1", response_ref(2), "Old answer"))
+        if boundary == "output_lock":
+            for _ in range(20):
+                if "call-1" in engine._delegate_output_started:
+                    break
+                await asyncio.sleep(0)
+            assert "call-1" in engine._delegate_output_started
+        elif boundary == "response_send":
+            await asyncio.wait_for(socket.send_entered.wait(), 1)
+        else:
+            await asyncio.wait_for(asyncio.shield(send), 1)
+        if boundary == "successor_bound":
+            socket.push(response_created("event-10", "provider-response-2"))
+            assert (await engine.next_event()).action.operation == "SPEAK"
+        socket.push(speech_started("event-9", "user-item-2", 20))
+        stop = await engine.next_event()
+        assert stop.action.operation == "STOP"
+        await engine.stop_foreground(response_ref(2 if boundary == "successor_bound" else 1))
+        if boundary == "successor_bound":
+            await engine.stop_foreground(response_ref(2))  # replay has no duplicate Provider cancel
+        if boundary == "output_lock":
+            engine._session._send_lock.release()
+            with pytest.raises(OpenAIRealtimeNativeInteractionError, match="Interrupted"):
+                await asyncio.wait_for(send, 1)
+        else:
+            socket.release_send.set()
+            await asyncio.wait_for(send, 1)
+        assert (await engine.next_event()).action.operation == "LISTEN"
+        if boundary != "output_lock":
+            if boundary != "successor_bound":
+                socket.push(response_created("event-10", "provider-response-2"))
+                assert await engine.next_event() == NativeEngineEvent()
+            socket.push(output_audio_delta("event-11", "provider-response-2", "obsolete-audio", 0))
+            assert await engine.next_event() == NativeEngineEvent()
+            socket.push(response_done("event-12", "provider-response-2", status="cancelled"))
+            assert await engine.next_event() == NativeEngineEvent()
+        sent = socket.sent[before:]
+        assert sum(event["type"] == "conversation.item.create" for event in sent) == 1
+        assert sum(event["type"] == "response.create" for event in sent) == (0 if boundary == "output_lock" else 1)
+        assert sum(event["type"] == "response.cancel" for event in sent) == (0 if boundary == "output_lock" else 1)
+        assert engine.snapshot().released_audio_count == 0
+        assert engine.snapshot().state is not NativeProviderState.FAILED
+    finally:
+        socket.release_send.set()
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_audio", [False, True])
+async def test_native_foreground_stop_and_cursor_share_inflight_provider_cancel(has_audio):
+    engine, socket, _ = active_engine(
+        speech_started("event-3", "user-item-1", 0),
+        speech_stopped("event-4", "user-item-1", 20),
+        input_committed("event-5", "user-item-1"),
+        response_created("event-6", "provider-response-1"),
+        function_done("event-7", "provider-response-1"),
+        response_done("event-8", "provider-response-1"),
+    )
+    await engine.start()
+    try:
+        await accept_basic_turn(engine)
+        await engine.next_event()
+        await engine.admit_response("provider-response-1", response_ref(1))
+        await engine.next_event()
+        await engine.next_event()
+        await engine.send_delegate_result("call-1", response_ref(2), "Old answer")
+        socket.push(response_created("event-9", "provider-response-2"))
+        assert (await engine.next_event()).action.operation == "SPEAK"
+        socket.push(output_transcript_done("event-10", "provider-response-2", "audio-2", "Old answer"))
+        await engine.next_event()
+        if has_audio:
+            socket.push(output_audio_delta("event-11", "provider-response-2", "audio-2", 0))
+            assert (await engine.next_event()).audio is not None
+        before = len(socket.sent)
+        socket.block_send_at = socket.send_calls + 1
+        stop = asyncio.create_task(engine.stop_foreground(response_ref(2)))
+        await asyncio.wait_for(socket.send_entered.wait(), 1)
+        cursor = NativePresentationCursor(response_ref(2), "audio-2", 0, 0)
+        truncate = asyncio.create_task(engine.cancel_response(cursor))
+        await asyncio.sleep(0)
+        assert not truncate.done()
+        socket.release_send.set()
+        await asyncio.wait_for(stop, 1)
+        receipt = await asyncio.wait_for(truncate, 1)
+        assert await engine.cancel_response(cursor) == receipt
+        await engine.stop_foreground(response_ref(2))
+        sent = socket.sent[before:]
+        assert [event["type"] for event in sent] == ["response.cancel", "conversation.item.truncate"]
+        assert receipt == (sent[0]["event_id"], sent[1]["event_id"])
+        assert sent[1]["audio_end_ms"] == 0
+        assert engine.snapshot().state is not NativeProviderState.FAILED
+    finally:
+        socket.release_send.set()
+        await engine.close()

@@ -368,9 +368,11 @@ function mediaTerminalFailureReason(event: Readonly<DedicatedMediaTerminalEvent>
 export function productCaptureTerminalFailureReason(
   event: Readonly<DedicatedMediaTerminalEvent>,
   endOfTurnNegotiated: boolean,
+  nativeRealtime = false,
 ): string {
   if (
     event.direction === 'uplink'
+    && !nativeRealtime
     && endOfTurnNegotiated
     && event.reason_id === 'MEDIA_CONSUMER_FAILED'
   ) return 'SPEECH_RECOGNITION_STREAM_FAILED';
@@ -3196,7 +3198,7 @@ export class ProductP1VoiceRouteOwner {
     }
     void this.#fail(
       Object.assign(new Error('formal dedicated media route terminated unexpectedly'), {
-        reason: productCaptureTerminalFailureReason(event, this.#endOfTurnNegotiated),
+        reason: productCaptureTerminalFailureReason(event, this.#endOfTurnNegotiated, this.interactionEngine() === 'openai-realtime-native'),
       })
     );
   }

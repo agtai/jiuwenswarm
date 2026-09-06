@@ -16,6 +16,13 @@ from datetime import UTC, datetime, timezone
 from enum import StrEnum
 from typing import Protocol
 
+from jiuwenswarm.common.live_voice_operation_budgets import (
+    NATIVE_AGENT_TIMEOUT_SECONDS, NATIVE_AGENT_MAX_TIMEOUT_SECONDS,
+)
+from jiuwenswarm.server.live_voice.native_foreground import (
+    NATIVE_FOREGROUND, NativeForegroundInterrupted,
+)
+
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,
     CancelScope,
@@ -43,6 +50,7 @@ from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
     WorkProgressDelivery,
 )
 from jiuwenswarm.server.live_voice.conversation_runtime import (
+    CancelState,
     ConversationRuntimeViolation,
     InteractionState,
     ResponseState,
@@ -118,8 +126,9 @@ _MAX_EFFECT_ID_UTF8_BYTES = 512
 _MAX_EFFECTS_PER_REQUEST = 3
 _MAX_FORMAL_CONTEXT_ENTRIES = 8
 _MAX_FORMAL_CONTEXT_UTF8_BYTES = 32 * 1024
-_DEFAULT_NATIVE_DELEGATE_TIMEOUT_SECONDS = 25.0
-_MAX_NATIVE_DELEGATE_TIMEOUT_SECONDS = 28.0
+
+_DEFAULT_NATIVE_DELEGATE_TIMEOUT_SECONDS = NATIVE_AGENT_TIMEOUT_SECONDS
+_MAX_NATIVE_DELEGATE_TIMEOUT_SECONDS = NATIVE_AGENT_MAX_TIMEOUT_SECONDS
 _NATIVE_DELEGATE_CANCEL_SETTLEMENT_SECONDS = 1.0
 
 
@@ -693,7 +702,7 @@ class AgentConversationRuntime:
             raise AgentConversationRuntimeViolation(
                 "INVALID_NATIVE_DELEGATE_TIMEOUT",
                 "Native delegate timeout must be finite, positive, and below "
-                "the 30 second carrier deadline",
+                "the bounded Native Agent deadline",
                 ErrorCode.INVALID_ARGUMENT,
             )
         self._scope = scope
@@ -894,7 +903,15 @@ class AgentConversationRuntime:
             ),
             None,
         )
-        if source_record is None or source_record.state is ResponseState.TERMINAL:
+        foreground = NATIVE_FOREGROUND.get()
+        # A completed tool-call response is the normal source of a pending
+        # Native delegate. Only its exact retained foreground admission can
+        # cross this terminal boundary; cancelled sources stay forbidden.
+        completed_delegate_source = (
+            foreground is not None and foreground.source_response == source_response
+            and source_record is not None and source_record.cancel_state is CancelState.NONE
+        )
+        if source_record is None or (source_record.state is ResponseState.TERMINAL and not completed_delegate_source):
             raise AgentConversationRuntimeViolation(
                 "NATIVE_DELEGATE_RESPONSE_STALE",
                 "Native Agent execution requires the live source response",
@@ -993,7 +1010,11 @@ class AgentConversationRuntime:
         harness_reservation: HarnessRoundReservation | None = None
         bridge_reservation: AgentBridgeDispatchReservation | None = None
         round_handle: HarnessRoundHandle | None = None
+        foreground = NATIVE_FOREGROUND.get()
         try:
+            if foreground is not None:
+                foreground.check()
+                foreground.observe("agent_started", timeout_ms=self._native_delegate_timeout_seconds * 1000)
             assert self._facade is not None
             harness_reservation = self._harness.reserve_round(
                 HarnessRoundBinding(
@@ -1029,17 +1050,23 @@ class AgentConversationRuntime:
                 adapter=JiuWenSwarmAgentAdapter(round_handle),
             )
             try:
-                completion = await asyncio.wait_for(
-                    submission.completion,
-                    timeout=self._native_delegate_timeout_seconds,
-                )
-            except TimeoutError as timeout_error:
+                if foreground is None:
+                    completion = await asyncio.wait_for(
+                        submission.completion, timeout=self._native_delegate_timeout_seconds,
+                    )
+                else:
+                    completion = await foreground.read_only(
+                        asyncio.shield(submission.completion),
+                        timeout=self._native_delegate_timeout_seconds,
+                    )
+            except (TimeoutError, NativeForegroundInterrupted) as timeout_error:
+                interrupted = isinstance(timeout_error, NativeForegroundInterrupted)
                 cancel = CommandEnvelope.from_dict(
                     {
                         "contract_version": "live-voice.contract.v2",
                         "request_id": request_id,
                         "command_id": (
-                            "native-delegate-timeout-"
+                            ("native-delegate-interrupt-" if interrupted else "native-delegate-timeout-")
                             + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
                         ),
                         "command_type": "round.cancel",
@@ -1072,10 +1099,12 @@ class AgentConversationRuntime:
                     )
                 except TimeoutError:
                     pass
+                if foreground is not None:
+                    foreground.observe("agent_cancelled", outcome="cancelled" if interrupted else "timeout")
                 raise AgentConversationRuntimeViolation(
-                    "NATIVE_DELEGATE_AGENT_TIMEOUT",
-                    "Native Agent delegate exceeded its server-owned deadline",
-                    ErrorCode.TIMEOUT,
+                    "NATIVE_DELEGATE_INTERRUPTED" if interrupted else "NATIVE_DELEGATE_AGENT_TIMEOUT",
+                    "Native Agent foreground interrupted" if interrupted else "Native Agent delegate exceeded its server-owned deadline",
+                    ErrorCode.CANCELLED if interrupted else ErrorCode.TIMEOUT,
                 ) from timeout_error
             if (
                 completion.status is not AgentBridgeCompletionStatus.TERMINAL_OBSERVED
@@ -1088,6 +1117,9 @@ class AgentConversationRuntime:
                     "Agent Bridge did not return one completed canonical final",
                     ErrorCode.RESULT_UNKNOWN,
                 )
+            if foreground is not None:
+                foreground.check()
+                foreground.observe("agent_completed", outcome="complete")
             return completion.canonical_text
         except BaseException:
             if bridge_reservation is not None:
