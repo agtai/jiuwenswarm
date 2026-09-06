@@ -1995,6 +1995,20 @@
   automatically re-executed. Terminal/unknown state and reads remain truthful.
   Request acceptance, execution timeout, cancellation settlement and presentation
   are separately bounded. This is not a general durable Executor replacement.
+- Context is a bounded observation, not an authority grant: canonical user and
+  heard/visible assistant history, authorized Task facts and current work facts
+  retain their distinct provenance. Exact target/revision and final authority
+  are checked again at dispatch. Native Task observation capacity is fixed by
+  the authenticated activation, within the existing Store limit; Cascade's
+  observation limit is unchanged. A completed creation receipt may repair its
+  missing Task projection association, never replay the Task effect. A crash
+  before the receipt commits still has an unknown outcome.
+- A valid Provider function identity with invalid business arguments receives
+  an exact error output without a business proposal or side effect. Bounded
+  correction uses the same response/turn and real playout settlement rules as
+  successful calls. All sibling calls settle before one successor response;
+  STOP or a new accepted turn fences the old continuation. Protocol corruption
+  outside that negotiated argument boundary remains a failure.
 - The private Native carrier negotiates the business extension explicitly; old
   closed delegate payloads keep their meaning. A versioned private context request
   on native.propose supplies authorized bootstrap/recovery facts. Optional P2

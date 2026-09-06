@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-06 (Native conversational execution authorized; implementation and acceptance in progress).
+> Updated: 2026-09-06 (Native conversational implementation and scoped verification recorded; physical acceptance remains open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -31,9 +31,14 @@ after the code/latency audit. Native gains structured authenticated business cal
 and Agent work independent of speech, with complete context/recovery, interruption,
 model binding, Task projection and critical diagnostic repair. Cascade retains its
 existing route. Shared protocol/authority/work boundaries are Tier 3; local state
-repairs are Tier 2. Implementation, connected verification, independent review and
-controlled deployment are in progress; no new capability or acceptance credit is
-claimed yet. The following earlier repairs are retained regression context.
+repairs are Tier 2. Structured Task dispatch, independent read-only work, bounded
+context recovery, model binding and media/UI integration are implemented with
+scoped automated and independent review evidence in the packet. Real Agent/file
+execution is verified separately from microphone/speaker acceptance. Controlled
+deployment binds clean source, actual assets and preserved data in the local
+runtime contract. Inherited broader regression failures and the complete physical
+Native/Cascade journey remain open; full candidate acceptance is not claimed.
+The following earlier repairs are retained regression context.
 
 ### Native recovery and presentation lifecycle
 
@@ -171,14 +176,14 @@ whole-project audit for every bounded task.
 | Speech Recognition | Streaming/batch finals, typed failure, bounded capture retry and lifetime repair | Long/paused speech, fallback/cancel, device/network and physical lifetime evidence |
 | Speech Synthesis | Streaming/batch TTS, response ownership, playback ACK | Interrupted/long answers, first-audio, underrun, pronunciation and stale-output proof |
 | Realtime Media | Dedicated transport, registration/rotation, bounded P2 pull | Backpressure/load, loss/order/corruption/reconnect and truthful recovery |
-| Conversation Runtime | Commit/generation fencing, Stop/Exit, playout and Cascade generation interruption; exact Native processing interruption and late-output fencing, continuity/ACK ownership | Combined physical listening/notification/Task races, no old-audio revival or detached-Task miscontrol |
-| Interaction Intelligence | Model semantic routing; controlled Native Demo with Provider-confirmed interruption; Cascade remains an available route | Full Native business-audio journey, endpoint/false-interruption evaluation, language/device scope |
-| Agent Bridge and dialogue truth | Real Agent/file tools, current requirements, canonical status, faithful Agent answer delivery | Broader real-model/physical verification, arithmetic/feasibility reliability, literal names/paths and concise speech |
+| Conversation Runtime | Commit/generation fencing, Stop/Exit, playout and Cascade generation interruption; Native analysis independent of speech, exact revision cancellation, response-group arbitration and ACK ownership | Combined physical listening/notification/Task races, no old-audio revival or detached-Task miscontrol |
+| Interaction Intelligence | Cascade semantic routing; Native typed business calls with bounded argument correction and Provider-confirmed interruption | Full Native business-audio journey, endpoint/false-interruption evaluation, language/device scope |
+| Agent Bridge and dialogue truth | Real Agent/file tools, independently owned read-only Native work, bound model/context, restart-unknown checkpoints and canonical heard history | Broader real-model/physical verification, arithmetic/feasibility reliability, literal names/paths and concise speech |
 | Task Control Core and Store | Canonical multi-Task state, durable commands/replay, exact targets/CAS, bounded adjustment delivery | Current concurrency/restart integration and full Task-operation coverage |
 | Executor & Durability | Direct D0/D2 v2 admission/reconciliation, sealed results/checkpoints, dedicated memory repair; v1 cannot dispatch v2 | Required review and real result/control acceptance; outside-checkout files or additional Executor/D1 capability need separate scope; no D1/host-crash claim |
-| Voice–Task Bridge | Unified committed semantics, direct exact local create/successor/adjust/cancel consent, scoped targets/requirements and target clarification | Real modification/query acceptance, generalization/retirement; update/reprioritize retain confirmation; pause/resume/provide-input remain unsupported |
-| Integrated Web product experience | Right-panel Registry Tasks, project-home Session startup, recovery/notification repairs; independent timers, exact notification ownership and Native processing/failure state independent of capture | Current-source busy-to-idle terminal delivery, stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh; projectless backend authority |
-| Observability, benchmark and latency | Scoped timing/error export, Native phase/deadline and true terminal outcomes, offline reports, tests/build/review and deployment samples | Current physical reproduction, interruption/first-audible baseline and SLOs; clock gaps/dropped data remain explicit |
+| Voice–Task Bridge | Unified committed semantics and Native structured dispatch through existing production policy, exact local create/successor/adjust/cancel consent, authorized target/revision checks and durable projection repair | Real modification/query acceptance, generalization/retirement; update/reprioritize retain confirmation; pause/resume/provide-input remain unsupported |
+| Integrated Web product experience | Right-panel Registry Tasks, operation-driven refresh, passive Native work state, confirmed model selection, text/notification ownership and processing state independent of capture | Current-source busy-to-idle terminal delivery, stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh; projectless backend authority |
+| Observability, benchmark and latency | Scoped timing/error export, Native call/context/work/model milestones, critical-event retention and true terminal outcomes | Current physical reproduction, interruption/first-audible baseline and SLOs; clock gaps/dropped data remain explicit |
 | Automated verification and acceptance | Focused regressions and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative review/human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, semantic cutover, bounded removals and prompt/config isolation | Complete reachability/retirement audit and remaining manifest rows; keep private artifacts/runtime data out of integration |
 | Production operations | Privacy/preflight/observability foundations | Auth/tenancy, public deployment, operations, retention, security, compatibility and release support after separate scope |
@@ -199,10 +204,10 @@ whole-project audit for every bounded task.
    listening, interruption or notification failures; preserve failed evidence.
 2. Complete affected positive/rejection/stale/replay/isolation checks and review.
    Verify authoritative Task/Attempt state, files and actual audio as applicable;
-   classify remaining Registry/Web failures. For the Native foreground and three
-   earlier Demo repairs, module evidence is recorded; the next trigger is
-   controlled Native startup followed by processing/playback interruption,
-   busy-to-idle notification and headset continuity rehearsal.
+   classify remaining Registry/Web failures. Native conversational module evidence
+   is recorded; the next trigger is controlled startup followed by real
+   Task operations, analysis with interjected speech, processing/playback
+   interruption, busy-to-idle notification and headset continuity rehearsal.
 3. Prove the [current A/B/A2 journey](demo/PRODUCT_READINESS_SHOWCASE.md): analysis,
    separate delegation, adjustment/query/cancel, offline completion, unread/ACK/
    refresh and preserved A/new A2. Include bounded negatives, another domain and

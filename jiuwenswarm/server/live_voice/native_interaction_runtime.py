@@ -563,6 +563,9 @@ class NativeInteractionRuntimeOwner:
                     proposal.request_text.encode("utf-8")
                 ).hexdigest(),
             }
+            from .native_business_contract import NativeBusinessProposal
+            if isinstance(proposal, NativeBusinessProposal):
+                identity["native_business_source"] = proposal.source_identity
             digest = hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
             provenance = {
                 "source": "openai_realtime_native_delegate",
@@ -576,6 +579,8 @@ class NativeInteractionRuntimeOwner:
                 "provider_item_id": proposal.provider_item_id,
                 "source_response_generation": proposal.response_generation,
             }
+            if isinstance(proposal, NativeBusinessProposal):
+                provenance["native_business_source"] = proposal.source_identity
             try:
                 turn_commit = TurnCommit.from_dict(
                     {
@@ -613,6 +618,7 @@ class NativeInteractionRuntimeOwner:
         *,
         canonical_text: str,
         route: UnifiedCommittedInputRoute,
+        allow_interrupted: bool = False,
     ) -> NativeDelegateResult:
         """Retain the result without fencing any current response or media."""
 
@@ -629,9 +635,13 @@ class NativeInteractionRuntimeOwner:
                     "NATIVE_DELEGATE_ADMISSION_STALE",
                     "delegate result does not match retained Runtime authority",
                 )
-            if admission.source_response in self._interrupted_delegate_sources:
+            from .native_business_contract import NativeBusinessProposal
+            if allow_interrupted and not isinstance(admission.proposal, NativeBusinessProposal):
+                raise NativeInteractionRuntimeError("NATIVE_BUSINESS_CAPABILITY_REQUIRED", "Only business receipts may settle after speech interruption")
+            if admission.source_response in self._interrupted_delegate_sources and not allow_interrupted:
                 raise NativeInteractionRuntimeError("NATIVE_DELEGATE_INTERRUPTED", "Interrupted delegate result is not presentable")
-            text = self._delegate_result_text(canonical_text)
+            text = self._delegate_result_text(canonical_text,
+                maximum=524288 if isinstance(admission.proposal, NativeBusinessProposal) else MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES)
             if not isinstance(route, UnifiedCommittedInputRoute):
                 raise NativeInteractionRuntimeError(
                     "NATIVE_DELEGATE_ROUTE_INVALID",
@@ -659,7 +669,8 @@ class NativeInteractionRuntimeOwner:
             return result
 
     async def accept_provider_response(
-        self, provider_response_id: str, response_id: str, *, turn_id: str | None = None
+        self, provider_response_id: str, response_id: str, *, turn_id: str | None = None,
+        require_current_idle: bool = False,
     ) -> NativeResponseAdmission:
         async with self._lock:
             self._require_open()
@@ -685,6 +696,14 @@ class NativeInteractionRuntimeOwner:
                     "NATIVE_RUNTIME_RESPONSE_ID_CONFLICT",
                     "Runtime response identity cannot bind another Provider response",
                 )
+            if require_current_idle:
+                current = self._current_response
+                if target_turn != self._current_turn_id:
+                    raise NativeInteractionRuntimeError("NATIVE_WORK_RESPONSE_TURN_STALE", "Work result must join the current accepted turn")
+                if current is not None and not current.cancelled and (
+                    current.done is None or (current.next_audio_sequence > 0 and not await self._runtime.presentation_complete(
+                        current.admission.response, PresentationSurface.AUDIO))):
+                    raise NativeInteractionRuntimeError("NATIVE_RESPONSE_PRESENTATION_BUSY", "Work result must wait for the current response")
             self._require_record_capacity(
                 len(self._responses_by_provider), "NATIVE_RESPONSE_LEDGER_FULL"
             )
@@ -704,6 +723,9 @@ class NativeInteractionRuntimeOwner:
             self._response_ids[runtime_response_id] = provider_id
             self._current_response = retained
             return admission
+
+    async def accept_work_provider_response(self, provider_response_id: str, response_id: str, *, turn_id: str):
+        return await self.accept_provider_response(provider_response_id, response_id, turn_id=turn_id, require_current_idle=True)
 
     async def accept_delegate_provider_response(
         self, provider_response_id: str, call_id: str, turn_id: str,
@@ -729,6 +751,14 @@ class NativeInteractionRuntimeOwner:
                 raise NativeInteractionRuntimeError("NATIVE_PROVIDER_RESPONSE_CONFLICT", "Provider response cannot change its binding")
             if prior_result is not None:
                 raise NativeInteractionRuntimeError("NATIVE_RUNTIME_RESPONSE_ID_CONFLICT", "A delegate permits only one Provider response")
+            from .native_business_contract import NativeBusinessProposal
+            if isinstance(source.proposal, NativeBusinessProposal):
+                siblings = [sibling_id for sibling_id, sibling in self._delegates_by_call.items()
+                    if sibling.source_response == source.source_response and isinstance(sibling.proposal, NativeBusinessProposal)]
+                if any(sibling_id in self._delegate_results for sibling_id in siblings):
+                    raise NativeInteractionRuntimeError("NATIVE_BUSINESS_RESPONSE_ALREADY_BOUND", "One business call group permits one successor")
+                if any(sibling_id not in self._prepared_delegate_results for sibling_id in siblings):
+                    raise NativeInteractionRuntimeError("NATIVE_BUSINESS_GROUP_PENDING", "All admitted business calls must settle before their successor")
             current = self._current_response
             if current is not None and not current.cancelled and (
                 current.done is None or (current.done.completed and current.next_audio_sequence > 0 and not await self._runtime.presentation_complete(
@@ -753,6 +783,15 @@ class NativeInteractionRuntimeOwner:
                 result.turn_commit, result.canonical_text, result.route, response,
             )
             self._delegate_holds.pop(call_id, None)
+            if isinstance(source.proposal, NativeBusinessProposal):
+                for sibling_id, sibling in self._delegates_by_call.items():
+                    sibling_result = self._prepared_delegate_results.get(sibling_id)
+                    if (sibling_id != call_id and sibling.source_response == source.source_response
+                        and isinstance(sibling.proposal, NativeBusinessProposal) and sibling_result is not None
+                        and sibling_id not in self._delegate_results):
+                        self._delegate_results[sibling_id] = NativeDelegateResult(
+                            sibling_result.turn_commit, sibling_result.canonical_text, sibling_result.route, response)
+                        self._delegate_holds.pop(sibling_id, None)
             self._retire_terminal_predecessor_audio_locked()
             admission = NativeResponseAdmission(provider_id, response)
             retained_response = _RuntimeResponse(admission, turn_id)
@@ -1133,11 +1172,13 @@ class NativeInteractionRuntimeOwner:
                 or retained.history is None
             ):
                 return None
+            from .native_business_contract import NativeBusinessProposal
             matches = [
                 result
-                for result in self._delegate_results.values()
+                for call_id, result in self._delegate_results.items()
                 if result.response == response
                 and result.route is UnifiedCommittedInputRoute.DIALOGUE
+                and not isinstance(self._delegates_by_call[call_id].proposal, NativeBusinessProposal)
             ]
             if len(matches) != 1:
                 return None
@@ -1444,7 +1485,7 @@ class NativeInteractionRuntimeOwner:
             _identity(provenance, "transcript_event_id")
 
     @staticmethod
-    def _delegate_result_text(value: object) -> str:
+    def _delegate_result_text(value: object, *, maximum: int = MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES) -> str:
         if (
             type(value) is not str
             or not value
@@ -1461,8 +1502,8 @@ class NativeInteractionRuntimeOwner:
         try:
             length = len(value.encode("utf-8"))
         except UnicodeEncodeError:
-            length = MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES + 1
-        if length > MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES:
+            length = maximum + 1
+        if length > maximum:
             raise NativeInteractionRuntimeError(
                 "NATIVE_DELEGATE_RESULT_INVALID",
                 "delegate result is oversized",

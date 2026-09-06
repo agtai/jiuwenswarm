@@ -704,6 +704,45 @@ class SqliteNativeWorkJournal:
                 ErrorCode.UNAVAILABLE,
             ) from error
 
+    def recover_task_origins(self, scope: ScopeRef) -> None:
+        """Repair a missing projection write from the exact durable call receipt.
+
+        A journal commit may succeed after the separate origin write failed.
+        This recovers only the association, including after process restart;
+        callers must still intersect it with current authorized Task facts.
+        """
+        scope_sha = _scope_digest(scope)
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT request_id,voice_identity_sha256,fingerprint,
+                          json_extract(result_json,'$.task_id') AS task_id,
+                          json_extract(result_json,'$.native_origin') AS origin_json
+                   FROM unified_committed_inputs
+                   WHERE status='completed' AND request_id LIKE 'native-business:%'
+                     AND json_valid(result_json)
+                     AND json_extract(result_json,'$.contract_version')='live-voice.native-business.v1'
+                     AND json_extract(result_json,'$.status')='dispatched'
+                     AND json_extract(result_json,'$.operation') IN ('task.create','task.create_successor')
+                     AND json_extract(result_json,'$.native_origin.scope_sha256')=?
+                     AND json_extract(result_json,'$.task_id') NOT IN
+                       (SELECT task_id FROM native_business_task_origin WHERE scope_sha256=?)
+                   LIMIT ?""", (scope_sha, scope_sha, self._max_task_origins + 1),
+            ).fetchall()
+        if len(rows) > self._max_task_origins:
+            raise NativeWorkViolation("NATIVE_TASK_ORIGIN_LEDGER_FULL", "Recovery exceeds origin capacity", ErrorCode.UNAVAILABLE)
+        for row in rows:
+            if type(row["origin_json"]) is not str or len(row["origin_json"].encode("utf-8")) > 4096:
+                raise NativeWorkViolation("NATIVE_TASK_ORIGIN_CORRUPT", "Creation receipt origin is invalid", ErrorCode.UNAVAILABLE)
+            origin = json.loads(row["origin_json"])
+            source = origin.get("source_identity")
+            identity = row["voice_identity_sha256"]
+            if (set(origin) != {"scope_sha256", "source_identity", "commit_id"}
+                or source != row["request_id"] or source != "native-business:" + identity
+                or len(identity) != 64 or any(char not in "0123456789abcdef" for char in identity)
+                or bytes(row["fingerprint"]) != bytes.fromhex(identity)):
+                raise NativeWorkViolation("NATIVE_TASK_ORIGIN_CORRUPT", "Creation receipt identity changed", ErrorCode.UNAVAILABLE)
+            self.record_task_origin(scope, row["task_id"], source, origin["commit_id"])
+
     def record_task_origin(
         self, scope: ScopeRef, task_id: str, source_identity: str, commit_id: str
     ) -> None:

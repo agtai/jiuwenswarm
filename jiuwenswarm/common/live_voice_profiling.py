@@ -22,6 +22,7 @@ _IDS = frozenset({
     "response_id", "operation_id", "request_id", "turn_id", "commit_id", "round_id",
     "task_id", "attempt_id", "command_id", "outbox_id", "unit_id", "activation_id",
     "project_id", "response_generation", "capture_generation", "activation_generation", "execution_session_id",
+    "work_id", "input_id", "context_id", "provider_call_id", "turn_commit_id", "source_event_id", "task_event_id",
 })
 _CONTAINERS = ("scope", "binding", "ref", "response", "response_ref", "capture", "commit")
 

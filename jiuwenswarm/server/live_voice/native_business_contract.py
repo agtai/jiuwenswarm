@@ -176,7 +176,13 @@ class NativeBusinessProposal(NativeDelegateProposal):
 
 
 def native_business_tool() -> dict[str, object]:
-    nullable_text = {"type": ["string", "null"]}
+    def text_argument(field: str, meaning: str) -> dict[str, object]:
+        operations = sorted(operation for operation, fields in _TEXT_ARGUMENTS.items() if field in fields)
+        return {"type": ["string", "null"], "description": (
+            meaning + " Required only for " + ", ".join(operations)
+            + "; must be null for every other operation."
+        )}
+
     return {
         "type": "function", "name": NATIVE_BUSINESS_TOOL_NAME,
         "description": (
@@ -195,9 +201,23 @@ def native_business_tool() -> dict[str, object]:
                 "action": {"type": "object", "additionalProperties": False,
                     "required": sorted(_FIELDS), "properties": {
                         "operation": {"type": "string", "enum": sorted(NATIVE_BUSINESS_OPERATIONS)},
-                        "context_id": nullable_text, "target_id": nullable_text,
-                        "expected_revision": {"type": ["integer", "null"]},
-                        "name": nullable_text, "instruction": nullable_text, "adjustment": nullable_text,
+                        "context_id": {"type": ["string", "null"], "description": (
+                            "Copy the exact context_id from the latest server context. Required for all operations "
+                            "except context.get, where null is allowed when no context is available."
+                        )},
+                        "target_id": {"type": ["string", "null"], "description": (
+                            "Must be null for " + ", ".join(sorted(_COLLECTION))
+                            + ". For every other operation copy the exact task_id or work_id from server facts. "
+                            "Never put a context ID, title, file name or guessed ID here."
+                        )},
+                        "expected_revision": {"type": ["integer", "null"], "description": (
+                            "Copy the target's observed revision_number (Task) or revision (work). Required only for "
+                            + ", ".join(sorted(_REVISION_REQUIRED))
+                            + "; must be null for every other operation."
+                        )},
+                        "name": text_argument("name", "A concise name for the new background Task."),
+                        "instruction": text_argument("instruction", "The complete work requirements, retaining relevant user constraints."),
+                        "adjustment": text_argument("adjustment", "The user's requested change to the existing Task."),
                     }},
             }},
     }

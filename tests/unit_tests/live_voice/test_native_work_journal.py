@@ -8,6 +8,7 @@ import json
 import sqlite3
 
 import pytest
+from jiuwenswarm.common.schema.live_voice_contract_v2 import canonical_json_bytes
 
 from jiuwenswarm.server.live_voice.native_work_journal import SqliteNativeWorkJournal
 from jiuwenswarm.server.live_voice.native_work_runtime import (
@@ -56,6 +57,35 @@ def protected(journal):
         return connection.execute(
             "SELECT value FROM protected_business_state"
         ).fetchall()
+
+
+@pytest.mark.parametrize("fault", [None, "scope", "source", "fingerprint", "extra_origin_field", "pending", "not_create"])
+def test_creation_receipt_recovery_requires_exact_completed_scoped_identity(tmp_path, fault):
+    store = journal(tmp_path)
+    unified = SqliteUnifiedCommittedInputJournal(store.database_path)
+    identity = hashlib.sha256(b"typed-native-input").hexdigest()
+    source = "native-business:" + identity
+    binding = dict(voice_identity_sha256=identity, fingerprint=bytes.fromhex(identity))
+    unified.admit(request_id=source,created_at="2026-09-06T10:00:00Z",**binding)
+    origin = {"scope_sha256": hashlib.sha256(canonical_json_bytes(scope().to_dict())).hexdigest(),
+        "source_identity": source, "commit_id":"accepted-commit"}
+    if fault == "scope": origin["scope_sha256"] = "b" * 64
+    if fault == "source": origin["source_identity"] = "native-business:" + "b" * 64
+    if fault == "extra_origin_field": origin["guessed"] = True
+    result = {"contract_version":"live-voice.native-business.v1", "status":"dispatched",
+        "operation":"task.adjust" if fault == "not_create" else "task.create", "task_id":"actual-task", "native_origin":origin}
+    if fault != "pending":
+        unified.complete(**binding,result=result,completed_at="2026-09-06T10:00:01Z")
+    if fault == "fingerprint":
+        with sqlite3.connect(store.database_path) as connection:
+            connection.execute("UPDATE unified_committed_inputs SET fingerprint=?",(bytes.fromhex("b"*64),))
+    if fault in {"source", "fingerprint", "extra_origin_field"}:
+        with pytest.raises(NativeWorkViolation, match="Creation receipt"):
+            store.recover_task_origins(scope())
+    else:
+        store.recover_task_origins(scope())
+    assert store.task_origins(scope()) == (("actual-task",) if fault is None else ())
+    assert store.restore() == () and protected(store) == [("unchanged",)]
 
 
 @pytest.mark.asyncio

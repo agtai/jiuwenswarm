@@ -1769,6 +1769,7 @@ def _registry(
     critical_input: bool = False,
     unified: bool = False,
     interaction_engine: InteractionEngineKind = InteractionEngineKind.CASCADE,
+    native_business: bool = False,
 ):
     p3_composition = _P3Composition(tmp_path)
     manager = _AgentManager()
@@ -1784,6 +1785,7 @@ def _registry(
             p3_text_enabled=p3,
             critical_input_enabled=critical_input,
             interaction_engine=interaction_engine,
+            native_business_enabled=native_business,
         ),
         p3_composition=p3_composition,
         agent_manager=manager,
@@ -1815,6 +1817,7 @@ def _unified_registry(
     critical_input: bool = False,
     composition: _UnifiedP3Composition | None = None,
     interaction_engine: InteractionEngineKind = InteractionEngineKind.CASCADE,
+    native_business: bool = False,
 ) -> tuple[AgentServerProductCompositionRegistry, _UnifiedP3Composition, _AgentManager]:
     composition = composition or _UnifiedP3Composition(tmp_path)
     manager = _AgentManager()
@@ -1829,6 +1832,7 @@ def _unified_registry(
             p3_mutation_enabled=mutation_enabled,
             critical_input_enabled=critical_input,
             interaction_engine=interaction_engine,
+            native_business_enabled=native_business,
         ),
         p3_composition=composition,
         agent_manager=manager,
@@ -2688,7 +2692,7 @@ async def test_native_dialogue_delegate_uses_agent_bridge_and_returns_result(
     async def send_delegate_result(*args):
         provider_sends.append(args)
         return ("provider-item-created", "provider-response-created")
-    session = SimpleNamespace(closed=False, activation=SimpleNamespace(binding=binding),
+    session = SimpleNamespace(closed=False, activation=SimpleNamespace(binding=binding, business_contract_version=None),
                               engine=SimpleNamespace(send_delegate_result=send_delegate_result),
                               barge_fenced_responses=set())
     media = DedicatedMediaProductRegistry(enabled=True)

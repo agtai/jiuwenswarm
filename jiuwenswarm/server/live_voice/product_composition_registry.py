@@ -103,6 +103,8 @@ from .native_interaction_runtime import (
     NativeInteractionRuntimeError,
     NativeInteractionRuntimeOwner,
 )
+from .native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION, NativeBusinessProposal
+from .native_business_router import NativeBusinessRouter
 from .latency_measurement import (
     L0Milestone,
     L0RoundBinding,
@@ -348,6 +350,7 @@ class ProductCompositionSettings:
     p3_mutation_enabled: bool = False
     critical_input_enabled: bool = False
     interaction_engine: InteractionEngineKind = InteractionEngineKind.CASCADE
+    native_business_enabled: bool = True
 
     @classmethod
     def from_environment(cls) -> ProductCompositionSettings:
@@ -479,6 +482,8 @@ class _P2Route:
     native_capability: str | None = field(default=None, repr=False)
     native_close_retry: tuple[str, bytes] | None = field(default=None, repr=False)
     native_closed: bool = False
+    native_business_enabled: bool = False
+    native_agent_model_confirmation: dict[str, object] | None = None
     native_user_history_turns: set[str] = field(default_factory=set, repr=False)
     native_pending_assistant_history: dict[ResponseRef, NativeHistoryAdmission] = field(
         default_factory=dict, repr=False
@@ -1126,6 +1131,7 @@ class AgentServerProductCompositionRegistry:
             str, _RetainedProductOperation
         ] = {}
         self._native_delegate_operations: dict[str, _RetainedProductOperation] = {}
+        self._native_business = NativeBusinessRouter(self)
         self._native_interrupted_sources: set[tuple[str, int, str, str, int]] = set()
         self._native_propose_operations: dict[str, _NativeProductOperation] = {}
         self._native_ack_operations: dict[str, _RetainedProductOperation] = {}
@@ -4403,6 +4409,7 @@ class AgentServerProductCompositionRegistry:
                         "claimed_user_id",
                         "claimed_project_id",
                         "interaction_engine",
+                        "agent_model_selection",
                     }
                 ),
             )
@@ -4440,6 +4447,10 @@ class AgentServerProductCompositionRegistry:
             requested_engine = params.get(
                 "interaction_engine", InteractionEngineKind.CASCADE.value
             )
+            selected_agent_model = None
+            if "agent_model_selection" in params:
+                from .native_agent_model import parse_native_agent_model_selection
+                selected_agent_model = parse_native_agent_model_selection(params["agent_model_selection"])
             if (
                 type(requested_engine) is not str
                 or requested_engine != self._settings.interaction_engine.value
@@ -4508,6 +4519,9 @@ class AgentServerProductCompositionRegistry:
                             )
                         if replay_authority.lease is not None:
                             await replay_authority.lease.close()
+                        if (selected_agent_model is not None and existing.native_agent_model_confirmation is not None
+                            and selected_agent_model.model_name != existing.native_agent_model_confirmation["model_name"]):
+                            return _error_result(request_id, reason="NATIVE_AGENT_MODEL_REPLAY_CONFLICT", code=ErrorCode.CONFLICT)
                         replay_result: dict[str, object] = {
                             "status": "active",
                             "replayed": True,
@@ -4518,6 +4532,8 @@ class AgentServerProductCompositionRegistry:
                             "activation_generation": generation,
                         }
                         replay_result.update(await self._restore_voice_task_origins(existing, params.get("auth_token")))
+                        if existing.native_agent_model_confirmation is not None:
+                            replay_result["agent_model_selection"] = dict(existing.native_agent_model_confirmation)
                         descriptor = self._native_gateway_descriptor(existing)
                         if descriptor is not None:
                             replay_result["_native_gateway"] = descriptor
@@ -4560,6 +4576,7 @@ class AgentServerProductCompositionRegistry:
                         reason="p2_route_superseded",
                     )
                     await existing.lease.close()
+                    self._native_business.retire_activation(existing)
                 except ProductCompositionLeaseCloseError as exc:
                     if existing.activation_lease.snapshot().state not in {
                         P2LeaseState.CLOSING,
@@ -4655,6 +4672,13 @@ class AgentServerProductCompositionRegistry:
                         raise ProductSegmentActivationError(
                             "NATIVE_P3_ACTIVATION_AUTHORITY_UNAVAILABLE"
                         )
+                    if self._settings.native_business_enabled:
+                        from .native_agent_model import resolve_native_agent_model
+                        confirmation = resolve_native_agent_model(self._p3_composition._model_resolver, selected_agent_model)
+                        native_p3_authority = replace(native_p3_authority,
+                            model_identity=confirmation.model_identity, model_config_version=confirmation.model_config_version,
+                            task_read_capacity=100)
+                        holder["native_agent_model_confirmation"] = confirmation.to_dict()
                 prepared = self._p2_adapter.prepare_activation(
                     P2AuthenticatedContext(canonical, canonical.scope),
                     request,
@@ -4918,6 +4942,8 @@ class AgentServerProductCompositionRegistry:
                     if isinstance(native_p3_authority, NativeP3ActivationAuthority)
                     else None
                 ),
+                native_business_enabled=native_runtime_owner is not None and self._settings.native_business_enabled,
+                native_agent_model_confirmation=holder.get("native_agent_model_confirmation"),
             )
             self._p2_routes[key] = retained_route
             self._observe_p2_activation(retained_route)
@@ -4932,6 +4958,8 @@ class AgentServerProductCompositionRegistry:
                 "activation_generation": binding.activation_generation,
             }
             activation_result.update(await self._restore_voice_task_origins(retained_route, params.get("auth_token")))
+            if retained_route.native_agent_model_confirmation is not None:
+                activation_result["agent_model_selection"] = dict(retained_route.native_agent_model_confirmation)
             descriptor = self._native_gateway_descriptor(retained_route)
             if descriptor is not None:
                 activation_result["_native_gateway"] = descriptor
@@ -4957,7 +4985,11 @@ class AgentServerProductCompositionRegistry:
             if scope != route.binding.scope:
                 raise FormalTaskViolation("VOICE_TASK_DISCOVERY_SCOPE_MISMATCH", "voice Task discovery changed scope", ErrorCode.PERMISSION_DENIED)
             restored: list[str] = []
+            native_task_ids = set(self._native_business.task_origins(scope)) if route.native_business_enabled else set()
             for task in tasks:
+                if task.scope == scope and task.task_id in native_task_ids:
+                    restored.append(task.task_id)
+                    continue
                 if task.scope != scope or task.spec.origin.kind != "committed_turn":
                     continue
                 commit = await asyncio.to_thread(journal.read_creation_origin, scope=scope,
@@ -5021,6 +5053,7 @@ class AgentServerProductCompositionRegistry:
             "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
             "binding": binding.to_dict(),
             "capability": capability,
+            **({"business_contract_version": NATIVE_BUSINESS_CONTRACT_VERSION} if route.native_business_enabled else {}),
         }
 
     @staticmethod
@@ -5168,6 +5201,7 @@ class AgentServerProductCompositionRegistry:
             channel_id="web",
         )
         await self._capture_semantic_analysis(route, history.response)
+        self._native_business.acknowledge_work(route, history.response)
         return True
 
     async def _release_native_assistant_history_after_user(
@@ -5189,6 +5223,7 @@ class AgentServerProductCompositionRegistry:
             )
             route.native_pending_assistant_history.pop(response, None)
             await self._capture_semantic_analysis(route, response)
+            self._native_business.acknowledge_work(route, response)
             projection = self._native_assistant_history_projection(history)
             projection["turn_id"] = history.turn_id
             released.append(projection)
@@ -5202,6 +5237,9 @@ class AgentServerProductCompositionRegistry:
         session_id: str | None,
     ) -> P3RouteResult:
         """Admit one capability-bound Native proposal through the P2 owners."""
+
+        if params.get("contract_version") == NATIVE_BUSINESS_CONTRACT_VERSION:
+            return await self._native_business.context_request(params=params, request_id=request_id, session_id=session_id)
 
         try:
             keys = frozenset(params)
@@ -5226,10 +5264,12 @@ class AgentServerProductCompositionRegistry:
             routed_session = _required_text(session_id, "routed_session_id")
             parsed_request_id = _required_text(request_id, "request_id")
             binding = NativeInteractionBinding.from_dict(params.get("binding"))
+            candidate_route = self._p2_routes.get((routed_session, binding.interaction_id))
+            business_capability = candidate_route is not None and candidate_route.native_business_enabled
             proposal: NativeInteractionProposal | None = None
             audio_batch: tuple[NativeInteractionProposal, ...] | None = None
             if keys == single_keys:
-                proposal = NativeInteractionProposal.from_dict(params.get("proposal"))
+                proposal = NativeInteractionProposal.from_dict(params.get("proposal"), business_capability=business_capability)
             else:
                 raw_proposals = params.get("proposals")
                 if (
@@ -5478,7 +5518,8 @@ class AgentServerProductCompositionRegistry:
                     if (any(value is not None for value in (proposal.turn_commit, proposal.input_transcript,
                             proposal.delegate, proposal.audio_observation, proposal.provider_done))
                         or set(speak_payload) not in ({"provider_response_id", "turn_id"},
-                                                    {"provider_response_id", "turn_id", "provider_call_id"})):
+                                                    {"provider_response_id", "turn_id", "provider_call_id"},
+                                                    {"provider_response_id", "turn_id", "work_event_id"})):
                         raise NativeInteractionRuntimeError("NATIVE_PROVIDER_RESPONSE_BINDING_INVALID", "SPEAK requires exact source identity")
                     for field in speak_payload:
                         _required_text(speak_payload[field], field)
@@ -5514,6 +5555,7 @@ class AgentServerProductCompositionRegistry:
                             raise NativeInteractionRuntimeError("NATIVE_INTERRUPT_CAPACITY_EXCEEDED", "Native interrupt ledger full")
                         action_intent = route.activation_lease.propose_action(route.binding, proposal.action)
                         await owner.interrupt_delegate_source(action_id=proposal.action.action_id, response=stop_ref)
+                        self._native_business.interrupt_work_presentation(route, stop_ref)
                         self._native_interrupted_sources.add(source_key)
                         for operation in self._native_delegate_operations.values():
                             control = operation.native_control
@@ -5674,7 +5716,13 @@ class AgentServerProductCompositionRegistry:
                     )
                     call_id = payload.get("provider_call_id")
                     turn_id = _required_text(payload.get("turn_id"), "turn_id")
-                    if call_id is None:
+                    work_event_id = payload.get("work_event_id")
+                    if work_event_id is not None:
+                        if not route.native_business_enabled:
+                            raise NativeInteractionRuntimeError("NATIVE_BUSINESS_CAPABILITY_REQUIRED", "work speech requires negotiated business mode")
+                        admission = await self._native_business.admit_work_response(route,
+                            event_id=work_event_id, provider_response_id=provider_response_id, turn_id=turn_id)
+                    elif call_id is None:
                         response_id = "native-response-" + hashlib.sha256(
                             proposal.action.action_id.encode("utf-8")
                         ).hexdigest()
@@ -5810,6 +5858,9 @@ class AgentServerProductCompositionRegistry:
                 native_p3_authority = route.native_p3_authority
                 assert owner is not None
                 assert native_p3_authority is not None
+                is_business = isinstance(proposal.delegate, NativeBusinessProposal)
+                if route.native_business_enabled != is_business:
+                    return _error_result(request_id, reason="NATIVE_BUSINESS_CAPABILITY_REQUIRED", code=ErrorCode.UNSUPPORTED)
                 source = owner.reserved_delegate_source(proposal.delegate.provider_call_id) or owner.snapshot().current_response
                 if source is None or source.response_generation != proposal.delegate.response_generation:
                     return _error_result(request_id, reason="NATIVE_DELEGATE_SOURCE_STALE", code=ErrorCode.STALE)
@@ -5817,18 +5868,12 @@ class AgentServerProductCompositionRegistry:
                     source.response_id, source.response_generation) in self._native_interrupted_sources:
                     return _error_result(request_id, reason="NATIVE_DELEGATE_INTERRUPTED", code=ErrorCode.CANCELLED)
                 await owner.reserve_delegate(proposal.delegate.provider_call_id, source, turn_id=proposal.delegate.turn_id)
-                control = NativeForegroundControl(source, identity_fields(binding, source, {"request_id": request_id}))
+                control = None if is_business else NativeForegroundControl(source, identity_fields(binding, source, {"request_id": request_id}))
+                operation = (self._native_business.handle if is_business else self._run_native_delegate_propose)(
+                    binding=binding, fingerprint=fingerprint, native_p3_authority=native_p3_authority,
+                    owner=owner, proposal=proposal, request_id=request_id, retained_route=route, routed_session=routed_session)
                 task = asyncio.create_task(
-                    control.run(self._run_native_delegate_propose(
-                        binding=binding,
-                        fingerprint=fingerprint,
-                        native_p3_authority=native_p3_authority,
-                        owner=owner,
-                        proposal=proposal,
-                        request_id=request_id,
-                        retained_route=route,
-                        routed_session=routed_session,
-                    )),
+                    operation if control is None else control.run(operation),
                     name=f"live-voice-native-delegate:{parsed_request_id}",
                 )
                 retained = _RetainedProductOperation(
@@ -6583,6 +6628,7 @@ class AgentServerProductCompositionRegistry:
                 owner = route.native_runtime_owner
                 assert owner is not None
                 route.native_closed = True
+                self._native_business.retire_activation(route)
                 for operation in self._native_delegate_operations.values():
                     if operation.p2_binding == route.binding and operation.native_control is not None:
                         operation.native_control.interrupt()
@@ -6670,6 +6716,7 @@ class AgentServerProductCompositionRegistry:
                     route.native_close_retry = None
                 else:
                     route.native_closed = True
+                    self._native_business.retire_activation(route)
                     route.native_close_retry = (
                         parsed_request_id,
                         bytes.fromhex(fingerprint),
@@ -10935,6 +10982,7 @@ class AgentServerProductCompositionRegistry:
                     reason="p2_route_closed",
                 )
                 await retained.lease.close()
+                self._native_business.retire_activation(retained)
             except ProductCompositionLeaseCloseError as exc:
                 if retained.activation_lease.snapshot().state not in {
                     P2LeaseState.CLOSING,
@@ -15835,6 +15883,7 @@ class AgentServerProductCompositionRegistry:
                         reason="gateway_route_closed",
                     )
                     await p2_retained.lease.close()
+                    self._native_business.retire_activation(p2_retained)
                 except Exception:
                     failures = True
                     logger.exception("[LiveVoiceProduct] P2 disconnect cleanup pending")
@@ -15919,6 +15968,7 @@ class AgentServerProductCompositionRegistry:
                 asyncio.gather(*native_lifecycle_tasks, return_exceptions=True)
             )
         await self.close_active_routes()
+        await self._native_business.close()
         drain_tasks = tuple(self._presentation_drain_tasks)
         if drain_tasks:
             await asyncio.shield(asyncio.gather(*drain_tasks, return_exceptions=True))
