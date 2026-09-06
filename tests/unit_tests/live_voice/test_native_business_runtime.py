@@ -2,6 +2,7 @@
 
 import pytest
 
+from jiuwenswarm.server.live_voice.presentation_ledger import PresentationSurface
 from jiuwenswarm.server.live_voice.native_business_contract import NativeBusinessAction, NativeBusinessProposal
 from jiuwenswarm.server.live_voice.native_interaction_runtime import NativeInteractionRuntimeError
 from jiuwenswarm.server.live_voice.voice_task_bridge import UnifiedCommittedInputRoute
@@ -90,5 +91,37 @@ async def test_work_result_waits_for_actual_audio_ack_and_current_turn_then_repl
         before = runtime.snapshot()
         assert await owner.accept_work_provider_response("work", "runtime-work", turn_id="native-turn-2") == work
         assert runtime.snapshot() == before
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial_transcript", [None, "This response stopped before its conclusion."])
+async def test_work_result_can_follow_unsuccessful_audio_without_forging_old_ack(partial_transcript):
+    owner, runtime = await active_owner()
+    try:
+        source = await owner.accept_provider_response("unsuccessful", "runtime-unsuccessful")
+        await owner.accept_audio(audio(source.response, "unsuccessful", 0))
+        await owner.accept_provider_done(done(source.response, "unsuccessful",
+            transcript=partial_transcript, completed=False))
+        assert not await runtime.presentation_complete(source.response, PresentationSurface.AUDIO)
+        assert owner.snapshot().history_count == 0
+
+        work = await owner.accept_work_provider_response("work", "runtime-work", turn_id="native-turn-1")
+        assert work.response != source.response
+        assert not await runtime.presentation_complete(source.response, PresentationSurface.AUDIO)
+        before = runtime.snapshot()
+        assert not await owner.accept_audio(audio(source.response, "unsuccessful", 1))
+        assert runtime.snapshot() == before
+        assert await owner.history_admission(source.response) is None
+        assert owner.snapshot().history_count == 0
+
+        await owner.accept_audio(audio(work.response, "work", 0))
+        await owner.accept_provider_done(done(work.response, "work", transcript="Verified work result."))
+        assert owner.snapshot().history_count == 0
+        heard = await owner.acknowledge_audio(ack_for(runtime, work.response, 0))
+        assert heard.transcript == "Verified work result."
+        assert owner.snapshot().history_count == 1
+        assert await owner.history_admission(source.response) is None
     finally:
         await owner.close()

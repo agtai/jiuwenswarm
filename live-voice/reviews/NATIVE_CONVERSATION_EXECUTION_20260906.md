@@ -156,6 +156,17 @@ add **34 passing** diagnostic checks (`diagnostics.txt`). Scoped `ruff --select
 F,E9` and `git diff --check` pass.
 After the tool-description correction, the business contract and Native Engine
 modules pass **152/152** again (`tool-description.txt`).
+The final connected probe exposed an additional work-delivery deadlock after
+Provider `failed`/`incomplete` audio: Engine scheduling and Runtime admission
+waited for an unavailable successful presentation ACK. Both now permit a fresh
+work response after that unsuccessful terminal state, preserving shared Task
+playback exclusion and leaving the old audio/history unacknowledged. Two Runtime
+cases fail at `NATIVE_RESPONSE_PRESENTATION_BUSY` before the fix and pass after
+it; Runtime/business regression is **37/37**. Engine adds four corresponding
+failed/incomplete and Task-busy cases. This changes no token limit or timeout.
+After integration, the business Runtime/Registry/authority, Native Runtime/Engine,
+Gateway client and dedicated-media modules pass **377/377**
+(`terminal-integration.txt`), with independent cross-owner review of both fixes.
 
 From the Web frontend directory, `node node_modules/typescript/bin/tsc --noEmit`
 and the actual Panel esbuild bundle pass. Mounted tests selected by
@@ -204,6 +215,17 @@ the generic exact-call correction path. Subsequent real calls confirm accepted
 typed context reads and normal error output without fatal activation or Task
 effects. OS audio probes are separate from a browser/microphone/human journey;
 retain their actual result and limitations in private evidence.
+
+`run-222941` additionally verifies real work continuing during an interjection,
+an independent spoken arithmetic answer with actual OS playback/ACK, and fresh
+admission of the completed work's result. It ended before full work-result audio
+ACK and cannot prove that last boundary. The next `run-223140`, using improved
+tool descriptions, is retained as a failure: VAD split the longer interjection
+into three turns, the model queried analysis instead of answering the arithmetic,
+and its incomplete audio exposed the work-delivery deadlock repaired above.
+The model/turn-segmentation failure is distinct from that fixed scheduler bug;
+a later shorter-input probe cannot erase or close it. Neither sample measures
+browser first-audible latency because the OS sink buffers each response.
 
 Deployment uses the existing controlled launcher, Native voice model/profile,
 registered project and data, without consuming notifications in a browser.

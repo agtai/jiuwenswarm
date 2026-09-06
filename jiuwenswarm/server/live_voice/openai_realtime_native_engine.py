@@ -1051,7 +1051,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             and not self._work_stop_pending
             and asyncio.get_running_loop().time() >= self._work_retry_after
             and (self._business_presentation_busy is None or not self._business_presentation_busy())
-            and (current is None or (current.done and (current.cancelled or current.presentation_acknowledged
+            and (current is None or (current.done and (not current.presentable or current.cancelled or current.presentation_acknowledged
                  or not any(item.received_samples for item in current.audio_items.values()))))
             and not any(call not in self._delegate_results and call not in self._retired_delegate_calls for call in self._delegates)
             and any(key not in self._work_seen for key in self._work_events)

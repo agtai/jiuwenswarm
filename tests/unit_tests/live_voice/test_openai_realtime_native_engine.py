@@ -555,6 +555,44 @@ async def test_business_invalid_recovery_waits_real_playout_and_enforces_call_an
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "incomplete"])
+@pytest.mark.parametrize("task_busy", [False, True])
+async def test_work_after_unsuccessful_audio_uses_fresh_response_without_old_playout_ack(status, task_busy):
+    async def refresh(): return {"context": business_context(), "work_events": [work_event()]}
+    engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
+        speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p1"),
+        output_audio_delta("old-audio", "p1", "old-item", 0), response_done("done", "p1", status=status),
+        refresh=refresh)
+    busy = [task_busy]
+    engine._business_presentation_busy = lambda: busy[0]
+    try:
+        _, _, commit = await accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        await engine.next_event(); await engine.admit_response("p1", response_ref(1))
+        assert (await engine.next_event()).audio.response == response_ref(1)
+        assert not (await engine.next_event()).provider_done.completed
+        before = engine.snapshot().released_audio_count
+        assert await engine.update_business_context(business_context(), [work_event()]) == ()
+        if task_busy:
+            assert sum(item["type"] == "response.create" for item in socket.sent) == 1
+            busy[0] = False
+            assert await engine.update_business_context(business_context(), [work_event()]) == ()
+        assert sum(item["type"] == "response.create" for item in socket.sent) == 2
+        socket.push(response_created("new", "p2"))
+        payload = dict((await engine.next_event()).action.payload)
+        assert payload == {"provider_response_id": "p2", "turn_id": commit.turn_commit.turn_id,
+                           "work_event_id": work_event()["event_id"]}
+        assert engine.snapshot().released_audio_count == before  # no replay of failed output
+        assert not engine._responses["p1"].presentation_acknowledged
+        assert not any(item["type"] == "conversation.item.truncate" for item in socket.sent)
+        await engine.admit_response("p2", response_ref(2))
+        socket.push(output_audio_delta("new-audio", "p2", "new-item", 0))
+        assert (await engine.next_event()).audio.response == response_ref(2)
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_business_session_seeds_json_facts_and_only_explicit_tool():
     engine, socket, _ = await started_business_engine()
     try:

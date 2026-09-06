@@ -701,7 +701,7 @@ class NativeInteractionRuntimeOwner:
                 if target_turn != self._current_turn_id:
                     raise NativeInteractionRuntimeError("NATIVE_WORK_RESPONSE_TURN_STALE", "Work result must join the current accepted turn")
                 if current is not None and not current.cancelled and (
-                    current.done is None or (current.next_audio_sequence > 0 and not await self._runtime.presentation_complete(
+                    current.done is None or (current.done.completed and current.next_audio_sequence > 0 and not await self._runtime.presentation_complete(
                         current.admission.response, PresentationSurface.AUDIO))):
                     raise NativeInteractionRuntimeError("NATIVE_RESPONSE_PRESENTATION_BUSY", "Work result must wait for the current response")
             self._require_record_capacity(
