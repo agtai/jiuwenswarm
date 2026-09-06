@@ -34,6 +34,7 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NativeInteractionBinding,
     NativeTurnCommit,
 )
+from jiuwenswarm.server.live_voice.native_business_contract import NativeBusinessProposal
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
     NativeAudioOutput,
     NativeEngineEvent,
@@ -412,7 +413,7 @@ class NativeInteractionProposal:
         )
 
     @classmethod
-    def from_dict(cls, value: object) -> NativeInteractionProposal:
+    def from_dict(cls, value: object, *, business_capability: bool = False) -> NativeInteractionProposal:
         data = _closed(
             value,
             _PROPOSAL_KEYS,
@@ -447,9 +448,17 @@ class NativeInteractionProposal:
                 if data["audio_observation"] is None
                 else NativeAudioObservation.from_dict(data["audio_observation"])
             )
+            if isinstance(data["delegate"], Mapping) and "business" in data["delegate"] and not business_capability:
+                raise NativeCarrierViolation(
+                    "NATIVE_BUSINESS_CAPABILITY_REQUIRED",
+                    "Native business proposals require an explicit negotiated capability",
+                    ErrorCode.UNSUPPORTED,
+                )
             delegate = (
                 None
                 if data["delegate"] is None
+                else NativeBusinessProposal.from_dict(data["delegate"])
+                if isinstance(data["delegate"], Mapping) and "business" in data["delegate"]
                 else NativeDelegateProposal.from_dict(data["delegate"])
             )
             done = (

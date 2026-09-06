@@ -1964,3 +1964,46 @@
   [rehearsal repair packet](../reviews/NATIVE_REHEARSAL_REPAIR_20260906.md) records
   bounds, matrix, actual checks, review, diagnostics and deployment requirements.
   Physical audio acceptance and comparable latency evidence remain separate.
+
+## D-119 Native structured business calls and conversational work
+
+- Date: 2026-09-06. The user accepted execution of the scoped architecture audit.
+  This expands D-101/D-102/D-103 and supersedes D-117's automatic cancellation of
+  foreground Agent analysis on speech interruption, only for the new explicitly
+  negotiated Native business capability. Cascade keeps its current route.
+- Native uses `live-voice.native-business.v1` typed proposals: authenticated
+  context read, Task list/status/result/create/successor/adjust/cancel, and
+  independent read-only Agent work start/list/get/update/cancel. A proposal carries
+  exact Native turn/call/activation, current request, selected context and target
+  revision. The authenticated Native Command Adapter binds this full proposal to
+  its structured origin digest before using existing production Task policy,
+  confirmation and Core dispatch. It does not masquerade as a second semantic
+  model, forge a TaskSemanticDecision, infer targets from recency or bypass final
+  scope/permission/Task-state checks. Ambiguous targets are clarified by the
+  conversation; no keyword classifier or fixture response is introduced.
+- Short Task calls return real service facts without semantic-model classification
+  or Agent paraphrase. Independent Agent work uses real Jiuwen file-read tools,
+  an immutable model/context binding and its own cancellation identity. It cannot
+  acquire project-write or unrestricted child/shell capability. Explicit artifact
+  production remains a formal Task. Speech retirement leaves admitted work alive;
+  updates supersede an exact read-only work revision after execution settlement.
+  Results obtain new presentation permission through the active Native owner,
+  never by reviving an interrupted response.
+- Reconnection restores only authorized conversation and work/Task facts. Work
+  checkpoints share the existing journal database; same-process work survives
+  media closure. After process restart an unfinished work is unknown, never
+  automatically re-executed. Terminal/unknown state and reads remain truthful.
+  Request acceptance, execution timeout, cancellation settlement and presentation
+  are separately bounded. This is not a general durable Executor replacement.
+- The private Native carrier negotiates the business extension explicitly; old
+  closed delegate payloads keep their meaning. A versioned private context request
+  on native.propose supplies authorized bootstrap/recovery facts. Optional P2
+  `live-voice.agent-model-selection.v1` binds a server-resolved Native Agent model
+  at activation; selection changes require a successor activation, not mutation
+  of accepted work. Provider voice-model configuration remains separate.
+- Tier-3 protocol/authority/work and Tier-2 state/UI owners, exclusions and real
+  integration requirements are in the [execution packet](../reviews/NATIVE_CONVERSATION_EXECUTION_20260906.md).
+  Pending response cancellation, cursorless generation cancellation, complete
+  Task-result delivery, operation-driven Task refresh and critical milestone
+  retention are owned repairs. Current testing status stays in STATUS; this
+  decision grants no unrun Provider/physical, Production or remote acceptance.
