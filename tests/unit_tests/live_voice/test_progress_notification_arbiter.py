@@ -236,6 +236,24 @@ def offer(
     )
 
 
+def test_work_filter_precedes_limit_and_preserves_unselected_candidates():
+    arbiter = ProgressNotificationArbiter()
+    for kind, identifier in [('task', 'b'), ('round', 'a'), ('task', 'a')]:
+        source = source_event(work_kind=kind, work_id=identifier)
+        progress = progress_event(source)
+        offer(arbiter, source, progress, foreground=busy_foreground())
+    before = arbiter.snapshot().pending_notifications
+    selected = arbiter.drain(scope(), safe_foreground(), work_ref=IdentityRef(IdentityKind.TASK, 'a'), max_items=1)
+    assert len(selected) == 1 and selected[0].work_ref == IdentityRef(IdentityKind.TASK, 'a')
+    assert arbiter.snapshot().pending_notifications == before == 3
+    assert arbiter.drain(scope(session_id='other'), safe_foreground(), work_ref=IdentityRef(IdentityKind.TASK, 'a'), max_items=1) == ()
+    assert arbiter.drain(scope(), safe_foreground(), work_ref=IdentityRef(IdentityKind.TASK, 'missing'), max_items=1) == ()
+    for bad in ['a', {'kind': 'task', 'id': 'a'}, IdentityRef(IdentityKind.ATTEMPT, 'a')]:
+        rejected = arbiter.drain(scope(), safe_foreground(), work_ref=bad, max_items=1)
+        assert rejected[0].disposition is NotificationDisposition.REJECTED
+        assert arbiter.snapshot().pending_notifications == 3
+
+
 def no_projection_advance(
     source: EventEnvelope,
     progress: EventEnvelope,

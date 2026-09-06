@@ -229,6 +229,7 @@ from .production_task_intent import (
     build_production_origin_binding,
 )
 from .task_progress_return import (
+    DeferredVoiceOwnership,
     task_progress_presentation_allowed,
     TaskProgressNotificationIntent,
     TaskProgressOriginBinding,
@@ -3024,13 +3025,13 @@ class AgentServerProductCompositionRegistry:
 
     async def _defer_voice_progress(
         self, intent: TaskProgressNotificationIntent
-    ) -> None:
+    ) -> DeferredVoiceOwnership:
         """Retain eligible speech while the P2 Runtime foreground is busy."""
 
         if not self._task_progress_presentable(intent.task_event, presentation_class="voice"):
-            return
+            return DeferredVoiceOwnership.SILENT
         if not self._p3_presentation_consumption_available:
-            return
+            return DeferredVoiceOwnership.BRIDGE
         binding = intent.origin
         key = (
             binding.session_id,
@@ -3064,7 +3065,7 @@ class AgentServerProductCompositionRegistry:
             # A successor activation cannot drain the old ordered voice route,
             # so move the immutable terminal fact to the P2 ACK replay ledger.
             await self._retain_terminal_after_voice_owner_loss(terminal)
-            return
+            return DeferredVoiceOwnership.REGISTRY
         if presentation_route is None:
             raise RuntimeError("deferred voice progress route is no longer current")
         self._defer_progress_presentation(
@@ -3072,6 +3073,7 @@ class AgentServerProductCompositionRegistry:
             intent,
             presentation_class="voice",
         )
+        return DeferredVoiceOwnership.REGISTRY
 
     def _current_terminal_notification_route(
         self, event: TaskProgressTextEvent

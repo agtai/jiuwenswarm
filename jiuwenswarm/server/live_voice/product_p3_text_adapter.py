@@ -37,6 +37,7 @@ from .product_authority import (
 from .progress_notification_arbiter import ProgressNotificationArbiter
 from .task_event_subscription import TaskEventSubscription
 from .task_progress_return import (
+    DeferredVoiceOwnership,
     ForegroundSupplier,
     GenerationIsCurrent,
     PreparedTaskProgressSource,
@@ -1020,10 +1021,10 @@ class ProductP3TextAdapter:
     ) -> VoiceIntentSink:
         selected_sink = self._voice_sink if sink is None else sink
 
-        async def deliver(intent: TaskProgressNotificationIntent) -> None:
+        async def deliver(intent: TaskProgressNotificationIntent) -> DeferredVoiceOwnership | None:
             if not await cleanup.wait_effect_permission(intent.origin):
                 raise RuntimeError("product P3 voice activation effects are fenced")
-            await selected_sink(intent)
+            return await selected_sink(intent)
 
         return deliver
 

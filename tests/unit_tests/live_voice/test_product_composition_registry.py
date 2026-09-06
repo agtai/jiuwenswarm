@@ -13053,7 +13053,7 @@ async def test_agent_ack_drains_deferred_voice_task_presentation(
         assert presentation.task_id == task_id
         assert presentation.presentation_class == "voice"
         assert presentation.event_seq == 4
-    assert retained_progress.progress_lease.snapshot().pending_voice_intents == 1
+    assert retained_progress.progress_lease.snapshot().pending_voice_intents == 0
     assert (
         store.unread_events_page(
             task_id, SCOPE, presentation_class="voice", limit=500

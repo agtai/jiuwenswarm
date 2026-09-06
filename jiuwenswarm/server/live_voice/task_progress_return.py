@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import threading
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -73,6 +74,7 @@ from .task_event_subscription import (
 from .task_store import SqliteTaskStore
 
 _EVENTS_CAPABILITY = frozenset({"task.events"})
+logger = logging.getLogger(__name__)
 TASK_PROGRESS_PRESENTABLE_EVENTS = {
     "task.retry_accepted": "accepted",
     "task.recovery_accepted": "accepted",
@@ -188,6 +190,14 @@ class TaskProgressReturnState(StrEnum):
     DETACHING = "detaching"
     CLOSED = "closed"
     FAILED = "failed"
+
+
+class DeferredVoiceOwnership(StrEnum):
+    """Internal scheduling handoff only; never a heard/durable consumption ACK."""
+
+    BRIDGE = "bridge"
+    REGISTRY = "registry"
+    SILENT = "silent"
 
 
 class TaskProgressSourceDecision(StrEnum):
@@ -784,7 +794,7 @@ class TaskEventAuthorityProgressSource:
 
 GenerationIsCurrent = Callable[[TaskProgressOriginBinding], bool]
 ForegroundSupplier = Callable[[], ForegroundSnapshot]
-VoiceIntentSink = Callable[[TaskProgressNotificationIntent], Awaitable[None]]
+VoiceIntentSink = Callable[[TaskProgressNotificationIntent], Awaitable[DeferredVoiceOwnership | None]]
 TextEventSink = Callable[[TaskProgressTextEvent], Awaitable[None]]
 
 
@@ -1225,6 +1235,7 @@ class TaskProgressReturnBridge:
         self._authority_attempt_number: int | None = None
         self._consumer_cursor_capability: object | None = None
         self._last_task_event_id: str | None = None
+        self._last_task_attempt_id: str | None = None
         self._last_task_event_seq: int | None = None
         self._last_progress_event_id: str | None = None
         self._last_source_decision: TaskProgressSourceDecision | None = None
@@ -1476,6 +1487,7 @@ class TaskProgressReturnBridge:
                     self._binding.scope,
                     foreground,
                     max_items=1,
+                    work_ref=IdentityRef(IdentityKind.TASK, self._binding.task_id),
                 )
             except Exception:
                 self._reject(TaskProgressReturnReason.ARBITER_REJECTED)
@@ -1483,6 +1495,7 @@ class TaskProgressReturnBridge:
             if not decisions:
                 return 0
             decision = decisions[0]
+            self._log_voice_owner("drain", decision=decision)
             self._arbiter_reason = decision.reason
             if decision.disposition is not NotificationDisposition.DISPLAY_NOW:
                 if decision.disposition is NotificationDisposition.REJECTED:
@@ -1492,7 +1505,11 @@ class TaskProgressReturnBridge:
             projection = (
                 self._deferred_voice.get(event_id) if type(event_id) is str else None
             )
-            if projection is None:
+            if (
+                projection is None
+                or decision.scope != self._binding.scope
+                or decision.work_ref != projection.notification_binding.work_ref
+            ):
                 self._reject(TaskProgressReturnReason.ARBITER_REJECTED)
                 return 0
             generation_current = self._generation_current(self._binding)
@@ -1622,6 +1639,7 @@ class TaskProgressReturnBridge:
             return False
         self._source_events += 1
         self._last_task_event_id = event.event_id
+        self._last_task_attempt_id = event.attempt_id
         self._last_task_event_seq = event.seq
         self._last_source_evidence = _evidence_id(binding, event)
         consumer_scope = self._uses_consumer_authority_source()
@@ -1767,7 +1785,7 @@ class TaskProgressReturnBridge:
                 binding.origin_kind is TaskProgressOriginKind.VOICE
                 and projection.progress_event.event_id in self._deferred_voice
             ):
-                if terminal_closes:
+                if terminal_closes and not self._uses_consumer_authority_source():
                     return False
                 await self._deferred_voice_settled.wait()
                 return (
@@ -1917,19 +1935,40 @@ class TaskProgressReturnBridge:
                     self._reject(TaskProgressReturnReason.ARBITER_REJECTED)
                     return False
                 if self._deferred_voice_sink is not None:
+                    retained_projection = self._deferred_voice[retained_id]
                     intent = TaskProgressNotificationIntent(
                         origin=binding,
-                        task_event=projection.task_event,
-                        source_event=projection.source_event,
-                        progress_event=projection.progress_event,
+                        task_event=retained_projection.task_event,
+                        source_event=retained_projection.source_event,
+                        progress_event=retained_projection.progress_event,
                         decision=decision,
-                        evidence_id=_evidence_id(binding, projection.task_event),
+                        evidence_id=_evidence_id(binding, retained_projection.task_event),
                     )
                     try:
-                        await self._deferred_voice_sink(intent)
+                        owner = await self._deferred_voice_sink(intent)
                     except Exception:
                         self._reject(TaskProgressReturnReason.VOICE_SINK_FAILED)
                         return False
+                    if owner is not None and type(owner) is not DeferredVoiceOwnership:
+                        self._reject(TaskProgressReturnReason.VOICE_SINK_FAILED)
+                        return False
+                    if owner in {DeferredVoiceOwnership.REGISTRY, DeferredVoiceOwnership.SILENT}:
+                        if self._close_requested or not self._generation_current(binding):
+                            self._reject(TaskProgressReturnReason.STALE_GENERATION)
+                            return False
+                        if not self._authorize(binding):
+                            self._reject(TaskProgressReturnReason.AUTHORIZATION_REJECTED)
+                            return False
+                        # Clear only the exact transferred scheduler entry. The
+                        # Registry still requires Runtime ACK + fresh task.ack_events.
+                        if not self._arbiter.acknowledge(
+                            binding.scope, projection.notification_binding.work_ref, retained_id,
+                        ):
+                            self._reject(TaskProgressReturnReason.ARBITER_ACK_FAILED)
+                            return False
+                        self._deferred_voice.pop(retained_id, None)
+                        self._deferred_voice_settled.set()
+                        self._log_voice_owner(owner.value, decision=decision)
                 return True
             if decision.disposition is not NotificationDisposition.DISPLAY_NOW:
                 self._reject(TaskProgressReturnReason.ARBITER_REJECTED)
@@ -2199,6 +2238,21 @@ class TaskProgressReturnBridge:
         self._rejected_events += 1
         self._settle(TaskProgressReturnState.FAILED, reason)
 
+    def _log_voice_owner(self, owner: str, *, decision: NotificationDecision | None = None) -> None:
+        binding = self._binding
+        logger.info(
+            "live_voice_task_progress_owner session=%s task=%s attempt=%s last_source_event=%s last_source_seq=%s "
+            "requested_work=task:%s returned_work=%s origin=%s generation_id=%s "
+            "generation=%s selected_progress_event=%s retained_progress_event=%s owner=%s state=%s reason=%s",
+            binding.session_id, binding.task_id, self._last_task_attempt_id, self._last_task_event_id,
+            self._last_task_event_seq, binding.task_id,
+            decision.work_ref if decision else None, binding.origin_id,
+            binding.generation_id, binding.generation,
+            decision.event_id if decision else None,
+            decision.retained_event_id if decision else None, owner, self._state.value,
+            decision.reason if decision else self._reason.value,
+        )
+
     def _settle(
         self, state: TaskProgressReturnState, reason: TaskProgressReturnReason
     ) -> None:
@@ -2206,6 +2260,7 @@ class TaskProgressReturnBridge:
             return
         self._state = state
         self._reason = reason
+        self._log_voice_owner("settled")
         self._deferred_voice_settled.set()
 
 

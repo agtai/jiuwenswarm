@@ -1260,13 +1260,14 @@ class ProgressNotificationArbiter:
         foreground: object,
         *,
         max_items: int | None = None,
+        work_ref: IdentityRef | None = None,
     ) -> tuple[NotificationDecision, ...]:
         """Return exact-scope delivery candidates without consuming them."""
 
         if not self._enabled:
             return ()
         with self._lock:
-            return self._drain_locked(scope, foreground, max_items=max_items)
+            return self._drain_locked(scope, foreground, max_items=max_items, work_ref=work_ref)
 
     def _drain_locked(
         self,
@@ -1274,6 +1275,7 @@ class ProgressNotificationArbiter:
         foreground: object,
         *,
         max_items: int | None,
+        work_ref: IdentityRef | None,
     ) -> tuple[NotificationDecision, ...]:
         try:
             selected_scope = self._validate_authenticated_scope(scope)
@@ -1284,10 +1286,24 @@ class ProgressNotificationArbiter:
         if max_items is not None and (type(max_items) is not int or max_items <= 0):
             self._rejected_events += 1
             return (self._rejected("INVALID_DRAIN_LIMIT", ErrorCode.INVALID_ARGUMENT),)
+        if work_ref is not None:
+            try:
+                valid_work = (
+                    type(work_ref) is IdentityRef
+                    and work_ref.kind in {IdentityKind.ROUND, IdentityKind.TASK}
+                    and IdentityRef.from_dict(work_ref.to_dict()) == work_ref
+                )
+            except (TypeError, ValueError):
+                valid_work = False
+            if not valid_work:
+                self._rejected_events += 1
+                return (self._rejected("INVALID_DRAIN_WORK_REF", ErrorCode.INVALID_ARGUMENT),)
         if not self._foreground_safe(facts):
             return ()
         pending = tuple(
-            item for key, item in self._pending.items() if key[0] == selected_scope
+            item for key, item in self._pending.items()
+            if key[0] == selected_scope
+            and (work_ref is None or key[1:] == (work_ref.kind, work_ref.id))
         )
         if max_items is not None:
             pending = pending[:max_items]
