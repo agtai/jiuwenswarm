@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-06 (Native delegate client contract and terminal diagnosis repaired; physical acceptance open).
+> Updated: 2026-09-06 (Native conversational execution authorized; implementation and acceptance in progress).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -23,6 +23,17 @@ appear through the scoped Registry in the right panel. Old candidate PASS on
 history, not acceptance of this candidate.
 
 ## Current execution packet
+
+### Native conversational execution
+
+The user authorized the [Native conversational execution packet](reviews/NATIVE_CONVERSATION_EXECUTION_20260906.md)
+after the code/latency audit. Native gains structured authenticated business calls
+and Agent work independent of speech, with complete context/recovery, interruption,
+model binding, Task projection and critical diagnostic repair. Cascade retains its
+existing route. Shared protocol/authority/work boundaries are Tier 3; local state
+repairs are Tier 2. Implementation, connected verification, independent review and
+controlled deployment are in progress; no new capability or acceptance credit is
+claimed yet. The following earlier repairs are retained regression context.
 
 ### Native recovery and presentation lifecycle
 
