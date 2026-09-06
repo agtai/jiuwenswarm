@@ -544,6 +544,7 @@ export class ProductP1VoiceRouteOwner {
   readonly #request: ProductP1Request;
   readonly #origin: string;
   readonly #socketFactory: DedicatedMediaSocketFactory;
+  readonly #nativeAgentModelConfirmed?: () => boolean;
   readonly #onStatus?: (status: ProductP1VoiceStatus, reason: string | null) => void;
   readonly #onConcurrentCaptureStarted?: () => void;
   readonly #onCaptureActivitySettled?: () => void;
@@ -642,6 +643,7 @@ export class ProductP1VoiceRouteOwner {
       request: ProductP1Request;
       expected_origin: string;
       socket_factory?: DedicatedMediaSocketFactory;
+      native_agent_model_confirmed?: () => boolean;
       audio_environment?: BrowserAudioEnvironment;
       capture_stream_factory?: BrowserAudioCaptureStreamFactory;
       local_barge_in_profile?: 'off' | 'verified_headset_aec_v1';
@@ -662,6 +664,7 @@ export class ProductP1VoiceRouteOwner {
     this.#request = input.request;
     this.#origin = requiredText(input.expected_origin, 'expected_origin');
     this.#socketFactory = input.socket_factory ?? defaultSocketFactory;
+    this.#nativeAgentModelConfirmed = input.native_agent_model_confirmed;
     this.#onStatus = input.on_status;
     this.#onConcurrentCaptureStarted = input.on_concurrent_capture_started;
     this.#onCaptureActivitySettled = input.on_capture_activity_settled;
@@ -939,6 +942,8 @@ export class ProductP1VoiceRouteOwner {
         this.#nativeInteraction = Object.prototype.hasOwnProperty.call(activation, 'native_interaction')
           ? parseProductP1NativeInteractionActivation(activation.native_interaction)
           : null;
+        if (this.#nativeInteraction !== null && this.#nativeAgentModelConfirmed?.() === false)
+          throw routeUnavailable('NATIVE_AGENT_MODEL_SELECTION_UNCONFIRMED');
         return activation;
       });
       this.#pendingMediaActivation = activationOperation;
@@ -2379,6 +2384,8 @@ export class ProductP1VoiceRouteOwner {
         throw new Error('concurrent media activation did not prove its privacy boundary');
       this.#observeStreamingAvailability(activation);
       this.#observeEndOfTurnAvailability(activation);
+      if (Object.prototype.hasOwnProperty.call(activation, 'native_interaction') && this.#nativeAgentModelConfirmed?.() === false)
+        throw routeUnavailable('NATIVE_AGENT_MODEL_SELECTION_UNCONFIRMED');
       return Object.freeze({ activation, subjectId });
     });
     this.#pendingMediaActivation = activationOperation;

@@ -303,7 +303,8 @@
     "send": "Send (Enter)",
     "stop": "Stop",
     "modelSelector": {
-      "tooltip": "Switch the model used for chat",
+      "tooltip": "Switch the chat model. Voice uses changes after restarting listening; accepted work keeps its original model.",
+      "activeVoiceModel": "Active voice Agent model",
       "clusterLockedTooltip": "Cluster mode uses the configured default model and cannot be changed",
       "configured": "Configured Models",
       "addModel": "Add Custom Model",

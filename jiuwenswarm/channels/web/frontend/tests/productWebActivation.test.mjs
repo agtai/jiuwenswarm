@@ -3100,3 +3100,59 @@ test('P3 progress close rejects a partial binding response and retries exact cle
   assert.equal((await owner.close()).status, 'closed');
   assert.equal(closeCalls, 2);
 });
+
+
+test('Agent model selection is immutable, versioned, and confirmed by the activation server', async () => {
+  const selected = { contract_version: 'live-voice.agent-model-selection.v1', model_name: 'GPT' };
+  const confirmed = { ...selected, model_identity: 'gpt-5.6#0', model_config_version: 'sha256:abc' };
+  const calls = [];
+  const owner = new ProductWebP2ActivationOwner({ enabled: true, agent_model_selection: selected,
+    request: async (method, params) => { calls.push({ method, params });
+      return response('active', { replayed: calls.length > 1, agent_model_selection: confirmed }); } });
+  selected.model_name = 'DeepSeek';
+  const activated = await owner.start(binding);
+  assert.equal(owner.requestedAgentModelName(), 'GPT');
+  assert.deepEqual(activated.agent_model_selection, confirmed);
+  assert.ok(Object.isFrozen(activated.agent_model_selection));
+  await owner.refreshMediaAuthority();
+  assert.deepEqual(calls.map(call => call.params.agent_model_selection.model_name), ['GPT', 'GPT']);
+  assert.equal(calls.every(call => call.method === PRODUCT_P2_ACTIVATE_METHOD), true);
+  assert.equal(JSON.stringify(calls).includes('api_key'), false);
+});
+
+for (const defect of ['extra', 'version', 'name', 'missing', 'changed']) test(`Agent model confirmation rejects ${defect} without media or work effects`, async () => {
+  const selection = { contract_version: 'live-voice.agent-model-selection.v1', model_name: 'GPT' };
+  const valid = { ...selection, model_identity: 'gpt-5.6#0', model_config_version: 'sha256:abc' };
+  let calls = 0;
+  const owner = new ProductWebP2ActivationOwner({ enabled: true, agent_model_selection: selection,
+    request: async method => {
+      assert.equal(method, PRODUCT_P2_ACTIVATE_METHOD); calls += 1;
+      let value = { ...valid };
+      if (calls === 1 && !['missing', 'changed'].includes(defect)) {
+        if (defect === 'extra') value.secret = 'PRIVATE';
+        if (defect === 'version') value.contract_version = 'other.v1';
+        if (defect === 'name') value.model_name = 'DeepSeek';
+      }
+      if (calls === 2 && defect === 'changed') value.model_config_version = 'sha256:changed';
+      return response('active', { replayed: calls > 1, ...(calls === 2 && defect === 'missing' ? {} : { agent_model_selection: value }) });
+    } });
+  if (['missing', 'changed'].includes(defect)) {
+    await owner.start(binding);
+    await assert.rejects(owner.refreshMediaAuthority(), /Agent model/);
+  } else await assert.rejects(owner.start(binding), /agent_model_selection|Agent model/);
+  assert.equal(owner.authorizesMediaStart(binding), false);
+});
+
+test('invalid Agent selection rejects before transport while Cascade omission remains compatible', async () => {
+  let calls = 0;
+  for (const selection of [{ contract_version: 'wrong', model_name: 'GPT' },
+    { contract_version: 'live-voice.agent-model-selection.v1', model_name: 'GPT', api_key: 'PRIVATE' }]) {
+    assert.throws(() => new ProductWebP2ActivationOwner({ enabled: true, agent_model_selection: selection,
+      request: async () => { calls++; } }), /agent_model_selection/);
+  }
+  assert.equal(calls, 0);
+  const owner = new ProductWebP2ActivationOwner({ enabled: true,
+    agent_model_selection: { contract_version: 'live-voice.agent-model-selection.v1', model_name: 'GPT' },
+    request: async () => response('active') });
+  assert.equal((await owner.start(binding)).agent_model_selection, undefined);
+});

@@ -6,11 +6,35 @@ import {
   readAudioDiagnosticJournal,
 } from './audioDiagnosticJournal.js';
 const LIMIT = 2048;
+const MILESTONE_LIMIT = 512;
+// Explicit low-frequency observations only. Frame, polling and ordinary profile
+// traffic cannot evict these causal records; the second lane remains bounded.
+const MILESTONE_EVENTS = new Set([
+  'browser_milestone', 'p1_milestone', 'p1_end_of_turn', 'media_end_of_turn', 'eot_handler_delivered',
+  'native_request_state', 'native_work_state', 'native_task_association', 'native_model_confirmed',
+  'native_context_selected', 'native_text_first_visible', 'native_text_read_failed',
+  'playout_first_scheduled', 'playout_clock_reached_start', 'playout_start_observation_expired',
+  'p1_stop_requested', 'p1_stop_result', 'playout_stop_requested', 'playout_sources_stopped',
+  'barge_in_delivered', 'barge_in_ui_received', 'barge_in_rpc_requested', 'barge_in_rpc_settled',
+  'native_playout_stop_ack', 'native_playout_stop_failed', 'media_terminal', 'voice_listening_start',
+  'voice_recovery_state', 'voice_recovery_cleared', 'presentation_acknowledged',
+  'browser_error', 'browser_unhandled_rejection', 'task_projection_refresh',
+]);
+function isMilestone(event: string, fields: Readonly<Record<string, string | number | boolean | null>>): boolean {
+  return MILESTONE_EVENTS.has(event) ||
+    (event === 'profile_span_settled' && ['failed', 'rejected', 'timeout', 'cancelled'].includes(String(fields.outcome))) ||
+    (event === 'p1_status' && ['failed', 'closed'].includes(String(fields.status)));
+}
 const ID_KEYS = new Set(['session_id', 'media_session_id', 'interaction_id', 'correlation_id', 'capture_id', 'response_id', 'lease_id']);
 const LABEL_KEYS = new Set(['status', 'reason', 'direction', 'outcome', 'context_state']);
-for (const key of ['request_id', 'operation_id', 'span_id', 'task_id', 'attempt_id', 'turn_id', 'commit_id', 'unit_id', 'activation_id', 'candidate_id']) ID_KEYS.add(key);
+for (const key of ['request_id', 'operation_id', 'span_id', 'task_id', 'attempt_id', 'turn_id', 'commit_id', 'unit_id', 'activation_id', 'candidate_id', 'work_id', 'input_id', 'context_id', 'provider_call_id', 'turn_commit_id', 'source_event_id', 'task_event_id', 'model_id', 'model_config_version', 'round_id']) ID_KEYS.add(key);
 for (const key of ['stage', 'rpc_method', 'error_type', 'error_code', 'error_reason', 'milestone', 'detector_profile']) LABEL_KEYS.add(key);
 const VALUE_KEYS = new Set([
+  'output_chars',
+  'context_version',
+  'work_version',
+  'event_head',
+  'revision_number',
   'generation',
   'operation_generation',
   'response_generation',
@@ -92,6 +116,7 @@ export interface AudioDiagnostic {
   readonly fields: Readonly<Record<string, string | number | boolean | null>>;
 }
 const records: Readonly<AudioDiagnostic>[] = [];
+const milestones: Readonly<AudioDiagnostic>[] = [];
 const clockId = `browser-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 let sequence = 0;
 let spanSequence = 0;
@@ -119,15 +144,20 @@ function rejectionFields(value: unknown): Record<string, unknown> {
   }
 }
 let dropped = 0;
+let milestoneDropped = 0;
 let installed = false;
 
 export function audioDiagnosticSnapshot(): readonly Readonly<AudioDiagnostic>[] {
-  return records.slice();
+  const unique = new Map<number, Readonly<AudioDiagnostic>>();
+  for (const record of [...milestones, ...records]) unique.set(record.sequence!, record);
+  return [...unique.values()].sort((a, b) => a.sequence! - b.sequence!);
 }
 
 export function clearAudioDiagnostics(): void {
   records.length = 0;
+  milestones.length = 0;
   dropped = 0;
+  milestoneDropped = 0;
   clearAudioDiagnosticJournal();
 }
 
@@ -136,7 +166,7 @@ function safeFields(fields: Readonly<Record<string, unknown>>): Record<string, s
   for (const [key, value] of Object.entries(fields)) {
     if (ID_KEYS.has(key) || LABEL_KEYS.has(key)) {
       if (value === null) safe[key] = null;
-      else if (typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value)) safe[key] = value;
+      else if (typeof value === 'string' && (key === 'model_id' ? /^[A-Za-z0-9_.:#-]{1,160}$/ : /^[A-Za-z0-9_.:-]{1,160}$/).test(value)) safe[key] = value;
     } else if (VALUE_KEYS.has(key)) {
       if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) safe[key] = value;
     }
@@ -147,7 +177,7 @@ function safeFields(fields: Readonly<Record<string, unknown>>): Record<string, s
 export function audioDiagnosticBundle() {
   const journal = readAudioDiagnosticJournal();
   const unique = new Map<string, AudioDiagnostic>();
-  for (const raw of [...journal.records, ...records]) {
+  for (const raw of [...journal.records, ...milestones, ...records]) {
     try {
       const value = raw as AudioDiagnostic;
       if (
@@ -177,6 +207,8 @@ export function audioDiagnosticBundle() {
     exported_at: new Date().toISOString(),
     clock_id: clockId,
     memory_overwrites: dropped,
+    milestone_memory_overwrites: milestoneDropped,
+    milestone_overwritten_pages: journal.milestone_overwritten_pages,
     overwritten_pages: journal.overwritten_pages,
     storage_failures: journal.storage_failures,
     records: [...unique.values()].sort((a, b) => a.observed_at.localeCompare(b.observed_at)),
@@ -300,7 +332,12 @@ export function recordAudioDiagnostic(event: string, fields: Readonly<Record<str
       dropped += 1;
     }
     records.push(record);
-    appendAudioDiagnosticJournal(record);
+    const milestone = isMilestone(event, safe);
+    if (milestone) {
+      if (milestones.length >= MILESTONE_LIMIT) { milestones.shift(); milestoneDropped += 1; }
+      milestones.push(record);
+    }
+    appendAudioDiagnosticJournal(record, milestone);
     if (typeof window !== 'undefined' && !installed) {
       installed = true;
       window.addEventListener('pagehide', flushAudioDiagnosticJournal);

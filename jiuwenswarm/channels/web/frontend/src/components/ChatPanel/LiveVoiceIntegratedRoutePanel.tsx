@@ -28,6 +28,7 @@ import {
   type ProductTextProgressEvent,
 } from '../../features/live-voice/formal/productTextProgress';
 import {
+  AGENT_MODEL_SELECTION_VERSION,
   PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
   PRODUCT_P2_PRESENTATION_ACK_METHOD,
   PRODUCT_P2_SUBMIT_METHOD,
@@ -150,6 +151,7 @@ export interface LiveVoiceIntegratedRoutePanelProps {
   activeSessionId: string | null;
   isConnected: boolean;
   agentRouteAvailable: boolean;
+  selectedAgentModelName?: string | null;
   routeSelection?: Readonly<IntegratedWebRouteSelection>;
   request?: (method: string, params?: Record<string, unknown>, options?: WebRequestOptions) => Promise<unknown>;
   progressSubscribe?: (listener: (payload: unknown) => void) => () => void;
@@ -2000,6 +2002,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     command: null,
     reason: FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ? null : 'FORMAL_P3_TASK_EXPERIENCE_DISABLED',
   });
+  useEffect(() => {
+    if (p2Activation.status !== 'active' || !p2Activation.agent_model_selection) return;
+    recordAudioDiagnostic('native_model_confirmed', { ...p2Activation.binding,
+      model_id: p2Activation.agent_model_selection.model_identity,
+      model_config_version: p2Activation.agent_model_selection.model_config_version });
+  }, [p2Activation.status, p2Activation.binding?.activation_id,
+    p2Activation.agent_model_selection?.model_identity, p2Activation.agent_model_selection?.model_config_version]);
+  const selectedAgentModelNameRef = useRef(props.selectedAgentModelName ?? null);
+  selectedAgentModelNameRef.current = props.selectedAgentModelName ?? null;
   const taskExperienceValidatedSessionRef = useRef<string | null>(null);
   const taskExperienceRevalidationPendingSessionRef = useRef<string | null>(null);
   const [p3RetryInspectionStatus, setP3RetryInspectionStatus] = useState<'idle' | 'checking' | 'eligible' | 'ineligible' | 'failed'>('idle');
@@ -2157,6 +2168,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const presentedProductResponsesRef = useRef(new Map<string, true>());
   const presentedNativeChatMessagesRef = useRef(new Map<string, true>());
   const discoveredNativeTasksRef = useRef(new Map<string, true>());
+  const refreshedNativeTaskOperationsRef = useRef(new Map<string, true>());
   const nativeTaskDiscoveryRef = useRef<Promise<void>>(Promise.resolve());
   const progressActivationOwnerRef = useRef<ProductWebP3ProgressOwner | null>(null);
   const p3MutationOwnerRef = useRef<ProductWebP3MutationOwner | null>(null);
@@ -2376,6 +2388,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       response_id: input.response?.response_id ?? null,
       response_generation: input.response?.response_generation ?? null,
     });
+    recordAudioDiagnostic('voice_recovery_state', { ...diagnostic, stage: diagnostic.seam, status: diagnostic.disposition });
     recoveryDiagnosticRef.current = diagnostic;
     setRecoveryDiagnostic(diagnostic);
     if (input.disposition === 'terminal' && input.seam === 'response_generation') {
@@ -2397,6 +2410,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const current = recoveryDiagnosticRef.current;
     if (current === null) return;
     if (input !== undefined && !productRecoveryDiagnosticMatchesClear(current, input)) return;
+    recordAudioDiagnostic('voice_recovery_cleared', { ...current, stage: current.seam, outcome: 'recovered' });
     recoveryDiagnosticRef.current = null;
     setRecoveryDiagnostic(null);
   };
@@ -2951,6 +2965,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         is_current: canAttemptPresentationAck,
       }))
       .then(() => {
+        recordAudioDiagnostic('presentation_acknowledged', { ...owner.snapshot().binding, ...retained.response,
+          task_id: retained.task_notification?.task_id ?? null, unit_id: retained.input.unit_id, outcome: 'acknowledged' });
         const currentPresentation = pendingPresentationAttemptRef.current;
         if (
           isCurrentPresentationOwner() &&
@@ -3295,29 +3311,50 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           current.activation_id === disposition.activation_id && current.activation_generation === disposition.activation_generation;
       };
       if (presentationBinding === null || !isCurrent()) return disposition;
-      const key = JSON.stringify([disposition.session_id, disposition.activation_id, disposition.activation_generation, disposition.task_id]);
-      if (discoveredNativeTasksRef.current.has(key)) return disposition;
-      retainBoundedPresentedProductResponse(discoveredNativeTasksRef.current, key);
-      // Discovery only: the existing fresh authenticated status/events reads
-      // establish the Task leaf. Serializing A/B avoids replacing each other's
-      // bootstrap, and an exact retired activation can never adopt a late leaf.
+      const taskKey = JSON.stringify([disposition.session_id, disposition.activation_id, disposition.activation_generation, disposition.task_id]);
+      const operationKey = JSON.stringify([taskKey, disposition.turn_commit_id, disposition.provider_call_id]);
+      if (refreshedNativeTaskOperationsRef.current.has(operationKey)) return disposition;
+      retainBoundedPresentedProductResponse(refreshedNativeTaskOperationsRef.current, operationKey);
+      // Discovery and operation invalidation have separate identities. A later
+      // confirmed operation always rereads canonical state, without replaying it
+      // or moving the user's selected Task back to an already discovered Task.
       nativeTaskDiscoveryRef.current = nativeTaskDiscoveryRef.current.catch(() => undefined).then(async () => {
         if (!isCurrent()) return;
-        try {
-          // The list owner reports its own read failure. Voice progress must
-          // still be discoverable when that independent list read fails.
-          await refreshUnifiedTaskProjection({ result: { task_id: disposition.task_id } }, disposition.session_id, isCurrent)
-            .catch(() => undefined);
+        const discovered = discoveredNativeTasksRef.current.has(taskKey);
+        let refreshed = false;
+        const waitForRetry = props.p3RetryInspectionWait ?? defaultP3RetryInspectionWait;
+        const retryAbort = new AbortController();
+        for (let attempt = 0; attempt <= PRODUCT_P3_CREATED_TASK_BOOTSTRAP_DELAYS_MS.length; attempt += 1) {
           if (!isCurrent()) return;
-          await bootstrapCreatedP3ProgressRoute(disposition.task_id, presentationBinding, isCurrent);
-        } catch {
-          discoveredNativeTasksRef.current.delete(key);
-          // The bootstrap publishes its bounded read failure; never resubmit
-          // the voice mutation in order to recover a discovery read.
+          try {
+            await refreshUnifiedTaskProjection({ result: { task_id: disposition.task_id } }, disposition.session_id, isCurrent, !discovered);
+            if (!isCurrent()) return;
+            refreshed = true;
+            break;
+          } catch {
+            if (!isCurrent()) return;
+            if (attempt < PRODUCT_P3_CREATED_TASK_BOOTSTRAP_DELAYS_MS.length)
+              await waitForRetry(PRODUCT_P3_CREATED_TASK_BOOTSTRAP_DELAYS_MS[attempt]!, retryAbort.signal);
+          }
         }
+        if (!isCurrent()) return;
+        recordAudioDiagnostic('task_projection_refresh', { ...presentationBinding, task_id: disposition.task_id,
+          turn_commit_id: disposition.turn_commit_id, provider_call_id: disposition.provider_call_id,
+          outcome: refreshed ? 'refreshed' : 'failed' });
+        // Progress discovery remains independent of a temporarily unavailable
+        // collection; a failed collection key is retryable even if bootstrap succeeds.
+        let bootstrapped = discovered;
+        if (!discovered) {
+          try {
+            bootstrapped = await bootstrapCreatedP3ProgressRoute(disposition.task_id, presentationBinding, isCurrent);
+            if (bootstrapped && isCurrent()) retainBoundedPresentedProductResponse(discoveredNativeTasksRef.current, taskKey);
+          } catch { /* Bootstrap publishes its own bounded read failure. */ }
+        }
+        if (!refreshed || !bootstrapped) refreshedNativeTaskOperationsRef.current.delete(operationKey);
       });
       return disposition;
     }
+
     if (disposition.kind === 'native_user_transcript') {
       if (
         presentationBinding === null ||
@@ -4478,6 +4515,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     clearCapturedTaskNotification();
     presentedNativeChatMessagesRef.current.clear();
     discoveredNativeTasksRef.current.clear();
+    refreshedNativeTaskOperationsRef.current.clear();
     terminalNotificationTaskIdRef.current = null;
     terminalAnnouncementSpeechOwnerRef.current = null;
     updateTerminalAnnouncementState('idle', null);
@@ -4941,6 +4979,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       activationGenerationRef.current = binding.activation_generation;
       let owner: ProductWebP2ActivationOwner | null = null;
       owner = createProductP2ActivationOwner({
+        ...(selectedAgentModelNameRef.current ? { agent_model_selection: { contract_version: AGENT_MODEL_SELECTION_VERSION, model_name: selectedAgentModelNameRef.current } } : {}),
         enabled: true,
         request: (method, params, requestId) => productRequest(method, params, productP2WebRequestOptions(method, requestId)),
         durable_operation_journal: journal,
@@ -5544,6 +5583,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               activationGenerationRef.current = successorBinding.activation_generation;
               let successor: ProductWebP2ActivationOwner | null = null;
               successor = createProductP2ActivationOwner({
+                ...(selectedAgentModelNameRef.current ? { agent_model_selection: { contract_version: AGENT_MODEL_SELECTION_VERSION, model_name: selectedAgentModelNameRef.current } } : {}),
                 enabled: true,
                 request: (method, params, requestId) => productRequest(method, params, productP2WebRequestOptions(method, requestId)),
                 durable_operation_journal: journal,
@@ -6045,7 +6085,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
   }, [props.isConnected]);
 
-  const refreshUnifiedTaskProjection = async (value: Readonly<Record<string, unknown>>, sessionId: string, isCurrentActivation: () => boolean = () => true): Promise<void> => {
+  const refreshUnifiedTaskProjection = async (value: Readonly<Record<string, unknown>>, sessionId: string, isCurrentActivation: () => boolean = () => true, selectDiscoveredTask = true): Promise<void> => {
     const result = value.result;
     const taskId = result !== null && typeof result === 'object' && !Array.isArray(result)
       ? (result as Record<string, unknown>).task_id : undefined;
@@ -6054,12 +6094,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const isCurrent = () => owner !== null && taskExperienceOwnerRef.current === owner
       && activeSessionRef.current === sessionId && isConnectedRef.current && isCurrentActivation();
     if (!isCurrent() || owner === null) return;
-    await owner.refresh(sessionId);
+    await owner.refresh(sessionId, isCurrent);
     if (!isCurrent()) return;
     if (!owner.snapshot().tasks.some(task => task.task_id === taskId)) {
       throw new Error('FORMAL_P3_UNIFIED_TASK_DISCOVERY_UNAVAILABLE');
     }
-    await owner.select(taskId);
+    if (selectDiscoveredTask && owner.snapshot().selected_task_id !== taskId) await owner.select(taskId, isCurrent);
   };
 
   const submitProductText = async (overrideText?: string, source: 'structured' | 'voice' = 'structured'): Promise<ProductTurnInput | null> => {
@@ -6819,6 +6859,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               activationGenerationRef.current = successorBinding.activation_generation;
               let successorOwner: ProductWebP2ActivationOwner | null = null;
               successorOwner = createProductP2ActivationOwner({
+                ...(selectedAgentModelNameRef.current ? { agent_model_selection: { contract_version: AGENT_MODEL_SELECTION_VERSION, model_name: selectedAgentModelNameRef.current } } : {}),
                 enabled: true,
                 request: (method, params, requestId) =>
                   productRequest(method, params, productP2WebRequestOptions(method, requestId)),
@@ -6916,6 +6957,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       const nextOwner = new ProductP1VoiceRouteOwner({
         enabled: true,
         expected_origin: window.location.origin,
+        native_agent_model_confirmed: () => activationOwner.requestedAgentModelName() === null ||
+          (isCurrentBinding() && activationOwner.snapshot().agent_model_selection?.model_name === activationOwner.requestedAgentModelName()),
         request: productRequest,
         ...(l0CaptureStreamFactoryRef.current === null
           ? {}
@@ -8838,6 +8881,18 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       voiceLoopGenerationRef.current += 1;
       voiceLoopEnabledRef.current = true;
     }
+    const activationOwner = activationOwnerRef.current;
+    const activationBinding = activationOwner?.snapshot().binding;
+    const captureStatus = p1VoiceOwnerRef.current?.status().status ?? 'closed';
+    if (activationOwner?.snapshot().status === 'active' && activationBinding &&
+        ['idle', 'closed', 'failed'].includes(captureStatus) &&
+        activationOwner.requestedAgentModelName() !== selectedAgentModelNameRef.current) {
+      // Selection changes start a new immutable activation. Accepted work keeps
+      // the predecessor's server-confirmed model and is never resubmitted here.
+      voiceLoopP2RefreshAfterGenerationRef.current = activationBinding.activation_generation;
+      voiceLoopP2RefreshCauseRef.current = 'active_recovery';
+    }
+
     if (
       p2Activation.status === 'unavailable' &&
       (p2Activation.reason === PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED ||
@@ -9302,6 +9357,9 @@ export function LiveVoiceIntegratedRoutePanelView({
             <DiagnosticsFact label={t('liveVoice.integrated.session')} value={manifest.session_id ?? 'null'} />
             <DiagnosticsFact label={t('liveVoice.integrated.correlation')} value={manifest.correlation_id} />
             <DiagnosticsFact label={t('liveVoice.integrated.observedAt')} value={manifest.observed_at} />
+            {p2Activation?.agent_model_selection && <DiagnosticsFact
+              label={t('chat.modelSelector.activeVoiceModel')}
+              value={p2Activation.agent_model_selection.model_name} />}
           </div>
           <div className="live-voice-integrated__routes">
             {manifest.segments.map(route => (

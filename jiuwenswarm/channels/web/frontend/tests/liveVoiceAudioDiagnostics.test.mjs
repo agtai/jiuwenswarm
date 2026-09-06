@@ -268,3 +268,56 @@ test('RPC rejection retains its code and reason, separate from transport failure
     clearAudioDiagnostics();
   }
 });
+
+
+test('milestones survive high-frequency audio and profile floods in memory and after reload', async () => {
+  const priorWindow = globalThis.window, priorInfo = console.info;
+  const storage = new Map();
+  globalThis.window = { sessionStorage: { getItem: key => storage.get(key) ?? null,
+    setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) }, addEventListener() {} };
+  console.info = () => undefined;
+  try {
+    clearAudioDiagnostics();
+    const events = ['p1_end_of_turn', 'native_request_state', 'playout_first_scheduled',
+      'playout_clock_reached_start', 'media_terminal', 'browser_milestone', 'native_text_first_visible',
+      'voice_recovery_state', 'voice_recovery_cleared', 'presentation_acknowledged', 'native_model_confirmed'];
+    for (const event of events) recordAudioDiagnostic(event, { session_id: 's1', turn_id: 'turn-1',
+      work_id: 'work-1', task_id: 'task-1', milestone: 'recovery', output_chars: 123,
+      model_id: 'gpt-5.6#0', model_config_version: 'sha256:abc',
+      transcript: 'PRIVATE', model_config: { api_key: 'PRIVATE' } });
+    for (let seq = 0; seq < 6000; seq++) {
+      recordAudioDiagnostic('capture_progress', { seq });
+      recordAudioDiagnostic('profile_span_started', { stage: 'browser.rpc' });
+      recordAudioDiagnostic('profile_span_settled', { stage: 'browser.rpc', outcome: 'returned' });
+    }
+    for (const snapshot of [audioDiagnosticSnapshot(), audioDiagnosticBundle().records]) {
+      for (const event of events) assert.equal(snapshot.filter(row => row.event === event).length, 1, event);
+      assert.ok(snapshot.length <= 4096 + 512);
+      assert.equal(snapshot.find(row => row.event === events[0]).fields.output_chars, 123);
+      assert.equal(snapshot.find(row => row.event === events[0]).fields.work_id, 'work-1');
+      assert.equal(snapshot.find(row => row.event === 'native_model_confirmed').fields.model_id, 'gpt-5.6#0');
+      assert.equal(JSON.stringify(snapshot).includes('PRIVATE'), false);
+    }
+    const reload = await import('../node_modules/.cache/live-voice-audio-diagnostics/audioDiagnostics.mjs?milestone-reload');
+    for (const event of events) assert.equal(reload.audioDiagnosticBundle().records.filter(row => row.event === event).length, 1, event);
+    const milestonePage = 'live-voice-diagnostics-milestones-v1:0';
+    const retained = JSON.parse(storage.get(milestonePage));
+    storage.set(milestonePage, JSON.stringify(retained.map(record => ({ ...record,
+      fields: { ...record.fields, transcript: 'PRIVATE_INJECTED', api_key: 'PRIVATE' } }))));
+    assert.equal(JSON.stringify(reload.audioDiagnosticBundle()).includes('PRIVATE'), false);
+    storage.set(milestonePage, '{corrupt');
+    assert.doesNotThrow(() => reload.audioDiagnosticBundle());
+    assert.ok(reload.audioDiagnosticBundle().storage_failures > 0);
+    storage.set(milestonePage, JSON.stringify(retained));
+
+    for (let seq = 0; seq < 800; seq++) recordAudioDiagnostic('media_terminal', { turn_id: `turn-${seq}`, reason: 'CLOSED' });
+    const bounded = audioDiagnosticBundle();
+    assert.ok(bounded.milestone_memory_overwrites > 0);
+    assert.ok(bounded.milestone_overwritten_pages > 0);
+    assert.ok(bounded.records.length <= 4096 + 512);
+    clearAudioDiagnostics();
+    assert.equal(reload.audioDiagnosticBundle().records.length, 0);
+  } finally {
+    clearAudioDiagnostics(); globalThis.window = priorWindow; console.info = priorInfo;
+  }
+});

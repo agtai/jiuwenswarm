@@ -784,6 +784,7 @@ export function ChatPanel({
   const contextCompressionRuntime = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRuntime);
   const contextCompressionSummary = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionSummary);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const selectedAgentModelName = useSessionStore((s) => s.getEffectiveModelName(activeSessionId));
   const hasHarnessProgress = useHarnessStore((s) => (
     mode === 'auto_harness' && (s.runtimes[activeSessionId ?? '']?.stageResults.length ?? 0) > 0
   ));
@@ -1589,6 +1590,7 @@ export function ChatPanel({
       {FEATURE_LIVE_VOICE_INTEGRATED_WEB && (
         <LiveVoiceIntegratedRoutePanel
           activeSessionId={activeSessionId}
+          selectedAgentModelName={selectedAgentModelName}
           isConnected={isConnected}
           agentRouteAvailable={mode === 'agent' && !liveVoiceInteractionBlocked}
           productVoiceControlRef={formalProductVoiceEnabled ? productVoiceControlRef : undefined}

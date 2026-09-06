@@ -530,8 +530,9 @@ export class FormalP3TaskExperienceOwner {
 
   snapshot(): FormalP3TaskExperienceSnapshot { return this.#state; }
 
-  async refresh(sessionIdInput: string): Promise<FormalP3TaskExperienceSnapshot> {
+  async refresh(sessionIdInput: string, isCurrent: () => boolean = () => true): Promise<FormalP3TaskExperienceSnapshot> {
     if (!this.#enabled) throw new Error('formal P3 Task experience is disabled');
+    if (!isCurrent()) throw new Error('formal P3 Task refresh became stale');
     const sessionId = text(sessionIdInput, 'session_id');
     if (this.#state.status === 'closed') throw new Error('formal P3 Task experience is closed');
     if (this.#state.session_id !== null && this.#state.session_id !== sessionId) {
@@ -550,7 +551,7 @@ export class FormalP3TaskExperienceOwner {
       for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
         const id = requestId('formal-p3-task-list');
         const response = await this.#request(FORMAL_P3_TASK_METHODS.list, { session_id: sessionId, limit: TASK_LIMIT, ...(cursor === null ? {} : { cursor }) }, id);
-        if (generation !== this.#generation) throw new Error('formal P3 Task refresh became stale');
+        if (generation !== this.#generation || !isCurrent()) throw new Error('formal P3 Task refresh became stale');
         const parsed = parseList(response, id, sessionId);
         if (collectionOperations !== null && (
           collectionOperations.length !== parsed.supported_operations.length
@@ -571,20 +572,21 @@ export class FormalP3TaskExperienceOwner {
         ?? null;
       this.#publish({ status: 'loading', session_id: sessionId, tasks: Object.freeze([...linked].sort((left, right) => left.task_id.localeCompare(right.task_id))), selected_task_id: null, collection_operations: collectionOperations ?? Object.freeze([]), command: this.#state.command, reason: null });
       if (selected !== null) {
-        await this.select(selected);
+        await this.select(selected, isCurrent);
       } else {
         this.#publish({ ...this.#state, status: 'ready', reason: null });
       }
       writeHint(this.#store, sessionId, this.#state.selected_task_id);
       return this.#state;
     } catch (error) {
-      if (generation === this.#generation) this.#publish({ status: 'failed', session_id: sessionId, tasks: Object.freeze([]), selected_task_id: null, collection_operations: Object.freeze([]), command: this.#state.command, reason: reason(error) });
+      if (generation === this.#generation && isCurrent()) this.#publish({ status: 'failed', session_id: sessionId, tasks: Object.freeze([]), selected_task_id: null, collection_operations: Object.freeze([]), command: this.#state.command, reason: reason(error) });
       throw error;
     }
   }
 
-  async select(taskIdInput: string): Promise<FormalP3TaskExperienceSnapshot> {
+  async select(taskIdInput: string, isCurrent: () => boolean = () => true): Promise<FormalP3TaskExperienceSnapshot> {
     const sessionId = this.#state.session_id;
+    if (!isCurrent()) throw new Error('formal P3 Task selection became stale');
     if (!this.#enabled || sessionId === null || this.#state.status === 'closed') throw new Error('formal P3 Task experience is unavailable');
     const taskId = text(taskIdInput, 'task_id');
     const listedTasks = this.#state.tasks;
@@ -597,7 +599,7 @@ export class FormalP3TaskExperienceOwner {
     try {
     const statusId = requestId('formal-p3-task-status');
     const statusResponse = await this.#request(FORMAL_P3_TASK_METHODS.status, { session_id: sessionId, task_id: taskId }, statusId);
-    if (generation !== this.#generation) throw new Error('formal P3 Task selection became stale');
+    if (generation !== this.#generation || !isCurrent()) throw new Error('formal P3 Task selection became stale');
     const status = envelope(statusResponse, statusId);
     const selected = parseTask(status.task, sessionId, {
       attempt: status.attempt,
@@ -618,7 +620,7 @@ export class FormalP3TaskExperienceOwner {
     for (let page = 0; page < MAX_EVENT_PAGES; page += 1) {
       const eventsId = requestId('formal-p3-task-events');
       const response = await this.#request(FORMAL_P3_TASK_METHODS.events, { session_id: sessionId, task_id: taskId, after_seq: afterSeq, limit: 500 }, eventsId);
-      if (generation !== this.#generation) throw new Error('formal P3 Task detail became stale');
+      if (generation !== this.#generation || !isCurrent()) throw new Error('formal P3 Task detail became stale');
       const parsed = parseEventPage(selected, response, eventsId, afterSeq);
       events.push(...parsed.events);
       if (!parsed.has_more) break;
@@ -631,7 +633,7 @@ export class FormalP3TaskExperienceOwner {
       { session_id: sessionId, task_id: taskId },
       resultId,
     );
-    if (generation !== this.#generation) throw new Error('formal P3 Task detail became stale');
+    if (generation !== this.#generation || !isCurrent()) throw new Error('formal P3 Task detail became stale');
     const terminalSourceEventId = events.length === 0 || events[events.length - 1].source_event_id === null
       ? null
       : text(events[events.length - 1].source_event_id, 'TaskEvent source_event_id');
@@ -645,7 +647,7 @@ export class FormalP3TaskExperienceOwner {
     writeHint(this.#store, sessionId, taskId);
     return this.#state;
     } catch (error) {
-      if (generation === this.#generation) {
+      if (generation === this.#generation && isCurrent()) {
         this.#publish({ status: 'failed', session_id: sessionId, tasks: Object.freeze([]), selected_task_id: null, collection_operations: Object.freeze([]), command: this.#state.command, reason: reason(error) });
       }
       throw error;

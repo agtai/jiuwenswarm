@@ -28,8 +28,33 @@ export interface ProductWebP2ActivationBinding {
   readonly activation_generation: number;
 }
 
+export const AGENT_MODEL_SELECTION_VERSION = 'live-voice.agent-model-selection.v1' as const;
+export interface ProductAgentModelSelection {
+  readonly contract_version: typeof AGENT_MODEL_SELECTION_VERSION;
+  readonly model_name: string;
+}
+export interface ProductConfirmedAgentModelSelection extends ProductAgentModelSelection {
+  readonly model_identity: string;
+  readonly model_config_version: string;
+}
+
+function parseAgentModelSelection(value: unknown): ProductAgentModelSelection {
+  const record = exactRecord(value, ['contract_version', 'model_name'], 'agent_model_selection');
+  if (record.contract_version !== AGENT_MODEL_SELECTION_VERSION) throw new Error('agent_model_selection version is invalid');
+  return Object.freeze({ contract_version: AGENT_MODEL_SELECTION_VERSION,
+    model_name: exactDurableText(record.model_name, 'agent_model_selection.model_name') });
+}
+
+function parseConfirmedAgentModelSelection(value: unknown): ProductConfirmedAgentModelSelection {
+  const record = exactRecord(value, ['contract_version', 'model_name', 'model_identity', 'model_config_version'], 'agent_model_selection');
+  const selection = parseAgentModelSelection({ contract_version: record.contract_version, model_name: record.model_name });
+  return Object.freeze({ ...selection, model_identity: exactDurableText(record.model_identity, 'model_identity'),
+    model_config_version: exactDurableText(record.model_config_version, 'model_config_version') });
+}
+
 export interface ProductWebP2ActivationSnapshot {
   readonly status: ProductWebP2ActivationStatus;
+  readonly agent_model_selection?: ProductConfirmedAgentModelSelection;
   readonly binding: ProductWebP2ActivationBinding | null;
   readonly reason: string | null;
 }
@@ -965,6 +990,8 @@ export class ProductWebP2ActivationOwner {
     this.voiceDiscoveryReason = reason as string | null;
   }
   private readonly enabled: boolean;
+  private readonly requestedAgentModel: ProductAgentModelSelection | null;
+  private confirmedAgentModel: ProductConfirmedAgentModelSelection | null = null;
   private readonly request: ProductWebRequest;
   private readonly durableOperationJournal?: ProductP2DurableOperationJournal;
   private readonly onSnapshot?: (snapshot: ProductWebP2ActivationSnapshot) => void;
@@ -1011,6 +1038,7 @@ export class ProductWebP2ActivationOwner {
     on_snapshot?: (snapshot: ProductWebP2ActivationSnapshot) => void;
     durable_operation_journal?: ProductP2DurableOperationJournal;
     notification_batch_size?: number;
+    agent_model_selection?: ProductAgentModelSelection;
   }) {
     if (typeof input.request !== 'function') throw new Error('product request owner is required');
     const notificationBatchSize = input.notification_batch_size ?? 1;
@@ -1018,6 +1046,7 @@ export class ProductWebP2ActivationOwner {
       throw new Error('product notification batch size is invalid');
     }
     this.enabled = input.enabled;
+    this.requestedAgentModel = input.agent_model_selection === undefined ? null : parseAgentModelSelection(input.agent_model_selection);
     this.request = input.request;
     this.notificationBatchSize = notificationBatchSize;
     this.durableOperationJournal = input.durable_operation_journal;
@@ -1027,7 +1056,26 @@ export class ProductWebP2ActivationOwner {
   }
 
   snapshot(): ProductWebP2ActivationSnapshot {
-    return Object.freeze({ status: this.status, binding: this.binding, reason: this.reason });
+    return Object.freeze({ status: this.status, binding: this.binding, reason: this.reason,
+      ...(this.confirmedAgentModel === null ? {} : { agent_model_selection: this.confirmedAgentModel }) });
+  }
+
+  requestedAgentModelName(): string | null { return this.requestedAgentModel?.model_name ?? null; }
+
+  private activationParams(binding: ProductWebP2ActivationBinding): Record<string, unknown> {
+    return { ...binding, ...(this.requestedAgentModel === null ? {} : { agent_model_selection: this.requestedAgentModel }) };
+  }
+
+  private adoptAgentModelSelection(result: JsonObject): void {
+    if (!Object.prototype.hasOwnProperty.call(result, 'agent_model_selection')) {
+      if (this.confirmedAgentModel !== null) throw new Error('confirmed Agent model disappeared on activation replay');
+      return; // Cascade keeps its existing activation contract.
+    }
+    const selection = parseConfirmedAgentModelSelection(result.agent_model_selection);
+    if ((this.requestedAgentModel !== null && selection.model_name !== this.requestedAgentModel.model_name) ||
+        (this.confirmedAgentModel !== null && JSON.stringify(selection) !== JSON.stringify(this.confirmedAgentModel)))
+      throw new Error('confirmed Agent model changed activation identity');
+    this.confirmedAgentModel = selection;
   }
 
   retirementStarted(): boolean {
@@ -1058,11 +1106,12 @@ export class ProductWebP2ActivationOwner {
     this.status = 'activating';
     this.reason = null;
     this.publish();
-    this.activationPromise = this.request(PRODUCT_P2_ACTIVATE_METHOD, { ...binding })
+    this.activationPromise = this.request(PRODUCT_P2_ACTIVATE_METHOD, this.activationParams(binding))
       .then(value => {
         try {
           const result = requireResult(value, 'active', binding);
           this.adoptVoiceTaskDiscovery(result);
+          this.adoptAgentModelSelection(result);
           this.activationReplayed = result.replayed === true ? true : result.replayed === false ? false : null;
         } catch (error) {
           throw ambiguousActivationResponse(error);
@@ -1104,7 +1153,7 @@ export class ProductWebP2ActivationOwner {
       return Promise.reject(error);
     }
     let retained: Promise<ProductWebP2ActivationSnapshot>;
-    retained = this.request(PRODUCT_P2_ACTIVATE_METHOD, { ...binding })
+    retained = this.request(PRODUCT_P2_ACTIVATE_METHOD, this.activationParams(binding))
       .then(value => {
         let result: JsonObject;
         try {
@@ -1116,6 +1165,7 @@ export class ProductWebP2ActivationOwner {
           throw new Error('product P2 media authority refresh did not replay the active binding');
         }
         this.adoptVoiceTaskDiscovery(result);
+        this.adoptAgentModelSelection(result);
         if (this.closing || this.binding === null || !sameBinding(this.binding, binding)) {
           throw new Error('product P2 activation changed during media authority refresh');
         }

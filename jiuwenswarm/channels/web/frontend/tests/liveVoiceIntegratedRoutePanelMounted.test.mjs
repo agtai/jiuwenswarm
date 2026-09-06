@@ -16155,19 +16155,46 @@ for (const outcome of ['recovered', 'persistent', 'exit']) {
 }
 
 
-for (const verify of ['task', 'text', 'barge_success', 'barge_failure', 'barge_fatal', 'fatal_before', 'fatal_after', 'fatal_overlap', 'fatal_audio']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
+for (const verify of ['model_before_start', 'model_while_active', 'model_missing_confirmation', 'task', 'task_keep_selection', 'task_foreign', 'task_retry', 'task_repeated_failure', 'task_retired_read', 'text', 'barge_success', 'barge_failure', 'barge_fatal', 'fatal_before', 'fatal_after', 'fatal_overlap', 'fatal_audio']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
   const i18n = await createI18n();
   const states = [], messages = [], calls = [], waiters = [], ended = [], sources = [];
   let activeMediaBinding = null, binding = null, renderer, textSnapshot = null, settleTaskFailure;
+  let taskReadFailures = 0, releaseTaskRead = null;
+  let selectedAgentModelName = verify.startsWith('model_') ? 'GPT' : undefined;
+  const activationModels = [];
   const controlRef = { current: null };
   const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding, holdDownlinkDetach: true, startAudioSource: ({ source }) => sources.push(source) });
   const activateP2 = createMountedP2ActivationResponder();
   const facts = mountedUnifiedTaskFixture('mounted-native-state-session');
+  const otherFacts = mountedUnifiedTaskFixture('mounted-native-state-session');
+  otherFacts.task.task_id = 'other-native-task';
   const request = async (method, params, options) => {
     calls.push(method);
-    if (method === 'live_voice.composition.p2.activate') { binding = { ...params }; return activateP2(params); }
+    if (method === 'live_voice.composition.p2.activate') {
+      const { agent_model_selection: selection, ...scope } = params;
+      binding = scope;
+      activationModels.push({ generation: scope.activation_generation, model: selection?.model_name });
+      const result = activateP2(scope);
+      if (selection && verify !== 'model_missing_confirmation') result.result.agent_model_selection = { ...selection,
+        model_identity: `${selection.model_name}#0`, model_config_version: 'config-v1' };
+      return result;
+    }
     if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
     if (method === 'live_voice.composition.p2.notification.next') return new Promise(resolve => waiters.push(resolve));
+    if (method === 'live_voice.task.list' && taskReadFailures > 0) {
+      taskReadFailures -= 1;
+      throw new Error('TASK_LIST_TEMPORARILY_UNAVAILABLE');
+    }
+    if (method === 'live_voice.task.list' && verify === 'task_retired_read' && facts.visible) {
+      return new Promise(resolve => { releaseTaskRead = () => resolve(facts.read(method, params, options?.requestId)); });
+    }
+    if (method === 'live_voice.task.list' && otherFacts.visible) {
+      const value = facts.read(method, params, options?.requestId);
+      value.result.tasks.push(otherFacts.task);
+      return value;
+    }
+    if (method.startsWith('live_voice.task.') && params.task_id === otherFacts.task.task_id)
+      return otherFacts.read(method, params, options?.requestId);
     if (method.startsWith('live_voice.task.')) return facts.read(method, params, options?.requestId);
     if (method === 'live_voice.composition.p3.progress.activate') return { ok: true, result: mountedProgressActivation(params) };
     if (method === 'live_voice.composition.p3.progress.close') return { ok: true, result: { status: 'closed', ...params } };
@@ -16216,17 +16243,54 @@ for (const verify of ['task', 'text', 'barge_success', 'barge_failure', 'barge_f
     await waitForMountedEffects(() => waiters.length > 0, 'Native notification did not settle');
   }
   try {
-    await act(async () => {
-      renderer = create(mountedFullyEnabledElement(i18n, 'mounted-native-state-session', request, true, {
-        productVoiceControlRef: controlRef, onProductVoiceStateChange: state => states.push(state), onProductVoiceMessage: event => messages.push(event),
-        onNativeVoiceDisplayEnded: (sessionId, keys) => ended.push({ sessionId, keys }),
-      }));
+    const element = () => mountedFullyEnabledElement(i18n, 'mounted-native-state-session', request, true, {
+      productVoiceControlRef: controlRef, onProductVoiceStateChange: state => states.push(state), onProductVoiceMessage: event => messages.push(event),
+      onNativeVoiceDisplayEnded: (sessionId, keys) => ended.push({ sessionId, keys }),
+      p3RetryInspectionWait: async () => undefined, selectedAgentModelName,
     });
+    await act(async () => { renderer = create(element()); });
     await waitForMountedEffects(() => controlRef.current !== null && !formalVoiceStartButton(renderer).props.disabled, 'Native panel activation missing');
+    if (verify === 'model_before_start') {
+      selectedAgentModelName = 'DeepSeek';
+      await act(async () => { renderer.update(element()); });
+    }
+
     await act(async () => { void controlRef.current.start(); });
+    if (verify === 'model_missing_confirmation') {
+      await waitForMountedEffects(() => states.at(-1)?.p1_status === 'failed', 'Native omission did not fail closed');
+      assert.equal(states.at(-1).p1_reason, 'NATIVE_AGENT_MODEL_SELECTION_UNCONFIRMED');
+      assert.equal(browser.counts.socketOpens, 0);
+      assert.equal(browser.counts.sourceStarts, 0);
+      assert.equal(calls.filter(method => method === 'live_voice.media.close').length, 1);
+      assert.equal(calls.some(method => /unified.submit|speech.recognize|presentation.ack|task.create|task.cancel|p3.mutate/u.test(method)), false);
+      return;
+    }
     await waitForMountedEffects(() => states.at(-1)?.p1_status === 'starting', 'Native capture did not start');
     await act(async () => { await browser.emitFirstFrame(0); });
     await waitForMountedEffects(() => states.at(-1)?.p1_status === 'capturing', 'Native capture not ready');
+    if (verify.startsWith('model_')) {
+      const expected = verify === 'model_before_start' ? 'DeepSeek' : 'GPT';
+      assert.equal(activationModels.at(-1).model, expected);
+      if (verify === 'model_before_start') assert.ok(activationModels.at(-1).generation > activationModels[0].generation);
+      const activations = activationModels.length;
+      selectedAgentModelName = 'AnotherModel';
+      await act(async () => { renderer.update(element()); });
+      assert.equal(activationModels.length, activations, 'active voice must not replace model for accepted work');
+      if (verify === 'model_while_active') {
+        await act(async () => { await controlRef.current.close(); });
+        await act(async () => { void controlRef.current.start(); });
+        await waitForMountedEffects(() => states.at(-1)?.p1_status === 'starting', 'restart did not create successor capture');
+        await act(async () => { await browser.emitFirstFrame(0); });
+        await waitForMountedEffects(() => states.at(-1)?.p1_status === 'capturing', 'restart capture not ready');
+        assert.equal(activationModels.at(-1).model, 'AnotherModel');
+        assert.ok(activationModels.at(-1).generation > activationModels[0].generation);
+      }
+
+      assert.equal(calls.filter(method => method === 'live_voice.media.activate').length, verify === 'model_while_active' ? 2 : 1);
+      assert.equal(calls.some(method => /unified.submit|presentation.ack|task.create|task.cancel|p3.mutate/u.test(method)), false);
+      return;
+    }
+
     await deliver(notification(1, 'processing'));
     assert.equal(states.at(-1).text_status, 'waiting');
     assert.equal(states.at(-1).p1_status, 'capturing');
@@ -16330,13 +16394,57 @@ for (const verify of ['task', 'text', 'barge_success', 'barge_failure', 'barge_f
     const association = notification(6, 'processing', { kind: 'native.task_association', response: oldResponse(),
       task_association: { task_id: facts.task.task_id, turn_commit_id: 'task-commit', provider_call_id: 'task-call' } });
     delete association.request_state;
-    await deliver({ ...association, activation_id: 'foreign' });
-    assert.equal(states.at(-1).task_experience.tasks.length, 0);
+    if (verify === 'task_foreign') {
+      const reads = calls.filter(method => method.startsWith('live_voice.task.')).length;
+      await deliver({ ...association, activation_id: 'foreign' });
+      assert.equal(states.at(-1).task_experience.tasks.length, 0);
+      assert.equal(calls.filter(method => method.startsWith('live_voice.task.')).length, reads);
+      assert.equal(calls.some(method => /unified.submit|presentation.ack|task.create|task.cancel|p3.mutate/u.test(method)), false);
+      return;
+    }
+    if (verify === 'task_retry') taskReadFailures = 1;
+    if (verify === 'task_repeated_failure') taskReadFailures = 4;
     await deliver(association);
+    if (verify === 'task_retired_read') {
+      await waitForMountedEffects(() => releaseTaskRead !== null, 'Task list did not start');
+      await act(async () => { await controlRef.current.close(); });
+      const readCount = calls.filter(method => method.startsWith('live_voice.task.')).length;
+      await act(async () => { releaseTaskRead(); await new Promise(resolve => setImmediate(resolve)); });
+      assert.equal(states.at(-1).task_experience.tasks.length, 0);
+      assert.equal(calls.filter(method => method.startsWith('live_voice.task.')).length, readCount);
+      assert.equal(calls.some(method => /unified.submit|presentation.ack|task.create|task.cancel|p3.mutate/u.test(method)), false);
+      return;
+    }
+    if (verify === 'task_repeated_failure') {
+      await waitForMountedEffects(() => taskReadFailures === 0, 'bounded list retries did not settle');
+      assert.equal(states.at(-1).task_experience.tasks.length, 0);
+      await deliver(association); // An exact duplicate must retry only the failed projection read.
+    }
     await waitForMountedEffects(() => states.at(-1)?.task_experience.tasks.length === 1,
       `Native Task absent from recent tasks: ${JSON.stringify({ calls, task: states.at(-1)?.task_experience, state: states.at(-1)?.text_status })}`);
     assert.equal(states.at(-1).task_experience.selected_task_id, facts.task.task_id);
     assert.ok(calls.filter(method => method === 'live_voice.task.list').length >= 2);
+    if (verify === 'task_keep_selection') {
+      otherFacts.visible = true;
+      await act(async () => { await controlRef.current.refreshTasks(); await controlRef.current.selectTask(otherFacts.task.task_id); });
+    }
+    if (verify === 'task' || verify === 'task_keep_selection' || verify === 'task_retry' || verify === 'task_repeated_failure') {
+      const reads = calls.filter(method => method === 'live_voice.task.list').length;
+      const progressActivations = calls.filter(method => method === 'live_voice.composition.p3.progress.activate').length;
+      await deliver(association);
+      assert.equal(calls.filter(method => method === 'live_voice.task.list').length, reads);
+      facts.task.spec.name = 'Updated equipment review';
+      facts.task.revision.number = 2;
+      await deliver({ ...association, task_association: { ...association.task_association,
+        turn_commit_id: 'adjust-commit', provider_call_id: 'adjust-call' } });
+      await waitForMountedEffects(() => states.at(-1).task_experience.tasks.find(task => task.task_id === facts.task.task_id)?.revision_number === 2,
+        'confirmed second operation on discovered Task did not refresh its version');
+      assert.equal(states.at(-1).task_experience.tasks.find(task => task.task_id === facts.task.task_id).name, 'Updated equipment review');
+      if (verify === 'task_keep_selection') assert.equal(states.at(-1).task_experience.selected_task_id, otherFacts.task.task_id);
+      assert.equal(calls.filter(method => method === 'live_voice.task.list').length, reads + 1);
+      assert.equal(calls.filter(method => method === 'live_voice.composition.p3.progress.activate').length, progressActivations);
+      assert.equal(calls.some(method => /unified.submit|presentation.ack|task.create|task.cancel|p3.mutate/u.test(method)), false);
+    }
     if (verify.startsWith('barge_')) {
       const taskResponse = { interaction_id: binding.interaction_id, response_id: 'task-notice-audio', response_generation: 3 };
       const source = taskNotificationSource(binding.session_id, facts.task.task_id);

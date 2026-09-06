@@ -304,7 +304,8 @@
     "send": "发送 (Enter)",
     "stop": "停止",
     "modelSelector": {
-      "tooltip": "切换对话使用的模型",
+      "tooltip": "切换对话模型。语音重新开始聆听后使用新选择；已受理的工作保持原模型。",
+      "activeVoiceModel": "当前语音 Agent 模型",
       "clusterLockedTooltip": "集群模式使用配置的默认模型，不支持修改",
       "configured": "已配置模型",
       "addModel": "添加自定义模型",

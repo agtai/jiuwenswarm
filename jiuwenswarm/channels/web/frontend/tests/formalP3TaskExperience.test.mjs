@@ -989,3 +989,30 @@ test('feature-off rejects refresh and allocates zero transport or business effec
   assert.equal(owner.snapshot().status, 'disabled');
   assert.equal(calls, 0);
 });
+
+
+for (const suspended of ['list', 'status', 'events', 'result']) test(`retired activation during Task ${suspended} cannot publish, persist selection, or continue reads`, async () => {
+  const fixture = authoritativeFixture();
+  const calls = [], snapshots = [];
+  let current = true, release;
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, store: fixture.store,
+    on_snapshot: snapshot => snapshots.push(snapshot),
+    request: async (method, params, id) => {
+      calls.push(method);
+      if (method === FORMAL_P3_TASK_METHODS[suspended])
+        return new Promise(resolve => { release = () => resolve(fixture.request(method, params, id)); });
+      return fixture.request(method, params, id);
+    } });
+  const pending = owner.refresh(sessionId, () => current);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(typeof release, 'function');
+  current = false;
+  const published = snapshots.length, requests = calls.length;
+  const hint = JSON.stringify([...fixture.store.values]);
+  release();
+  await assert.rejects(pending, /became stale/);
+  assert.equal(snapshots.length, published);
+  assert.equal(calls.length, requests);
+  assert.equal(JSON.stringify([...fixture.store.values]), hint);
+  assert.equal(calls.some(method => /mutate|intent|confirmation/.test(method)), false);
+});
