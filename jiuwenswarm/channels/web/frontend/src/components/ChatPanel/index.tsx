@@ -1281,6 +1281,7 @@ export function ChatPanel({
         previous.recovery_diagnostic === next.recovery_diagnostic &&
         previous.terminal_notification === next.terminal_notification &&
         previous.adjustment_notification === next.adjustment_notification &&
+        previous.native_work === next.native_work &&
         previous.task_experience === next.task_experience
       ) {
         return previous;

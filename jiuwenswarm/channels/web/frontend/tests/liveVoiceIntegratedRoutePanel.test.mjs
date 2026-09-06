@@ -2354,3 +2354,41 @@ test('Native task discovery is closed, activation-bound data without command aut
     assert.deepEqual(classifyProductP2Notification({ ...value, ...change }), { kind: 'failed', reason: 'PRODUCT_NATIVE_TASK_ASSOCIATION_INVALID' });
   }
 });
+
+
+function nativeWorkStatePacket() {
+  return { status: 'notification', kind: 'native.work_state', request_id: 'work-state-request',
+    round_id: null, response: null, agent_event: null, source_event: null, progress_event: null,
+    presentation_unit: null, audio: null, error_reason: null, publish_seq: null, sequence_effect: 'neutral',
+    session_id: 'session', correlation_id: 'correlation', interaction_id: 'interaction', activation_id: 'activation', activation_generation: 1,
+    work_state: { contract_version: 'live-voice.native-work-state.v1', sequence: 1,
+      works: [{ work_id: 'work-1', revision: 1, sequence: 2, state: 'running', execution_settled: false }] } };
+}
+test('Native work state is a closed bounded passive notification', () => {
+  const packet = nativeWorkStatePacket();
+  const accepted = classifyProductP2Notification(JSON.parse(JSON.stringify(packet)));
+  assert.equal(accepted.kind, 'native_work_state');
+  assert.deepEqual(accepted.works, packet.work_state.works);
+  assert.ok(Object.isFrozen(accepted.works[0]));
+  packet.work_state.works[0].state = 'unknown';
+  assert.equal(classifyProductP2Notification(packet).works[0].execution_settled, false);
+  packet.work_state.works = [];
+  assert.equal(classifyProductP2Notification(packet).works.length, 0);
+  packet.work_state.works = Array.from({ length: 32 }, (_, index) => ({ work_id: `work-${index}`, revision: 1, sequence: 1, state: 'accepted', execution_settled: false }));
+  assert.equal(classifyProductP2Notification(packet).works.length, 32);
+  for (const change of [
+    p => { p.extra = true; }, p => { delete p.work_state; }, p => { p.response = {}; },
+    p => { p.sequence_effect = 'consumed'; }, p => { p.work_state.contract_version = 'wrong'; },
+    p => { p.work_state.sequence = 0; }, p => { p.work_state.sequence = Number.MAX_SAFE_INTEGER + 1; },
+    p => { p.work_state.works[0].revision = 0; }, p => { p.work_state.works[0].sequence = true; },
+    p => { p.work_state.works[0].state = 'invented'; }, p => { p.work_state.works[0].execution_settled = 1; },
+    p => { p.work_state.works[0].instruction = 'PRIVATE CONTENT'; },
+    p => { p.work_state.works[0].work_id = 'x'.repeat(257); },
+    p => { p.work_state.works[0].work_id = '\ud800'; },
+    p => { p.work_state.works.push({ ...p.work_state.works[0] }); },
+    p => { p.work_state.works = Array.from({ length: 33 }, (_, index) => ({ ...p.work_state.works[0], work_id: `work-${index}` })); },
+  ]) {
+    const malformed = nativeWorkStatePacket(); change(malformed);
+    assert.deepEqual(classifyProductP2Notification(malformed), { kind: 'continue' }, 'bad passive metadata must not fail the foreground');
+  }
+});

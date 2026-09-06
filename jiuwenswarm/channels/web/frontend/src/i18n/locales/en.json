@@ -2148,6 +2148,17 @@
     "transcriptPlaceholder": "Your speech will appear here",
     "retryListening": "Listen again",
     "formal": {
+      "work": {
+        "accepted": "Analysis queued ({{count}})",
+        "running": "Analysis in progress ({{count}})",
+        "cancelling": "Cancelling analysis ({{count}})",
+        "completed": "Analysis completed ({{count}})",
+        "cancelled": "Analysis cancelled ({{count}})",
+        "superseded": "Analysis updated ({{count}})",
+        "failed": "Analysis failed ({{count}})",
+        "unknown": "Analysis status unconfirmed ({{count}})",
+        "keepSpeaking": "You can keep speaking"
+      },
       "recentTasks": {
         "refresh": "Refresh",
         "unavailable": "Background tasks cannot be refreshed right now",

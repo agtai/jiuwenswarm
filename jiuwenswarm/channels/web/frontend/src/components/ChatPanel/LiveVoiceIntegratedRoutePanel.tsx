@@ -1,3 +1,4 @@
+import { parseNativeWorkStateNotification, nativeWorkBindingMatches, nativeWorkSnapshotAdvances, type NativeWorkStateSnapshot, type NativeWorkStateNotification } from '../../features/live-voice/formal/nativeWorkState';
 import { taskNotificationSourceKey, type TaskNotificationDisplay } from '../../features/live-voice/formal/taskNotificationIdentity';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { recordAudioDiagnostic } from '../../features/live-voice/formal/audioDiagnostics';
@@ -219,6 +220,7 @@ export type ProductLiveVoiceSurfaceState = Readonly<{
   terminal_notification: string | null;
   adjustment_notification: string | null;
   task_experience: FormalP3TaskExperienceSnapshot;
+  native_work?: NativeWorkStateSnapshot | null;
 }>;
 
 export interface ProductLiveVoiceSurfaceControl {
@@ -784,6 +786,7 @@ function recognizedSpeechConfirmationAuthorityMatches(
 }
 
 export type ProductP2NotificationDisposition =
+  | NativeWorkStateNotification
   | { readonly kind: 'continue' }
   | {
       readonly kind: 'native_task_association';
@@ -1480,6 +1483,10 @@ export function bindProductVoiceTaskOrigin(
 }
 
 export function classifyProductP2Notification(notification: Readonly<Record<string, unknown>>, hasPresentedOutput = false): ProductP2NotificationDisposition {
+  if (notification.kind === 'native.work_state') {
+    try { return parseNativeWorkStateNotification(notification); }
+    catch { return { kind: 'continue' }; }
+  }
   const event = recordValue(notification.agent_event);
   const unit = recordValue(notification.presentation_unit);
   const response = recordValue(notification.response);
@@ -1956,6 +1963,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const nativeForegroundEpochRef = useRef(0);
   const nativePresentationQueueRef = useRef<{ key: string; owner: ProductWebP2ActivationOwner; notification: Readonly<Record<string, unknown>>; admission: ProductP2NotificationAdmission }[]>([]);
   const nativeRequestStateRef = useRef<{ binding: string; sequence: number; phase: string } | null>(null);
+  const [nativeWorkState, setNativeWorkState] = useState<NativeWorkStateSnapshot | null>(null);
+  const nativeWorkStateRef = useRef<NativeWorkStateSnapshot | null>(null);
   const nativeTextReadRef = useRef<{ owner: ProductWebP2ActivationOwner; voice: ProductP1VoiceRouteOwner;
     binding: string; sessionId: string; revision: number; visible: Set<string>; ended: boolean;
     onEnd: LiveVoiceIntegratedRoutePanelProps['onNativeVoiceDisplayEnded'] } | null>(null);
@@ -3274,6 +3283,24 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // so neither may fail, render, speak, acknowledge or reach history in
       // the replacement turn. Ignored Native audio still releases the poll.
       if (disposition.kind === 'native_audio') setP2NotificationWakeEpoch(epoch => epoch + 1);
+      return disposition;
+    }
+    if (disposition.kind === 'native_work_state') {
+      if (p1VoiceOwnerRef.current?.interactionEngine() !== 'openai-realtime-native' ||
+          activationOwnerRef.current !== owner || !voiceLoopEnabledRef.current || !mountedRef.current ||
+          activeSessionRef.current !== disposition.session_id || !nativeWorkBindingMatches(disposition, presentationBinding) ||
+          !nativeWorkSnapshotAdvances(nativeWorkStateRef.current, disposition)) return disposition;
+      const prior = nativeWorkStateRef.current;
+      nativeWorkStateRef.current = disposition;
+      setNativeWorkState(disposition);
+      for (const work of disposition.works) {
+        if (prior !== null && nativeWorkBindingMatches(prior, disposition) &&
+            prior.works.some(item => item.work_id === work.work_id && item.sequence === work.sequence)) continue;
+        recordAudioDiagnostic('native_work_state', {
+          ...presentationBinding, work_id: work.work_id, revision_number: work.revision, work_version: work.sequence,
+          status: work.state, seq: disposition.sequence,
+        });
+      }
       return disposition;
     }
     if (disposition.kind === 'native_request_state') {
@@ -5721,7 +5748,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                 )
               : false;
           if (readPendingUnifiedFinal() !== null && !exactForegroundDelivery) return;
-          const exactNativeStateDelivery = previewDisposition.kind === 'native_request_state' &&
+          const exactNativeStateDelivery = (previewDisposition.kind === 'native_request_state' || previewDisposition.kind === 'native_work_state') &&
             activationOwnerRef.current === owner && activeSessionRef.current === binding.session_id &&
             voiceLoopGenerationRef.current === notificationAdmission.voice_loop_generation &&
             previewDisposition.session_id === binding.session_id && previewDisposition.correlation_id === binding.correlation_id &&
@@ -8944,6 +8971,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     await startProductVoiceCapture();
   };
 
+  const currentNativeWorkState = nativeWorkState !== null && props.isConnected && voiceLoopEnabledRef.current &&
+    p2Activation.status === 'active' && props.activeSessionId === nativeWorkState.session_id &&
+    nativeWorkBindingMatches(nativeWorkState, p2Activation.binding) ? nativeWorkState : null;
+  useEffect(() => {
+    if (currentNativeWorkState === null && nativeWorkStateRef.current !== null) {
+      nativeWorkStateRef.current = null;
+      setNativeWorkState(null);
+    }
+  }, [currentNativeWorkState]);
+
   useEffect(() => {
     props.onProductVoiceStateChange?.(
       Object.freeze({
@@ -8978,6 +9015,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         terminal_notification: terminalNotification,
         adjustment_notification: adjustmentNotification,
         task_experience: taskExperience,
+        native_work: currentNativeWorkState,
       }),
     );
   }, [
@@ -9000,6 +9038,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     progress?.task_id,
     progressAck,
     props.onProductVoiceStateChange,
+    currentNativeWorkState,
     props.isConnected,
     editedVoiceDraftConfirmation?.phase,
     recognizedSpeechConfirmation?.phase,

@@ -2146,6 +2146,17 @@
     "transcriptPlaceholder": "说话内容会显示在这里",
     "retryListening": "重新监听",
     "formal": {
+      "work": {
+        "accepted": "资料分析等待执行（{{count}}项）",
+        "running": "资料分析中（{{count}}项）",
+        "cancelling": "资料分析取消中（{{count}}项）",
+        "completed": "资料分析已完成（{{count}}项）",
+        "cancelled": "资料分析已取消（{{count}}项）",
+        "superseded": "资料分析已更新（{{count}}项）",
+        "failed": "资料分析失败（{{count}}项）",
+        "unknown": "资料分析状态待确认（{{count}}项）",
+        "keepSpeaking": "可继续说话"
+      },
       "recentTasks": {
         "refresh": "刷新",
         "unavailable": "后台任务暂时无法刷新",

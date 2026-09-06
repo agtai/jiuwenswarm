@@ -1,3 +1,4 @@
+import { NATIVE_WORK_STATES, type NativeWorkStateSnapshot } from '../../features/live-voice/formal/nativeWorkState';
 import { downloadAudioDiagnostics } from '../../features/live-voice/formal/audioDiagnostics';
 import { useId, useState } from 'react';
 import { AlertCircle, LoaderCircle, Mic, Square, Volume2, X } from 'lucide-react';
@@ -93,6 +94,8 @@ export interface LiveVoiceDemoBarProps {
   onTranscriptChange?: (value: string) => void;
   commandCenter?: LiveVoiceCommandCenterProps;
   handsFree?: boolean;
+  nativeWork?: NativeWorkStateSnapshot | null;
+  nativeWorkCanSpeak?: boolean;
   onEnable: () => void;
   onExit: () => void;
   onPrimaryAction: () => void;
@@ -103,6 +106,8 @@ export interface LiveVoiceDemoBarProps {
 }
 
 export type FormalProductTaskPresentationState = Readonly<{
+  native_work?: NativeWorkStateSnapshot | null;
+  p1_status?: ProductLiveVoiceSurfaceState['p1_status'];
   terminal_notification: string | null;
   adjustment_notification: string | null;
   task_progress_state: string | null;
@@ -379,6 +384,8 @@ export function LiveVoiceDemoBar({
   onTranscriptChange,
   commandCenter,
   handsFree = false,
+  nativeWork = null,
+  nativeWorkCanSpeak = false,
   onEnable,
   onExit,
   onPrimaryAction,
@@ -472,6 +479,17 @@ export function LiveVoiceDemoBar({
             </span>
           )}
         </div>
+
+        {nativeWork !== null && nativeWork.works.length > 0 && (
+          <div className="live-voice-demo__work" data-testid="live-voice-native-work" role="status" aria-live="polite" aria-atomic="true">
+            {NATIVE_WORK_STATES.map(phase => {
+              const count = nativeWork.works.filter(work => work.state === phase).length;
+              return count > 0 ? <span key={phase} data-work-state={phase}>{t(`liveVoice.formal.work.${phase}`, { count })}</span> : null;
+            })}
+            {nativeWorkCanSpeak && nativeWork.works.some(work => ['accepted', 'running', 'cancelling'].includes(work.state)) &&
+              <span>{t('liveVoice.formal.work.keepSpeaking')}</span>}
+          </div>
+        )}
 
         {hasCommandCenter && commandCenter && <CommandCenter commandCenter={commandCenter} />}
 
@@ -601,5 +619,6 @@ export function FormalProductLiveVoiceDemoBar({ surfaceState, ...props }: Formal
   const taskProgressPresentation = progressEvent && surfaceState
     ? Object.freeze({ event: progressEvent, nodeRef: surfaceState.task_progress_node_ref })
     : null;
-  return <LiveVoiceDemoBar {...props} taskActivity={taskActivity} taskProgressPresentation={taskProgressPresentation} />;
+  return <LiveVoiceDemoBar {...props} taskActivity={taskActivity} taskProgressPresentation={taskProgressPresentation}
+    nativeWork={surfaceState?.native_work ?? null} nativeWorkCanSpeak={surfaceState?.p1_status === 'capturing' || surfaceState?.p1_status === 'playing'} />;
 }

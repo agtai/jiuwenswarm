@@ -16155,7 +16155,7 @@ for (const outcome of ['recovered', 'persistent', 'exit']) {
 }
 
 
-for (const verify of ['model_before_start', 'model_while_active', 'model_missing_confirmation', 'task', 'task_keep_selection', 'task_foreign', 'task_retry', 'task_repeated_failure', 'task_retired_read', 'text', 'barge_success', 'barge_failure', 'barge_fatal', 'fatal_before', 'fatal_after', 'fatal_overlap', 'fatal_audio']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
+for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while_active', 'model_missing_confirmation', 'task', 'task_keep_selection', 'task_foreign', 'task_retry', 'task_repeated_failure', 'task_retired_read', 'text', 'barge_success', 'barge_failure', 'barge_fatal', 'fatal_before', 'fatal_after', 'fatal_overlap', 'fatal_audio']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
   const i18n = await createI18n();
   const states = [], messages = [], calls = [], waiters = [], ended = [], sources = [];
   let activeMediaBinding = null, binding = null, renderer, textSnapshot = null, settleTaskFailure;
@@ -16207,7 +16207,7 @@ for (const verify of ['model_before_start', 'model_while_active', 'model_missing
       return { status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED', subject_id: 'mounted-native-subject',
         endpoint_path: '/ws/live-voice/media', media_ticket: 'N'.repeat(43), subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30000,
         end_of_turn: { status: 'fallback', requested_capability: 'media.end_of_turn.v1', reason_id: 'MEDIA_END_OF_TURN_FEATURE_OFF', fallback: 'manual', visible: true },
-        native_interaction: { contract_version: 'live-voice.native-interaction.v1', engine: 'openai-realtime-native', model: 'gpt-realtime-2' },
+        ...(verify === 'work_cascade' ? {} : { native_interaction: { contract_version: 'live-voice.native-interaction.v1', engine: 'openai-realtime-native', model: 'gpt-realtime-2' } }),
         binding: activeMediaBinding, privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true } };
     }
     if (method === 'live_voice.speech.synthesize_batch') return {
@@ -16240,10 +16240,10 @@ for (const verify of ['model_before_start', 'model_while_active', 'model_missing
   async function deliver(value) {
     await waitForMountedEffects(() => waiters.length > 0, 'Native notification consumer did not remain live');
     await act(async () => { waiters.shift()({ ok: true, result: value }); await new Promise(resolve => setImmediate(resolve)); });
-    await waitForMountedEffects(() => waiters.length > 0, 'Native notification did not settle');
+    if (verify !== 'work_cascade') await waitForMountedEffects(() => waiters.length > 0, 'Native notification did not settle');
   }
   try {
-    const element = () => mountedFullyEnabledElement(i18n, 'mounted-native-state-session', request, true, {
+    const element = () => (verify.startsWith('work') ? mountedFullyEnabledProductCarrierElement : mountedFullyEnabledElement)(i18n, 'mounted-native-state-session', request, true, {
       productVoiceControlRef: controlRef, onProductVoiceStateChange: state => states.push(state), onProductVoiceMessage: event => messages.push(event),
       onNativeVoiceDisplayEnded: (sessionId, keys) => ended.push({ sessionId, keys }),
       p3RetryInspectionWait: async () => undefined, selectedAgentModelName,
@@ -16288,6 +16288,61 @@ for (const verify of ['model_before_start', 'model_while_active', 'model_missing
 
       assert.equal(calls.filter(method => method === 'live_voice.media.activate').length, verify === 'model_while_active' ? 2 : 1);
       assert.equal(calls.some(method => /unified.submit|presentation.ack|task.create|task.cancel|p3.mutate/u.test(method)), false);
+      return;
+    }
+
+    if (verify.startsWith('work')) {
+      const makeWork = (sequence, state, workSequence = sequence) => {
+        const packet = notification(sequence, 'processing', { kind: 'native.work_state',
+          work_state: { contract_version: 'live-voice.native-work-state.v1', sequence,
+            works: [{ work_id: 'analysis-1', revision: 1, sequence: workSequence, state,
+              execution_settled: state === 'completed' }] } });
+        delete packet.request_state;
+        return packet;
+      };
+      const taskReads = calls.filter(method => method.startsWith('live_voice.task.')).length;
+      const textStatus = states.at(-1).text_status;
+      await deliver(makeWork(1, 'running'));
+      if (verify === 'work_cascade') {
+        assert.equal(states.at(-1).native_work, null);
+        assert.equal(renderer.root.findAll(node => node.props['data-testid'] === 'live-voice-native-work').length, 0);
+        return;
+      }
+      await waitForMountedEffects(() => states.at(-1).native_work?.works[0].state === 'running', 'work state did not reach product surface');
+      assert.equal(states.at(-1).p1_status, 'capturing');
+      assert.equal(states.at(-1).text_status, textStatus);
+      assert.equal(formalProductVoiceActivity(states.at(-1)).status, 'listening');
+      const workPanel = renderer.root.findByProps({ 'data-testid': 'live-voice-native-work' });
+      const labels = workPanel.findAllByType('span').map(node => node.children.join(' ')).join(' ');
+      assert.match(labels, /Analysis in progress/u);
+      assert.match(labels, /You can keep speaking/u);
+      await deliver(makeWork(1, 'failed'));
+      assert.equal(states.at(-1).native_work.works[0].state, 'running');
+      await deliver(makeWork(2, 'failed', 1));
+      assert.equal(states.at(-1).native_work.works[0].state, 'running', 'regressed row sequence cannot change work truth');
+      const malformed = makeWork(3, 'completed'); malformed.work_state.works[0].extra = 'private';
+      await deliver(malformed);
+      assert.equal(states.at(-1).native_work.works[0].state, 'running');
+      await deliver(makeWork(4, 'unknown'));
+      assert.equal(states.at(-1).native_work.works[0].state, 'unknown');
+      await deliver(makeWork(5, 'completed'));
+      assert.equal(states.at(-1).native_work.works[0].state, 'completed');
+      assert.equal(states.at(-1).text_status, textStatus);
+      assert.equal(calls.filter(method => method.startsWith('live_voice.task.')).length, taskReads);
+      assert.equal(calls.some(method => /unified.submit|presentation.ack|task.create|task.cancel|p3.mutate/u.test(method)), false);
+      assert.equal(messages.length, 0);
+      assert.equal(browser.counts.sourceStarts, 0);
+      const oldNotice = makeWork(6, 'running');
+      await act(async () => { await controlRef.current.close(); });
+      await waitForMountedEffects(() => states.at(-1).native_work === null, 'closed voice retained live work status');
+      await act(async () => { void controlRef.current.start(); });
+      await waitForMountedEffects(() => states.at(-1)?.p1_status === 'starting', 'work restart did not start capture');
+      await act(async () => { await browser.emitFirstFrame(0); });
+      await waitForMountedEffects(() => states.at(-1)?.p1_status === 'capturing', 'work restart capture not ready');
+      await deliver(oldNotice);
+      assert.equal(states.at(-1).native_work, null, 'old activation response cannot republish work state');
+      await deliver(makeWork(1, 'running'));
+      await waitForMountedEffects(() => states.at(-1).native_work?.sequence === 1, 'new activation did not reset its sequence');
       return;
     }
 
@@ -16518,4 +16573,24 @@ for (const verify of ['model_before_start', 'model_while_active', 'model_missing
     if (renderer) await act(async () => { renderer.unmount(); await new Promise(resolve => setImmediate(resolve)); });
     browser.restore();
   }
+});
+
+
+for (const language of ['zh', 'en']) test(`Native work bar separates analysis from foreground speech in ${language}`, async () => {
+  const i18n = await createI18n(language);
+  let renderer;
+  try {
+    const work = { work_id: 'private-work-id', revision: 1, sequence: 2, state: 'running', execution_settled: false };
+    const surfaceState = { p1_status: 'capturing', native_work: { sequence: 1, works: [work] },
+      task_progress_event: null, task_progress_state: null, terminal_notification: null, adjustment_notification: null };
+    await act(async () => { renderer = create(React.createElement(I18nextProvider, { i18n },
+      React.createElement(MountedFormalProductLiveVoiceDemoBar, { active: true, available: true, status: 'listening',
+        interimTranscript: '', handsFree: true, surfaceState, onEnable() {}, onExit() {}, onPrimaryAction() {} }))); });
+    const text = JSON.stringify(renderer.toJSON());
+    assert.match(text, language === 'zh' ? /资料分析中/u : /Analysis in progress/u);
+    assert.match(text, language === 'zh' ? /可继续说话/u : /You can keep speaking/u);
+    assert.doesNotMatch(text, /private-work-id|native-work-state|model_identity/u);
+    assert.equal(renderer.root.findByProps({ 'data-testid': 'live-voice-demo' }).props['data-state'], 'listening');
+    assert.equal(renderer.root.findAllByProps({ 'data-testid': 'live-voice-product-task-notification' }).length, 0);
+  } finally { if (renderer) await act(async () => renderer.unmount()); }
 });

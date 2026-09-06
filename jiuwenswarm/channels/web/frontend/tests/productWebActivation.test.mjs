@@ -765,6 +765,11 @@ test('Gateway-local Native audio does not consume the AgentServer notification s
 for (const [name, localReplies] of [
   ['audio then user transcript', [nativeAudioNotification(), nativeUserTranscriptNotification()]],
   ['user transcript then audio', [nativeUserTranscriptNotification(), nativeAudioNotification()]],
+  ['work snapshot then audio', [nativeAudioNotification({
+    kind: 'native.work_state', response: null, presentation_unit: null, audio: null,
+    work_state: { contract_version: 'live-voice.native-work-state.v1', sequence: 1,
+      works: [{ work_id: 'analysis-1', revision: 1, sequence: 2, state: 'running', execution_settled: false }] },
+  }), nativeAudioNotification()]],
 ]) {
   test(`all Gateway-local notification kinds keep the same AgentServer candidate: ${name}`, async () => {
     const calls = [];
