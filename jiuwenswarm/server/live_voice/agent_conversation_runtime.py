@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import math
 import secrets
 import threading
@@ -21,6 +22,9 @@ from jiuwenswarm.common.live_voice_operation_budgets import (
 )
 from jiuwenswarm.server.live_voice.native_foreground import (
     NATIVE_FOREGROUND, NativeForegroundInterrupted,
+)
+from jiuwenswarm.server.live_voice.native_work_runtime import (
+    NativeWorkControl, NativeWorkCancelled, context_identity,
 )
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
@@ -844,6 +848,69 @@ class AgentConversationRuntime:
         self._native_owner = owner
         return owner
 
+    async def execute_native_work(
+        self, *, control: NativeWorkControl, commit: TurnCommit,
+        context: FormalContextSnapshot, correlation_id: str, channel_id: str = "web",
+        allow_tools: bool = True,
+    ) -> str:
+        """Execute admitted read-only work independently of any spoken response.
+
+        The internal ResponseRef correlates Harness/Bridge records only. No CR
+        turn, presentation, history, notification or speech authority is created.
+        """
+        self._require_admission()
+        if (not isinstance(control, NativeWorkControl) or not isinstance(commit, TurnCommit)
+                or not isinstance(context, FormalContextSnapshot)
+                or control.snapshot.scope != self._scope or commit.scope != self._scope
+                or control.snapshot.input_id != commit.commit_id
+                or control.snapshot.context_id != context_identity(context)):
+            raise AgentConversationRuntimeViolation("NATIVE_WORK_BINDING_MISMATCH",
+                "Native work requires its exact admitted input and context", ErrorCode.PERMISSION_DENIED)
+        specifications = [entry for entry in context.entries
+                          if entry.ref.source == "live_voice.native_work_specification"]
+        try:
+            specification = json.loads(specifications[0].content) if len(specifications) == 1 else None
+        except (ValueError, TypeError):
+            specification = None
+        if not isinstance(specification, dict) or specification.get("instruction") != control.snapshot.instruction:
+            raise AgentConversationRuntimeViolation("NATIVE_WORK_SPECIFICATION_MISMATCH",
+                "Native work requires its exact selected specification", ErrorCode.PERMISSION_DENIED)
+        context.validate_for(commit)
+        self._validate_dispatch_channel(channel_id)
+        if type(allow_tools) is not bool:
+            raise AgentConversationRuntimeViolation("INVALID_AGENT_TOOL_POLICY", "tool policy must be boolean", ErrorCode.INVALID_ARGUMENT)
+        if self._facade is None:
+            raise AgentConversationRuntimeViolation("FORMAL_AGENT_FACADE_UNAVAILABLE", "formal Agent facade is unavailable", ErrorCode.CAPABILITY_UNAVAILABLE)
+        control.check()
+        identity = control.snapshot
+        request_id = f"{identity.work_id}:r{identity.revision}"
+        response = ResponseRef(commit.interaction_id, request_id, 1)
+        fingerprint = hashlib.sha256(canonical_json_bytes({
+            "commit": commit.to_dict(), "context_id": identity.context_id,
+            "model_identity": identity.model_identity, "model_config_version": identity.model_config_version,
+            "correlation_id": correlation_id, "channel_id": channel_id, "allow_tools": allow_tools,
+        })).digest()
+        async with self._identity_claim_lock:
+            prior = self._native_delegate_executions.get(request_id)
+            if prior is not None:
+                if prior[0] != fingerprint:
+                    raise AgentConversationRuntimeViolation("NATIVE_WORK_REQUEST_CONFLICT", "work revision cannot change execution binding", ErrorCode.CONFLICT)
+                operation = prior[1]
+            else:
+                if len(self._native_delegate_executions) >= self._max_requests:
+                    raise AgentConversationRuntimeViolation("NATIVE_WORK_LEDGER_FULL", "bounded Agent work ledger is full", ErrorCode.UNAVAILABLE)
+                token = NATIVE_FOREGROUND.set(None)
+                try:
+                    operation = asyncio.create_task(self._run_native_delegate(
+                        request_id=request_id, source_response=response, correlation_id=correlation_id,
+                        commit=commit, context=context, channel_id=channel_id, allow_tools=allow_tools,
+                        answer_from_selected_task_result=False, work_control=control,
+                    ), name=f"native-agent-work:{request_id}")
+                finally:
+                    NATIVE_FOREGROUND.reset(token)
+                self._native_delegate_executions[request_id] = (fingerprint, operation)
+        return await asyncio.shield(operation)
+
     async def execute_native_delegate(
         self,
         *,
@@ -1010,15 +1077,21 @@ class AgentConversationRuntime:
         channel_id: str,
         allow_tools: bool,
         answer_from_selected_task_result: bool,
+        work_control: NativeWorkControl | None = None,
     ) -> str:
         harness_reservation: HarnessRoundReservation | None = None
         bridge_reservation: AgentBridgeDispatchReservation | None = None
         round_handle: HarnessRoundHandle | None = None
-        foreground = NATIVE_FOREGROUND.get()
+        foreground = work_control if work_control is not None else NATIVE_FOREGROUND.get()
         try:
             if foreground is not None:
                 foreground.check()
-                foreground.observe("agent_started", timeout_ms=self._native_delegate_timeout_seconds * 1000)
+                if work_control is None:
+                    foreground.observe("agent_started", timeout_ms=self._native_delegate_timeout_seconds * 1000)
+                else:
+                    # The service work owner has the sole execution deadline.
+                    # Speech/delegate budgets never retire accepted work.
+                    foreground.observe("agent_started")
             assert self._facade is not None
             harness_reservation = self._harness.reserve_round(
                 HarnessRoundBinding(
@@ -1047,12 +1120,17 @@ class AgentConversationRuntime:
                 channel_id=channel_id,
                 allow_tools=allow_tools,
                 answer_from_selected_task_result=(answer_from_selected_task_result),
+                read_only_tools=work_control is not None,
+                model_identity=work_control.snapshot.model_identity if work_control else None,
+                model_config_version=work_control.snapshot.model_config_version if work_control else None,
             )
             submission = self._bridge.commit_dispatch(
                 bridge_reservation,
                 response_ref=source_response,
                 adapter=JiuWenSwarmAgentAdapter(round_handle),
             )
+            if work_control is not None:
+                work_control.settlement = asyncio.create_task(round_handle.wait_settled())
             try:
                 if foreground is None:
                     completion = await asyncio.wait_for(
@@ -1061,10 +1139,10 @@ class AgentConversationRuntime:
                 else:
                     completion = await foreground.read_only(
                         asyncio.shield(submission.completion),
-                        timeout=self._native_delegate_timeout_seconds,
+                        timeout=self._native_delegate_timeout_seconds if work_control is None else None,
                     )
-            except (TimeoutError, NativeForegroundInterrupted) as timeout_error:
-                interrupted = isinstance(timeout_error, NativeForegroundInterrupted)
+            except (TimeoutError, NativeForegroundInterrupted, NativeWorkCancelled) as timeout_error:
+                interrupted = isinstance(timeout_error, (NativeForegroundInterrupted, NativeWorkCancelled))
                 cancel = CommandEnvelope.from_dict(
                     {
                         "contract_version": "live-voice.contract.v2",
@@ -1096,13 +1174,23 @@ class AgentConversationRuntime:
                     }
                 )
                 round_handle.cancel(cancel)
+                cancel_completion = None
                 try:
-                    await asyncio.wait_for(
+                    cancel_completion = await asyncio.wait_for(
                         submission.completion,
                         timeout=_NATIVE_DELEGATE_CANCEL_SETTLEMENT_SECONDS,
                     )
                 except TimeoutError:
                     pass
+                if work_control is not None:
+                    if (cancel_completion is None
+                            or cancel_completion.status is not AgentBridgeCompletionStatus.TERMINAL_OBSERVED):
+                        raise AgentConversationRuntimeViolation("NATIVE_WORK_CANCEL_OUTCOME_UNKNOWN",
+                            "work cancellation has not reached a terminal observation", ErrorCode.RESULT_UNKNOWN) from timeout_error
+                    raise AgentConversationRuntimeViolation(
+                        "NATIVE_WORK_CANCELLED" if interrupted else "NATIVE_WORK_DEADLINE_EXCEEDED",
+                        "Native work ended after cancellation", ErrorCode.CANCELLED,
+                    ) from timeout_error
                 if foreground is not None:
                     foreground.observe("agent_cancelled", outcome="cancelled" if interrupted else "timeout")
                 raise AgentConversationRuntimeViolation(

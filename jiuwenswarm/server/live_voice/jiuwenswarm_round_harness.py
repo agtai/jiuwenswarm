@@ -236,6 +236,13 @@ class HarnessRoundHandle:
     def terminal_event(self) -> EventEnvelope | None:
         return self._harness.terminal_event(self)
 
+    async def wait_settled(self) -> EventEnvelope | None:
+        """Wait for this actual runner and cleanup without cancelling its owner."""
+        self._harness.require_handle(self)
+        record = self._harness._rounds[self.round_id]
+        await asyncio.shield(record.task)
+        return record.terminal_event
+
     async def events(self) -> AsyncIterator[AgentResponseChunk | EventEnvelope]:
         self._harness.require_handle(self)
         if self._subscribed:
@@ -498,6 +505,9 @@ class JiuWenSwarmRoundHarness:
         channel_id: str = "web",
         allow_tools: bool = True,
         answer_from_selected_task_result: bool = False,
+        read_only_tools: bool = False,
+        model_identity: str | None = None,
+        model_config_version: str | None = None,
     ) -> HarnessRoundHandle:
         running = self._require_owner()
         record = self._require_reservation(reservation)
@@ -578,6 +588,9 @@ class JiuWenSwarmRoundHarness:
                 for entry in context.entries
             ),
             answer_from_selected_task_result=answer_from_selected_task_result,
+            read_only_tools=read_only_tools,
+            model_identity=model_identity,
+            model_config_version=model_config_version,
         )
         started = asyncio.Event()
         cancel_safe = asyncio.Event()

@@ -51,6 +51,9 @@ from jiuwenswarm.common.utils import logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
 _FORMAL_TOOL_EVENT_CAPACITY = 192
+# Trusted registered local file readers only. No shell, network, task_tool,
+# arbitrary connector, mutable wiki/memory or tool-loader capability is admitted.
+NATIVE_READ_ONLY_TOOL_NAMES = frozenset({"read_file", "list_files", "glob", "grep"})
 _TOOL_OUTCOME_MAX_DEPTH = 32
 _TOOL_OUTCOME_MAX_NODES = 2048
 _INVALID_TOOL_OUTCOME = object()
@@ -460,6 +463,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         self._cancelled_tool_results: dict[str, list[dict[str, Any]]] = {}
         self._symphony_stream_handler = SymphonyToolStreamHandler()
         self._formal_tool_event_captures: dict[str, FormalToolEventCapture] = {}
+        self._formal_read_only_sessions: set[str] = set()
         self._formal_no_tool_sessions: set[str] = set()
 
     def init(self, agent: Any) -> None:
@@ -719,12 +723,14 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         self._main_sessions.pop(sid, None)
         self._cancelled_tool_results.pop(sid, None)
         self._formal_no_tool_sessions.discard(sid)
+        self._formal_read_only_sessions.discard(sid)
 
     def open_formal_tool_event_capture(
         self,
         session_id: str,
         *,
         allow_tools: bool = True,
+        read_only_tools: bool = False,
     ) -> FormalToolEventCapture:
         """Open the sole callback-authoritative capture for ``session_id``."""
 
@@ -732,12 +738,14 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_SESSION_INVALID")
         if session_id in self._formal_tool_event_captures:
             raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_CONFLICT")
-        if type(allow_tools) is not bool:
+        if type(allow_tools) is not bool or type(read_only_tools) is not bool:
             raise RuntimeError("FORMAL_TOOL_POLICY_INVALID")
         capture = FormalToolEventCapture(session_id)
         self._formal_tool_event_captures[session_id] = capture
         if not allow_tools:
             self._formal_no_tool_sessions.add(session_id)
+        if read_only_tools:
+            self._formal_read_only_sessions.add(session_id)
         return capture
 
     def close_formal_tool_event_capture(
@@ -760,6 +768,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             if self._formal_tool_event_captures.get(session_id) is capture:
                 self._formal_tool_event_captures.pop(session_id, None)
             self._formal_no_tool_sessions.discard(session_id)
+            self._formal_read_only_sessions.discard(session_id)
 
     def get_cancelled_tool_results(self, session_id: str = "") -> list[dict[str, Any]]:
         """Get cancelled tool results collected during interrupt.
@@ -870,6 +879,13 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             except (AttributeError, TypeError) as exc:
                 raise RuntimeError("FORMAL_NO_TOOL_MODEL_INPUT_REJECTED") from exc
         else:
+            if sid in self._formal_read_only_sessions:
+                from openjiuwen.core.runner.callback.errors import AbortError
+                try:
+                    ctx.inputs.tools = [tool for tool in ctx.inputs.tools
+                                        if getattr(tool, "name", None) in NATIVE_READ_ONLY_TOOL_NAMES]
+                except (AttributeError, TypeError) as error:
+                    raise AbortError("FORMAL_READ_ONLY_MODEL_INPUT_REJECTED", cause=error) from error
             self._inject_tool_call_goal_schema(ctx)
 
         if ctx.context is not None:
@@ -955,6 +971,16 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         await self._get_tool_pause_event(sid).wait()
         if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
+        if sid in self._formal_read_only_sessions:
+            from openjiuwen.core.runner.callback.errors import AbortError
+            inputs = ctx.inputs
+            if (sid in self._formal_no_tool_sessions
+                    or not isinstance(inputs, ToolCallInputs)
+                    or getattr(inputs.tool_call, "name", None) not in NATIVE_READ_ONLY_TOOL_NAMES
+                    or inputs.tool_name != getattr(inputs.tool_call, "name", None)):
+                # Ordinary callback errors are logged and ignored by the SDK.
+                # AbortError is the execution boundary, before all tool effects.
+                raise AbortError("FORMAL_READ_ONLY_TOOL_FORBIDDEN")
         if sid in self._formal_no_tool_sessions:
             raise RuntimeError("FORMAL_TOOL_EXECUTION_FORBIDDEN")
 

@@ -213,6 +213,9 @@ class FormalAgentExecution:
     context: FormalContextSnapshot
     allow_tools: bool = True
     answer_from_selected_task_result: bool = False
+    read_only_tools: bool = False
+    model_identity: str | None = None
+    model_config_version: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.request_id, "request_id")
@@ -229,6 +232,15 @@ class FormalAgentExecution:
                 "formal execution tool policy must be a boolean",
             )
         self.context.validate_for(self.commit)
+        if type(self.read_only_tools) is not bool or (
+            (self.model_identity is None) != (self.model_config_version is None)
+        ):
+            raise FormalLiveVoiceViolation("INVALID_FORMAL_AGENT_INPUT", "invalid formal execution policy binding")
+        if self.read_only_tools and self.model_identity is None:
+            raise FormalLiveVoiceViolation("INVALID_FORMAL_AGENT_INPUT", "Native analysis requires an exact model binding")
+        if self.model_identity is not None:
+            _require_text(self.model_identity, "model_identity")
+            _require_text(self.model_config_version, "model_config_version")
         if type(self.answer_from_selected_task_result) is not bool:
             raise FormalLiveVoiceViolation(
                 "INVALID_FORMAL_AGENT_INPUT",

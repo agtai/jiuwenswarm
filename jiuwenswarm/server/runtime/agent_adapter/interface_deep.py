@@ -3466,6 +3466,19 @@ class JiuWenSwarmDeepAdapter:
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    def resolve_formal_model_binding(self, model_identity: str | None = None) -> tuple[str, str]:
+        """Exact registered selection; formal work never falls back to default."""
+        resolved = self._formal_model_resolver().resolve(model_identity, instantiate=False)
+        return resolved.identity, resolved.config_version
+
+    @staticmethod
+    def _formal_model_resolver():
+        from jiuwenswarm.server.live_voice.p3_model_resolution import ServerModelCatalogResolver
+        return ServerModelCatalogResolver(
+            catalog_reader=lambda: get_default_models(get_config()),
+            model_builder=build_model_from_entry,
+        )
+
     def _resolve_model_by_name(self, requested_model_name: str = "") -> Model | None:
         """Resolve the exact model object that will be used."""
         requested = (requested_model_name or "").strip()
@@ -9326,22 +9339,30 @@ class JiuWenSwarmDeepAdapter:
             "supports_user_interaction",
         }
         tools_allowed = metadata.get("formal_live_voice_tools_allowed")
+        model_policy_keys = {
+            "formal_live_voice_read_only_tools",
+            "formal_live_voice_model_identity",
+            "formal_live_voice_model_config_version",
+        }
+        has_model_policy = bool(set(metadata) & model_policy_keys)
+        read_only_tools = metadata.get("formal_live_voice_read_only_tools", False)
         if (
             set(params) - allowed_params
             or params.get("mode") != "agent"
             or params.get("source") != "live_voice.formal"
             or params.get("supports_user_interaction") is not False
             or set(metadata)
-            != {
+            != ({
                 "enable_memory",
                 "skip_a2ui",
                 "formal_live_voice",
                 "formal_live_voice_tools_allowed",
-            }
+            } | (model_policy_keys if has_model_policy else set()))
             or metadata.get("enable_memory") is not False
             or metadata.get("skip_a2ui") is not True
             or metadata.get("formal_live_voice") is not True
             or type(tools_allowed) is not bool
+            or type(read_only_tools) is not bool
             or inputs.get("enable_memory") is not False
             or inputs.get("skip_a2ui") is not True
             or inputs.get("conversation_id") != request.session_id
@@ -9349,6 +9370,17 @@ class JiuWenSwarmDeepAdapter:
             or not request.session_id.startswith("lv-formal-")
         ):
             raise RuntimeError("FORMAL_EXECUTION_INPUT_REJECTED")
+
+        selected_model = None
+        if has_model_policy:
+            identity = metadata["formal_live_voice_model_identity"]
+            version = metadata["formal_live_voice_model_config_version"]
+            if not isinstance(identity, str) or not isinstance(version, str):
+                raise RuntimeError("FORMAL_MODEL_BINDING_REJECTED")
+            selected_model = self._formal_model_resolver().resolve(
+                identity, expected_identity=identity, expected_config_version=version,
+                instantiate=True,
+            ).model
 
         session_id = request.session_id
         rid = request.request_id
@@ -9376,7 +9408,7 @@ class JiuWenSwarmDeepAdapter:
                 )
             # Observe an isolated clone with the configured Agent options unchanged.
             # The voice transport does not own answer reasoning or presentation policy.
-            original_model = getattr(self, "_model", None)
+            original_model = selected_model if selected_model is not None else getattr(self, "_model", None)
             if original_model is not None:
                 voice_model = Model(
                     model_client_config=original_model.model_client_config,
@@ -9386,8 +9418,10 @@ class JiuWenSwarmDeepAdapter:
 
                 observe_formal_model(voice_model, envelope=str(inputs.get("query", "")),
                     request_id=rid, session_id=session_id)
-                voice_original_model = original_model
+                voice_original_model = getattr(self, "_model", None)
                 self._apply_model_to_react_agent(voice_model)
+                if selected_model is not None and getattr(self, "_runtime_prompt_rail", None) is not None:
+                    self._runtime_prompt_rail.set_model_name(voice_model.model_config.model_name)
             # This seam has already validated the complete formal request and
             # runs in its own isolated adapter. Never derive system instructions
             # from a query, tool result or caller-supplied metadata string.
@@ -9481,6 +9515,7 @@ class JiuWenSwarmDeepAdapter:
                 tool_capture = stream_event_rail.open_formal_tool_event_capture(
                     session_id,
                     allow_tools=tools_allowed,
+                    read_only_tools=read_only_tools,
                 )
                 if formal_tool_gate.should_pause(session_id):
                     # A speculative candidate: every tool call waits for the

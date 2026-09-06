@@ -1195,6 +1195,14 @@ class JiuWenSwarm:
         if rail is not None:
             rail.abort(session_id)
 
+    def resolve_formal_model_binding(self, model_identity: str | None = None) -> tuple[str, str]:
+        """Read the exact registered model/configuration selected for new work."""
+        adapter = self._ensure_adapter(mode="agent")
+        resolve = getattr(adapter, "resolve_formal_model_binding", None)
+        if not callable(resolve):
+            raise RuntimeError("FORMAL_MODEL_BINDING_UNAVAILABLE")
+        return resolve(model_identity)
+
     async def process_formal_live_voice_stream(
         self,
         execution: "FormalAgentExecution",
@@ -1242,6 +1250,12 @@ class JiuWenSwarm:
             },
             enable_memory=False,
         )
+        if execution.model_identity is not None:
+            formal_request.metadata.update({
+                "formal_live_voice_read_only_tools": execution.read_only_tools,
+                "formal_live_voice_model_identity": execution.model_identity,
+                "formal_live_voice_model_config_version": execution.model_config_version,
+            })
         inputs, _memory_mode, _raw_query = self._build_inputs(formal_request)
         if inputs.get("conversation_id") != execution.internal_session_id:
             raise RuntimeError(
