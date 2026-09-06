@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import replace
 
 import pytest
 
@@ -525,7 +526,7 @@ async def test_gateway_delegate_uses_composed_semantic_deadline(
     monkeypatch.setattr(client_module.asyncio, "wait_for", capture_deadline)
     agent.result_override = {
         "kind": "delegate",
-        "status": "completed",
+        "status": "prepared",
         "accepted": True,
         "provider_call_id": "provider-call-1",
         "route": "dialogue",
@@ -678,11 +679,12 @@ async def test_gateway_native_audio_batch_uses_one_bounded_closed_e2a_request() 
 
 
 @pytest.mark.asyncio
-async def test_gateway_accepts_closed_native_delegate_result() -> None:
+@pytest.mark.parametrize("replaced_while_waiting", [False, True])
+async def test_gateway_accepts_closed_native_delegate_result(replaced_while_waiting) -> None:
     client, agent, _sanitized = observed_client()
     agent.result_override = {
         "kind": "delegate",
-        "status": "completed",
+        "status": "prepared",
         "accepted": True,
         "provider_call_id": "provider-call-1",
         "route": "dialogue",
@@ -691,24 +693,47 @@ async def test_gateway_accepts_closed_native_delegate_result() -> None:
         "response": {
             "interaction_id": BINDING.interaction_id,
             "response_id": "native-delegate-response-1",
-            "response_generation": 2,
+            "response_generation": 1,
         },
     }
-
-    result = await client.propose(
+    started, release = asyncio.Event(), asyncio.Event()
+    original_send = agent.send_request
+    async def send_request(envelope):
+        started.set()
+        await release.wait()
+        return await original_send(envelope)
+    agent.send_request = send_request
+    pending = asyncio.create_task(client.propose(
         binding=BINDING,
         capability=CAPABILITY,
-        event=listen_event(),
+        event=delegate_event(),
         request_id="native-delegate-result-1",
-    )
+    ))
+    await asyncio.wait_for(started.wait(), 1)
+    if replaced_while_waiting:
+        newer = replace(BINDING, activation_id="activation-new", activation_generation=2)
+        client.observe_activation_response(activation_payload_for(newer, "b" * 64),
+            routed_session_id=SCOPE.session_id, connection_id="web-connection-2",
+            request_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value)
+    release.set()
+    if replaced_while_waiting:
+        with pytest.raises(NativeRuntimeClientError, match="current activation"):
+            await pending
+        assert client.activation_for(session_id=SCOPE.session_id,
+            interaction_id=BINDING.interaction_id, connection_id="web-connection-2").binding == newer
+    else:
+        assert await pending == agent.result_override
 
-    assert result == agent.result_override
+    assert len(agent.requests) == 1
+    assert client.snapshot().completed_requests == 1
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "change",
     [
+        {"status": "completed"},
+        {"status": "ready"},
         {"route": "provider-selected-route"},
         {"canonical_text": "changed\ncontrol"},
         {"response": {"interaction_id": BINDING.interaction_id}},
@@ -720,7 +745,7 @@ async def test_gateway_rejects_malformed_native_delegate_result(
     client, agent, _sanitized = observed_client()
     result: dict[str, object] = {
         "kind": "delegate",
-        "status": "completed",
+        "status": "prepared",
         "accepted": True,
         "provider_call_id": "provider-call-1",
         "route": "dialogue",
@@ -739,11 +764,14 @@ async def test_gateway_rejects_malformed_native_delegate_result(
         await client.propose(
             binding=BINDING,
             capability=CAPABILITY,
-            event=listen_event(),
+            event=delegate_event(),
             request_id="native-delegate-invalid-1",
         )
 
     assert raised.value.reason == "NATIVE_RUNTIME_RESPONSE_INVALID"
+
+    assert len(agent.requests) == 1
+    assert client.snapshot().completed_requests == 0
 
 
 @pytest.mark.asyncio

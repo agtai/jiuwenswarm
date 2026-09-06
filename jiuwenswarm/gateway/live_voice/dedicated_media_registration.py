@@ -946,6 +946,7 @@ class _NativeNotificationSequenceFence:
     forwarded_request_id: str | None = None
     forwarded_client_sequence: int | None = None
     forwarded_agent_sequence: int | None = None
+    terminal_notification: dict[str, object] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -989,6 +990,7 @@ class _NativeMediaSession:
     delegate_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict, repr=False)
     delegate_proposals: dict[str, NativeEngineEvent] = field(default_factory=dict, repr=False)
     foreground_turn_id: str | None = None
+    failure_reason: str | None = None
     delivery_response: ResponseRef | None = None
     request_state_sequence: int = 0
     generated_text_revision: int = 0
@@ -1689,15 +1691,19 @@ class DedicatedMediaProductRegistry:
             expected_agent_sequence = fence.agent_high_water + 1
             if parsed_notification_sequence != expected_agent_sequence:
                 return None
-            queue_owner = self._native_notifications.get(
-                (parsed_session_id, parsed_interaction_id, parsed_connection_id)
-            )
-            if queue_owner is None:
-                return None
-            try:
-                notification = queue_owner.get_nowait()
-            except asyncio.QueueEmpty:
-                return None
+            notification = fence.terminal_notification
+            if notification is not None:
+                fence.terminal_notification = None
+            else:
+                queue_owner = self._native_notifications.get(
+                    (parsed_session_id, parsed_interaction_id, parsed_connection_id)
+                )
+                if queue_owner is None:
+                    return None
+                try:
+                    notification = queue_owner.get_nowait()
+                except asyncio.QueueEmpty:
+                    return None
             manifest = json.loads(
                 canonical_json_bytes(authority.product_composition).decode("utf-8")
             )
@@ -2252,7 +2258,7 @@ class DedicatedMediaProductRegistry:
                 return
             raise
 
-    def _native_request_state(self, session: _NativeMediaSession, phase: str, turn_id: str, reason: str | None = None, *, response: ResponseRef | None = None) -> None:
+    def _native_request_state(self, session: _NativeMediaSession, phase: str, turn_id: str, reason: str | None = None, *, response: ResponseRef | None = None, retain_for_close: bool = False) -> None:
         if session.closed or session.foreground_turn_id != turn_id:
             return
         parent = self._records.get(session.record_id)
@@ -2260,12 +2266,12 @@ class DedicatedMediaProductRegistry:
             return
         notifications = self._native_notifications.get((parent.binding.session_id,
             parent.binding.interaction_id, parent.binding.connection_id))
-        if notifications is None or notifications.full():
+        if not retain_for_close and (notifications is None or notifications.full()):
             raise MediaTransportViolation("MEDIA_NATIVE_NOTIFICATION_BACKPRESSURE", "Native request state unavailable")
         session.request_state_sequence += 1
         profile_event("native_request_state", **identity_fields(session.activation.binding, response),
                       turn_id=turn_id, status=phase, reason=reason, seq=session.request_state_sequence)
-        notifications.put_nowait({
+        notification = {
             "status": "notification", "kind": "native.request_state",
             "request_id": self._native_request_id(session, "request-state"),
             "round_id": None, "response": None if response is None else {
@@ -2278,7 +2284,22 @@ class DedicatedMediaProductRegistry:
             "session_id": parent.binding.session_id, "correlation_id": parent.binding.correlation_id,
             "interaction_id": parent.binding.interaction_id, "activation_id": parent.product_activation_id,
             "activation_generation": parent.product_activation_generation,
-        })
+        }
+        if retain_for_close:
+            # One terminal diagnostic belongs to the authenticated activation,
+            # independently of the media queue that close must destroy.
+            with self._lock:
+                authority = self._product_activations.get((parent.binding.session_id,
+                    parent.binding.connection_id, parent.binding.interaction_id))
+                if (authority is not None and self._monotonic() <= authority.expires_at
+                    and authority.correlation_id == parent.binding.correlation_id
+                    and authority.activation_id == parent.product_activation_id
+                    and authority.activation_generation == parent.product_activation_generation
+                    and authority.notification_fence.terminal_notification is None):
+                    authority.notification_fence.terminal_notification = notification
+        else:
+            assert notifications is not None
+            notifications.put_nowait(notification)
 
     def _queue_native_user_transcript(
         self,
@@ -2525,6 +2546,8 @@ class DedicatedMediaProductRegistry:
     ) -> None:
         delegate = event.delegate
         assert delegate is not None
+        if session.closed:
+            return
         response_payload = result.get("response")
         settled_task = result.get("status") in {"interrupted", "failed"}
         if (
@@ -3283,6 +3306,11 @@ class DedicatedMediaProductRegistry:
                 profile_event("native_media_failure", **identity_fields(session.activation.binding, response),
                               stage="media.delivery" if task is session.delivery_task else "media.provider",
                               reason=reason, turn_id=session.foreground_turn_id, outcome="failed")
+                if session.failure_reason is None:
+                    session.failure_reason = reason
+                    if session.foreground_turn_id is not None:
+                        self._native_request_state(session, "failed", session.foreground_turn_id,
+                                                   reason, retain_for_close=True)
                 for snapshot in session.generated_text.values():
                     if snapshot["state"] == "generating":
                         snapshot["state"] = "interrupted"

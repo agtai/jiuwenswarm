@@ -442,7 +442,7 @@ def _validate_method_result(
                 ),
             )
             valid = (
-                (result.get("status") == "completed" or settled_task)
+                (result.get("status") == "prepared" or settled_task)
                 and type(result.get("accepted")) is bool
                 and _canonical_result_identity(result.get("provider_call_id"))
                 and result.get("route")
@@ -702,7 +702,7 @@ class GatewayNativeInteractionRuntimeClient:
     ) -> dict[str, object]:
         retained = self._authorize(binding, capability)
         proposal = NativeInteractionProposal.from_engine_event(binding, event)
-        return await self._request(
+        result = await self._request(
             method=ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE,
             binding=binding,
             capability=retained.capability,
@@ -714,6 +714,10 @@ class GatewayNativeInteractionRuntimeClient:
                 else self._timeout_seconds
             ),
         )
+        # Agent work can outlive closure or replacement of this activation.
+        # Revalidate before releasing its result to the media/Provider owner.
+        self._authorize(binding, capability)
+        return result
 
     async def propose_audio_batch(
         self,

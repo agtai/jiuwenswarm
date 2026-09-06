@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-06 (Native recovery, response and Task presentation lifecycle repair verified within its modules; physical acceptance open).
+> Updated: 2026-09-06 (Native delegate client contract and terminal diagnosis repaired; physical acceptance open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -26,15 +26,28 @@ history, not acceptance of this candidate.
 
 ### Native recovery and presentation lifecycle
 
-The current [Native lifecycle repair](reviews/NATIVE_SESSION_LIFECYCLE_REPAIR_20260906.md)
+The current [Native delegate client repair](reviews/NATIVE_DELEGATE_CLIENT_REPAIR_20260906.md)
+closes the missing Gateway client compatibility in the two-phase delegate return:
+the Registry's successful `prepared` result now survives actual server serialization,
+strict client validation and media consumption. Delayed results recheck activation
+ownership. Fatal Native reasons survive media cleanup on the exact authenticated
+activation and remain visible through secondary P1/Task-to-Native playback failures;
+an admitted processing turn is diagnosed as response generation. Scoped automated
+checks, independent review and a configured real Agent/file-tool return-path probe
+pass. The probe uses synthetic Provider inputs and records its outbound function
+result; it does not establish microphone/speaker acceptance. Controlled deployment
+must bind clean source, served assets, readiness and unchanged project/Task state.
+
+The preceding [Native lifecycle repair](reviews/NATIVE_SESSION_LIFECYCLE_REPAIR_20260906.md)
 fixes recovery turn collisions, stranded generated text, premature delegate response
 admission, and Task/Native playback ownership races. Exact Task-event identity now
 coalesces preview, text fallback and voice retry; Task playback retains input and
 yields to speech or a Native successor without false audio ACK. The existing Web
 STOP contract is serialized correctly, and Task status reads retry only a verified
 same-attempt event-head advance. Scoped checks, independent review, production
-build and separate real Provider/Engine and Agent/file-tool checks pass. The packet
-records five proven baseline test exclusions; full-suite and physical acceptance
+build and separate real Provider/Engine and Agent/file-tool checks passed, but
+missed the intervening strict client validator repaired above. The packets
+record proven adjacent baseline test exclusions; full-suite and physical acceptance
 are not claimed. Deploy through the existing controlled launcher and bind the
 actual clean source, served assets, readiness and preserved data in local evidence.
 

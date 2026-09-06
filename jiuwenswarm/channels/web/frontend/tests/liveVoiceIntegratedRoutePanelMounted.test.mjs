@@ -893,6 +893,14 @@ function installP1BrowserEnvironment({
       });
       await new Promise(resolve => setImmediate(resolve));
     },
+    async emitNativeConsumerFailure() {
+      const socket = sockets.filter(candidate => candidate.binding?.direction === 'uplink').at(-1);
+      assert.ok(socket);
+      socket.onmessage?.({ data: serializeMediaControl({ type: 'media.detach',
+        lease_id: socket.binding.lease_id, generation: socket.binding.generation.value,
+        reason_id: 'MEDIA_CONSUMER_FAILED', through_seq: 0, business_cancel_count_delta: 0 }) });
+      await new Promise(resolve => setImmediate(resolve));
+    },
     async emitSpeechStart() {
       await waitForMounted(
         () => sockets.some(socket => socket.binding?.direction === 'uplink'),
@@ -16147,7 +16155,7 @@ for (const outcome of ['recovered', 'persistent', 'exit']) {
 }
 
 
-for (const verify of ['task', 'text', 'barge_success', 'barge_failure']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
+for (const verify of ['task', 'text', 'barge_success', 'barge_failure', 'barge_fatal', 'fatal_before', 'fatal_after', 'fatal_overlap', 'fatal_audio']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
   const i18n = await createI18n();
   const states = [], messages = [], calls = [], waiters = [], ended = [], sources = [];
   let activeMediaBinding = null, binding = null, renderer, textSnapshot = null, settleTaskFailure;
@@ -16223,6 +16231,49 @@ for (const verify of ['task', 'text', 'barge_success', 'barge_failure']) test(`m
     assert.equal(states.at(-1).text_status, 'waiting');
     assert.equal(states.at(-1).p1_status, 'capturing');
     assert.equal(formalProductVoiceActivity(states.at(-1)).status, 'thinking');
+    if (verify.startsWith('fatal_')) {
+      if (verify === 'fatal_audio') {
+        const response = oldResponse(), unitId = 'failed-native-unit';
+        const audioNotice = notification(1, 'processing', { kind: 'native.audio', response,
+          presentation_unit: { response, surface: 'audio', unit_id: unitId, seq: 0, source_start_utf8: 0, source_end_utf8: 480, content_ref: `sha256:${'a'.repeat(64)}` },
+          audio: { format: 'pcm_f32_mono_20ms', sample_rate_hz: 48000, channel_count: 1, frame_count: null,
+            delivery: 'dedicated_media_downlink', endpoint_path: '/ws/live-voice/media', media_ticket: 'D'.repeat(43),
+            subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30000, binding: mountedDownlinkBinding(response, unitId, 2, activeMediaBinding),
+            max_pending_frames: 8, max_pending_bytes: 131072, streaming: true, degradation_reason: null } });
+        delete audioNotice.request_state;
+        await act(async () => { waiters.shift()({ ok: true, result: audioNotice }); });
+        await act(async () => { for (let frame = 0; frame < 14; frame += 1) await browser.emitDownlinkFrame(frame); });
+        await waitForMountedEffects(() => states.at(-1)?.p1_status === 'playing' && browser.counts.sourceStarts > 0, 'Native audio did not start before fault');
+      }
+      const failure = notification(2, 'failed');
+      failure.request_state.reason = 'NATIVE_RUNTIME_RESPONSE_INVALID';
+      if (verify === 'fatal_audio') {
+        await act(async () => { await browser.emitNativeConsumerFailure(); });
+        await waitForMountedEffects(() => states.at(-1)?.p1_status === 'failed', 'Native playback failure did not settle');
+        await deliver(failure);
+      } else if (verify === 'fatal_before') {
+        await deliver(failure);
+        await act(async () => { await browser.emitNativeConsumerFailure(); });
+      } else if (verify === 'fatal_after') {
+        await act(async () => { await browser.emitNativeConsumerFailure(); });
+        assert.equal(states.at(-1).recovery_diagnostic.seam, 'response_generation');
+        await deliver(failure);
+      } else {
+        await act(async () => {
+          waiters.shift()({ ok: true, result: failure });
+          await browser.emitNativeConsumerFailure();
+        });
+      }
+      await waitForMountedEffects(() => states.at(-1)?.recovery_diagnostic?.reason === 'NATIVE_RUNTIME_RESPONSE_INVALID',
+        'exact Native failure was lost or overwritten by P1 detach');
+      assert.equal(states.at(-1).recovery_diagnostic.seam, 'response_generation');
+      assert.equal(states.at(-1).recovery_diagnostic.disposition, 'terminal');
+      assert.equal(states.at(-1).text_reason, 'NATIVE_RUNTIME_RESPONSE_INVALID');
+      if (verify === 'fatal_audio') assert.ok(browser.counts.sourceStarts > 0);
+      else assert.equal(browser.counts.sourceStarts, 0);
+      assert.equal(calls.some(method => /unified.submit|speech.recognize|presentation.ack|task.create|task.cancel/u.test(method)), false);
+      return;
+    }
     await deliver(notification(2, 'failed'));
     assert.equal(states.at(-1).text_status, 'failed');
     assert.equal(states.at(-1).text_reason, 'NATIVE_DELEGATE_AGENT_TIMEOUT', JSON.stringify({ states: states.slice(-6).map(s => ({status:s.text_status,reason:s.text_reason,recovery:s.recovery_diagnostic})), calls }));
@@ -16311,6 +16362,19 @@ for (const verify of ['task', 'text', 'barge_success', 'barge_failure']) test(`m
       const starts = browser.counts.sourceStarts;
       assert.ok(browser.counts.sourceStops >= 1);
       assert.equal(states.at(-1).text_status, 'waiting');
+      if (verify === 'barge_fatal') {
+        const failure = notification(8, 'failed');
+        failure.request_state.reason = 'NATIVE_RUNTIME_RESPONSE_INVALID';
+        await deliver(failure);
+        await act(async () => { await browser.emitNativeConsumerFailure(); settleTaskFailure(); });
+        await waitForMountedEffects(() => states.at(-1)?.p1_status === 'failed', 'Handoff failure did not settle');
+        assert.equal(states.at(-1).text_reason, 'NATIVE_RUNTIME_RESPONSE_INVALID');
+        assert.equal(states.at(-1).recovery_diagnostic.reason, 'NATIVE_RUNTIME_RESPONSE_INVALID');
+        assert.equal(states.at(-1).recovery_diagnostic.disposition, 'terminal');
+        assert.equal(browser.counts.sourceStarts, starts);
+        assert.equal(calls.some(method => /playout_receipt|presentation.ack|unified.submit|task.cancel|task.create/.test(method)), false);
+        return;
+      }
       if (verify === 'barge_success') {
         await deliver({ status: 'notification', ...binding, kind: 'agent.output', request_id: 'task-fallback-request',
           response: { ...taskResponse, response_id: 'task-fallback-text', response_generation: 5 }, source_event: source,

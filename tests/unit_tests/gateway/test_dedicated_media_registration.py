@@ -4043,6 +4043,71 @@ async def test_native_provider_event_failure_fences_and_closes_session() -> None
     assert registry._native_notifications == {}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("queue_full", [False, True])
+@pytest.mark.parametrize("authority_state", ["current", "replaced", "expired"])
+async def test_native_fatal_reason_survives_media_close_with_exact_activation(queue_full, authority_state):
+    activation = _native_activation()
+    client, engine = _FakeNativeRuntimeClient(activation), _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=client,
+                                             native_engine_factory=lambda _binding: engine)
+    params = _params(sample_rate_hz=24_000)
+    activated = _activate(registry, params=params, request_origin=ORIGIN, connection_id="connection-1")
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    await registry.begin_native_interaction(uplink)
+    session = registry._native_sessions[registry._native_session_keys_by_record[uplink.record_id]]
+    session.foreground_turn_id = "committed-turn-1"
+    queue = registry._native_notifications[("session-1", "interaction-1", "connection-1")]
+    if queue_full:
+        while not queue.full():
+            queue.put_nowait({"obsolete_audio": True})
+    async def fail(reason):
+        raise NativeRuntimeClientError(reason, "private failure detail")
+    for reason in ("NATIVE_RUNTIME_RESPONSE_INVALID", "MEDIA_NATIVE_INPUT_FENCE_REJECTED"):
+        task = asyncio.create_task(fail(reason))
+        await asyncio.sleep(0)
+        registry._consume_native_task(uplink, task)
+    await asyncio.wait_for(engine.close_event.wait(), 1)
+    assert registry._native_sessions == {}
+    assert registry._native_notifications == {}
+    assert client.close_calls == 1
+    assert client.proposals == []
+    # Refreshing the same activation must not erase its unconsumed terminal truth.
+    _trust_product_activation(registry, params)
+    request = dict(request_id="fatal-reason-1", session_id="session-1", correlation_id="correlation-1",
+                   interaction_id="interaction-1", activation_id="activation-1", activation_generation=1,
+                   connection_id="connection-1", notification_sequence=1)
+    if authority_state == "replaced":
+        _trust_product_activation(registry, {**params, "activation_id": "activation-2", "activation_generation": 2})
+        assert registry.take_native_notification_response(**request) is None
+        assert registry.take_native_notification_response(**{**request, "activation_id": "activation-2", "activation_generation": 2}) is None
+        assert engine.delegate_results == [] and registry._native_notifications == {}
+        return
+    if authority_state == "expired":
+        authority = registry._product_activations[("session-1", "connection-1", "interaction-1")]
+        registry._monotonic = lambda: authority.expires_at + 1
+        assert registry.take_native_notification_response(**request) is None
+        assert engine.delegate_results == [] and registry._native_notifications == {}
+        return
+    for change in ({"activation_id": "foreign"}, {"activation_generation": 2},
+                   {"connection_id": "foreign"}, {"session_id": "foreign"}, {"notification_sequence": 2}):
+        assert registry.take_native_notification_response(**{**request, **change}) is None
+    # A terminal diagnostic cannot steal an already forwarded Agent request.
+    assert registry.mark_native_notification_forwarded(**request)
+    assert registry.take_native_notification_response(**request) is None
+    request = {**request, "request_id": "fatal-local-2", "notification_sequence": 2}
+    result = registry.take_native_notification_response(**request)
+    assert result is not None
+    state = result["result"]
+    assert state["request_state"] == {"turn_id": "committed-turn-1", "phase": "failed",
+                                       "reason": "NATIVE_RUNTIME_RESPONSE_INVALID", "sequence": 1}
+    assert all(state[field] is None for field in ("response", "audio", "presentation_unit", "agent_event", "source_event"))
+    assert "private failure detail" not in repr(result)
+    assert result["result"]["sequence_effect"] == "neutral"
+    assert registry.take_native_notification_response(**request) == result
+    assert registry.take_native_notification_response(**{**request, "request_id": "fatal-next"}) is None
+
+
 def test_websocket_transport_debug_cannot_persist_binary_media(
     tmp_path: Path,
 ) -> None:

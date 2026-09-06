@@ -1953,7 +1953,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [productTextReason, setProductTextReason] = useState<string | null>(null);
   const nativeForegroundEpochRef = useRef(0);
   const nativePresentationQueueRef = useRef<{ key: string; owner: ProductWebP2ActivationOwner; notification: Readonly<Record<string, unknown>>; admission: ProductP2NotificationAdmission }[]>([]);
-  const nativeRequestStateRef = useRef<{ binding: string; sequence: number } | null>(null);
+  const nativeRequestStateRef = useRef<{ binding: string; sequence: number; phase: string } | null>(null);
   const nativeTextReadRef = useRef<{ owner: ProductWebP2ActivationOwner; voice: ProductP1VoiceRouteOwner;
     binding: string; sessionId: string; revision: number; visible: Set<string>; ended: boolean;
     onEnd: LiveVoiceIntegratedRoutePanelProps['onNativeVoiceDisplayEnded'] } | null>(null);
@@ -2402,6 +2402,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   };
   activeSessionRef.current = props.activeSessionId;
   isConnectedRef.current = props.isConnected;
+
+  const hasExactNativeTerminalFailure = (binding: ProductWebP2ActivationSnapshot['binding']) => {
+    const state = nativeRequestStateRef.current;
+    const retained = recoveryDiagnosticRef.current;
+    return binding !== null && state?.phase === 'failed' &&
+      state.binding === JSON.stringify([binding.session_id, binding.activation_id, binding.activation_generation]) &&
+      retained?.seam === 'response_generation' && retained.disposition === 'terminal' &&
+      retained.session_id === binding.session_id && retained.correlation_id === binding.correlation_id &&
+      retained.interaction_id === binding.interaction_id && retained.activation_id === binding.activation_id &&
+      retained.activation_generation === binding.activation_generation;
+  };
 
   const currentDeferredTaskPresentation = (owner = activationOwnerRef.current) =>
     owner !== null && deferredTaskPresentationRef.current?.owner === owner
@@ -3258,7 +3269,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       const key = JSON.stringify([disposition.session_id, disposition.activation_id, disposition.activation_generation]);
       const prior = nativeRequestStateRef.current;
       if (prior?.binding === key && prior.sequence >= disposition.sequence) return disposition;
-      nativeRequestStateRef.current = { binding: key, sequence: disposition.sequence };
+      nativeRequestStateRef.current = { binding: key, sequence: disposition.sequence, phase: disposition.phase };
       nativeForegroundEpochRef.current += 1;
       if (disposition.response !== null) retainBoundedPresentedProductResponse(interruptedProductResponsesRef.current, productResponseGenerationIdentity(disposition.response));
       recordAudioDiagnostic('native_request_state', { ...presentationBinding, turn_id: disposition.turn_id, status: disposition.phase,
@@ -3491,6 +3502,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           activeVoiceResponseRef.current = null;
         }
         if (!isCurrentNativePlayout()) return;
+        if (hasExactNativeTerminalFailure(presentationBinding)) {
+          setP2NotificationWakeEpoch(epoch => epoch + 1);
+          return;
+        }
         const reason = stableProductTextReason(error, 'PRODUCT_NATIVE_AUDIO_PLAYOUT_FAILED');
         setProductTextReason(reason);
         setProductTextStatus('failed');
@@ -5666,7 +5681,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                 )
               : false;
           if (readPendingUnifiedFinal() !== null && !exactForegroundDelivery) return;
-          if (cancelled && !exactForegroundDelivery) {
+          const exactNativeStateDelivery = previewDisposition.kind === 'native_request_state' &&
+            activationOwnerRef.current === owner && activeSessionRef.current === binding.session_id &&
+            voiceLoopGenerationRef.current === notificationAdmission.voice_loop_generation &&
+            previewDisposition.session_id === binding.session_id && previewDisposition.correlation_id === binding.correlation_id &&
+            previewDisposition.interaction_id === binding.interaction_id && previewDisposition.activation_id === binding.activation_id &&
+            previewDisposition.activation_generation === binding.activation_generation;
+          if (cancelled && !exactForegroundDelivery && !exactNativeStateDelivery) {
             // A poll opened before submit may finish with the interrupted old
             // answer. Its obsolete effect must release a wake for the current
             // foreground; otherwise the successor stays listening forever.
@@ -6967,7 +6988,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                 activeResponse?.interaction_id === binding.interaction_id
                   ? activeResponse
                   : null;
-              const seam: ProductLiveVoiceRecoveryDiagnostic['seam'] = response === null ? 'activation' : 'tts';
+              const nativeState = nativeRequestStateRef.current;
+              const ownsNativeTurn = nativeState?.binding === JSON.stringify([binding.session_id, binding.activation_id, binding.activation_generation]);
+              const seam: ProductLiveVoiceRecoveryDiagnostic['seam'] = response !== null ? 'tts'
+                : ownsNativeTurn && ['processing', 'failed'].includes(nativeState.phase) ? 'response_generation' : 'activation';
               if (publishedStatus === 'cleanup_pending' && publishedReason !== 'FORMAL_P1_CLEANUP_IN_PROGRESS') {
                 const retainedDiagnostic = recoveryDiagnosticRef.current;
                 const retainsExactTerminalTruth =
@@ -6980,7 +7004,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                   (response === null ||
                     (retainedDiagnostic.response_id === response.response_id &&
                       retainedDiagnostic.response_generation === response.response_generation));
-                if (!retainsExactTerminalTruth) {
+                if (!retainsExactTerminalTruth && !hasExactNativeTerminalFailure(binding)) {
                   publishProductRecoveryDiagnostic({
                     seam,
                     disposition: 'retrying',
@@ -6990,13 +7014,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                   });
                 }
               } else if (publishedStatus === 'failed') {
-                publishProductRecoveryDiagnostic({
-                  seam,
-                  disposition: 'terminal',
-                  reason: stableProductTextReason(publishedReason, 'PRODUCT_P1_ROUTE_FAILED'),
-                  binding,
-                  response,
-                });
+                if (!hasExactNativeTerminalFailure(binding)) publishProductRecoveryDiagnostic({
+                    seam, disposition: 'terminal',
+                    reason: stableProductTextReason(publishedReason, 'PRODUCT_P1_ROUTE_FAILED'), binding, response,
+                  });
               } else if (['idle', 'capturing', 'recognized', 'closed'].includes(publishedStatus)) {
                 clearProductRecoveryDiagnostic({ seam: 'activation', binding });
               }

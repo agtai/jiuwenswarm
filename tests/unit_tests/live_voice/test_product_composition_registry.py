@@ -2610,6 +2610,12 @@ async def test_native_activation_action_ledger_crosses_generic_256_default(
 async def test_native_dialogue_delegate_uses_agent_bridge_and_returns_result(
     tmp_path: Path,
 ) -> None:
+    from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_unary
+    from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import GatewayNativeInteractionRuntimeClient
+    from jiuwenswarm.gateway.live_voice.dedicated_media_registration import DedicatedMediaProductRegistry
+    from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import MediaTransportViolation
+    from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
     registry, composition, manager = _unified_registry(
         tmp_path,
         interaction_engine=InteractionEngineKind.OPENAI_REALTIME_NATIVE,
@@ -2652,22 +2658,60 @@ async def test_native_dialogue_delegate_uses_agent_bridge_and_returns_result(
         response_generation=cast(int, source_response_payload["response_generation"]),
     )
 
-    delegated = await registry.handle_native_propose(
-        params=_native_propose_params(
-            binding,
-            capability,
-            _native_delegate_proposal(
-                binding,
-                source_response,
-                request_text="Tell me one short fact about Paris.",
-            ),
-        ),
-        request_id="request-native-delegate-dialogue",
-        session_id=SCOPE.session_id,
-    )
+    class LoopbackAgentClient:
+        async def send_request(self, envelope):
+            sent = []
+            async def send(payload):
+                sent.append(json.loads(payload))
+            request = AgentRequest(request_id=envelope.request_id, channel_id=envelope.channel,
+                                   session_id=envelope.session_id, req_method=ReqMethod(envelope.method),
+                                   params=json.loads(json.dumps(envelope.params)))
+            await AgentWebSocketServer._handle_live_voice_native_request(
+                SimpleNamespace(_live_voice_product_composition=registry),
+                SimpleNamespace(send=send), request, asyncio.Lock(),
+            )
+            assert len(sent) == 1
+            return parse_agent_server_wire_unary(sent[0])
 
-    assert delegated.ok is True
-    result = cast(dict[str, object], delegated.payload["result"])
+    client = GatewayNativeInteractionRuntimeClient(LoopbackAgentClient(), native_model="gpt-realtime-2")
+    client.observe_activation_response(dict(activated.payload), routed_session_id=SCOPE.session_id,
+                                       connection_id="native-loopback", request_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE.value)
+    proposal = _native_delegate_proposal(binding, source_response, request_text="Tell me one short fact about Paris.")
+    event = NativeEngineEvent(action=proposal.action, delegate=proposal.delegate)
+    result = await client.propose(
+        binding=binding, capability=capability, event=event,
+        request_id="request-native-delegate-dialogue",
+    )
+    # Exercise the actual Gateway consumer after actual server wire encoding and
+    # client decoding/validation. Only the external Provider send is recorded.
+    provider_sends = []
+    async def send_delegate_result(*args):
+        provider_sends.append(args)
+        return ("provider-item-created", "provider-response-created")
+    session = SimpleNamespace(closed=False, activation=SimpleNamespace(binding=binding),
+                              engine=SimpleNamespace(send_delegate_result=send_delegate_result),
+                              barge_fenced_responses=set())
+    media = DedicatedMediaProductRegistry(enabled=True)
+    before_delivery = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)].activation_lease._runtime.snapshot()
+    for change in (
+        {"provider_call_id": "foreign-call"},
+        {"response": {**result["response"], "interaction_id": "foreign-interaction"}},
+        {"response": {**result["response"], "response_generation": source_response.response_generation + 1}},
+    ):
+        with pytest.raises(MediaTransportViolation, match="Native (delegate result|prepared result)"):
+            await media._return_native_delegate_result(session, event, {**result, **change})
+        assert provider_sends == []
+    session.closed = True
+    await media._return_native_delegate_result(session, event, result)
+    assert provider_sends == []
+    assert registry._p2_routes[(SCOPE.session_id, binding.interaction_id)].activation_lease._runtime.snapshot() == before_delivery
+    assert manager.agent.calls == 1 and composition.handle_calls == []
+    session.closed = False
+    await media._return_native_delegate_result(session, event, result)
+    assert provider_sends == [("provider-call-1", source_response, "formal result")]
+    replay = await client.propose(binding=binding, capability=capability, event=event,
+                                  request_id="request-native-delegate-dialogue")
+    assert replay == result
     assert result == {
         "kind": "delegate",
         "status": "prepared",
