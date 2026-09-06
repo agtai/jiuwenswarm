@@ -104,5 +104,70 @@ requested/returned work, origin, generation and state/reason.
 
 ### Audio
 
-Implementation and scoped verification in progress. No physical acceptance is
-claimed by deterministic or module checks.
+Previously `beginPlayout` spent the startup lead while waiting for the downlink
+connection; the six recorded first enqueues therefore had zero buffer ahead.
+The first accepted PCM now anchors the full 250 ms lead. Subsequent frames append
+at the scheduled end. Only actual starvation starts a new reserve, using the
+observed interarrival interval clamped to one through three startup leads
+(250–750 ms at the unchanged default). This is a latency/continuity tradeoff:
+it can add a longer recovery pause so a following burst plays continuously. It
+does not eliminate arbitrary upstream stalls or promise physical word continuity.
+No samples are dropped/replayed and stop/tentative pause retain the unplayed
+cursor and exact response/generation fencing; render ACK remains on actual
+source completion, not enqueue or scheduling.
+
+Bounded metadata records initial frames and supply gaps at Gateway pull-ready,
+successful send and validated enqueue ACK, and browser accepted receive,
+successful ACK send and scheduling. Pull-ready is the Gateway observation, not
+proof of when the Provider generated a frame. The async source remains serial
+send → enqueue ACK → next pull. No flow-control or Provider optimization was made.
+Scheduling gap includes the recovery reserve; `supply_late_ms` separates lateness
+from the added reserve. Gap endpoints and buffer values survive offline import.
+No PCM, speech text or private device contents are added to diagnostics.
+
+Tier-2 checks cover immediate/330 ms/2 s first-PCM arrival, short seed then gap and
+burst, repeated starvation with capped recovery, short tail, pre-first-PCM cancel,
+stop and tentative pause during recovery, unplayed sample preservation, old
+response rejection, reordered/duplicate source callbacks, feature-off and sink
+failures. Delayed async-source tests prove the real Gateway adapter's pull/ACK
+ordering. Malformed frames close exactly once with no audio/stop side effect;
+passive diagnostic failure cannot change delivery or ACK authority.
+
+- `npm run test:live-voice-browser-audio-io`: **120 passed**
+  (`audio-diag-final.txt`), including numeric full-gap/reserve diagnostics.
+- `npm run test:live-voice-browser-dedicated-media`: **32 passed**
+  (`browser-media-final.txt`), including immediate/deferred failed-send ACK logs.
+- `npm run test:live-voice-native-interaction`: **126 passed** (`route1.txt`),
+  including the affected P1 route and exact generation/Exit integration. The
+  later browser change only moves passive ACK logging after successful send and
+  has its own final adapter regression above.
+- `pytest -o addopts='' tests/unit_tests/gateway/test_dedicated_live_voice_media_route.py tests/unit_tests/live_voice/test_demo_profiling.py`:
+  **117 passed** (`media-final.txt`). After adding report-field preservation,
+  the full profiling file has **28 passed** (`report-final.txt`). Tests use an
+  isolated `JIUWENSWARM_DATA_DIR` and separate basetemp under ignored logs.
+- The existing `probe_startup_lead.mjs` was reused in memory, with only fixture
+  extraction made tolerant of the newly inserted test declarations. At immediate
+  first PCM, starts remain 250/270 ms. At 330 ms first PCM, starts are now
+  **580/600 ms**, with **250 ms actual lead and zero inter-frame gap**, versus
+  baseline 330/460 ms, zero lead and 110 ms gap. Output: `startup-repaired.json`;
+  adapter source SHA-256: `55bbf0c6d763e687f5cf49ee774248582010bbe4795371d8ffd6977a81ab0ef7`.
+
+Complete cold scoped diff review and independent read-only review completed.
+Review findings about pre-validation diagnostic exceptions and incomplete gap
+accounting were repaired and verified, with delayed-source and tentative-pause
+regressions added. The original six video/waveform observations are retained;
+they have not been relabelled as repaired physical evidence. Per-gap upstream
+causes and current-head headset continuity remain unproved.
+
+## Controlled deployment boundary
+
+Initial runtime check found no listeners on the four Demo ports and the old
+service PID was gone. The registered private project was clean, all 89 retained
+Tasks were terminal, and SDK `0.1.16+jiuwenswarm.responses2` was installed.
+Deployment uses the existing [runbook §7.5](../runbooks/E2E_RUNBOOK.md#75-当前受控-live-voice-启动与预演)
+launcher after local module commits, with formal-web-validation, Cascade,
+verified-headset-aec-v1 and NoBrowser. The new ignored runtime contract and live
+PID/ports, not this preparation record or old contract, establish actual startup.
+Model/Provider/VAD, project files, historical results and heard watermarks are
+preserved. Real Speech readiness does not close full Agent/Task/headset A/B/A2
+acceptance; the user must perform the current rehearsal and export diagnostics.

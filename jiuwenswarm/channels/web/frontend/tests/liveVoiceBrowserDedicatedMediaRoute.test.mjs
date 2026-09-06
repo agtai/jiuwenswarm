@@ -610,6 +610,34 @@ test('downlink accepts exact binary sequence, invokes audio once, and returns ty
   assert.deepEqual(effects, { audio: 1, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
 });
 
+test('downlink diagnostics record enqueue ACK only after successful immediate or deferred send', () => {
+  const previous = console.info;
+  try {
+    for (const deferDownlinkAck of [false, true]) for (const throwOnSend of [false, true]) {
+      const facts = [];
+      const route = active({ exactBinding: binding({ direction: 'downlink' }), deferDownlinkAck });
+      attach(route);
+      console.info = message => {
+        if (message.startsWith('live_voice_audio_diagnostic ')) {
+          const fact = JSON.parse(message.slice(28));
+          facts.push(fact);
+          if (fact.event === 'media_downlink_enqueue_ack') assert.equal(route.socket.sent.length, 1);
+        }
+      };
+      route.socket.throwOnSend = throwOnSend;
+      route.socket.message(encodeAudioFrame(route.activation.binding, mediaFrame()));
+      if (deferDownlinkAck) {
+        assert.equal(facts.some(fact => fact.event === 'media_downlink_enqueue_ack'), false);
+        route.activation.leaf.acknowledgeDownlinkThrough(0);
+      }
+      assert.equal(facts.filter(fact => fact.event === 'media_downlink_received').length, 1);
+      assert.equal(facts.filter(fact => fact.event === 'media_downlink_enqueue_ack').length, throwOnSend ? 0 : 1);
+      assert.deepEqual(route.effects, { audio: 1, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
+      route.activation.leaf.close();
+    }
+  } finally { console.info = previous; }
+});
+
 test('downlink reports a bounded browser consumer reason without changing the wire detach', () => {
   const terminal = [];
   const route = active({

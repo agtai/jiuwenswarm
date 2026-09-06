@@ -28,6 +28,8 @@ TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
 BROWSER_VALUES = frozenset({
     "operation_generation", "pending_frames", "pending_bytes", "socket_buffered_bytes", "frame_age_ms", "tick_delay_ms",
     "rms_peak", "energy_frames", "startup_lead_ms", "buffer_ahead_ms", "schedule_gap_ms", "scheduled_sources",
+    "frame_interarrival_ms", "reserve_ms", "supply_late_ms", "gap_start_context_ms",
+    "gap_end_context_ms", "scheduled_end_context_ms", "received_through_seq",
     "stopped_sources", "failed_sources", "long_task_ms", "seq", "provider_speech_started", "eot_pending",
     "eot_delivered", "handler_present", "playout_pending", "rotation_in_flight", "attached", "closed",
     "callback_current", "capture_ready", "echo_cancellation", "noise_suppression", "auto_gain_control",

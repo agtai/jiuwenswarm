@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-05 (rehearsal repair module verification; physical acceptance open).
+> Updated: 2026-09-06 (three Demo repairs verified within their modules; physical acceptance open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -24,25 +24,22 @@ history, not acceptance of this candidate.
 
 ## Current execution packet
 
-### Rehearsal recovery follow-up: deployed, physical rehearsal open
+### Three Demo repairs: module checks complete, controlled startup and physical rehearsal
 
-The [recovery follow-up](reviews/REHEARSAL_RECOVERY_FOLLOWUP_20260905.md) repairs
-restored selected voice Tasks acquiring a premature TEXT subscription and extends
-exact local consent to successors, including formal target clarification. Scoped
-automation and independent review pass; retained baseline failures and physical
-reopen/playback acceptance remain open. Controlled local deployment and real
-Speech readiness probes passed. It also separates model generation,
-post-model stream draining and periodic Task-status ingestion in the new profile.
-Model replacement and performance tuning remain separate follow-up work.
+The [three-repair evidence](reviews/DEMO_THREE_REPAIRS_20260906.md) owns independent
+user-turn elapsed time, exact Task notification selection/ownership transfer,
+and PCM-anchored startup lead with bounded starvation recovery. Scoped automation
+and independent review are complete; existing Bridge regression failures are
+reproduced at baseline and remain open. Actual headset continuity and same-session
+busy-to-idle terminal notification still need current-source physical evidence.
 
-The [bounded repair packet](reviews/REHEARSAL_REPAIR_20260905.md) owns controlled
-build defaults, exact local cancellation consent, adjustment adoption between
-tools/work stages, task/result UI separation, unread/deferred notification recovery
-and creation-receipt/current-state truth. Private demo self-drive costs are now
-1400. Focused module checks and independent review passed; the broader mounted
-suite retains documented baseline failures. The controlled local deployment and
-real Speech probe passed; physical A/B/A2 acceptance is unproved. Model intent/arithmetic and performance tuning remain
-deferred until the AgentModel is changed.
+Use the controlled launcher after clean local commits; verify its new runtime
+contract, real Speech probe and live process before rehearsal. Keep NoBrowser so
+startup does not consume retained notifications. Preserve GPT-5.6 low, Cascade,
+the registered project, headset profile, VAD 800 ms and historical results/ACK.
+No per-gap Provider attribution or full performance optimization is authorized.
+The recovery, cancellation and adjustment repairs below retain their own scoped
+credit; they do not establish a complete current A/B/A2 acceptance.
 
 ### Verified-headset interruption: implemented, physical acceptance open
 
@@ -80,7 +77,7 @@ deferred until the AgentModel is changed.
 | Profiling | Browser/RPC/media/Speech/Agent/Task/notification timing, bounded browser export and offline reports have scoped tests/build/review and deployed samples. Use [runbook §7.7](runbooks/E2E_RUNBOOK.md#77-普通-demo-的性能记录与故障报告) for a rehearsal; [deployment evidence](evidence/DEMO_PROFILING_DEPLOYMENT_20260904.md) retains chronology. No latency improvement/SLO claim. |
 | Speech lifetime | D-113 removes a cumulative identity quota while retaining exact authority/resource bounds; scoped tests/review and deployment are recorded in [lifecycle evidence](evidence/SPEECH_LIFECYCLE_REPAIR_20260904.md). Physical stability remains open. |
 | Local Task adjustment/control | D-116 extends direct exact local consent to cancellation and adopts adjustment constraints before the next model call, after the current tool/stage. Applied means adopted, not a completed revised file. Scoped real Executor/SDK and semantic evidence: [repair packet](reviews/REHEARSAL_REPAIR_20260905.md); physical A/B/A2 acceptance remains open. |
-| Notification | Routine running notices are silent in text/voice while Task state remains queryable: [running policy](reviews/RUNNING_NOTIFICATION_POLICY_20260905.md). Cancelled Task voice notices are also silent, including deferred/reopened delivery; text-origin cancellation, cards and action replies remain: [cancellation policy](reviews/CANCELLED_NOTIFICATION_POLICY_20260906.md). Other terminal outcomes and actionable/retry/recovery notices retain unread/ACK delivery. Adjusted histories rehydrate; selected voice Tasks wait for authenticated discovery/Start rather than acquiring a TEXT prefix, with P1-off and discovery-failure behavior preserved: [follow-up](reviews/REHEARSAL_RECOVERY_FOLLOWUP_20260905.md). Scoped checks/review pass; broader baseline failures and physical journey remain open. |
+| Notification | Routine running notices are silent in text/voice while Task state remains queryable: [running policy](reviews/RUNNING_NOTIFICATION_POLICY_20260905.md). Cancelled Task voice notices are also silent, including deferred/reopened delivery; text-origin cancellation, cards and action replies remain: [cancellation policy](reviews/CANCELLED_NOTIFICATION_POLICY_20260906.md). Other terminal outcomes and actionable/retry/recovery notices retain unread/ACK delivery. Exact Task selection and explicit Bridge/Registry takeover preserve that boundary: [three repairs](reviews/DEMO_THREE_REPAIRS_20260906.md). Adjusted histories rehydrate; selected voice Tasks wait for authenticated discovery/Start rather than acquiring a TEXT prefix, with P1-off and discovery-failure behavior preserved: [follow-up](reviews/REHEARSAL_RECOVERY_FOLLOWUP_20260905.md). Scoped checks/review pass; broader baseline failures and physical journey remain open. |
 | Segmentation/dialogue | One-capture/one-final rejects later Provider items; whole-capture fallback can time out. Lossless post-EOT continuation needs accepted split/merge semantics; repeated greeting causality still needs reproduction: [diagnostics](evidence/SEGMENT_AND_DIALOGUE_DIAGNOSTICS_20260904.md). |
 
 ## Completion boundaries
@@ -104,7 +101,7 @@ whole-project audit for every bounded task.
 
 | Capability / module | Implemented boundary | Remaining / dependency |
 |---|---|---|
-| Audio Device & browser I/O | Capture/playout, media wiring, exact-owner fencing; home-entry transcription | Physical listening/recovery/playback, permission/device coverage, AEC/NS/AGC, double-talk and loss/stop targets |
+| Audio Device & browser I/O | Capture/playout, media wiring, exact-owner fencing; home-entry transcription; PCM-anchored lead and bounded starvation recovery with scoped evidence in the [three repairs](reviews/DEMO_THREE_REPAIRS_20260906.md) | Current-source headset continuity, listening/recovery/playback, permission/device coverage, AEC/NS/AGC, double-talk and loss/stop targets |
 | Speech Recognition | Streaming/batch finals, typed failure, bounded capture retry and lifetime repair | Long/paused speech, fallback/cancel, device/network and physical lifetime evidence |
 | Speech Synthesis | Streaming/batch TTS, response ownership, playback ACK | Interrupted/long answers, first-audio, underrun, pronunciation and stale-output proof |
 | Realtime Media | Dedicated transport, registration/rotation, bounded P2 pull | Backpressure/load, loss/order/corruption/reconnect and truthful recovery |
@@ -114,7 +111,7 @@ whole-project audit for every bounded task.
 | Task Control Core and Store | Canonical multi-Task state, durable commands/replay, exact targets/CAS, bounded adjustment delivery | Current concurrency/restart integration and full Task-operation coverage |
 | Executor & Durability | Direct D0/D2 v2 admission/reconciliation, sealed results/checkpoints, dedicated memory repair; v1 cannot dispatch v2 | Required review and real result/control acceptance; outside-checkout files or additional Executor/D1 capability need separate scope; no D1/host-crash claim |
 | Voice–Task Bridge | Unified committed semantics, direct exact local create/successor/adjust/cancel consent, scoped targets/requirements and target clarification | Real modification/query acceptance, generalization/retirement; update/reprioritize retain confirmation; pause/resume/provide-input remain unsupported |
-| Integrated Web product experience | Right-panel Registry Tasks, project-home Session startup, recovery/notification repairs | Stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh; projectless backend authority |
+| Integrated Web product experience | Right-panel Registry Tasks, project-home Session startup, recovery/notification repairs; independent user timers and exact Task notification ownership | Current-source busy-to-idle terminal delivery, stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh; projectless backend authority |
 | Observability, benchmark and latency | Scoped timing/error export, offline reports, tests/build/review and deployment samples | Current physical reproduction, interruption/first-audible baseline and SLOs; clock gaps/dropped data remain explicit |
 | Automated verification and acceptance | Focused regressions and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative review/human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, semantic cutover, bounded removals and prompt/config isolation | Complete reachability/retirement audit and remaining manifest rows; keep private artifacts/runtime data out of integration |
@@ -136,7 +133,9 @@ whole-project audit for every bounded task.
    listening, interruption or notification failures; preserve failed evidence.
 2. Complete affected positive/rejection/stale/replay/isolation checks and review.
    Verify authoritative Task/Attempt state, files and actual audio as applicable;
-   classify remaining Registry/Web failures.
+   classify remaining Registry/Web failures. For the three Demo repairs, module
+   evidence is recorded; the next trigger is controlled startup followed by
+   current-source busy-to-idle notification and headset continuity rehearsal.
 3. Prove the [current A/B/A2 journey](demo/PRODUCT_READINESS_SHOWCASE.md): analysis,
    separate delegation, adjustment/query/cancel, offline completion, unread/ACK/
    refresh and preserved A/new A2. Include bounded negatives, another domain and

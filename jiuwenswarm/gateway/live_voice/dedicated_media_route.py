@@ -20,6 +20,7 @@ import inspect
 import ipaddress
 import math
 import re
+import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import (
@@ -36,6 +37,7 @@ from typing import (
     cast,
 )
 from urllib.parse import urlsplit
+from jiuwenswarm.common.live_voice_audio_diagnostics import record_audio_diagnostic
 
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MEDIA_CONTRACT_VERSION,
@@ -1384,6 +1386,25 @@ async def run_dedicated_media_downlink_socket_leaf(
     peak_pending_frames = 0
     peak_pending_bytes = 0
 
+    diagnostic_frames: set[int] = set()
+    diagnostic_count = 0
+    last_source_at: float | None = None
+
+    def diagnose_frame(stage: str, seq: int, **facts: object) -> None:
+        try:
+            playout = binding.playout
+            record_audio_diagnostic(
+                "media_downlink_frame", stage=stage, frame_seq=seq,
+                session_id=binding.session_id, media_session_id=binding.media_session_id,
+                interaction_id=binding.interaction_id, lease_id=binding.lease_id,
+                response_id=playout.response_id if playout else None,
+                response_generation=playout.response_generation if playout else None,
+                unit_id=playout.unit_id if playout else None,
+                queue_frames=sender.pending_frames, **facts,
+            )
+        except Exception:
+            pass  # Passive metadata must not alter delivery or ACK authority.
+
     async def close_socket() -> None:
         nonlocal socket_touched
         try:
@@ -1501,8 +1522,10 @@ async def run_dedicated_media_downlink_socket_leaf(
         while True:
             while not source_exhausted:
                 if pending_frame is None:
+                    pull_started = time.perf_counter()
                     try:
                         pending_frame = await take_source_frame()
+                        pending_source_ready_at = time.perf_counter()
                     except StopAsyncIteration:
                         source_exhausted = True
                         break
@@ -1516,6 +1539,16 @@ async def run_dedicated_media_downlink_socket_leaf(
                     return await terminate(MediaDetachReason.INVALID_FRAME)
                 enqueued = sender.enqueue(pending_frame)
                 if enqueued.accepted:
+                    source_at = pending_source_ready_at
+                    source_gap_ms = 0 if last_source_at is None else (source_at - last_source_at) * 1000
+                    if diagnostic_count < 128 and (pending_frame.seq < 8 or source_gap_ms >= 80):
+                        diagnostic_frames.add(pending_frame.seq)
+                        diagnostic_count += 1
+                        diagnose_frame("source_ready", pending_frame.seq,
+                            duration_ms=(source_at - pull_started) * 1000,
+                            audio_duration_ms=len(pending_frame.samples) / binding.frame_format.sample_rate_hz * 1000,
+                            max_chunk_gap_ms=source_gap_ms)
+                    last_source_at = source_at
                     peak_pending_frames = max(
                         peak_pending_frames, sender.pending_frames
                     )
@@ -1542,11 +1575,14 @@ async def run_dedicated_media_downlink_socket_leaf(
             if sender.closed:
                 return await terminate(coerce_reason(drained.reason_id))
             for binary in outbound:
+                send_started = time.perf_counter()
                 if not await send_message(binary):
                     return await terminate(
                         MediaDetachReason.TRANSPORT_SEND_FAILED,
                         send_detach=False,
                     )
+                if sent_frames in diagnostic_frames:
+                    diagnose_frame("sent", sent_frames, socket_send_ms=(time.perf_counter() - send_started) * 1000)
                 sent_frames += 1
 
             if source_exhausted and sender.pending_frames == 0:
@@ -1581,6 +1617,10 @@ async def run_dedicated_media_downlink_socket_leaf(
                 if detach is not None:
                     return await terminate(detach.reason_id)
                 acknowledged_through_seq = control.through_seq
+                for seq in tuple(diagnostic_frames):
+                    if seq <= control.through_seq:
+                        diagnose_frame("enqueue_ack", seq)
+                        diagnostic_frames.discard(seq)
                 continue
             if isinstance(control, MediaPlaybackStopReceipt):
                 try:

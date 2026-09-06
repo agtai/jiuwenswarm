@@ -418,6 +418,7 @@ interface PlaybackSession {
   readonly acknowledged: Map<string, number>;
   readonly units: Set<string>;
   nextStartTime: number;
+  lastEnqueueTime: number | null;
   firstStartTime: number | null;
   nearEndVoiceRunFrames: number;
   nearEndEchoRunFrames: number;
@@ -1448,7 +1449,9 @@ export class BrowserAudioIOAdapter {
       completed: new Map(),
       acknowledged: new Map(),
       units: new Set(),
-      nextStartTime: context.currentTime + PLAYOUT_STARTUP_LEAD_SECONDS,
+      // Connection/Provider acquisition does not consume the PCM reserve.
+      nextStartTime: context.currentTime,
+      lastEnqueueTime: null,
       firstStartTime: null,
       nearEndVoiceRunFrames: 0,
       nearEndEchoRunFrames: 0,
@@ -1522,6 +1525,9 @@ export class BrowserAudioIOAdapter {
     }
     if (!accepted) return false;
     playback.units.add(chunk.unit_id);
+    const arrivalTime = context.currentTime;
+    const interarrivalSeconds = playback.lastEnqueueTime === null ? 0 : Math.max(0, arrivalTime - playback.lastEnqueueTime);
+    playback.lastEnqueueTime = arrivalTime;
     const durationSeconds = chunk.samples.length / chunk.sample_rate_hz;
     if (playback.tentativePause !== null) {
       playback.tentativePause.records.push({
@@ -1543,7 +1549,16 @@ export class BrowserAudioIOAdapter {
       source = context.createBufferSource();
       source.buffer = buffer;
       source.connect(context.destination);
-      const startAt = Math.max(context.currentTime, playback.nextStartTime);
+      const firstPcm = playback.firstStartTime === null;
+      const gapSeconds = firstPcm ? 0 : Math.max(0, context.currentTime - playback.nextStartTime);
+      // Rebuild a bounded reserve only after actual starvation. Ordinary frames
+      // stay contiguous; neither handshake time nor each new frame resets it.
+      // A longer observed supply interval gets at most three leads (750 ms at
+      // the default). Unbounded upstream stalls remain observable gaps.
+      const reserveSeconds = firstPcm ? PLAYOUT_STARTUP_LEAD_SECONDS
+        : gapSeconds > 0 ? Math.min(PLAYOUT_STARTUP_LEAD_SECONDS * 3, Math.max(PLAYOUT_STARTUP_LEAD_SECONDS, interarrivalSeconds)) : 0;
+      const startAt = reserveSeconds > 0 ? context.currentTime + reserveSeconds : playback.nextStartTime;
+      const scheduledGapMs = firstPcm ? 0 : Math.max(0, startAt - playback.nextStartTime) * 1000;
       const record: PlaybackSourceRecord = {
         unitId: chunk.unit_id,
         seq: chunk.seq,
@@ -1597,7 +1612,20 @@ export class BrowserAudioIOAdapter {
         this.#pruneFarEndSegments(playback, context.currentTime, 0);
       }
       const diagnosticNow = performance.now();
-      playback.diagnosticMaxGapMs = Math.max(playback.diagnosticMaxGapMs, (context.currentTime - playback.nextStartTime) * 1000);
+      playback.diagnosticMaxGapMs = Math.max(playback.diagnosticMaxGapMs, scheduledGapMs);
+      if (chunk.seq < 8 || gapSeconds > 0) {
+        recordAudioDiagnostic(gapSeconds > 0 ? 'playout_rebuffered' : 'playout_frame_scheduled', {
+          ...playback.response, unit_id: chunk.unit_id, seq: chunk.seq,
+          duration_ms: durationSeconds * 1000, frame_interarrival_ms: interarrivalSeconds * 1000,
+          buffer_ahead_ms: Math.max(0, (startAt - context.currentTime) * 1000),
+          reserve_ms: reserveSeconds * 1000, schedule_gap_ms: scheduledGapMs,
+          supply_late_ms: gapSeconds * 1000,
+          gap_start_context_ms: gapSeconds > 0 ? playback.nextStartTime * 1000 : null,
+          gap_end_context_ms: gapSeconds > 0 ? startAt * 1000 : null,
+          scheduled_end_context_ms: (startAt + durationSeconds) * 1000,
+          scheduled_sources: playback.sources.size,
+        });
+      }
       if (playback.diagnosticLastMs === null || diagnosticNow - playback.diagnosticLastMs >= 1000) {
         if (playback.diagnosticLastMs === null) this.#observeDiagnosticStart(playback, context, startAt);
         recordAudioDiagnostic(playback.diagnosticLastMs === null ? 'playout_first_scheduled' : 'playout_progress', {

@@ -2238,8 +2238,17 @@ async def test_downlink_practical_limit_boundaries_are_accepted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_downlink_async_source_streams_in_order_and_closes_exactly_once() -> None:
+@pytest.mark.parametrize("diagnostic_throws", [False, True])
+async def test_downlink_async_source_streams_in_order_and_closes_exactly_once(monkeypatch, diagnostic_throws) -> None:
     binding = _downlink_binding()
+    diagnostics = []
+
+    def diagnostic(event, **fields):
+        if diagnostic_throws:
+            raise RuntimeError('passive sink unavailable')
+        diagnostics.append((event, fields))
+
+    monkeypatch.setattr('jiuwenswarm.gateway.live_voice.dedicated_media_route.record_audio_diagnostic', diagnostic)
 
     class _AsyncFrames:
         def __init__(self) -> None:
@@ -2286,6 +2295,79 @@ async def test_downlink_async_source_streams_in_order_and_closes_exactly_once() 
     assert result.sent_frames == 2
     assert result.acknowledged_through_seq == 1
     assert frames.close_calls == 1
+    if not diagnostic_throws:
+        assert [(fields['stage'], fields['frame_seq']) for _, fields in diagnostics] == [
+            ('source_ready', 0), ('sent', 0), ('enqueue_ack', 0),
+            ('source_ready', 1), ('sent', 1), ('enqueue_ack', 1),
+        ]
+        assert all('samples' not in fields and 'audio' not in fields for _, fields in diagnostics)
+        assert diagnostics[0][1]['audio_duration_ms'] == 20
+
+
+@pytest.mark.asyncio
+async def test_delayed_async_downlink_is_pulled_only_after_enqueue_ack():
+    binding = _downlink_binding()
+    ready = [asyncio.Event(), asyncio.Event()]
+    pulls = []
+    controls = asyncio.Queue()
+
+    class Socket(_FakeDedicatedSocket):
+        async def recv(self):
+            return await controls.get()
+
+    async def frames():
+        for seq in range(2):
+            pulls.append(seq)
+            await ready[seq].wait()
+            yield _frame(seq, seq * 160)
+
+    socket = Socket([])
+    task = asyncio.create_task(run_dedicated_media_downlink_socket_leaf(
+        _request(binding), socket=socket, frames=frames(), on_playback_stop=lambda _: None,
+        max_pending_frames=4, max_pending_bytes=8192))
+
+    async def until(predicate):
+        async with asyncio.timeout(2):
+            while not predicate():
+                await asyncio.sleep(0)
+
+    try:
+        await until(lambda: pulls == [0])
+        assert not any(isinstance(item, bytes) for item in socket.sent)
+        ready[0].set()
+        await until(lambda: len([x for x in socket.sent if isinstance(x, bytes)]) == 1)
+        assert pulls == [0]
+        controls.put_nowait(serialize_media_control(MediaAck(binding.lease_id, binding.generation.value, 0)))
+        await until(lambda: pulls == [0, 1])
+        assert len([x for x in socket.sent if isinstance(x, bytes)]) == 1
+        ready[1].set()
+        await until(lambda: len([x for x in socket.sent if isinstance(x, bytes)]) == 2)
+        controls.put_nowait(serialize_media_control(MediaAck(binding.lease_id, binding.generation.value, 1)))
+        result = await asyncio.wait_for(task, 2)
+        assert result.reason_id is MediaDetachReason.LOCAL_CLOSE
+        assert result.sent_frames == 2 and result.acknowledged_through_seq == 1
+        assert len(socket.close_calls) == 1
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('frame,reason', [
+    (MediaAudioFrame('bad', 0, (0.0,) * 160), MediaDetachReason.SEQUENCE_VIOLATION),
+    (MediaAudioFrame(0, 0, None), MediaDetachReason.INVALID_FRAME),
+])
+async def test_downlink_diagnostics_cannot_bypass_invalid_frame_cleanup(frame, reason):
+    socket = _FakeDedicatedSocket([])
+    completed, stopped = [], []
+    result = await run_dedicated_media_downlink_socket_leaf(_request(_downlink_binding()),
+        socket=socket, frames=[frame], on_playback_stop=lambda receipt: stopped.append(receipt),
+        on_complete=lambda value: completed.append(value), max_pending_frames=1, max_pending_bytes=2048)
+    assert result.reason_id is reason
+    assert len(socket.close_calls) == len(completed) == 1
+    assert stopped == []
+    assert not any(isinstance(item, bytes) for item in socket.sent)
 
 
 @pytest.mark.asyncio

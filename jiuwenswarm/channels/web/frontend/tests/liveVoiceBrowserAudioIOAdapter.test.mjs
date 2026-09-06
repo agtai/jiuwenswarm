@@ -358,6 +358,115 @@ const secondResponse = Object.freeze({ interaction_id: 'interaction-1', response
 const thirdResponse = Object.freeze({ interaction_id: 'interaction-1', response_id: 'response-3', response_generation: 2 });
 const provider = Object.freeze({ provider_id: 'formal-tts', implementation_class: 'formal', fallback_from: null });
 
+test('first accepted PCM owns the full lead regardless of connection delay; later frames remain contiguous', async () => {
+  for (const connectionDelay of [0, 0.33, 2]) {
+    const fake = fakeEnvironment();
+    const adapter = new BrowserAudioIOAdapter({ enabled: true, environment: fake.environment });
+    await adapter.unlockPlayout();
+    adapter.beginPlayout(firstResponse);
+    const context = fake.contexts[0];
+    context.currentTime += connectionDelay;
+    const arrivedAt = context.currentTime;
+    assert.equal(adapter.enqueuePlayout(pcmChunk(secondResponse, 0)), false);
+    assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+    context.currentTime += .13;
+    assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 1)), true);
+    assert.ok(Math.abs(context.bufferSources[0].starts[0] - arrivedAt - .25) < 1e-9);
+    assert.ok(Math.abs(context.bufferSources[1].starts[0] - arrivedAt - .27) < 1e-9);
+    assert.equal(adapter.businessCancelCount(), 0);
+    await adapter.close();
+  }
+});
+
+test('starvation rebuilds a bounded reserve then a burst continues without loss or duplicate render ACK', async () => {
+  const fake = fakeEnvironment();
+  const rendered = [];
+  const adapter = new BrowserAudioIOAdapter({ enabled: true, environment: fake.environment,
+    observer: { onPlayoutState: event => { if (event.reason === 'render_completed') rendered.push(event.through_seq); } } });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  const context = fake.contexts[0];
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 0));
+  context.currentTime += .65; // 380 ms beyond the first 20 ms frame's scheduled end.
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 1));
+  const recoveredAt = context.bufferSources[1].starts[0];
+  assert.ok(Math.abs(recoveredAt - context.currentTime - .65) < 1e-9);
+  for (let seq = 2; seq < 20; seq++) adapter.enqueuePlayout(pcmChunk(firstResponse, seq));
+  for (let seq = 2; seq < 20; seq++) {
+    assert.ok(Math.abs(context.bufferSources[seq].starts[0] - recoveredAt - (seq - 1) * .02) < 1e-9);
+  }
+  context.currentTime += 10;
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 20, { samples: new Float32Array(240).fill(.2) }));
+  assert.ok(Math.abs(context.bufferSources[20].starts[0] - context.currentTime - .75) < 1e-9);
+  // Reordered browser callbacks cannot acknowledge a missing prefix.
+  context.bufferSources[1].end();
+  assert.deepEqual(rendered, []);
+  context.bufferSources[0].end();
+  context.bufferSources[0].end();
+  for (const source of context.bufferSources.slice(2)) source.end();
+  assert.deepEqual(rendered, Array.from({ length: 20 }, (_, i) => i + 1));
+  assert.equal(adapter.businessCancelCount(), 0);
+  await adapter.close();
+});
+
+test('cancel during recovery fences queued sources and late old-response PCM', async () => {
+  const fake = fakeEnvironment();
+  const adapter = new BrowserAudioIOAdapter({ enabled: true, environment: fake.environment });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  const context = fake.contexts[0];
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 0));
+  context.currentTime += 1;
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 1));
+  const sources = context.bufferSources.slice();
+  assert.equal(adapter.stopPlayout(firstResponse), true);
+  assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 2)), false);
+  assert.ok(sources.every(source => source.stopCount === 1));
+  adapter.beginPlayout(secondResponse);
+  assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 2)), false);
+  adapter.enqueuePlayout(pcmChunk(secondResponse, 0));
+  assert.ok(Math.abs(context.bufferSources.at(-1).starts[0] - context.currentTime - .25) < 1e-9);
+  sources.forEach(source => source.end());
+  assert.equal(adapter.businessCancelCount(), 0);
+  await adapter.close();
+});
+
+test('tentative pause during recovery resumes only unplayed samples and fences old callbacks', async () => {
+  const fake = fakeEnvironment();
+  const rendered = [];
+  const adapter = new BrowserAudioIOAdapter({ enabled: true, localBargeInProfile: 'verified_headset_aec_v1', environment: fake.environment,
+    observer: { onPlayoutState: event => { if (event.reason === 'render_completed') rendered.push(event.through_seq); } } });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  const context = fake.contexts[0];
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 0));
+  context.currentTime += 1;
+  context.bufferSources[0].end();
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 1));
+  const queued = context.bufferSources[1];
+  const oldEnd = queued.onended;
+  assert.ok(queued.starts[0] > context.currentTime);
+  assert.equal((await adapter.pausePlayoutExact({ response: firstResponse, candidate_id: 'recovery-pause' })).outcome, 'paused');
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 2));
+  oldEnd();
+  assert.deepEqual(rendered, [0]);
+  context.currentTime += .1;
+  assert.equal((await adapter.resumePlayoutExact(firstResponse, 'recovery-pause')).outcome, 'resumed');
+  const resumed = context.bufferSources.slice(2);
+  assert.equal(resumed.length, 2);
+  assert.ok(resumed.every(source => source.offsets[0] === 0));
+  assert.deepEqual(resumed.map(source => [...source.buffer.copied[0].source]), [pcmChunk(firstResponse, 1), pcmChunk(firstResponse, 2)].map(chunk => [...chunk.samples]));
+  assert.ok(Math.abs(resumed[1].starts[0] - resumed[0].starts[0] - .02) < 1e-9);
+  resumed[1].end();
+  assert.deepEqual(rendered, [0]);
+  resumed[0].end();
+  resumed[0].end();
+  oldEnd();
+  assert.deepEqual(rendered, [0, 2]);
+  assert.equal(adapter.businessCancelCount(), 0);
+  await adapter.close();
+});
+
 function pcmChunk(response, seq, overrides = {}) {
   return {
     response,
@@ -413,6 +522,11 @@ test('playout diagnostics report startup gap and exact stop without payload or s
     assert.equal(first.fields.response_id, firstResponse.response_id);
     fake.contexts[0].currentTime += 2;
     assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 1)), true);
+    const recovery = facts.find(fact => fact.event === 'playout_rebuffered').fields;
+    assert.equal(recovery.reserve_ms, 750);
+    assert.ok(Math.abs(recovery.supply_late_ms - 1730) < 1e-6);
+    assert.ok(Math.abs(recovery.schedule_gap_ms - 2480) < 1e-6);
+    assert.ok(Math.abs(recovery.gap_end_context_ms - recovery.gap_start_context_ms - recovery.schedule_gap_ms) < 1e-6);
     assert.equal(adapter.stopPlayoutExact(firstResponse).local_fence_established, true);
     const stop = facts.find(fact => fact.event === 'playout_sources_stopped');
     assert.equal(stop.fields.stopped_sources, 2);

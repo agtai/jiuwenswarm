@@ -666,6 +666,9 @@ export class BrowserDedicatedMediaSocketLeaf {
   readonly #pendingDownlinkAcks = new Map<number, Readonly<{ ack: Readonly<MediaAck>; byteLength: number }>>();
   #pendingDownlinkBytes = 0;
   #lastDeferredDownlinkAck = -1;
+  #diagnosticLastDownlinkAt: number | null = null;
+  #diagnosticDownlinkCount = 0;
+  readonly #diagnosticDownlinkAcks = new Set<number>();
   #attached = false;
   #closed = false;
   #retainedClose: MediaRegistrationOwnerCloseResult | null = null;
@@ -1085,6 +1088,16 @@ export class BrowserDedicatedMediaSocketLeaf {
       return;
     }
     const result = this.#activation.owner.acceptBinary(binary);
+    if (result.type === 'media.ack') {
+      const now = monotonicNowMs();
+      const interval = this.#diagnosticLastDownlinkAt === null ? 0 : now - this.#diagnosticLastDownlinkAt;
+      this.#diagnosticLastDownlinkAt = now;
+      if (this.#diagnosticDownlinkCount < 128 && (result.through_seq < 8 || interval >= 80)) {
+        this.#diagnosticDownlinkCount += 1;
+        this.#diagnose('media_downlink_received', { seq: result.through_seq, frame_interarrival_ms: interval });
+        this.#diagnosticDownlinkAcks.add(result.through_seq);
+      }
+    }
     if (result.type === 'media.detach' && result.reason_id === 'MEDIA_CONSUMER_FAILED') {
       this.#consumerFailureReasonId = this.#activation.owner.consumer_failure_reason_id;
     }
@@ -1214,6 +1227,9 @@ export class BrowserDedicatedMediaSocketLeaf {
     }
     try {
       this.#socket.send(serializeMediaControl(control));
+      if (control.type === 'media.ack' && this.#diagnosticDownlinkAcks.delete(control.through_seq)) {
+        this.#diagnose('media_downlink_enqueue_ack', { seq: control.through_seq });
+      }
     } catch {
       this.#terminate('MEDIA_TRANSPORT_SEND_FAILED', false, 'transport_close');
     }

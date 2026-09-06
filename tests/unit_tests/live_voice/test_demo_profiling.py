@@ -148,6 +148,18 @@ def test_browser_overlap_activity_timing_survives_sanitized_report_import():
     assert "PRIVATE" not in repr(imported)
 
 
+def test_rebuffer_and_media_ack_timing_survives_sanitized_report_import():
+    fields = dict(seq=1, reserve_ms=650, supply_late_ms=380, schedule_gap_ms=1030,
+                  gap_start_context_ms=270, gap_end_context_ms=1300,
+                  scheduled_end_context_ms=1320, frame_interarrival_ms=650,
+                  buffer_ahead_ms=650, received_through_seq=1)
+    imported = report.sanitize_record({"event": "playout_rebuffered", "sequence": 2,
+        "clock_id": "browser-a", "monotonic_ms": 650, "observed_at": "2026-09-06T16:00:00Z",
+        "fields": dict(fields, samples="PRIVATE_PCM")})
+    assert imported["fields"] == fields
+    assert "PRIVATE" not in repr(imported)
+
+
 def test_session_join_keeps_explicit_foreign_session_out():
     rows = [row("opened", 1, 1, session_id="a", request_id="r"),
             row("opened", 2, 2, request_id="r", capture_id="c"),
