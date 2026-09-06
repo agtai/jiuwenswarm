@@ -11,6 +11,7 @@ repository root). Use the shared `.venv` Python.
 | `inventory_loc.py` | Dedicated whole-file LOC, deleted/new production paths and shared-host drift against the atomic manifest | `python scripts/live_voice/slimming/inventory_loc.py --manifest live-voice/reviews/OPENJIUWEN_LIVEVOICE_ATOMIC_DISPOSITION_2026-08-31.md --base 59998e2c5 --head HEAD` |
 | `retire_rows.py` | Stable-symbol revalidation of manifest rows on changed paths plus importer scan of whole-file retire candidates | `python scripts/live_voice/slimming/retire_rows.py --manifest live-voice/reviews/OPENJIUWEN_LIVEVOICE_ATOMIC_DISPOSITION_2026-08-31.md --rev HEAD --base 59998e2c5` |
 | `module_buckets.py` | Coarse 18-module bucketing of dedicated LiveVoice production files with non-behaviour line share | `python scripts/live_voice/slimming/module_buckets.py --rev HEAD` |
+| `hermes_voice_inventory.py` | Physical-LOC inventory of the official Hermes (NousResearch/hermes-agent) voice surface: curated dedicated files by category, voice-named symbol segments in shared hosts, voice test files | `python scripts/live_voice/slimming/hermes_voice_inventory.py --repo "D:/XGG AI/openjiuwen/hermes-agent-review-9a84bee26"` |
 
 `--manifest` accepts a filesystem path (relative to the current directory or the repository root)
 or `REV:PATH` for a manifest that only exists on another commit.

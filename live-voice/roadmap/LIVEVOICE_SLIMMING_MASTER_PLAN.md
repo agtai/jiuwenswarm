@@ -13,7 +13,7 @@
 |---|---|---|
 | 判断现在能不能开工、开工哪些包 | §1.3 触发条件、§5 实施包 A 期 | [激活预检](../reviews/OPENJIUWEN_LIVEVOICE_SLIMMING_ACTIVATION_PRECHECK_2026-09-05.md) |
 | 删除臃肿、无用、堆积的代码 | §2 移除清单 | [可去掉性验证](../reviews/OPENJIUWEN_LIVEVOICE_REMOVABILITY_VERIFICATION_2026-09-05.md)、[原子归属表](../reviews/OPENJIUWEN_LIVEVOICE_ATOMIC_DISPOSITION_2026-08-31.md) |
-| 对比 Hermes 收敛某个模块 | §3 模块收敛清单、§9.4 拆分行 | [逐模块验证](../reviews/OPENJIUWEN_LIVEVOICE_SLIMMING_THESIS_VERIFICATION_2026-09-05.md)、[零基线模块审计](../reviews/OPENJIUWEN_LIVEVOICE_ZERO_BASE_MODULE_AUDIT_2026-08-31.md)、[中文架构指南](../reviews/OPENJIUWEN_LIVEVOICE_HERMES_MODULE_ARCHITECTURE_ZH_2026-08-31.md) |
+| 对比 Hermes 收敛某个模块 | §3 模块收敛清单、§9.4 拆分行 | [官方 Hermes Voice 对比](../reviews/OPENJIUWEN_LIVEVOICE_OFFICIAL_HERMES_VOICE_COMPARISON_2026-09-06.md)（模块对照、Hermes 术语解释、AgentCore 校准）、[逐模块验证](../reviews/OPENJIUWEN_LIVEVOICE_SLIMMING_THESIS_VERIFICATION_2026-09-05.md)、[零基线模块审计](../reviews/OPENJIUWEN_LIVEVOICE_ZERO_BASE_MODULE_AUDIT_2026-08-31.md)；个人仓库对标的[中文架构指南](../reviews/OPENJIUWEN_LIVEVOICE_HERMES_MODULE_ARCHITECTURE_ZH_2026-08-31.md)只作历史读物 |
 | 下沉到 AgentCore（直接复用、适配复用、PR） | §4 | [AgentCore 零基线审计](../reviews/OPENJIUWEN_AGENTCORE_FOUNDATION_ZERO_BASE_AUDIT_2026-09-01.md)、[symbol 迁移映射](../reviews/OPENJIUWEN_LIVEVOICE_SYMBOL_MIGRATION_MAP_2026-08-24.md) |
 | 分支又前进了，要重基线 | §8 | `scripts/live_voice/slimming/README.md` |
 | 某个包的验收与回滚 | §5、§6 | root `TESTING.md`、[预算文档 §9](../reviews/OPENJIUWEN_LIVEVOICE_HERMES_ALIGNED_SLIMMING_BUDGET_2026-08-31.md) |
@@ -71,7 +71,7 @@ tests/ · scripts/ · validation/      L5：oracle、合成语音 journey、探�
 | 共享宿主 LiveVoice segment | 4,054（59998e2c 归因）+ 未归因新增约 0.3K | 零基线审计 §3.2；冻结后重算 |
 | v1 规划中心 | 约 50,200（18 模块中心之和，Native 行剔除） | §3 表 |
 | 实测预期 | 60K 到 65K | 逐模块验证 §1.3：第五种机制约 69K 只确认方向 |
-| Hermes 对照 | 25,254 shipped | 预算文档 §2 |
+| Hermes 对照 | 官方 `NousResearch/hermes-agent@9a84bee26` 语音生产面 20,265（可比集 17,887，非行为行 32%）；个人仓库 25,254 只作历史 | [官方对比](../reviews/OPENJIUWEN_LIVEVOICE_OFFICIAL_HERMES_VOICE_COMPARISON_2026-09-06.md) §6 |
 
 ### 1.5 不变约束
 
@@ -130,30 +130,31 @@ AR-126 demo fixture、AR-213 Alpha 意图启发式、AR-075–078 旧 Task lane�
 
 ## 3. 对比 Hermes 的收敛清单（18 个责任模块）
 
-HEAD 实测来自 `module_buckets.py`（文件名规则粗分）；Hermes 为 pinned
-`bielcarpi/hermes-live-voice@3dd8af38` 的 shipped LOC；目标是规划中心，不是 Gate。
+HEAD 实测来自 `module_buckets.py`（文件名规则粗分）；Hermes 列自 2026-09-06 起为官方
+`NousResearch/hermes-agent@9a84bee26` 语音可比集 17,887 行按责任分配到 18 模块的值（[官方对比](../reviews/OPENJIUWEN_LIVEVOICE_OFFICIAL_HERMES_VOICE_COMPARISON_2026-09-06.md) §4；
+模块 7–11 在 Hermes 语音层为 0，对照改为 core substrate 约 3.3K，见其 §8.1）；目标是规划中心，不是 Gate。
 
 | # | 模块 | HEAD | Hermes | v1 目标 | 收敛机制 | 包 | 确认 |
 |---:|---|---:|---:|---:|---|---|---|
-| 1 | Browser Audio Edge | 8,429 | 5,763 | 5,500 | 拆 `productP1VoiceRoute.ts`（capture/recognition/playout/diagnostics 混装）；音频诊断归观测 | B2d | 方向确认 |
-| 2 | Web/Gateway media transport | 17,409 | 937 | 5,500 | 拆 `dedicated_media_registration.py` 为 registration/product authority/diagnostics（Native 段不动）；三条 route 的 lifecycle 与 fallback 投影合一 | B2a | 幅度存疑 |
-| 3 | Speech provider | 9,909 | 1,803 | 6,000 | `batch_speech`/`openai_streaming_speech`/`streaming_speech` 各拆 contract、传输、orchestration | B2e | 确认 |
-| 4 | Committed input / product authority | 16,850 | 763 | 3,800 | 四套一次性授权 CAS ledger 合成一个 authorization owner + 一个 journal；`p3_authenticated_composition` 拆认证、翻译、构造根 | B2b | 目标偏激进（5K–7K） |
-| 5 | Conversation Runtime | 8,224 | 1,942 | 4,500 | 播放期插话与生成期打断合成一个 response fence；fake 退休 | B2c | 确认 |
-| 6 | Agent bridge | 3,015 | 1,140 | 1,300 | `AgentBridgeRuntime` 与 `JiuWenSwarmRoundHarness` 合为一层；tool hold 收敛为一个 rail element（fixture seam 与 ScriptedCascade 已在 A1 删除） | B1 | 确认 |
-| 7 | Task domain/control | 5,342 | 2,075 | 1,000 | 通用值类型归 F1–F3；`TaskCore` 死；`PersistentTaskCore` 成薄 facade | C1 | 确认（需 installed） |
-| 8 | Task Store | 15,175 | 1,075 | 600 | 整个通用 Store 由 F1–F6 替代；只留 importer/rollback reader | C2 | 确认（转移，非删除） |
+| 1 | Browser Audio Edge | 8,429 | 4,671 | 5,500 | 拆 `productP1VoiceRoute.ts`（capture/recognition/playout/diagnostics 混装）；音频诊断归观测 | B2d | 方向确认 |
+| 2 | Web/Gateway media transport | 17,409 | 2,070 | 5,500 | 拆 `dedicated_media_registration.py` 为 registration/product authority/diagnostics（Native 段不动）；三条 route 的 lifecycle 与 fallback 投影合一 | B2a | 幅度存疑 |
+| 3 | Speech provider | 9,909 | 6,018 | 6,000 | `batch_speech`/`openai_streaming_speech`/`streaming_speech` 各拆 contract、传输、orchestration | B2e | 确认 |
+| 4 | Committed input / product authority | 16,850 | 391 | 3,800 | 四套一次性授权 CAS ledger 合成一个 authorization owner + 一个 journal；`p3_authenticated_composition` 拆认证、翻译、构造根 | B2b | 目标偏激进（5K–7K） |
+| 5 | Conversation Runtime | 8,224 | 3,150 | 4,500 | 播放期插话与生成期打断合成一个 response fence；fake 退休 | B2c | 确认 |
+| 6 | Agent bridge | 3,015 | 36 | 1,300 | `AgentBridgeRuntime` 与 `JiuWenSwarmRoundHarness` 合为一层；tool hold 收敛为一个 rail element（fixture seam 与 ScriptedCascade 已在 A1 删除） | B1 | 确认 |
+| 7 | Task domain/control | 5,342 | 0 | 1,000 | 通用值类型归 F1–F3；`TaskCore` 死；`PersistentTaskCore` 成薄 facade | C1 | 确认（需 installed） |
+| 8 | Task Store | 15,175 | 0 | 600 | 整个通用 Store 由 F1–F6 替代；只留 importer/rollback reader | C2 | 确认（转移，非删除） |
 | 9 | Project executor | 6,755 | 0 | 3,200 | legacy carrier 死；generic attempt/lease/settlement 归 F4/F6；Direct journal 只留 Git/worktree 事实 | C3 | 确认 |
 | 10 | Checkpoint/effect | 2,953 | 0 | 800 | prefix verifier 归 F5/F6；六文件复制的 helper 合一；只留 codec/identity 映射 | C3 | 确认 |
-| 11 | Task event/progress | 8,078 | 312 | 1,500 | 游标订阅归 F2/F3；arbiter 与 progress_return 的 queue/ACK/lease 机制合一 | C1 + B2b | 目标偏激进（2K–3K） |
-| 12 | Presentation/history | 2,045 | 0 | 2,500 | 不需削减 | — | 确认 |
-| 13 | Formal Web/UI | 16,906 | 4,701 | 5,600 | 拆 Panel 为 P1/P2/P3 owner；三个 Task UI owner 合一；三本同模式 journal 合一；通知仲裁纯函数独立 | B2d | 目标偏激进（6K–8K） |
-| 14 | Composition/config | 19,826 | 1,172 | 2,700 | registry 只留注册与生命周期；handler 工厂搬回各 owner，删除逐 handler 重复的 scope/session/principal 校验 | B2b | 约 10K 是搬迁，删除量取决于目标模块吸收 |
-| 15 | Observability | 17,322 | 2,668 | 3,500 | 无 caller 支持代码退休（A1）；L0 工具 re-home；OTel/被动 profiling/音频诊断三通道合成一个 exporter，适配已安装 tracer | B4 | 确认 |
-| 16 | Schema/protocol | 7,474 | 742 | 2,000 | canonical source 生成 TS client/types 与 allowlist；手写副本退休 | A3/B3 | 确认 |
+| 11 | Task event/progress | 8,078 | 0 | 1,500 | 游标订阅归 F2/F3；arbiter 与 progress_return 的 queue/ACK/lease 机制合一 | C1 + B2b | 目标偏激进（2K–3K） |
+| 12 | Presentation/history | 2,045 | 88 | 2,500 | 不需削减 | — | 确认 |
+| 13 | Formal Web/UI | 16,906 | 1,372 | 5,600 | 拆 Panel 为 P1/P2/P3 owner；三个 Task UI owner 合一；三本同模式 journal 合一；通知仲裁纯函数独立 | B2d | 目标偏激进（6K–8K） |
+| 14 | Composition/config | 19,826 | 75 | 2,700 | registry 只留注册与生命周期；handler 工厂搬回各 owner，删除逐 handler 重复的 scope/session/principal 校验 | B2b | 约 10K 是搬迁，删除量取决于目标模块吸收 |
+| 15 | Observability | 17,322 | 16 | 3,500 | 无 caller 支持代码退休（A1）；L0 工具 re-home；OTel/被动 profiling/音频诊断三通道合成一个 exporter，适配已安装 tracer | B4 | 确认 |
+| 16 | Schema/protocol | 7,474 | 0 | 2,000 | canonical source 生成 TS client/types 与 allowlist；手写副本退休 | A3/B3 | 确认 |
 | 17 | Legacy/compat | 3,058 | 0 | 0 | 单 owner cutover 后退休 | D1 | 确认 |
-| 18 | Test/reference in prod | 2,661 | 161 | 200 | 零 caller，先迁 oracle | A1 | 确认 |
-| | **合计** | **171,431** | **25,254** | **≈50,200** | | | |
+| 18 | Test/reference in prod | 2,661 | 0 | 200 | 零 caller，先迁 oracle | A1 | 确认 |
+| | **合计** | **171,431** | **17,887** | **≈50,200** | | | |
 
 削减按机制分账（逐模块验证 §3.1）：死代码与 legacy 约 12K（已验证）、AgentCore 转移约 25K、
 观测收敛约 10K、schema 单源约 5K、并行 owner 与逐层重复校验的收敛约 69K（只确认方向）。
@@ -212,8 +213,10 @@ API 缺失）、`JIUWEN_KEEP`、`REJECT/RETIRE`。锁定依赖 `openjiuwen 0.1.1
 ### 4.3 基础能力新增（AGENTCORE_FOUNDATION_ADD，原子表 `AGENTCORE_PR` 13 行）
 
 13 行是缺口定位，不是实现单元；它们收敛为四个事务能力族、六个最小 public seam。规划中心
-约 5,300 行，区间约 3,600–8,100（约 1,490 适配/扩展 + 约 3,810 真正新增）；这是成本归因线，
-不是 Gate。
+约 5,300 行，区间约 3,600–8,100（校准前的分解：约 1,490 适配/扩展 + 约 3,810 真正新增）；这是成本归因线，
+不是 Gate。按官方 Hermes core 的后台工作 substrate（约 3,300 行）逐 seam 校准后，建议中心下调到
+约 4,100（区间 3,150–5,700），并在 A2 decision record 中评估 F5 并入 F6；见
+[官方对比](../reviews/OPENJIUWEN_LIVEVOICE_OFFICIAL_HERMES_VOICE_COMPARISON_2026-09-06.md) §8。
 
 | Seam | 覆盖的 locator | 复用什么 | 只新增什么 | 明确不新增 | 本分支增量补充的 invariant |
 |---|---|---|---|---|---|
@@ -319,7 +322,8 @@ finalize、前端 Task 呈现与 home start；理由见当前分支重分析 §3
   → [当前分支重分析](../reviews/OPENJIUWEN_LIVEVOICE_CURRENT_BRANCH_ANALYSIS_AND_PLAN_2026-09-05.md)
   → [可去掉性验证](../reviews/OPENJIUWEN_LIVEVOICE_REMOVABILITY_VERIFICATION_2026-09-05.md)
   → [逐模块验证](../reviews/OPENJIUWEN_LIVEVOICE_SLIMMING_THESIS_VERIFICATION_2026-09-05.md)
-  → 本文。
+  → 本文 → [官方 Hermes Voice 对比](../reviews/OPENJIUWEN_LIVEVOICE_OFFICIAL_HERMES_VOICE_COMPARISON_2026-09-06.md)
+  （2026-09-06；§3 的 Hermes 列与 §4.3 的 AgentCore 校准来自它）。
 - 移植的准备审计：[预算](../reviews/OPENJIUWEN_LIVEVOICE_HERMES_ALIGNED_SLIMMING_BUDGET_2026-08-31.md)、
   [AgentCore 零基线审计](../reviews/OPENJIUWEN_AGENTCORE_FOUNDATION_ZERO_BASE_AUDIT_2026-09-01.md)、
   [原子归属表](../reviews/OPENJIUWEN_LIVEVOICE_ATOMIC_DISPOSITION_2026-08-31.md)、
