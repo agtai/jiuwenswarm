@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-07 (P0–P9 per-point candidate complete; unified acceptance remains open).
+> Updated: 2026-09-07 (real acceptance exposed defects; six-point repairs authorized).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -24,7 +24,20 @@ history, not acceptance of this candidate.
 
 ## Current execution packet
 
-### Realtime optimization: full implementation and unified acceptance
+### Realtime acceptance repairs
+
+The user accepted the [six-point repair packet](reviews/REALTIME_ACCEPTANCE_REPAIRS_20260907.md)
+after the designated real browser Session exposed output truncation, lifecycle
+read blocking, discarded buffered audio, expected-interruption failure messages,
+Task dirty-workspace admission and intent errors, and startup underruns. Main
+owns independent worker worktrees, point commits, review, integration and local
+deployment. D-120 records the accepted changes, including authorized dirty input
+snapshots and bounded fault-tail playback; these are not merely parameter edits.
+Implementation and scoped verification are in progress. The prior candidate did
+not pass the user's unified acceptance. Physical playback, exact A-to-AA output
+intent and the full current-source journey remain required.
+
+### Retained Realtime optimization baseline
 
 The user authorized all P0–P9 optimization points, one local commit per point and
 unified acceptance in the [full execution packet](reviews/REALTIME_OPTIMIZATION_FULL_20260907.md).

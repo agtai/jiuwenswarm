@@ -53,6 +53,7 @@ from jiuwenswarm.server.live_voice.native_business_tools import (
 from jiuwenswarm.server.live_voice.native_business_encoding import compact_native_business_output
 from jiuwenswarm.server.live_voice.native_interaction_config import (
     DEFAULT_NATIVE_VAD_EAGERNESS, validate_native_vad_eagerness,
+    DEFAULT_NATIVE_MAX_OUTPUT_TOKENS, validate_native_max_output_tokens,
 )
 from jiuwenswarm.server.live_voice.native_business_observation import project_native_receipt
 from jiuwenswarm.server.live_voice.native_continuation_preparation import (
@@ -463,10 +464,14 @@ _WORK_NOTIFICATION_INSTRUCTIONS = (
 )
 
 
-def _session_update(vad_eagerness: str = DEFAULT_NATIVE_VAD_EAGERNESS) -> dict[str, object]:
+def _session_update(
+    vad_eagerness: str = DEFAULT_NATIVE_VAD_EAGERNESS,
+    max_output_tokens: int | str = DEFAULT_NATIVE_MAX_OUTPUT_TOKENS,
+) -> dict[str, object]:
     return {
         "type": "realtime",
         "output_modalities": ["audio"],
+        "max_output_tokens": validate_native_max_output_tokens(max_output_tokens),
         "instructions": (
             "Respond by voice. You may answer directly only for casual conversation "
             "or self-contained information that needs no Jiuwen Agent, Task, tool, "
@@ -770,6 +775,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         event_queue_capacity: int = 256,
         pending_audio_capacity: int = 64,
         vad_eagerness: str = DEFAULT_NATIVE_VAD_EAGERNESS,
+        max_output_tokens: int | str = DEFAULT_NATIVE_MAX_OUTPUT_TOKENS,
     ) -> None:
         if not isinstance(binding, NativeInteractionBinding):
             raise TypeError("binding must use NativeInteractionBinding")
@@ -780,6 +786,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             if type(value) is not int or not 0 < value <= _MAX_ENGINE_CAPACITY:
                 raise ValueError(f"{name} must be an integer in [1, 4096]")
         self._vad_eagerness = validate_native_vad_eagerness(vad_eagerness)
+        self._max_output_tokens = validate_native_max_output_tokens(max_output_tokens)
         self._binding = binding
         self._session = OpenAIRealtimeSession(config, socket_factory=socket_factory,
                                              diagnostic_origin=identity_fields(binding))
@@ -1044,7 +1051,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             )
         self._state = NativeProviderState.STARTING
         try:
-            update = _session_update(self._vad_eagerness)
+            update = _session_update(self._vad_eagerness, self._max_output_tokens)
             self._profile_business("endpoint_strategy_requested", status=self._vad_eagerness)
             if self._business_context is not None:
                 update.update(instructions=_BUSINESS_INSTRUCTIONS, tools=native_business_tools())
@@ -1653,7 +1660,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                         turn_id=self._business_accepted_turn, delegate_call_id=None,
                         work_event_id=work["event_id"], payload={"response": {
                             "metadata": {"work_event_id": work["event_id"]}, "tool_choice": "none",
-                            "max_output_tokens": 1024,
+                            "max_output_tokens": self._max_output_tokens,
                             "instructions": _WORK_NOTIFICATION_INSTRUCTIONS,
                         }})
                     self._work_seen[work["event_id"]] = hashlib.sha256(canonical_json_bytes(work)).digest()
@@ -1800,7 +1807,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                     tool_choice = "none"
             self._response_request_queue.append(_ProviderResponseRequest(
                 turn_id=source.turn_id, delegate_call_id=anchor, business_recovery=anchor is None,
-                payload={"response": {"instructions": instructions, "max_output_tokens": 1024,
+                payload={"response": {"instructions": instructions, "max_output_tokens": self._max_output_tokens,
                                       "tool_choice": tool_choice}},
             ))
             self._profile_business("successor_queued", response=source)
@@ -1979,10 +1986,9 @@ class OpenAIRealtimeNativeInteractionEngine:
                     "response": {
                         "instructions": _DELEGATE_SUCCESSOR_INSTRUCTIONS,
                         # Realtime counts generated audio in this shared budget.
-                        # 256 truncated ordinary Chinese task acknowledgements in
-                        # production-like playback, so keep the response bounded
-                        # while leaving enough room for one complete spoken result.
-                        "max_output_tokens": 1_024,
+                        # Use the configured model maximum by default; a short
+                        # text-like cap also truncates ordinary spoken answers.
+                        "max_output_tokens": self._max_output_tokens,
                         "tool_choice": "none",
                     }
                 },

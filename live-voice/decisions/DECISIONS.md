@@ -2027,3 +2027,48 @@
   Task-result delivery, operation-driven Task refresh and critical milestone
   retention are owned repairs. Current testing status stays in STATUS; this
   decision grants no unrun Provider/physical, Production or remote acceptance.
+
+## D-120 Realtime acceptance repair contracts
+
+- Date: 2026-09-07. Accepted: the user approved the six-point design with “开始”.
+  The [execution packet](../reviews/REALTIME_ACCEPTANCE_REPAIRS_20260907.md) assigns
+  source/test ownership, risk and acceptance. Current progress remains in STATUS.
+- Native speech defaults to the configured model's maximum output budget (`inf`)
+  consistently across session and response overrides. Explicit supported integer
+  limits remain configurable. An incomplete generation is still a valid failure
+  state and cannot be converted to complete by budget policy or UI editing.
+- Generation terminal, media delivery and actual rendered playback are independent.
+  Incomplete/failed generation does not free outstanding media ownership. Provider
+  reading and STOP controls must not wait for playback delivery. A generation's
+  finite PCM EOF may be known while its answer remains incomplete; only exact
+  rendered evidence settles the played prefix, never transport/enqueue ACK.
+- On a Provider transport-only failure, a browser may finish an exact, finite,
+  already-accepted contiguous PCM prefix frozen at failure. STOP/new turn revokes
+  it before cleanup. No late appends, replay, old-generation revival or false
+  complete heard history are permitted. Unknown Provider EOF stays unknown;
+  ambiguous ownership or failed local playback stops. Closure receipts cannot
+  authorize new speech or Agent/Tool/Task effects.
+- Expected user interruption and internal prepared replacement are cancellation
+  or retirement, not request failure. Do not add failure chat bubbles or speak
+  implementation codes. Real errors retain actionable status and diagnostics;
+  generated text remains distinct from delivered/heard truth.
+- D-098/D-099's blanket exclusion of user tracked/untracked edits is superseded
+  for authorized project snapshots. Accept and serialize Tasks against current
+  project contents; preserve original staged state, seed isolated execution and
+  apply only Task changes. Snapshot/read/write conflict validation and D2 recovery
+  use the same baseline. Where complete read dependencies cannot be proven,
+  retain a conservative dependency scope and report conflicts accurately. Never
+  auto commit/stash/reset/clean the user's project or partially overwrite it.
+  Exact scope, root/HEAD, permissions, link safety and canonical Task authority
+  remain required. Derive-and-save-as is one coherent Task: preserve input,
+  apply all requested changes to the new output, and do not separately alter input.
+- Browser startup/recovery storage represents actual received PCM, not elapsed
+  waiting. Only unstarted audio may be arranged; never recreate started sources
+  to shorten reserve. Authenticated exact EOF flushes short tails. Transport
+  credit and actual rendering receipts stay separate and bounded; STOP fences
+  all waiting, queued and scheduled old audio. No AudioWorklet migration is
+  required by this repair. Validate supply gaps and first-audible delay separately.
+- These Tier-2/3 extensions do not grant Production/remote acceptance or change
+  configured providers/models, device profile, existing user project data or
+  completed Task effects. Controlled local deployment and the designated human
+  journey verify the integrated candidate after scoped checks and independent review.

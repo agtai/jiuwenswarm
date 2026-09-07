@@ -1679,6 +1679,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     native_session_config,
                     binding=binding,
                     vad_eagerness=interaction_selection.native_vad_eagerness,
+                    max_output_tokens=interaction_selection.native_max_output_tokens,
                 )
 
         except Exception:

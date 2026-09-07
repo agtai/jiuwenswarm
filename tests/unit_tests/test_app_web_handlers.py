@@ -151,14 +151,17 @@ async def test_web_disconnect_unregisters_physical_subscriptions() -> None:
 
 
 @pytest.mark.parametrize("eagerness", ["auto", "high"])
+@pytest.mark.parametrize("budget", ["inf", "4096"])
 def test_web_handlers_select_native_runtime_client_once(
     monkeypatch: pytest.MonkeyPatch,
     eagerness: str,
+    budget: str,
 ) -> None:
     monkeypatch.setenv("LIVE_VOICE_INTERACTION_ENGINE", "openai-realtime-native")
     monkeypatch.setenv("LIVE_VOICE_SPEECH_API_KEY", "private-test-key")
     monkeypatch.setenv("LIVE_VOICE_SPEECH_API_BASE", "https://api.openai.com/v1")
     monkeypatch.setenv("LIVE_VOICE_NATIVE_VAD_EAGERNESS", eagerness)
+    monkeypatch.setenv("LIVE_VOICE_NATIVE_MAX_OUTPUT_TOKENS", budget)
     channel = FakeWebChannel()
     agent = FakeAgentClient()
 
@@ -177,6 +180,7 @@ def test_web_handlers_select_native_runtime_client_once(
                                        "interaction", "activation", 1, "correlation")
     engine = channel.live_voice_media_registry._native_engine_factory(binding)
     assert engine._vad_eagerness == eagerness
+    assert engine._max_output_tokens == (budget if budget == "inf" else int(budget))
     assert engine._session.snapshot().client_event_count == 0
 
 

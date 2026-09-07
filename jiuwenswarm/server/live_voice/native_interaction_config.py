@@ -8,13 +8,16 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 
 
 INTERACTION_ENGINE_ENV = "LIVE_VOICE_INTERACTION_ENGINE"
 NATIVE_REALTIME_MODEL_ENV = "LIVE_VOICE_NATIVE_REALTIME_MODEL"
 NATIVE_VAD_EAGERNESS_ENV = "LIVE_VOICE_NATIVE_VAD_EAGERNESS"
+NATIVE_MAX_OUTPUT_TOKENS_ENV = "LIVE_VOICE_NATIVE_MAX_OUTPUT_TOKENS"
 DEFAULT_NATIVE_REALTIME_MODEL = "gpt-realtime-2.1-mini"
 DEFAULT_NATIVE_VAD_EAGERNESS = "auto"
+DEFAULT_NATIVE_MAX_OUTPUT_TOKENS: Literal["inf"] = "inf"
 _MAX_MODEL_CHARS = 256
 _MAX_MODEL_UTF8_BYTES = 1_024
 
@@ -35,6 +38,34 @@ class NativeInteractionSelection:
     kind: InteractionEngineKind
     native_model: str | None
     native_vad_eagerness: str | None = None
+    native_max_output_tokens: int | Literal["inf"] = DEFAULT_NATIVE_MAX_OUTPUT_TOKENS
+
+
+def validate_native_max_output_tokens(value: object) -> int | Literal["inf"]:
+    """Use the model maximum unless an explicit Realtime integer limit is set."""
+    if type(value) is str and value == "inf":
+        return "inf"
+    if type(value) is int and 1 <= value <= 4_096:
+        return value
+    raise NativeInteractionConfigurationError(
+        "NATIVE_MAX_OUTPUT_TOKENS_INVALID",
+        "Native output budget must be inf or an integer from 1 to 4096",
+    )
+
+
+def _output_tokens_environment(value: object) -> int | Literal["inf"]:
+    if (
+        type(value) is str and 1 <= len(value) <= 4
+        and value.isascii() and value.isdecimal() and not value.startswith("0")
+    ):
+        return validate_native_max_output_tokens(int(value))
+    # Environment values must be strings; direct Engine options use typed ints.
+    if type(value) is str and value == "inf":
+        return "inf"
+    raise NativeInteractionConfigurationError(
+        "NATIVE_MAX_OUTPUT_TOKENS_INVALID",
+        "Native output budget must be inf or a canonical integer from 1 to 4096",
+    )
 
 
 def validate_native_vad_eagerness(value: object) -> str:
@@ -114,18 +145,24 @@ def select_interaction_engine_environment(
     return NativeInteractionSelection(
         kind=kind, native_model=_model(raw_model),
         native_vad_eagerness=validate_native_vad_eagerness(raw_eagerness),
+        native_max_output_tokens=_output_tokens_environment(
+            environ.get(NATIVE_MAX_OUTPUT_TOKENS_ENV, DEFAULT_NATIVE_MAX_OUTPUT_TOKENS)
+        ),
     )
 
 
 __all__ = [
     "DEFAULT_NATIVE_REALTIME_MODEL",
     "DEFAULT_NATIVE_VAD_EAGERNESS",
+    "DEFAULT_NATIVE_MAX_OUTPUT_TOKENS",
     "INTERACTION_ENGINE_ENV",
     "NATIVE_REALTIME_MODEL_ENV",
     "NATIVE_VAD_EAGERNESS_ENV",
+    "NATIVE_MAX_OUTPUT_TOKENS_ENV",
     "InteractionEngineKind",
     "NativeInteractionConfigurationError",
     "NativeInteractionSelection",
     "select_interaction_engine_environment",
     "validate_native_vad_eagerness",
+    "validate_native_max_output_tokens",
 ]

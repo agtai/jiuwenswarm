@@ -332,6 +332,7 @@ def active_engine(
     event_queue_capacity: int = 16,
     pending_audio_capacity: int = 8,
     session_config: OpenAIRealtimeSessionConfig | None = None,
+    max_output_tokens: int | str = "inf",
 ) -> tuple[OpenAIRealtimeNativeInteractionEngine, ScriptedSocket, CapturingFactory]:
     socket = ScriptedSocket((*negotiation(), *events))
     factory = CapturingFactory(socket)
@@ -341,6 +342,7 @@ def active_engine(
         socket_factory=factory,
         event_queue_capacity=event_queue_capacity,
         pending_audio_capacity=pending_audio_capacity,
+        max_output_tokens=max_output_tokens,
     )
     return engine, socket, factory
 
@@ -380,8 +382,8 @@ def business_function(event_id, response_id, call_id):
                        "expected_revision": None, "name": None, "instruction": None, "adjustment": None}}))
 
 
-async def started_business_engine(*events, refresh=None):
-    engine, socket, factory = active_engine(*events)
+async def started_business_engine(*events, refresh=None, max_output_tokens="inf"):
+    engine, socket, factory = active_engine(*events, max_output_tokens=max_output_tokens)
     engine.configure_business_context(business_context(), refresh=refresh)
     await engine.start()
     return engine, socket, factory
@@ -744,10 +746,11 @@ async def test_business_session_seeds_json_facts_and_only_explicit_tool():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("done_first", [True, False])
-async def test_business_group_waits_all_real_outputs_then_single_auto_successor(done_first):
+@pytest.mark.parametrize("budget", ["inf", 4096])
+async def test_business_group_waits_all_real_outputs_then_single_auto_successor(done_first, budget):
     engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
         speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p1"),
-        business_function("f1", "p1", "call1"), business_function("f2", "p1", "call2"))
+        business_function("f1", "p1", "call1"), business_function("f2", "p1", "call2"), max_output_tokens=budget)
     try:
         _, _, commit = await accept_basic_turn(engine)
         await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
@@ -769,6 +772,7 @@ async def test_business_group_waits_all_real_outputs_then_single_auto_successor(
             await engine.next_event()
         requests = [i for i in socket.sent if i["type"] == "response.create"]
         assert len(requests) == 2 and requests[-1]["response"]["tool_choice"] == "auto"
+        assert requests[-1]["response"]["max_output_tokens"] == budget
         socket.push(response_created("r2", "p2"))
         assert action_payload(await engine.next_event())["provider_call_id"] == "call1"
         await engine.send_delegate_result("call2", response_ref(1), output)
@@ -802,14 +806,15 @@ async def test_business_interrupted_source_keeps_real_output_without_successor_o
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("still_current", [True, False])
-async def test_work_event_requires_accepted_turn_idle_and_fresh_membership(still_current):
+@pytest.mark.parametrize("budget", ["inf", 4096])
+async def test_work_event_requires_accepted_turn_idle_and_fresh_membership(still_current, budget):
     refreshes = []
     async def refresh():
         refreshes.append(True)
         return {"context": business_context(), "work_events": [work_event()] if still_current else []}
     engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
         speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p1"),
-        response_done("done", "p1"), refresh=refresh)
+        response_done("done", "p1"), refresh=refresh, max_output_tokens=budget)
     try:
         await engine.update_business_context(business_context(), [work_event()])
         assert not refreshes and not any(i["type"] == "response.create" for i in socket.sent)
@@ -825,7 +830,7 @@ async def test_work_event_requires_accepted_turn_idle_and_fresh_membership(still
         if still_current:
             assert requests[-1]["response"]["metadata"] == {"work_event_id": "work-1:1"}
             notification = requests[-1]["response"]
-            assert notification["max_output_tokens"] == 1024
+            assert notification["max_output_tokens"] == budget
             assert notification["tool_choice"] == "none"
             instructions = notification["instructions"]
             for requirement in ("one or two short sentences", "user's current request",
@@ -2863,7 +2868,8 @@ async def test_response_admission_is_exact_and_changed_replay_has_zero_release()
 
 
 @pytest.mark.asyncio
-async def test_delegate_is_proposal_only_and_result_round_trip_is_exact() -> None:
+@pytest.mark.parametrize("budget", ["inf", 4096])
+async def test_delegate_is_proposal_only_and_result_round_trip_is_exact(budget) -> None:
     engine, socket, _ = active_engine(
         speech_started("event-3", "user-item-1", 0),
         speech_stopped("event-4", "user-item-1", 20),
@@ -2873,6 +2879,7 @@ async def test_delegate_is_proposal_only_and_result_round_trip_is_exact() -> Non
         response_done("event-8", "provider-response-1"),
         response_created("event-9", "provider-response-2"),
         output_audio_delta("event-10", "provider-response-2", "assistant-item-2", 0),
+        max_output_tokens=budget,
     )
     await engine.start()
     await accept_basic_turn(engine)
@@ -2916,7 +2923,7 @@ async def test_delegate_is_proposal_only_and_result_round_trip_is_exact() -> Non
             "work unless the function output explicitly says so, mention "
             "implementation details, or invent details or suggestions."
         ),
-        "max_output_tokens": 1_024,
+        "max_output_tokens": budget,
         "tool_choice": "none",
     }
     assert (
@@ -2981,7 +2988,7 @@ async def test_concurrent_exact_delegate_result_sends_one_provider_pair() -> Non
             "work unless the function output explicitly says so, mention "
             "implementation details, or invent details or suggestions."
         ),
-        "max_output_tokens": 1_024,
+        "max_output_tokens": "inf",
         "tool_choice": "none",
     }
     await engine.close()

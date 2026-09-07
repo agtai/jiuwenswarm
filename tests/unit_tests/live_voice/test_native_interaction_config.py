@@ -10,6 +10,7 @@ from jiuwenswarm.server.live_voice.native_interaction_config import (
     INTERACTION_ENGINE_ENV,
     NATIVE_REALTIME_MODEL_ENV,
     NATIVE_VAD_EAGERNESS_ENV,
+    NATIVE_MAX_OUTPUT_TOKENS_ENV,
     InteractionEngineKind,
     NativeInteractionConfigurationError,
     NativeInteractionSelection,
@@ -146,7 +147,7 @@ def test_native_endpoint_configuration_is_exact_and_fails_closed(value):
 def test_cascade_never_reads_native_endpoint_configuration(kind):
     class CascadeEnvironment(dict):
         def get(self, key, *default):
-            if key in {NATIVE_VAD_EAGERNESS_ENV, NATIVE_REALTIME_MODEL_ENV}:
+            if key in {NATIVE_VAD_EAGERNESS_ENV, NATIVE_REALTIME_MODEL_ENV, NATIVE_MAX_OUTPUT_TOKENS_ENV}:
                 raise AssertionError("Cascade accessed Native-only configuration")
             return super().get(key, *default)
 
@@ -161,3 +162,22 @@ def test_endpoint_selection_reads_only_explicit_environment_and_retains_old_cons
     selected = select_interaction_engine_environment({INTERACTION_ENGINE_ENV: "openai-realtime-native"})
     assert selected.native_vad_eagerness == "auto"
     assert NativeInteractionSelection(InteractionEngineKind.CASCADE, None).native_vad_eagerness is None
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(None, "inf"), ("inf", "inf"), ("1", 1), ("2048", 2048), ("4096", 4096)])
+def test_native_output_budget_uses_model_maximum_or_explicit_limit(raw, expected):
+    environment = {INTERACTION_ENGINE_ENV: "openai-realtime-native"}
+    if raw is not None:
+        environment[NATIVE_MAX_OUTPUT_TOKENS_ENV] = raw
+    selected = select_interaction_engine_environment(environment)
+    assert selected.native_max_output_tokens == expected
+
+
+@pytest.mark.parametrize("raw", [None, True, 1024, "", "INF", " inf", "inf\n", "0", "01", "4097", "32000", "1.5", "١", [], {}])
+def test_native_output_budget_rejects_malformed_values(raw):
+    with pytest.raises(NativeInteractionConfigurationError) as raised:
+        select_interaction_engine_environment({
+            INTERACTION_ENGINE_ENV: "openai-realtime-native",
+            NATIVE_MAX_OUTPUT_TOKENS_ENV: raw,
+        })
+    assert raised.value.reason == "NATIVE_MAX_OUTPUT_TOKENS_INVALID"
