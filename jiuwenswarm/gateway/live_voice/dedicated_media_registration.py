@@ -1620,49 +1620,6 @@ class DedicatedMediaProductRegistry:
             provider_end_ms=provider_end_ms,
         )
 
-    async def next_native_notification(
-        self,
-        *,
-        session_id: str,
-        interaction_id: str,
-        connection_id: str,
-    ) -> dict[str, object]:
-        key = (
-            _required_id(session_id, "session_id"),
-            _required_id(interaction_id, "interaction_id"),
-            _required_id(connection_id, "connection_id"),
-        )
-        queue_owner = self._native_notifications.get(key)
-        if queue_owner is None:
-            raise MediaTransportViolation(
-                "MEDIA_NATIVE_NOTIFICATION_UNAVAILABLE",
-                "Native notification route is not active",
-            )
-        return await queue_owner.get()
-
-    def take_native_notification(
-        self,
-        *,
-        session_id: str,
-        interaction_id: str,
-        connection_id: str,
-    ) -> dict[str, object] | None:
-        try:
-            key = (
-                _required_id(session_id, "session_id"),
-                _required_id(interaction_id, "interaction_id"),
-                _required_id(connection_id, "connection_id"),
-            )
-        except MediaTransportViolation:
-            return None
-        queue_owner = self._native_notifications.get(key)
-        if queue_owner is None:
-            return None
-        try:
-            return queue_owner.get_nowait()
-        except asyncio.QueueEmpty:
-            return None
-
     def take_native_notification_response(
         self,
         *,

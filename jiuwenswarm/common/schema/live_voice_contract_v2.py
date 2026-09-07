@@ -18,7 +18,6 @@ from typing import Final, Generic, TypeAlias, TypeVar
 
 
 CONTRACT_VERSION: Final = "live-voice.contract.v2"
-V1_CONTRACT_VERSION: Final = "live-voice.contract.v1"
 MAX_SAFE_INTEGER: Final = 9_007_199_254_740_991
 
 
@@ -2862,44 +2861,6 @@ class CapabilityDescriptor:
         }
 
 
-class CapabilityRegistry:
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._descriptors: dict[str, CapabilityDescriptor] = {}
-
-    def register(self, descriptor: CapabilityDescriptor) -> None:
-        with self._lock:
-            existing = self._descriptors.get(descriptor.component)
-            if existing is not None and existing != descriptor:
-                raise _violation(
-                    "CAPABILITY_DESCRIPTOR_CONFLICT",
-                    f"component {descriptor.component!r} changed descriptor",
-                    code=ErrorCode.CONFLICT,
-                )
-            self._descriptors[descriptor.component] = descriptor
-
-    def require(self, component: str, operation: str) -> None:
-        parsed_component = _required_text(component, "capability.component")
-        parsed_operation = _namespaced(operation, "capability.operation")
-        with self._lock:
-            descriptor = self._descriptors.get(parsed_component)
-            if (
-                descriptor is None
-                or parsed_operation not in descriptor.supported_operations
-            ):
-                raise _violation(
-                    "CAPABILITY_UNSUPPORTED",
-                    f"{parsed_component!r} does not support {parsed_operation!r}",
-                    code=ErrorCode.UNSUPPORTED,
-                )
-            if descriptor.availability is Availability.UNAVAILABLE:
-                raise _violation(
-                    "CAPABILITY_TEMPORARILY_UNAVAILABLE",
-                    f"{parsed_component!r} is temporarily unavailable",
-                    code=ErrorCode.UNAVAILABLE,
-                )
-
-
 _LIFECYCLE_TRANSITIONS: Final = MappingProxyType(
     {
         LifecycleKind.INTERACTION: MappingProxyType(
@@ -3153,22 +3114,6 @@ class TurnCommitLedger:
             return True, effect(commit)
 
 
-def dispatch_committed_input(
-    state: InputCommitState | str,
-    target: SideEffectTarget | str,
-    effect: Callable[[], _ValueT],
-) -> _ValueT:
-    commit_state = _enum(InputCommitState, state, "input.state")
-    _enum(SideEffectTarget, target, "input.target")
-    if commit_state is not InputCommitState.COMMITTED:
-        raise _violation(
-            "INPUT_NOT_COMMITTED",
-            "partial or uncommitted input cannot invoke Agent, Tool, or Task",
-            code=ErrorCode.PERMISSION_DENIED,
-        )
-    return effect()
-
-
 @dataclass(frozen=True, slots=True)
 class ResponseRef:
     interaction_id: str
@@ -3252,109 +3197,6 @@ class ResponseFence:
                 code=ErrorCode.STALE,
             )
         return state
-
-
-def default_barge_in_scopes(
-    *, cancel_response: bool = False
-) -> tuple[CancelScope, ...]:
-    cancel_response = _bool(cancel_response, "barge_in.cancel_response")
-    scopes = [CancelScope.PLAYBACK_STOP]
-    if cancel_response:
-        scopes.append(CancelScope.RESPONSE_CANCEL)
-    return tuple(scopes)
-
-
-def dispatch_cancel(
-    command: CommandEnvelope,
-    handlers: Mapping[CancelScope, Callable[[CommandEnvelope], _ValueT]],
-) -> _ValueT:
-    try:
-        scope = CancelScope(command.command_type)
-    except ValueError as error:
-        raise _violation(
-            "NOT_A_CANCEL_COMMAND", "command is not an explicit cancel operation"
-        ) from error
-    handler = handlers.get(scope)
-    if handler is None:
-        raise _violation(
-            "CANCEL_HANDLER_UNAVAILABLE",
-            f"no handler is available for {scope.value}",
-            code=ErrorCode.CAPABILITY_UNAVAILABLE,
-        )
-    return handler(command)
-
-
-@dataclass(slots=True)
-class _CommandExecution:
-    fingerprint: bytes
-    result: ResultEnvelope | None = None
-    pending: bool = True
-
-
-class CommandResultLedger:
-    """Thread-safe command idempotency with cached owner-bound results."""
-
-    def __init__(self) -> None:
-        self._condition = threading.Condition(threading.RLock())
-        self._entries: dict[str, _CommandExecution] = {}
-
-    def execute(
-        self,
-        command: CommandEnvelope,
-        *,
-        observed_at: str,
-        handler: Callable[[CommandEnvelope], ResultEnvelope],
-    ) -> ResultEnvelope:
-        observed_at = _timestamp(observed_at, "result.observed_at")
-        fingerprint = command.fingerprint()
-        with self._condition:
-            entry = self._entries.get(command.command_id)
-            if entry is not None and entry.fingerprint != fingerprint:
-                return ResultEnvelope.failure(
-                    owner=command,
-                    error=ContractError(
-                        code=ErrorCode.CONFLICT,
-                        reason="IDEMPOTENCY_CONFLICT",
-                        message="command_id was reused with different content",
-                        retriable=False,
-                        correlation_id=command.correlation_id,
-                        _details=_freeze_object({}, "error.details"),
-                    ),
-                    observed_at=observed_at,
-                )
-            if entry is not None:
-                while entry.pending:
-                    self._condition.wait()
-                assert entry.result is not None
-                return entry.result.for_request(command.request_id)
-            entry = _CommandExecution(fingerprint=fingerprint)
-            self._entries[command.command_id] = entry
-
-        try:
-            result = handler(command)
-            ResultEnvelope.from_dict(result.to_dict(), owner=command)
-        except ContractViolation as error:
-            result = ResultEnvelope.failure(
-                owner=command, error=error.error, observed_at=observed_at
-            )
-        except Exception:
-            result = ResultEnvelope.failure(
-                owner=command,
-                error=ContractError(
-                    code=ErrorCode.INTERNAL,
-                    reason="COMMAND_HANDLER_FAILED",
-                    message="command handler failed",
-                    retriable=False,
-                    correlation_id=command.correlation_id,
-                    _details=_freeze_object({}, "error.details"),
-                ),
-                observed_at=observed_at,
-            )
-        with self._condition:
-            entry.result = result
-            entry.pending = False
-            self._condition.notify_all()
-        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -3903,52 +3745,12 @@ class EventSequenceTracker:
         return applied
 
 
-def classify_contract(payload: object) -> str:
-    data = _strict_object(payload, field_name="contract")
-    version = data.get("contract_version")
-    if version == CONTRACT_VERSION:
-        return "v2"
-    if version == V1_CONTRACT_VERSION:
-        return "v1"
-    raise _violation(
-        "UNSUPPORTED_CONTRACT_VERSION",
-        "payload is neither the v1 nor v2 contract",
-        code=ErrorCode.UNSUPPORTED,
-    )
-
-
-def parse_v2_envelope(
-    payload: object,
-    *,
-    identities: IdentityRegistry | None = None,
-    commits: TurnCommitLedger | None = None,
-) -> CommandEnvelope | QueryEnvelope | ResultEnvelope | EventEnvelope:
-    data = _strict_object(payload, field_name="envelope")
-    if data.get("contract_version") != CONTRACT_VERSION:
-        raise _violation(
-            "UNSUPPORTED_CONTRACT_VERSION",
-            f"expected {CONTRACT_VERSION}",
-            code=ErrorCode.UNSUPPORTED,
-        )
-    if "command_type" in data:
-        return CommandEnvelope.from_dict(data, identities=identities, commits=commits)
-    if "query_type" in data:
-        return QueryEnvelope.from_dict(data, identities=identities)
-    if "event_type" in data:
-        return EventEnvelope.from_dict(data, identities=identities)
-    if "ok" in data:
-        return ResultEnvelope.from_dict(data)
-    raise _violation("UNKNOWN_ENVELOPE_KIND", "cannot identify v2 envelope kind")
-
-
 __all__ = [
     "Assurance",
     "Availability",
     "CancelScope",
     "CapabilityDescriptor",
-    "CapabilityRegistry",
     "CommandEnvelope",
-    "CommandResultLedger",
     "ConnectionEpochRef",
     "ContextRedaction",
     "ContextRef",
@@ -3982,7 +3784,6 @@ __all__ = [
     "TerminalOutcome",
     "TurnCommit",
     "TurnCommitLedger",
-    "V1_CONTRACT_VERSION",
     "Speakability",
     "WorkProgressEventV2",
     "WorkProgressSource",
@@ -3991,10 +3792,5 @@ __all__ = [
     "WorkUrgency",
     "canonical_json",
     "canonical_json_bytes",
-    "classify_contract",
-    "default_barge_in_scopes",
-    "dispatch_cancel",
-    "dispatch_committed_input",
-    "parse_v2_envelope",
     "validate_transition",
 ]

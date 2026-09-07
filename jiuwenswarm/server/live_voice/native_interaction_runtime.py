@@ -18,7 +18,6 @@ from datetime import UTC, datetime
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,
     ContextRef,
-    MAX_SAFE_INTEGER,
     ResponseRef,
     TerminalOutcome,
     TurnCommit,
@@ -42,10 +41,8 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
     NativeTurnCommit,
 )
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
-    MAX_NATIVE_AUDIO_DELTA_BYTES,
     MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES,
     NATIVE_PCM_SAMPLE_RATE,
-    NativeAudioOutput,
     NativeProviderDone,
 )
 from jiuwenswarm.server.live_voice.voice_task_bridge import (
@@ -827,38 +824,6 @@ class NativeInteractionRuntimeOwner:
         predecessor.audio_units_by_sequence.clear()
         predecessor.audio_samples_by_item.clear()
 
-    async def accept_audio(self, output: NativeAudioOutput) -> bool:
-        async with self._lock:
-            self._require_open()
-            if not isinstance(output, NativeAudioOutput):
-                raise NativeInteractionRuntimeError(
-                    "NATIVE_AUDIO_INVALID", "audio must use NativeAudioOutput"
-                )
-            retained = self._responses_by_provider.get(output.provider_response_id)
-            if (
-                retained is None
-                or retained is not self._current_response
-                or retained.admission.response != output.response
-                or retained.cancelled
-                or retained.done is not None
-            ):
-                return False
-            self._validate_audio_output(output, retained)
-            observation = NativeAudioObservation(
-                provider_event_id=output.provider_event_id,
-                provider_response_id=output.provider_response_id,
-                provider_item_id=output.provider_item_id,
-                content_index=output.content_index,
-                sequence=output.sequence,
-                sample_count=len(output.pcm16) // 2,
-                content_sha256=hashlib.sha256(output.pcm16).hexdigest(),
-                response=output.response,
-            )
-            accepted, _unit = await self._accept_audio_observation_locked(
-                observation, retained
-            )
-            return accepted
-
     async def accept_audio_observation(
         self, observation: NativeAudioObservation
     ) -> NativeAudioAdmission | None:
@@ -1433,32 +1398,6 @@ class NativeInteractionRuntimeOwner:
             barge_count=len(self._barges),
         )
 
-    def _validate_audio_output(
-        self, output: NativeAudioOutput, retained: _RuntimeResponse
-    ) -> None:
-        _identity(output.provider_event_id, "provider_event_id")
-        _identity(output.provider_response_id, "provider_response_id")
-        _identity(output.provider_item_id, "provider_item_id")
-        if (
-            type(output.content_index) is not int
-            or not 0 <= output.content_index <= MAX_SAFE_INTEGER
-            or type(output.sequence) is not int
-            or not 0 <= output.sequence <= MAX_SAFE_INTEGER
-            or type(output.pcm16) is not bytes
-            or not output.pcm16
-            or len(output.pcm16) % 2
-            or len(output.pcm16) > MAX_NATIVE_AUDIO_DELTA_BYTES
-        ):
-            raise NativeInteractionRuntimeError(
-                "NATIVE_AUDIO_INVALID",
-                "Native audio fields must be bounded PCM16 and safe cursors",
-            )
-        if output.response != retained.admission.response:
-            raise NativeInteractionRuntimeError(
-                "NATIVE_AUDIO_RESPONSE_MISMATCH",
-                "Native audio must match the exact Runtime response tuple",
-            )
-
     def _validate_audio_observation(
         self, observation: NativeAudioObservation, retained: _RuntimeResponse
     ) -> None:
@@ -1513,7 +1452,7 @@ class NativeInteractionRuntimeOwner:
         return value
 
     @staticmethod
-    def _audio_unit_id(output: NativeAudioOutput | NativeAudioObservation) -> str:
+    def _audio_unit_id(output: NativeAudioObservation) -> str:
         digest = hashlib.sha256(
             (
                 f"{output.response.interaction_id}\0{output.response.response_id}\0"

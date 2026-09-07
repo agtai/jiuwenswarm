@@ -2717,14 +2717,6 @@ class DirectProjectManagedBaselineReader:
             return False
 
 
-def _text(payload: Mapping[str, Any], *keys: str) -> str | None:
-    for key in keys:
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
 def _closed_stream_text(value: object, *, maximum: int) -> str | None:
     if type(value) is not str or not value or len(value) > maximum or "\x00" in value:
         return None

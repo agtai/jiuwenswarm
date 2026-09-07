@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any
 from urllib.parse import unquote, urlparse
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
@@ -2565,17 +2564,6 @@ def require_exact_payload(
         )
 
 
-def safe_json_value(value: Any) -> Any:
-    """Return a JSON-only copy and reject custom values before persistence."""
-
-    canonical_json_bytes(value)
-    if type(value) is dict:
-        return {key: safe_json_value(item) for key, item in value.items()}
-    if type(value) is list:
-        return [safe_json_value(item) for item in value]
-    return value
-
-
 __all__ = [
     "AdmissionDisposition",
     "AdmissionPolicy",
@@ -2623,6 +2611,5 @@ __all__ = [
     "canonical_task_adjustment_rejection_reason",
     "command_result_extensions",
     "require_exact_payload",
-    "safe_json_value",
     "utc_now",
 ]

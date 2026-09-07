@@ -113,14 +113,6 @@ class TaskEventSource(Protocol):
     ) -> tuple[PersistentTaskEvent, ...]: ...
 
 
-class TaskEventAuthoritySource(TaskEventSource, Protocol):
-    """Store authority surface for an atomic prefix/cursor handoff."""
-
-    def event_authority_snapshot(
-        self, task_id: str, scope: ScopeRef, *, max_events: int
-    ) -> TaskEventAuthoritySnapshot: ...
-
-
 class TaskEventSubscriptionState(StrEnum):
     NEW = "new"
     DISABLED = "disabled"
@@ -1560,7 +1552,6 @@ class TaskEventSubscription:
 
 
 __all__ = [
-    "TaskEventAuthoritySource",
     "TaskEventSource",
     "TaskEventSubscription",
     "TaskEventSubscriptionSnapshot",

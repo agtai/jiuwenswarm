@@ -960,31 +960,6 @@ export class BrowserDedicatedMediaSocketLeaf {
     return createPlaybackStopReceipt(this.binding, receipt.outcome, confirmedThroughSeq);
   }
 
-  sendLocalPlaybackStop(value: unknown): MediaPlaybackStopReceipt {
-    const control = this.localPlaybackStopReceipt(value);
-    if (this.#closed) {
-      throw new MediaTransportViolation('MEDIA_STOP_NOT_DELIVERED', 'local playback stop was not delivered because the media leaf is closed');
-    }
-    if (!this.#attached) {
-      this.#terminate('MEDIA_LOCAL_CLOSE', true, 'local_close');
-      throw new MediaTransportViolation('MEDIA_STOP_NOT_DELIVERED', 'local playback stop was not delivered before server attach');
-    }
-    if (this.#socket.readyState !== SOCKET_OPEN) {
-      this.#terminate('MEDIA_TRANSPORT_CLOSED', false, 'transport_close');
-      throw new MediaTransportViolation('MEDIA_STOP_NOT_DELIVERED', 'local playback stop was not delivered because the transport is unavailable');
-    }
-    try {
-      this.#socket.send(serializeMediaControl(control));
-    } catch {
-      this.#terminate('MEDIA_TRANSPORT_SEND_FAILED', false, 'transport_close');
-      throw new MediaTransportViolation('MEDIA_STOP_NOT_DELIVERED', 'local playback stop transport send failed');
-    }
-    if (!this.#closed) {
-      this.#terminate('MEDIA_LOCAL_CLOSE', true, 'local_close');
-    }
-    return control;
-  }
-
   close(reasonId: MediaDetachReason = 'MEDIA_LOCAL_CLOSE'): MediaRegistrationOwnerCloseResult {
     return this.#terminate(reasonId, true, 'local_close');
   }
