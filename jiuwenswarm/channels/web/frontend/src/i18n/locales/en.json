@@ -17,7 +17,8 @@
       "globalResume": "Resume all",
       "killSwitch": "Revoke all mandates",
       "killSwitchConfirm": "Click again to confirm: revoke every document's standing mandate",
-      "watchExpired": "Expired"
+      "watchExpired": "Expired",
+      "watchNotify": "Notify"
     },
     "addPlaceholder": "＋ Paste a document link to add, e.g. https://docs.google.com/document/d/…",
     "status": {
@@ -177,6 +178,36 @@
     },
     "backlogBanner": "{{count}} comment(s) backlogged awaiting authorization",
     "linkUnknown": "Link unknown — paste the document's link again to restore it",
+    "personal": {
+      "kindPersonal": "personal",
+      "notifyOnly": "A personal identity only notifies; it never acts for you",
+      "discover": "Shared with me · {{name}}",
+      "discoverTitle": "Documents shared with me",
+      "discoverHint": "Listed only, never adopted unasked; tick the ones to adopt",
+      "discoverNote": "\"Shared with me\" can run to hundreds of documents and polling all of them would exhaust the quota, so only what you tick is adopted.",
+      "discoverEmpty": "Nothing listed as shared with you (or Feishu does not expose the listing). You can still paste a document link to adopt it.",
+      "discoverFailed": "Could not read the shared list",
+      "adoptSelected": "Adopt selected ({{count}})",
+      "adoptedAll": "Adopted {{n}}",
+      "adoptedPartly": "Adopted {{n}}; {{refused}} could not be read and were not adopted",
+      "alreadyAdopted": "adopted",
+      "readOnly": "read-only",
+      "unread": "{{count}} new notices",
+      "identityLabel": "Executes as: ",
+      "identityService": "service",
+      "identityPersonal": "me",
+      "identityHint": "This document is reachable through both the service identity and your own. Chat reads and writes use the identity chosen here (service by default); the receipt records which one actually executed."
+    },
+    "notice": {
+      "mentioned": "Someone mentioned you in a document",
+      "assigned": "Someone assigned a comment to you",
+      "handle": "Handle it",
+      "noAutoReply": "A personal identity never replies on its own; you decide in the chat.",
+      "promptHead": "Handle this comment in \"{{title}}\" (comment_id: {{comment_id}}).",
+      "promptQuote": "Quoted text: \"{{quote}}\"",
+      "promptComment": "Comment by {{author}}: {{text}}",
+      "promptTail": "Read the document and this comment's thread first and tell me what you would change; ask me before changing anything."
+    },
     "workbench": {
       "openHere": "Open in workbench",
       "openExternal": "Open in new tab",
@@ -296,7 +327,21 @@
       "modelUseDefault": "Use default",
       "guideTitle": "Before connecting",
       "guideApis": "1. Enable the Docs / Drive / Sheets / Slides APIs on your GCP project.",
-      "guideShare": "2. Share the documents with the SA email above (editor role), then adopt them in the Docs panel."
+      "guideShare": "2. Share the documents with the SA email above (editor role), then adopt them in the Docs panel.",
+      "kindService": "service",
+      "kindPersonal": "personal",
+      "personalTitle": "Connect as me (personal identity)",
+      "personalHint": "Let the swarm work on documents shared with you, as your own Feishu account. Requires a user login on this machine (lark-cli auth login, with the docs and drive domains). No key to upload.",
+      "personalModel": "A swarm working as you is not another collaborator in the document — it is you: nobody can @ it, they @ you; the document history shows your name. A personal identity only notifies and never replies on its own; you decide in the chat, and its replies carry a signature and a receipt number.",
+      "personalConnect": "Connect as my Feishu identity",
+      "personalAdded": "Connected as you. In the Docs panel, open \"Shared with me\" and tick the documents to adopt.",
+      "personalNotLoggedIn": "lark-cli has no user login yet: run lark-cli auth login --domain docs,drive in a terminal, scan the code, then retry. {{detail}}",
+      "signatureTitle": "Reply signature (personal identity)",
+      "signatureHint": "Appended to every reply sent as you; {name} becomes your name. Leave empty for the default wording.",
+      "signatureDefault": "— executed by {name}'s JiuwenSwarm agent",
+      "signatureTail": "The receipt number (\"· 回执 xxxx\") is appended by the system after the signature; it cannot be customised or omitted.",
+      "signatureSave": "Save",
+      "signatureSaved": "Saved. Example: {{preview}} · 回执 ab12cd34ef56"
     },
     "title": "Settings",
     "categories": {

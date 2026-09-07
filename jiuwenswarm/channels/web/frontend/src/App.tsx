@@ -19,7 +19,7 @@ import { UpdatePanel } from './components/UpdatePanel';
 import { DocsPanel } from './components/DocsPanel';
 import { DocWorkbench } from './components/DocWorkbench';
 import { useDocWorkbenchStore } from './stores/docWorkbenchStore';
-import { OPEN_DOC_EVENT, consumePendingOpenDoc } from './features/clouddoc/openDocSignal';
+import { OPEN_DOC_EVENT, consumePendingOpenDoc, consumePendingOpenContext } from './features/clouddoc/openDocSignal';
 import { ExternalCliInstallDialog, type ExternalCliInstallStatuses } from './components/ExternalCliInstallDialog';
 import { SettingsPage } from './features/settings/SettingsPage';
 import type { SettingsPageDefinition } from './features/settings/registry/types';
@@ -1550,6 +1550,16 @@ function AppContent({
       // does not know is still opened by id, with the id as its title.
       const docId = consumePendingOpenDoc();
       if (!docId) return;
+      const context = consumePendingOpenContext();
+      // A notice's "handle it" (S.4) brings the comment into the chat as a draft
+      // in the composer -- the person's to edit or send, never sent for them.
+      const prefill = () => {
+        if (!context?.prompt) return;
+        const sid = useChatStore.getState().activeSessionId;
+        if (!sid) return;
+        useChatStore.getState().setInputValue(sid, context.prompt);
+        window.dispatchEvent(new CustomEvent('chat-input-sync', { detail: { sessionId: sid, value: context.prompt } }));
+      };
       void webRequest<{ docs?: { doc_id: string; title?: string; kind?: string; url?: string; provider?: string; provider_name?: string }[] }>('clouddoc.list_docs')
         .then((out) => {
           const row = (out?.docs ?? []).find((d) => d.doc_id === docId);
@@ -1562,10 +1572,12 @@ function AppContent({
             providerName: row?.provider_name,
           });
           setActiveNav('chat');
+          prefill();
         })
         .catch(() => {
           useDocWorkbenchStore.getState().openDoc({ docId, title: docId, kind: 'document', url: '', provider: '' });
           setActiveNav('chat');
+          prefill();
         });
     };
     window.addEventListener(OPEN_DOC_EVENT, onOpenDoc);

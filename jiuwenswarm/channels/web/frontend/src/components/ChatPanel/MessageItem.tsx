@@ -44,6 +44,8 @@ import { isTeamP2PMessageToUser, parseTeamEventMessage } from './teamEventUtils'
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { AgentAvatar } from '../AgentAvatar';
 import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
+import { CloudDocNoticeCard } from './CloudDocNoticeCard';
+import { parseNoticeContent } from '../../features/clouddoc/notices';
 import { fileArtifactId } from '../ArtifactsPanel';
 import { openArtifactPanel } from '../../features/teamPanelState';
 import { openSingleAgentPanel } from '../../features/singleAgentPanelState';
@@ -554,6 +556,11 @@ export const MessageItem = memo(function MessageItem({
 
   // 系统消息
   if (role === 'system') {
+    // A personal-identity notice (release §13): a card with "handle it".
+    const notice = parseNoticeContent(content);
+    if (notice) {
+      return <CloudDocNoticeCard notice={notice} />;
+    }
     // slash 命令输出按命令类型路由：BTW 使用侧问卡片，compact 使用时间线分隔条，
     // 其余命令退回通用文本；isCommandOutput 标记不会影响其他 system 消息。
     if (isCommandOutput) {

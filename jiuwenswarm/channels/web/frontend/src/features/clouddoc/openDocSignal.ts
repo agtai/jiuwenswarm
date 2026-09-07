@@ -9,15 +9,28 @@
 
 export const OPEN_DOC_EVENT = 'jiuwen:clouddoc-open-doc';
 
-let pendingDocId: string | null = null;
+/** What travels with an open request: a composer prefill (a notice's "handle it"). */
+export interface OpenDocContext {
+  prompt?: string;
+}
 
-export function requestOpenDoc(docId: string): void {
+let pendingDocId: string | null = null;
+let pendingContext: OpenDocContext | null = null;
+
+export function requestOpenDoc(docId: string, context?: OpenDocContext): void {
   pendingDocId = docId;
+  pendingContext = context ?? null;
   window.dispatchEvent(new Event(OPEN_DOC_EVENT));
 }
 
 export function consumePendingOpenDoc(): string | null {
   const v = pendingDocId;
   pendingDocId = null;
+  return v;
+}
+
+export function consumePendingOpenContext(): OpenDocContext | null {
+  const v = pendingContext;
+  pendingContext = null;
   return v;
 }

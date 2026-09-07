@@ -42,6 +42,7 @@ import {
   useWorkspaceStore,
   useCronStore,
 } from '../stores';
+import { NOTICE_EVENT, noticeMessageContent, type CloudDocNotice } from '../features/clouddoc/notices';
 import {
   isPlanWireMode,
   isTeamAgentMode,
@@ -3751,6 +3752,26 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           id: messageId,
           role: 'system',
           content,
+          timestamp: new Date().toISOString(),
+        });
+      }),
+      webClient.on('clouddoc.notice', ({ payload }) => {
+        // A personal connection's watcher found a comment that summons the
+        // person (release §13, S.3): one system message in the active session,
+        // rendered as a card with "handle it", plus a window event for the Docs
+        // panel's badges. The document is never written to.
+        const notice = payload as unknown as CloudDocNotice;
+        if (!notice || typeof notice.doc_id !== 'string' || typeof notice.comment_id !== 'string') return;
+        window.dispatchEvent(new CustomEvent(NOTICE_EVENT, { detail: notice }));
+        const chatState = useChatStore.getState();
+        const sid = chatState.activeSessionId;
+        if (!sid || !chatState.getRuntime(sid)) return;
+        const messageId = `clouddoc-notice-${notice.notice_id || notice.key || `${notice.doc_id}:${notice.comment_id}:${notice.reply_id ?? '-'}`}`;
+        if (chatState.getRuntime(sid)?.messages.some((m) => m.id === messageId)) return;
+        chatState.addMessage(sid, {
+          id: messageId,
+          role: 'system',
+          content: noticeMessageContent(notice),
           timestamp: new Date().toISOString(),
         });
       }),

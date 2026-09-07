@@ -16,6 +16,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { webRequest } from '../../services/webClient';
 import { requestOpenDoc } from '../../features/clouddoc/openDocSignal';
+import { NOTICE_EVENT, handleNotice, type CloudDocNotice } from '../../features/clouddoc/notices';
 import { RECEIPT_OP_KEY, RECEIPT_STATUS_KEY, type ReceiptRow } from '../../features/clouddoc/receipts';
 import ConfirmDialog from '../CronPanel/ConfirmDialog';
 import SimpleSelect from '../CronPanel/SimpleSelect';
@@ -33,6 +34,13 @@ interface DocRow {
   provider?: string;
   provider_name?: string;
   connection_id?: string;
+  // Personal identity (release §13, matrix §S): which kind of connection this row
+  // belongs to, whether the document is also adopted the other way, which identity
+  // executes on it, and how many unread notices it holds.
+  connection_kind?: 'service' | 'personal';
+  overlap?: boolean;
+  identity?: 'service' | 'personal';
+  notices?: number;
 }
 
 interface Connection {
@@ -41,6 +49,7 @@ interface Connection {
   provider_name: string;
   agent_address: string;
   agent_display?: string;
+  kind?: 'service' | 'personal';
   docs_count: number;
   health?: 'ok' | 'attention' | 'down' | 'idle';
   ok?: number;
@@ -266,6 +275,16 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
   const [filterTier, setFilterTier] = useState('');
   const [filterKind, setFilterKind] = useState('');
   const [addConnId, setAddConnId] = useState('');
+  // S.6: a personal connection's "shared with me", listed and ticked -- never
+  // adopted unasked.
+  type Candidate = { doc_id: string; title: string; kind?: string; url?: string; can_edit?: boolean; adopted?: boolean };
+  const [discoverFor, setDiscoverFor] = useState<Connection | null>(null);
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [candidateSel, setCandidateSel] = useState<Set<string>>(new Set());
+  const [discoverBusy, setDiscoverBusy] = useState(false);
+  const [discoverNote, setDiscoverNote] = useState('');
+  // S.3: unread notices per document, refreshed on the gateway's push.
+  const [noticesByDoc, setNoticesByDoc] = useState<Record<string, CloudDocNotice[]>>({});
   const setMode = useCallback(async (mode: 'mandate' | 'direct') => {
     await webRequest('clouddoc.set_mode', { mode });
     setArmDirect(false);
@@ -318,6 +337,82 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
   useEffect(() => {
     if (isConnected) void reload();
   }, [isConnected, reload]);
+
+  const loadNotices = useCallback(async () => {
+    try {
+      const out = await webRequest<{ notices?: CloudDocNotice[] }>('clouddoc.notices', { limit: 200 });
+      const map: Record<string, CloudDocNotice[]> = {};
+      for (const n of out?.notices ?? []) (map[n.doc_id] ??= []).push(n);
+      setNoticesByDoc(map);
+    } catch {
+      setNoticesByDoc({});
+    }
+  }, []);
+  useEffect(() => {
+    if (isConnected) void loadNotices();
+  }, [isConnected, loadNotices]);
+  useEffect(() => {
+    const onNotice = () => { void loadNotices(); void reload(); };
+    window.addEventListener(NOTICE_EVENT, onNotice);
+    return () => window.removeEventListener(NOTICE_EVENT, onNotice);
+  }, [loadNotices, reload]);
+
+  // "Handle it" from the panel: the newest unread notice of the row, or the
+  // document alone when the badge is already clear.
+  const handleRowNotice = useCallback(async (d: DocRow) => {
+    const list = noticesByDoc[d.doc_id] ?? [];
+    if (list.length === 0) { requestOpenDoc(d.doc_id); return; }
+    handleNotice(list[0], t);
+    await webRequest('clouddoc.notice_ack', { doc_id: d.doc_id }).catch(() => undefined);
+    void loadNotices();
+    void reload();
+  }, [noticesByDoc, t, loadNotices, reload]);
+
+  const setIdentity = useCallback(async (docId: string, identity: 'service' | 'personal') => {
+    await webRequest('clouddoc.set_identity_choice', { doc_id: docId, identity }).catch(() => undefined);
+    setMenuFor(null);
+    await reload();
+  }, [reload]);
+
+  const openDiscover = useCallback(async (c: Connection) => {
+    setDiscoverFor(c);
+    setCandidates([]);
+    setCandidateSel(new Set());
+    setDiscoverNote('');
+    setDiscoverBusy(true);
+    try {
+      const out = await webRequest<{ result: string; candidates?: Candidate[] }>(
+        'clouddoc.sync_shared_docs', { connection_id: c.id },
+      );
+      setCandidates(out?.candidates ?? []);
+      if (out?.result !== 'ok') setDiscoverNote(t('docs.personal.discoverFailed'));
+    } catch (e) {
+      setDiscoverNote(String(e));
+    } finally {
+      setDiscoverBusy(false);
+    }
+  }, [t]);
+
+  const adoptSelected = useCallback(async () => {
+    if (!discoverFor || candidateSel.size === 0) return;
+    setDiscoverBusy(true);
+    try {
+      const out = await webRequest<{ adopted?: string[]; refused?: { doc_id: string; result: string }[] }>(
+        'clouddoc.adopt_docs', { connection_id: discoverFor.id, doc_ids: [...candidateSel] },
+      );
+      const refused = out?.refused ?? [];
+      setDiscoverNote(
+        refused.length
+          ? t('docs.personal.adoptedPartly', { n: out?.adopted?.length ?? 0, refused: refused.length })
+          : t('docs.personal.adoptedAll', { n: out?.adopted?.length ?? 0 }),
+      );
+      setCandidateSel(new Set());
+      await reload();
+      await openDiscover(discoverFor);
+    } finally {
+      setDiscoverBusy(false);
+    }
+  }, [discoverFor, candidateSel, t, reload, openDiscover]);
 
   const conns = conf?.connections ?? [];
   const conn = conns.find((c) => c.id === selectedConn) ?? conns[0] ?? null;
@@ -473,9 +568,9 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
   // documents are simply there. list_docs stays API-free; this one call is the deliberate
   // exception, and it is what makes sharing the only step a user performs.
   useEffect(() => {
-    if (!isConnected || !conn?.id) return;
+    if (!isConnected || !conn?.id || conn.kind === 'personal') return;
     void syncShared(conn.id).then((n) => { if (n > 0) void reload(); });
-  }, [isConnected, conn?.id, syncShared, reload]);
+  }, [isConnected, conn?.id, conn?.kind, syncShared, reload]);
 
   const copyAddress = () => {
     if (!conn?.agent_address) return;
@@ -516,8 +611,9 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
       for (const d of connDocs) {
         await webRequest('clouddoc.update_doc', { doc_id: d.doc_id }).catch(() => {});
       }
-      await syncShared(conn?.id);
+      if (conn?.kind !== 'personal') await syncShared(conn?.id);
       await reload();
+      await loadNotices();
     } finally {
       setRefreshing(false);
     }
@@ -527,7 +623,7 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
     if (!removeTarget) return;
     setRemoving(true);
     try {
-      await webRequest('clouddoc.remove_doc', { doc_id: removeTarget.doc_id }).catch(() => {});
+      await webRequest('clouddoc.remove_doc', { doc_id: removeTarget.doc_id, connection_id: removeTarget.connection_id }).catch(() => {});
       await reload();
     } finally {
       setRemoving(false);
@@ -721,7 +817,19 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
             <option value="off">{t('docs.watch.watchOff')}</option>
             <option value="reply_only">{t('docs.watch.watchReply')}</option>
             <option value="apply_scoped">{t('docs.watch.watchApply')}</option>
+            <option value="notify">{t('docs.watch.watchNotify')}</option>
           </select>
+          {conns.filter((c) => c.kind === 'personal').map((c) => (
+            <button
+              key={c.id}
+              onClick={() => void openDiscover(c)}
+              className="rounded-md border border-border px-2.5 py-1 text-xs hover:bg-bg-hover"
+              data-testid="docs-personal-discover"
+              title={c.agent_display || c.agent_address}
+            >
+              {t('docs.personal.discover', { name: c.agent_display || c.agent_address })}
+            </button>
+          ))}
           {backlogCount > 0 && (
             <span className="rounded-full bg-amber-50 px-2.5 py-0.5 text-[11px] text-amber-700">
               {t('docs.backlogBanner', { count: backlogCount })}
@@ -775,14 +883,20 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
                     .filter((d) => !filterKind || (d.kind || 'document') === filterKind)
                     .filter((d) => {
                       if (!filterTier) return true;
+                      if (filterTier === 'notify') return d.connection_kind === 'personal';
+                      if (d.connection_kind === 'personal') return false;
                       const w = watches[d.doc_id];
                       return filterTier === 'off' ? !w : w?.mode === filterTier;
                     })
                     .sort((a, b) => (b.checked_at ?? 0) - (a.checked_at ?? 0))
                     .map((d) => {
-                      const w = watches[d.doc_id];
+                      const personal = d.connection_kind === 'personal';
+                      const w = personal ? undefined : watches[d.doc_id];
                       const cconn = conns.find((c) => c.id === d.connection_id);
-                      const tierLabel = !w
+                      const unread = d.notices ?? 0;
+                      const tierLabel = personal
+                        ? t('docs.watch.watchNotify')
+                        : !w
                         ? t('docs.watch.watchOff')
                         : w.expired
                           ? t('docs.watch.watchExpired')
@@ -791,7 +905,9 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
                             : w.mode === 'apply_scoped'
                               ? t('docs.watch.watchApply')
                               : t('docs.watch.watchReply');
-                      const tierCls = !w
+                      const tierCls = personal
+                        ? 'bg-violet-50 text-violet-700'
+                        : !w
                         ? 'bg-bg-hover text-text-muted'
                         : w.expired || w.suspended || globalSuspended
                           ? 'bg-amber-50 text-amber-700'
@@ -803,10 +919,21 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
                           ? Math.max(0, Math.ceil((w.expires_at * 1000 - Date.now()) / 86400000))
                           : null;
                       return (
-                        <tr key={d.doc_id} className="border-b border-border/60 hover:bg-bg-hover/40" data-testid="docs-table-row">
+                        <tr key={`${d.connection_id ?? ''}:${d.doc_id}`} className="border-b border-border/60 hover:bg-bg-hover/40" data-testid="docs-table-row" data-connection-kind={d.connection_kind ?? 'service'}>
                           <td className="max-w-[340px] px-4 py-2">
                             <span className="flex items-center gap-2.5">
-                              <DocIcon px={26} provider={d.provider} kind={d.kind} />
+                              <span className="relative flex-none">
+                                <DocIcon px={26} provider={d.provider} kind={d.kind} />
+                                {unread > 0 && (
+                                  <span
+                                    className="absolute -right-1.5 -top-1.5 min-w-[16px] rounded-full bg-red-500 px-1 text-center text-[10px] font-semibold leading-4 text-white"
+                                    data-testid="docs-notice-badge"
+                                    title={t('docs.personal.unread', { count: unread })}
+                                  >
+                                    {unread}
+                                  </span>
+                                )}
+                              </span>
                               <span className="min-w-0">
                                 {d.url && d.url.startsWith('http') ? (
                                   <span className="flex items-center gap-1.5 truncate font-medium">
@@ -847,14 +974,34 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
                                   <span className="rounded bg-bg-muted px-1 text-[10px]">{d.provider_name}</span>
                                 )}
                                 {cconn?.agent_display || (cconn?.agent_address || '').split('@')[0] || d.connection_id}
+                                {personal && <span className="rounded bg-violet-50 px-1 text-[10px] text-violet-700">{t('docs.personal.kindPersonal')}</span>}
                               </span>
                             </td>
                           )}
                           <td className="whitespace-nowrap px-3 py-2"><StatusPill status={d.status} /></td>
                           <td className="whitespace-nowrap px-3 py-2">
-                            <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${tierCls}`}>{tierLabel}</span>
+                            <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${tierCls}`} data-testid="docs-tier-label">{tierLabel}</span>
                             {daysLeft !== null && (
                               <span className="ml-1.5 text-[11px] text-text-muted">{t('docs.table.daysLeft', { count: daysLeft })}</span>
+                            )}
+                            {d.overlap && (
+                              <span
+                                className="ml-1.5 text-[11px] text-text-muted"
+                                title={t('docs.personal.identityHint')}
+                                data-testid="docs-identity-label"
+                              >
+                                {t('docs.personal.identityLabel')}
+                                {d.identity === 'personal' ? t('docs.personal.identityPersonal') : t('docs.personal.identityService')}
+                              </span>
+                            )}
+                            {personal && unread > 0 && (
+                              <button
+                                onClick={() => void handleRowNotice(d)}
+                                className="ml-1.5 rounded-md border border-border px-1.5 py-0.5 text-[11px] hover:bg-bg-hover"
+                                data-testid="docs-notice-handle"
+                              >
+                                {t('docs.notice.handle')}
+                              </button>
                             )}
                           </td>
                           <td className="whitespace-nowrap px-3 py-2 font-mono text-[11px] text-text-muted">
@@ -870,8 +1017,52 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
                               >
                                 ⋯
                               </button>
-                              {menuFor === d.doc_id && (
+                              {menuFor === d.doc_id && personal && (
+                                /* A personal row has no tiers (S.3): notify is its only
+                                   state, so the menu carries no reply/apply controls. */
+                                <span className="absolute right-0 top-7 z-10 block w-44 rounded-lg border border-border bg-card py-1 shadow-lg" data-testid="docs-personal-menu">
+                                  <span className="block px-3 py-1.5 text-[11px] text-text-muted">{t('docs.personal.notifyOnly')}</span>
+                                  <button
+                                    onClick={() => { setMenuFor(null); void handleRowNotice(d); }}
+                                    className="block w-full border-t border-border px-3 py-1.5 text-left text-xs hover:bg-bg-hover"
+                                  >
+                                    {t('docs.notice.handle')}
+                                  </button>
+                                  <button
+                                    data-testid="docs-panel-history-open"
+                                    onClick={() => void openHistory(d)}
+                                    className="block w-full border-t border-border px-3 py-1.5 text-left text-xs hover:bg-bg-hover"
+                                  >
+                                    {t('docs.history.open')}
+                                  </button>
+                                  <button
+                                    onClick={() => { setMenuFor(null); setRemoveTarget(d); }}
+                                    className="block w-full border-t border-border px-3 py-1.5 text-left text-xs text-red-600 hover:bg-bg-hover"
+                                  >
+                                    {t('docs.remove')}
+                                  </button>
+                                </span>
+                              )}
+                              {menuFor === d.doc_id && !personal && (
                                 <span className="absolute right-0 top-7 z-10 block w-44 rounded-lg border border-border bg-card py-1 shadow-lg">
+                                  {d.overlap && (
+                                    /* S.2: the document is reachable both ways; the person
+                                       picks which identity executes, service by default. */
+                                    <>
+                                      <span className="block px-3 py-1 text-[11px] text-text-muted">{t('docs.personal.identityLabel')}</span>
+                                      {(['service', 'personal'] as const).map((idn) => (
+                                        <button
+                                          key={idn}
+                                          onClick={() => void setIdentity(d.doc_id, idn)}
+                                          className={`block w-full px-3 py-1.5 text-left text-xs hover:bg-bg-hover ${(d.identity ?? 'service') === idn ? 'font-semibold text-[#2563eb]' : ''}`}
+                                          data-testid={`docs-identity-${idn}`}
+                                        >
+                                          {idn === 'service' ? t('docs.personal.identityService') : t('docs.personal.identityPersonal')}
+                                        </button>
+                                      ))}
+                                      <span className="block border-t border-border" />
+                                    </>
+                                  )}
                                   {(['off', 'reply_only', 'apply_scoped'] as const).map((m) => {
                                     const current = (!w && m === 'off') || w?.mode === m;
                                     const label =
@@ -1070,6 +1261,69 @@ export function DocsPanel({ isConnected }: { isConnected: boolean }) {
           </div>
         )}
       </div>
+
+      {discoverFor && (
+        <div
+          data-testid="docs-personal-discover-modal"
+          className="fixed inset-0 z-30 flex items-center justify-center bg-black/30"
+          onClick={() => setDiscoverFor(null)}
+        >
+          <div
+            className="max-h-[80vh] w-[min(640px,92vw)] overflow-auto rounded-lg border border-border bg-card p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-sm font-semibold text-text-strong">{t('docs.personal.discoverTitle')}</h3>
+                <p className="mt-0.5 text-xs text-text-muted">{discoverFor.agent_display || discoverFor.agent_address} · {t('docs.personal.discoverHint')}</p>
+              </div>
+              <button onClick={() => setDiscoverFor(null)} className="rounded-md px-2 py-1 text-text-muted hover:bg-bg-hover">✕</button>
+            </div>
+            {discoverNote && <p className="mb-2 rounded-md bg-bg-hover px-3 py-2 text-xs">{discoverNote}</p>}
+            {discoverBusy && candidates.length === 0 ? (
+              <p className="py-6 text-center text-xs text-text-muted">…</p>
+            ) : candidates.length === 0 ? (
+              <p className="py-6 text-center text-xs text-text-muted">{t('docs.personal.discoverEmpty')}</p>
+            ) : (
+              <ul className="flex flex-col gap-1">
+                {candidates.map((c) => (
+                  <li key={c.doc_id} className="flex items-center gap-2 rounded-md px-2 py-1 hover:bg-bg-hover/60" data-testid="docs-personal-candidate">
+                    <input
+                      type="checkbox"
+                      disabled={!!c.adopted || discoverBusy}
+                      checked={!!c.adopted || candidateSel.has(c.doc_id)}
+                      onChange={(e) => {
+                        const next = new Set(candidateSel);
+                        if (e.target.checked) next.add(c.doc_id); else next.delete(c.doc_id);
+                        setCandidateSel(next);
+                      }}
+                    />
+                    <DocIcon px={20} provider={discoverFor.provider} kind={c.kind} />
+                    <span className="min-w-0 flex-1 truncate text-[13px]">{c.title || c.doc_id}</span>
+                    <span className="flex-none text-[11px] text-text-muted">{t(`docs.kind.${c.kind || 'document'}`, c.kind || 'document')}</span>
+                    {c.adopted ? (
+                      <span className="flex-none rounded-full bg-green-50 px-2 py-0.5 text-[11px] text-green-700">{t('docs.personal.alreadyAdopted')}</span>
+                    ) : c.can_edit === false ? (
+                      <span className="flex-none rounded-full bg-bg-muted px-2 py-0.5 text-[11px] text-text-muted">{t('docs.personal.readOnly')}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="mt-3 flex items-center justify-between">
+              <span className="text-[11px] text-text-muted">{t('docs.personal.discoverNote')}</span>
+              <button
+                onClick={() => void adoptSelected()}
+                disabled={discoverBusy || candidateSel.size === 0}
+                className="rounded-md bg-[#1f1f23] px-3 py-1.5 text-xs text-white disabled:opacity-50"
+                data-testid="docs-personal-adopt"
+              >
+                {t('docs.personal.adoptSelected', { count: candidateSel.size })}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {usageFor && (
         <div

@@ -17,7 +17,8 @@
       "globalResume": "全部恢复",
       "killSwitch": "撤销全部授权",
       "killSwitchConfirm": "再点一次确认：撤销所有文档的常设授权",
-      "watchExpired": "已到期"
+      "watchExpired": "已到期",
+      "watchNotify": "通知"
     },
     "addPlaceholder": "＋ 粘贴文档链接添加，如 https://docs.google.com/document/d/…",
     "status": {
@@ -177,6 +178,36 @@
     },
     "backlogBanner": "{{count}} 条批注积压待授权",
     "linkUnknown": "平台链接未知——重新粘贴该文档链接即可恢复",
+    "personal": {
+      "kindPersonal": "个人",
+      "notifyOnly": "个人身份只通知，不代为处理",
+      "discover": "与我共享 · {{name}}",
+      "discoverTitle": "与我共享的文档",
+      "discoverHint": "只列出，不自动纳管；勾选后按文档纳管",
+      "discoverNote": "与我共享的文档可能很多，全部轮询会耗尽配额，所以只纳管你勾选的。",
+      "discoverEmpty": "没有列到与你共享的文档（或飞书没有开放枚举）。也可以直接粘贴文档链接纳管。",
+      "discoverFailed": "读取共享列表失败",
+      "adoptSelected": "纳管所选（{{count}}）",
+      "adoptedAll": "已纳管 {{n}} 篇",
+      "adoptedPartly": "已纳管 {{n}} 篇，{{refused}} 篇无法读取，未纳管",
+      "alreadyAdopted": "已纳管",
+      "readOnly": "只读",
+      "unread": "{{count}} 条新通知",
+      "identityLabel": "执行身份：",
+      "identityService": "服务",
+      "identityPersonal": "个人",
+      "identityHint": "这篇文档服务身份与个人身份都能到达。聊天里的读写用这里选的身份，默认服务身份；回执会记下实际执行身份。"
+    },
+    "notice": {
+      "mentioned": "有人在文档里 @ 了你",
+      "assigned": "有人把评论指派给了你",
+      "handle": "去处理",
+      "noAutoReply": "个人身份不会自动回帖；你在聊天里决定怎么办。",
+      "promptHead": "处理文档「{{title}}」里的这条评论（comment_id: {{comment_id}}）。",
+      "promptQuote": "被 @ 的引文：「{{quote}}」",
+      "promptComment": "{{author}} 的评论：{{text}}",
+      "promptTail": "请先读这篇文档和这条评论的线程，告诉我你打算怎么改；改动前先问我。"
+    },
     "workbench": {
       "openHere": "在工作台打开",
       "openExternal": "新标签打开",
@@ -296,7 +327,21 @@
       "modelUseDefault": "恢复默认",
       "guideTitle": "接入前的准备",
       "guideApis": "1. 在 GCP 项目中启用 Docs / Drive / Sheets / Slides API。",
-      "guideShare": "2. 把要协作的文档共享给上方的 SA 邮箱（编辑者权限），然后到 Docs 面板纳管。"
+      "guideShare": "2. 把要协作的文档共享给上方的 SA 邮箱（编辑者权限），然后到 Docs 面板纳管。",
+      "kindService": "服务身份",
+      "kindPersonal": "个人身份",
+      "personalTitle": "以我的身份连接（个人身份）",
+      "personalHint": "用你自己的飞书账号，让 swarm 处理共享给你的文档。前提：本机已用 lark-cli auth login 扫码登录（勾选 docs、drive 域）。不需要上传任何密钥。",
+      "personalModel": "以本人身份工作的 swarm 不是文档里的另一个协作者，它就是你本人：没人能 @ 它，别人 @ 的是你；文档历史里是你的名字。个人身份只通知、不自动回帖；你在聊天里决定怎么办，它的回帖会带上签名和回执编号。",
+      "personalConnect": "以我的飞书身份连接",
+      "personalAdded": "已以你的身份连接。到 Docs 面板点「与我共享」勾选要纳管的文档。",
+      "personalNotLoggedIn": "lark-cli 还没有用户登录：请在终端运行 lark-cli auth login --domain docs,drive 扫码登录后重试。{{detail}}",
+      "signatureTitle": "回帖签名（个人身份）",
+      "signatureHint": "以你身份发出的每条回帖末尾都会追加这一行；{name} 会换成你的名字。留空用默认文案。",
+      "signatureDefault": "— 由 {name} 的 JiuwenSwarm 代理执行",
+      "signatureTail": "回执编号「· 回执 xxxx」由系统固定追加在签名之后，不可定制、不可省略。",
+      "signatureSave": "保存",
+      "signatureSaved": "已保存。示例：{{preview}} · 回执 ab12cd34ef56"
     },
     "title": "设置",
     "categories": {
