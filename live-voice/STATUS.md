@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-06 (Native conversational implementation and scoped verification recorded; physical acceptance remains open).
+> Updated: 2026-09-07 (P0–P9 per-point candidate complete; unified acceptance remains open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -23,6 +23,55 @@ appear through the scoped Registry in the right panel. Old candidate PASS on
 history, not acceptance of this candidate.
 
 ## Current execution packet
+
+### Realtime optimization: full implementation and unified acceptance
+
+The user authorized all P0–P9 optimization points, one local commit per point and
+unified acceptance in the [full execution packet](reviews/REALTIME_OPTIMIZATION_FULL_20260907.md).
+Main owns parallel work, shared semantics, review and local integration. The
+[first bounded batch](reviews/REALTIME_OPTIMIZATION_20260907.md) retains scoped
+automation/review credit for passive diagnostics, argument descriptions and
+equivalent receipt encoding. P0 transport/argument/endpoint observations and
+offline identity-safe timing now have scoped automation and independent review.
+P1 operation-specific Provider tools retain the authoritative v1 carrier and
+have scoped automation, independent review and real selected-Provider schema/call
+conformance; first-call accuracy improvement and physical latency remain unproved.
+P5 now uses the existing async audio window and bounded retained cleanup; scoped
+automation and independent review pass, with physical supply/continuity still open.
+P3 exposes controlled Native endpoint eagerness; same-byte real Provider trials
+found an extra late-supplement split with high, so auto remains the default.
+Configuration, launcher and endpoint checks pass; no general speedup is claimed.
+P8 removes a duplicate construction of the fresh selected Native model while
+retaining execution isolation; formal checks and independent review pass. Agent
+round reduction and background-task latency improvement remain unproved.
+P4 applies a Native conclusion-first, source-qualified answer policy. Formal and
+Runtime checks, independent review and a real Agent/file-tool sample pass their
+owned boundaries. The recorded final answer is shorter but its total execution
+is not faster; precompletion publication and physical gains remain unproved.
+P6's early recovery rescheduling was rejected after independent and Astra max
+review reproduced added underrun and repeated PCM. The original reserve remains;
+regression guards pass, but the P6 latency target has not been achieved.
+P9 retains service, durable receipt, actual-playback ACK and transcript authority
+as the handoff's low-priority decision; no speedup is allocated or claimed.
+P7 prepares exact terminal notification TTS before playback arbitration, retaining
+child cancellation through actual render settlement. Scoped backend/frontend,
+independent review and real selected-TTS/registered-media-leaf checks pass; the
+physical reactivation target and complete mounted acceptance remain unproved.
+P2 now retains complete canonical truth while reducing redundant receipt context,
+waking/coalescing observations and preparing one bounded successor behind the real
+predecessor playback ACK. Early control receipts, STOP priority, bounded observation
+retention and exact failed Task-presentation retirement have scoped regression and
+independent max/ultra review. Final cumulative backend checks pass 642 cases;
+real selected-Realtime output/truncation and selected-TTS/media-leaf probes pass
+their recorded boundaries with unchanged private configuration.
+
+P0–P9 have each been handled in one local point commit, including the explicit
+P3/P6/P9 retain-or-reject decisions. The candidate is ready for unified review;
+this does not claim all latency targets were achieved. Original rehearsal files
+are absent locally; measured overall latency, physical playback and complete
+product acceptance remain unproved. Inherited Registry and mounted failures are
+recorded in the packet and remain open. The Native boundary below supplies the
+baseline. Local integration does not update any separately pinned deployment.
 
 ### Native conversational execution
 
@@ -183,7 +232,7 @@ whole-project audit for every bounded task.
 | Executor & Durability | Direct D0/D2 v2 admission/reconciliation, sealed results/checkpoints, dedicated memory repair; v1 cannot dispatch v2 | Required review and real result/control acceptance; outside-checkout files or additional Executor/D1 capability need separate scope; no D1/host-crash claim |
 | Voice–Task Bridge | Unified committed semantics and Native structured dispatch through existing production policy, exact local create/successor/adjust/cancel consent, authorized target/revision checks and durable projection repair | Real modification/query acceptance, generalization/retirement; update/reprioritize retain confirmation; pause/resume/provide-input remain unsupported |
 | Integrated Web product experience | Right-panel Registry Tasks, operation-driven refresh, passive Native work state, confirmed model selection, text/notification ownership and processing state independent of capture | Current-source busy-to-idle terminal delivery, stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh; projectless backend authority |
-| Observability, benchmark and latency | Scoped timing/error export, Native call/context/work/model milestones, critical-event retention and true terminal outcomes | Current physical reproduction, interruption/first-audible baseline and SLOs; clock gaps/dropped data remain explicit |
+| Observability, benchmark and latency | Scoped timing/error export, Native call/context/work/model and response/wait/argument/receipt milestones, critical-event retention and true terminal outcomes | Current physical reproduction, interruption/first-audible baseline and SLOs; clock gaps/dropped data remain explicit |
 | Automated verification and acceptance | Focused regressions and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative review/human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, semantic cutover, bounded removals and prompt/config isolation | Complete reachability/retirement audit and remaining manifest rows; keep private artifacts/runtime data out of integration |
 | Production operations | Privacy/preflight/observability foundations | Auth/tenancy, public deployment, operations, retention, security, compatibility and release support after separate scope |

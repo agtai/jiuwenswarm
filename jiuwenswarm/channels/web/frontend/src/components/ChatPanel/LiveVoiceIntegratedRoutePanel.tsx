@@ -820,6 +820,7 @@ export type ProductP2NotificationDisposition =
       readonly unit_id: string;
       readonly history_message_id: string | null;
       readonly task_notification_event_key?: string | null;
+      readonly task_notification_text_sha256?: string | null;
       readonly ack: ProductPresentationAckInput;
       readonly replayed: boolean;
       readonly task_notification: boolean;
@@ -1805,6 +1806,7 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
           : `live-voice:${response.interaction_id}:${response.response_id}:${response.response_generation}:${presentationSurface}:${unit.seq}:${unit.seq}:${contentDigest}`,
       replayed: hasPresentedOutput,
       task_notification_event_key: taskNotification ? taskNotificationSourceKey(notification.source_event, String(notification.session_id)) : null,
+      task_notification_text_sha256: taskNotification ? contentDigest : null,
       task_notification: taskNotification,
       task_id: notificationTaskId,
       task_notification_terminal: taskTerminal,
@@ -3255,6 +3257,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     ],
   );
 
+  const prepareTerminalTaskNotification = (owner: ProductWebP2ActivationOwner,
+    disposition: ProductP2NotificationDisposition) => {
+    const binding = owner.snapshot().binding;
+    const voiceOwner = p1VoiceOwnerRef.current;
+    if (!mountedRef.current || !voiceLoopEnabledRef.current || !isConnectedRef.current ||
+        activationOwnerRef.current !== owner || binding === null || activeSessionRef.current !== binding.session_id ||
+        voiceOwner?.interactionEngine() !== 'openai-realtime-native' || disposition.kind !== 'presentation' ||
+        !disposition.task_notification || !disposition.task_notification_terminal || disposition.ack.surface !== 'audio' ||
+        !disposition.task_notification_event_key || !disposition.task_notification_text_sha256) return;
+    voiceOwner.prepareTaskNotification({ response: disposition.response, unit_id: disposition.unit_id,
+      text: disposition.text, event_key: disposition.task_notification_event_key,
+      text_sha256: disposition.task_notification_text_sha256 });
+  };
+
   const adoptProductP2Notification = (
     owner: ProductWebP2ActivationOwner,
     notification: Readonly<Record<string, unknown>>,
@@ -3605,6 +3621,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
       return disposition;
     }
+    prepareTerminalTaskNotification(owner, disposition);
     if (
       disposition.task_notification &&
       (pendingUnifiedFinalRef.current !== null ||
@@ -5655,6 +5672,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             outcome.notification,
             previewResponseId !== null && presentedProductResponsesRef.current.has(previewResponseId),
           );
+          prepareTerminalTaskNotification(owner, previewDisposition);
           const pendingUnified = readPendingUnifiedFinal();
           if (pendingUnified !== null) {
             if (previewDisposition.kind === 'presentation' && previewDisposition.task_notification) {
@@ -7339,6 +7357,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           reason: 'PRODUCT_TERMINAL_ANNOUNCEMENT_RECOVERY_REQUIRED',
         });
       }
+      await activationOwner.replayNotificationForMediaAuthorization({
+        ...terminal.disposition.response,
+        unit_id: terminal.disposition.unit_id,
+      });
+      if (activationOwnerRef.current !== activationOwner || pendingPresentationAttemptRef.current !== retained ||
+          p1VoiceOwnerRef.current !== retryOwner || !voiceLoopEnabledRef.current) return;
+      prepareTerminalTaskNotification(activationOwner, terminal.disposition);
       const pauseOutcome = await prepareTaskNotificationCapture(retryOwner, retained, true);
       if (pauseOutcome === 'speaker_active') {
         terminal.retry_pending = false;
@@ -7349,10 +7374,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (retryOwner.interactionEngine() !== 'openai-realtime-native') p1VoiceCaptureBindingRef.current = null;
       updateTerminalAnnouncementState('playing');
       activeVoiceResponseRef.current = terminal.disposition.response;
-      await activationOwner.replayNotificationForMediaAuthorization({
-        ...terminal.disposition.response,
-        unit_id: terminal.disposition.unit_id,
-      });
       await awaitProductTaskNotificationPlayout(
         retryOwner.playAgentText({
           response: terminal.disposition.response,

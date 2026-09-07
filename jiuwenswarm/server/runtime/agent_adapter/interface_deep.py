@@ -9406,11 +9406,12 @@ class JiuWenSwarmDeepAdapter:
                         supports_user_interaction=False,
                     )
                 )
-            # Observe an isolated clone with the configured Agent options unchanged.
+            # A resolved Native model is already fresh and execution-private.
+            # Clone only the cached/default model, retaining all configured options.
             # The voice transport does not own answer reasoning or presentation policy.
             original_model = selected_model if selected_model is not None else getattr(self, "_model", None)
             if original_model is not None:
-                voice_model = Model(
+                voice_model = selected_model if selected_model is not None else Model(
                     model_client_config=original_model.model_client_config,
                     model_config=original_model.model_config.model_copy(deep=True),
                 )
@@ -9428,6 +9429,7 @@ class JiuWenSwarmDeepAdapter:
             from openjiuwen.harness.prompts import PromptSection
             from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
                 FORMAL_VOICE_PRESENTATION_INSTRUCTIONS,
+                NATIVE_ANALYSIS_PRESENTATION_INSTRUCTIONS,
             )
 
             voice_prompt_builder = getattr(self._instance, "system_prompt_builder", None)
@@ -9442,6 +9444,11 @@ class JiuWenSwarmDeepAdapter:
                         "用户要求简短时简短，要求详细时充分解释。你负责分析、事实核验及最终回答；"
                         "最终回答会原样传递给用户。"
                         "用户询问模型时，依据 runtime.setting 中的当前模型或可用模型列表回答。"
+                    ) + (
+                        " 本轮为 Native 只读语音分析：最终回答第一句直接给出结论和必要限定。"
+                        "默认用几句口语回答，不加标题、读文件说明、重复小结或未要求的备选方案。"
+                        "保留必要来源、具体数值和不确定性；用户要求详细推导时提供完整细节。"
+                        "已有 Task 回执或结果回答契约优先。" if read_only_tools else ""
                     ),
                     "en": (
                         "# Conversation setting\nThis turn comes from spoken conversation. "
@@ -9449,16 +9456,26 @@ class JiuWenSwarmDeepAdapter:
                         "for brevity and explain fully when asked for detail. You own the analysis, "
                         "fact checking and final answer, which will be delivered unchanged."
                         " Answer model identity/availability questions from runtime.setting."
+                    ) + (
+                        " For Native read-only speech, start the final answer with the conclusion "
+                        "and essential caveats. Use a few spoken sentences by default, without "
+                        "headings, reading acknowledgements, repetition or unrequested alternatives. "
+                        "Retain necessary sources, exact values and uncertainty; give full detail "
+                        "when requested. Existing Task receipt/result contracts take priority."
+                        if read_only_tools else ""
                     ),
                 },
                 # Keep the actual spoken-output contract after dynamic runtime
                 # and workspace guidance, including on subsequent Tool rounds.
                 priority=1_000,
             ))
+            presentation_instructions = FORMAL_VOICE_PRESENTATION_INSTRUCTIONS
+            if read_only_tools:
+                presentation_instructions += " " + NATIVE_ANALYSIS_PRESENTATION_INSTRUCTIONS
             voice_prompt_builder.add_section(PromptSection(
                 name="formal_live_voice_presentation",
-                content={"cn": FORMAL_VOICE_PRESENTATION_INSTRUCTIONS,
-                         "en": FORMAL_VOICE_PRESENTATION_INSTRUCTIONS},
+                content={"cn": presentation_instructions,
+                         "en": presentation_instructions},
                 priority=66,  # After the ordinary output section (65).
             ))
             token_cid = TOOL_PERMISSION_CHANNEL_ID.set((cid or "").strip())

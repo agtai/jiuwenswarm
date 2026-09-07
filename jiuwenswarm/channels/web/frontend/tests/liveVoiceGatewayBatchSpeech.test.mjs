@@ -937,6 +937,63 @@ test('mismatched Provider rate and malformed capture fail closed before AIO appl
   assert.equal(calls, 1);
 });
 
+test('P7 exact child preparation neither cancels nor advances an ordinary synthesis owner', async () => {
+  const calls = [], pending = deferred();
+  let synthesisParams;
+  const version = 'live-voice.task-notification-preparation.v1';
+  const client = new GatewayBatchSpeechClient({ enabled: true, scope, createId: ids(), transport: {
+    async request(method, params) {
+      calls.push({ method, params });
+      if (method === SPEECH_SYNTHESIZE_BATCH_METHOD) { synthesisParams = params; return pending.promise; }
+      return { contract_version: version, preparation_id: params.preparation_id,
+        status: method.endsWith('_cancel') ? 'cancelled' : 'ready', presented: false };
+    },
+  } });
+  const response = { interaction_id: 'interaction-1', response_id: 'ordinary', response_generation: 1 };
+  const ordinary = client.synthesizeAuthoritative({ response, unitId: 'unit-1',
+    renderPlan: { display_text: 'Hello', spoken_text: 'Hello', transforms: [] }, authoritativeAgentText: true,
+    locale: 'en-US', requiredSampleRateHz: 16000, correlationId: 'correlation-1' });
+  const input = { preparationId: 'prepare-1', activationId: 'activation-1', activationGeneration: 2,
+    eventKey: '["task","attempt","event"]', textSha256: 'a'.repeat(64), text: 'Task complete.',
+    response: { ...response, response_id: 'task', response_generation: 3 }, unitId: 'unit-task',
+    locale: 'en-US', requiredSampleRateHz: 16000, correlationId: 'correlation-1' };
+  await client.prepareTaskNotification(input);
+  await client.cancelTaskNotification(input);
+  assert.equal(calls.some(call => call.method === SPEECH_CANCEL_METHOD), false);
+  assert.equal(calls.some(call => call.method.endsWith('_claim')), false);
+  assert.deepEqual(calls[1].params, { contract_version: version, preparation_id: 'prepare-1',
+    session_id: scope.session_id, subject_id: scope.subject_id, correlation_id: 'correlation-1',
+    interaction_id: 'interaction-1', activation_id: 'activation-1', activation_generation: 2,
+    event_key: input.eventKey, response: input.response, unit_id: 'unit-task', text_sha256: input.textSha256,
+    locale: 'en-US', sample_rate_hz: 16000, text: input.text });
+  assert.equal('text' in calls[2].params, false);
+  pending.resolve(synthesisEnvelope(synthesisParams));
+  assert.equal((await ordinary).response.response_id, 'ordinary');
+});
+
+test('P7 negotiated states reject extra fields, premature presentation, wrong identity and inline audio claims', async () => {
+  const version = 'live-voice.task-notification-preparation.v1';
+  const input = { preparationId: 'prepare-1', activationId: 'activation-1', activationGeneration: 2,
+    eventKey: '["task","attempt","event"]', textSha256: 'a'.repeat(64), text: 'Task complete.',
+    response: { interaction_id: 'interaction-1', response_id: 'task', response_generation: 3 }, unitId: 'unit-task',
+    locale: 'en-US', requiredSampleRateHz: 16000, correlationId: 'correlation-1' };
+  let value;
+  const client = new GatewayBatchSpeechClient({ enabled: true, scope, transport: { async request() { return value; } } });
+  const ready = { contract_version: version, preparation_id: input.preparationId, status: 'ready', presented: false };
+  for (const change of [{ extra: true }, { presented: true }, { preparation_id: 'foreign' }, { contract_version: 'unknown' }, { status: 'completed' }]) {
+    value = { ...ready, ...change };
+    await assert.rejects(client.prepareTaskNotification(input));
+  }
+  value = { contract_version: version, preparation_id: input.preparationId, status: 'claimed',
+    response: input.response, unit_id: input.unitId, audio: { format: 'wav_pcm16_mono', data_base64: base64(pcmWav()) },
+    provider: provider(), presented: false };
+  await assert.rejects(client.claimTaskNotification(input), error => error.reason === 'TASK_PREPARATION_CLAIM_INVALID');
+  value = { contract_version: version, available: false, max_frames: 750, max_bytes: 3 * 1024 * 1024, retention_ms: 30000 };
+  assert.equal(await client.taskPreparationAvailable(), false);
+  value = { ...value, max_frames: 751 };
+  await assert.rejects(client.taskPreparationAvailable(), error => error.reason === 'TASK_PREPARATION_CONTRACT_INVALID');
+});
+
 test('malformed authoritative render plans fail before Provider transport', async () => {
   let calls = 0;
   const client = new GatewayBatchSpeechClient({

@@ -456,6 +456,12 @@ def test_speech_methods_bypass_agent_callback_and_tool_task_authority() -> None:
         "live_voice.media.activate",
         "live_voice.media.close",
         "live_voice.media.playout_receipt",
+        "live_voice.media.playout_stop",
+        "live_voice.media.native_text",
+        "live_voice.speech.task_preparation_capabilities",
+        "live_voice.speech.task_preparation_prepare",
+        "live_voice.speech.task_preparation_claim",
+        "live_voice.speech.task_preparation_cancel",
     } == _LOCAL_HANDLER_ONLY_METHODS
 
 

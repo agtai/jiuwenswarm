@@ -306,6 +306,11 @@ class NativeWorkRuntime:
         self._latest: dict[tuple[ScopeRef, str], int] = {}
         self._closed = False
         self._owner_loop: asyncio.AbstractEventLoop | None = None
+        self._observation_epoch = secrets.token_hex(16)
+        self._observation_sequence: dict[ScopeRef, int] = {}
+        self._observation_events: dict[ScopeRef, asyncio.Event] = {}
+        self._observation_waiters = 0
+        self._observation_event_waiters: dict[asyncio.Event, int] = {}
         if len(restored) > max_records:
             raise NativeWorkViolation(
                 "NATIVE_WORK_LEDGER_FULL", "restored work exceeds configured capacity"
@@ -412,6 +417,63 @@ class NativeWorkRuntime:
         self._latest[(s.scope, s.work_id)] = max(
             s.revision, self._latest.get((s.scope, s.work_id), 0)
         )
+        self._signal_observation(s.scope)
+
+    def observation_cursor(self, scope: ScopeRef) -> dict[str, object]:
+        return {"epoch": self._observation_epoch,
+                "sequence": self._observation_sequence.get(scope, 0), "read_sequence": 0}
+
+    def _signal_observation(self, scope: ScopeRef) -> None:
+        if (scope not in self._observation_sequence
+                and len(self._observation_sequence) >= self._max_records):
+            # Retired activations can introduce scopes without any Work record.
+            # A bounded observation cache must not retain those scopes forever.
+            # Epoch replacement makes every older cursor request full facts;
+            # waking the exact old events preserves installed waiter ownership.
+            self._observation_epoch = secrets.token_hex(16)
+            self._observation_sequence.clear()
+            for event in self._observation_events.values():
+                event.set()
+            self._observation_events.clear()
+        self._observation_sequence[scope] = self._observation_sequence.get(scope, 0) + 1
+        event = self._observation_events.pop(scope, None)
+        if event is not None:
+            event.set()
+
+    def wake_observers(self, scope: ScopeRef) -> None:
+        self._signal_observation(scope)
+
+    async def wait_for_observation(self, *, scope: ScopeRef, after, wait_ms: int) -> None:
+        from .native_business_observation import observation_cursor, MAX_OBSERVATION_WAIT_MS
+        self._require_owner()
+        after = observation_cursor(after)
+        if type(wait_ms) is not int or not 0 <= wait_ms <= MAX_OBSERVATION_WAIT_MS:
+            raise ValueError("invalid Native observation wait")
+        current = self.observation_cursor(scope)
+        if (self._closed or after is None or not wait_ms
+                or (after["epoch"], after["sequence"]) != (current["epoch"], current["sequence"])):
+            return
+        if self._observation_waiters >= 128:
+            raise NativeWorkViolation("NATIVE_OBSERVATION_CAPACITY", "bounded observation capacity is full", ErrorCode.UNAVAILABLE)
+        # No await separates the cursor check and event installation. Work
+        # transitions use this same event-loop owner and set this exact event.
+        event = self._observation_events.setdefault(scope, asyncio.Event())
+        self._observation_waiters += 1
+        self._observation_event_waiters[event] = self._observation_event_waiters.get(event, 0) + 1
+        try:
+            try:
+                await asyncio.wait_for(event.wait(), wait_ms / 1000)
+            except TimeoutError:
+                pass
+        finally:
+            self._observation_waiters -= 1
+            remaining = self._observation_event_waiters[event] - 1
+            if remaining:
+                self._observation_event_waiters[event] = remaining
+            else:
+                self._observation_event_waiters.pop(event, None)
+                if self._observation_events.get(scope) is event:
+                    self._observation_events.pop(scope, None)
 
     def _transition(self, record: _Record, state: NativeWorkState, **fields) -> bool:
         if state not in {NativeWorkState.COMPLETED, NativeWorkState.SUPERSEDED}:
@@ -435,8 +497,10 @@ class NativeWorkRuntime:
                 result_text=None,
             )
             record.control.cancelled.set()
+            self._signal_observation(record.snapshot.scope)
             return False
         record.snapshot = updated
+        self._signal_observation(updated.scope)
         return True
 
     def _record(
@@ -866,6 +930,8 @@ class NativeWorkRuntime:
     async def close(self) -> tuple[NativeWorkSnapshot, ...]:
         self._require_owner()
         self._closed = True
+        for scope in tuple(self._observation_events):
+            self._signal_observation(scope)
         pending = []
         for record in self._records.values():
             if record.operation is not None and not record.operation.done():

@@ -4,6 +4,7 @@ param(
     [string]$RuntimeProfile = 'hands-free-demo',
     [ValidateSet(
         'codex/live-voice-generation-interruption-realtime-adaptation',
+        'codex/realtime-optimization-20260907',
         'hx/0812_live_voice_w3',
         'hx/0823_generation_interruption'
     )]
@@ -34,6 +35,8 @@ param(
     [ValidateLength(1, 256)]
     [ValidatePattern('^[^\r\n]+$')]
     [string]$NativeRealtimeModel = 'gpt-realtime-2.1-mini',
+    [ValidateSet('auto', 'high', IgnoreCase = $false)]
+    [string]$NativeVadEagerness = 'auto',
     [switch]$L0Measurement,
     [switch]$L0OrdinaryChromeBatch,
     [switch]$L0ResumeBatch,
@@ -923,6 +926,7 @@ try {
         LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED                = '1'
         LIVE_VOICE_INTERACTION_ENGINE                              = $InteractionEngine
         LIVE_VOICE_NATIVE_REALTIME_MODEL                           = $NativeRealtimeModel
+        LIVE_VOICE_NATIVE_VAD_EAGERNESS                             = $NativeVadEagerness
         PYTHONUTF8                                                = '1'
         PYTHONIOENCODING                                          = 'utf-8'
     }
@@ -1214,6 +1218,7 @@ try {
         ports                     = $ExpectedPorts
         interaction_engine        = $InteractionEngine
         native_realtime_model     = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeRealtimeModel } else { $null }
+        native_vad_eagerness       = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeVadEagerness } else { $null }
         required_flags            = $validatedFlags
         frontend_flags            = [ordered]@{
             VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION = $generationInterruptionEnabled

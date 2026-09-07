@@ -202,6 +202,8 @@ class _AutoAckDownlinkSocket:
         assert isinstance(self._lease_id, str)
         assert isinstance(self._generation, int)
         self._authenticated = False
+        self._acks: asyncio.Queue[str] = asyncio.Queue()
+        self._sent_frames = 0
         self.sent: list[str | bytes] = []
         self.close_calls = 0
 
@@ -209,14 +211,18 @@ class _AutoAckDownlinkSocket:
         if not self._authenticated:
             self._authenticated = True
             return self._auth_frame
-        sent_frames = sum(isinstance(message, bytes) for message in self.sent)
-        assert sent_frames > 0
-        return serialize_media_control(
-            MediaAck(self._lease_id, self._generation, sent_frames - 1)
-        )
+        # The async downlink reads controls while waiting for Provider supply.
+        # Model a real peer: ACKs exist only after a frame arrives, and an idle
+        # connection waits instead of inventing an unlimited duplicate prefix.
+        return await self._acks.get()
 
     async def send(self, message: str | bytes) -> None:
         self.sent.append(message)
+        if isinstance(message, bytes):
+            self._sent_frames += 1
+            self._acks.put_nowait(serialize_media_control(
+                MediaAck(self._lease_id, self._generation, self._sent_frames - 1)
+            ))
 
     async def close(self, _code: int = 1000, _reason: str = "") -> None:
         self.close_calls += 1

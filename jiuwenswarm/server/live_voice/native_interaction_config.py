@@ -12,7 +12,9 @@ from enum import StrEnum
 
 INTERACTION_ENGINE_ENV = "LIVE_VOICE_INTERACTION_ENGINE"
 NATIVE_REALTIME_MODEL_ENV = "LIVE_VOICE_NATIVE_REALTIME_MODEL"
+NATIVE_VAD_EAGERNESS_ENV = "LIVE_VOICE_NATIVE_VAD_EAGERNESS"
 DEFAULT_NATIVE_REALTIME_MODEL = "gpt-realtime-2.1-mini"
+DEFAULT_NATIVE_VAD_EAGERNESS = "auto"
 _MAX_MODEL_CHARS = 256
 _MAX_MODEL_UTF8_BYTES = 1_024
 
@@ -32,6 +34,17 @@ class InteractionEngineKind(StrEnum):
 class NativeInteractionSelection:
     kind: InteractionEngineKind
     native_model: str | None
+    native_vad_eagerness: str | None = None
+
+
+def validate_native_vad_eagerness(value: object) -> str:
+    """Select the controlled endpoint experiment without changing ownership."""
+    if type(value) is not str or value not in {"auto", "high"}:
+        raise NativeInteractionConfigurationError(
+            "NATIVE_VAD_EAGERNESS_INVALID",
+            "Native VAD eagerness must be exactly auto or high",
+        )
+    return value
 
 
 def _model(value: object) -> str:
@@ -97,15 +110,22 @@ def select_interaction_engine_environment(
     if kind is InteractionEngineKind.CASCADE:
         return NativeInteractionSelection(kind=kind, native_model=None)
     raw_model = environ.get(NATIVE_REALTIME_MODEL_ENV, DEFAULT_NATIVE_REALTIME_MODEL)
-    return NativeInteractionSelection(kind=kind, native_model=_model(raw_model))
+    raw_eagerness = environ.get(NATIVE_VAD_EAGERNESS_ENV, DEFAULT_NATIVE_VAD_EAGERNESS)
+    return NativeInteractionSelection(
+        kind=kind, native_model=_model(raw_model),
+        native_vad_eagerness=validate_native_vad_eagerness(raw_eagerness),
+    )
 
 
 __all__ = [
     "DEFAULT_NATIVE_REALTIME_MODEL",
+    "DEFAULT_NATIVE_VAD_EAGERNESS",
     "INTERACTION_ENGINE_ENV",
     "NATIVE_REALTIME_MODEL_ENV",
+    "NATIVE_VAD_EAGERNESS_ENV",
     "InteractionEngineKind",
     "NativeInteractionConfigurationError",
     "NativeInteractionSelection",
     "select_interaction_engine_environment",
+    "validate_native_vad_eagerness",
 ]

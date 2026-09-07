@@ -6,10 +6,13 @@ import pytest
 
 from jiuwenswarm.server.live_voice.native_interaction_config import (
     DEFAULT_NATIVE_REALTIME_MODEL,
+    DEFAULT_NATIVE_VAD_EAGERNESS,
     INTERACTION_ENGINE_ENV,
     NATIVE_REALTIME_MODEL_ENV,
+    NATIVE_VAD_EAGERNESS_ENV,
     InteractionEngineKind,
     NativeInteractionConfigurationError,
+    NativeInteractionSelection,
     select_interaction_engine_environment,
 )
 
@@ -19,6 +22,7 @@ def test_cascade_is_the_default_and_does_not_require_openai_secret() -> None:
 
     assert selection.kind is InteractionEngineKind.CASCADE
     assert selection.native_model is None
+    assert selection.native_vad_eagerness is None
 
 
 def test_explicit_cascade_ignores_native_model_configuration() -> None:
@@ -109,3 +113,51 @@ def test_selection_reads_only_passed_mapping(monkeypatch: pytest.MonkeyPatch) ->
     selection = select_interaction_engine_environment({})
 
     assert selection.kind is InteractionEngineKind.CASCADE
+
+
+@pytest.mark.parametrize("eagerness", [None, "auto", "high"])
+def test_native_endpoint_selection_preserves_model_and_defaults_to_auto(eagerness):
+    environment = {
+        INTERACTION_ENGINE_ENV: "openai-realtime-native",
+        NATIVE_REALTIME_MODEL_ENV: "gpt-realtime-2",
+    }
+    if eagerness is not None:
+        environment[NATIVE_VAD_EAGERNESS_ENV] = eagerness
+    original = environment.copy()
+    selection = select_interaction_engine_environment(environment)
+    assert selection.kind is InteractionEngineKind.OPENAI_REALTIME_NATIVE
+    assert selection.native_model == "gpt-realtime-2"
+    assert selection.native_vad_eagerness == (eagerness or "auto")
+    assert DEFAULT_NATIVE_VAD_EAGERNESS == "auto"
+    assert environment == original
+
+
+@pytest.mark.parametrize("value", [None, "", " high", "high ", "HIGH", "medium", "low", "high\n", "high\x00", True, 1, [], {}])
+def test_native_endpoint_configuration_is_exact_and_fails_closed(value):
+    with pytest.raises(NativeInteractionConfigurationError) as raised:
+        select_interaction_engine_environment({
+            INTERACTION_ENGINE_ENV: "openai-realtime-native",
+            NATIVE_VAD_EAGERNESS_ENV: value,
+        })
+    assert raised.value.reason == "NATIVE_VAD_EAGERNESS_INVALID"
+
+
+@pytest.mark.parametrize("kind", [None, "cascade"])
+def test_cascade_never_reads_native_endpoint_configuration(kind):
+    class CascadeEnvironment(dict):
+        def get(self, key, *default):
+            if key in {NATIVE_VAD_EAGERNESS_ENV, NATIVE_REALTIME_MODEL_ENV}:
+                raise AssertionError("Cascade accessed Native-only configuration")
+            return super().get(key, *default)
+
+    environment = CascadeEnvironment({} if kind is None else {INTERACTION_ENGINE_ENV: kind})
+    selected = select_interaction_engine_environment(environment)
+    assert selected.kind is InteractionEngineKind.CASCADE
+    assert selected.native_vad_eagerness is None
+
+
+def test_endpoint_selection_reads_only_explicit_environment_and_retains_old_constructor(monkeypatch):
+    monkeypatch.setenv(NATIVE_VAD_EAGERNESS_ENV, "high")
+    selected = select_interaction_engine_environment({INTERACTION_ENGINE_ENV: "openai-realtime-native"})
+    assert selected.native_vad_eagerness == "auto"
+    assert NativeInteractionSelection(InteractionEngineKind.CASCADE, None).native_vad_eagerness is None

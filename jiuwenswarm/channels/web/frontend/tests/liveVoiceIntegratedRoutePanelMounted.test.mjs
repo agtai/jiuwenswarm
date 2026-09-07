@@ -829,13 +829,14 @@ function installP1BrowserEnvironment({
         generation: socket.binding.generation.value, reason_id: 'MEDIA_LOCAL_CLOSE', through_seq: throughSeq, business_cancel_count_delta: 0 }) });
       await new Promise(resolve => setImmediate(resolve));
     },
-    async emitDownlinkFrame(sequence = 0) {
+    async emitDownlinkFrame(sequence = 0, latest = false) {
       await waitForMounted(
         () => sockets.some(socket => socket.binding?.direction === 'downlink'),
         `dedicated downlink media route did not attach; sockets=${sockets.map(socket => socket.binding?.direction ?? 'unbound').join(',')}`,
       );
       await new Promise(resolve => setImmediate(resolve));
-      const socket = sockets.find(candidate => candidate.binding?.direction === 'downlink');
+      const downlinks = sockets.filter(candidate => candidate.binding?.direction === 'downlink');
+      const socket = latest ? downlinks.at(-1) : downlinks[0];
       socket.onmessage?.({
         data: encodeAudioFrame(socket.binding, {
           seq: sequence,
@@ -16589,6 +16590,129 @@ for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while
   }
 });
 
+
+for (const finish of ['played', 'close_pending']) test(`P7 mounted terminal preparation keeps Native speaker priority and readiness creates no presentation effects: ${finish}`, async () => {
+  const i18n = await createI18n();
+  const version = 'live-voice.task-notification-preparation.v1';
+  const sessionId = `mounted-p7-${finish}`, taskText = 'Prepared terminal Task result.';
+  const states = [], messages = [], calls = [], waiters = [], sources = [];
+  const ready = deferred(), controlRef = { current: null };
+  let binding = null, activeMediaBinding = null, renderer;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding, holdDownlinkDetach: true,
+    startAudioSource: ({ source }) => sources.push(source) });
+  const activateP2 = createMountedP2ActivationResponder();
+  const request = async (method, params, options) => {
+    calls.push({ method, params, requestId: options?.requestId });
+    if (method === 'live_voice.composition.p2.activate') { binding = params; return activateP2(params); }
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(resolve => waiters.push(resolve));
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.media.native_text') return { status: 'native_text', binding, revision: 0, snapshots: [] };
+    if (method === 'live_voice.media.activate') {
+      activeMediaBinding = mountedMediaBinding(params, 1);
+      return { status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED', subject_id: 'p7-media-subject',
+        endpoint_path: '/ws/live-voice/media', media_ticket: 'N'.repeat(43), subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30000,
+        end_of_turn: { status: 'active', capability_version: 'media.end_of_turn.v1', detector: 'server_vad', create_response: false, interrupt_response: false },
+        native_interaction: { contract_version: 'live-voice.native-interaction.v1', engine: 'openai-realtime-native', model: 'gpt-realtime-2' },
+        binding: activeMediaBinding, privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true } };
+    }
+    if (method === 'live_voice.speech.task_preparation_capabilities') return {
+      contract_version: version, available: true, max_frames: 750, max_bytes: 3 * 1024 * 1024, retention_ms: 30000 };
+    if (method === 'live_voice.speech.task_preparation_prepare') {
+      assert.equal(params.activation_id, binding.activation_id);
+      assert.equal(params.activation_generation, binding.activation_generation);
+      assert.equal(params.text, taskText);
+      assert.equal(params.text_sha256, 'c'.repeat(64));
+      assert.deepEqual(JSON.parse(params.event_key), ['test-subject', 'test-project', sessionId, 'authenticated', 'p7-task', 'p7-attempt', 'p7-task-terminal-event']);
+      await ready.promise;
+      return { contract_version: version, preparation_id: params.preparation_id, status: 'ready', presented: false };
+    }
+    if (method === 'live_voice.speech.task_preparation_cancel') return {
+      contract_version: version, preparation_id: params.preparation_id, status: 'cancelled', presented: false };
+    if (method === 'live_voice.speech.task_preparation_claim') return {
+      contract_version: version, preparation_id: params.preparation_id, status: 'claimed', response: params.response, unit_id: params.unit_id,
+      audio: descriptor(params.response, params.unit_id, 3), provider: { provider_id: 'p7-existing-tts', implementation_class: 'formal', fallback_from: null, model: 'tts' }, presented: false };
+    if (method === 'live_voice.media.playout_receipt') return { status: 'media_playout_acknowledged',
+      reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED', receipt_id: `p7-receipt-${params.response_id}`, duplex_media_observed: true, ...params };
+    if (method === 'live_voice.composition.p2.presentation.ack') return { ok: true, result: {
+      status: 'presentation_acknowledged', ...params, accepted: true, replayed: false, history_records_written: 1, history_pending: false } };
+    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    throw new Error(`forbidden P7 mounted effect: ${method}`);
+  };
+  const descriptor = (response, unitId, sequence) => ({ format: 'pcm_f32_mono_20ms', sample_rate_hz: 48000,
+    channel_count: 1, frame_count: null, delivery: 'dedicated_media_downlink', endpoint_path: '/ws/live-voice/media', media_ticket: 'P'.repeat(43),
+    subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30000, binding: mountedDownlinkBinding(response, unitId, sequence, activeMediaBinding),
+    max_pending_frames: 8, max_pending_bytes: 131072, streaming: true, degradation_reason: null });
+  const deliver = async notification => {
+    await waitForMountedEffects(() => waiters.length > 0, 'P7 notification consumer missing');
+    await act(async () => { waiters.shift()({ ok: true, result: notification }); await new Promise(resolve => setImmediate(resolve)); });
+  };
+  try {
+    await act(async () => { renderer = create(mountedFullyEnabledElement(i18n, sessionId, request, true, {
+      productVoiceControlRef: controlRef, onProductVoiceStateChange: state => states.push(state),
+      onProductVoiceMessage: event => messages.push(event) })); });
+    await waitForMountedEffects(() => controlRef.current !== null && !formalVoiceStartButton(renderer).props.disabled, 'P7 activation missing');
+    await act(async () => { void controlRef.current.start(); });
+    await waitForMountedEffects(() => states.at(-1)?.p1_status === 'starting', 'P7 capture did not start');
+    await act(async () => { await browser.emitFirstFrame(0); });
+    await waitForMountedEffects(() => states.at(-1)?.p1_status === 'capturing', 'P7 capture missing');
+    const taskResponse = { interaction_id: binding.interaction_id, response_id: 'p7-task-response', response_generation: 3 };
+    await act(async () => { await browser.emitSpeechStart(); });
+    const source = taskNotificationSource(sessionId, 'p7-task');
+    source.extensions = { 'jiuwenswarm.task_progress_return': { persistent_attempt_id: 'p7-attempt' } };
+    const taskNotice = { status: 'notification', ...binding, kind: 'agent.output', response: taskResponse, source_event: source,
+      agent_event: { event_type: 'chat.final', text: taskText, source_provenance: 'server.task_notification' },
+      presentation_unit: { surface: 'audio', unit_id: 'p7-task-unit', seq: 0, content_ref: `sha256:${'c'.repeat(64)}` } };
+    await deliver(taskNotice);
+    await waitForMountedEffects(() => calls.some(call => call.method.endsWith('task_preparation_prepare')), 'P7 did not prepare while speaker owned capture');
+    await waitForMountedEffects(() => states.at(-1)?.terminal_announcement_state === 'queued', 'P7 did not yield to speaker');
+    assert.equal(calls.filter(call => call.method.endsWith('task_preparation_prepare')).length, 1);
+    assert.equal(calls.some(call => /task_preparation_claim|playout_receipt|presentation.ack/.test(call.method)), false);
+    // The established presenter may show an authenticated Task preview. PCM
+    // readiness itself must add no display, heard history, playback or ACK.
+    const previewMessages = messages.length;
+    assert.equal(messages.filter(event => event.message.content === taskText).length, 1);
+    assert.equal(messages.at(-1).message.taskNotification.presentation, 'preview');
+    assert.equal(browser.counts.socketOpens, 1, 'Preparation cannot open a Task downlink');
+    const startedBeforeReady = browser.counts.sourceStarts;
+    if (finish === 'close_pending') {
+      await act(async () => { await controlRef.current.close(); ready.resolve(); });
+      await waitForMountedEffects(() => calls.some(call => call.method.endsWith('task_preparation_cancel')), 'P7 close did not cancel exact child');
+      assert.equal(browser.counts.sourceStarts, startedBeforeReady);
+      assert.equal(calls.some(call => /task_preparation_claim|playout_receipt|presentation.ack/.test(call.method)), false);
+      return;
+    }
+    await act(async () => { ready.resolve(); await new Promise(resolve => setImmediate(resolve)); });
+    assert.equal(browser.counts.sourceStarts, startedBeforeReady);
+    assert.equal(calls.some(call => call.method.endsWith('task_preparation_claim')), false);
+    assert.equal(messages.length, previewMessages);
+    await act(async () => { await browser.emitSpeechEndOfTurnOnly(); });
+    await waitForMountedEffects(() => calls.some(call => call.method.endsWith('task_preparation_claim')), 'P7 did not claim after speaker arbitration');
+    assert.equal(calls.filter(call => call.method.endsWith('task_preparation_claim')).length, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 0);
+    assert.equal(calls.some(call => call.method === 'live_voice.composition.p2.presentation.ack'), false);
+    await waitForMountedEffects(() => browser.counts.socketOpens === 2, 'P7 claimed downlink did not attach');
+    const foregroundSources = sources.length;
+    await act(async () => { for (let seq = 0; seq < 14; seq += 1) await browser.emitDownlinkFrame(seq, true); });
+    await waitForMountedEffects(() => sources.length > foregroundSources, 'P7 claimed audio did not play');
+    assert.equal(calls.some(call => call.method === 'live_voice.composition.p2.presentation.ack'), false);
+    await act(async () => {
+      await browser.completeDownlink(13);
+      for (let index = foregroundSources; index < sources.length; index += 1) { sources[index].onended?.(); await new Promise(resolve => setImmediate(resolve)); }
+    });
+    await waitForMountedEffects(() => calls.some(call => call.method === 'live_voice.composition.p2.presentation.ack'), 'P7 rendered Task never settled');
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.playout_receipt' && call.params.response_id === taskResponse.response_id).length, 1);
+    assert.equal(messages.filter(event => event.message.content === taskText).length, 1);
+    assert.equal(states.at(-1).p1_status, 'capturing');
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.close').length, 0);
+    assert.equal(calls.some(call => /unified.submit|speech.recognize|task.create|task.cancel|p3.mutate/.test(call.method)), false);
+  } finally {
+    ready.resolve();
+    if (renderer) await act(async () => { renderer.unmount(); await new Promise(resolve => setImmediate(resolve)); });
+    browser.restore();
+  }
+});
 
 for (const language of ['zh', 'en']) test(`Native work bar separates analysis from foreground speech in ${language}`, async () => {
   const i18n = await createI18n(language);

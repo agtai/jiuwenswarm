@@ -104,6 +104,7 @@ from .native_interaction_runtime import (
     NativeInteractionRuntimeOwner,
 )
 from .native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION, NativeBusinessProposal
+from .native_business_observation import NATIVE_BUSINESS_OBSERVATION_VERSION
 from .native_business_router import NativeBusinessRouter
 from .latency_measurement import (
     L0Milestone,
@@ -5053,7 +5054,8 @@ class AgentServerProductCompositionRegistry:
             "contract_version": NATIVE_INTERACTION_CONTRACT_VERSION,
             "binding": binding.to_dict(),
             "capability": capability,
-            **({"business_contract_version": NATIVE_BUSINESS_CONTRACT_VERSION} if route.native_business_enabled else {}),
+            **({"business_contract_version": NATIVE_BUSINESS_CONTRACT_VERSION,
+                "observation_contract_version": NATIVE_BUSINESS_OBSERVATION_VERSION} if route.native_business_enabled else {}),
         }
 
     @staticmethod
@@ -5238,7 +5240,7 @@ class AgentServerProductCompositionRegistry:
     ) -> P3RouteResult:
         """Admit one capability-bound Native proposal through the P2 owners."""
 
-        if params.get("contract_version") == NATIVE_BUSINESS_CONTRACT_VERSION:
+        if params.get("contract_version") in (NATIVE_BUSINESS_CONTRACT_VERSION, NATIVE_BUSINESS_OBSERVATION_VERSION):
             return await self._native_business.context_request(params=params, request_id=request_id, session_id=session_id)
 
         try:
