@@ -1,7 +1,7 @@
 """Build the pinned SDK metadata repair for the OpenAI Responses Agent.
 
 Creates its own fresh checkout; never edits site-packages or an existing SDK
-checkout. Install the resulting wheel explicitly with --no-deps (see README).
+checkout. Install the resulting wheel explicitly with --no-deps.
 """
 from __future__ import annotations
 

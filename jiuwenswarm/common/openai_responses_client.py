@@ -287,6 +287,6 @@ def openai_responses_client_config(client_config: ModelClientConfig, *, model_na
     if provider == "OpenAI" and model_name in _VERIFIED_MODELS and _official_endpoint(client_config.api_base):
         if version("openjiuwen") != SDK_VERSION:
             raise RuntimeError("GPT-5.6 Responses requires the context-preserving SDK; "
-                               "build/install it using scripts/sdk_patches/README.md")
+                               "build it with scripts/build_openai_agent_sdk.py and install the generated wheel")
         return client_config.model_copy(update={"client_provider": _PROVIDER})
     return client_config
