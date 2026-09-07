@@ -1,0 +1,363 @@
+{
+  "recorded_at": "2026-09-07T10:00:48.528716+00:00",
+  "result": "controlled_ten_user_test_environment_available",
+  "branch": "hx/0812_live_voice_w3",
+  "source_commit": "edca12699f92d97374ee5f71b1ed3eff285436db",
+  "image_id": "sha256:38b0e72784d9d91c26da5487ad61ee456f36b10565e5ea365f5765c1424dfaf0",
+  "source_archive_sha256": "4b570dd9949c96b5265eef6680253e72bff78d66c7b3febf33eb7889b6a0e577",
+  "portal": "https://swarm.164.30.6.242.sslip.io/",
+  "instances": 10,
+  "agent_configuration": {
+    "first_use": "empty",
+    "development_agent_model_copied": false,
+    "browser_empty_model_checks": 10,
+    "incomplete_configuration_save": "disabled"
+  },
+  "speech": {
+    "credential_source": "authorized_development_speech_configuration_private_server_copy",
+    "native_model": "gpt-realtime-2",
+    "real_tts_stt_round_trips_passed": 10,
+    "gateway_receipt_checks_passed": 10,
+    "concurrent_provider_connection_check": {
+      "observed_at": "2026-09-07T09:52:55.325645+00:00",
+      "simultaneous_provider_sessions": 10,
+      "model": "gpt-realtime-2",
+      "session_created": 10,
+      "pongs": 10,
+      "audio_input_sent": false,
+      "business_input_sent": false,
+      "full_voice_workload": "not_exercised"
+    }
+  },
+  "build": {
+    "python": "3.12",
+    "node": "20.20.2",
+    "python_dependencies": "uv sync --frozen --no-dev",
+    "frontend": "npm ci --no-audit --no-fund && npm run build:live-voice",
+    "source_worktree_at_archive": "clean",
+    "frontend_flags": {
+      "INTEGRATED_WEB": true,
+      "INTEGRATED_P1": true,
+      "PRODUCT_P3_MUTATION": true,
+      "GENERATION_INTERRUPTION": true
+    }
+  },
+  "bootstrap_tests": {
+    "command": ".venv/Scripts/python.exe -m pytest deploy/live_voice/test_launch.py -q --no-cov --disable-warnings",
+    "passed": 7,
+    "failed": 0
+  },
+  "public_ingress": {
+    "observed_at": "2026-09-07T09:52:55.209136+00:00",
+    "scope": "public_https_wss_and_empty_model_readiness",
+    "agent_tool_calls": 0,
+    "speech_calls": 0,
+    "negative": [
+      {
+        "instance": "lv01",
+        "unauthenticated_routes": "401",
+        "other_account": "401",
+        "other_origin": "403"
+      },
+      {
+        "instance": "lv02",
+        "unauthenticated_routes": "401",
+        "other_account": "401",
+        "other_origin": "403"
+      },
+      {
+        "instance": "lv03",
+        "unauthenticated_routes": "401",
+        "other_account": "401",
+        "other_origin": "403"
+      },
+      {
+        "instance": "lv04",
+        "unauthenticated_routes": "401",
+        "other_account": "401",
+        "other_origin": "403"
+      },
+      {
+        "instance": "lv05",
+        "unauthenticated_routes": "401",
+        "other_account": "401",
+        "other_origin": "403"
+      },
+      {
+        "instance": "lv06",
+        "unauthenticated_routes": "401",
+        "other_account": "401",
+        "other_origin": "403"
+      },
+      {
+        "instance": "lv07",
+        "unauthenticated_routes": "401",
+        "other_account": "401",
+        "other_origin": "403"
+      },
+      {
+        "instance": "lv08",
+        "unauthenticated_routes": "401",
+        "other_account": "401",
+        "other_origin": "403"
+      },
+      {
+        "instance": "lv09",
+        "unauthenticated_routes": "401",
+        "other_account": "401",
+        "other_origin": "403"
+      },
+      {
+        "instance": "lv10",
+        "unauthenticated_routes": "401",
+        "other_account": "401",
+        "other_origin": "403"
+      }
+    ],
+    "waves": [
+      {
+        "connections": 1,
+        "ready_acks": 1,
+        "empty_agent_models": 1,
+        "unique_projects": 1,
+        "pongs": 1
+      },
+      {
+        "connections": 3,
+        "ready_acks": 3,
+        "empty_agent_models": 3,
+        "unique_projects": 3,
+        "pongs": 3
+      },
+      {
+        "connections": 10,
+        "ready_acks": 10,
+        "empty_agent_models": 10,
+        "unique_projects": 10,
+        "pongs": 10
+      }
+    ]
+  },
+  "browser": {
+    "observedAt": "2026-09-07T09:53:21.049Z",
+    "contexts": [
+      {
+        "instance": "lv01",
+        "http": 200,
+        "secureContext": true,
+        "emptyModelFields": true,
+        "incompleteModelSaveRejected": true,
+        "pageErrors": 0
+      },
+      {
+        "instance": "lv02",
+        "http": 200,
+        "secureContext": true,
+        "emptyModelFields": true,
+        "incompleteModelSaveRejected": true,
+        "pageErrors": 0
+      },
+      {
+        "instance": "lv03",
+        "http": 200,
+        "secureContext": true,
+        "emptyModelFields": true,
+        "incompleteModelSaveRejected": true,
+        "pageErrors": 0
+      },
+      {
+        "instance": "lv04",
+        "http": 200,
+        "secureContext": true,
+        "emptyModelFields": true,
+        "incompleteModelSaveRejected": true,
+        "pageErrors": 0
+      },
+      {
+        "instance": "lv05",
+        "http": 200,
+        "secureContext": true,
+        "emptyModelFields": true,
+        "incompleteModelSaveRejected": true,
+        "pageErrors": 0
+      },
+      {
+        "instance": "lv06",
+        "http": 200,
+        "secureContext": true,
+        "emptyModelFields": true,
+        "incompleteModelSaveRejected": true,
+        "pageErrors": 0
+      },
+      {
+        "instance": "lv07",
+        "http": 200,
+        "secureContext": true,
+        "emptyModelFields": true,
+        "incompleteModelSaveRejected": true,
+        "pageErrors": 0
+      },
+      {
+        "instance": "lv08",
+        "http": 200,
+        "secureContext": true,
+        "emptyModelFields": true,
+        "incompleteModelSaveRejected": true,
+        "pageErrors": 0
+      },
+      {
+        "instance": "lv09",
+        "http": 200,
+        "secureContext": true,
+        "emptyModelFields": true,
+        "incompleteModelSaveRejected": true,
+        "pageErrors": 0
+      },
+      {
+        "instance": "lv10",
+        "http": 200,
+        "secureContext": true,
+        "emptyModelFields": true,
+        "incompleteModelSaveRejected": true,
+        "pageErrors": 0
+      }
+    ],
+    "physicalMicrophone": "not_run",
+    "agentToolJourney": "requires_user_model"
+  },
+  "assets": {
+    "image_files": 180,
+    "instance_manifests_equal": true,
+    "manifest_sha256": "59de4bb533a89f00952eb9f23912d02bc1b32f17d11ca306be09d343f73e6f95",
+    "served_assets": {
+      "observed_at": "2026-09-07T09:56:20.943387+00:00",
+      "source_commit": "edca12699f92d97374ee5f71b1ed3eff285436db",
+      "assets": {
+        "index.html": "4c185c98b6b58d94666e389ac9d1711f2631e090ec7a89821f057d2cfb02b5d5",
+        "assets/index-Dw8QUZMQ.js": "6daa11b6510af2dcd8a24657f88c889569631ca513b081b4e41739ec6932b071",
+        "assets/index-S9JkoYTS.js": "b2542cbf86b3c6f786732ca9589f47ff157c800ae40ce1367ded260e0b3b00e1",
+        "assets/index-1IElfUMI.js": "69734f3f2cb6d3c0f5f0d02ff67b9b7e0c1a8e7de9b7ee5f04299825df4d25d6",
+        "assets/index-BrFZC0At.js": "df01765744561d8cb4cbf29ea9f7434501faa4a6069949f1b3b8900a25cf3996",
+        "assets/index-B8ZS86XT.js": "2d80d34ac480bc469e265e2e7bd44fc1b1f1caa3c869adc026f8b18066af7748",
+        "assets/index-D6Vp8-sm.js": "9512e5ed950897a7af53354c1cc7d8484f92642e14192b0682b9815c595577de",
+        "assets/index-C38hCJtk.js": "5aeafb902445cc1f3b58d7f9edeb72787f74037596cf40857b47414153bcca39",
+        "assets/index-BpidR9jD.css": "02848bb64c2180d5e7d7e46acedc7795f90a8ca348f2f1507c2e0e6349e2f22d",
+        "assets/index-CXtikkOw.js": "026b1cdc8fdd6c5b7bd1d988f5702bffc08050d0286fd03ae5638aeca90b6ae5",
+        "assets/index-nk0bybIj.js": "0ce5b27898e9eaf35815a3dce2ebcff70c597e7e2c9218d483d7af072217fd0d",
+        "assets/index-CK4hAk0X.js": "b2cb4dd128e277dee650cbb5da8e24dce90c70b30ea48cc2ff266419435e5f9d",
+        "assets/index-CLynSUcH.js": "49ac019306e1a926f5757a75e59286e07be0f92d226d6a7167b3bfc075d400d3",
+        "assets/index-PBMj0dsY.js": "4e4e8a6e2d3410dd937324546111b482f5c316d9ba4389c0b54bcc4f3ff21dec",
+        "assets/index-Bvf07rzy.js": "a3d4f3b83bb48f2e230a0ed3fa9fb8e4904d8589adbf5a5706a4336dca334474",
+        "assets/index-Dsk5Bs3N.js": "28bbf99166d41018e14ac4b2a1d8d3f4428ca39253160295315fda25d1bcab16",
+        "assets/index-B1EIlU3c.js": "05ca2bfda3e65d0cadb2d3b49c48a14d8452994995a4612065206d99cae46455",
+        "assets/index-DtLc81G-.js": "f6d6f74269695478c7076251c7829cec080f729886ec4990bc552ccb3aeb25e4"
+      },
+      "results": [
+        {
+          "instance": "lv01",
+          "matching_assets": 18
+        },
+        {
+          "instance": "lv02",
+          "matching_assets": 18
+        },
+        {
+          "instance": "lv03",
+          "matching_assets": 18
+        },
+        {
+          "instance": "lv04",
+          "matching_assets": 18
+        },
+        {
+          "instance": "lv05",
+          "matching_assets": 18
+        },
+        {
+          "instance": "lv06",
+          "matching_assets": 18
+        },
+        {
+          "instance": "lv07",
+          "matching_assets": 18
+        },
+        {
+          "instance": "lv08",
+          "matching_assets": 18
+        },
+        {
+          "instance": "lv09",
+          "matching_assets": 18
+        },
+        {
+          "instance": "lv10",
+          "matching_assets": 18
+        }
+      ]
+    }
+  },
+  "durability": {
+    "upgrade_preserved_instances": 10,
+    "hashed_files_per_instance": 6,
+    "fault_recovery": {
+      "observed_at": "2026-09-07T09:56:03.572821+00:00",
+      "source_commit": "edca12699f92d97374ee5f71b1ed3eff285436db",
+      "restart_count": 1,
+      "health": "healthy",
+      "protected_files_unchanged": true,
+      "checked_files": 6
+    },
+    "post_restart_authenticated_wss": "connection.ack_and_empty_model_and_project_verified"
+  },
+  "formal_business_store_after_checks": {
+    "instances_checked": 10,
+    "commands_tasks_attempts_events_results_and_durability_business_rows": 0,
+    "schema_metadata_rows_per_instance": 1
+  },
+  "isolation": {
+    "separate_bridges": 10,
+    "separate_data_and_project_volumes": 10,
+    "bound_host_ports": "127.0.0.1:26101-26110",
+    "user": "10001:10001",
+    "cpu_limit_per_instance": 2,
+    "memory_limit_gib_per_instance": 4,
+    "pids_limit_per_instance": 512,
+    "capabilities": "ALL dropped",
+    "no_new_privileges": true,
+    "sample": {
+      "other_instance_tcp_rejected": true,
+      "other_instance_volume_absent": true,
+      "docker_socket_absent": true
+    },
+    "forbidden_agent_tool_calls_from_rejected_probes": 0
+  },
+  "operations": {
+    "systemd_startup": "jiuwen-livevoice.service enabled",
+    "restart_policy": "on-failure:3",
+    "certificate": "Lets Encrypt, portal + lv01-lv10",
+    "certificate_expires_at": "2026-12-06T08:17:11Z",
+    "renewal_timer": "enabled",
+    "renewal_dry_run": "passed",
+    "live_voice_authorization_expires_at": "2026-10-07T09:18:38.289104+00:00",
+    "idle_memory_observation": "about 1 GiB per instance; no Agent workload benchmark"
+  },
+  "existing_service": {
+    "pid": 13854,
+    "restarts": 0,
+    "active": true,
+    "http_status": 200,
+    "tailscale_route_preserved": true,
+    "tailnet_hostname_http_status": 200
+  },
+  "review": {
+    "cold_complete_diff": "completed_with_startup_and_git_bootstrap_findings_fixed",
+    "independent_review": "tool_unavailable; recorded TESTING substitute; no independent reviewer credit"
+  },
+  "not_claimed": [
+    "full microphone to configured Agent/tools to artifact and speaker journey",
+    "ten concurrent active Agent/voice workloads or latency SLO",
+    "physical browser/device/audio acceptance",
+    "production tenancy or adversarial secrecy from authorized code-executing testers"
+  ],
+  "private_material": "Credentials, full runtime contracts and raw logs remain outside Git; see deploy/live_voice/README.md for administration."
+}

@@ -27,6 +27,20 @@ The build uses Node 20.20.2, Python 3.12, frozen uv dependencies and
 base image tags and OS repositories can change even with the same application
 commit. Use that image ID with `provision.py --image` for the active deployment.
 
+To reproduce the same installed dependencies on another server, transfer the
+already verified image over SSH, then verify its image ID after import:
+
+```sh
+docker image save --output jiuwen-livevoice-image.tar jiuwen-livevoice:<commit>
+# Transfer this archive privately to the destination, then there:
+docker image load --input jiuwen-livevoice-image.tar
+docker image inspect jiuwen-livevoice:<commit> --format '{{.Id}}'
+```
+
+The image contains application code and dependencies. Supply Speech credentials
+separately and generate fresh instance data/logins for a new test installation.
+Replace the destination interface/DNS values and obtain its HTTPS certificate.
+
 ## Host and private configuration
 
 The verified host is Ubuntu 24.04, 32 logical CPUs and 60 GiB RAM. Install

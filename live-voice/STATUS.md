@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-06 (Native conversational implementation and scoped verification recorded; physical acceptance remains open).
+> Updated: 2026-09-07 (ten-user remote test deployment is available; physical acceptance remains open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -23,6 +23,23 @@ appear through the scoped Registry in the right panel. Old candidate PASS on
 history, not acceptance of this candidate.
 
 ## Current execution packet
+
+### Ten-user remote test environment
+
+The authorized w3 deployment on `164.30.6.242` provides ten separately
+authenticated HTTPS browser environments with independent model, project and
+runtime data. Agent configuration starts empty; Native Realtime explicitly uses
+`gpt-realtime-2` with the privately supplied development Speech credential.
+[Deployment evidence](evidence/TEN_USER_DEPLOYMENT_20260907.json) binds the clean
+source/image, served assets, concurrent browser/WSS and Provider connections,
+isolation and recovery checks. The [deployment review](reviews/TEN_USER_DEPLOYMENT_20260907.md)
+records scope and the unavailable independent-review substitute. This is a
+controlled test environment: complete microphone/Agent/tool/speaker acceptance
+and ten concurrent model workloads still require user-configured Agent models.
+
+Deployment evidence applies to its recorded source/image. Removing local
+Realtime optimization commits does not redeploy or roll back that remote runtime;
+its recorded checks do not establish acceptance of a different checkout.
 
 ### Native conversational execution
 
@@ -186,7 +203,7 @@ whole-project audit for every bounded task.
 | Observability, benchmark and latency | Scoped timing/error export, Native call/context/work/model milestones, critical-event retention and true terminal outcomes | Current physical reproduction, interruption/first-audible baseline and SLOs; clock gaps/dropped data remain explicit |
 | Automated verification and acceptance | Focused regressions and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative review/human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, semantic cutover, bounded removals and prompt/config isolation | Complete reachability/retirement audit and remaining manifest rows; keep private artifacts/runtime data out of integration |
-| Production operations | Privacy/preflight/observability foundations | Auth/tenancy, public deployment, operations, retention, security, compatibility and release support after separate scope |
+| Production operations | Privacy/preflight/observability foundations; controlled ten-user HTTPS deployment with separate test instances and scoped recovery evidence | Production tenancy, retention, adversarial security, model-load/SLO, compatibility and release support after separate scope |
 
 ## Current acceptance gates
 

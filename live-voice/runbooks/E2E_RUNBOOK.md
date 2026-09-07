@@ -360,6 +360,11 @@ Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 
 ### 7.5 当前受控 Live Voice 启动与预演
 
+十人 Linux/HTTPS 浏览器测试环境使用[独立容器部署说明](../../deploy/live_voice/README.md)。
+该部署允许 Agent 模型初始为空，通过现有 Web 首次配置表单由测试者填写；
+Speech/Realtime 连通和十路连接验证不等于完整 Agent/工具/麦克风/扬声器验收。
+下面的 PowerShell 启动流程仍用于已配置模型的本地受控环境。
+
 本节用于当前受控产品候选的准备和最终验证；它不倒写历史 Alpha 结果，也不取得生产化信用。2026-08-17 的完整 Journey 已作为缺陷发现执行结束，结果是 `COMPLETED — DEFECTS RECORDED`，不是 PASS；当前缺陷、运行环境和下一步只看 [STATUS](../STATUS.md)。修复完成后，只有在干净、不可变的候选源码上按 [产品准备度合同](../validation/PRODUCT_READINESS_ACCEPTANCE.md) 和 [完整人工 Journey](../demo/PRODUCT_READINESS_SHOWCASE.md) 成功执行，才能形成新的受控候选 PASS。
 
 本节保留启动、目标隔离和真实副作用规则。旧 D119 单任务脚本及固定 itinerary

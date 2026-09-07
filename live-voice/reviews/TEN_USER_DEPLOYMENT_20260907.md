@@ -116,5 +116,21 @@ concurrent model workloads, and subjective latency/audio quality remain untested
 This controlled cohort does not establish production tenancy or adversarial
 isolation of the shared Speech key from code executed by authorized testers.
 
-The final clean deployment source, immutable image and exact served assets are
-recorded in the closing evidence after rebuilding from the deployment commit.
+## Final deployment identity
+
+The final image was built from a clean archive of deployment commit
+`edca12699f92d97374ee5f71b1ed3eff285436db` and installed by immutable image ID
+`sha256:38b0e72784d9d91c26da5487ad61ee456f36b10565e5ea365f5765c1424dfaf0`.
+All ten healthy instances report that source and have identical 180-file asset
+manifests. Eighteen served HTML/JS/CSS files per entry match their manifest hashes.
+All sixty protected configuration/project file hashes survive the image switch.
+All ten formal task stores still contain zero command, Task, attempt, event,
+result and durability business rows after the checks; only schema metadata is
+present. The existing co-scribe tailnet hostname also returns HTTP 200.
+
+The [sanitized closing evidence](../evidence/TEN_USER_DEPLOYMENT_20260907.json)
+records repeated final-image 1/3/10 WSS checks, ten real Chrome contexts, ten
+simultaneous `gpt-realtime-2` Provider sessions, and final-image fault/recovery with
+unchanged files and an authenticated WSS recheck. The Provider concurrency test
+sends no audio or business input and does not establish active voice throughput.
+Later documentation-only commits do not replace the recorded deployed source.

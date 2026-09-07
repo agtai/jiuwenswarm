@@ -14,6 +14,7 @@ read in this session; links are conditional, not a recursive reading list.
 | Another capability/module | That capability row and dependency route in STATUS; affected source/tests; only the relevant accepted design/ACG/decision sections |
 | Complete-project planning | STATUS completion boundaries, full capability matrix and dependency route; heading `D-084` in [decisions](decisions/DECISIONS.md); stable capability/contract sections (§§2, 4–5) of the [design snapshot](architecture/FULL_SOLUTION_2026-07-30.md) |
 | Rehearsal or candidate/product acceptance | [Human journey](demo/PRODUCT_READINESS_SHOWCASE.md), which separates rehearsal from full candidate acceptance; only the required [runbook](runbooks/E2E_RUNBOOK.md) startup/diagnosis/cleanup sections and applicable acceptance contract |
+| Ten-user Linux/public browser deployment | [Container deployment instructions](../deploy/live_voice/README.md); the scoped deployment evidence in STATUS; use the human journey only for model/device acceptance |
 | Documentation change | [Documentation rules](DOCUMENTATION_RULES.md), root `TESTING.md` documentation-only section and only the authorities changed by the edit |
 | Architecture/authority/protocol/security/durability change | Exact ACG and governing decision sections; full design only if the long-term boundary itself changes or is ambiguous |
 | Git/review/parallel work | Root `AGENTS.md`, applicable root `TESTING.md` sections and only the active packet named by STATUS |
