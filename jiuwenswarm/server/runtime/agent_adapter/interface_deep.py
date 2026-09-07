@@ -9406,11 +9406,12 @@ class JiuWenSwarmDeepAdapter:
                         supports_user_interaction=False,
                     )
                 )
-            # Observe an isolated clone with the configured Agent options unchanged.
+            # A resolved Native model is already fresh and execution-private.
+            # Clone only the cached/default model, retaining all configured options.
             # The voice transport does not own answer reasoning or presentation policy.
             original_model = selected_model if selected_model is not None else getattr(self, "_model", None)
             if original_model is not None:
-                voice_model = Model(
+                voice_model = selected_model if selected_model is not None else Model(
                     model_client_config=original_model.model_client_config,
                     model_config=original_model.model_config.model_copy(deep=True),
                 )

@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+import asyncio
 
 import pytest
 
@@ -176,15 +177,18 @@ def model(name):
 
 
 @pytest.mark.asyncio
-async def test_native_model_uses_same_catalog_binding_as_task_and_fixed_isolated_clone(
+async def test_native_model_reuses_exact_fresh_catalog_instance_without_second_construction(
     monkeypatch,
 ):
     entries = catalog()
     builds = []
+    resolved_models = []
 
     def build(client, config):
         builds.append(client["model_name"])
-        return model(client["model_name"])
+        selected = model(client["model_name"])
+        resolved_models.append(selected)
+        return selected
 
     resolver = ServerModelCatalogResolver(
         catalog_reader=lambda: entries, model_builder=build
@@ -203,7 +207,7 @@ async def test_native_model_uses_same_catalog_binding_as_task_and_fixed_isolated
     adapter._model = original
     monkeypatch.setattr(adapter, "_formal_model_resolver", lambda: resolver)
     monkeypatch.setattr(
-        interface_deep, "Model", lambda **values: SimpleNamespace(**values)
+        interface_deep, "Model", lambda **values: pytest.fail("fresh Native model was constructed again")
     )
     request, inputs = formal_request()
     request.metadata.update(
@@ -230,6 +234,7 @@ async def test_native_model_uses_same_catalog_binding_as_task_and_fixed_isolated
     assert chunks[-1].payload["content"] == "Verified answer."
     assert builds == ["second-model"] and len(instance.sent) == 1
     assert applied[0].model_config.model_name == "second-model"
+    assert applied[0] is resolved_models[0]
     assert len(applied) == 2 and applied[1] is original
     assert original.model_config.model_name == "first-model"
     assert root._model is original
@@ -275,3 +280,65 @@ async def test_native_model_drift_unknown_or_incomplete_binding_fails_before_mod
         ]
     assert builds == [] and instance.sent == [] and adapter.formal_runtime_configs == []
     assert adapter._stream_event_rail._formal_tool_event_captures == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["complete", "failure", "cancel"])
+async def test_fresh_native_models_and_observers_are_isolated_and_restored_after_settlement(monkeypatch, outcome):
+    from jiuwenswarm.server.runtime.agent_adapter.formal_model_diagnostics import FormalModelDiagnostics
+    built = []
+    def build(client, _config):
+        selected = model(client["model_name"])
+        selected._client = object()
+        built.append(selected)
+        return selected
+    resolver = ServerModelCatalogResolver(catalog_reader=catalog, model_builder=build)
+    accepted = resolver.resolve("Second", instantiate=False)
+    monkeypatch.setattr(interface_deep, "Model", lambda **values: pytest.fail("duplicate Native construction"))
+    adapters, applied, entered, leases, tasks = [], [], [], [], []
+    class Lease(OutputLease):
+        async def __anext__(self):
+            self.entered.set()
+            if outcome == "failure":
+                raise RuntimeError("execution failed")
+            if outcome == "cancel":
+                await asyncio.Event().wait()
+            return await super().__anext__()
+    async def consume(adapter, request, inputs):
+        return [chunk async for chunk in adapter.process_formal_live_voice_stream_impl(request, inputs)]
+    for index in range(2):
+        lease = Lease([RawChunk("answer", {"output": {"output": "Verified answer."}})])
+        lease.entered = asyncio.Event()
+        instance = FormalInstance(lease)
+        changes = []
+        instance._react_agent = SimpleNamespace(set_llm=changes.append, _config=SimpleNamespace())
+        adapter = adapter_with(instance)
+        adapter._model = model("first-model")
+        monkeypatch.setattr(adapter, "_formal_model_resolver", lambda: resolver)
+        request, inputs = formal_request()
+        request.session_id = inputs["conversation_id"] = f"lv-formal-isolated-{index}"
+        request.request_id = f"request-{index}"
+        request.metadata.update(formal_live_voice_read_only_tools=True,
+            formal_live_voice_model_identity=accepted.identity,
+            formal_live_voice_model_config_version=accepted.config_version)
+        adapters.append((adapter, adapter._model))
+        applied.append(changes)
+        entered.append(lease.entered.wait())
+        leases.append(lease)
+        tasks.append(asyncio.create_task(consume(adapter, request, inputs)))
+    await asyncio.wait_for(asyncio.gather(*entered), 2)
+    if outcome == "cancel":
+        for task in tasks:
+            task.cancel()
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    assert len(built) == 2 and built[0] is not built[1]
+    for index, ((adapter, original), changes, lease, result) in enumerate(zip(adapters, applied, leases, results)):
+        assert changes == [built[index], original] and adapter._model is original
+        assert isinstance(built[index]._client, FormalModelDiagnostics)
+        assert built[index]._client._ids["request_id"] == f"request-{index}"
+        assert lease.closed_with == [outcome != "complete"]
+        assert not adapter._stream_event_rail._formal_read_only_sessions
+        if outcome == "complete":
+            assert result[-1].payload["content"] == "Verified answer."
+        else:
+            assert isinstance(result, asyncio.CancelledError if outcome == "cancel" else RuntimeError)

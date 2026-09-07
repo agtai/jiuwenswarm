@@ -201,3 +201,24 @@ before the backend rejected it; the parameter now rejects case variants before
 any launcher effects, matching the backend's exact setting contract.
 The reviewer rechecked the actual parameter AST: auto/high accept, HIGH/Auto
 reject during binding, and the complete script parses. No findings remain.
+
+### P8 — Reuse the fresh selected model for one Native execution
+
+The catalog resolver constructs a new Model from an independently read configuration
+for every exact Native binding. The adapter now observes that same execution-private
+instance instead of immediately constructing another identical client. The cached/default
+path still clones its configuration and model; no cross-request model pool is introduced.
+Model identity, options, provider, read-only tool policy and final output are unchanged.
+
+Main's formal policy/adapter/model-diagnostic suite passes 65 checks, including concurrent
+complete/failure/cancellation isolation and restoration after output settlement. Independent
+review traced the production catalog and builder, ran the 17 policy checks, and found no
+actionable issue. Scoped Ruff `F,E9` and diff checks pass. Local evidence is
+`logs/p8-model.txt`; tests use the isolated patched SDK and `logs/p8-data`.
+
+This removes one redundant setup construction per selected Native execution. It does
+not eliminate an Agent model round. The imported seven-call background trace is absent
+locally and does not prove redundant reasoning or reads; no model switch, read suppression,
+or speculative pooling is justified. A new real Agent/file-tool probe accompanies P4
+and cumulative acceptance; neither a background-task speedup nor the imported target
+is established by this setup change.

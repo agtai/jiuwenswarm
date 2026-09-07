@@ -41,6 +41,9 @@ automation and independent review pass, with physical supply/continuity still op
 P3 exposes controlled Native endpoint eagerness; same-byte real Provider trials
 found an extra late-supplement split with high, so auto remains the default.
 Configuration, launcher and endpoint checks pass; no general speedup is claimed.
+P8 removes a duplicate construction of the fresh selected Native model while
+retaining execution isolation; formal checks and independent review pass. Agent
+round reduction and background-task latency improvement remain unproved.
 The remaining implementation continues independently
 of evidence synchronization. Original rehearsal files are absent locally; full
 optimization, measured latency and physical acceptance remain unproved. The
