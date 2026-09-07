@@ -9,12 +9,18 @@ const resources = {
   en: { translation: en },
 };
 
+i18n.on('languageChanged', (language: string) => {
+  if (typeof document !== 'undefined') {
+    document.documentElement.lang = language.startsWith('en') ? 'en' : 'zh-CN';
+  }
+});
+
 i18n
   .use(LanguageDetector)
   .use(initReactI18next)
   .init({
     resources,
-    fallbackLng: 'zh',
+    fallbackLng: 'en',
     supportedLngs: ['zh', 'en'],
     interpolation: {
       escapeValue: false,

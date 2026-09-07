@@ -25,16 +25,16 @@ const assert = require('node:assert/strict');
       assert.equal(response.status(), 200);
       assert.equal(await page.evaluate(() => window.isSecureContext), true);
       assert.equal(await page.title(), 'JiuwenSwarm');
-      await page.getByRole('button', { name: '更多', exact: true }).click();
-      if (!(await page.getByRole('heading', { name: '配置信息', exact: true }).isVisible())) {
-        await page.getByRole('button', { name: '配置信息', exact: true }).click();
+      await page.getByRole('button', { name: 'More', exact: true }).click();
+      if (!(await page.getByRole('heading', { name: 'Configuration', exact: true }).isVisible())) {
+        await page.getByRole('button', { name: 'Configuration', exact: true }).click();
       }
-      await page.getByRole('heading', { name: '配置信息', exact: true }).waitFor();
+      await page.getByRole('heading', { name: 'Configuration', exact: true }).waitFor();
       const empty = await page.locator('input[type="text"],input[type="password"]').evaluateAll(
         fields => fields.length >= 4 && fields.every(field => field.value === '')
       );
       assert.equal(empty, true);
-      assert.equal(await page.getByRole('button', { name: '保存', exact: true }).isDisabled(), true);
+      assert.equal(await page.getByRole('button', { name: 'Save', exact: true }).isDisabled(), true);
       assert.deepEqual(errors, []);
       if (index === 0) await page.screenshot({ path: path.join(outputDirectory, 'first-use-model-setup.png'), fullPage: true });
       return { instance: entry.instance, http: 200, secureContext: true, emptyModelFields: true,

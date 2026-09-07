@@ -51,6 +51,7 @@ def test_first_use_has_no_agent_credentials_and_registered_code_project(tmp_path
     assert result.returncode == 0, result.stdout + result.stderr
     config = yaml.safe_load((tmp_path / 'data/config/config.yaml').read_text(encoding='utf-8'))
     assert config['models'] == {'defaults': []}
+    assert config['preferred_language'] == 'en'
     assert config['setup_guide']['enabled'] is True
     assert (tmp_path / 'data/config/.env').read_text() == 'API_KEY=\nAPI_BASE=\nMODEL_NAME=\nMODEL_PROVIDER=\n'
     projects = json.loads((tmp_path / 'data/agent/projects.json').read_text())['projects']

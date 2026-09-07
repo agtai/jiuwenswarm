@@ -138,13 +138,16 @@ def provision(root: Path, address: str, suffix: str, image: str):
     domains = [f'swarm.{suffix}'] + [f'lv{i:02d}.{suffix}' for i in range(1, 11)]
     landing = root / 'portal'
     landing.mkdir(exist_ok=True)
-    links = ''.join(f'<li><a href="https://lv{i:02d}.{html.escape(suffix)}/">测试入口 {i:02d}</a></li>' for i in range(1,11))
-    write(landing / 'index.html', '<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
+    links = ''.join(f'<li><a href="https://lv{i:02d}.{html.escape(suffix)}/">Test environment {i:02d}</a></li>' for i in range(1,11))
+    write(landing / 'index.html', '<!doctype html><html lang="en"><meta charset="utf-8">'
           '<meta name="viewport" content="width=device-width,initial-scale=1">'
-          '<title>JiuwenSwarm Live Voice</title><body><main><h1>JiuwenSwarm Live Voice 测试</h1>'
-          '<p>请打开分配给你的入口，并使用对应账号登录。</p>'
-          '<p>首次使用：在“更多 → 配置信息”填写自己的 Agent 模型和 API 配置；'
-          '将左侧 Work 切换为 Code，选择 Live Voice Test 项目，再开启语音。</p>'
+          '<title>JiuwenSwarm Live Voice</title><body><main><h1>JiuwenSwarm Live Voice Testing</h1>'
+          '<p>Open your assigned test environment and sign in with your existing account.</p>'
+          '<p>If your administrator has configured the Agent model, you can start testing immediately. '
+          'Otherwise, enter the model and API settings under More &rarr; Configuration.</p>'
+          '<p>Switch the sidebar from Work to Code. Hover over the Live Voice Test project '
+          'and click its plus button to start a new conversation. Enable Live Voice and allow '
+          'microphone access in Chrome or Edge.</p>'
           f'<ol>{links}</ol></main></body></html>', mode=0o644)
     header = f'''map $http_upgrade $jiuwen_connection_upgrade {{ default upgrade; '' close; }}
 server {{

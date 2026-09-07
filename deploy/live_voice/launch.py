@@ -88,7 +88,7 @@ def initialize(runtime: dict) -> dict:
     config = yaml.safe_load(config_path.read_text())
     config['models'] = {'defaults': []}
     config['setup_guide'] = {'enabled': True}
-    config['preferred_language'] = 'zh'
+    config['preferred_language'] = 'en'
     config['auto_recap'] = {'enabled': False}
     config['auto_memory_enabled'] = False
     for name, channel in config.get('channels', {}).items():
@@ -101,11 +101,13 @@ def initialize(runtime: dict) -> dict:
     (DATA / 'config/.env').write_text('API_KEY=\nAPI_BASE=\nMODEL_NAME=\nMODEL_PROVIDER=\n')
     PROJECT.mkdir(parents=True)
     (PROJECT / 'README.md').write_text(
-        '# Live Voice 测试项目\n\n'
-        '这是当前测试者的独立项目。先在 Web 设置中填写自己的 Agent 模型和 API 配置，'
-        '再将左侧 Work 切换为 Code，选择本项目开启 Live Voice。Realtime 语音服务已由服务器配置。\n\n'
-        '可先让 Agent 读取 inventory.csv，再要求它在本项目创建一份简短汇总，'
-        '核对文件、任务结果和语音播报是否一致。\n', encoding='utf-8')
+        '# Live Voice test project\n\n'
+        'This is your independent test project. Confirm the Agent model in Web settings; '
+        'enter its configuration if the administrator has not supplied it. '
+        'Switch the sidebar from Work to Code, select this project and enable Live Voice. '
+        'The server supplies the Realtime speech service.\n\n'
+        'Ask the Agent to read inventory.csv, then create a short summary in this project. '
+        'Compare the file, task result and spoken response.\n', encoding='utf-8')
     (PROJECT / 'inventory.csv').write_text('item,quantity\nnotebooks,12\npens,30\nfolders,8\n')
     for args in (
         ['init', '-b', 'main'], ['config', 'user.name', 'Live Voice Tester'],

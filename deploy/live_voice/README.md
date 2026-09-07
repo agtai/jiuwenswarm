@@ -2,8 +2,9 @@
 
 This deployment runs the requested branch in ten independent containers. Each
 tester has a separate HTTPS hostname, login, configuration, project and runtime
-database. Agent models start empty. Only the administrator's four Speech settings
-are supplied privately; Native Realtime is explicitly `gpt-realtime-2`.
+database. New instances use English and start with empty Agent models. An
+administrator can supply Agent settings privately to existing instances;
+Native Realtime is explicitly `gpt-realtime-2` with separate Speech credentials.
 
 This is a controlled test installation. Ten connected UIs are distinct from ten
 simultaneous completed Agent/voice tasks. Model quotas and a real microphone,
@@ -11,12 +12,18 @@ Agent/tool and speaker journey require separate acceptance.
 
 ## Build from a committed source
 
-Use a clean checkout of `hx/0812_live_voice_w3`; record its full commit. Never
-include a developer workspace, `.env`, API key, SSH key or DPAPI file in the
-build context. On the server, extract a `git archive` of that exact commit into
-`/srv/jiuwen-livevoice/releases/<commit>` and run:
+Use a clean server checkout of `codex/deploy-live-voice-ten-user`; record its full
+commit. Never include a developer workspace, `.env`, API key, SSH key or DPAPI file in the
+build context. Clone directly on the server, or fast-forward an existing clean
+checkout, then build there:
 
 ```sh
+git clone --single-branch --branch codex/deploy-live-voice-ten-user \
+  https://github.com/agtai/jiuwenswarm.git /srv/jiuwenswarm
+cd /srv/jiuwenswarm
+# For subsequent updates: git pull --ff-only
+git status --short --branch
+git rev-parse HEAD
 docker build --build-arg SOURCE_COMMIT=<full-commit> \
   -t jiuwen-livevoice:<commit> -f deploy/live_voice/Dockerfile .
 docker image inspect jiuwen-livevoice:<commit> --format '{{.Id}}'
@@ -58,8 +65,9 @@ to `private/speech.json` (root:root, mode 0600):
 - `LIVE_VOICE_SPEECH_STT_MODEL`
 - `LIVE_VOICE_SPEECH_TTS_MODEL`
 
-Do not copy Agent model values. Do not echo credentials or pass them in command
-arguments. Remove temporary plaintext transfer files after installation. The
+Keep Agent model credentials in the instance configuration, outside Git and the
+image. Do not echo credentials or pass them in command arguments. Remove temporary
+plaintext transfer files after installation. The
 encrypted Windows sudo file stays on the administrator's computer.
 
 ## HTTPS and instance generation
@@ -119,10 +127,12 @@ quota or microphone/Agent acceptance.
 
 ## Tester journey
 
-Open the assigned HTTPS URL and log in. Use the existing model configuration UI
-to enter your own Agent model name, provider, API base and API key, then save and
-confirm the model. Switch the left sidebar from **Work** to **Code**, choose the
-**Live Voice Test** project and enable Live Voice.
+Open the assigned HTTPS URL and log in. If the administrator has configured the
+Agent model, no model setup is needed. Otherwise use **More → Configuration**
+to enter the Agent model name, provider, API base and API key, then save and
+confirm the model. Switch the left sidebar from **Work** to **Code**, hover over
+the **Live Voice Test** project and click its plus button to start a new
+conversation, then enable Live Voice.
 Allow microphone access in the browser. The server supplies Native Realtime;
 testers do not need the shared Speech API key.
 
@@ -130,6 +140,28 @@ Read `inventory.csv`, ask the Agent to create a short report inside that project
 and compare the actual file, task result and spoken response. With no Agent model
 configured, model-dependent voice/Agent work is not ready. ASR/TTS connectivity
 alone must not be reported as a successful Agent/tool journey.
+
+## English interface and existing instances
+
+The portal is generated in English by `provision.py`. Change its source template,
+not only the generated `portal/index.html`, so rebuilding another server produces
+the same interface. The Web UI already contains English translations; the
+deployment launcher initializes `preferred_language: en` for new instances.
+
+Existing volumes are deliberately preserved by initialization. Before updating
+them, back up their `data/config/config.yaml` files privately. Set English using
+the Web UI language setting, or call the existing authenticated WebSocket method
+`locale.set_conf` with `{"preferred_language":"en"}` for each assigned instance.
+Check `locale.get_conf` and reload the browser. This updates only the language
+setting; do not replace the whole configuration or reinitialize user data.
+
+For an update containing frontend translation changes, rebuild the image from
+the pulled commit, regenerate compose and the portal with `provision.py`, and
+recreate the containers using the new immutable image ID. Keep the original
+credentials and volumes. Verify ten English UIs, their model configuration,
+authentication isolation and the Live Voice start/stop controls. Existing user
+messages, project files and model-generated responses are not translated by a UI
+language change. Speech/Agent behavior and physical acceptance are separate.
 
 ## Maintenance and recovery
 

@@ -26,16 +26,25 @@ history, not acceptance of this candidate.
 
 ### Ten-user remote test environment
 
-The authorized w3 deployment on `164.30.6.242` provides ten separately
-authenticated HTTPS browser environments with independent model, project and
-runtime data. Agent configuration starts empty; Native Realtime explicitly uses
-`gpt-realtime-2` with the privately supplied development Speech credential.
+The deployment on `164.30.6.242` is maintained on the separate
+`codex/deploy-live-voice-ten-user` branch and built from a server Git checkout.
+It provides ten separately authenticated HTTPS browser environments with
+independent model, project and runtime data. New instances start with empty
+Agent configuration; the existing installation has administrator-supplied Agent
+settings. Native Realtime explicitly uses `gpt-realtime-2` with a separate private
+Speech credential. The authorized English interface update owns the portal
+template, English translation gaps, new-instance language default and application
+of the existing locale setting to retained instances (Tier 1). It excludes
+Agent/voice policy, protocol, account and task changes. Acceptance requires the
+frontend build, bootstrap preservation checks and ten authenticated English UIs
+with model settings preserved; deployment evidence stays bound to the actual
+served commit and image.
 [Deployment evidence](evidence/TEN_USER_DEPLOYMENT_20260907.json) binds the clean
 source/image, served assets, concurrent browser/WSS and Provider connections,
 isolation and recovery checks. The [deployment review](reviews/TEN_USER_DEPLOYMENT_20260907.md)
 records scope and the unavailable independent-review substitute. This is a
 controlled test environment: complete microphone/Agent/tool/speaker acceptance
-and ten concurrent model workloads still require user-configured Agent models.
+and ten concurrent model workloads remain separate acceptance boundaries.
 
 Deployment evidence applies to its recorded source/image. Removing local
 Realtime optimization commits does not redeploy or roll back that remote runtime;

@@ -282,6 +282,7 @@
     "modeAutoHarnessDesc": "Automatically analyze and optimize target repository",
     "recording": "Recording... (release to send)",
     "waitingTasks": "Waiting tasks",
+    "messageQueue": "Message Queue",
     "waitingTasksCount": "Waiting tasks ({{count}})",
     "removeTask": "Remove task",
     "addImage": "Add image",
@@ -1206,6 +1207,7 @@
       "actions": "Actions",
       "noProject": "-",
       "runNow": "Run now",
+      "start": "Start",
       "stop": "Stop",
       "edit": "Edit",
       "more": "More",
@@ -2719,5 +2721,8 @@
   },
   "qaSummary": {
     "title": "Clarifications"
+  },
+  "security": {
+    "contentRetracted": "Content has been retracted for security reasons"
   }
 }
