@@ -40,6 +40,7 @@ import {
   type FormalBatchSynthesisResult,
   type FormalStreamingRecognitionResult,
   type FormalSynthesisDownlink,
+  type FormalTaskPreparationInput,
   type GatewaySpeechProvider,
 } from './gatewayBatchSpeechClient.js';
 import {
@@ -605,6 +606,18 @@ export class ProductP1VoiceRouteOwner {
   #nativePlayoutFailureReason: string | null = null;
   #nativeCaptureSendPaused = false;
   #nativeTaskNotification: { readonly response: Readonly<AudioResponseRef>; speechObserved: boolean } | null = null;
+  #taskPreparationSequence = 0;
+  #taskPreparationCapability: Promise<boolean> | null = null;
+  #taskPreparation: {
+    input: Readonly<FormalTaskPreparationInput>;
+    speech: GatewayBatchSpeechClient;
+    ready: Promise<boolean>;
+    playout: Promise<ProductP1NativeChatMessage | null> | null;
+    timer: ReturnType<typeof setTimeout> | null;
+    requested: boolean;
+    cancelled: boolean;
+    claimed: boolean;
+  } | null = null;
   #pendingMediaActivation: Promise<unknown> | null = null;
   #endOfTurnNegotiated = false;
   #pendingSpeechStart: Readonly<MediaSpeechStart> | null = null;
@@ -834,6 +847,9 @@ export class ProductP1VoiceRouteOwner {
     });
     const operationGeneration = ++this.#operationGeneration;
     this.#setStatus('starting', null);
+    this.cancelPreparedTaskNotification();
+    this.#taskPreparation = null;
+    this.#taskPreparationCapability = null;
     this.#captureStartupAudioReady = false;
     this.#captureStartupFailure = null;
     this.#mediaTerminalFailure = null;
@@ -1488,6 +1504,72 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
+  /** Prepare exact terminal TTS without capture, display, playback or ACK effects. */
+  prepareTaskNotification(input: Readonly<{ response: Readonly<AudioResponseRef>; unit_id: string;
+    text: string; event_key: string; text_sha256: string }>): void {
+    const speech = this.#speech;
+    if (this.#nativeInteraction === null || speech === null || this.#playout === null ||
+        this.#closed || this.#closeRequested || this.#route === null || !this.#route.leaf.attached ||
+        this.#route.leaf.closed || input.response.interaction_id !== this.#interactionId ||
+        (this.#pendingPlayout !== null && !this.#pendingPlayout.native)) return;
+    const prior = this.#taskPreparation;
+    if (prior !== null) {
+      // A later queued terminal must not supersede the first notification's
+      // TTS admission. Only a rewrite of that same response invalidates it.
+      if (l0ResponseKey(prior.input.response) !== l0ResponseKey(input.response)) return;
+      if (prior.input.unitId !== input.unit_id ||
+          prior.input.text !== input.text || prior.input.eventKey !== input.event_key || prior.input.textSha256 !== input.text_sha256) {
+        this.cancelPreparedTaskNotification();
+      }
+      return;
+    }
+    const operationGeneration = this.#operationGeneration;
+    const preparedInput = Object.freeze<FormalTaskPreparationInput>({
+      preparationId: `task-prepare-${Date.now()}-${++this.#taskPreparationSequence}`,
+      activationId: requiredText(this.#activationId, 'activation_id'), activationGeneration: this.#activationGeneration,
+      eventKey: input.event_key, textSha256: input.text_sha256, text: input.text,
+      response: Object.freeze({ ...input.response }), unitId: input.unit_id, locale: this.#locale,
+      requiredSampleRateHz: this.#playout.sample_rate_hz,
+      correlationId: requiredText(this.#correlationId, 'correlation_id'),
+    });
+    const slot = { input: preparedInput, speech, ready: Promise.resolve(false),
+      playout: null as Promise<ProductP1NativeChatMessage | null> | null,
+      timer: null as ReturnType<typeof setTimeout> | null, requested: false, cancelled: false, claimed: false };
+    this.#taskPreparation = slot;
+    slot.ready = (async () => {
+      this.#taskPreparationCapability ??= speech.taskPreparationAvailable();
+      if (!await this.#taskPreparationCapability) return false;
+      if (slot.cancelled || this.#taskPreparation !== slot || this.#speech !== speech ||
+          this.#operationGeneration !== operationGeneration || this.#closeRequested) {
+        throw Object.assign(new Error('Task preparation owner changed'), { reason: 'TASK_PREPARATION_STALE' });
+      }
+      slot.requested = true;
+      slot.timer = setTimeout(() => this.cancelPreparedTaskNotification(preparedInput.response), 30_000);
+      (slot.timer as unknown as { unref?: () => void }).unref?.();
+      await speech.prepareTaskNotification(preparedInput);
+      if (slot.cancelled || this.#taskPreparation !== slot || this.#speech !== speech ||
+          this.#operationGeneration !== operationGeneration || this.#closeRequested) {
+        void speech.cancelTaskNotification(preparedInput).catch(() => undefined);
+        throw Object.assign(new Error('Task preparation owner changed'), { reason: 'TASK_PREPARATION_STALE' });
+      }
+      return true;
+    })().catch(error => {
+      throw Object.assign(new Error('Task preparation did not complete'), {
+        reason: 'TASK_PREPARATION_FAILED', cause: error,
+      });
+    });
+    void slot.ready.catch(() => undefined);
+  }
+
+  cancelPreparedTaskNotification(response?: Readonly<AudioResponseRef>): void {
+    const slot = this.#taskPreparation;
+    if (slot === null || (response !== undefined && l0ResponseKey(slot.input.response) !== l0ResponseKey(response))) return;
+    slot.cancelled = true;
+    if (slot.timer !== null) clearTimeout(slot.timer);
+    slot.timer = null;
+    if (slot.requested) void slot.speech.cancelTaskNotification(slot.input).catch(() => undefined);
+  }
+
   prepareNativeTaskNotification(response: Readonly<AudioResponseRef>):
     | Readonly<{ status: 'not_native' | 'speaker_active' }>
     | Readonly<{ status: 'ready'; release: () => void }> {
@@ -1514,6 +1596,7 @@ export class ProductP1VoiceRouteOwner {
     if (lease === null || l0ResponseKey(lease.response) !== l0ResponseKey(response)) return false;
     // Retain user priority even if speech ends before synthesis returns.
     lease.speechObserved = true;
+    this.cancelPreparedTaskNotification(response);
     const pending = this.#pendingPlayout;
     if (pending !== null && !pending.native && l0ResponseKey(pending.response) === l0ResponseKey(response)) {
       return this.stopAgentPlayout(response);
@@ -1521,7 +1604,22 @@ export class ProductP1VoiceRouteOwner {
     return true;
   }
 
-  async playAgentText(
+  playAgentText(input: Readonly<{ response: Readonly<AudioResponseRef>; unit_id: string; text: string;
+    capture_during_playout?: boolean }>): Promise<ProductP1NativeChatMessage | null> {
+    const prepared = this.#taskPreparation;
+    if (prepared !== null && this.#pendingNativeAudio === null && this.#nativeTaskNotification !== null &&
+        l0ResponseKey(this.#nativeTaskNotification.response) === l0ResponseKey(input.response) &&
+        l0ResponseKey(prepared.input.response) === l0ResponseKey(input.response) &&
+        prepared.input.unitId === input.unit_id && prepared.input.text === input.text) {
+      // Coalesced presentation continuations share the entire claim/render/
+      // receipt result. A duplicate never cancels the first consumer's source.
+      prepared.playout ??= this.#playAgentText(input);
+      return prepared.playout;
+    }
+    return this.#playAgentText(input);
+  }
+
+  async #playAgentText(
     input: Readonly<{
       response: Readonly<AudioResponseRef>;
       unit_id: string;
@@ -1535,6 +1633,7 @@ export class ProductP1VoiceRouteOwner {
     const taskNotification = continuousNative && !native && this.#nativeTaskNotification !== null &&
       l0ResponseKey(this.#nativeTaskNotification.response) === l0ResponseKey(input.response);
     const taskLease = taskNotification ? this.#nativeTaskNotification : null;
+    const prepared = taskNotification ? this.#taskPreparation : null;
     if (this.#speech === null || this.#playout === null || this.#closed || this.#closeRequested) {
       throw new Error('formal P1 synthesis authority is unavailable');
     }
@@ -1550,7 +1649,26 @@ export class ProductP1VoiceRouteOwner {
       const text = requiredText(input.text, 'agent_text');
       const measurementBinding = this.#l0Binding(input.response);
       if (measurementBinding !== null) registerBrowserL0Response(measurementBinding);
-      const result = nativeDelivery ?? await speech.synthesizeAuthoritative({
+      let preparedResult: Readonly<FormalBatchSynthesisResult> | null = null;
+      if (prepared !== null) {
+        if (prepared.input.text !== text || prepared.input.unitId !== input.unit_id ||
+            l0ResponseKey(prepared.input.response) !== l0ResponseKey(input.response)) {
+          this.cancelPreparedTaskNotification();
+          throw Object.assign(new Error('Task preparation source changed'), { reason: 'TASK_PREPARATION_SOURCE_CHANGED' });
+        }
+        if (await prepared.ready) {
+          if (prepared.cancelled || prepared.claimed || this.#taskPreparation !== prepared ||
+              this.#nativeTaskNotification !== taskLease || taskLease?.speechObserved) {
+            throw Object.assign(new Error('Task preparation no longer owns claim'), { reason: 'TASK_PREPARATION_STALE' });
+          }
+          prepared.claimed = true;
+          if (prepared.timer !== null) clearTimeout(prepared.timer);
+          prepared.timer = null;
+          try { preparedResult = await speech.claimTaskNotification(prepared.input); }
+          catch { throw Object.assign(new Error('Task preparation claim failed'), { reason: 'TASK_PREPARATION_CLAIM_FAILED' }); }
+        }
+      }
+      const result = nativeDelivery ?? preparedResult ?? await speech.synthesizeAuthoritative({
           response: input.response,
           unitId: requiredText(input.unit_id, 'unit_id'),
           renderPlan: createAudioRenderPlan(text, text, []),
@@ -1562,6 +1680,11 @@ export class ProductP1VoiceRouteOwner {
         });
       this.#requireCurrent(operationGeneration);
       if (result === null) throw new Error('formal synthesis was fenced');
+      if (prepared !== null && taskLease !== null &&
+          (this.#nativeTaskNotification !== taskLease || taskLease.speechObserved)) {
+        this.cancelPreparedTaskNotification(input.response);
+        throw Object.assign(new Error('Task announcement yielded to the speaker'), { reason: 'FORMAL_PLAYOUT_BARGED' });
+      }
       if ((result.chunks.length === 0) === (result.downlink === null)) {
         throw new Error('formal synthesis must return exactly one audio delivery');
       }
@@ -1834,6 +1957,12 @@ export class ProductP1VoiceRouteOwner {
           reason: 'FORMAL_P1_CLOSED',
         });
       }
+      if (taskNotification && stableFailureReason(error).startsWith('TASK_PREPARATION_')) {
+        this.cancelPreparedTaskNotification(input.response);
+        // Preparation owns no microphone or presentation receipt. The panel
+        // reconciles this exact unplayed Task via its canonical failure path.
+        throw error;
+      }
       const failure =
         playoutResponse !== null && stableFailureReason(error) === 'PAGE_HIDDEN'
           ? Object.assign(new Error('formal browser playout was fenced because the page is hidden'), {
@@ -1848,6 +1977,11 @@ export class ProductP1VoiceRouteOwner {
       // downlink socket and discards the response identity needed for cleanup.
       await this.#fail(failure);
       throw failure;
+    } finally {
+      if (prepared !== null && this.#taskPreparation === prepared) {
+        if (prepared.timer !== null) clearTimeout(prepared.timer);
+        this.#taskPreparation = null;
+      }
     }
   }
 
@@ -2113,6 +2247,7 @@ export class ProductP1VoiceRouteOwner {
   }
 
   async close(): Promise<void> {
+    this.cancelPreparedTaskNotification();
     for (const route of this.#nativeStoppingRoutes) route.leaf.close('MEDIA_LOCAL_CLOSE');
     this.#nativeStoppingRoutes.clear();
     this.#nativeTaskNotification = null;
@@ -3622,6 +3757,7 @@ export class ProductP1VoiceRouteOwner {
   }
 
   async #fail(error: unknown): Promise<void> {
+    this.cancelPreparedTaskNotification();
     if (this.#closed) {
       this.#setStatus('closed', null);
       return;

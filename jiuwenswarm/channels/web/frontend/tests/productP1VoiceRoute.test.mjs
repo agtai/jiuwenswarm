@@ -6979,6 +6979,143 @@ test('formal P1 exposes recognition-stream failure only for negotiated uplink ca
   );
 });
 
+for (const preparationCase of ['complete', 'cancel', 'changed_text', 'close_while_preparing', 'speech_during_claim', 'lost_claim', 'unsupported']) {
+test(`P7 prepared terminal TTS retains Native input and claims only after arbitration: ${preparationCase}`, async () => {
+  const environment = audioEnvironment();
+  const calls = [], sockets = [];
+  const preparedReady = deferred();
+  const claimReady = deferred();
+  const response = { interaction_id: 'interaction-1', response_id: 'prepared-task', response_generation: 3 };
+  const uplinkBinding = serverBinding();
+  const downlinkBinding = { ...serverBinding(), direction: 'downlink', lease_id: 'prepared-downlink',
+    authority_evidence_id: 'prepared-authority', media_session_id: 'prepared-session', track_id: 'prepared-track',
+    generation: { kind: 'response', id: response.response_id, value: 3 },
+    playout: { response_id: response.response_id, response_generation: 3, unit_id: 'task-unit' } };
+  const version = 'live-voice.task-notification-preparation.v1';
+  class PreparedSocket extends FakeSocket {
+    send(value) {
+      super.send(value);
+      if (typeof value !== 'string' || this.binding?.direction !== 'downlink') return;
+      const control = JSON.parse(value);
+      if (control.type === 'media.ack' && control.through_seq === 0) {
+        queueMicrotask(() => this.onmessage?.({ data: serializeMediaControl({ type: 'media.detach',
+          lease_id: this.binding.lease_id, generation: 3, reason_id: 'MEDIA_LOCAL_CLOSE', through_seq: 0,
+          business_cancel_count_delta: 0 }) }));
+      }
+    }
+  }
+  const owner = new ProductP1VoiceRouteOwner({ enabled: true, expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      const socket = new PreparedSocket();
+      const binding = sockets.length === 0 ? uplinkBinding : downlinkBinding;
+      sockets.push(socket);
+      queueMicrotask(() => {
+        socket.open(binding);
+        if (binding.direction === 'downlink') queueMicrotask(() => socket.onmessage?.({
+          data: encodeAudioFrame(binding, { seq: 0, sample_cursor: 0, samples: new Float32Array(960).fill(0.25) }) }));
+      });
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) return nativeMediaActivation(uplinkBinding);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      if (method === 'live_voice.speech.task_preparation_capabilities') return {
+        contract_version: version, available: preparationCase !== 'unsupported', max_frames: 750, max_bytes: 3 * 1024 * 1024, retention_ms: 30_000 };
+      if (method === 'live_voice.speech.task_preparation_prepare') {
+        await preparedReady.promise;
+        return { contract_version: version, preparation_id: params.preparation_id, status: 'ready', presented: false };
+      }
+      if (method === 'live_voice.speech.task_preparation_cancel') return {
+        contract_version: version, preparation_id: params.preparation_id, status: 'cancelled', presented: false };
+      if (method === 'live_voice.speech.task_preparation_claim') {
+        if (preparationCase === 'speech_during_claim') await claimReady.promise;
+        if (preparationCase === 'lost_claim') throw Object.assign(new Error('claim response lost'), { code: 'WS_DISCONNECTED' });
+        return {
+        contract_version: version, preparation_id: params.preparation_id, status: 'claimed', response: params.response,
+        unit_id: params.unit_id, presented: false,
+        provider: { provider_id: 'prepared-tts', implementation_class: 'formal', fallback_from: null, model: 'tts-model' },
+        audio: { format: 'pcm_f32_mono_20ms', sample_rate_hz: 48_000, channel_count: 1, frame_count: null,
+          delivery: 'dedicated_media_downlink', endpoint_path: '/ws/live-voice/media', media_ticket: 'Q'.repeat(43),
+          subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000, binding: downlinkBinding,
+          max_pending_frames: 8, max_pending_bytes: 131_072, streaming: true, degradation_reason: null } };
+      }
+      if (method === 'live_voice.speech.synthesize_batch' && preparationCase === 'unsupported') return {
+        contract_version: 'live-voice.contract.v2', request_id: params.request_id, operation_id: params.operation_id,
+        ok: true, error: null, result: { operation: 'speech.synthesize.batch', response: params.response, unit_id: params.unit_id,
+          audio: { format: 'wav_pcm16_mono', sample_rate_hz: 48_000, channel_count: 1, data_base64: wavBase64() },
+          provider: { provider_id: 'legacy-tts', implementation_class: 'formal', fallback_from: null, model: 'legacy' }, presented: false } };
+      if (method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD) return {
+        status: 'media_playout_acknowledged', reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED', receipt_id: 'prepared-receipt',
+        duplex_media_observed: true, ...params };
+      throw new Error(`forbidden P7 method ${method}`);
+    },
+  });
+  await startCaptureWithFirstFrame(owner, environment, { session_id: 'session-1', interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1', activation_id: 'activation-1', activation_generation: 7, locale: 'zh-CN' },
+    { samples: new Float32Array(960) });
+  const input = { response, unit_id: 'task-unit', text: 'Task complete.', event_key: '["task","attempt","event"]', text_sha256: 'a'.repeat(64) };
+  owner.prepareTaskNotification(input);
+  owner.prepareTaskNotification(input);
+  owner.prepareTaskNotification({ ...input, response: { ...response, response_id: 'later-queued-task', response_generation: 4 } });
+  for (let i = 0; i < 20 && !calls.some(([method]) => method.includes('task_preparation_prepare')) && preparationCase !== 'unsupported'; i += 1)
+    await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sockets.length, 1);
+  assert.equal(environment.contexts[0].sourceStartCount, 0);
+  assert.equal(calls.some(([method]) => method.includes('claim') || method.includes('receipt')), false);
+  assert.equal(calls.some(([method]) => method.includes('task_preparation_cancel')), false,
+    'A later queued notification must not supersede the first preparation');
+  sendNextFrameFromCurrentWorklet(environment, 1, new Float32Array(960));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sockets[0].sent.filter(value => typeof value !== 'string').length, 2);
+  if (preparationCase === 'close_while_preparing') {
+    await owner.close();
+    preparedReady.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls.some(([method]) => method.includes('claim') || method.includes('receipt')), false);
+    assert.equal(environment.contexts[0].sourceStartCount, 0);
+    assert.ok(calls.some(([method]) => method.includes('task_preparation_cancel')));
+    return;
+  }
+  if (preparationCase === 'cancel') owner.cancelPreparedTaskNotification(response);
+  preparedReady.resolve();
+  const lease = owner.prepareNativeTaskNotification(response);
+  assert.equal(lease.status, 'ready');
+  const played = owner.playAgentText({ response, unit_id: 'task-unit',
+    text: preparationCase === 'changed_text' ? 'Changed text.' : input.text, capture_during_playout: false });
+  if (preparationCase !== 'changed_text') {
+    assert.equal(owner.playAgentText({ response, unit_id: 'task-unit', text: input.text, capture_during_playout: false }), played,
+      'Concurrent exact continuations must share one claim/play/receipt result');
+  }
+  if (preparationCase === 'speech_during_claim') {
+    for (let i = 0; i < 20 && !calls.some(([method]) => method.includes('task_preparation_claim')); i += 1)
+      await new Promise(resolve => setImmediate(resolve));
+    assert.equal(owner.yieldNativeTaskNotification(response), true);
+    claimReady.resolve();
+    await assert.rejects(played, error => error.reason === 'FORMAL_PLAYOUT_BARGED');
+    assert.equal(sockets.length, 1, 'Stale claim cannot open a child audio socket');
+    assert.equal(environment.contexts[0].sourceStartCount, 0);
+    assert.equal(calls.some(([method]) => method.includes('receipt') || method.includes('synthesize_batch')), false);
+  } else if (['cancel', 'changed_text', 'lost_claim'].includes(preparationCase)) {
+    await assert.rejects(played, error => error.reason.startsWith('TASK_PREPARATION_'));
+    assert.equal(calls.some(([method]) => method.includes('receipt') || method.includes('synthesize_batch')), false);
+    assert.equal(calls.filter(([method]) => method.includes('task_preparation_claim')).length, preparationCase === 'lost_claim' ? 1 : 0);
+    assert.equal(environment.contexts[0].sourceStartCount, 0);
+  } else {
+    await played;
+    assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+    assert.equal(calls.filter(([method]) => method.includes('task_preparation_claim')).length, preparationCase === 'complete' ? 1 : 0);
+    assert.equal(calls.filter(([method]) => method.includes('synthesize_batch')).length, preparationCase === 'unsupported' ? 1 : 0);
+  }
+  assert.equal(owner.status().status, 'capturing');
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD).length, 0);
+  assert.equal(calls.some(([method]) => /recognize|task\.(?:create|adjust|cancel)|agent|history/.test(method)), false);
+  lease.release();
+  await owner.close();
+});
+}
+
 for (const staleTask of ['none', 'success', 'failure']) {
 test(`formal P1 Native activation preserves continuous uplink against stale Task synthesis: ${staleTask}`, async () => {
   const calls = [];

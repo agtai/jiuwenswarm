@@ -323,3 +323,49 @@ redundancy and P5 owns frame-window supply. Their effects must be attributed to 
 boundaries once measured. This decision adds no classifier, shortcut, model change,
 new test requirement or release gate. Scoped document links and whitespace are checked;
 the affected ACK/replay compatibility tests remain part of P2 and cumulative acceptance.
+
+### P2 review refinement — bounded observation scope retention
+
+Main's cold review reproduced 1,000 retained observation counters from 1,000
+unique retired/no-Work scopes, despite the existing 128-record Work bound. Before
+repair, Main takes the `native_work_runtime.py` and business-observation test
+writer lease; the parallel P2 repair keeps its Engine/helper lease. The intended
+Tier-3 behavior bounds counter retention by the existing Work-record capacity.
+Overflow rotates the observation epoch, wakes all existing waiters and starts
+fresh counters. Existing epoch-mismatch handling requires a complete snapshot;
+no observation becomes admission authority and no Work/Task record is removed.
+Acceptance includes bounded churn, old/new waiter cleanup, epoch refresh and
+unchanged business records. No protocol field, model or product policy is added.
+
+### P7 — Prepare exact terminal notification audio before playback arbitration
+
+The [P7 contract](REALTIME_P7_CONTRACT_20260907.md) records the negotiated local
+preparation/claim/cancel family. A true terminal notification may prepare its
+existing selected TTS while capture or Native playback retains priority. Exact
+activation, Task/attempt/event, response, unit, text digest, locale and rate bind
+one bounded slot. Claim alone creates the existing fresh one-use media ticket;
+prepared PCM and transport completion never count as heard output.
+
+Independent Astra max review and real media-leaf checks repaired cancellation
+after EOF, after transport completion and during ticket attachment, duplicate
+claim/play promises, successful leaf-finally cleanup, and exceptional socket
+cleanup. The exact child remains revocable until accepted render settlement;
+its timeout fences output and never invents playback or revokes the parent mic.
+The final independent review has no remaining scoped finding.
+
+Main's combined P2/P5/P7 Gateway passes 331 affected backend cases. Strict Native/P1
+and Gateway/privacy checks pass 140 and 35 cases; production frontend build passes.
+The independent reviewer additionally ran the two P7 mounted scenarios and the
+215-case worker backend boundary. The contract records the identical baseline
+mounted/source-pattern failures; broad mounted/product acceptance is not claimed.
+
+[Real selected-TTS observations](../evidence/REALTIME_TASK_TTS_PREPARATION_20260907.json)
+retain three source-bound revisions. The final sample uses actual TTS through the
+production registered media socket leaf: 113 contiguous 20ms frames, no render
+receipt, and cancellation still removes the exact child after transport completion.
+Its network-ACK peer and terminal Task/Native activation are synthetic. A separate
+preclaim cancellation also passes; both finish with zero retained cleanup owners
+and unchanged private configuration. Ready/claim take 1786/0.44ms in that sample,
+but no paired reactivation benchmark or 3–4.5 second target achievement follows.
+Main logs are `logs/p7-main-*`, `logs/p7-real-integrated-leaf/` and
+`logs/p7_real_tts_probe.py`. Physical playback remains part of unified acceptance.

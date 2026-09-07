@@ -221,6 +221,21 @@ export interface FormalSynthesisInput {
   readonly signal?: AbortSignal;
 }
 
+export const TASK_PREPARATION_VERSION = 'live-voice.task-notification-preparation.v1';
+export interface FormalTaskPreparationInput {
+  readonly preparationId: string;
+  readonly activationId: string;
+  readonly activationGeneration: number;
+  readonly eventKey: string;
+  readonly textSha256: string;
+  readonly text: string;
+  readonly response: Readonly<AudioResponseRef>;
+  readonly unitId: string;
+  readonly locale: string;
+  readonly requiredSampleRateHz: number;
+  readonly correlationId: string;
+}
+
 export interface LocalSpeechCapability {
   readonly enabled: boolean;
   readonly formal_available: boolean;
@@ -1135,7 +1150,12 @@ export class GatewayBatchSpeechClient {
     }
     if (this.#responses.get(response.interaction_id)?.token !== operation.token) return null;
     this.#responses.delete(response.interaction_id);
-    const result = parseEnvelope(raw, requestId, operation.operationId);
+    return this.#parseSynthesisResult(parseEnvelope(raw, requestId, operation.operationId), input);
+  }
+
+  #parseSynthesisResult(result: Record<string, unknown>,
+    input: Pick<FormalSynthesisInput, 'response' | 'unitId' | 'requiredSampleRateHz'>): Readonly<FormalBatchSynthesisResult> {
+    const response = input.response;
     const resultResponse = objectValue(result.response, 'result.response');
     const audio = objectValue(result.audio, 'result.audio');
     if (
@@ -1289,6 +1309,78 @@ export class GatewayBatchSpeechClient {
     if (active === undefined) return;
     this.#responses.delete(interactionId);
     await this.#cancelBestEffort(active);
+  }
+
+  async taskPreparationAvailable(): Promise<boolean> {
+    this.#requireEnabled();
+    let value: unknown;
+    try {
+      value = await this.#transport!.request('live_voice.speech.task_preparation_capabilities',
+        { contract_version: TASK_PREPARATION_VERSION }, { timeoutMs: 2000 });
+    } catch { return false; }
+    const result = exactArgumentRecord(value, ['contract_version', 'available', 'max_frames', 'max_bytes', 'retention_ms'], 'task_preparation_capabilities');
+    if (result.contract_version !== TASK_PREPARATION_VERSION || typeof result.available !== 'boolean' ||
+        result.max_frames !== 750 || result.max_bytes !== 3 * 1024 * 1024 || result.retention_ms !== 30_000) {
+      throw new GatewayBatchSpeechError('PROTOCOL_VIOLATION', 'TASK_PREPARATION_CONTRACT_INVALID', 'Task preparation capability is not exact');
+    }
+    return result.available;
+  }
+
+  async prepareTaskNotification(input: Readonly<FormalTaskPreparationInput>): Promise<void> {
+    const result = await this.#transport!.request('live_voice.speech.task_preparation_prepare',
+      { ...this.#taskPreparationParams(input), text: input.text }, { timeoutMs: 16_000 });
+    this.#requireTaskPreparationState(result, input.preparationId, 'ready');
+  }
+
+  async claimTaskNotification(input: Readonly<FormalTaskPreparationInput>): Promise<Readonly<FormalBatchSynthesisResult>> {
+    const result = exactArgumentRecord(await this.#transport!.request('live_voice.speech.task_preparation_claim',
+      this.#taskPreparationParams(input), { timeoutMs: 16_000 }),
+      ['contract_version', 'preparation_id', 'status', 'response', 'unit_id', 'audio', 'provider', 'presented'], 'task_preparation_claim');
+    if (result.contract_version !== TASK_PREPARATION_VERSION || result.preparation_id !== input.preparationId ||
+        result.status !== 'claimed' || result.presented !== false) {
+      throw new GatewayBatchSpeechError('PROTOCOL_VIOLATION', 'TASK_PREPARATION_CLAIM_INVALID', 'Task preparation claim is not exact');
+    }
+    const audio = objectValue(result.audio, 'task_preparation.audio');
+    if (audio.delivery !== 'dedicated_media_downlink' || audio.streaming !== true || audio.frame_count !== null) {
+      throw new GatewayBatchSpeechError('PROTOCOL_VIOLATION', 'TASK_PREPARATION_CLAIM_INVALID', 'Task preparation requires its dedicated TTS source');
+    }
+    const synthesis = this.#parseSynthesisResult({ ...result, operation: 'speech.synthesize.batch' }, input);
+    const last = this.#responseGenerations.get(input.response.interaction_id) ?? -1;
+    if (input.response.response_generation <= last) {
+      throw new GatewayBatchSpeechError('STALE', 'TASK_PREPARATION_STALE', 'Task preparation response is stale');
+    }
+    this.#boundedSet(this.#responseGenerations, input.response.interaction_id, input.response.response_generation);
+    return synthesis;
+  }
+
+  async cancelTaskNotification(input: Readonly<FormalTaskPreparationInput>): Promise<void> {
+    const result = await this.#transport!.request('live_voice.speech.task_preparation_cancel',
+      this.#taskPreparationParams(input), { timeoutMs: 2000 });
+    this.#requireTaskPreparationState(result, input.preparationId, 'cancelled');
+  }
+
+  #requireTaskPreparationState(value: unknown, id: string, status: string): void {
+    const result = exactArgumentRecord(value, ['contract_version', 'preparation_id', 'status', 'presented'], 'task_preparation');
+    if (result.contract_version !== TASK_PREPARATION_VERSION || result.preparation_id !== id ||
+        result.status !== status || result.presented !== false) {
+      throw new GatewayBatchSpeechError('PROTOCOL_VIOLATION', 'TASK_PREPARATION_STATE_INVALID', 'Task preparation state is not exact');
+    }
+  }
+
+  #taskPreparationParams(input: Readonly<FormalTaskPreparationInput>): Record<string, unknown> {
+    this.#requireEnabled();
+    if (!/^[0-9a-f]{64}$/.test(input.textSha256) || input.eventKey.length > 2048) {
+      throw new GatewayBatchSpeechError('INVALID_ARGUMENT', 'TASK_PREPARATION_IDENTITY_INVALID', 'Task preparation identity is invalid');
+    }
+    return { contract_version: TASK_PREPARATION_VERSION, preparation_id: requiredText(input.preparationId, 'preparation_id'),
+      session_id: this.#scope!.session_id, subject_id: this.#scope!.subject_id,
+      correlation_id: requiredText(input.correlationId, 'correlation_id'),
+      interaction_id: requiredText(input.response.interaction_id, 'interaction_id'),
+      activation_id: requiredText(input.activationId, 'activation_id'),
+      activation_generation: nonNegativeSafeInteger(input.activationGeneration, 'activation_generation'),
+      event_key: requiredText(input.eventKey, 'event_key'), response: { ...input.response },
+      unit_id: requiredText(input.unitId, 'unit_id'), text_sha256: input.textSha256,
+      locale: requiredText(input.locale, 'locale'), sample_rate_hz: positiveSafeInteger(input.requiredSampleRateHz, 'sample_rate_hz') };
   }
 
   #beginOperation(operationId: string | undefined, correlationId: string): ActiveOperation {

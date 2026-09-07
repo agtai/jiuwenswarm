@@ -53,6 +53,10 @@ review reproduced added underrun and repeated PCM. The original reserve remains;
 regression guards pass, but the P6 latency target has not been achieved.
 P9 retains service, durable receipt, actual-playback ACK and transcript authority
 as the handoff's low-priority decision; no speedup is allocated or claimed.
+P7 prepares exact terminal notification TTS before playback arbitration, retaining
+child cancellation through actual render settlement. Scoped backend/frontend,
+independent review and real selected-TTS/registered-media-leaf checks pass; the
+physical reactivation target and complete mounted acceptance remain unproved.
 The remaining implementation continues independently
 of evidence synchronization. Original rehearsal files are absent locally; full
 optimization, measured latency and physical acceptance remain unproved. The

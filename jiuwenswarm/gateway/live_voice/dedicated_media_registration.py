@@ -20,6 +20,7 @@ import logging
 import math
 import os
 import queue
+import re
 import secrets
 import struct
 import threading
@@ -89,6 +90,7 @@ from jiuwenswarm.gateway.live_voice.product_streaming_synthesis import (
     ProductStreamingSynthesisSource,
     start_product_streaming_synthesis,
 )
+from jiuwenswarm.gateway.live_voice import task_notification_preparation as task_preparation
 from jiuwenswarm.gateway.live_voice.native_response_downlink import (
     NativeDownlinkPresentationUnit,
     NativeResponseDownlinkSource,
@@ -886,7 +888,7 @@ class _MediaAuthority:
     )
     downlink_frames: tuple[MediaAudioFrame, ...] = field(default=(), repr=False)
     downlink_stream_source: (
-        ProductStreamingSynthesisSource | NativeResponseDownlinkSource | None
+        ProductStreamingSynthesisSource | NativeResponseDownlinkSource | task_preparation.PreparedNotificationSource | None
     ) = field(default=None, repr=False)
     downlink_response: ResponseRef | None = None
     downlink_unit_id: str | None = None
@@ -924,6 +926,29 @@ def _l0_media_binding(
         return None
 
 
+def _terminal_preparation_event_key(result: Mapping[str, object]) -> str | None:
+    source = result.get("source_event")
+    if not isinstance(source, Mapping):
+        return None
+    scope, stream, payload, extensions = (source.get(name) for name in ("scope", "stream_ref", "payload", "extensions"))
+    if not all(isinstance(value, Mapping) for value in (scope, stream, payload, extensions)):
+        return None
+    progress = extensions.get("jiuwenswarm.task_progress_return")
+    if (scope.get("assurance") != "authenticated" or scope.get("session_id") != result.get("session_id")
+            or stream.get("kind") != "task" or payload.get("state") != "terminal"
+            or payload.get("outcome") not in {"completed", "failed", "interrupted", "unknown"}
+            or not isinstance(progress, Mapping)):
+        return None
+    values = [scope.get("subject_id"), scope.get("project_id"), scope.get("session_id"),
+              "authenticated", stream.get("id"), progress.get("persistent_attempt_id"), source.get("event_id")]
+    try:
+        for value in values:
+            _required_id(value, "terminal_source_identity")
+    except MediaTransportViolation:
+        return None
+    return json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+
+
 @dataclass(slots=True)
 class _SynthesisAuthorityTransfer:
     """A bounded P2 notification handoff, claimable by one media operation."""
@@ -933,6 +958,7 @@ class _SynthesisAuthorityTransfer:
     claimed_subject_id: str | None = None
     claimed_operation_id: str | None = None
     task_notification: bool = False
+    terminal_event_key: str | None = None
     streaming_authority: SpeechStreamAuthority | None = field(default=None, repr=False)
 
 
@@ -1231,6 +1257,8 @@ class DedicatedMediaProductRegistry:
     ) -> None:
         self.enabled = enabled is True
         self._monotonic = monotonic
+        self._task_preparations = task_preparation.TaskNotificationPreparationOwner(monotonic=monotonic)
+        self._tts_opening: dict[tuple[str, str, str], set[object]] = {}
         self._ticket_ttl = ticket_ttl_seconds
         self._authority_ttl = authority_ttl_seconds
         self._capacity = max(1, min(capacity, _MAX_RECORDS))
@@ -1839,6 +1867,7 @@ class DedicatedMediaProductRegistry:
             task = session.close_task
             if task is None or task.done():
                 session.closed = True
+                self._reconcile_task_preparations()
                 task = asyncio.create_task(
                     self._run_native_session_close(record, session),
                     name=f"live-voice-native-close:{record.record_id}",
@@ -4115,6 +4144,12 @@ class DedicatedMediaProductRegistry:
             ):
                 return None
             assert matched_ticket is not None
+            if isinstance(record.downlink_stream_source, task_preparation.PreparedNotificationSource):
+                try:
+                    record.downlink_stream_source.attach()
+                except task_preparation.PreparationViolation:
+                    self._reconcile_task_preparations()
+                    return None
             self._pending_tickets.pop(matched_ticket, None)
             record.ticket_consumed = True
             return record
@@ -5196,6 +5231,9 @@ class DedicatedMediaProductRegistry:
         """Close one exceptional/cancelled media owner with zero retained audio."""
 
         with self._lock:
+            if isinstance(record.downlink_stream_source, task_preparation.PreparedNotificationSource):
+                record.downlink_stream_source.fence("TASK_PREPARATION_CANCELLED")
+                self._reconcile_task_preparations()
             record.route_completed = True
             record.recognition_content_sha256 = None
             record.downlink_frames = ()
@@ -5303,6 +5341,7 @@ class DedicatedMediaProductRegistry:
                     self._schedule_streaming_abort(owned)
                     self._schedule_native_close(owned)
                 self._remember_revoked(subject_id, binding)
+        self._reconcile_task_preparations()
         return {
             "status": "closed",
             "reason_id": "MEDIA_ROUTE_REVOKED",
@@ -5530,6 +5569,7 @@ class DedicatedMediaProductRegistry:
             surface == "audio"
             and event.get("source_provenance") == "server.task_notification"
         )
+        terminal_event_key = _terminal_preparation_event_key(result) if trusted_task_audio else None
         if (
             result.get("kind") != "agent.output"
             or event.get("event_type") != "chat.final"
@@ -5635,6 +5675,7 @@ class DedicatedMediaProductRegistry:
                     now=now,
                     expires_at=now + self._authority_ttl,
                     task_notification=trusted_task_audio,
+                    terminal_event_key=terminal_event_key,
                 )
                 if transfer is not None:
                     record.synthesis_content_sha256[(ref, unit_id)] = (
@@ -5642,7 +5683,8 @@ class DedicatedMediaProductRegistry:
                     )
                 elif (
                     existing_transfer is not None
-                    and existing_transfer.content_sha256 != content_sha256
+                    and (existing_transfer.content_sha256 != content_sha256
+                         or existing_transfer.terminal_event_key != terminal_event_key)
                 ):
                     # A trusted final that changes the exact render digest
                     # fences the old operation.  The replacement gets a new
@@ -5651,6 +5693,7 @@ class DedicatedMediaProductRegistry:
                         _SynthesisAuthorityTransfer(
                             content_sha256, now + self._authority_ttl,
                             task_notification=trusted_task_audio,
+                            terminal_event_key=terminal_event_key,
                         )
                     )
                     record.synthesis_content_sha256[(ref, unit_id)] = content_sha256
@@ -5668,6 +5711,7 @@ class DedicatedMediaProductRegistry:
                 streaming_response_authorities=activation.streaming_response_authorities,
             )
             self._product_activations.move_to_end(activation_key)
+            self._reconcile_task_preparations()
 
     @staticmethod
     def _retain_synthesis_transfer(
@@ -5680,11 +5724,13 @@ class DedicatedMediaProductRegistry:
         now: float,
         expires_at: float,
         task_notification: bool = False,
+        terminal_event_key: str | None = None,
     ) -> _SynthesisAuthorityTransfer | None:
         DedicatedMediaProductRegistry._prune_synthesis_transfers(transfers, now)
         existing = transfers.get(key)
         if existing is not None:
-            if existing.content_sha256 != content_sha256 or existing.task_notification != task_notification:
+            if (existing.content_sha256 != content_sha256 or existing.task_notification != task_notification
+                    or existing.terminal_event_key != terminal_event_key):
                 return None
             transfers.move_to_end(key)
             return existing
@@ -5700,7 +5746,8 @@ class DedicatedMediaProductRegistry:
             if evicted_key is None:
                 return None
             transfers.pop(evicted_key)
-        transfer = _SynthesisAuthorityTransfer(content_sha256, expires_at, task_notification=task_notification)
+        transfer = _SynthesisAuthorityTransfer(content_sha256, expires_at,
+            task_notification=task_notification, terminal_event_key=terminal_event_key)
         transfers[key] = transfer
         return transfer
 
@@ -5953,6 +6000,195 @@ class DedicatedMediaProductRegistry:
                 return binding
             return None
 
+    def task_preparation_capabilities(self, params: object) -> dict[str, object]:
+        if params != {"contract_version": task_preparation.CONTRACT_VERSION}:
+            raise task_preparation.PreparationViolation("TASK_PREPARATION_CONTRACT_INVALID")
+        return {"contract_version": task_preparation.CONTRACT_VERSION,
+            "available": self.enabled and self._streaming_synthesis_owner is not None,
+            "max_frames": task_preparation.MAX_FRAMES, "max_bytes": task_preparation.MAX_BYTES,
+            "retention_ms": int(task_preparation.RETENTION_SECONDS * 1000)}
+
+    def _task_preparation_request(self, params: object, *, routed_session_id: str,
+            connection_id: str, request_origin: str | None, with_text: bool = False
+    ) -> tuple[task_preparation.PreparationIdentity, str, _MediaAuthority, _SynthesisAuthorityTransfer]:
+        keys = {"contract_version", "preparation_id", "session_id", "subject_id", "correlation_id",
+            "interaction_id", "activation_id", "activation_generation", "event_key", "response",
+            "unit_id", "text_sha256", "locale", "sample_rate_hz"}
+        if with_text:
+            keys.add("text")
+        if (not isinstance(params, Mapping) or set(params) != keys
+                or params.get("contract_version") != task_preparation.CONTRACT_VERSION):
+            raise task_preparation.PreparationViolation("TASK_PREPARATION_CONTRACT_INVALID")
+        response = params["response"]
+        if not isinstance(response, Mapping) or set(response) != {"interaction_id", "response_id", "response_generation"}:
+            raise task_preparation.PreparationViolation("TASK_PREPARATION_CONTRACT_INVALID")
+        identity = task_preparation.PreparationIdentity(
+            *(_required_id(params[name], name) for name in ("session_id",)),
+            connection_id, *(_required_id(params[name], name) for name in
+                ("subject_id", "correlation_id", "interaction_id", "activation_id")),
+            _safe_uint(params["activation_generation"], "activation_generation"),
+            str(params["event_key"]), _required_id(response["response_id"], "response_id"),
+            _safe_uint(response["response_generation"], "response_generation"),
+            _required_id(params["unit_id"], "unit_id"), str(params["text_sha256"]),
+            _required_id(params["locale"], "locale"), _safe_uint(params["sample_rate_hz"], "sample_rate_hz"))
+        preparation_id = _required_id(params["preparation_id"], "preparation_id")
+        if (identity.session_id != routed_session_id or response["interaction_id"] != identity.interaction_id
+                or not isinstance(params["event_key"], str) or not 0 < len(identity.event_key) <= 2048
+                or not isinstance(params["text_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", identity.text_sha256)
+                or identity.sample_rate_hz not in {16_000, 24_000, 48_000}):
+            raise task_preparation.PreparationViolation("TASK_PREPARATION_IDENTITY_INVALID")
+        parent = self._records.get(self._subjects.get((identity.session_id, identity.subject_id), ""))
+        native_session_key = self._native_session_keys_by_record.get(parent.record_id) if parent is not None else None
+        native_session = self._native_sessions.get(native_session_key) if native_session_key is not None else None
+        now = self._monotonic()
+        if (parent is None or native_session is None or native_session.closed
+                or native_session.record_id != parent.record_id or parent.route_completed or not parent.ticket_consumed
+                or parent.native_activation is None or parent.binding.connection_id != connection_id
+                or parent.expected_origin != request_origin or not is_allowed_browser_origin(request_origin)
+                or parent.binding.correlation_id != identity.correlation_id
+                or parent.binding.interaction_id != identity.interaction_id
+                or parent.product_activation_id != identity.activation_id
+                or parent.product_activation_generation != identity.activation_generation
+                or parent.locale != identity.locale
+                or parent.binding.frame_format.sample_rate_hz != identity.sample_rate_hz
+                or now >= parent.authority_expires_at or not self._has_retained_product_activation(parent, now)):
+            raise task_preparation.PreparationViolation("TASK_PREPARATION_OWNER_MISMATCH")
+        activation = self._product_activations[(identity.session_id, connection_id, identity.interaction_id)]
+        ref = ResponseRef(identity.interaction_id, identity.response_id, identity.response_generation)
+        transfer = activation.synthesis_content_sha256.get((ref, identity.unit_id, identity.locale, identity.sample_rate_hz))
+        if (transfer is None or not transfer.task_notification or transfer.terminal_event_key != identity.event_key
+                or now >= transfer.expires_at):
+            raise task_preparation.PreparationViolation("TASK_PREPARATION_SOURCE_MISMATCH")
+        if with_text:
+            text = params["text"]
+            if (not isinstance(text, str) or not text.strip() or len(text) > 4000
+                    or hashlib.sha256(text.encode("utf-8")).hexdigest() != identity.text_sha256):
+                raise task_preparation.PreparationViolation("TASK_PREPARATION_TEXT_MISMATCH")
+            digest = hashlib.sha256(canonical_json_bytes({"response": dict(response), "unit_id": identity.unit_id,
+                "display_text": text, "spoken_text": text, "transforms": [], "locale": identity.locale,
+                "voice": None, "required_sample_rate_hz": identity.sample_rate_hz})).hexdigest()
+            if digest != transfer.content_sha256:
+                raise task_preparation.PreparationViolation("TASK_PREPARATION_TEXT_MISMATCH")
+        return identity, preparation_id, parent, transfer
+
+    async def prepare_task_notification(self, *, params: object, routed_session_id: str,
+            connection_id: str, request_origin: str | None) -> dict[str, object]:
+        with self._lock:
+            self._prune(self._monotonic())
+            identity, preparation_id, parent, transfer = self._task_preparation_request(params,
+                routed_session_id=routed_session_id, connection_id=connection_id, request_origin=request_origin, with_text=True)
+            owner = self._streaming_synthesis_owner
+            if owner is None:
+                raise task_preparation.PreparationViolation("TASK_PREPARATION_UNAVAILABLE")
+            key = (identity.session_id, connection_id, identity.interaction_id)
+            existing = self._task_preparations.active(identity.activation_key)
+            if existing is None and (self._tts_opening.get(key) or any(
+                    record.binding.direction is MediaDirection.DOWNLINK and not record.route_completed
+                    and record.binding.session_id == identity.session_id and record.binding.connection_id == connection_id
+                    and record.binding.interaction_id == identity.interaction_id and record.native_activation is None
+                    for record in self._records.values())):
+                raise task_preparation.PreparationViolation("TASK_PREPARATION_BUSY")
+
+            def current() -> bool:
+                with self._lock:
+                    now = self._monotonic()
+                    activation = self._product_activations.get(key)
+                    ref = ResponseRef(identity.interaction_id, identity.response_id, identity.response_generation)
+                    native_key = self._native_session_keys_by_record.get(parent.record_id)
+                    native = self._native_sessions.get(native_key) if native_key is not None else None
+                    return bool(self._records.get(parent.record_id) is parent and not parent.route_completed
+                        and native is not None and not native.closed and native.record_id == parent.record_id
+                        and now < parent.authority_expires_at and self._has_retained_product_activation(parent, now)
+                        and activation is not None and now < transfer.expires_at
+                        and activation.synthesis_content_sha256.get((ref, identity.unit_id, identity.locale, identity.sample_rate_hz)) is transfer
+                        and transfer.terminal_event_key == identity.event_key)
+
+            async def produce() -> ProductStreamingSynthesisSource:
+                context = SpeechRpcContext(identity.subject_id, identity.session_id, Assurance.AUTHENTICATED)
+                payload = {"contract_version": SPEECH_CONTRACT_VERSION, "request_id": preparation_id,
+                    "operation_id": preparation_id, "operation": SYNTHESIZE_OPERATION,
+                    "correlation_id": identity.correlation_id, "session_id": identity.session_id,
+                    "scope": {"subject_id": identity.subject_id, "project_id": None,
+                        "session_id": identity.session_id, "assurance": "authenticated"},
+                    "timeout_ms": 15_000, "response": dict(params["response"]), "unit_id": identity.unit_id,
+                    "render_plan": {"display_text": params["text"], "spoken_text": params["text"], "transforms": []},
+                    "authoritative_agent_text": True, "locale": identity.locale, "voice": None,
+                    "required_sample_rate_hz": identity.sample_rate_hz}
+                request = parse_synthesis_batch_request(payload, context)
+                binding = _synthesis_authorization_binding(request)
+                with self._lock:
+                    if not current() or self.authorize(binding) != binding:
+                        raise task_preparation.PreparationViolation("TASK_PREPARATION_STALE")
+                    stream = self._admit_streaming_synthesis(request, identity.session_id, identity.subject_id,
+                        "task-preparation-" + hashlib.sha256(preparation_id.encode()).hexdigest()[:32])
+                if stream is None:
+                    raise task_preparation.PreparationViolation("TASK_PREPARATION_STALE")
+                start = await start_product_streaming_synthesis(owner, stream,
+                    scope_identity=(identity.session_id, identity.subject_id, identity.correlation_id))
+                if start.source is None:
+                    raise task_preparation.PreparationViolation("TASK_PREPARATION_SYNTHESIS_FAILED")
+                return start.source
+
+            slot = self._task_preparations.start(identity, preparation_id, produce, current)
+        await slot.wait_ready()
+        return {"contract_version": task_preparation.CONTRACT_VERSION,
+            "preparation_id": preparation_id, "status": "ready", "presented": False}
+
+    async def claim_task_notification(self, *, params: object, routed_session_id: str,
+            connection_id: str, request_origin: str | None) -> dict[str, object]:
+        with self._lock:
+            self._prune(self._monotonic())
+            identity, preparation_id, parent, transfer = self._task_preparation_request(params,
+                routed_session_id=routed_session_id, connection_id=connection_id, request_origin=request_origin)
+            slot = self._task_preparations.exact(identity, preparation_id)
+        await slot.wait_ready()
+        with self._lock:
+            self._task_preparation_request(params, routed_session_id=routed_session_id,
+                connection_id=connection_id, request_origin=request_origin)
+            if self._media_capacity_in_use() >= self._capacity:
+                raise task_preparation.PreparationViolation("TASK_PREPARATION_CAPACITY")
+            slot.claim(ticket_ttl=self._ticket_ttl)
+            now = self._monotonic()
+            ref = ResponseRef(identity.interaction_id, identity.response_id, identity.response_generation)
+            ticket = secrets.token_urlsafe(32)
+            record_id = f"media-record-{secrets.token_hex(16)}"
+            media_binding = MediaAuthorityBinding(lease_id=f"media-downlink-{secrets.token_hex(16)}",
+                authority_evidence_id=f"media-authority-{secrets.token_hex(16)}",
+                connection_id=connection_id, connection_epoch=parent.binding.connection_epoch,
+                session_id=identity.session_id, media_session_id=f"media-session-{secrets.token_hex(16)}",
+                interaction_id=identity.interaction_id, track_id=f"playout-{secrets.token_hex(12)}",
+                correlation_id=identity.correlation_id, direction=MediaDirection.DOWNLINK,
+                generation=MediaGenerationBinding(MediaGenerationKind.RESPONSE, ref.response_id, ref.response_generation),
+                frame_format=MediaFrameFormat(sample_rate_hz=identity.sample_rate_hz,
+                    samples_per_channel=identity.sample_rate_hz // 50),
+                playout=MediaPlayoutBinding(ref.response_id, ref.response_generation, identity.unit_id))
+            self._records[record_id] = _MediaAuthority(record_id=record_id, subject_id=parent.subject_id,
+                expected_origin=parent.expected_origin, product_activation_id=identity.activation_id,
+                product_activation_generation=identity.activation_generation, binding=media_binding,
+                locale=identity.locale, end_of_turn_capability=None, issued_at=now,
+                ticket_expires_at=now + self._ticket_ttl, authority_expires_at=parent.authority_expires_at,
+                downlink_stream_source=slot, downlink_response=ref, downlink_unit_id=identity.unit_id,
+                downlink_content_sha256=transfer.content_sha256)
+            self._pending_tickets[ticket] = record_id
+            audio = {"format": "pcm_f32_mono_20ms", "sample_rate_hz": identity.sample_rate_hz,
+                "channel_count": 1, "frame_count": None, "delivery": "dedicated_media_downlink",
+                "endpoint_path": MEDIA_ROUTE_PATH, "media_ticket": ticket, "subprotocol": MEDIA_SUBPROTOCOL,
+                "ticket_ttl_ms": int(self._ticket_ttl * 1000), "binding": _binding_payload(media_binding),
+                "max_pending_frames": 8, "max_pending_bytes": 131_072, "streaming": True, "degradation_reason": None}
+        return {"contract_version": task_preparation.CONTRACT_VERSION, "preparation_id": preparation_id,
+            "status": "claimed", "response": dict(params["response"]), "unit_id": identity.unit_id,
+            "audio": audio, "provider": slot.provider, "presented": False}
+
+    def cancel_task_notification(self, *, params: object, routed_session_id: str,
+            connection_id: str, request_origin: str | None) -> dict[str, object]:
+        with self._lock:
+            identity, preparation_id, _parent, _transfer = self._task_preparation_request(params,
+                routed_session_id=routed_session_id, connection_id=connection_id, request_origin=request_origin)
+            self._task_preparations.cancel(identity, preparation_id)
+            self._reconcile_task_preparations()
+        return {"contract_version": task_preparation.CONTRACT_VERSION, "preparation_id": preparation_id,
+            "status": "cancelled", "presented": False}
+
     def _admit_streaming_synthesis(
         self,
         request: SynthesisBatchRequest,
@@ -6047,7 +6283,38 @@ class DedicatedMediaProductRegistry:
                 transfer.streaming_authority = stream_request.authority
             return replace(stream_request, authority=transfer.streaming_authority)
 
-    async def try_streaming_synthesis(
+    async def try_streaming_synthesis(self, operation_name: str, params: object,
+            context: SpeechRpcContext, session_id: str, *, batch_service: FormalBatchSpeechService
+    ) -> dict[str, object] | None:
+        if operation_name != SYNTHESIZE_OPERATION or self._streaming_synthesis_owner is None:
+            return None
+        try:
+            request = parse_synthesis_batch_request(params, context)
+        except Exception:
+            return None
+        token = object()
+        key = None
+        with self._lock:
+            parent = self._records.get(self._subjects.get((session_id, context.subject_id or ""), ""))
+            if parent is not None:
+                key = (session_id, parent.binding.connection_id, request.response.interaction_id)
+                preparation_key = (*key, parent.product_activation_id, parent.product_activation_generation)
+                if self._task_preparations.active(preparation_key) is not None:
+                    return _streaming_error_envelope(request, "TASK_PREPARATION_BUSY")
+                self._tts_opening.setdefault(key, set()).add(token)
+        try:
+            return await self._try_streaming_synthesis_admitted(operation_name, params, context,
+                session_id, batch_service=batch_service)
+        finally:
+            if key is not None:
+                with self._lock:
+                    tokens = self._tts_opening.get(key)
+                    if tokens is not None:
+                        tokens.discard(token)
+                        if not tokens:
+                            self._tts_opening.pop(key, None)
+
+    async def _try_streaming_synthesis_admitted(
         self,
         operation_name: str,
         params: object,
@@ -6513,7 +6780,11 @@ class DedicatedMediaProductRegistry:
         self, record: _MediaAuthority, result: DedicatedMediaSocketLeafResult
     ) -> bool:
         with self._lock:
+            self._reconcile_task_preparations()
+            if self._records.get(record.record_id) is not record:
+                return False
             source = record.downlink_stream_source
+            prepared_source = source if isinstance(source, task_preparation.PreparedNotificationSource) else None
             native_source = (
                 source if isinstance(source, NativeResponseDownlinkSource) else None
             )
@@ -6537,7 +6808,7 @@ class DedicatedMediaProductRegistry:
             record.downlink_frames = ()
             # Native playback may outlive its download. Retain the bounded
             # frame-to-Provider cursor map until playback ACK/stop or teardown.
-            if native_source is None:
+            if native_source is None and prepared_source is None:
                 self._release_stream_source(record)
             response = record.downlink_response
             unit_id = record.downlink_unit_id
@@ -6575,6 +6846,10 @@ class DedicatedMediaProductRegistry:
                 and 0 < result.peak_pending_frames <= 8
                 and 0 < result.peak_pending_bytes <= 131_072
             )
+            if prepared_source is not None and not complete:
+                prepared_source.fence("TASK_PREPARATION_TRANSPORT_FAILED")
+                self._reconcile_task_preparations()
+                return False
             if response is None or unit_id is None:
                 return False
             parent_record_id = self._subjects.get(
@@ -6918,6 +7193,23 @@ class DedicatedMediaProductRegistry:
                     "MEDIA_PLAYOUT_RECEIPT_CONFLICT",
                     "media playout receipt cannot change after acceptance",
                 )
+            prepared_child = next((child for child in self._records.values()
+                if child.subject_id == record.subject_id and child.binding.session_id == session_id
+                and child.binding.connection_id == owner_connection_id
+                and child.product_activation_id == record.product_activation_id
+                and child.product_activation_generation == record.product_activation_generation
+                and child.downlink_response == response and child.downlink_unit_id == unit_id
+                and isinstance(child.downlink_stream_source, task_preparation.PreparedNotificationSource)), None)
+            if prepared_child is not None:
+                try:
+                    prepared_child.downlink_stream_source.mark_rendered()
+                except task_preparation.PreparationViolation:
+                    self._reconcile_task_preparations()
+                    raise MediaTransportViolation("MEDIA_PLAYOUT_RECEIPT_UNTRUSTED",
+                        "Task preparation no longer owns its render receipt") from None
+                self._records.pop(prepared_child.record_id, None)
+                self._drop_pending_for_record_id(prepared_child.record_id)
+                self._release_stream_source(prepared_child)
             record.playout_receipts[key] = payload
             assert isinstance(content_sha256, str)
             record.playout_receipt_content_sha256[key] = content_sha256
@@ -7207,6 +7499,9 @@ class DedicatedMediaProductRegistry:
         return len(self._records) + len(orphaned_close_owners)
 
     def _prune(self, now: float) -> None:
+        # Preparation expiry revokes only its exact child, before generic
+        # media expiry can remember a revocation for the shared parent subject.
+        self._reconcile_task_preparations()
         for authority in self._product_activations.values():
             self._prune_synthesis_transfers(authority.synthesis_content_sha256, now)
         expired = [
@@ -7250,6 +7545,27 @@ class DedicatedMediaProductRegistry:
             authority = self._product_activations.pop(key, None)
             if authority is not None:
                 self._revoke_media_for_product_activation(authority)
+        self._reconcile_task_preparations()
+
+    def _reconcile_task_preparations(self) -> None:
+        """Fence only failed preparation children, including unconsumed tickets."""
+        with self._lock:
+            self._task_preparations.reconcile()
+            for record_id, record in tuple(self._records.items()):
+                source = record.downlink_stream_source
+                if not isinstance(source, task_preparation.PreparedNotificationSource) or source.reason is None:
+                    continue
+                self._records.pop(record_id, None)
+                self._drop_pending_for_record_id(record_id)
+                record.route_completed = True
+                parent = self._records.get(self._subjects.get((record.binding.session_id, record.subject_id), ""))
+                if parent is not None:
+                    key = (record.downlink_response, record.downlink_unit_id)
+                    result = parent.downlink_results.get(key)
+                    if result is not None and result.get("content_sha256") == record.downlink_content_sha256:
+                        parent.downlink_results.pop(key, None)
+                record.downlink_content_sha256 = None
+                self._release_stream_source(record)
 
     def _has_retained_product_activation(
         self, record: _MediaAuthority, now: float
@@ -7314,6 +7630,8 @@ class DedicatedMediaProductRegistry:
             record.pcm.clear()
             self._schedule_streaming_abort(record)
             self._schedule_native_close(record)
+
+        self._reconcile_task_preparations()
 
     def _schedule_native_close(self, record: _MediaAuthority) -> None:
         key = self._native_session_keys_by_record.get(record.record_id)
@@ -7537,6 +7855,34 @@ def register_dedicated_media_rpc_handlers(
             )
 
     channel.register_method(MEDIA_ACTIVATE_METHOD, activation_handler)
+    def task_preparation_handler(action: str) -> Callable[..., Awaitable[None]]:
+        async def handler(ws: Any, req_id: str, params: object, session_id: str,
+                          user_id: str | None = None) -> None:
+            del user_id
+            try:
+                if action == "capabilities":
+                    payload = registry.task_preparation_capabilities(params)
+                else:
+                    arguments = {"params": params, "routed_session_id": session_id,
+                        "connection_id": str(getattr(ws, "_jiuwen_ws_id", "") or id(ws)),
+                        "request_origin": _request_origin(ws)}
+                    if action == "prepare":
+                        payload = await registry.prepare_task_notification(**arguments)
+                    elif action == "claim":
+                        payload = await registry.claim_task_notification(**arguments)
+                    else:
+                        payload = registry.cancel_task_notification(**arguments)
+                await channel.send_response(ws, req_id, ok=True, payload=payload)
+            except (task_preparation.PreparationViolation, MediaTransportViolation) as exc:
+                await channel.send_response(ws, req_id, ok=False,
+                    error="Task notification preparation is unavailable", code=exc.reason_id)
+        return handler
+
+    for method, action in ((task_preparation.CAPABILITIES_METHOD, "capabilities"),
+                          (task_preparation.PREPARE_METHOD, "prepare"),
+                          (task_preparation.CLAIM_METHOD, "claim"),
+                          (task_preparation.CANCEL_METHOD, "cancel")):
+        channel.register_method(method, task_preparation_handler(action))
     channel.register_method(MEDIA_CLOSE_METHOD, close_handler)
     channel.register_method(MEDIA_PLAYOUT_RECEIPT_METHOD, playout_receipt_handler)
     channel.register_method(MEDIA_PLAYOUT_STOP_METHOD, playout_stop_handler)
