@@ -51,6 +51,8 @@ is not faster; precompletion publication and physical gains remain unproved.
 P6's early recovery rescheduling was rejected after independent and Astra max
 review reproduced added underrun and repeated PCM. The original reserve remains;
 regression guards pass, but the P6 latency target has not been achieved.
+P9 retains service, durable receipt, actual-playback ACK and transcript authority
+as the handoff's low-priority decision; no speedup is allocated or claimed.
 The remaining implementation continues independently
 of evidence synchronization. Original rehearsal files are absent locally; full
 optimization, measured latency and physical acceptance remain unproved. The

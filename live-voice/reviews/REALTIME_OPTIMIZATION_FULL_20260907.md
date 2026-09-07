@@ -299,3 +299,27 @@ Main copied only the final tests and decision into the integration worktree;
 all 125 audio/capture cases there (`logs/p6-main-audio-tests.txt`). Main's frontend
 dependencies use package junctions with a separate local build cache. No physical
 speaker evidence or performance improvement follows from these scheduling tests.
+
+### P9 — Preserve service, ACK and transcript authority
+
+This point closes as the handoff's Tier 0 prioritization decision, with no product
+code change and no allocated speedup. The imported trace reports individual service
+calls of 0.30–0.75 seconds but only 0.716 seconds exposed as silence; its 1.330 seconds
+of ordinary conversation is a different category. Even eliminating the entire
+0.716-second service contribution would account for only about 1.44% of the imported
+49.783 seconds. Those are source-provided budget figures, not fresh measurements.
+
+The source review confirms that [Native audio ACK](../../jiuwenswarm/server/live_voice/native_interaction_runtime.py)
+checks the exact open response and delegates to the presentation ledger before
+reconciling heard history. [Business receipt completion](../../jiuwenswarm/server/live_voice/native_business_router.py)
+persists the authoritative result before producing its receipt; an optional context
+refresh failure cannot rewrite an already committed Task effect. Removing these
+steps, deferring persistence past success, conflating network delivery with playback,
+or suppressing accurate transcript/history handling would alter authority and recovery.
+No current trace establishes a safe duplicated service call worth removing here.
+
+P0 supplies content-free timings for future measurements; P2 owns context/observation
+redundancy and P5 owns frame-window supply. Their effects must be attributed to those
+boundaries once measured. This decision adds no classifier, shortcut, model change,
+new test requirement or release gate. Scoped document links and whitespace are checked;
+the affected ACK/replay compatibility tests remain part of P2 and cumulative acceptance.
