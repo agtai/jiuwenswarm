@@ -135,7 +135,12 @@
       "opTrash": "moved to trash",
       "opRestore": "restored from trash",
       "opUnshare": "unshared from",
-      "undoHint": "This is a record, not an undo. To undo a change, use the platform's version history."
+      "undoHint": "This is a record, not an undo. To undo a change, use the platform's version history.",
+      "executorService": "executed by the service identity",
+      "executorPersonal": "executed as you · {{who}}",
+      "executorComment": "comment-triggered (unattended)",
+      "executorPerson": "saved by you in the workbench",
+      "executorMcp": "external client · {{who}}"
     },
     "usage": {
       "open": "Usage audit",
@@ -196,7 +201,12 @@
       "identityLabel": "Executes as: ",
       "identityService": "service",
       "identityPersonal": "me",
-      "identityHint": "This document is reachable through both the service identity and your own. Chat reads and writes use the identity chosen here (service by default); the receipt records which one actually executed."
+      "identityHint": "This document is reachable through both the service identity and your own. Chat reads and writes use the identity chosen here (service by default); the receipt records which one actually executed.",
+      "reachLabel": "Reach: ",
+      "reachBoth": "both identities",
+      "statusByHint": "Status as seen by your own identity (the service identity's status is on the left)",
+      "heldByService": "held by the service identity",
+      "heldByServiceHint": "The team's service identity already manages this one; ticking it makes it reachable through your identity as well — still one row in the panel, never a duplicate."
     },
     "notice": {
       "mentioned": "Someone mentioned you in a document",
@@ -341,7 +351,21 @@
       "signatureDefault": "— executed by {name}'s JiuwenSwarm agent",
       "signatureTail": "The receipt number (\"· 回执 xxxx\") is appended by the system after the signature; it cannot be customised or omitted.",
       "signatureSave": "Save",
-      "signatureSaved": "Saved. Example: {{preview}} · 回执 ab12cd34ef56"
+      "signatureSaved": "Saved. Example: {{preview}} · 回执 ab12cd34ef56",
+      "googlePersonalTitle": "Google personal identity (OAuth user token)",
+      "googlePersonalHint": "Create a \"Desktop app\" OAuth client in your own GCP project and paste its client_id / client_secret here; then click \"Authorize with Google\". After consent the browser returns to a loopback port on this machine. The refresh token is stored locally with mode 600.",
+      "googleSecretKept": "(saved; leave empty to keep)",
+      "googleClientSave": "Save client",
+      "googleClientSaved": "Google OAuth client saved.",
+      "googleClientCleared": "Google OAuth client cleared.",
+      "googleAuthorize": "Authorize with Google",
+      "googleWaiting": "Waiting for the browser to finish…",
+      "googleDone": "Connected as your Google identity.",
+      "googleLinkHint": "Browser did not open?",
+      "googleOpenLink": "Open the authorization link",
+      "googleRedirect": "redirect {{uri}}",
+      "googleCodePlaceholder": "If the loopback is unreachable, paste the full redirected URL or the code here",
+      "googleFinish": "Finish"
     },
     "title": "Settings",
     "categories": {

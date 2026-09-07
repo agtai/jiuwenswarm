@@ -31,6 +31,23 @@ export const RECEIPT_STATUS_KEY: Record<string, string> = {
   unknown: 'docs.history.statusUnknown',
 };
 
+/**
+ * Who executed a receipt, for the history views. Both identities' writes on one
+ * document sit in one ledger; the executor field is what tells them apart:
+ * `chat` is the service identity from the chat, `chat:<address>` the person's
+ * own identity, `comment:<id>` a comment-triggered turn, `person` a workbench
+ * save, `mcp:<client>` an exported surface.
+ */
+export function executorLabel(executor: string | undefined, t: (k: string, o?: Record<string, unknown>) => string): string {
+  const e = executor || '';
+  if (e.startsWith('chat:')) return t('docs.history.executorPersonal', { who: e.slice(5) });
+  if (e === 'chat') return t('docs.history.executorService');
+  if (e.startsWith('comment:')) return t('docs.history.executorComment');
+  if (e === 'person') return t('docs.history.executorPerson');
+  if (e.startsWith('mcp:')) return t('docs.history.executorMcp', { who: e.slice(4) });
+  return e;
+}
+
 export const RECEIPT_OP_KEY: Record<string, string> = {
   create: 'docs.history.opCreate',
   share: 'docs.history.opShare',

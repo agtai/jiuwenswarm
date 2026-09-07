@@ -11,7 +11,7 @@ import { useChatStore } from '../../stores/chatStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { ChatTimelineList } from '../ChatPanel/MessageList';
 import { KindIcon } from './KindIcon';
-import { RECEIPT_OP_KEY, RECEIPT_STATUS_KEY, receiptRegions, type ReceiptRow } from '../../features/clouddoc/receipts';
+import { RECEIPT_OP_KEY, RECEIPT_STATUS_KEY, executorLabel, receiptRegions, type ReceiptRow } from '../../features/clouddoc/receipts';
 import type { RailTab, WorkbenchTab } from '../../stores/docWorkbenchStore';
 
 const TONE: Record<string, string> = {
@@ -108,6 +108,7 @@ export function SideRail({
                 <div className="doc-workbench__receipt-head">
                   <span className="font-mono text-[11px] text-text-muted">{r.receipt_id.slice(0, 8)}</span>
                   <span className={`doc-workbench__chip doc-workbench__chip--${TONE[r.status] ?? 'muted'}`}>{t(RECEIPT_STATUS_KEY[r.status] ?? '', { defaultValue: r.status })}</span>
+                  {r.executor && <span className="text-[11px] text-text-muted" data-testid="doc-workbench-receipt-executor">{executorLabel(r.executor, t)}</span>}
                   <span className="flex-1" />
                   <span className="text-[11px] text-text-muted">{new Date((r.ts || 0) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                 </div>

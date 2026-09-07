@@ -135,7 +135,12 @@
       "opTrash": "移入回收站",
       "opRestore": "从回收站恢复",
       "opUnshare": "取消共享",
-      "undoHint": "这里只记录，不撤销。要撤销改动，请用平台的版本历史（Google「版本记录」/ 飞书「历史版本」）。"
+      "undoHint": "这里只记录，不撤销。要撤销改动，请用平台的版本历史（Google「版本记录」/ 飞书「历史版本」）。",
+      "executorService": "服务身份执行",
+      "executorPersonal": "个人身份执行 · {{who}}",
+      "executorComment": "评论触发（无人值守）",
+      "executorPerson": "本人在工作台保存",
+      "executorMcp": "外部接入 · {{who}}"
     },
     "usage": {
       "open": "使用审计",
@@ -196,7 +201,12 @@
       "identityLabel": "执行身份：",
       "identityService": "服务",
       "identityPersonal": "个人",
-      "identityHint": "这篇文档服务身份与个人身份都能到达。聊天里的读写用这里选的身份，默认服务身份；回执会记下实际执行身份。"
+      "identityHint": "这篇文档服务身份与个人身份都能到达。聊天里的读写用这里选的身份，默认服务身份；回执会记下实际执行身份。",
+      "reachLabel": "可达：",
+      "reachBoth": "两种身份",
+      "statusByHint": "个人身份视角的状态（服务身份的状态见左侧）",
+      "heldByService": "已由服务身份纳管",
+      "heldByServiceHint": "团队的服务身份已经纳管了这篇；勾选后它会同时经你的身份可达，面板里仍是同一行，不会出现两条记录。"
     },
     "notice": {
       "mentioned": "有人在文档里 @ 了你",
@@ -341,7 +351,21 @@
       "signatureDefault": "— 由 {name} 的 JiuwenSwarm 代理执行",
       "signatureTail": "回执编号「· 回执 xxxx」由系统固定追加在签名之后，不可定制、不可省略。",
       "signatureSave": "保存",
-      "signatureSaved": "已保存。示例：{{preview}} · 回执 ab12cd34ef56"
+      "signatureSaved": "已保存。示例：{{preview}} · 回执 ab12cd34ef56",
+      "googlePersonalTitle": "Google 个人身份（OAuth 用户令牌）",
+      "googlePersonalHint": "在你自己的 GCP 项目里创建一个「桌面应用」类型的 OAuth 客户端，把 client_id / client_secret 填在这里；然后点「用 Google 授权」，浏览器完成同意后会回到本机的回环端口。刷新令牌以 600 权限存在本机。",
+      "googleSecretKept": "（已保存，留空则沿用）",
+      "googleClientSave": "保存客户端",
+      "googleClientSaved": "Google OAuth 客户端已保存。",
+      "googleClientCleared": "Google OAuth 客户端已清除。",
+      "googleAuthorize": "用 Google 授权",
+      "googleWaiting": "等待浏览器完成授权…",
+      "googleDone": "已以你的 Google 身份连接。",
+      "googleLinkHint": "浏览器没有自动打开？",
+      "googleOpenLink": "打开授权链接",
+      "googleRedirect": "回调地址 {{uri}}",
+      "googleCodePlaceholder": "回环无法访问时，把授权后的完整跳转地址或 code 粘贴到这里",
+      "googleFinish": "完成授权"
     },
     "title": "设置",
     "categories": {

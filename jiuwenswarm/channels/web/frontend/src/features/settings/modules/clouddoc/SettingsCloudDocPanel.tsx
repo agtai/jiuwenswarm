@@ -37,6 +37,14 @@ export function SettingsCloudDocPanel({ isConnected }: { isConnected: boolean })
   // appended by the server and is not editable here.
   const [signature, setSignature] = useState('');
   const [signatureSaved, setSignatureSaved] = useState('');
+  // Google personal identity: an OAuth client the self-hoster registered, then a
+  // consent flow that comes back on a loopback port (or a pasted code).
+  const [gClientId, setGClientId] = useState('');
+  const [gClientSecret, setGClientSecret] = useState('');
+  const [gConfigured, setGConfigured] = useState(false);
+  const [gFlow, setGFlow] = useState<{ state: string; auth_url: string; redirect_uri: string } | null>(null);
+  const [gStatus, setGStatus] = useState<{ status: string; detail?: string } | null>(null);
+  const [gCode, setGCode] = useState('');
 
   const refresh = useCallback(async () => {
     try {
@@ -47,6 +55,9 @@ export function SettingsCloudDocPanel({ isConnected }: { isConnected: boolean })
       setModelName(conf?.model_name ?? '');
       setSignature(conf?.personal_signature ?? '');
       setSignatureSaved(conf?.personal_signature ?? '');
+      const g = (conf as { google_oauth?: { configured?: boolean; client_id?: string } } | null)?.google_oauth;
+      setGConfigured(!!g?.configured);
+      setGClientId(g?.client_id ?? '');
       const keys = await webRequest<{ keys?: SavedKey[] }>('clouddoc.list_keys');
       setSavedKeys(keys?.keys ?? []);
     } catch (e) {
@@ -128,6 +139,76 @@ export function SettingsCloudDocPanel({ isConnected }: { isConnected: boolean })
       setSignature(out?.personal_signature ?? '');
       setSignatureSaved(out?.personal_signature ?? '');
       setNote(t('settingsPanel.clouddoc.signatureSaved', { preview: out?.preview ?? '' }));
+    } catch (e) {
+      setNote(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveGoogleClient = async () => {
+    setBusy(true);
+    setNote('');
+    try {
+      const out = await webRequest<{ ok?: boolean; configured?: boolean }>(
+        'clouddoc.google_oauth_configure', { client_id: gClientId, client_secret: gClientSecret },
+      );
+      setGConfigured(!!out?.configured);
+      setGClientSecret('');
+      setNote(out?.configured ? t('settingsPanel.clouddoc.googleClientSaved') : t('settingsPanel.clouddoc.googleClientCleared'));
+    } catch (e) {
+      setNote(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startGoogle = async () => {
+    setBusy(true);
+    setNote('');
+    setGStatus(null);
+    try {
+      const out = await webRequest<{ result: string; detail?: string; state?: string; auth_url?: string; redirect_uri?: string }>(
+        'clouddoc.google_oauth_start',
+      );
+      if (out?.result !== 'ok' || !out.state || !out.auth_url) {
+        setNote(out?.detail || out?.result || '');
+        return;
+      }
+      setGFlow({ state: out.state, auth_url: out.auth_url, redirect_uri: out.redirect_uri ?? '' });
+      setGStatus({ status: 'pending' });
+      window.open(out.auth_url, '_blank', 'noopener');
+    } catch (e) {
+      setNote(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // The flow finishes on its own when the browser comes back; poll until then.
+  useEffect(() => {
+    if (!gFlow || gStatus?.status !== 'pending') return;
+    const id = window.setInterval(() => {
+      void webRequest<{ status: string; detail?: string }>('clouddoc.google_oauth_status', { state: gFlow.state })
+        .then((s) => {
+          if (!s) return;
+          setGStatus(s);
+          if (s.status === 'done') { void refresh(); announce(); }
+        })
+        .catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(id);
+  }, [gFlow, gStatus?.status, refresh]);
+
+  const finishGoogle = async () => {
+    if (!gFlow || !gCode.trim()) return;
+    setBusy(true);
+    try {
+      const s = await webRequest<{ status: string; detail?: string }>(
+        'clouddoc.google_oauth_finish', { state: gFlow.state, code: gCode.trim() },
+      );
+      setGStatus(s);
+      if (s?.status === 'done') { setGCode(''); await refresh(); announce(); }
     } catch (e) {
       setNote(String(e));
     } finally {
@@ -261,6 +342,68 @@ export function SettingsCloudDocPanel({ isConnected }: { isConnected: boolean })
         >
           {t('settingsPanel.clouddoc.personalConnect')}
         </button>
+        <div className="mt-3 rounded-md border border-border p-3" data-testid="settings-clouddoc-google-personal">
+          <div className="text-xs font-medium mb-1">{t('settingsPanel.clouddoc.googlePersonalTitle')}</div>
+          <div className="text-xs text-text-muted mb-2">{t('settingsPanel.clouddoc.googlePersonalHint')}</div>
+          <div className="flex flex-col gap-1.5">
+            <input
+              data-testid="settings-clouddoc-google-client-id"
+              className="rounded-md border border-border px-2 py-1 text-xs font-mono"
+              placeholder="client_id (…apps.googleusercontent.com)"
+              value={gClientId}
+              onChange={(e) => setGClientId(e.target.value)}
+            />
+            <input
+              data-testid="settings-clouddoc-google-client-secret"
+              type="password"
+              className="rounded-md border border-border px-2 py-1 text-xs font-mono"
+              placeholder={gConfigured ? t('settingsPanel.clouddoc.googleSecretKept') : 'client_secret'}
+              value={gClientSecret}
+              onChange={(e) => setGClientSecret(e.target.value)}
+            />
+            <div className="flex items-center gap-2">
+              <button
+                data-testid="settings-clouddoc-google-save"
+                className="rounded-md border border-border px-3 py-1 text-xs"
+                disabled={busy || (!!gClientId && !gClientSecret && !gConfigured)}
+                onClick={() => void saveGoogleClient()}
+              >
+                {t('settingsPanel.clouddoc.googleClientSave')}
+              </button>
+              <button
+                data-testid="settings-clouddoc-google-authorize"
+                className="rounded-md border border-border px-3 py-1 text-xs"
+                disabled={busy || !gConfigured}
+                onClick={() => void startGoogle()}
+              >
+                {t('settingsPanel.clouddoc.googleAuthorize')}
+              </button>
+              {gStatus?.status === 'pending' && <span className="text-xs text-text-muted">{t('settingsPanel.clouddoc.googleWaiting')}</span>}
+              {gStatus?.status === 'done' && <span className="text-xs text-green-700">{t('settingsPanel.clouddoc.googleDone')}</span>}
+              {gStatus?.status === 'error' && <span className="text-xs text-red-600">{gStatus.detail}</span>}
+            </div>
+            {gFlow && gStatus?.status === 'pending' && (
+              <div className="mt-1 text-xs text-text-muted" data-testid="settings-clouddoc-google-fallback">
+                <div>
+                  {t('settingsPanel.clouddoc.googleLinkHint')}{' '}
+                  <a className="text-text-link underline" href={gFlow.auth_url} target="_blank" rel="noreferrer">{t('settingsPanel.clouddoc.googleOpenLink')}</a>
+                  {' · '}{t('settingsPanel.clouddoc.googleRedirect', { uri: gFlow.redirect_uri })}
+                </div>
+                <div className="mt-1 flex items-center gap-2">
+                  <input
+                    className="flex-1 rounded-md border border-border px-2 py-1 text-xs font-mono"
+                    placeholder={t('settingsPanel.clouddoc.googleCodePlaceholder')}
+                    value={gCode}
+                    onChange={(e) => setGCode(e.target.value)}
+                  />
+                  <button className="rounded-md border border-border px-3 py-1 text-xs" disabled={busy || !gCode.trim()} onClick={() => void finishGoogle()}>
+                    {t('settingsPanel.clouddoc.googleFinish')}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
         <div className="mt-3">
           <div className="text-xs font-medium mb-1">{t('settingsPanel.clouddoc.signatureTitle')}</div>
           <div className="text-xs text-text-muted mb-1">{t('settingsPanel.clouddoc.signatureHint')}</div>
