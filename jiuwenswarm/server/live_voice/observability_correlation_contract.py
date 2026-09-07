@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Callable, Final, Mapping, TypeAlias
+from typing import Final, Mapping
 
 from jiuwenswarm.server.live_voice.observability import (
     CANCEL_SCOPES,
@@ -36,8 +36,6 @@ MAX_CORRELATION_IDENTITY_LENGTH: Final = 103
 MAX_CORRELATION_LINKS: Final = 19
 MAX_METRIC_DIMENSIONS: Final = 7
 MAX_SAFE_GENERATION: Final = 9_007_199_254_740_991
-PUBLIC_CORRELATION_TOKEN_VERSION: Final = "v1"
-PUBLIC_CORRELATION_TOKEN_DIGEST_LENGTH: Final = 64
 CORRELATION_TOKENIZATION_RECEIPT_VERSION: Final = (
     "live-voice.correlation-tokenization-receipt.v1"
 )
@@ -89,14 +87,6 @@ class CorrelationEvaluationReason(StrEnum):
     READY = "ready"
     INVALID_MAP = "invalid_map"
     PRIVATE_CONTENT_REJECTED = "private_content_rejected"
-
-
-class CorrelationReplayReason(StrEnum):
-    FEATURE_DISABLED = "feature_disabled"
-    IDEMPOTENT = "idempotent"
-    INVALID_MAP = "invalid_map"
-    IDENTITY_MISMATCH = "identity_mismatch"
-    CONFLICT = "conflict"
 
 
 class CorrelationTokenizationIssuer(StrEnum):
@@ -196,7 +186,6 @@ HIGH_CARDINALITY_TRACE_FIELD_ORDER: Final = (
     "effect_id",
     "presentation_id",
 )
-HIGH_CARDINALITY_TRACE_FIELDS: Final = frozenset(HIGH_CARDINALITY_TRACE_FIELD_ORDER)
 
 
 def _looks_like_ordinary_pii(value: object) -> bool:
@@ -294,11 +283,6 @@ class CorrelationTokenizationReceipt:
             raise PrivateCorrelationContent(
                 "tokenization receipt cannot include raw identity"
             )
-
-
-CorrelationTokenizationReceiptVerifier: TypeAlias = Callable[
-    [CorrelationTokenizationReceipt, Mapping[str, str | None]], bool
-]
 
 
 @dataclass(frozen=True, slots=True)
@@ -614,47 +598,6 @@ class CorrelationEvaluation:
             raise ValueError("a pure correlation evaluation cannot own effects")
 
 
-@dataclass(frozen=True, slots=True)
-class CorrelationReplayEvaluation:
-    accepted: bool
-    reason: CorrelationReplayReason
-    exporter_called: bool = False
-    network_changed: bool = False
-    persistence_changed: bool = False
-    lifecycle_authority_exercised: bool = False
-    business_result_changed: bool = False
-    agent_effect: bool = False
-    tool_effect: bool = False
-    task_effect: bool = False
-    audio_effect: bool = False
-    history_effect: bool = False
-
-    def __post_init__(self) -> None:
-        if (
-            type(self.accepted) is not bool
-            or type(self.reason) is not CorrelationReplayReason
-        ):
-            raise ValueError("correlation replay has invalid truth fields")
-        if self.accepted != (self.reason is CorrelationReplayReason.IDEMPOTENT):
-            raise ValueError("only an identical replay may be accepted")
-        if any(
-            value is not False
-            for value in (
-                self.exporter_called,
-                self.network_changed,
-                self.persistence_changed,
-                self.lifecycle_authority_exercised,
-                self.business_result_changed,
-                self.agent_effect,
-                self.tool_effect,
-                self.task_effect,
-                self.audio_effect,
-                self.history_effect,
-            )
-        ):
-            raise ValueError("correlation replay cannot own effects")
-
-
 def _validated_map(
     candidate: ObservabilityCorrelationMap,
     trusted_receipt_verifier: object,
@@ -797,54 +740,6 @@ def evaluate_observability_correlation_map(
     )
 
 
-def evaluate_observability_correlation_replay(
-    original: object,
-    replay: object,
-    *,
-    enabled: bool,
-    trusted_receipt_verifier: object = None,
-) -> CorrelationReplayEvaluation:
-    """Accept one exact replay only after trusted provenance verification."""
-
-    if type(enabled) is not bool:
-        raise ValueError("enabled must be exact bool")
-    if not enabled:
-        return CorrelationReplayEvaluation(
-            accepted=False,
-            reason=CorrelationReplayReason.FEATURE_DISABLED,
-        )
-    if (
-        type(original) is not ObservabilityCorrelationMap
-        or type(replay) is not ObservabilityCorrelationMap
-    ):
-        return CorrelationReplayEvaluation(
-            accepted=False,
-            reason=CorrelationReplayReason.INVALID_MAP,
-        )
-    try:
-        checked_original = _validated_map(original, trusted_receipt_verifier)
-        checked_replay = _validated_map(replay, trusted_receipt_verifier)
-    except Exception:
-        return CorrelationReplayEvaluation(
-            accepted=False,
-            reason=CorrelationReplayReason.INVALID_MAP,
-        )
-    if checked_original.map_id != checked_replay.map_id:
-        return CorrelationReplayEvaluation(
-            accepted=False,
-            reason=CorrelationReplayReason.IDENTITY_MISMATCH,
-        )
-    if checked_original != checked_replay:
-        return CorrelationReplayEvaluation(
-            accepted=False,
-            reason=CorrelationReplayReason.CONFLICT,
-        )
-    return CorrelationReplayEvaluation(
-        accepted=True,
-        reason=CorrelationReplayReason.IDEMPOTENT,
-    )
-
-
 __all__ = [
     "BoundedMetricDimensions",
     "CorrelationCausationLink",
@@ -852,25 +747,18 @@ __all__ = [
     "CorrelationEvaluation",
     "CorrelationEvaluationReason",
     "CorrelationIdentityKind",
-    "CorrelationReplayEvaluation",
-    "CorrelationReplayReason",
     "CorrelationTokenizationIssuer",
     "CorrelationTokenizationMethod",
     "CorrelationTokenizationReceipt",
-    "CorrelationTokenizationReceiptVerifier",
     "CORRELATION_TOKENIZATION_RECEIPT_VERSION",
     "HIGH_CARDINALITY_TRACE_FIELD_ORDER",
-    "HIGH_CARDINALITY_TRACE_FIELDS",
     "MAX_CORRELATION_IDENTITY_LENGTH",
     "MAX_CORRELATION_LINKS",
     "MAX_METRIC_DIMENSIONS",
     "MetricDimension",
     "MetricDimensionKey",
     "OBSERVABILITY_CORRELATION_CONTRACT_VERSION",
-    "PUBLIC_CORRELATION_TOKEN_DIGEST_LENGTH",
-    "PUBLIC_CORRELATION_TOKEN_VERSION",
     "ObservabilityCorrelationMap",
     "PrivateCorrelationContent",
     "evaluate_observability_correlation_map",
-    "evaluate_observability_correlation_replay",
 ]

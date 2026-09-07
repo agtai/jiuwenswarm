@@ -86,21 +86,6 @@ def parse_native_agent_model_selection(value: object) -> NativeAgentModelSelecti
     )
 
 
-def parse_native_agent_model_confirmation(
-    value: object,
-) -> NativeAgentModelConfirmation:
-    record = _closed(
-        value,
-        {"contract_version", "model_name", "model_identity", "model_config_version"},
-    )
-    return NativeAgentModelConfirmation(
-        contract_version=record["contract_version"],
-        model_name=record["model_name"],
-        model_identity=record["model_identity"],
-        model_config_version=record["model_config_version"],
-    )
-
-
 def resolve_native_agent_model(
     resolver: P3ModelResolver,
     selection: NativeAgentModelSelection | None = None,

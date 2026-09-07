@@ -18,7 +18,6 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     QueryEnvelope,
     ResultEnvelope,
     ScopeRef,
-    WorkProgressEventV2,
 )
 
 from .formal_task_models import (
@@ -60,16 +59,6 @@ from .durability_authority import DurabilityMutationAuthorization
 from .durability_recovery_facts import ExecutorRecoveryFacts
 from .task_store import SqliteTaskStore
 
-_PROJECTABLE_TASK_EVENTS = frozenset(
-    {
-        "task.accepted",
-        "task.retry_accepted",
-        "task.running",
-        "task.blocked",
-        "task.decision_required",
-        "task.terminal",
-    }
-)
 _OUTBOX_CLAIM_LEASE = timedelta(minutes=5)
 _ADJUSTMENT_CLAIM_RENEW_SECONDS = 60.0
 _MAX_INFLIGHT_ADJUSTMENTS = 64
@@ -203,59 +192,6 @@ def _failure(
         observed_at=observed_at,
         extensions=extensions,
     )
-
-
-def project_task_event(event: PersistentTaskEvent) -> dict[str, object]:
-    """Pure TaskEvent -> WorkProgress projection; never mutates or invokes TTS."""
-
-    if event.event_type not in _PROJECTABLE_TASK_EVENTS:
-        raise FormalTaskViolation(
-            "TASK_EVENT_NOT_PROJECTABLE",
-            "attempt/control/internal events cannot emit duplicate task progress",
-            ErrorCode.PROTOCOL_VIOLATION,
-        )
-    terminal = event.state == "terminal"
-    if terminal != (event.outcome is not None):
-        raise FormalTaskViolation(
-            "INVALID_TASK_PROGRESS_SOURCE",
-            "terminal progress and outcome must agree",
-            ErrorCode.PROTOCOL_VIOLATION,
-        )
-    details = event.details
-    summary = details.get("summary")
-    if summary is not None and type(summary) is not str:
-        summary = None
-    payload = {
-        "work_ref": {"kind": "task", "id": event.task_id},
-        "source": {
-            "authority": "task_core",
-            "event_id": event.event_id,
-            "source_work_ref": {"kind": "task", "id": event.task_id},
-            "adapter": (
-                None if event.producer.startswith("task_core") else event.producer
-            ),
-        },
-        "seq": event.seq,
-        "state": event.state,
-        "outcome": event.outcome,
-        "summary": (
-            {"knowledge": "unknown"}
-            if summary is None
-            else {"knowledge": "known", "value": summary}
-        ),
-        "blocking_question": {"knowledge": "unknown"},
-        "artifact_refs": {"knowledge": "unknown"},
-        "urgency": "unknown",
-        "speakability": "not_speakable",
-    }
-    try:
-        return WorkProgressEventV2.from_dict(payload).to_dict()
-    except ContractViolation as error:
-        raise FormalTaskViolation(
-            "INVALID_TASK_PROGRESS_PROJECTION",
-            f"Task Core produced invalid WorkProgress: {error}",
-            ErrorCode.PROTOCOL_VIOLATION,
-        ) from error
 
 
 ReconciliationEventSink = Callable[
@@ -1623,5 +1559,4 @@ __all__ = [
     "FormalExecutor",
     "PersistentTaskCore",
     "ReconciliationEventSink",
-    "project_task_event",
 ]

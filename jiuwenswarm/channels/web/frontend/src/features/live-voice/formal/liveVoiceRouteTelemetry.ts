@@ -25,14 +25,6 @@ export interface RouteTelemetryRecord {
   readonly safe_reason: string | null;
 }
 
-export interface RouteTelemetryLedger {
-  readonly enabled: boolean;
-  add(record: RouteTelemetryRecord | RouteTelemetryInput): boolean;
-  list(): readonly RouteTelemetryRecord[];
-  queryBySegment(segmentId: string): readonly RouteTelemetryRecord[];
-  size(): number;
-}
-
 export class RouteTelemetryViolation extends Error {
   readonly reason: string;
 
@@ -220,38 +212,4 @@ export function createRouteTelemetryRecord(input: RouteTelemetryInput): RouteTel
     observed_at: observedAt,
     safe_reason: safeReason,
   });
-}
-
-export function createRouteTelemetryLedger(options: { enabled?: boolean } = {}): RouteTelemetryLedger {
-  const enabled = options.enabled ?? true;
-  if (typeof enabled !== 'boolean') {
-    throw violation('INVALID_BOOLEAN', 'enabled must be a boolean');
-  }
-  if (!enabled) {
-    return {
-      enabled: false,
-      add: () => false,
-      list: () => [],
-      queryBySegment: () => [],
-      size: () => 0,
-    };
-  }
-
-  const records: RouteTelemetryRecord[] = [];
-  return {
-    enabled: true,
-    add(record: RouteTelemetryRecord | RouteTelemetryInput): boolean {
-      records.push(createRouteTelemetryRecord(record));
-      return true;
-    },
-    list(): readonly RouteTelemetryRecord[] {
-      return records.slice();
-    },
-    queryBySegment(segmentId: string): readonly RouteTelemetryRecord[] {
-      return records.filter(record => record.segment_id === segmentId);
-    },
-    size(): number {
-      return records.length;
-    },
-  };
 }

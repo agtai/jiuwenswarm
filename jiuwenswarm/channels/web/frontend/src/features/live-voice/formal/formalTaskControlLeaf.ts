@@ -10,7 +10,6 @@ export const FORMAL_TASK_CONTROL_LIMITS = Object.freeze({
 } as const);
 
 export type FormalTaskControlOperation = (typeof FORMAL_TASK_CONTROL_OPERATIONS)[number];
-export type FormalTaskCancelScope = 'playback.stop' | 'response.cancel' | 'round.cancel' | 'task.cancel';
 export type FormalTaskState = 'accepted' | 'running' | 'blocked' | 'decision_required' | 'terminal';
 
 export interface FormalTaskControlBinding {
@@ -375,11 +374,6 @@ function sameBinding(left: FormalTaskControlBinding, right: FormalTaskControlBin
     left.correlation_id === right.correlation_id &&
     left.generation === right.generation
   );
-}
-
-export function mapFormalTaskCancel(scope: FormalTaskCancelScope, taskId: string | null): Readonly<{ operation: 'task.cancel'; task_id: string }> | null {
-  if (scope !== 'task.cancel') return null;
-  return Object.freeze({ operation: 'task.cancel', task_id: text(taskId, 'task_id') });
 }
 
 export function prepareFormalTaskMutation(

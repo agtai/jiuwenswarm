@@ -1106,15 +1106,6 @@ def _project_task_progress_event(
     )
 
 
-def project_task_progress_event(
-    event: object,
-    origin: object,
-) -> TaskProgressProjection:
-    """Project only an exact same-Session TaskEvent on the public pure surface."""
-
-    return _project_task_progress_event(event, origin, consumer_scope=False)
-
-
 @dataclass(frozen=True, slots=True)
 class TaskProgressReturnActivation:
     active: bool
@@ -2287,5 +2278,4 @@ __all__ = [
     "TaskProgressTextEvent",
     "TextEventSink",
     "VoiceIntentSink",
-    "project_task_progress_event",
 ]

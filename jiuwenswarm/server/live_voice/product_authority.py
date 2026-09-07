@@ -16,7 +16,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
@@ -26,10 +26,6 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 
 from .formal_task_models import TaskAuthorizationGrant
 from .p3_confirmation import P3ConfirmationBinding, VerifiedP3Confirmation
-
-if TYPE_CHECKING:
-    from .batch_speech import SpeechAuthorizationBinding
-
 
 _MAX_ID_LENGTH = 256
 _MAX_SOURCE_LENGTH = 128
@@ -952,50 +948,6 @@ def _authorized_or_none(
     return decision.authority
 
 
-class SpeechAuthorityResolverAdapter:
-    """Implement the existing Speech resolver without accepting browser grants."""
-
-    def __init__(self, service: ProductAuthorityService) -> None:
-        if not isinstance(service, ProductAuthorityService):
-            raise _input_error("speech_adapter.service")
-        self._service = service
-
-    def authorize(
-        self, binding: SpeechAuthorizationBinding
-    ) -> SpeechAuthorizationBinding | None:
-        try:
-            scope = _normalize_scope(binding.scope, "speech.scope")
-            operation = _require_text(binding.operation, "speech.operation")
-            resource = AuthorityResourceBinding(
-                kind="speech.authorization",
-                resource_id=_require_text(binding.operation_id, "speech.operation_id"),
-                fingerprint_sha256=_require_sha256(
-                    binding.content_sha256, "speech.content_sha256"
-                ),
-            )
-            route = AuthorityRouteContext(
-                session_id=_require_text(scope.session_id, "speech.session_id"),
-                correlation_id=_require_text(
-                    binding.correlation_id, "speech.correlation_id"
-                ),
-                claimed_user_id=_require_text(binding.subject_id, "speech.subject_id"),
-                claimed_project_id=scope.project_id,
-                claimed_scope=scope,
-            )
-            request = ProductAuthorityRequest(
-                route=route,
-                operation=operation,
-                required_capabilities=frozenset({operation}),
-                resource=resource,
-            )
-        except (AttributeError, ProductAuthorityInputError, TypeError):
-            return None
-        authority = _authorized_or_none(self._service.resolve(request))
-        if authority is None:
-            return None
-        return binding
-
-
 @dataclass(frozen=True, slots=True, repr=False)
 class P2AuthenticatedContext:
     authority: ResolvedProductAuthority
@@ -1295,7 +1247,6 @@ __all__ = [
     "ProductAuthorityService",
     "ProductAuthorityUnavailable",
     "ResolvedProductAuthority",
-    "SpeechAuthorityResolverAdapter",
     "TrustedAuthorityCandidate",
     "TrustedAuthorityLookup",
     "TrustedAuthorityResolver",

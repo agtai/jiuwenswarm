@@ -31,7 +31,6 @@ EXTERNAL_EFFECT_FACT_CONTRACT_VERSION: Final = "live-voice.d2-effect-fact.v1"
 MAX_EXTERNAL_EFFECT_FACT_BYTES: Final = 65_536
 
 _MAX_TEXT_BYTES = 512
-_MAX_OBSERVATIONS = 1_024
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -45,14 +44,6 @@ class EffectObservationKind(StrEnum):
     NO_EFFECT = "no_effect"
     APPLIED = "applied"
     UNKNOWN = "unknown"
-
-
-class EffectReconciliationKind(StrEnum):
-    NO_EFFECT = "no_effect"
-    SAFELY_RETRYABLE = "safely_retryable"
-    APPLIED = "applied"
-    UNKNOWN = "unknown"
-    MANUAL_REQUIRED = "manual_required"
 
 
 class EffectSettlementKind(StrEnum):
@@ -806,98 +797,6 @@ def effect_fact_from_bytes(payload: object) -> EffectFact:
     return fact
 
 
-@dataclass(frozen=True, slots=True)
-class EffectReconciliationDecision(_AuthorityFreeEffectFact):
-    kind: EffectReconciliationKind
-    reason: str
-
-    def __post_init__(self) -> None:
-        if type(self.kind) is not EffectReconciliationKind:
-            raise ExternalEffectContractViolation(
-                "INVALID_RECONCILIATION_DECISION",
-                "effect reconciliation kind must use the closed vocabulary",
-            )
-        _text(self.reason, "decision.reason")
-
-
-def decide_effect_reconciliation(
-    *,
-    intent: ExternalEffectIntent,
-    receipt: EffectDispatchReceipt | None,
-    observations: tuple[ExternalEffectObservation, ...],
-    manual_required: bool,
-) -> EffectReconciliationDecision:
-    """Classify exact facts without authorizing or performing any action."""
-
-    if type(intent) is not ExternalEffectIntent:
-        raise ExternalEffectContractViolation(
-            "INVALID_EFFECT_FACT",
-            "reconciliation intent must be exact",
-        )
-    ExternalEffectIntent.from_dict(intent.to_dict())
-    if receipt is not None:
-        if type(receipt) is not EffectDispatchReceipt:
-            raise ExternalEffectContractViolation(
-                "INVALID_EFFECT_FACT",
-                "reconciliation receipt must be exact",
-            )
-        EffectDispatchReceipt.from_dict(receipt.to_dict())
-        if receipt.binding != intent.binding:
-            raise ExternalEffectContractViolation(
-                "EFFECT_BINDING_MISMATCH",
-                "effect receipt binding does not match the intent",
-            )
-    if type(observations) is not tuple or len(observations) > _MAX_OBSERVATIONS:
-        raise ExternalEffectContractViolation(
-            "EFFECT_FACT_OUT_OF_BOUNDS",
-            "effect observations are outside the bounded range",
-        )
-    if type(manual_required) is not bool:
-        raise ExternalEffectContractViolation(
-            "INVALID_EFFECT_FACT",
-            "manual-required fact must be exact bool",
-        )
-
-    by_ordinal: dict[int, ExternalEffectObservation] = {}
-    for observation in observations:
-        if type(observation) is not ExternalEffectObservation:
-            raise ExternalEffectContractViolation(
-                "INVALID_EFFECT_FACT",
-                "effect observation must be exact",
-            )
-        checked = ExternalEffectObservation.from_dict(observation.to_dict())
-        if checked.binding != intent.binding:
-            raise ExternalEffectContractViolation(
-                "EFFECT_BINDING_MISMATCH",
-                "effect observation binding does not match the intent",
-            )
-        prior = by_ordinal.get(checked.observation_ordinal)
-        if prior is not None and prior != checked:
-            raise ExternalEffectContractViolation(
-                "EFFECT_FACT_CONFLICT",
-                "changed effect fact reuses one observation ordinal",
-            )
-        by_ordinal[checked.observation_ordinal] = checked
-
-    latest = by_ordinal[max(by_ordinal)] if by_ordinal else None
-    if latest is not None and latest.kind is EffectObservationKind.APPLIED:
-        kind = EffectReconciliationKind.APPLIED
-        reason = "observed_applied"
-    elif manual_required:
-        kind = EffectReconciliationKind.MANUAL_REQUIRED
-        reason = "manual_resolution_required"
-    elif latest is None or latest.kind is EffectObservationKind.UNKNOWN:
-        kind = EffectReconciliationKind.UNKNOWN
-        reason = "effect_outcome_unknown"
-    elif intent.replay_safe:
-        kind = EffectReconciliationKind.SAFELY_RETRYABLE
-        reason = "observed_no_effect_and_replay_safe"
-    else:
-        kind = EffectReconciliationKind.NO_EFFECT
-        reason = "observed_no_effect"
-    return EffectReconciliationDecision(kind=kind, reason=reason)
-
-
 __all__ = [
     "EXTERNAL_EFFECT_FACT_CONTRACT_VERSION",
     "MAX_EXTERNAL_EFFECT_FACT_BYTES",
@@ -905,8 +804,6 @@ __all__ = [
     "EffectDispatchReceipt",
     "EffectFact",
     "EffectObservationKind",
-    "EffectReconciliationDecision",
-    "EffectReconciliationKind",
     "EffectSettlementKind",
     "ExternalEffectBinding",
     "ExternalEffectContractViolation",
@@ -914,7 +811,6 @@ __all__ = [
     "ExternalEffectDispatch",
     "ExternalEffectObservation",
     "ExternalEffectSettlement",
-    "decide_effect_reconciliation",
     "effect_fact_bytes",
     "effect_fact_from_bytes",
 ]

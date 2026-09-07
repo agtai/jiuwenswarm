@@ -53,7 +53,6 @@ from jiuwenswarm.server.live_voice.openai_realtime_session import (
     RealtimeSocketCleanupOwner,
     RealtimeSocketFactory,
     RealtimeTransport,
-    default_realtime_socket_factory as _default_socket_factory,
     official_realtime_url,
     validate_official_openai_api_base as _validate_api_base,
 )

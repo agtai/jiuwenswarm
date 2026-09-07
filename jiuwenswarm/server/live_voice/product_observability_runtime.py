@@ -1392,17 +1392,6 @@ def create_product_observability_runtime_from_environment(
     )
 
 
-def product_observability_enabled_from_environment() -> bool:
-    """Read only the diagnostic master gate before allocating its dependencies."""
-
-    return str(os.getenv(PRODUCT_OBSERVABILITY_ENABLE_ENV) or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 __all__ = [
     "BoundedInMemoryOtelBackend",
     "PRODUCT_OBSERVABILITY_BACKEND_ENV",
@@ -1421,5 +1410,4 @@ __all__ = [
     "ProductOtelBackendEnvelope",
     "TrustedCorrelationProjectionOwner",
     "create_product_observability_runtime_from_environment",
-    "product_observability_enabled_from_environment",
 ]

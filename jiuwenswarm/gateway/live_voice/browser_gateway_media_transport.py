@@ -18,8 +18,6 @@ from typing import Callable, Deque, Mapping, TypeAlias
 
 
 MEDIA_CONTRACT_VERSION = "live-voice.media.v1"
-MEDIA_TRANSPORT_KIND = "websocket_binary"
-MEDIA_WIRE_CODEC = "pcm_f32le"
 MEDIA_CAPTURE_ENCODING = "pcm_f32"
 MEDIA_FRAME_DURATION_MS = 20
 MEDIA_END_OF_TURN_CAPABILITY = "media.end_of_turn.v1"
@@ -454,52 +452,6 @@ class MediaAudioFrame:
 
 
 @dataclass(frozen=True, slots=True)
-class MediaCapability:
-    contract_version: str
-    transport_kind: str
-    wire_codec: str
-    capture_encoding: str
-    frame_duration_ms: int
-    channel_count: int
-    provider_neutral: bool
-    evidence_scope: str
-    contract_vector_evidence_id: str
-    formal_route_ready: bool
-    real_transport_observed: bool
-    registration_evidence_id: str | None
-    runtime_evidence_id: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class MediaActivationRequest:
-    enabled: bool
-    binding: MediaAuthorityBinding | None
-    provider_available: bool
-    transport_available: bool
-    max_pending_frames: int = 8
-    max_pending_bytes: int = 131_072
-
-
-@dataclass(frozen=True, slots=True)
-class InactiveMediaActivation:
-    active: bool
-    reason_id: str
-    capability: MediaCapability
-
-
-@dataclass(frozen=True, slots=True)
-class ActiveMediaActivation:
-    active: bool
-    binding: MediaAuthorityBinding
-    sender: "BoundedMediaSender"
-    receiver: "StrictMediaReceiver"
-    capability: MediaCapability
-
-
-MediaActivation: TypeAlias = InactiveMediaActivation | ActiveMediaActivation
-
-
-@dataclass(frozen=True, slots=True)
 class MediaEnqueueResult:
     accepted: bool
     reason_id: str
@@ -527,63 +479,6 @@ class MediaCloseResult:
             self.business_cancel_count_delta,
             reason_id="MEDIA_CANCEL_SCOPE_VIOLATION",
         )
-
-
-def _capability() -> MediaCapability:
-    return MediaCapability(
-        contract_version=MEDIA_CONTRACT_VERSION,
-        transport_kind=MEDIA_TRANSPORT_KIND,
-        wire_codec=MEDIA_WIRE_CODEC,
-        capture_encoding=MEDIA_CAPTURE_ENCODING,
-        frame_duration_ms=MEDIA_FRAME_DURATION_MS,
-        channel_count=1,
-        provider_neutral=True,
-        evidence_scope="contract_only",
-        contract_vector_evidence_id="live-voice.media.v1.roundtrip-vector",
-        formal_route_ready=False,
-        real_transport_observed=False,
-        registration_evidence_id=None,
-        runtime_evidence_id=None,
-    )
-
-
-def create_gateway_media_activation(
-    request: MediaActivationRequest,
-    *,
-    on_audio_frame: Callable[[MediaAudioFrame], None],
-) -> MediaActivation:
-    """Create inert seams only after all externally resolved gates are present."""
-
-    reason_id: str | None = None
-    if request.enabled is not True:
-        reason_id = "MEDIA_FEATURE_DISABLED"
-    elif not isinstance(request.binding, MediaAuthorityBinding):
-        reason_id = "MEDIA_AUTHORITY_UNAVAILABLE"
-    elif request.provider_available is not True:
-        reason_id = "MEDIA_PROVIDER_UNAVAILABLE"
-    elif request.transport_available is not True:
-        reason_id = "MEDIA_TRANSPORT_UNAVAILABLE"
-    if reason_id is not None:
-        return InactiveMediaActivation(
-            active=False, reason_id=reason_id, capability=_capability()
-        )
-    if not callable(on_audio_frame):
-        raise MediaTransportViolation(
-            "MEDIA_INVALID_CONSUMER", "audio consumer must be callable"
-        )
-    binding = request.binding
-    assert binding is not None
-    return ActiveMediaActivation(
-        active=True,
-        binding=binding,
-        sender=BoundedMediaSender(
-            binding,
-            max_pending_frames=request.max_pending_frames,
-            max_pending_bytes=request.max_pending_bytes,
-        ),
-        receiver=StrictMediaReceiver(binding, on_audio_frame=on_audio_frame),
-        capability=_capability(),
-    )
 
 
 def _check_control_uint(name: str, value: int) -> None:
@@ -1369,35 +1264,6 @@ class StrictMediaReceiver:
         was_active = not self._closed
         detach = self._terminal(reason_id)
         return MediaCloseResult(was_active, detach.reason_id, 0, 0, detach)
-
-
-def create_playback_stop_receipt(
-    binding: MediaAuthorityBinding,
-    *,
-    outcome: MediaPlaybackStopOutcome,
-    confirmed_through_seq: int | None = None,
-) -> MediaPlaybackStopReceipt:
-    """Create a playout-only stop receipt which cannot escalate cancellation."""
-
-    if binding.direction is not MediaDirection.DOWNLINK or binding.playout is None:
-        raise MediaTransportViolation(
-            "MEDIA_STOP_BINDING_MISMATCH", "playback stop requires downlink authority"
-        )
-    if not isinstance(outcome, MediaPlaybackStopOutcome):
-        raise MediaTransportViolation(
-            "MEDIA_INVALID_CONTROL", "playback stop outcome is not closed"
-        )
-    if confirmed_through_seq is not None:
-        _require_safe_uint("confirmed_through_seq", confirmed_through_seq)
-    receipt = MediaPlaybackStopReceipt(
-        lease_id=binding.lease_id,
-        response_id=binding.playout.response_id,
-        response_generation=binding.playout.response_generation,
-        unit_id=binding.playout.unit_id,
-        outcome=outcome,
-        confirmed_through_seq=confirmed_through_seq,
-    )
-    return validate_playback_stop_receipt(binding, receipt)
 
 
 def validate_playback_stop_receipt(

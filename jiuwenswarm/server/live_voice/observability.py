@@ -208,7 +208,6 @@ _FAILURE_REASONS = {
     "UNAVAILABLE",
     "PROTOCOL_REJECTED",
 }
-_QUEUE_SEGMENTS = {"runtime.queue", "agent.queue", "task.queue"}
 _SOURCE_FACTS = (
     "source_event_id",
     "source_record_id",
@@ -605,25 +604,6 @@ METRIC_SEMANTIC_MATRIX: Final[Mapping[str, Mapping[str, object]]] = MappingProxy
             allowed=("reason_code",),
             reasons=("DEGRADED", "RECOVERED"),
         ),
-    }
-)
-
-IDENTITY_POLICY: Final[Mapping[str, object]] = MappingProxyType(
-    {
-        "max_length": IDENTITY_MAX_LENGTH,
-        "allowed_pattern": r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$",
-        "blocked_markers": (
-            "api_key",
-            "authorization",
-            "bearer",
-            "credential",
-            "password",
-            "passwd",
-            "secret",
-            "token",
-            "transcript",
-        ),
-        "trusted_source_boundary": "authoritative_public_identity_fields_only",
     }
 )
 
@@ -1756,26 +1736,6 @@ class LiveVoiceObservabilityCollector:
                 self._sink_failures += 1
 
 
-def route_descriptor_from_route_record(record: Mapping[str, object]) -> RouteDescriptor:
-    """Redact W1-X1 free-text reasons while preserving truthful route class."""
-
-    if type(record) is not dict:
-        raise _violation("INVALID_JSON_OBJECT", "route record must be a plain object")
-    implementation_class = _required_text(
-        record.get("implementation_class"), "route_record.implementation_class"
-    )
-    reason_code = _ROUTE_REASON.get(implementation_class)
-    return create_route_descriptor(
-        {
-            "implementation_class": implementation_class,
-            "owner_module": record.get("owner_module"),
-            "capability_provider": record.get("capability_provider"),
-            "contract_version": record.get("contract_version"),
-            "reason_code": reason_code,
-        }
-    )
-
-
 def observation_from_task_event(
     event: object,
     *,
@@ -1824,101 +1784,6 @@ def observation_from_task_event(
     )
 
 
-def observation_from_task_outbox(
-    item: object,
-    task: object,
-    *,
-    observation_id: str,
-    observed_at: str,
-    monotonic_ms: float,
-    route: RouteDescriptor | object,
-) -> LiveVoiceObservation:
-    """Observe a durable outbox item without copying its task spec or instruction."""
-
-    from jiuwenswarm.server.live_voice.formal_task_models import (
-        OutboxKind,
-        OutboxState,
-        PersistentOutboxItem,
-        PersistentTaskRecord,
-    )
-
-    if not isinstance(item, PersistentOutboxItem) or not isinstance(
-        task, PersistentTaskRecord
-    ):
-        raise _violation(
-            "INVALID_TASK_OUTBOX", "item and task must use formal persistent models"
-        )
-    if not isinstance(item.kind, OutboxKind) or not isinstance(item.state, OutboxState):
-        raise _violation(
-            "INVALID_TASK_OUTBOX", "outbox kind and state must use formal vocabulary"
-        )
-    if (
-        item.task_id != task.task_id
-        or item.attempt_id != task.attempt_id
-        or item.scope != task.scope
-    ):
-        raise _violation(
-            "TASK_OUTBOX_BINDING_MISMATCH",
-            "outbox item must bind the exact task, attempt, and scope",
-        )
-    event_name = {
-        OutboxKind.ATTEMPT_DISPATCH: "task.dispatch_outbox_observed",
-        OutboxKind.ATTEMPT_CANCEL: "task.cancel_outbox_observed",
-        OutboxKind.ATTEMPT_ADJUST: "task.adjust_outbox_observed",
-    }[item.kind]
-    return create_observation(
-        {
-            "schema_version": OBSERVABILITY_SCHEMA_VERSION,
-            "event_id": observation_id,
-            "event_name": event_name,
-            "segment_name": "task.queue",
-            "observed_at": observed_at,
-            "monotonic_ms": monotonic_ms,
-            "binding": {
-                "correlation_id": task.correlation_id,
-                "task_id": task.task_id,
-                "attempt_id": task.attempt_id,
-            },
-            "route": route.to_dict() if isinstance(route, RouteDescriptor) else route,
-            "source_component": "task.core",
-            "source_record_id": item.outbox_id,
-            "source_seq": item.source_seq,
-            "state": item.state.value,
-        }
-    )
-
-
-def create_queue_metric(
-    *,
-    measurement_id: str,
-    binding: TraceBinding | object,
-    route: RouteDescriptor | object,
-    observed_at: str,
-    segment_name: str,
-    depth: int,
-) -> LiveVoiceMetric:
-    """Create a bounded queue gauge from a public runtime/Agent/Task snapshot."""
-
-    descriptor = create_route_descriptor(route)
-    return create_metric(
-        {
-            "schema_version": OBSERVABILITY_SCHEMA_VERSION,
-            "measurement_id": measurement_id,
-            "metric_name": "live_voice.queue_depth",
-            "metric_kind": "gauge",
-            "unit": "items",
-            "value": depth,
-            "observed_at": observed_at,
-            "binding": (
-                binding.to_dict() if isinstance(binding, TraceBinding) else binding
-            ),
-            "route": descriptor.to_dict(),
-            "segment_name": segment_name,
-            "implementation_class": descriptor.implementation_class,
-        }
-    )
-
-
 __all__ = [
     "CANCEL_SCOPES",
     "CANCEL_TARGET_SEGMENT_MATRIX",
@@ -1929,7 +1794,6 @@ __all__ = [
     "FAILURE_ERROR_MATRIX",
     "FAILURE_SEGMENT_MATRIX",
     "IDENTITY_MAX_LENGTH",
-    "IDENTITY_POLICY",
     "LIVE_VOICE_CONTRACT_VERSION",
     "METRIC_DEFINITIONS",
     "METRIC_SEMANTIC_MATRIX",
@@ -1950,11 +1814,8 @@ __all__ = [
     "contains_private_observability_content",
     "create_metric",
     "create_observation",
-    "create_queue_metric",
     "create_route_descriptor",
     "create_trace_binding",
     "observation_from_task_event",
-    "observation_from_task_outbox",
-    "route_descriptor_from_route_record",
     "validate_observability_timestamp",
 ]

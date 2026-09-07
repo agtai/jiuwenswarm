@@ -453,15 +453,6 @@ export function productTextProgressPresentationBinding(event: Readonly<ProductTe
   );
 }
 
-export function adoptProductTextProgressEvent(
-  current: Readonly<ProductTextProgressEvent> | null,
-  value: unknown,
-  activeSessionId: string | null
-): Readonly<ProductTextProgressEvent> | null {
-  const incoming = parseProductTextProgressEvent(value);
-  if (!incoming) return current;
-  return adoptParsedProductTextProgressEvent(current, incoming, activeSessionId);
-}
 
 export function adoptParsedProductTextProgressEvent(
   current: Readonly<ProductTextProgressEvent> | null,

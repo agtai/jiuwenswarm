@@ -105,14 +105,6 @@ class ConfigurationDeclarationReason(StrEnum):
     CAPABILITY_CONFLICT = "capability_conflict"
 
 
-class ConfigurationReplayReason(StrEnum):
-    FEATURE_DISABLED = "feature_disabled"
-    IDEMPOTENT = "idempotent"
-    INVALID_DECLARATION = "invalid_declaration"
-    IDENTITY_MISMATCH = "identity_mismatch"
-    CONFIGURATION_CONFLICT = "configuration_conflict"
-
-
 _REQUIRED_EXECUTOR_CAPABILITIES: Final = {
     DurabilityLevel.D0: frozenset(
         {
@@ -678,57 +670,6 @@ class ConfigurationDeclarationResult:
             raise ValueError("a pure configuration result cannot own effects")
 
 
-@dataclass(frozen=True, slots=True)
-class ConfigurationReplayResult:
-    accepted: bool
-    reason: ConfigurationReplayReason
-    environment_read: bool = False
-    provider_started: bool = False
-    backend_called: bool = False
-    worker_started: bool = False
-    network_changed: bool = False
-    persistence_changed: bool = False
-    authentication_downgraded: bool = False
-    durability_downgraded: bool = False
-    business_result_changed: bool = False
-    agent_effect: bool = False
-    tool_effect: bool = False
-    task_effect: bool = False
-    audio_effect: bool = False
-    history_effect: bool = False
-    authorization_granted: bool = False
-
-    def __post_init__(self) -> None:
-        if (
-            type(self.accepted) is not bool
-            or type(self.reason) is not ConfigurationReplayReason
-        ):
-            raise ValueError("configuration replay truth fields are invalid")
-        if self.accepted != (self.reason is ConfigurationReplayReason.IDEMPOTENT):
-            raise ValueError("only an identical configuration replay may be accepted")
-        if any(
-            value is not False
-            for value in (
-                self.environment_read,
-                self.provider_started,
-                self.backend_called,
-                self.worker_started,
-                self.network_changed,
-                self.persistence_changed,
-                self.authentication_downgraded,
-                self.durability_downgraded,
-                self.business_result_changed,
-                self.agent_effect,
-                self.tool_effect,
-                self.task_effect,
-                self.audio_effect,
-                self.history_effect,
-                self.authorization_granted,
-            )
-        ):
-            raise ValueError("configuration replay cannot own effects")
-
-
 def _validated_authentication(
     value: ValidatedAuthenticationConfiguration | None,
 ) -> ValidatedAuthenticationConfiguration | None:
@@ -851,18 +792,6 @@ def _build_declaration(
     )
 
 
-def _validated_declaration(
-    declaration: LiveVoiceCapabilityDeclaration,
-) -> LiveVoiceCapabilityDeclaration:
-    checked_configuration = _validated_configuration(declaration.source_configuration)
-    checked = _build_declaration(checked_configuration)
-    if declaration != checked:
-        raise ConfigurationContractViolation(
-            "declaration is not the exact non-authoritative projection"
-        )
-    return checked
-
-
 def declare_live_voice_capabilities(
     configuration: object,
     *,
@@ -913,77 +842,12 @@ def declare_live_voice_capabilities(
     )
 
 
-def evaluate_live_voice_capability_declaration_replay(
-    original: object,
-    replay: object,
-    *,
-    enabled: bool,
-) -> ConfigurationReplayResult:
-    """Compare sealed configuration truth without granting authorization."""
-
-    if type(enabled) is not bool:
-        raise ValueError("enabled must be exact bool")
-    if not enabled:
-        return ConfigurationReplayResult(
-            accepted=False,
-            reason=ConfigurationReplayReason.FEATURE_DISABLED,
-        )
-    if (
-        type(original) is not LiveVoiceCapabilityDeclaration
-        or type(replay) is not LiveVoiceCapabilityDeclaration
-    ):
-        return ConfigurationReplayResult(
-            accepted=False,
-            reason=ConfigurationReplayReason.INVALID_DECLARATION,
-        )
-    try:
-        checked_original = _validated_declaration(original)
-        checked_replay = _validated_declaration(replay)
-    except Exception:
-        return ConfigurationReplayResult(
-            accepted=False,
-            reason=ConfigurationReplayReason.INVALID_DECLARATION,
-        )
-    original_identity = (
-        checked_original.source_configuration_id,
-        checked_original.source_configuration_digest,
-    )
-    replay_identity = (
-        checked_replay.source_configuration_id,
-        checked_replay.source_configuration_digest,
-    )
-    if original_identity != replay_identity:
-        return ConfigurationReplayResult(
-            accepted=False,
-            reason=ConfigurationReplayReason.IDENTITY_MISMATCH,
-        )
-    if (
-        checked_original.source_configuration_fingerprint
-        != checked_replay.source_configuration_fingerprint
-    ):
-        return ConfigurationReplayResult(
-            accepted=False,
-            reason=ConfigurationReplayReason.CONFIGURATION_CONFLICT,
-        )
-    if checked_original != checked_replay:
-        return ConfigurationReplayResult(
-            accepted=False,
-            reason=ConfigurationReplayReason.INVALID_DECLARATION,
-        )
-    return ConfigurationReplayResult(
-        accepted=True,
-        reason=ConfigurationReplayReason.IDEMPOTENT,
-    )
-
-
 __all__ = [
     "AuthenticationMode",
     "CapabilityConfigurationConflict",
     "ConfigurationContractViolation",
     "ConfigurationDeclarationReason",
     "ConfigurationDeclarationResult",
-    "ConfigurationReplayReason",
-    "ConfigurationReplayResult",
     "DurabilityLevel",
     "ExecutorCapability",
     "LIVE_VOICE_CAPABILITY_DECLARATION_VERSION",
@@ -999,5 +863,4 @@ __all__ = [
     "ValidatedLiveVoiceConfiguration",
     "ValidatedProviderConfiguration",
     "declare_live_voice_capabilities",
-    "evaluate_live_voice_capability_declaration_replay",
 ]
