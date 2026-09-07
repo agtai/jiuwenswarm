@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-07 (six repairs and the exposed startup repair independently reviewed).
+> Updated: 2026-09-07 (Shenzhen rehearsal exposed further playback and delegation defects).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -48,6 +48,14 @@ not pass unified acceptance. Controlled redeployment and actual Native listening
 must bind the repaired source; clean w3 source and assets are recorded in
 `logs/live_voice_runtime_contract.json`; physical
 playback, exact A-to-AA output and the full current-source journey remain required.
+
+The subsequent [Shenzhen rehearsal diagnosis](reviews/SHENZHEN_REHEARSAL_DIAGNOSIS_20260907.md)
+records actual playback starvation, an itinerary misrouted to read-only work and
+a lost receipt successor with repeated presentation-busy rejection. The primary
+human script is now [Shenzhen business travel](demo/PRODUCT_READINESS_SHOWCASE.md#4-current-shenzhen-business-trip-showcase).
+That showcase is BLOCKED on these defects and grounded current-information lookup.
+The diagnosis and script do not claim a product repair or supersede retained
+candidate acceptance requirements.
 
 ### Retained Realtime optimization baseline
 
