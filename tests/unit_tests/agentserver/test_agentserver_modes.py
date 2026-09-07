@@ -1309,7 +1309,7 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     monkeypatch.setattr(adapter, "_build_task_planning_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_security_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_heartbeat_rail", lambda: None)
-    monkeypatch.setattr(adapter, "_build_circuit_breaker_rail", lambda **_kwargs: None)
+    monkeypatch.setattr(adapter, "_build_circuit_breaker_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_avatar_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_subagent_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_skill_rail", lambda **_kwargs: None)
@@ -1694,7 +1694,7 @@ def test_deep_adapter_rebuilds_plan_evolution_rails_when_language_changes(monkey
     assert adapter._evolution_interrupt_rail is interrupt_rails[0]
 
 
-async def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monkeypatch):
+def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     monkeypatch.setattr(
@@ -1715,15 +1715,12 @@ async def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat
         },
     )
 
-    try:
-        response = await adapter.handle_user_answer(request)
-    finally:
-        await adapter.cleanup()
+    response = asyncio.run(adapter.handle_user_answer(request))
 
     assert response.payload["resolved"] is False
 
 
-async def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch):
+def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     calls: list[tuple[str, str]] = []
@@ -1767,10 +1764,7 @@ async def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkey
         },
     )
 
-    try:
-        response = await adapter.handle_user_answer(request)
-    finally:
-        await adapter.cleanup()
+    response = asyncio.run(adapter.handle_user_answer(request))
 
     assert response.payload["resolved"] is True
     assert calls == [("approve_simplify", "evolve_simplify_team123")]

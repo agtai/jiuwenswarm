@@ -20,7 +20,6 @@ class _FakeWebSocket:
     def __init__(self) -> None:
         self.sent_frames: list[dict[str, Any]] = []
         self.remote_address = ("127.0.0.1", 12345)
-        self.closed = False
 
     async def send(self, data: str) -> None:
         self.sent_frames.append(json.loads(data))

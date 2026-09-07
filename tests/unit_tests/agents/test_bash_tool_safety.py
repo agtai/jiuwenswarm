@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from jiuwenswarm.agents.harness.common.tools import bash_tool_safety
 from jiuwenswarm.agents.harness.common.tools.bash_tool_safety import (
     _pre_execute_shell_command,
     install_shell_tool_safety_hooks,

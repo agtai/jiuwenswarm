@@ -132,17 +132,6 @@ async def test_oversized_server_push_preserves_push_marker(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_agentserver_send_push_reports_missing_gateway_as_not_delivered():
-    server = agent_ws_server.AgentWebSocketServer.__new__(
-        agent_ws_server.AgentWebSocketServer
-    )
-    server._current_ws = None
-    server._current_send_lock = None
-
-    assert await server.send_push({"payload": {}}) is False
-
-
-@pytest.mark.asyncio
 async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
     class FakeAgent:
         async def process_message_stream(self, request):

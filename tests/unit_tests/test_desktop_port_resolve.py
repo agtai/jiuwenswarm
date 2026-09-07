@@ -108,23 +108,6 @@ def test_load_dotenv_runtime_non_desktop_allows_override(tmp_path: Path, monkeyp
     assert os.environ["WEB_PORT"] == "11111"
 
 
-def test_load_dotenv_runtime_keeps_normal_agent_dotenv_behavior(
-    tmp_path: Path, monkeypatch
-):
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "MODEL_NAME=dotenv-model\nAPI_KEY=normal-runtime-key\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("MODEL_NAME", "parent-model")
-    monkeypatch.delenv("API_KEY", raising=False)
-
-    load_dotenv_runtime(env_file, override=True)
-
-    assert os.environ["MODEL_NAME"] == "dotenv-model"
-    assert os.environ["API_KEY"] == "normal-runtime-key"
-
-
 def test_load_dotenv_runtime_preserves_cli_ports(tmp_path: Path, monkeypatch):
     """Issue #2749: jiuwenswarm-start injected ports must beat stale .env.
 

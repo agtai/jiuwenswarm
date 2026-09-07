@@ -13,6 +13,17 @@ from jiuwenswarm.server.runtime.agent_adapter import interface_code
 from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
 
 
+class _FakeResourceMgr:
+    def __init__(self) -> None:
+        self._tools: dict[str, object] = {}
+
+    def get_tool(self, tool_id: str) -> object | None:
+        return self._tools.get(tool_id)
+
+    def add_tool(self, tool: object) -> None:
+        self._tools[tool.card.id] = tool
+
+
 def test_code_adapter_builds_acp_chat_when_profile_configured(monkeypatch):
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.agent_adapter.interface_code.get_config",
@@ -21,6 +32,11 @@ def test_code_adapter_builds_acp_chat_when_profile_configured(monkeypatch):
             "modes": {"code": {"tools": ["acp_chat"]}},
         },
     )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_code.Runner",
+        SimpleNamespace(resource_mgr=_FakeResourceMgr()),
+    )
+
     cards = JiuwenSwarmCodeAdapter().build_code_tool_cards("agent-id")
 
     assert [card.name for card in cards] == ["acp_chat"]
@@ -34,6 +50,11 @@ def test_code_adapter_skips_acp_chat_without_profiles(monkeypatch):
             "modes": {"code": {"tools": ["acp_chat"]}},
         },
     )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_code.Runner",
+        SimpleNamespace(resource_mgr=_FakeResourceMgr()),
+    )
+
     cards = JiuwenSwarmCodeAdapter().build_code_tool_cards("agent-id")
 
     assert cards == []
