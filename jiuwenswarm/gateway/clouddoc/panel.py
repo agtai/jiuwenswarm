@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from typing import Any
 
 from jiuwenswarm.agents.harness.common.tools.clouddoc.provider import ProviderError
@@ -736,10 +737,13 @@ class CloudDocPanel:
         Both refusals are here, on the server, so a UI that offered the control
         anyway would still be refused."""
         reg = getattr(self, "_reg", None)
-        owners = reg.owners(doc_id) if reg is not None else []
+        owners_fn = getattr(reg, "owners", None)
+        owners = owners_fn(doc_id) if owners_fn is not None else (
+            [] if reg is None or reg.find_doc(doc_id) is None else [reg.find_doc(doc_id)]
+        )
         if reg is not None and not owners:
             return {"ok": False, "detail": "文档未纳管，不能签发档位。"}
-        if owners and all(c.personal for c in owners):
+        if owners and all(getattr(c, "personal", False) for c in owners):
             return {
                 "ok": False, "doc_id": doc_id,
                 "detail": "个人连接下的文档没有值守档位：个人身份只通知，不代为处理。",
@@ -1223,6 +1227,202 @@ class CloudDocPanel:
 
         self._write_config(mutate)
         return {"ok": True, "doc_id": doc_id, "identity": choice}
+
+    # ------------------------------------------------- Feishu personal identity (device code)
+
+    # The lark-cli domains a personal connection needs: documents and drive for
+    # the body and comments, sheets/slides for the other formats, wiki for
+    # wiki-hosted documents.
+    FEISHU_LOGIN_DOMAINS = "docs,drive,sheets,slides,wiki"
+    FEISHU_LOGIN_SLACK_S = 30.0
+
+    async def _lark_exec(self, args: list[str], *, timeout: float = 60.0) -> tuple[int, str, str]:
+        """Run one ``lark-cli`` command. The seam the login tests stub."""
+        binary = "lark-cli"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                binary, *args,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            return 127, "", f"cannot start {binary}: {exc}"
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
+        return proc.returncode or 0, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+
+    @staticmethod
+    def _lark_json(text: str) -> dict:
+        text = (text or "").strip()
+        if not text.startswith("{"):
+            return {}
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @classmethod
+    def _lark_error(cls, out: str, err: str, code: int) -> str:
+        for text in (err, out):
+            data = cls._lark_json(text)
+            e = data.get("error")
+            if isinstance(e, dict):
+                return str(e.get("message") or e.get("subtype") or e.get("type") or "")
+        return (err or out or "").strip()[:300] or f"lark-cli exited with {code}"
+
+    def _feishu_flows(self) -> dict[str, dict[str, Any]]:
+        flows = getattr(self, "_feishu_login_flows", None)
+        if flows is None:
+            flows = {}
+            self._feishu_login_flows = flows
+        return flows
+
+    async def feishu_user_logged_in(self) -> bool:
+        try:
+            code, out, _ = await self._lark_exec(["auth", "status", "--json"], timeout=30)
+        except asyncio.TimeoutError:
+            return False
+        data = self._lark_json(out)
+        user = (data.get("identities") or {}).get("user") or {}
+        return bool(user.get("available"))
+
+    async def feishu_login_start(self) -> dict[str, Any]:
+        """Begin the device-code login inside the swarm (no terminal anywhere).
+
+        ``lark-cli auth login --no-wait --json`` returns a verification URL (with
+        the user code in its query), a device code and an expiry; the URL is
+        rendered to a PNG by ``lark-cli auth qrcode``. The device code stays in
+        this process's memory for the life of the flow -- never on disk, never in
+        a response -- and the completion (``--device-code``, which blocks until
+        the person scans, denies, or the code expires) runs as a background task
+        whose outcome ``feishu_login_status`` reports. A user who is already
+        logged in gets ``already`` so the caller connects straight away.
+        """
+        if await self.feishu_user_logged_in():
+            return {"result": "already"}
+        try:
+            code, out, err = await self._lark_exec(
+                ["auth", "login", "--no-wait", "--json", "--domain", self.FEISHU_LOGIN_DOMAINS],
+                timeout=60,
+            )
+        except asyncio.TimeoutError:
+            return {"result": "error", "detail": "lark-cli 没有在 60 秒内返回登录链接。"}
+        if code != 0:
+            return {"result": "error", "detail": self._lark_error(out, err, code)}
+        data = self._lark_json(out)
+        device_code = str(data.get("device_code") or "")
+        url = str(data.get("verification_url") or data.get("verification_uri") or "")
+        if not device_code or not url:
+            return {"result": "error", "detail": "lark-cli 返回的登录信息不完整（缺少设备码或链接）。"}
+        try:
+            expires_in = float(data.get("expires_in") or 600)
+        except (TypeError, ValueError):
+            expires_in = 600.0
+        from urllib.parse import parse_qs, urlsplit
+
+        user_code = str(data.get("user_code") or (parse_qs(urlsplit(url).query).get("user_code") or [""])[0])
+        qr_b64 = await self._feishu_qr_png(url)
+        state = uuid.uuid4().hex
+        flow: dict[str, Any] = {
+            "state": state, "device_code": device_code, "verification_url": url,
+            "user_code": user_code, "expires_at": time.time() + expires_in,
+            "status": "pending", "detail": "", "connection": None, "identity": None,
+        }
+        self._feishu_flows()[state] = flow
+        flow["task"] = asyncio.create_task(
+            self._feishu_login_wait(flow, expires_in), name=f"clouddoc-feishu-login-{state[:8]}",
+        )
+        return {
+            "result": "ok", "state": state, "verification_url": url, "user_code": user_code,
+            "qr_png_base64": qr_b64, "expires_at": flow["expires_at"],
+        }
+
+    async def _feishu_qr_png(self, url: str) -> str:
+        """The verification link as a PNG (base64), via the CLI's own renderer.
+        Empty on failure: the link and the user code still get the person there."""
+        import base64
+        import tempfile
+
+        fd, path = tempfile.mkstemp(prefix="jiuwen-lark-qr-", suffix=".png", dir="/tmp")
+        os.close(fd)
+        try:
+            code, out, err = await self._lark_exec(
+                ["auth", "qrcode", url, "--output", path, "--size", "256"], timeout=30,
+            )
+            if code != 0:
+                logger.warning("[clouddoc] lark-cli qrcode failed: %s", self._lark_error(out, err, code))
+                return ""
+            data = await asyncio.to_thread(pathlib.Path(path).read_bytes)
+            return base64.b64encode(data).decode("ascii") if data else ""
+        except Exception:  # noqa: BLE001 - the QR is a convenience over the link
+            logger.exception("[clouddoc] qr render failed")
+            return ""
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    async def _feishu_login_wait(self, flow: dict[str, Any], expires_in: float) -> None:
+        """Complete the device flow: block on ``--device-code`` until the person
+        scans (exit 0), denies, or the code expires; then connect as them."""
+        try:
+            code, out, err = await self._lark_exec(
+                ["auth", "login", "--device-code", flow["device_code"], "--json"],
+                timeout=expires_in + self.FEISHU_LOGIN_SLACK_S,
+            )
+        except asyncio.TimeoutError:
+            flow["status"], flow["detail"] = "expired", "登录链接已过期（十分钟内没有完成扫码）。请重新开始。"
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            flow["status"], flow["detail"] = "error", str(exc)
+            return
+        finally:
+            flow["device_code"] = ""
+        if code != 0:
+            detail = self._lark_error(out, err, code)
+            low = detail.lower()
+            expired = "expire" in low or "过期" in detail
+            flow["status"] = "expired" if expired else "denied"
+            flow["detail"] = detail or ("登录链接已过期。" if expired else "授权未完成或被拒绝。")
+            return
+        result = await self.add_personal_connection("feishu")
+        if result.get("result") == "ok":
+            flow["status"], flow["connection"] = "done", result.get("connection")
+            conn = result.get("connection") or {}
+            flow["identity"] = {"open_id": conn.get("agent_address"), "name": conn.get("agent_display")}
+        elif result.get("result") == "duplicate":
+            flow["status"], flow["detail"] = "done", "这个飞书账号已经连接过了。"
+            flow["connection"] = next(
+                (_conn_payload(c) for c in self._reg.list() if c.personal and c.kind == "feishu"), None,
+            )
+        else:
+            flow["status"], flow["detail"] = "error", str(result.get("detail") or result.get("result") or "")
+
+    async def feishu_login_status(self, state: str) -> dict[str, Any]:
+        flow = self._feishu_flows().get(str(state or ""))
+        if flow is None:
+            return {"status": "error", "detail": "没有这个登录请求；请重新开始。"}
+        if flow["status"] == "pending" and time.time() > float(flow["expires_at"]) + self.FEISHU_LOGIN_SLACK_S:
+            flow["status"], flow["detail"] = "expired", "登录链接已过期。请重新开始。"
+            task = flow.get("task")
+            if task is not None and not task.done():
+                task.cancel()
+        out = {
+            "status": flow["status"], "detail": flow["detail"], "connection": flow["connection"],
+            "identity": flow["identity"], "expires_at": flow["expires_at"],
+            "verification_url": flow["verification_url"], "user_code": flow["user_code"],
+        }
+        if flow["status"] != "pending":
+            # One flow, one outcome: a finished flow is dropped once reported.
+            self._feishu_flows().pop(flow["state"], None)
+        return out
 
     # ------------------------------------------------- Google personal identity (OAuth)
 

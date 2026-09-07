@@ -111,13 +111,15 @@ async def test_personal_identity_is_the_logged_in_person_by_open_id():
 
 
 @pytest.mark.asyncio
-async def test_a_missing_user_login_is_an_auth_error_naming_the_command():
+async def test_a_missing_user_login_is_an_auth_error_pointing_at_the_settings_page():
+    """The login lives inside the swarm (settings → personal account → scan); no
+    message may send a person to a terminal."""
     p = FeishuDocsProvider(profile="p", identity="user")
     p._cli = _StubCli({"whoami": {"identity": "user", "available": False, "tokenStatus": "missing"}})
     with pytest.raises(ProviderError) as exc:
         await p.self_identity()
     assert exc.value.kind == "auth"
-    assert "lark-cli auth login" in str(exc.value)
+    assert "扫码登录" in str(exc.value) and "lark-cli" not in str(exc.value)
 
 
 @pytest.mark.asyncio

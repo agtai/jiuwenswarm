@@ -6681,6 +6681,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await _clouddoc_call(ws, req_id, "set_identity_choice",
                              str(p.get("doc_id")), str(p.get("identity") or "service"))
 
+    async def _clouddoc_feishu_login_start(ws, req_id, params, session_id):
+        await _clouddoc_call(ws, req_id, "feishu_login_start")
+
+    async def _clouddoc_feishu_login_status(ws, req_id, params, session_id):
+        p = params if isinstance(params, dict) else {}
+        await _clouddoc_call(ws, req_id, "feishu_login_status", str(p.get("state") or ""))
+
     async def _clouddoc_google_oauth_configure(ws, req_id, params, session_id):
         p = params if isinstance(params, dict) else {}
         await _clouddoc_call(ws, req_id, "set_google_oauth",
@@ -6882,6 +6889,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("clouddoc.set_signature", _clouddoc_set_signature)
     channel.register_method("clouddoc.set_identity_choice", _clouddoc_set_identity_choice)
     channel.register_method("clouddoc.notices", _clouddoc_notices)
+    channel.register_method("clouddoc.feishu_login_start", _clouddoc_feishu_login_start)
+    channel.register_method("clouddoc.feishu_login_status", _clouddoc_feishu_login_status)
     channel.register_method("clouddoc.google_oauth_configure", _clouddoc_google_oauth_configure)
     channel.register_method("clouddoc.google_oauth_start", _clouddoc_google_oauth_start)
     channel.register_method("clouddoc.google_oauth_status", _clouddoc_google_oauth_status)

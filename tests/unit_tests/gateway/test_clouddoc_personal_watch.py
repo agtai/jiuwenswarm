@@ -363,7 +363,12 @@ def kit(tmp_path):
     def factory(path: str) -> FakeProvider:
         body = json.loads(open(path).read())
         personal = body.get("kind") == "personal"
-        p = FakeProvider(personal=personal, address=body.get("open_id") or body.get("bot_open_id"))
+        # A personal file written before the identity resolved has no open_id yet;
+        # the real provider learns it from the platform, this fake knows it.
+        p = FakeProvider(
+            personal=personal,
+            address=body.get("open_id") or body.get("bot_open_id") or (ME if personal else BOT),
+        )
         providers[path.rsplit("/", 1)[-1]] = p
         return p
 
@@ -581,8 +586,7 @@ async def test_add_personal_connection_writes_no_secret_and_cleans_up_when_not_l
     assert out["result"] == "ok" and out["connection"]["kind"] == "personal"
     f = tmp_path / "clouddoc-keys" / "personal-feishu-cli_x.json"
     body = json.loads(f.read_text())
-    assert body == {"kind": "personal", "brand": "feishu", "profile": "cli_x", "open_id": None, "name": "张三"} or \
-        body["open_id"] is None or body["kind"] == "personal"
+    assert body == {"kind": "personal", "brand": "feishu", "profile": "cli_x", "open_id": ME, "name": "张三"}
     assert "app_secret" not in body and "app_id" not in body
     keys = (await kit.panel.list_keys())["keys"]
     assert keys[0]["kind"] == "personal" and keys[0]["in_use"] is True
@@ -713,3 +717,107 @@ async def test_a_failed_exchange_leaves_no_file_and_says_why(kit, tmp_path):
     still = await kit.panel.google_oauth_finish(started["state"], "http://127.0.0.1:1/?state=other&code=x")
     assert still["status"] == "pending"
     await kit.reg.stop_all()
+
+
+# ------------------------------------------------------------ Feishu device-code login inside the swarm
+
+
+class _LarkStub:
+    """A scripted lark-cli: status not logged in, a device flow, a QR renderer, and a
+    completion whose outcome the test decides (``ready`` / ``denied`` / never)."""
+
+    def __init__(self, *, outcome: str, logged_in: bool = False, expires_in: int = 600):
+        self.outcome, self.logged_in, self.expires_in = outcome, logged_in, expires_in
+        self.calls: list[list[str]] = []
+        self.release = asyncio.Event()
+
+    async def __call__(self, args, *, timeout=60.0):
+        self.calls.append(list(args))
+        if args[:2] == ["auth", "status"]:
+            return 0, json.dumps({"identities": {"user": {"available": self.logged_in}}}), ""
+        if args[:3] == ["auth", "login", "--no-wait"]:
+            return 0, json.dumps({
+                "device_code": "DEV-SECRET", "expires_in": self.expires_in,
+                "verification_url": "https://accounts.feishu.cn/oauth/v1/device/verify?flow_id=f&user_code=AB12-CD34",
+            }), ""
+        if args[:2] == ["auth", "qrcode"]:
+            pathlib.Path(args[args.index("--output") + 1]).write_bytes(b"\x89PNG-fake")
+            return 0, "", ""
+        if args[:3] == ["auth", "login", "--device-code"]:
+            assert args[3] == "DEV-SECRET"
+            try:
+                await asyncio.wait_for(self.release.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                raise
+            if self.outcome == "ready":
+                return 0, json.dumps({"ok": True, "identity": "user"}), ""
+            return 3, "", json.dumps({"ok": False, "error": {"type": "authentication", "message": "authorization denied by user"}})
+        raise AssertionError(f"unexpected lark-cli call {args}")
+
+
+import asyncio
+import base64
+import pathlib
+
+
+async def _settled(panel, state, tries=50):
+    for _ in range(tries):
+        out = await panel.feishu_login_status(state)
+        if out["status"] != "pending":
+            return out
+        await asyncio.sleep(0.02)
+    return out
+
+
+@pytest.mark.asyncio
+async def test_feishu_login_success_shows_a_qr_and_connects_without_a_terminal(kit, tmp_path):
+    stub = _LarkStub(outcome="ready")
+    kit.panel._lark_exec = stub
+    started = await kit.panel.feishu_login_start()
+    assert started["result"] == "ok"
+    assert started["user_code"] == "AB12-CD34"
+    assert started["verification_url"].startswith("https://accounts.feishu.cn/")
+    assert base64.b64decode(started["qr_png_base64"]).startswith(b"\x89PNG")
+    assert "device_code" not in started and "DEV-SECRET" not in json.dumps(started), (
+        "the device code never leaves the process"
+    )
+    assert not list(pathlib.Path("/tmp").glob("jiuwen-lark-qr-*.png")), "the QR file is not left behind"
+    pending = await kit.panel.feishu_login_status(started["state"])
+    assert pending["status"] == "pending" and pending["user_code"] == "AB12-CD34"
+    stub.release.set()
+    done = await _settled(kit.panel, started["state"])
+    assert done["status"] == "done", done
+    assert done["connection"]["kind"] == "personal" and done["identity"]["open_id"] == ME
+    assert [c.id for c in kit.reg.list()] == [f"feishu:personal:{ME}"]
+    assert [c for c in stub.calls if c[:3] == ["auth", "login", "--device-code"]], "completion ran --device-code"
+    # One flow, one outcome: reported once, then gone.
+    assert (await kit.panel.feishu_login_status(started["state"]))["status"] == "error"
+    await kit.reg.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_feishu_login_denied_reports_the_reason_and_connects_nothing(kit):
+    stub = _LarkStub(outcome="denied")
+    kit.panel._lark_exec = stub
+    started = await kit.panel.feishu_login_start()
+    stub.release.set()
+    done = await _settled(kit.panel, started["state"])
+    assert done["status"] == "denied" and "denied" in done["detail"]
+    assert kit.reg.list() == []
+
+
+@pytest.mark.asyncio
+async def test_feishu_login_expiry_is_reported_and_the_wait_ends(kit):
+    stub = _LarkStub(outcome="never", expires_in=1)
+    kit.panel._lark_exec = stub
+    kit.panel.FEISHU_LOGIN_SLACK_S = 0.05
+    started = await kit.panel.feishu_login_start()
+    done = await _settled(kit.panel, started["state"], tries=100)
+    assert done["status"] == "expired" and "过期" in done["detail"]
+    assert kit.reg.list() == []
+
+
+@pytest.mark.asyncio
+async def test_feishu_login_start_short_circuits_when_already_logged_in(kit):
+    kit.panel._lark_exec = _LarkStub(outcome="ready", logged_in=True)
+    assert (await kit.panel.feishu_login_start()) == {"result": "already"}

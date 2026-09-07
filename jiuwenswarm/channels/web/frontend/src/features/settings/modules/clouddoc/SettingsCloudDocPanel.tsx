@@ -45,6 +45,10 @@ export function SettingsCloudDocPanel({ isConnected }: { isConnected: boolean })
   const [gFlow, setGFlow] = useState<{ state: string; auth_url: string; redirect_uri: string } | null>(null);
   const [gStatus, setGStatus] = useState<{ status: string; detail?: string } | null>(null);
   const [gCode, setGCode] = useState('');
+  // Feishu personal identity: the device-code login, entirely inside the swarm --
+  // a QR code, the link and the user code, polled until the person has scanned.
+  const [fFlow, setFFlow] = useState<{ state: string; verification_url: string; user_code: string; qr_png_base64: string; expires_at: number } | null>(null);
+  const [fStatus, setFStatus] = useState<{ status: string; detail?: string } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -113,12 +117,32 @@ export function SettingsCloudDocPanel({ isConnected }: { isConnected: boolean })
   const addPersonal = async () => {
     setBusy(true);
     setNote('');
+    setFStatus(null);
     try {
+      // A user already logged in connects straight away; otherwise the device
+      // flow starts and the QR code below takes over.
+      const start = await webRequest<{ result: string; detail?: string; state?: string; verification_url?: string; user_code?: string; qr_png_base64?: string; expires_at?: number }>(
+        'clouddoc.feishu_login_start',
+      );
+      if (start?.result === 'ok' && start.state) {
+        setFFlow({
+          state: start.state,
+          verification_url: start.verification_url ?? '',
+          user_code: start.user_code ?? '',
+          qr_png_base64: start.qr_png_base64 ?? '',
+          expires_at: start.expires_at ?? 0,
+        });
+        setFStatus({ status: 'pending' });
+        return;
+      }
+      if (start?.result !== 'already') {
+        setFStatus({ status: 'error', detail: start?.detail || start?.result || '' });
+        return;
+      }
       const out = await webRequest<{ result?: string; detail?: string }>(
         'clouddoc.add_personal_connection', { brand: 'feishu' },
       );
       if (out?.result === 'ok') setNote(t('settingsPanel.clouddoc.personalAdded'));
-      else if (out?.result === 'not_logged_in') setNote(t('settingsPanel.clouddoc.personalNotLoggedIn', { detail: out.detail ?? '' }));
       else setNote(out?.detail || out?.result || '');
       await refresh();
       announce();
@@ -128,6 +152,21 @@ export function SettingsCloudDocPanel({ isConnected }: { isConnected: boolean })
       setBusy(false);
     }
   };
+
+  // The login finishes on its own once the person has scanned; poll every 3s.
+  useEffect(() => {
+    if (!fFlow || fStatus?.status !== 'pending') return;
+    const id = window.setInterval(() => {
+      void webRequest<{ status: string; detail?: string }>('clouddoc.feishu_login_status', { state: fFlow.state })
+        .then((s) => {
+          if (!s) return;
+          setFStatus(s);
+          if (s.status === 'done') { void refresh(); announce(); }
+        })
+        .catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(id);
+  }, [fFlow, fStatus?.status, refresh]);
 
   const saveSignature = async () => {
     setBusy(true);
@@ -332,16 +371,60 @@ export function SettingsCloudDocPanel({ isConnected }: { isConnected: boolean })
 
       <div data-testid="settings-clouddoc-personal">
         <div className="font-medium mb-1">{t('settingsPanel.clouddoc.personalTitle')}</div>
-        <div className="text-xs text-text-muted mb-2">{t('settingsPanel.clouddoc.personalHint')}</div>
         <div className="text-xs text-text-muted mb-2">{t('settingsPanel.clouddoc.personalModel')}</div>
-        <button
-          data-testid="settings-clouddoc-add-personal"
-          className="rounded-md border border-border px-3 py-1.5"
-          disabled={busy}
-          onClick={() => void addPersonal()}
-        >
-          {t('settingsPanel.clouddoc.personalConnect')}
-        </button>
+        <div className="rounded-md border border-border p-3" data-testid="settings-clouddoc-feishu-personal">
+          <div className="text-xs font-medium mb-1">{t('settingsPanel.clouddoc.feishuPersonalTitle')}</div>
+          <div className="text-xs text-text-muted mb-2">{t('settingsPanel.clouddoc.personalHint')}</div>
+          <div className="flex items-center gap-2">
+            <button
+              data-testid="settings-clouddoc-add-personal"
+              className="rounded-md border border-border px-3 py-1.5"
+              disabled={busy || fStatus?.status === 'pending'}
+              onClick={() => void addPersonal()}
+            >
+              {fStatus?.status === 'error' || fStatus?.status === 'denied' || fStatus?.status === 'expired'
+                ? t('settingsPanel.clouddoc.feishuRetry')
+                : t('settingsPanel.clouddoc.personalConnect')}
+            </button>
+            {fStatus?.status === 'pending' && <span className="text-xs text-text-muted">{t('settingsPanel.clouddoc.feishuWaiting')}</span>}
+            {fStatus?.status === 'done' && <span className="text-xs text-green-700">{t('settingsPanel.clouddoc.feishuDone')}</span>}
+            {(fStatus?.status === 'error' || fStatus?.status === 'denied' || fStatus?.status === 'expired') && (
+              <span className="text-xs text-red-600" data-testid="settings-clouddoc-feishu-error">
+                {fStatus.status === 'expired' ? t('settingsPanel.clouddoc.feishuExpired') : fStatus.status === 'denied' ? t('settingsPanel.clouddoc.feishuDenied') : ''}
+                {fStatus.detail ? ` ${fStatus.detail}` : ''}
+              </span>
+            )}
+          </div>
+          {fFlow && fStatus?.status === 'pending' && (
+            <div className="mt-2 flex items-start gap-4" data-testid="settings-clouddoc-feishu-qr">
+              {fFlow.qr_png_base64 ? (
+                <img
+                  src={`data:image/png;base64,${fFlow.qr_png_base64}`}
+                  alt="QR"
+                  width={160}
+                  height={160}
+                  className="flex-none rounded-md border border-border bg-white"
+                  data-testid="settings-clouddoc-feishu-qr-img"
+                />
+              ) : null}
+              <div className="text-xs leading-relaxed">
+                <div>{t('settingsPanel.clouddoc.feishuScanHint')}</div>
+                <div className="mt-1">
+                  {t('settingsPanel.clouddoc.feishuUserCode')}{' '}
+                  <span className="rounded bg-bg-muted px-1.5 py-0.5 font-mono text-sm" data-testid="settings-clouddoc-feishu-user-code">{fFlow.user_code}</span>
+                </div>
+                <div className="mt-1">
+                  <a className="text-text-link underline break-all" href={fFlow.verification_url} target="_blank" rel="noreferrer">
+                    {t('settingsPanel.clouddoc.feishuOpenLink')}
+                  </a>
+                </div>
+                {fFlow.expires_at > 0 && (
+                  <div className="mt-1 text-text-muted">{t('settingsPanel.clouddoc.feishuExpiresAt', { time: new Date(fFlow.expires_at * 1000).toLocaleTimeString() })}</div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
         <div className="mt-3 rounded-md border border-border p-3" data-testid="settings-clouddoc-google-personal">
           <div className="text-xs font-medium mb-1">{t('settingsPanel.clouddoc.googlePersonalTitle')}</div>
           <div className="text-xs text-text-muted mb-2">{t('settingsPanel.clouddoc.googlePersonalHint')}</div>

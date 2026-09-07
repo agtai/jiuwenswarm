@@ -370,8 +370,7 @@ class FeishuDocsProvider(DocProvider):
         if data.get("available") is False or str(data.get("tokenStatus") or "") == "missing":
             raise ProviderError(
                 "auth",
-                "飞书个人身份未登录：请在本机运行 `lark-cli auth login`（选择 docs、drive 域），"
-                "扫码登录后再添加个人连接。",
+                "飞书个人身份尚未登录：请在设置 → Cloud Docs 的「个人账号」里点「以我的飞书身份连接」扫码登录。",
             )
         open_id = str(_first(data, "open_id", "openId", "user_open_id", default="") or "")
         name = str(_first(data, "name", "user_name", "display_name", default="") or "")
@@ -387,7 +386,7 @@ class FeishuDocsProvider(DocProvider):
         self._self_open_id = self._self_open_id or open_id
         if not self._self_open_id:
             raise ProviderError(
-                "auth", "无法取得个人身份的 open_id；请确认 lark-cli 已以用户身份登录。"
+                "auth", "无法取得个人身份的 open_id；请在设置页重新扫码登录飞书个人身份。"
             )
         self._identity = AgentIdentity(
             display_name=name or self._preset_name or self._self_open_id,
