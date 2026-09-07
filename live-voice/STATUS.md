@@ -48,6 +48,9 @@ P4 applies a Native conclusion-first, source-qualified answer policy. Formal and
 Runtime checks, independent review and a real Agent/file-tool sample pass their
 owned boundaries. The recorded final answer is shorter but its total execution
 is not faster; precompletion publication and physical gains remain unproved.
+P6's early recovery rescheduling was rejected after independent and Astra max
+review reproduced added underrun and repeated PCM. The original reserve remains;
+regression guards pass, but the P6 latency target has not been achieved.
 The remaining implementation continues independently
 of evidence synchronization. Original rehearsal files are absent locally; full
 optimization, measured latency and physical acceptance remain unproved. The

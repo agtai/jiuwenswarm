@@ -279,3 +279,23 @@ regressions pass. Scoped Ruff `F,E9` and diff checks pass. Local logs are
 `logs/p4_real_agent_probe.py`. Independent review ran the nine new policy cases,
 verified full input/final-output preservation and Task-contract precedence, and
 found no actionable issue.
+
+### P6 — Reject early recovery rescheduling; retain continuity guards
+
+The [P6 decision](REALTIME_P6_RECOVERY_DECISION_20260907.md) retains the original
+250–750ms bounded reserve. Independent review found that a filled burst followed
+by another delay can gain an extra underrun, and a main-thread stall while stopping
+sources can replay PCM already started by the audio clock. Astra max confirmed
+both structural counterexamples; the candidate production changes were withdrawn.
+No reserve-delay saving is credited and the imported 1–1.5 second target is unmet.
+
+The single P6 commit contains the decision and regression guards. The independent
+reviewer reran the exact frozen baseline/candidate comparisons: baseline five cases
+pass; the rejected candidate adds a gap and repeats 240 samples (5ms at 48kHz).
+Tail and healthy-supply controls pass on both. The reviewer verified both frozen
+source hashes and found no remaining production diff or documentation issue.
+Main copied only the final tests and decision into the integration worktree;
+`npm run test:live-voice-browser-audio-io` passes strict TypeScript, bundling and
+all 125 audio/capture cases there (`logs/p6-main-audio-tests.txt`). Main's frontend
+dependencies use package junctions with a separate local build cache. No physical
+speaker evidence or performance improvement follows from these scheduling tests.

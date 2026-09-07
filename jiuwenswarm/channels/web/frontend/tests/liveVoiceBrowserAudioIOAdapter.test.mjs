@@ -467,6 +467,152 @@ test('tentative pause during recovery resumes only unplayed samples and fences o
   await adapter.close();
 });
 
+// Observe the fake audio clock independently of adapter records. In particular,
+// a source stopped after its scheduled start has already consumed that prefix;
+// replacing it at offset zero must not make those samples disappear from this
+// oracle. This is deterministic schedule evidence, not a physical-output claim.
+function recoveryRenderedSegments(context, stoppedAt = new Map()) {
+  return context.bufferSources
+    .flatMap(source => {
+      if (source.starts.length === 0) return [];
+      const samples = source.buffer.copied[0].source;
+      const offset = Math.round((source.offsets[0] ?? 0) * context.sampleRate);
+      const count = Math.min(
+        samples.length - offset,
+        Math.max(0, Math.round(((stoppedAt.get(source) ?? context.currentTime) - source.starts[0]) * context.sampleRate)),
+      );
+      return count === 0 ? [] : [{ start: source.starts[0], samples: samples.slice(offset, offset + count) }];
+    })
+    .sort((left, right) => left.start - right.start);
+}
+
+test('recovery keeps continuity when a filled reserve is followed by another delayed burst', async t => {
+  const burst = (at, count) => Array.from({ length: count }, () => at);
+  const traces = [
+    { name: 'two_delayed_bursts', arrivals: [...burst(0, 1), ...burst(0.65, 33), ...burst(1.35, 50)], gaps: [1.03] },
+    { name: 'short_tail', arrivals: [...burst(0, 1), ...burst(0.65, 3)], gaps: [1.03] },
+    { name: 'healthy_supply', arrivals: Array.from({ length: 80 }, (_, index) => index * 0.02), gaps: [] },
+  ];
+  for (const trace of traces) {
+    await t.test(trace.name, async () => {
+      const fake = fakeEnvironment();
+      const rendered = [];
+      const adapter = new BrowserAudioIOAdapter({
+        enabled: true,
+        environment: fake.environment,
+        observer: { onPlayoutState: event => { if (event.reason === 'render_completed') rendered.push(event.through_seq); } },
+      });
+      await adapter.unlockPlayout();
+      adapter.beginPlayout(firstResponse);
+      const context = fake.contexts[0];
+      const origin = context.currentTime;
+      const ended = new Set();
+      const stoppedAt = new Map();
+      const createSource = context.createBufferSource.bind(context);
+      context.createBufferSource = () => {
+        const source = createSource();
+        const stop = source.stop.bind(source);
+        source.stop = () => { stoppedAt.set(source, context.currentTime); stop(); };
+        return source;
+      };
+      const renderReady = () => {
+        for (const source of context.bufferSources) {
+          const duration = source.buffer.copied[0].source.length / context.sampleRate;
+          if (!ended.has(source) && !stoppedAt.has(source) && source.starts[0] + duration <= context.currentTime + 1e-9) {
+            ended.add(source);
+            source.end();
+          }
+        }
+      };
+      const chunks = trace.arrivals.map((_, seq) => pcmChunk(firstResponse, seq, {
+        samples: new Float32Array(960).fill((seq + 1) / 100),
+      }));
+      try {
+        for (let seq = 0; seq < chunks.length; seq++) {
+          context.currentTime = origin + trace.arrivals[seq];
+          renderReady();
+          assert.equal(adapter.enqueuePlayout(chunks[seq]), true);
+        }
+        context.currentTime += 10;
+        renderReady();
+        const segments = recoveryRenderedSegments(context, stoppedAt);
+        const gaps = segments.slice(1).map((segment, index) =>
+          segment.start - segments[index].start - segments[index].samples.length / context.sampleRate,
+        ).filter(gap => gap > 1e-8);
+        assert.equal(gaps.length, trace.gaps.length, `${trace.name} introduced an extra underrun`);
+        gaps.forEach((gap, index) => assert.ok(Math.abs(gap - trace.gaps[index]) < 1e-8));
+        assert.ok(Math.abs(segments[0].start - origin - 0.25) < 1e-9);
+        assert.deepEqual(segments.flatMap(segment => [...segment.samples]), chunks.flatMap(chunk => [...chunk.samples]));
+        assert.deepEqual(rendered, chunks.map(chunk => chunk.seq));
+        const settled = rendered.slice();
+        context.bufferSources.forEach(source => source.end());
+        assert.deepEqual(rendered, settled);
+        assert.equal(adapter.businessCancelCount(), 0);
+      } finally {
+        await adapter.close();
+      }
+    });
+  }
+});
+
+test('recovery near its deadline never replays a prefix when source stop would stall', async t => {
+  const fake = fakeEnvironment();
+  const rendered = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: { onPlayoutState: event => { if (event.reason === 'render_completed') rendered.push(event.through_seq); } },
+  });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  const context = fake.contexts[0];
+  const origin = context.currentTime;
+  const stoppedAt = new Map();
+  const createSource = context.createBufferSource.bind(context);
+  let delayedStop = false;
+  context.createBufferSource = () => {
+    const source = createSource();
+    const stop = source.stop.bind(source);
+    source.stop = () => {
+      if (!delayedStop && source === context.bufferSources[1]) {
+        // The render thread continues while the main thread is stalled before
+        // it submits the first stop; this crosses the old 1.300 second start.
+        delayedStop = true;
+        context.currentTime += 0.03;
+      }
+      stoppedAt.set(source, context.currentTime);
+      stop();
+    };
+    return source;
+  };
+  const chunks = Array.from({ length: 34 }, (_, seq) => pcmChunk(firstResponse, seq, {
+    samples: Float32Array.from({ length: 960 }, (_, index) => (seq * 960 + index + 1) / (34 * 960)),
+  }));
+  try {
+    assert.equal(adapter.enqueuePlayout(chunks[0]), true);
+    context.currentTime = origin + 0.65;
+    context.bufferSources[0].end();
+    for (let seq = 1; seq <= 32; seq++) assert.equal(adapter.enqueuePlayout(chunks[seq]), true);
+    assert.ok(Math.abs(context.bufferSources[1].starts[0] - origin - 1.3) < 1e-9);
+    context.currentTime = origin + 1.275;
+    assert.equal(adapter.enqueuePlayout(chunks[33]), true);
+    context.currentTime = origin + 10;
+    const segments = recoveryRenderedSegments(context, stoppedAt);
+    const actual = segments.flatMap(segment => [...segment.samples]);
+    const expected = chunks.flatMap(chunk => [...chunk.samples]);
+    t.diagnostic(JSON.stringify({ supplied_samples: expected.length, scheduled_render_samples: actual.length }));
+    assert.equal(actual.length, expected.length, 'recovery repeated samples after a stop crossed the scheduled start');
+    assert.deepEqual(actual, expected);
+    context.bufferSources.filter(source => !stoppedAt.has(source)).forEach(source => source.end());
+    assert.deepEqual(rendered, chunks.map(chunk => chunk.seq));
+    context.bufferSources.forEach(source => source.end());
+    assert.deepEqual(rendered, chunks.map(chunk => chunk.seq));
+    assert.equal(adapter.businessCancelCount(), 0);
+  } finally {
+    await adapter.close();
+  }
+});
+
 function pcmChunk(response, seq, overrides = {}) {
   return {
     response,
