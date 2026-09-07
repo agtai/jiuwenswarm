@@ -78,6 +78,7 @@ _VALUES = _VALUES | frozenset({
     "argument_blank", "argument_has_nul",
     "canonical_receipt_bytes", "provider_output_bytes",
     "received_monotonic_ms", "decode_ms",
+    "socket_errno", "received_close_code", "sent_close_code",
 })
 WIRE_EVENTS = frozenset({
     "session.updated", "transcription_session.updated", "session.created",

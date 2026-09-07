@@ -333,6 +333,7 @@ def active_engine(
     pending_audio_capacity: int = 8,
     session_config: OpenAIRealtimeSessionConfig | None = None,
     max_output_tokens: int | str = "inf",
+    settle_silent_delivery: bool = True,
 ) -> tuple[OpenAIRealtimeNativeInteractionEngine, ScriptedSocket, CapturingFactory]:
     socket = ScriptedSocket((*negotiation(), *events))
     factory = CapturingFactory(socket)
@@ -344,6 +345,18 @@ def active_engine(
         pending_audio_capacity=pending_audio_capacity,
         max_output_tokens=max_output_tokens,
     )
+    if settle_silent_delivery:
+        next_event = engine.next_event
+        async def consume_event():
+            event = await next_event()
+            if event.provider_done is not None:
+                response = engine._responses[event.provider_done.provider_response_id]
+                if response.next_audio_sequence == 0:
+                    # This fixture models the accepting Runtime/Gateway consumer.
+                    # Race tests disable it and control terminal settlement.
+                    await engine.acknowledge_delivery(event.provider_done.response)
+            return event
+        engine.next_event = consume_event
     return engine, socket, factory
 
 
@@ -691,7 +704,7 @@ async def test_business_invalid_recovery_waits_real_playout_and_enforces_call_an
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["failed", "incomplete"])
 @pytest.mark.parametrize("task_busy", [False, True])
-async def test_work_after_unsuccessful_audio_uses_fresh_response_without_old_playout_ack(status, task_busy):
+async def test_work_after_unsuccessful_audio_waits_for_exact_finite_playout_ack(status, task_busy):
     async def refresh(): return {"context": business_context(), "work_events": [work_event()]}
     engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
         speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p1"),
@@ -707,6 +720,10 @@ async def test_work_after_unsuccessful_audio_uses_fresh_response_without_old_pla
         assert not (await engine.next_event()).provider_done.completed
         before = engine.snapshot().released_audio_count
         assert await engine.update_business_context(business_context(), [work_event()]) == ()
+        assert sum(item["type"] == "response.create" for item in socket.sent) == 1
+        await engine.acknowledge_delivery(response_ref(1))
+        assert sum(item["type"] == "response.create" for item in socket.sent) == 1
+        await engine.acknowledge_presentation(response_ref(1))
         if task_busy:
             assert sum(item["type"] == "response.create" for item in socket.sent) == 1
             busy[0] = False
@@ -717,7 +734,8 @@ async def test_work_after_unsuccessful_audio_uses_fresh_response_without_old_pla
         assert payload == {"provider_response_id": "p2", "turn_id": commit.turn_commit.turn_id,
                            "work_event_id": work_event()["event_id"]}
         assert engine.snapshot().released_audio_count == before  # no replay of failed output
-        assert not engine._responses["p1"].presentation_acknowledged
+        assert engine._responses["p1"].presentation_acknowledged
+        assert not engine._responses["p1"].presentable
         assert not any(item["type"] == "conversation.item.truncate" for item in socket.sent)
         await engine.admit_response("p2", response_ref(2))
         socket.push(output_audio_delta("new-audio", "p2", "new-item", 0))
@@ -4038,7 +4056,7 @@ async def test_prepared_delegate_waits_for_exact_audio_ack_and_can_be_stopped_af
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["incomplete", "failed"])
-async def test_unsuccessful_audio_completion_does_not_wait_for_impossible_ack(status):
+async def test_unsuccessful_audio_completion_holds_owner_until_explicit_stop(status):
     engine, socket, _ = active_engine(
         speech_started("event-3", "user-item-1", 0), speech_stopped("event-4", "user-item-1", 20),
         input_committed("event-5", "user-item-1"), response_created("event-6", "provider-response-1"),
@@ -4060,6 +4078,9 @@ async def test_unsuccessful_audio_completion_does_not_wait_for_impossible_ack(st
         # REVISE from the prior stopped interval can precede LISTEN.
         while True:
             event = await engine.next_event()
+            if event.action and event.action.operation == "STOP":
+                assert sum(item["type"] == "response.create" for item in socket.sent) == 1
+                await engine.stop_foreground(response_ref(1))
             if event.action and event.action.operation == "LISTEN":
                 break
         await engine.next_event()

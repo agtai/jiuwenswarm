@@ -235,6 +235,7 @@ class _ProviderResponse:
     cancelled: bool = False
     presentable: bool = False
     presentation_acknowledged: bool = False
+    delivery_settled: bool = False
     work_event_id: str | None = None
     business_calls: list[str] = field(default_factory=list)
     business_successor_requested: bool = False
@@ -1611,6 +1612,10 @@ class OpenAIRealtimeNativeInteractionEngine:
             if current is not None and not current.done:
                 self._profile_business_wait("response_generation", response=current)
                 return
+            if (current is not None and not current.cancelled and current.runtime_ref is not None
+                    and current.next_audio_sequence == 0 and not current.delivery_settled):
+                self._profile_business_wait("generation_terminal_delivery", response=current)
+                return
             self._queue_business_successors()
             draining = self._response_draining(current)
             if draining and (not self._continuation_preparation or current.runtime_ref is None
@@ -1752,9 +1757,9 @@ class OpenAIRealtimeNativeInteractionEngine:
 
     @staticmethod
     def _response_draining(response: _ProviderResponse | None) -> bool:
-        return bool(response is not None and response.done and response.presentable
+        return bool(response is not None and response.done
                     and not response.cancelled and not response.presentation_acknowledged
-                    and any(item.received_samples > 0 for item in response.audio_items.values()))
+                    and response.next_audio_sequence > 0)
 
     def _work_ready(self, *, preparing: bool = False) -> bool:
         current = self._current_response()
@@ -1767,8 +1772,8 @@ class OpenAIRealtimeNativeInteractionEngine:
             and not self._work_stop_pending
             and asyncio.get_running_loop().time() >= self._work_retry_after
             and (preparing or self._business_presentation_busy is None or not self._business_presentation_busy())
-            and (current is None or (current.done and (not current.presentable or current.cancelled or current.presentation_acknowledged
-                 or preparing or not any(item.received_samples for item in current.audio_items.values()))))
+            and (current is None or (current.done and (current.cancelled or current.presentation_acknowledged
+                 or preparing or (current.next_audio_sequence == 0 and current.delivery_settled))))
             and not any(call not in self._delegate_results and call not in self._retired_delegate_calls for call in self._delegates)
             and any(key not in self._work_seen for key in self._work_events)
         )
@@ -2225,7 +2230,13 @@ class OpenAIRealtimeNativeInteractionEngine:
         return True
 
     async def acknowledge_presentation(self, ref: ResponseRef) -> bool:
-        """Retire one exact completed response after authoritative audio playout."""
+        """Retire exact rendered media, independently of generation success.
+
+        The Gateway authenticates the complete finite media stream and its real
+        rendered cursor. A non-success generation can retire its played prefix
+        only after Gateway settled that terminal; it remains non-presentable for
+        complete response/history purposes.
+        """
 
         self._require_operational()
         parsed = _response_ref(ref, self._binding)
@@ -2233,19 +2244,38 @@ class OpenAIRealtimeNativeInteractionEngine:
         if (
             not response.done
             or response.cancelled
-            or not response.presentable
-            or not any(
-                item.received_samples > 0 for item in response.audio_items.values()
-            )
+            or (not response.presentable and not response.delivery_settled)
+            or response.next_audio_sequence == 0
         ):
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_PRESENTATION_ACK_INVALID",
-                "presentation acknowledgement requires completed presentable audio",
+                "presentation acknowledgement requires terminal delivered audio",
             )
         if response.presentation_acknowledged:
             return False
         response.presentation_acknowledged = True
-        self._profile_business("presentation_acknowledged", response=response)
+        self._profile_business("presentation_acknowledged", response=response,
+                               status="completed" if response.presentable else "partial")
+        await self._request_pending_provider_response()
+        return True
+
+    async def acknowledge_delivery(self, ref: ResponseRef) -> bool:
+        """Retire exact Gateway delivery without claiming any rendered playback.
+
+        Every audio response still waits for its actual presentation ACK or STOP.
+        Processing the generation terminal and sealing delivery never retires
+        queued Browser PCM, even when Provider finished much earlier.
+        """
+        self._require_operational()
+        response = self._find_response(_response_ref(ref, self._binding))
+        if not response.done:
+            raise OpenAIRealtimeNativeInteractionError(
+                "NATIVE_DELIVERY_SETTLEMENT_INVALID", "Delivery settlement requires a generation terminal"
+            )
+        if response.delivery_settled:
+            return False
+        response.delivery_settled = True
+        self._profile_business("delivery_settled", response=response)
         await self._request_pending_provider_response()
         return True
 
@@ -2519,8 +2549,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                     and call_id not in self._delegate_successors
                     for call_id, wait in self._delegates.items()
                 )
-                or (current.presentable and not current.presentation_acknowledged
-                    and any(item.received_samples > 0 for item in current.audio_items.values()))
+                or self._response_draining(current)
             )
         ):
             operations.insert(0,

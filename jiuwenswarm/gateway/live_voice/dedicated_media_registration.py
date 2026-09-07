@@ -895,6 +895,7 @@ class _MediaAuthority:
     downlink_unit_seq: int | None = None
     native_final_unit_id: str | None = None
     native_final_unit_seq: int | None = None
+    native_generation_completed: bool | None = None
     downlink_content_sha256: str | None = field(default=None, repr=False)
     downlink_overlap_record_id: str | None = None
     downlink_overlap_observed: bool = False
@@ -2187,17 +2188,12 @@ class DedicatedMediaProductRegistry:
                 event.action is not None
                 and event.action.operation in _NATIVE_ORDERED_CONTROL_OPERATIONS
             ):
-                try:
-                    session.delivery_queue.put_nowait(event)
-                except asyncio.QueueFull:
-                    raise MediaTransportViolation(
-                        "MEDIA_NATIVE_PROVIDER_EVENT_BACKPRESSURE",
-                        "Native Provider delivery exceeded its bounded queue",
-                    ) from None
-                # Do not read/map later Provider audio until the Runtime has
-                # admitted this ordered turn boundary. Prior audio keeps its
-                # playout order; STOP alone may bypass it.
-                await session.delivery_queue.join()
+                # Engine generation/delivery/playback gates own successor
+                # eligibility. Admit this ordered control before reading its
+                # output, without waiting behind unrelated queued PCM. In
+                # particular a new SPEAK must not prevent the sole reader from
+                # observing a later Provider STOP while old media drains.
+                await self._handle_native_event(session, event)
                 continue
             if event.audio is not None or event.provider_done is not None:
                 fenced_response = (
@@ -2475,6 +2471,12 @@ class DedicatedMediaProductRegistry:
             await self._allocate_native_downlink(session, event.audio, result)
         elif event.provider_done is not None:
             await self._seal_native_downlink(session, event.provider_done, result)
+            if result.get("accepted") is False:
+                await session.engine.fence_response(event.provider_done.response)
+                return
+            settle_delivery = getattr(session.engine, "acknowledge_delivery", None)
+            if callable(settle_delivery):
+                await settle_delivery(event.provider_done.response)
             retained = session.generated_text.get(event.provider_done.response)
             if retained is not None and retained["state"] == "generating":
                 retained["state"] = "generated" if event.provider_done.completed else "interrupted"
@@ -3328,9 +3330,13 @@ class DedicatedMediaProductRegistry:
                 "MEDIA_NATIVE_AUDIO_FENCED",
                 "Native response completion lost its downlink source",
             )
-        if result.get("accepted") is False or not done.completed:
+        if result.get("accepted") is False:
             await source.aclose()
             return
+        # EOF describes the finite received PCM, not successful generation.
+        # Incomplete/failed output must drain its valid frames and wait for the
+        # exact Browser rendered ACK; closing here would discard queued tails.
+        record.native_generation_completed = done.completed
         try:
             await source.seal(done.response)
         except MediaTransportViolation as error:
@@ -7495,6 +7501,11 @@ class DedicatedMediaProductRegistry:
                 )
             projected_receipt = dict(receipt)
             if result.get("history_eligible") is True:
+                if downlink.native_generation_completed is not True:
+                    raise MediaTransportViolation(
+                        "MEDIA_NATIVE_PRESENTATION_ACK_INVALID",
+                        "A partial generation cannot publish complete heard history",
+                    )
                 history = result.get("history")
                 if not isinstance(history, Mapping) or set(history) != {
                     "response",

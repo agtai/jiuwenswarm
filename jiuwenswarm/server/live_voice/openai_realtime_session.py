@@ -35,6 +35,32 @@ _TIMED_PROVIDER_EVENTS = frozenset({
     "input_audio_buffer.committed", "response.function_call_arguments.done",
 })
 
+_TRANSPORT_EXCEPTION_NAMES = frozenset({
+    "ConnectionClosed", "ConnectionClosedError", "ConnectionClosedOK",
+    "ConnectionResetError", "ConnectionAbortedError", "BrokenPipeError",
+    "ConnectionError", "OSError", "TimeoutError", "RuntimeError", "EOFError",
+})
+
+
+def _transport_failure_fields(error: BaseException) -> dict[str, str | int]:
+    """Retain only closed classification and numeric public socket facts."""
+    name = type(error).__name__
+    fields: dict[str, str | int] = {
+        "error_type": name if name in _TRANSPORT_EXCEPTION_NAMES else "other",
+    }
+    try:
+        errno = getattr(error, "errno", None)
+        if type(errno) is int and 0 <= errno <= 65_535:
+            fields["socket_errno"] = errno
+        for attribute, label in (("rcvd", "received_close_code"), ("sent", "sent_close_code")):
+            code = getattr(getattr(error, attribute, None), "code", None)
+            if type(code) is int and 1_000 <= code <= 4_999:
+                fields[label] = code
+    except Exception:
+        # Diagnostics cannot change transport failure or expose arbitrary data.
+        pass
+    return fields
+
 
 MAX_REALTIME_WIRE_MESSAGE_BYTES = 1_048_576
 # The close frame is sent before this WebSocket-library timeout starts.  Keep
@@ -733,13 +759,19 @@ class OpenAIRealtimeSession:
             except (KeyboardInterrupt, SystemExit, GeneratorExit):
                 raise
             except (TimeoutError, asyncio.TimeoutError):
+                self._observe_transport("socket_send_failed", parsed_type, event_id,
+                    error_type="TimeoutError",
+                    socket_send_ms=(time.perf_counter() - socket_started) * 1000)
                 error = OpenAIRealtimeSessionError(
                     "REALTIME_PROVIDER_TIMEOUT",
                     "Realtime Provider send timed out",
                 )
                 await self._record_primary(error.reason)
                 raise error from None
-            except Exception:
+            except Exception as exc:
+                self._observe_transport("socket_send_failed", parsed_type, event_id,
+                    socket_send_ms=(time.perf_counter() - socket_started) * 1000,
+                    **_transport_failure_fields(exc))
                 error = OpenAIRealtimeSessionError(
                     "REALTIME_TRANSPORT_SEND_FAILED",
                     "Realtime Provider send failed",
@@ -771,13 +803,17 @@ class OpenAIRealtimeSession:
                 except (TimeoutError, asyncio.TimeoutError):
                     if not allow_opening and await self._can_wait_for_provider(socket):
                         continue
+                    self._observe_transport("socket_receive_failed", "receive", "",
+                                            error_type="TimeoutError")
                     error = OpenAIRealtimeSessionError(
                         "REALTIME_PROVIDER_TIMEOUT",
                         "Realtime Provider receive timed out",
                     )
                     await self._record_primary(error.reason)
                     raise error from None
-                except Exception:
+                except Exception as exc:
+                    self._observe_transport("socket_receive_failed", "receive", "",
+                                            **_transport_failure_fields(exc))
                     error = OpenAIRealtimeSessionError(
                         "REALTIME_TRANSPORT_RECEIVE_FAILED",
                         "Realtime Provider receive failed",

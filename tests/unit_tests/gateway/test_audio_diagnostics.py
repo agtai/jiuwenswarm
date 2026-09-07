@@ -10,6 +10,7 @@ from jiuwenswarm.common import live_voice_audio_diagnostics as diagnostics
 @pytest.mark.asyncio
 async def test_audio_diagnostics_allowlist_scalars_without_payload_or_secrets(monkeypatch):
     lines = []
+    await asyncio.to_thread(diagnostics._QUEUE.join)
     monkeypatch.setattr(diagnostics._LOGGER, "info", lambda template, *args: lines.append(template % args))
     diagnostics.record_audio_diagnostic("capture_progress", session_id="session-a", capture_id="capture-a",
         generation=3, queue_frames=5, transcript="PRIVATE_TEXT", pcm=b"PRIVATE_AUDIO",

@@ -725,6 +725,7 @@ class _FakeNativeEngine:
         self.admissions: list[tuple[str, ResponseRef]] = []
         self.playback_actions: list[tuple[str, object]] = []
         self.presentation_acknowledgements: list[ResponseRef] = []
+        self.delivery_acknowledgements: list[ResponseRef] = []
         self.delegate_results: list[tuple[str, ResponseRef, str]] = []
         self.delegate_result_sent = asyncio.Event()
 
@@ -770,12 +771,65 @@ class _FakeNativeEngine:
         self.presentation_acknowledgements.append(response)
         return True
 
+    async def acknowledge_delivery(self, response: ResponseRef) -> bool:
+        self.delivery_acknowledgements.append(response)
+        return True
+
     async def send_delegate_result(
         self, call_id: str, response: ResponseRef, output: str
     ) -> tuple[str, str]:
         self.delegate_results.append((call_id, response, output))
         self.delegate_result_sent.set()
         return ("provider-output-event-1", "provider-response-create-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("accepted", [True, False])
+async def test_silent_terminal_ack_waits_for_runtime_while_provider_control_remains_live(accepted):
+    activation = _native_activation()
+    client, engine = _FakeNativeRuntimeClient(activation), _FakeNativeEngine()
+    entered, release = asyncio.Event(), asyncio.Event()
+    propose = client.propose
+    async def held_propose(**kwargs):
+        if kwargs["event"].provider_done is not None:
+            entered.set()
+            await release.wait()
+            return {"kind": "done", "status": "observed", "accepted": accepted}
+        return await propose(**kwargs)
+    client.propose = held_propose
+    registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine)
+    activated = _activate(registry, params=_params(sample_rate_hz=24_000),
+                          request_origin=ORIGIN, connection_id="connection-1")
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    await registry.begin_native_interaction(uplink)
+    response = ResponseRef("interaction-1", "silent-response", 1)
+    try:
+        await engine.events.put(NativeEngineEvent(provider_done=NativeProviderDone(
+            provider_event_id="silent-done", provider_response_id="provider-silent",
+            response=response, completed=True, transcript=None, transcript_event_id=None)))
+        await asyncio.wait_for(entered.wait(), 1)
+        await engine.events.put(NativeEngineEvent(action=InteractionAction(
+            action_id="listen-during-terminal", operation="LISTEN",
+            interaction_id=activation.binding.interaction_id, scope=activation.binding.scope,
+            payload=(("provider_item_id", "input-next"), ("provider_start_ms", "140")))))
+        async def control_observed():
+            while not any(event.action is not None for event in client.proposals):
+                await asyncio.sleep(0)
+        await asyncio.wait_for(control_observed(), 1)
+        assert engine.delivery_acknowledgements == []
+        assert engine.presentation_acknowledgements == []
+        release.set()
+        async def settled():
+            while not (engine.delivery_acknowledgements or engine.playback_actions):
+                await asyncio.sleep(0)
+        await asyncio.wait_for(settled(), 1)
+        assert engine.delivery_acknowledgements == ([response] if accepted else [])
+        assert engine.playback_actions == ([] if accepted else [("provider_fence", response)])
+        assert engine.presentation_acknowledgements == [] and engine.delegate_results == []
+    finally:
+        release.set()
+        await registry.close_native_interaction(uplink)
 
 
 class _RetainedCloseNativeEngine(_FakeNativeEngine):
@@ -2212,7 +2266,7 @@ async def test_native_delivery_splits_audio_batches_at_response_and_item_boundar
 
 
 @pytest.mark.asyncio
-async def test_native_unconsumed_downlink_saturation_closes_before_later_controls() -> (
+async def test_native_unconsumed_downlink_saturation_keeps_control_live_but_fences_completion() -> (
     None
 ):
     activation_handle = _native_activation()
@@ -2282,13 +2336,13 @@ async def test_native_unconsumed_downlink_saturation_closes_before_later_control
             await asyncio.sleep(0)
 
     await asyncio.wait_for(wait_until_cleanup_is_visible(), timeout=1.0)
-    assert len(client.proposals) == 9
-    assert all(proposal.audio is not None for proposal in client.proposals)
-    # The lifecycle barrier moved LISTEN behind the prior audio, then stopped
-    # the Provider reader. Saturation admits neither that control nor the later
-    # completion; the unread fake completion remains outside product effects.
-    assert engine.events.qsize() == 1
-    assert engine.events._queue[0].provider_done is not None
+    assert len(client.proposals) == 10
+    assert sum(proposal.audio is not None for proposal in client.proposals) == 9
+    assert [proposal.action.operation for proposal in client.proposals if proposal.action] == ["LISTEN"]
+    # Control stays responsive while the source saturates. Queued media terminal
+    # still has zero Runtime effects after delivery fails and cleanup fences it.
+    assert all(proposal.provider_done is None for proposal in client.proposals)
+    assert engine.events.qsize() == 0
     assert client.close_calls == 1
     assert registry._records == {uplink.record_id: uplink}
     assert uplink.route_completed is True
@@ -3299,7 +3353,7 @@ async def test_native_audio_fenced_while_runtime_proposal_is_in_flight_keeps_ses
 
 
 @pytest.mark.asyncio
-async def test_native_turn_control_barrier_stops_provider_reader_behind_playout_audio() -> (
+async def test_native_turn_controls_keep_provider_reader_live_during_blocked_audio() -> (
     None
 ):
     activation_handle = _native_activation()
@@ -3403,11 +3457,9 @@ async def test_native_turn_control_barrier_stops_provider_reader_behind_playout_
         await engine.events.put(event)
 
     try:
-        await asyncio.sleep(0.05)
-        assert engine.response_admitted.is_set() is False
-        assert engine.events.qsize() == 3
-        client.release_blocked_audio.set()
         await asyncio.wait_for(engine.response_admitted.wait(), timeout=1.0)
+        assert not client.release_blocked_audio.is_set()
+        assert engine.events.qsize() == 0
         assert [
             proposal.action.operation
             for proposal in client.proposals
@@ -3542,7 +3594,8 @@ async def test_native_provider_stop_overtakes_blocked_audio_admission() -> None:
 
 
 @pytest.mark.asyncio
-async def test_native_completed_downlink_reuses_existing_playout_receipt_ack() -> None:
+@pytest.mark.parametrize("generation_completed", [True, False])
+async def test_native_terminal_downlink_reuses_exact_rendered_receipt_ack(generation_completed) -> None:
     activation_handle = _native_activation()
     client = _FakeNativeRuntimeClient(activation_handle)
     engine = _FakeNativeEngine()
@@ -3597,13 +3650,15 @@ async def test_native_completed_downlink_reuses_existing_playout_receipt_ack() -
                 provider_event_id="provider-done-presentation-1",
                 provider_response_id="provider-response-1",
                 response=response,
-                completed=True,
+                completed=generation_completed,
                 transcript=None,
                 transcript_event_id=None,
             )
         )
     )
     assert len([frame async for frame in source]) == 1
+    assert downlink.native_generation_completed is generation_completed
+    assert engine.presentation_acknowledgements == []
     registry.mark_downlink_started(downlink)
     assert registry.complete_downlink(
         downlink,

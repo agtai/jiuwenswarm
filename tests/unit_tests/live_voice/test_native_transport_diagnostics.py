@@ -1,10 +1,12 @@
 """P0 timing is passive, bounded and tied to the producing activation."""
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from jiuwenswarm.common.live_voice_profiling import _CURRENT
+from jiuwenswarm.common import live_voice_audio_diagnostics as diagnostics
 from jiuwenswarm.server.live_voice import openai_realtime_native_engine as native
 from jiuwenswarm.server.live_voice import openai_realtime_session as transport
 from test_openai_realtime_native_engine import (
@@ -77,8 +79,55 @@ async def test_transport_without_origin_stays_silent_and_failed_send_never_claim
     session._diagnostic_origin = {"session_id": "origin"}
     with pytest.raises(transport.OpenAIRealtimeSessionError, match="send failed"):
         await session.send_event("response.create", {})
-    assert [r["milestone"] for r in records] == ["socket_send_started"]
+    assert [r["milestone"] for r in records] == ["socket_send_started", "socket_send_failed"]
+    assert records[-1]["error_type"] == "RuntimeError"
     await session.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_audio_send_retains_close_codes_without_error_text(monkeypatch):
+    records = []
+    monkeypatch.setattr(transport, "profile_snapshot_event", lambda *args, **fields: records.append(fields))
+    socket = ScriptedRealtimeSocket(negotiated_events())
+    session = transport.OpenAIRealtimeSession(realtime_config(), socket_factory=CapturingFactory(socket),
+        diagnostic_origin={"session_id": "origin"})
+    await session.open(session_update=session_update())
+    class ConnectionClosedError(Exception):
+        rcvd = SimpleNamespace(code=1001, reason="PRIVATE_CLOSE_REASON")
+        sent = SimpleNamespace(code=1011, reason="PRIVATE_SENT_REASON")
+    async def fail_send(_wire):
+        raise ConnectionClosedError("PRIVATE_SOCKET_URL_AND_CREDENTIALS")
+    socket.send = fail_send
+    with pytest.raises(transport.OpenAIRealtimeSessionError) as failure:
+        await session.send_event("input_audio_buffer.append", {"audio": "PRIVATE_PCM"})
+    assert failure.value.reason == "REALTIME_TRANSPORT_SEND_FAILED"
+    failed = records[-1]
+    assert failed["status"] == "input_audio_buffer.append"
+    assert failed["milestone"] == "socket_send_failed"
+    assert failed["error_type"] == "ConnectionClosedError"
+    assert failed["received_close_code"] == 1001 and failed["sent_close_code"] == 1011
+    assert "PRIVATE" not in repr(records)
+    await session.close()
+
+
+@pytest.mark.asyncio
+async def test_real_diagnostic_sink_keeps_closed_transport_facts_and_no_socket_text(monkeypatch):
+    records = []
+    await asyncio.to_thread(diagnostics._QUEUE.join)
+    monkeypatch.setattr(diagnostics._LOGGER, "info", lambda template, *args: records.append(template % args))
+    class ConnectionClosedError(OSError):
+        rcvd = SimpleNamespace(code=1001, reason="PRIVATE_CLOSE_REASON")
+        sent = SimpleNamespace(code=1011, reason="PRIVATE_SENT_REASON")
+    failure = ConnectionClosedError(10054, "PRIVATE_SOCKET_URL")
+    session = transport.OpenAIRealtimeSession(realtime_config(), diagnostic_origin={"session_id": "sink-origin"})
+    session._observe_transport("socket_send_failed", "input_audio_buffer.append", "client-event-1",
+                              **transport._transport_failure_fields(failure))
+    await asyncio.to_thread(diagnostics._QUEUE.join)
+    payload = json.loads(records[-1].split(" ", 1)[1])["fields"]
+    assert payload["error_type"] == "ConnectionClosedError"
+    assert payload["received_close_code"] == 1001 and payload["sent_close_code"] == 1011
+    assert payload["socket_errno"] == 10054 and payload["session_id"] == "sink-origin"
+    assert "PRIVATE" not in repr(records)
 
 
 @pytest.mark.asyncio

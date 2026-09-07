@@ -14,7 +14,8 @@ from tests.unit_tests.live_voice.test_openai_realtime_native_engine import (
 )
 
 
-async def preparing_engine(*, confirm=True, prepare=True, event_queue_capacity=16, session_config=None):
+async def preparing_engine(*, confirm=True, prepare=True, event_queue_capacity=16, session_config=None,
+                           predecessor_status="completed"):
     fresh = {"context": business_context(), "work_events": []}
     async def refresh():
         return fresh
@@ -30,7 +31,7 @@ async def preparing_engine(*, confirm=True, prepare=True, event_queue_capacity=1
     await engine.admit_response("p1", response_ref(1))
     socket.push(output_audio_delta("a1", "p1", "audio1", 0))
     assert (await engine.next_event()).audio.response == response_ref(1)
-    socket.push(response_done("d1", "p1"))
+    socket.push(response_done("d1", "p1", status=predecessor_status))
     assert (await engine.next_event()).provider_done.response == response_ref(1)
     if not prepare:
         return engine, socket, fresh
@@ -41,6 +42,58 @@ async def preparing_engine(*, confirm=True, prepare=True, event_queue_capacity=1
         socket.push(response_created("r2", "p2"))
         assert await engine.next_event() == NativeEngineEvent()
     return engine, socket, fresh
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["completed", "incomplete", "failed", "cancelled"])
+async def test_terminal_pcm_keeps_owner_after_transport_completion_until_actual_rendered_ack(terminal):
+    engine, socket, _ = await preparing_engine(predecessor_status=terminal)
+    try:
+        predecessor = engine._responses["p1"]
+        assert engine._response_draining(predecessor)
+        assert engine._responses["p2"].runtime_ref is None
+        await feed(engine, socket, output_audio_delta("a2", "p2", "audio2", 0))
+        await complete_audio(engine, socket)
+        # A drained server queue or transport ACK cannot release browser PCM.
+        assert await engine.acknowledge_delivery(response_ref(1))
+        assert not await engine.acknowledge_delivery(response_ref(1))
+        await asyncio.sleep(0)
+        assert not predecessor.presentation_acknowledged
+        assert engine._response_draining(predecessor)
+        assert engine._current_response_id == "p1"
+        assert engine._responses["p2"].runtime_ref is None
+        assert engine.snapshot().released_audio_count == 1
+        with pytest.raises(OpenAIRealtimeNativeInteractionError):
+            await engine.acknowledge_presentation(response_ref(99))
+        await engine.acknowledge_presentation(response_ref(1))
+        assert predecessor.presentable is (terminal == "completed")
+        assert action_payload(await next_output(engine))["provider_response_id"] == "p2"
+        await engine.admit_response("p2", response_ref(2))
+        assert (await next_output(engine)).audio.response == response_ref(2)
+        assert not engine._delegates
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["incomplete", "failed", "cancelled"])
+async def test_terminal_partial_pcm_remains_stoppable_and_cannot_be_acknowledged_early(terminal):
+    engine, socket, _ = await preparing_engine(prepare=False, predecessor_status=terminal)
+    try:
+        with pytest.raises(OpenAIRealtimeNativeInteractionError):
+            await engine.acknowledge_presentation(response_ref(1))
+        with pytest.raises(OpenAIRealtimeNativeInteractionError):
+            await engine.acknowledge_delivery(response_ref(99))
+        stop = await feed(engine, socket, speech_started("s2", "u2", 700))
+        assert stop.action.operation == "STOP"
+        assert action_payload(stop)["provider_response_id"] == "p1"
+        await engine.stop_foreground(response_ref(1))
+        with pytest.raises(OpenAIRealtimeNativeInteractionError):
+            await engine.acknowledge_presentation(response_ref(1))
+        assert len(requests(socket)) == 1
+        assert not engine._delegates
+    finally:
+        await engine.close()
 
 
 def requests(socket):
@@ -86,6 +139,42 @@ async def next_output(engine):
         if event != NativeEngineEvent():
             return event
     raise AssertionError("No bounded output became available")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("speaker_interrupts", [False, True])
+@pytest.mark.parametrize("unemitted_partial", [False, True])
+async def test_silent_predecessor_waits_for_runtime_terminal_without_stalling_reader(speaker_interrupts, unemitted_partial):
+    engine, socket, _ = active_engine(speech_started("s1", "u1", 0),
+        speech_stopped("e1", "u1", 500), input_committed("c1", "u1"), response_created("r1", "p1"),
+        settle_silent_delivery=False)
+    async def refresh():
+        return {"context": business_context(), "work_events": [work_event()]}
+    engine.configure_business_context(business_context(), refresh=refresh, continuation_preparation=True)
+    await engine.start()
+    try:
+        _, _, commit = await accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        await engine.next_event()
+        await engine.admit_response("p1", response_ref(1))
+        if unemitted_partial:
+            event = await feed(engine, socket, output_audio_delta("partial", "p1", "audio1", 0, pcm16=b"\x01\x00" * 100))
+            assert event.audio is None
+        done = await feed(engine, socket, response_done("done", "p1", status="failed" if unemitted_partial else "completed"))
+        assert done.provider_done is not None
+        assert not engine._response_draining(engine._responses["p1"])
+        # Gateway/Runtime terminal RPC is held here, independent of media drain.
+        await engine.update_business_context(business_context(), [work_event()])
+        assert len(requests(socket)) == 1
+        assert engine.snapshot().released_audio_count == 0
+        if speaker_interrupts:
+            listen = await feed(engine, socket, speech_started("s2", "u2", 700))
+            assert listen.action.operation == "LISTEN"
+        await engine.acknowledge_delivery(response_ref(1))
+        assert len(requests(socket)) == (1 if speaker_interrupts else 2)
+        assert not engine._delegates and engine.snapshot().released_audio_count == 0
+    finally:
+        await engine.close()
 
 
 @pytest.mark.asyncio
