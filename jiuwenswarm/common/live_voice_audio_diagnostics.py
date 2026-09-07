@@ -53,7 +53,7 @@ def _encode_record(value: dict) -> str:
 _IDS = frozenset({"session_id", "media_session_id", "capture_id", "lease_id", "interaction_id", "correlation_id", "response_id", "operation_id", "request_id"})
 _IDS = _IDS | frozenset({"span_id", "model_call_id", "parent_span_id", "turn_id", "commit_id", "round_id", "task_id", "attempt_id", "command_id", "outbox_id", "tool_call_id", "unit_id", "activation_id", "project_id", "execution_session_id"})
 _IDS = _IDS | frozenset({"work_id", "input_id", "context_id", "provider_call_id", "turn_commit_id", "source_event_id", "task_event_id", "model_config_version"})
-_IDS = _IDS | frozenset({"provider_response_id"})
+_IDS = _IDS | frozenset({"provider_response_id", "provider_item_id"})
 _TOKENS = frozenset({"stage", "rpc_method", "error_type", "error_location", "error_code", "error_reason", "result_state", "milestone", "tool_name", "status", "reason", "reason_id"})
 _VALUES = frozenset({"generation", "frame_count", "frames_sent", "frames_acked", "queue_frames", "received_samples", "sent_sample_end", "send_peak_ms", "vad_silence_ms", "provider_ms", "provider_start_ms", "provider_end_ms", "speech_started", "input_fenced", "elapsed_ms", "preopen_frames"})
 _VALUES = _VALUES | frozenset({
@@ -77,6 +77,7 @@ _VALUES = _VALUES | frozenset({
     "argument_present", "argument_chars", "argument_utf8_bytes", "argument_utf8_valid",
     "argument_blank", "argument_has_nul",
     "canonical_receipt_bytes", "provider_output_bytes",
+    "received_monotonic_ms", "decode_ms",
 })
 WIRE_EVENTS = frozenset({
     "session.updated", "transcription_session.updated", "session.created",

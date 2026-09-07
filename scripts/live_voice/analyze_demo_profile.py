@@ -232,6 +232,17 @@ def build_report(records, warnings=(), retention=()):
             phase = fields.get("http_phase", "unknown")
             boundary(("http", row["clock_id"], fields.get("operation_id") or fields["span_id"], phase),
                      "http." + phase, row, fields.get("outcome") == "started", "phase_ms")
+        origin = (row["clock_id"], fields.get("session_id"), fields.get("activation_id"))
+        if row["event"] == "native_transport_timeline" and all(origin) and fields.get("source_event_id"):
+            if fields.get("milestone") in {"socket_send_started", "socket_send_completed"}:
+                boundary(("native_send", *origin, fields["source_event_id"]),
+                         "native.transport." + fields.get("status", "unknown"), row,
+                         fields["milestone"] == "socket_send_started", "socket_send_ms")
+        if row["event"] == "native_business_timeline" and all(origin):
+            argument_key = ("native_arguments", *origin, fields.get("provider_response_id"), fields.get("provider_item_id"))
+            if all(argument_key) and fields.get("milestone") in {"arguments_first_delta", "arguments_completed"}:
+                boundary(argument_key, "native.arguments_generation", row,
+                         fields["milestone"] == "arguments_first_delta")
         if (fields.get("outcome") in {"failed", "rejected", "timeout", "cancelled", "fallback"}
             or fields.get("status") in {"failed", "error", "rejected", "timeout", "cancelled", "fallback"}
             or fields.get("milestone") in {"fallback", "failed", "cancelled", "timeout", "chat.error"}) or any(
@@ -242,7 +253,9 @@ def build_report(records, warnings=(), retention=()):
     for key, row in boundaries.items():
         fields = row["fields"]
         stage = {"tool": "tool." + fields.get("tool_name", "unknown"),
-                 "model": "model.stream", "http": "http." + fields.get("http_phase", "unknown")}[key[0]]
+                 "model": "model.stream", "http": "http." + fields.get("http_phase", "unknown"),
+                 "native_send": "native.transport." + fields.get("status", "unknown"),
+                 "native_arguments": "native.arguments_generation"}[key[0]]
         spans.append({"stage": stage, "start": row, "fields": fields, "duration_ms": None, "state": "open_or_truncated"})
     spans.sort(key=lambda span: (span["start"]["wall_ms"], span["start"]["monotonic_ms"]))
     grouped = defaultdict(list)
@@ -263,6 +276,8 @@ def build_report(records, warnings=(), retention=()):
         "Notification / ACK": ("notification.", "rpc.notification", "rpc.presentation"),
         "Interruption / recovery": ("barge_in", "rpc.barge", "rpc.interrupt", "p1_stop"),
         "Browser RPC": ("browser.rpc",),
+        "Native transport / endpoint": ("native_transport_", "endpoint_observed"),
+        "Native business / waits": ("native_business_", "native_context_", "native_work_"),
     }
     coverage = {}
     for name, prefixes in coverage_rules.items():

@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-07 (Realtime optimization first batch has scoped verification; physical acceptance remains open).
+> Updated: 2026-09-07 (Full Realtime optimization active; physical acceptance remains open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -24,19 +24,20 @@ history, not acceptance of this candidate.
 
 ## Current execution packet
 
-### Realtime optimization first batch
+### Realtime optimization: full implementation and unified acceptance
 
-The user authorized isolated development and Main-owned parallel acceptance and
-local w3 integration in the [Realtime optimization packet](reviews/REALTIME_OPTIMIZATION_20260907.md).
-Its first batch owns passive Native wait/argument diagnostics, descriptions that
-match existing argument validation, and equivalent Provider receipt encoding.
-Shared scheduling, schema, authority and model selection retain their current
-contracts. Implementation, scoped automation and independent module review pass;
-canonical receipt/digest/replay and actual playback ACK remain unchanged. Original
-rehearsal files are absent locally and there is no verified current Native runtime.
-The next optimization trigger is evidence synchronization and controlled Native
-startup for a fresh comparison. Full P0/P1/P2 scope, measured latency and physical
-acceptance remain unproved. The Native boundary below supplies the baseline.
+The user authorized all P0–P9 optimization points, one local commit per point and
+unified acceptance in the [full execution packet](reviews/REALTIME_OPTIMIZATION_FULL_20260907.md).
+Main owns parallel work, shared semantics, review and local integration. The
+[first bounded batch](reviews/REALTIME_OPTIMIZATION_20260907.md) retains scoped
+automation/review credit for passive diagnostics, argument descriptions and
+equivalent receipt encoding. P0 transport/argument/endpoint observations and
+offline identity-safe timing now have scoped automation and independent review.
+The remaining implementation continues independently
+of evidence synchronization. Original rehearsal files are absent locally; full
+optimization, measured latency and physical acceptance remain unproved. The
+packet defines per-point ownership, risk and required evidence; the Native
+boundary below supplies the baseline.
 
 ### Native conversational execution
 

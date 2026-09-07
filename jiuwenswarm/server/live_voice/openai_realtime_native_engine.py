@@ -226,6 +226,7 @@ class _ProviderResponse:
     work_event_id: str | None = None
     business_calls: list[str] = field(default_factory=list)
     business_successor_requested: bool = False
+    first_argument_items: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True, slots=True)
@@ -740,7 +741,8 @@ class OpenAIRealtimeNativeInteractionEngine:
             if type(value) is not int or not 0 < value <= _MAX_ENGINE_CAPACITY:
                 raise ValueError(f"{name} must be an integer in [1, 4096]")
         self._binding = binding
-        self._session = OpenAIRealtimeSession(config, socket_factory=socket_factory)
+        self._session = OpenAIRealtimeSession(config, socket_factory=socket_factory,
+                                             diagnostic_origin=identity_fields(binding))
         self._event_queue_capacity = event_queue_capacity
         self._pending_audio_capacity = pending_audio_capacity
         self._state = NativeProviderState.NEW
@@ -1658,6 +1660,8 @@ class OpenAIRealtimeNativeInteractionEngine:
     ) -> list[NativeEngineEvent]:
         event_type = event.event_type
         if event_type in _HARMLESS_EVENT_TYPES:
+            if event_type == "response.function_call_arguments.delta":
+                self._observe_first_arguments(event, data)
             return []
         if event_type == "error":
             self._provider_error(data)
@@ -1689,6 +1693,29 @@ class OpenAIRealtimeNativeInteractionEngine:
         raise OpenAIRealtimeNativeInteractionError(
             "NATIVE_PROVIDER_EVENT_UNSUPPORTED", "Provider event is unsupported"
         )
+
+    def _observe_first_arguments(self, event: OpenAIRealtimeEvent, data: dict[str, object]) -> None:
+        # This optional delta is not an authority event. Malformed or late hints
+        # remain harmless, and neither their arguments nor arbitrary keys escape.
+        if self._business_context is None:
+            return
+        try:
+            response_id, item_id = data.get("response_id"), data.get("item_id")
+            if type(response_id) is not str or type(item_id) is not str:
+                return
+            response = self._responses.get(response_id)
+            if response is None or response.done or response.cancelled or response.runtime_ref is None:
+                return
+            _identity(item_id, reason="NATIVE_PROVIDER_ITEM_INVALID", field_name="item id")
+            if item_id in response.first_argument_items or len(response.first_argument_items) >= 8:
+                return
+            if type(data.get("delta")) is not str or not data["delta"]:
+                return
+            response.first_argument_items.add(item_id)
+            self._profile_business("arguments_first_delta", response=response,
+                                   source_event_id=event.event_id, provider_item_id=item_id)
+        except Exception:
+            pass
 
     def _provider_error(self, data: dict[str, object]) -> None:
         error = data["error"]
@@ -1872,6 +1899,8 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._require_action_capacity(1)
         self._input_end_ms = end_ms
         self._state = NativeProviderState.LISTENING
+        self._profile_business("endpoint_observed", source_event_id=event.event_id,
+                               provider_item_id=item_id, provider_end_ms=end_ms, turn_id=None)
         return [
             NativeEngineEvent(
                 action=self._action(
@@ -1957,6 +1986,8 @@ class OpenAIRealtimeNativeInteractionEngine:
             (("turn_id", turn_id), ("provider_item_id", item_id)),
         )
         self._current_turn_id = turn_id
+        self._profile_business("input_committed", source_event_id=event.event_id,
+                               provider_item_id=item_id, turn_commit_id=commit.commit_id)
         if turn_id in self._direct_response_requested_turn_ids:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_DIRECT_RESPONSE_REQUEST_CONFLICT",
@@ -2726,7 +2757,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             proposal_type = NativeBusinessProposal if business else NativeDelegateProposal
             if business:
                 self._profile_business("arguments_completed", response=response, provider_call_id=call_id,
-                                       source_event_id=event.event_id)
+                                       source_event_id=event.event_id, provider_item_id=item_id)
             proposal = proposal_type.from_function_call(
                 binding=self._binding,
                 turn_id=response.turn_id,

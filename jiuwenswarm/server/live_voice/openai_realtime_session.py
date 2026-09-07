@@ -13,6 +13,7 @@ import asyncio
 import inspect
 import json
 import math
+import time
 import unicodedata
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
@@ -20,6 +21,19 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 from urllib.parse import urlencode, urlparse, urlunparse
+
+from jiuwenswarm.common.live_voice_profiling import identity_fields, profile_snapshot_event
+
+
+_TIMED_CLIENT_EVENTS = frozenset({
+    "session.update", "response.create", "response.cancel", "conversation.item.create",
+    "conversation.item.truncate", "input_audio_buffer.commit",
+})
+_TIMED_PROVIDER_EVENTS = frozenset({
+    "session.created", "session.updated", "response.created", "response.done",
+    "input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped",
+    "input_audio_buffer.committed", "response.function_call_arguments.done",
+})
 
 
 MAX_REALTIME_WIRE_MESSAGE_BYTES = 1_048_576
@@ -466,6 +480,7 @@ class OpenAIRealtimeSession:
         config: OpenAIRealtimeSessionConfig,
         *,
         socket_factory: RealtimeSocketFactory | None = None,
+        diagnostic_origin: Mapping[str, object] | None = None,
     ) -> None:
         if not isinstance(config, OpenAIRealtimeSessionConfig):
             raise TypeError("config must be OpenAIRealtimeSessionConfig")
@@ -485,6 +500,17 @@ class OpenAIRealtimeSession:
         self._primary_error_reason: str | None = None
         self._close_error_reason: str | None = None
         self._close_complete = False
+        self._diagnostic_origin = None if diagnostic_origin is None else identity_fields(dict(diagnostic_origin))
+
+    def _observe_transport(self, milestone: str, event_type: str, event_id: str, **fields) -> None:
+        if self._diagnostic_origin is None:
+            return
+        try:
+            profile_snapshot_event("native_transport_timeline", self._diagnostic_origin,
+                                   milestone=milestone, status=event_type,
+                                   source_event_id=event_id, **fields)
+        except Exception:
+            pass
 
     async def open(self, *, session_update: Mapping[str, object]) -> None:
         async with self._state_lock:
@@ -681,13 +707,22 @@ class OpenAIRealtimeSession:
             await self._record_primary(error.reason)
             raise error from None
 
+        lock_started = time.perf_counter()
         async with self._send_lock:
             socket = await self._require_socket(allow_opening=allow_opening)
+            encode_started = time.perf_counter()
             next_count = self._client_event_count + 1
             event_id = f"client_event_{next_count:08d}"
             wire = _encode_client_event(
                 {"type": parsed_type, "event_id": event_id, **parsed_payload}
             )
+            send_started = time.perf_counter()
+            if parsed_type in _TIMED_CLIENT_EVENTS:
+                self._observe_transport("socket_send_started", parsed_type, event_id,
+                    lock_wait_ms=(encode_started - lock_started) * 1000,
+                    encode_ms=(send_started - encode_started) * 1000,
+                    wire_bytes=len(wire.encode("utf-8")))
+            socket_started = time.perf_counter()
             try:
                 await asyncio.wait_for(
                     socket.send(wire),
@@ -712,6 +747,9 @@ class OpenAIRealtimeSession:
                 await self._record_primary(error.reason)
                 raise error from None
             self._client_event_count = next_count
+            if parsed_type in _TIMED_CLIENT_EVENTS:
+                self._observe_transport("socket_send_completed", parsed_type, event_id,
+                                        socket_send_ms=(time.perf_counter() - socket_started) * 1000)
             return event_id
 
     async def _receive_event_internal(
@@ -746,6 +784,7 @@ class OpenAIRealtimeSession:
                     )
                     await self._record_primary(error.reason)
                     raise error from None
+            received_at = time.perf_counter()
             event, protocol_reason = _decode_provider_event(wire)
             wire = None
             if protocol_reason is not None:
@@ -756,6 +795,10 @@ class OpenAIRealtimeSession:
                 await self._record_primary(error.reason)
                 raise error from None
             assert event is not None
+            if event.event_type in _TIMED_PROVIDER_EVENTS:
+                self._observe_transport("socket_received", event.event_type, event.event_id,
+                    received_monotonic_ms=received_at * 1000,
+                    decode_ms=(time.perf_counter() - received_at) * 1000)
             retained, ledger_reason = await self._retain_provider_event(event)
             event = None
             if ledger_reason is not None:
