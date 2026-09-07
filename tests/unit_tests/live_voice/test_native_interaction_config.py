@@ -11,6 +11,7 @@ from jiuwenswarm.server.live_voice.native_interaction_config import (
     NATIVE_REALTIME_MODEL_ENV,
     NATIVE_VAD_EAGERNESS_ENV,
     NATIVE_MAX_OUTPUT_TOKENS_ENV,
+    NATIVE_AUDIO_SPEED_ENV,
     InteractionEngineKind,
     NativeInteractionConfigurationError,
     NativeInteractionSelection,
@@ -147,7 +148,7 @@ def test_native_endpoint_configuration_is_exact_and_fails_closed(value):
 def test_cascade_never_reads_native_endpoint_configuration(kind):
     class CascadeEnvironment(dict):
         def get(self, key, *default):
-            if key in {NATIVE_VAD_EAGERNESS_ENV, NATIVE_REALTIME_MODEL_ENV, NATIVE_MAX_OUTPUT_TOKENS_ENV}:
+            if key in {NATIVE_VAD_EAGERNESS_ENV, NATIVE_REALTIME_MODEL_ENV, NATIVE_MAX_OUTPUT_TOKENS_ENV, NATIVE_AUDIO_SPEED_ENV}:
                 raise AssertionError("Cascade accessed Native-only configuration")
             return super().get(key, *default)
 
@@ -181,3 +182,21 @@ def test_native_output_budget_rejects_malformed_values(raw):
             NATIVE_MAX_OUTPUT_TOKENS_ENV: raw,
         })
     assert raised.value.reason == "NATIVE_MAX_OUTPUT_TOKENS_INVALID"
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(None, 1.0), ("0.25", 0.25), ("1", 1.0), ("1.5", 1.5)])
+def test_native_audio_speed_selection(raw, expected):
+    environment = {INTERACTION_ENGINE_ENV: "openai-realtime-native"}
+    if raw is not None:
+        environment[NATIVE_AUDIO_SPEED_ENV] = raw
+    assert select_interaction_engine_environment(environment).native_audio_speed == expected
+
+
+@pytest.mark.parametrize("raw", [None, True, 1.5, "", " 1.5", "1.5\n", "0.24", "1.51", "2", "nan", "inf", "-1", "١", [], {}])
+def test_native_audio_speed_rejects_invalid_environment(raw):
+    with pytest.raises(NativeInteractionConfigurationError) as raised:
+        select_interaction_engine_environment({
+            INTERACTION_ENGINE_ENV: "openai-realtime-native",
+            NATIVE_AUDIO_SPEED_ENV: raw,
+        })
+    assert raised.value.reason == "NATIVE_AUDIO_SPEED_INVALID"

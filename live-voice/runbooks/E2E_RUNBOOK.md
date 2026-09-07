@@ -360,6 +360,13 @@ Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 
 ### 7.5 当前受控 Live Voice 启动与预演
 
+Realtime 播报语速可通过启动器 `-NativeAudioSpeed 1.5` 设置；范围为 0.25–1.5，默认 1.0。
+`-SaveConfiguration` 保存该选择，后续未显式传参时复用。它通过
+`LIVE_VOICE_NATIVE_AUDIO_SPEED` 进入 Provider 的 `session.audio.output.speed`，重启服务并重新开启
+Live Voice 后生效；不改变本地播放时钟、VAD 或后台任务，也不调整独立 TTS 通知的语速。
+该参数仅改变播报速度，不保证模型生成或工具执行更快。范围依据
+[OpenAI Realtime API](https://developers.openai.com/api/reference/resources/realtime/subresources/calls/methods/create)。
+
 本节用于当前受控产品候选的准备和最终验证；它不倒写历史 Alpha 结果，也不取得生产化信用。2026-08-17 的完整 Journey 已作为缺陷发现执行结束，结果是 `COMPLETED — DEFECTS RECORDED`，不是 PASS；当前缺陷、运行环境和下一步只看 [STATUS](../STATUS.md)。修复完成后，只有在干净、不可变的候选源码上按 [产品准备度合同](../validation/PRODUCT_READINESS_ACCEPTANCE.md) 和 [完整人工 Journey](../demo/PRODUCT_READINESS_SHOWCASE.md) 成功执行，才能形成新的受控候选 PASS。
 
 本节保留启动、目标隔离和真实副作用规则。旧 D119 单任务脚本及固定 itinerary

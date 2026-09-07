@@ -39,6 +39,8 @@ param(
     [string]$NativeVadEagerness = 'auto',
     [ValidateScript({ $_ -ceq 'inf' -or ($_ -cmatch '\A[1-9][0-9]{0,3}\z' -and [int]$_ -le 4096) })]
     [string]$NativeMaxOutputTokens = 'inf',
+    [ValidateRange(0.25, 1.5)]
+    [double]$NativeAudioSpeed = 1.0,
     [switch]$L0Measurement,
     [switch]$L0OrdinaryChromeBatch,
     [switch]$L0ResumeBatch,
@@ -714,6 +716,13 @@ try {
             $ProjectId = [string]$savedConfig.project_id
         }
         $savedLocalBargeInProperty = $savedConfig.PSObject.Properties['local_barge_in_profile']
+        $savedAudioSpeedProperty = $savedConfig.PSObject.Properties['native_audio_speed']
+        if (-not $PSBoundParameters.ContainsKey('NativeAudioSpeed') -and $null -ne $savedAudioSpeedProperty -and $null -ne $savedAudioSpeedProperty.Value) {
+            $NativeAudioSpeed = [double]$savedAudioSpeedProperty.Value
+            if ([double]::IsNaN($NativeAudioSpeed) -or $NativeAudioSpeed -lt 0.25 -or $NativeAudioSpeed -gt 1.5) {
+                Fail '已保存的 Realtime 语速必须在 0.25 到 1.5 之间。'
+            }
+        }
         if (-not $PSBoundParameters.ContainsKey('LocalBargeInProfile') -and $null -ne $savedLocalBargeInProperty -and $null -ne $savedLocalBargeInProperty.Value) {
             $savedLocalBargeInProfile = [string]$savedLocalBargeInProperty.Value
             if (@('off', 'verified-headset-aec-v1') -notcontains $savedLocalBargeInProfile) {
@@ -819,6 +828,7 @@ try {
             project_id     = $ProjectId
             data_dir       = $DataDir
             local_barge_in_profile = $LocalBargeInProfile
+            native_audio_speed = $NativeAudioSpeed
         } | ConvertTo-Json | Set-Content -LiteralPath $DemoConfigPath -Encoding UTF8
         Write-Pass "已保存无密钥的机器私有 Demo 选择：$DemoConfigPath"
     }
@@ -930,6 +940,7 @@ try {
         LIVE_VOICE_NATIVE_REALTIME_MODEL                           = $NativeRealtimeModel
         LIVE_VOICE_NATIVE_VAD_EAGERNESS                             = $NativeVadEagerness
         LIVE_VOICE_NATIVE_MAX_OUTPUT_TOKENS                        = $NativeMaxOutputTokens
+        LIVE_VOICE_NATIVE_AUDIO_SPEED                              = $NativeAudioSpeed.ToString([System.Globalization.CultureInfo]::InvariantCulture)
         PYTHONUTF8                                                = '1'
         PYTHONIOENCODING                                          = 'utf-8'
     }
@@ -1223,6 +1234,7 @@ try {
         native_realtime_model     = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeRealtimeModel } else { $null }
         native_vad_eagerness       = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeVadEagerness } else { $null }
         native_max_output_tokens  = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeMaxOutputTokens } else { $null }
+        native_audio_speed        = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeAudioSpeed } else { $null }
         required_flags            = $validatedFlags
         frontend_flags            = [ordered]@{
             VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION = $generationInterruptionEnabled

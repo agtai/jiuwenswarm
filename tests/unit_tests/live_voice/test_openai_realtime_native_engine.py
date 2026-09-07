@@ -333,6 +333,7 @@ def active_engine(
     pending_audio_capacity: int = 8,
     session_config: OpenAIRealtimeSessionConfig | None = None,
     max_output_tokens: int | str = "inf",
+    audio_speed: float = 1.0,
     settle_silent_delivery: bool = True,
 ) -> tuple[OpenAIRealtimeNativeInteractionEngine, ScriptedSocket, CapturingFactory]:
     socket = ScriptedSocket((*negotiation(), *events))
@@ -344,6 +345,7 @@ def active_engine(
         event_queue_capacity=event_queue_capacity,
         pending_audio_capacity=pending_audio_capacity,
         max_output_tokens=max_output_tokens,
+        audio_speed=audio_speed,
     )
     if settle_silent_delivery:
         next_event = engine.next_event
@@ -363,6 +365,29 @@ def active_engine(
 def action_payload(event: NativeEngineEvent) -> dict[str, str]:
     assert event.action is not None
     return dict(event.action.payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("speed", [0.25, 1.0, 1.5])
+async def test_native_audio_speed_reaches_provider_session(speed):
+    engine, socket, _ = active_engine(audio_speed=speed)
+    try:
+        await engine.start()
+        output = socket.sent[0]["session"]["audio"]["output"]
+        assert output == {"format": {"type": "audio/pcm", "rate": 24000}, "voice": "marin", "speed": speed}
+    finally:
+        await engine.close()
+
+
+@pytest.mark.parametrize("speed", [True, None, "1.5", 0.24, 1.51, float("nan"), float("inf")])
+def test_invalid_native_audio_speed_rejected_before_connecting(speed):
+    from jiuwenswarm.server.live_voice.native_interaction_config import NativeInteractionConfigurationError
+
+    factory = CapturingFactory(ScriptedSocket())
+    with pytest.raises(NativeInteractionConfigurationError) as raised:
+        OpenAIRealtimeNativeInteractionEngine(config(), binding=binding(), socket_factory=factory, audio_speed=speed)
+    assert raised.value.reason == "NATIVE_AUDIO_SPEED_INVALID"
+    assert factory.calls == []
 
 
 async def accept_basic_turn(
