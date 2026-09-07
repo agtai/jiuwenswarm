@@ -1,0 +1,17 @@
+[Unit]
+Description=Ten isolated JiuwenSwarm Live Voice test instances
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/srv/jiuwen-livevoice
+ExecStart=/usr/bin/docker compose -f compose.json up -d
+ExecStop=/usr/bin/docker compose -f compose.json stop
+TimeoutStartSec=300
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

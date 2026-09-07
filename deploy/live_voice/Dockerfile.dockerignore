@@ -1,0 +1,15 @@
+.git
+.venv
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+logs
+.env
+**/.env.local
+**/.env.*.local
+**/frontend/dist
+*.tar
+*.tar.gz
+**/*.pem
+**/*.dpapi
