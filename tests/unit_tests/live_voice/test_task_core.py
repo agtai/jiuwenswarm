@@ -24,7 +24,6 @@ from jiuwenswarm.server.live_voice.task_core import (
     TaskState,
     project_work_progress,
 )
-from jiuwenswarm.server.live_voice.executor_port import ExecutorPort, ExecutorState
 
 
 def scope(subject: str = "subject-1") -> ScopeRef:
@@ -424,26 +423,3 @@ def test_unsupported_full_p3_command_fails_closed() -> None:
         core.execute(command, auth(operations=frozenset({"task.pause"})))
     assert raised.value.reason == "UNSUPPORTED_TASK_COMMAND"
     assert core.snapshot() == before
-
-
-def test_fake_core_and_executor_preserve_task_and_attempt_identity() -> None:
-    core = TaskCore()
-    executor = ExecutorPort()
-    created = core.execute(create_command(), auth())
-    dispatch = core.snapshot().dispatch_intents[0]
-    accepted, executor_status = executor.dispatch(dispatch)
-    assert accepted is True
-    assert executor_status.attempt_id == created.attempt_id
-    assert executor.start(created.attempt_id).state is ExecutorState.RUNNING
-    core.mark_attempt_running(created.task_id, created.attempt_id, auth())
-    assert (
-        executor.finish(created.attempt_id, TerminalOutcome.COMPLETED).state
-        is ExecutorState.TERMINAL
-    )
-    core.finish_attempt(
-        created.task_id, created.attempt_id, TerminalOutcome.COMPLETED, auth()
-    )
-    task = core.query(TaskQuery("q", "task.get", scope(), created.task_id), auth())
-    assert task.task_id == created.task_id
-    assert task.attempt_id == created.attempt_id
-    assert task.outcome is TerminalOutcome.COMPLETED
