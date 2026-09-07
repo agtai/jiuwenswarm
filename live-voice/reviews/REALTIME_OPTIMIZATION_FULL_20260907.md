@@ -222,3 +222,60 @@ locally and does not prove redundant reasoning or reads; no model switch, read s
 or speculative pooling is justified. A new real Agent/file-tool probe accompanies P4
 and cumulative acceptance; neither a background-task speedup nor the imported target
 is established by this setup change.
+
+### P4 — Scope checkpoint before implementation
+
+Main selects a Tier 2 Native read-only answer policy within the existing final-result
+boundary: lead with the shortest complete supported conclusion and essential caveats,
+then give the requested detail. Bind facts to their source, subject and effective time;
+read necessary project evidence without a narration or planning round. Keep all committed
+text, selected context and source refs intact, and retain stronger Task receipt/result
+contracts. This owns `formal_live_voice.py`, the trusted formal adapter prompt section
+and focused envelope/adapter tests. P8's execution-private model setup is its dependency.
+Acceptance requires exact preservation/override tests and a real JiuwenSwarm/file-tool
+quality sample with unchanged model settings; prompt instructions alone do not prove
+that facts are correct or delivery is faster.
+
+No separate precompletion publication is introduced. The existing Work contract publishes
+result text only at terminal; the imported first-output timestamp does not establish a
+source-verified intermediate conclusion. Publishing raw deltas, inventing a new partial
+truth owner, or adding a model tool round solely to manufacture a stage would not meet
+the accepted provenance requirement. This point targets avoidable preambles/answer bulk
+and source confusion, with precompletion delivery explicitly remaining unproved.
+
+The implementation applies the source-qualified Native policy through the trusted
+formal system section and the current Chinese/English output section. An ordinary
+read-only envelope receives the conclusion-first answer contract only when no stronger
+Task receipt/result contract exists. Full selected context, exact refs, committed
+text, requested detail, final answer and model/tool ownership remain intact.
+
+The initial policy was visible in each real model round but still yielded a long
+answer. The final output-section wording produces a conclusion in the first sentence
+and removes headings in the recorded sample. The real selected default model remains
+`deepseek-v4-flash#0`; both candidate and baseline perform actual `glob` and `read_file`
+through AgentManager's formal P2 facade and the patched SDK. They correctly use v2's
+35-minute warehouse travel time, reject the superseded 20-minute value and distinguish
+the unselected office route. Arrival 09:40 misses the 09:35 check-in cutoff by five
+minutes; departure by 09:00 is required. Only the synthetic fixture existed before
+and after execution, its bytes and the private configuration remained unchanged,
+and Agent cleanup completed.
+
+[Recorded Agent observations](../evidence/REALTIME_AGENT_ANALYSIS_20260907.json)
+retain the baseline, initial verbose candidates and final sample. The final sample
+contains 349 characters versus the baseline's 605, but takes 12.18 seconds versus
+10.06 seconds. Both need three model calls. These cold-session/network-dependent
+samples demonstrate source/answer behavior, not overall acceleration or P8 round
+reduction. Earlier first-output tokens are not accepted conclusions. The initial
+probe mistakenly selected a Code facade and failed before execution; its failure
+is retained and the corrected probe uses the same Agent-profile route as production.
+Older intermediate samples without exact file hashes are explicitly labelled as
+incomplete source bindings. The final sample records both affected source hashes.
+
+Checks: 74 formal policy/adapter/model-diagnostic cases pass, including Chinese and
+English execution-only policy restoration, full final-text preservation and three
+stronger Task-contract precedence cases. Another 109 ConversationRuntime/speculation
+regressions pass. Scoped Ruff `F,E9` and diff checks pass. Local logs are
+`logs/p4-final-tests.txt`, `logs/p4-runtime-tests.txt` and `logs/p4-real-*`; the probe is
+`logs/p4_real_agent_probe.py`. Independent review ran the nine new policy cases,
+verified full input/final-output preservation and Task-contract precedence, and
+found no actionable issue.

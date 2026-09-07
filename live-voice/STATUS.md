@@ -44,6 +44,10 @@ Configuration, launcher and endpoint checks pass; no general speedup is claimed.
 P8 removes a duplicate construction of the fresh selected Native model while
 retaining execution isolation; formal checks and independent review pass. Agent
 round reduction and background-task latency improvement remain unproved.
+P4 applies a Native conclusion-first, source-qualified answer policy. Formal and
+Runtime checks, independent review and a real Agent/file-tool sample pass their
+owned boundaries. The recorded final answer is shorter but its total execution
+is not faster; precompletion publication and physical gains remain unproved.
 The remaining implementation continues independently
 of evidence synchronization. Original rehearsal files are absent locally; full
 optimization, measured latency and physical acceptance remain unproved. The
