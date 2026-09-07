@@ -6,7 +6,8 @@ This module is deliberately not a registered WebSocket handler.  It accepts an
 already server-authored :class:`MediaAuthorityBinding`, enforces a same-origin
 request context, and exposes typed LVM1 sessions plus runners for an injected,
 already-accepted socket.  It has no JSON logger, persistence callback, socket
-factory, or retry surface; short-lived tasks exist only for socket/EOT arbitration.
+factory, or retry surface; short-lived tasks arbitrate socket, speech boundaries
+and bounded async downlink supply.
 
 An active object proves only the package contract.  Product route truth remains
 ``unavailable`` until the Integration Owner registers the real handler and an
@@ -1301,6 +1302,7 @@ async def run_dedicated_media_downlink_socket_leaf(
     on_complete: Callable[[DedicatedMediaSocketLeafResult], None] | None = None,
     max_pending_frames: int = 8,
     max_pending_bytes: int = 131_072,
+    cleanup_owner: DedicatedMediaLeafCleanupOwner | None = None,
 ) -> DedicatedMediaSocketLeafResult:
     """Send one exact downlink lease over an injected, already-accepted socket."""
 
@@ -1378,6 +1380,16 @@ async def run_dedicated_media_downlink_socket_leaf(
         raise MediaTransportViolation(
             "MEDIA_INVALID_CONSUMER", "downlink frames must be iterable"
         ) from error
+    if cleanup_owner is not None and not isinstance(
+        cleanup_owner, DedicatedMediaLeafCleanupOwner
+    ):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER", "downlink cleanup owner must be typed"
+        )
+    # Registered routes share the registry owner. Standalone injected leaves
+    # retain the same bounded ownership through task callbacks after return.
+    owned_cleanup = cleanup_owner or DedicatedMediaLeafCleanupOwner(capacity=2)
+    cleanup_token = owned_cleanup.reserve(2) if async_frame_iterator is not None else None
     socket_touched = False
     attach_sent = False
     sent_frames = 0
@@ -1389,6 +1401,14 @@ async def run_dedicated_media_downlink_socket_leaf(
     diagnostic_frames: set[int] = set()
     diagnostic_count = 0
     last_source_at: float | None = None
+    source_task: asyncio.Task[tuple[MediaAudioFrame, float, float]] | None = None
+    receive_task: asyncio.Task[str | bytes] | None = None
+    source_closed = False
+    source_read_active = False
+    close_requested = False
+    cleanup_settled = False
+    cleanup_pending_count = 0
+    leaf_task = asyncio.current_task()
 
     def diagnose_frame(stage: str, seq: int, **facts: object) -> None:
         try:
@@ -1435,7 +1455,6 @@ async def run_dedicated_media_downlink_socket_leaf(
             await send(message)
         except asyncio.CancelledError:
             sender.close(MediaDetachReason.TRANSPORT_CLOSED)
-            await asyncio.shield(close_socket())
             raise
         except Exception:
             return False
@@ -1462,6 +1481,8 @@ async def run_dedicated_media_downlink_socket_leaf(
             configured_max_pending_bytes=max_pending_bytes,
             peak_pending_frames=peak_pending_frames,
             peak_pending_bytes=peak_pending_bytes,
+            cleanup_complete=cleanup_pending_count == 0,
+            cleanup_pending_tasks=cleanup_pending_count,
         )
 
     async def terminate(
@@ -1470,6 +1491,7 @@ async def run_dedicated_media_downlink_socket_leaf(
         send_detach: bool = True,
     ) -> DedicatedMediaSocketLeafResult:
         closed = sender.close(reason_id)
+        await settle_reads()
         if send_detach and closed.detach is not None:
             await send_message(serialize_media_control(closed.detach))
         leaf_result = result(closed)
@@ -1482,12 +1504,6 @@ async def run_dedicated_media_downlink_socket_leaf(
             await close_socket()
         return leaf_result
 
-    if not await send_message(serialize_media_control(MediaAttach(binding))):
-        return await terminate(
-            MediaDetachReason.TRANSPORT_SEND_FAILED,
-            send_detach=False,
-        )
-    attach_sent = True
     source_exhausted = False
     pending_frame: MediaAudioFrame | None = None
 
@@ -1501,15 +1517,77 @@ async def run_dedicated_media_downlink_socket_leaf(
             # StopIteration cannot escape an async function (PEP 479).
             raise StopAsyncIteration from error
 
-    async def close_source() -> None:
-        iterator = async_frame_iterator
-        if iterator is None:
+    async def timed_source_frame() -> tuple[MediaAudioFrame, float, float]:
+        nonlocal source_read_active
+        if close_requested or (leaf_task is not None and leaf_task.cancelling()):
+            # Cancellation can arrive before this scheduled task first runs.
+            # Keep its source slot and close without starting a forbidden pull.
+            await close_source()
+            raise asyncio.CancelledError
+        started = time.perf_counter()
+        source_read_active = True
+        try:
+            frame = await take_source_frame()
+            return frame, started, time.perf_counter()
+        finally:
+            source_read_active = False
+            # A hostile __anext__ may outlive the socket leaf. Its retained
+            # task closes the generator only after that read actually settles.
+            if close_requested:
+                await close_source()
+
+    async def receive_control() -> str | bytes:
+        nonlocal socket_touched
+        socket_touched = True
+        return await socket.recv()
+
+    async def settle_reads() -> None:
+        nonlocal close_requested, cleanup_settled, cleanup_pending_count
+        if cleanup_settled:
             return
+        close_requested = True
+        tasks = {task for task in (source_task, receive_task) if task is not None}
+        for task in tasks:
+            if not task.done() and not (task is source_task and not source_read_active):
+                task.cancel()
+        if async_frame_iterator is not None and (source_task is None or source_task.done()):
+            # A completed pull cannot run the finally above. Its already
+            # reserved source slot owns this close operation instead.
+            tasks.add(asyncio.create_task(close_source()))
+        wait_interruption: BaseException | None = None
+        pending = {task for task in tasks if not task.done()}
+        if tasks:
+            try:
+                _done, pending = await asyncio.wait(
+                    tasks, timeout=_SOCKET_CLOSE_TIMEOUT_SECONDS
+                )
+            except BaseException as error:
+                # A second caller cancellation must not drop unfinished reads.
+                wait_interruption = error
+                pending = {task for task in tasks if not task.done()}
+        for task in tasks - pending:
+            owned_cleanup._consume_task_result(task)
+        if cleanup_token is not None:
+            cleanup_pending_count = owned_cleanup.settle_reservation(
+                cleanup_token, pending
+            )
+        cleanup_settled = True
+        if wait_interruption is not None:
+            raise wait_interruption
+
+    async def close_source() -> None:
+        nonlocal source_closed
+        iterator = async_frame_iterator
+        if iterator is None or source_closed:
+            return
+        source_closed = True
         close = getattr(iterator, "aclose", None)
         if not callable(close):
             return
         try:
-            await asyncio.wait_for(close(), timeout=_SOCKET_CLOSE_TIMEOUT_SECONDS)
+            # This runs inside the source-slot task. The outer bounded settle
+            # owns a slow/hostile close just like a slow/hostile source read.
+            await close()
         except asyncio.CancelledError:
             current = asyncio.current_task()
             if current is not None and current.cancelling():
@@ -1518,10 +1596,101 @@ async def run_dedicated_media_downlink_socket_leaf(
         except BaseException:
             return
 
+    async def accept_control(message: object) -> DedicatedMediaSocketLeafResult | None:
+        nonlocal acknowledged_through_seq, playback_stop_receipts
+        if not isinstance(message, str):
+            return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+        try:
+            control = deserialize_media_control(message)
+        except MediaTransportViolation:
+            return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+        if isinstance(control, MediaAck):
+            detach = sender.acknowledge(control)
+            if detach is not None:
+                return await terminate(detach.reason_id)
+            acknowledged_through_seq = control.through_seq
+            for seq in tuple(diagnostic_frames):
+                if seq <= control.through_seq:
+                    diagnose_frame("enqueue_ack", seq)
+                    diagnostic_frames.discard(seq)
+            return None
+        if isinstance(control, MediaPlaybackStopReceipt):
+            try:
+                exact_stop = validate_playback_stop_receipt(binding, control)
+                if (
+                    exact_stop.confirmed_through_seq is not None
+                    and exact_stop.confirmed_through_seq >= sent_frames
+                ):
+                    return await terminate(MediaDetachReason.ACK_UNSENT)
+                retained = on_playback_stop(exact_stop)
+                if inspect.isawaitable(retained):
+                    await retained
+            except MediaTransportViolation as error:
+                return await terminate(coerce_reason(error.reason_id))
+            except Exception:
+                return await terminate(MediaDetachReason.CONSUMER_FAILED)
+            playback_stop_receipts += 1
+            return await terminate(MediaDetachReason.PEER_CLOSE)
+        if isinstance(control, MediaDetach):
+            if (
+                control.lease_id != binding.lease_id
+                or control.generation != binding.generation.value
+            ):
+                mismatch = (
+                    MediaDetachReason.STALE_GENERATION
+                    if control.generation != binding.generation.value
+                    else MediaDetachReason.BINDING_MISMATCH
+                )
+                return await terminate(mismatch)
+            return await terminate(control.reason_id, send_detach=False)
+        return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+
     try:
+        if not await send_message(serialize_media_control(MediaAttach(binding))):
+            return await terminate(
+                MediaDetachReason.TRANSPORT_SEND_FAILED,
+                send_detach=False,
+            )
+        attach_sent = True
         while True:
+            if async_frame_iterator is not None:
+                # A ready control wins over a simultaneously ready source. In
+                # particular, a peer stop cannot leak one more frame just
+                # because Provider supply resumed in the same event-loop turn.
+                if receive_task is not None and receive_task.done():
+                    completed_receive, receive_task = receive_task, None
+                    try:
+                        message = completed_receive.result()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        return await terminate(
+                            MediaDetachReason.TRANSPORT_CLOSED, send_detach=False
+                        )
+                    terminal = await accept_control(message)
+                    if terminal is not None:
+                        return terminal
+                    receive_task = asyncio.create_task(receive_control())
+                    # Let an already queued stop/detach reach its owned reader
+                    # before using the credit just released by the prior ACK.
+                    await asyncio.sleep(0)
+                    continue
+                if source_task is not None and source_task.done():
+                    completed_source, source_task = source_task, None
+                    try:
+                        pending_frame, pull_started, pending_source_ready_at = completed_source.result()
+                    except StopAsyncIteration:
+                        source_exhausted = True
+                    except DedicatedMediaDownlinkSourceFailure as error:
+                        return await terminate(error.reason_id)
+                    except asyncio.CancelledError:
+                        raise
+                    except BaseException:
+                        return await terminate(MediaDetachReason.CONSUMER_FAILED)
             while not source_exhausted:
                 if pending_frame is None:
+                    if async_frame_iterator is not None:
+                        break
                     pull_started = time.perf_counter()
                     try:
                         pending_frame = await take_source_frame()
@@ -1554,10 +1723,9 @@ async def run_dedicated_media_downlink_socket_leaf(
                     )
                     peak_pending_bytes = max(peak_pending_bytes, sender.pending_bytes)
                     pending_frame = None
-                    # A native stream may not have its next Provider chunk yet.
-                    # Drain the accepted chunk immediately and wait for its
-                    # browser render ACK instead of blocking first audio behind
-                    # a speculative pull or reading beyond downlink pressure.
+                    # Send a ready async frame immediately. The next read runs
+                    # independently of the control receive below, bounded by
+                    # negotiated credit rather than one network RTT per frame.
                     if async_frame_iterator is not None:
                         break
                     continue
@@ -1588,6 +1756,25 @@ async def run_dedicated_media_downlink_socket_leaf(
             if source_exhausted and sender.pending_frames == 0:
                 return await terminate(MediaDetachReason.LOCAL_CLOSE)
 
+            if async_frame_iterator is not None:
+                if receive_task is None:
+                    receive_task = asyncio.create_task(receive_control())
+                if (
+                    not source_exhausted
+                    and pending_frame is None
+                    and source_task is None
+                    and sender.pending_frames < max_pending_frames
+                    and sender.pending_bytes < max_pending_bytes
+                ):
+                    source_task = asyncio.create_task(timed_source_frame())
+                # At most one extra frame may wait for byte credit after its
+                # encoded size is known. A full frame window never pulls ahead.
+                await asyncio.wait(
+                    tuple(task for task in (receive_task, source_task) if task is not None),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                continue
+
             try:
                 recv = socket.recv
             except Exception:
@@ -1599,61 +1786,24 @@ async def run_dedicated_media_downlink_socket_leaf(
                 message = await recv()
             except asyncio.CancelledError:
                 sender.close(MediaDetachReason.TRANSPORT_CLOSED)
-                await asyncio.shield(close_socket())
                 raise
             except Exception:
                 return await terminate(
                     MediaDetachReason.TRANSPORT_CLOSED,
                     send_detach=False,
                 )
-            if not isinstance(message, str):
-                return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
-            try:
-                control = deserialize_media_control(message)
-            except MediaTransportViolation:
-                return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
-            if isinstance(control, MediaAck):
-                detach = sender.acknowledge(control)
-                if detach is not None:
-                    return await terminate(detach.reason_id)
-                acknowledged_through_seq = control.through_seq
-                for seq in tuple(diagnostic_frames):
-                    if seq <= control.through_seq:
-                        diagnose_frame("enqueue_ack", seq)
-                        diagnostic_frames.discard(seq)
-                continue
-            if isinstance(control, MediaPlaybackStopReceipt):
-                try:
-                    exact_stop = validate_playback_stop_receipt(binding, control)
-                    if (
-                        exact_stop.confirmed_through_seq is not None
-                        and exact_stop.confirmed_through_seq >= sent_frames
-                    ):
-                        return await terminate(MediaDetachReason.ACK_UNSENT)
-                    retained = on_playback_stop(exact_stop)
-                    if inspect.isawaitable(retained):
-                        await retained
-                except MediaTransportViolation as error:
-                    return await terminate(coerce_reason(error.reason_id))
-                except Exception:
-                    return await terminate(MediaDetachReason.CONSUMER_FAILED)
-                playback_stop_receipts += 1
-                return await terminate(MediaDetachReason.PEER_CLOSE)
-            if isinstance(control, MediaDetach):
-                if (
-                    control.lease_id != binding.lease_id
-                    or control.generation != binding.generation.value
-                ):
-                    mismatch = (
-                        MediaDetachReason.STALE_GENERATION
-                        if control.generation != binding.generation.value
-                        else MediaDetachReason.BINDING_MISMATCH
-                    )
-                    return await terminate(mismatch)
-                return await terminate(control.reason_id, send_detach=False)
-            return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+            terminal = await accept_control(message)
+            if terminal is not None:
+                return terminal
+    except asyncio.CancelledError:
+        sender.close(MediaDetachReason.TRANSPORT_CLOSED)
+        try:
+            await settle_reads()
+        finally:
+            await asyncio.shield(close_socket())
+        raise
     finally:
-        await close_source()
+        await settle_reads()
 
 
 __all__ = [

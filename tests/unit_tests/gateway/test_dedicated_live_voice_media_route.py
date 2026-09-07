@@ -96,6 +96,77 @@ class _BlockingDedicatedSocket(_FakeDedicatedSocket):
         raise AssertionError("unreachable")
 
 
+class _ControlledDownlinkSocket(_FakeDedicatedSocket):
+    def __init__(self, *, acknowledge_sent: bool = False, fail_send_at: int | None = None):
+        super().__init__([], fail_send_at=fail_send_at)
+        self.controls: asyncio.Queue[object] = asyncio.Queue()
+        self.acknowledge_sent = acknowledge_sent
+        self.active_receives = 0
+        self.peak_receives = 0
+
+    async def recv(self) -> str | bytes:
+        self.active_receives += 1
+        self.peak_receives = max(self.peak_receives, self.active_receives)
+        try:
+            value = await self.controls.get()
+            if isinstance(value, Exception):
+                raise value
+            return value  # type: ignore[return-value]
+        finally:
+            self.active_receives -= 1
+
+    async def send(self, message: str | bytes) -> None:
+        await super().send(message)
+        if self.acknowledge_sent and isinstance(message, bytes):
+            binding = _downlink_binding()
+            frame = decode_audio_frame(binding, message)
+            self.controls.put_nowait(serialize_media_control(
+                MediaAck(binding.lease_id, binding.generation.value, frame.seq)
+            ))
+
+
+class _ReadyDownlinkFrames:
+    def __init__(self, count: int, *, stall_at: int | None = None):
+        self.count = count
+        self.stall_at = stall_at
+        self.release = asyncio.Event()
+        self.next_seq = 0
+        self.next_calls = 0
+        self.active_reads = 0
+        self.peak_reads = 0
+        self.close_calls = 0
+        self.read_tasks: set[asyncio.Task[Any]] = set()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> MediaAudioFrame:
+        self.next_calls += 1
+        self.active_reads += 1
+        self.peak_reads = max(self.peak_reads, self.active_reads)
+        self.read_tasks.add(asyncio.current_task())
+        try:
+            if self.next_seq == self.stall_at:
+                await self.release.wait()
+            if self.next_seq >= self.count:
+                raise StopAsyncIteration
+            frame = _frame(self.next_seq, self.next_seq * 160)
+            self.next_seq += 1
+            return frame
+        finally:
+            self.active_reads -= 1
+
+    async def aclose(self) -> None:
+        assert self.active_reads == 0
+        self.close_calls += 1
+
+
+async def _until_downlink(predicate) -> None:
+    async with asyncio.timeout(2):
+        while not predicate():
+            await asyncio.sleep(0)
+
+
 class _CancellationObservedSocket(_BlockingDedicatedSocket):
     def __init__(self) -> None:
         super().__init__()
@@ -2269,16 +2340,7 @@ async def test_downlink_async_source_streams_in_order_and_closes_exactly_once(mo
             self.close_calls += 1
 
     frames = _AsyncFrames()
-    socket = _FakeDedicatedSocket(
-        [
-            serialize_media_control(
-                MediaAck(binding.lease_id, binding.generation.value, 0)
-            ),
-            serialize_media_control(
-                MediaAck(binding.lease_id, binding.generation.value, 1)
-            ),
-        ]
-    )
+    socket = _ControlledDownlinkSocket(acknowledge_sent=True)
 
     result = await run_dedicated_media_downlink_socket_leaf(
         _request(binding),
@@ -2305,7 +2367,7 @@ async def test_downlink_async_source_streams_in_order_and_closes_exactly_once(mo
 
 
 @pytest.mark.asyncio
-async def test_delayed_async_downlink_is_pulled_only_after_enqueue_ack():
+async def test_delayed_async_downlink_sends_first_frame_without_waiting_for_next_source_or_ack():
     binding = _downlink_binding()
     ready = [asyncio.Event(), asyncio.Event()]
     pulls = []
@@ -2336,9 +2398,12 @@ async def test_delayed_async_downlink_is_pulled_only_after_enqueue_ack():
         assert not any(isinstance(item, bytes) for item in socket.sent)
         ready[0].set()
         await until(lambda: len([x for x in socket.sent if isinstance(x, bytes)]) == 1)
-        assert pulls == [0]
-        controls.put_nowait(serialize_media_control(MediaAck(binding.lease_id, binding.generation.value, 0)))
         await until(lambda: pulls == [0, 1])
+        # A stalled second pull does not gate the first frame or its ACK. The
+        # pull is retained across the ACK, never cancelled and re-issued.
+        controls.put_nowait(serialize_media_control(MediaAck(binding.lease_id, binding.generation.value, 0)))
+        await asyncio.sleep(0)
+        assert pulls == [0, 1]
         assert len([x for x in socket.sent if isinstance(x, bytes)]) == 1
         ready[1].set()
         await until(lambda: len([x for x in socket.sent if isinstance(x, bytes)]) == 2)
@@ -2371,6 +2436,477 @@ async def test_downlink_diagnostics_cannot_bypass_invalid_frame_cleanup(frame, r
 
 
 @pytest.mark.asyncio
+async def test_async_downlink_uses_whole_credit_window_and_final_ack_owns_completion():
+    binding = _downlink_binding()
+    source = _ReadyDownlinkFrames(10)
+    socket = _ControlledDownlinkSocket()
+    completed = []
+    stopped = []
+    operation = asyncio.create_task(run_dedicated_media_downlink_socket_leaf(
+        _request(binding), socket=socket, frames=source,
+        on_playback_stop=stopped.append, on_complete=completed.append,
+    ))
+    binaries = lambda: [value for value in socket.sent if isinstance(value, bytes)]
+    try:
+        await _until_downlink(lambda: len(binaries()) == 8)
+        assert source.next_calls == 8  # No ninth pull beyond the full window.
+        assert completed == [] and not operation.done()
+        socket.controls.put_nowait(serialize_media_control(MediaAck(binding.lease_id, binding.generation.value, 3)))
+        await _until_downlink(lambda: source.next_calls == 11)
+        assert len(binaries()) == 10 and completed == []
+        # A duplicate prefix ACK releases no credit and cannot close an EOF
+        # source with unacknowledged frames remaining.
+        socket.controls.put_nowait(serialize_media_control(MediaAck(binding.lease_id, binding.generation.value, 3)))
+        await asyncio.sleep(0)
+        assert not operation.done() and completed == []
+        socket.controls.put_nowait(serialize_media_control(MediaAck(binding.lease_id, binding.generation.value, 9)))
+        result = await asyncio.wait_for(operation, 2)
+        assert result.reason_id is MediaDetachReason.LOCAL_CLOSE
+        assert result.sent_frames == 10 and result.acknowledged_through_seq == 9
+        assert result.peak_pending_frames == 8
+        assert result.peak_pending_bytes <= result.configured_max_pending_bytes
+        assert [decode_audio_frame(binding, value).seq for value in binaries()] == list(range(10))
+        assert completed == [result] and stopped == []
+        assert result.business_cancel_count_delta == 0
+        assert source.close_calls == 1 and source.active_reads == socket.active_receives == 0
+        assert source.peak_reads == socket.peak_receives == 1
+        assert all(task.done() for task in source.read_tasks)
+    finally:
+        if not operation.done():
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_async_downlink_byte_credit_retains_only_one_unsent_frame():
+    binding = _downlink_binding()
+    frame_bytes = len(encode_audio_frame(binding, _frame()))
+    byte_limit = frame_bytes * 2 + frame_bytes // 2
+    source = _ReadyDownlinkFrames(3)
+    socket = _ControlledDownlinkSocket()
+    operation = asyncio.create_task(run_dedicated_media_downlink_socket_leaf(
+        _request(binding), socket=socket, frames=source,
+        on_playback_stop=lambda _: pytest.fail('unexpected playback stop'),
+        max_pending_frames=8, max_pending_bytes=byte_limit,
+    ))
+    try:
+        await _until_downlink(lambda: source.next_calls == 3)
+        assert len([value for value in socket.sent if isinstance(value, bytes)]) == 2
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert source.next_calls == 3
+        socket.controls.put_nowait(serialize_media_control(MediaAck(binding.lease_id, binding.generation.value, 0)))
+        await _until_downlink(lambda: source.next_calls == 4)
+        socket.controls.put_nowait(serialize_media_control(MediaAck(binding.lease_id, binding.generation.value, 2)))
+        result = await asyncio.wait_for(operation, 2)
+        assert result.reason_id is MediaDetachReason.LOCAL_CLOSE
+        assert result.sent_frames == 3 and result.peak_pending_frames == 2
+        assert result.peak_pending_bytes == frame_bytes * 2 <= byte_limit
+        assert source.close_calls == 1 and source.active_reads == socket.active_receives == 0
+        assert result.business_cancel_count_delta == 0
+    finally:
+        if not operation.done():
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stall_at', [0, 1])
+@pytest.mark.parametrize('terminal', ['stop', 'detach', 'transport_loss'])
+async def test_async_downlink_stalled_source_never_blocks_control_cleanup(stall_at, terminal):
+    binding = _downlink_binding()
+    source = _ReadyDownlinkFrames(3, stall_at=stall_at)
+    socket = _ControlledDownlinkSocket()
+    effects = {'stop': 0, 'agent': 0, 'tool': 0, 'task': 0, 'history': 0, 'store': 0}
+    completed = []
+
+    def on_complete(result):
+        assert source.close_calls == 1 and source.active_reads == socket.active_receives == 0
+        completed.append(result)
+
+    operation = asyncio.create_task(run_dedicated_media_downlink_socket_leaf(
+        _request(binding), socket=socket, frames=source,
+        on_playback_stop=lambda _: effects.__setitem__('stop', effects['stop'] + 1),
+        on_complete=on_complete,
+    ))
+    try:
+        await _until_downlink(lambda: source.active_reads == 1 and source.next_calls == stall_at + 1)
+        if terminal == 'stop':
+            message = serialize_media_control(create_playback_stop_receipt(binding,
+                outcome=MediaPlaybackStopOutcome.LOCAL_FENCE_ESTABLISHED,
+                confirmed_through_seq=0 if stall_at else None))
+            expected = MediaDetachReason.PEER_CLOSE
+        elif terminal == 'detach':
+            message = serialize_media_control(MediaDetach(binding.lease_id, binding.generation.value, MediaDetachReason.LOCAL_CLOSE))
+            expected = MediaDetachReason.LOCAL_CLOSE
+        else:
+            message = ConnectionError('transport unavailable')
+            expected = MediaDetachReason.TRANSPORT_CLOSED
+        socket.controls.put_nowait(message)
+        result = await asyncio.wait_for(operation, 2)
+        assert result.reason_id is expected and result.sent_frames == stall_at
+        assert source.close_calls == len(socket.close_calls) == 1
+        assert all(task.done() for task in source.read_tasks)
+        assert completed == [result] and result.business_cancel_count_delta == 0
+        assert effects == {'stop': int(terminal == 'stop'), 'agent': 0, 'tool': 0, 'task': 0, 'history': 0, 'store': 0}
+        source.release.set()
+        await asyncio.sleep(0)
+        assert len([value for value in socket.sent if isinstance(value, bytes)]) == stall_at
+    finally:
+        if not operation.done():
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('invalid', ['wrong_generation', 'wrong_lease', 'unsent_cursor'])
+async def test_async_downlink_invalid_ack_while_source_stalls_has_zero_successor_effects(invalid):
+    binding = _downlink_binding()
+    source = _ReadyDownlinkFrames(2, stall_at=1)
+    socket = _ControlledDownlinkSocket()
+    stopped = []
+    operation = asyncio.create_task(run_dedicated_media_downlink_socket_leaf(
+        _request(binding), socket=socket, frames=source, on_playback_stop=stopped.append,
+    ))
+    try:
+        await _until_downlink(lambda: source.next_calls == 2)
+        control = MediaAck(
+            'other-lease' if invalid == 'wrong_lease' else binding.lease_id,
+            binding.generation.value + int(invalid == 'wrong_generation'),
+            7 if invalid == 'unsent_cursor' else 0,
+        )
+        socket.controls.put_nowait(serialize_media_control(control))
+        result = await asyncio.wait_for(operation, 2)
+        assert result.reason_id is {
+            'wrong_generation': MediaDetachReason.STALE_GENERATION,
+            'wrong_lease': MediaDetachReason.BINDING_MISMATCH,
+            'unsent_cursor': MediaDetachReason.ACK_GAP,
+        }[invalid]
+        assert result.sent_frames == 1 and result.acknowledged_through_seq is None
+        assert stopped == [] and result.business_cancel_count_delta == 0
+        assert source.close_calls == 1 and source.active_reads == socket.active_receives == 0
+    finally:
+        if not operation.done():
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_async_downlink_queued_stop_wins_when_ack_and_source_resume_together():
+    binding = _downlink_binding()
+    source = _ReadyDownlinkFrames(2, stall_at=1)
+    socket = _ControlledDownlinkSocket()
+    stopped = []
+    operation = asyncio.create_task(run_dedicated_media_downlink_socket_leaf(
+        _request(binding), socket=socket, frames=source, on_playback_stop=stopped.append,
+    ))
+    try:
+        await _until_downlink(lambda: source.next_calls == 2)
+        socket.controls.put_nowait(serialize_media_control(MediaAck(binding.lease_id, binding.generation.value, 0)))
+        socket.controls.put_nowait(serialize_media_control(create_playback_stop_receipt(binding,
+            outcome=MediaPlaybackStopOutcome.LOCAL_FENCE_ESTABLISHED, confirmed_through_seq=0)))
+        source.release.set()
+        result = await asyncio.wait_for(operation, 2)
+        assert result.reason_id is MediaDetachReason.PEER_CLOSE
+        assert result.sent_frames == 1 and result.acknowledged_through_seq == 0
+        assert len(stopped) == 1 and source.close_calls == 1
+        assert source.active_reads == socket.active_receives == 0
+        assert result.business_cancel_count_delta == 0
+    finally:
+        if not operation.done():
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('waiting', ['first_source', 'full_window'])
+async def test_async_downlink_cancellation_settles_both_reads_then_closes_source(waiting):
+    source = _ReadyDownlinkFrames(10, stall_at=0 if waiting == 'first_source' else None)
+    socket = _ControlledDownlinkSocket()
+    completed, stopped = [], []
+    operation = asyncio.create_task(run_dedicated_media_downlink_socket_leaf(
+        _request(_downlink_binding()), socket=socket, frames=source,
+        on_playback_stop=stopped.append, on_complete=completed.append,
+    ))
+    await _until_downlink(lambda: source.active_reads == 1 if waiting == 'first_source' else source.next_calls == 8)
+    operation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(operation, 2)
+    assert source.close_calls == len(socket.close_calls) == 1
+    assert source.active_reads == socket.active_receives == 0
+    assert all(task.done() for task in source.read_tasks)
+    assert completed == stopped == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fail_send_at', [0, 1])
+async def test_async_downlink_send_failure_always_closes_unconsumed_or_active_source(fail_send_at):
+    source = _ReadyDownlinkFrames(3)
+    socket = _ControlledDownlinkSocket(fail_send_at=fail_send_at)
+    result = await run_dedicated_media_downlink_socket_leaf(
+        _request(_downlink_binding()), socket=socket, frames=source,
+        on_playback_stop=lambda _: pytest.fail('unexpected playback stop'),
+    )
+    assert result.reason_id is MediaDetachReason.TRANSPORT_SEND_FAILED
+    assert result.sent_frames == 0 and result.business_cancel_count_delta == 0
+    assert source.next_calls == fail_send_at
+    assert source.close_calls == len(socket.close_calls) == 1
+    assert source.active_reads == socket.active_receives == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('terminal', ['stop', 'detach', 'caller_cancel', 'cancel_during_cleanup'])
+async def test_async_downlink_hostile_source_has_bounded_retained_cleanup(monkeypatch, terminal):
+    monkeypatch.setattr(route_module, '_SOCKET_CLOSE_TIMEOUT_SECONDS', 0.01 if terminal != 'cancel_during_cleanup' else 1)
+    binding = _downlink_binding()
+    owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    hostile = _CancellationHostileAwaitable(_frame())
+    socket = _ControlledDownlinkSocket()
+    completed, stopped = [], []
+
+    class Source:
+        close_calls = 0
+        active = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            self.active = True
+            try:
+                return await hostile
+            finally:
+                self.active = False
+
+        async def aclose(self):
+            assert not self.active
+            self.close_calls += 1
+
+    source = Source()
+    operation = asyncio.create_task(run_dedicated_media_downlink_socket_leaf(
+        _request(binding), socket=socket, frames=source, cleanup_owner=owner,
+        on_playback_stop=stopped.append, on_complete=completed.append,
+    ))
+    try:
+        await hostile.started.wait()
+        if terminal == 'caller_cancel':
+            operation.cancel()
+        else:
+            control = create_playback_stop_receipt(binding,
+                outcome=MediaPlaybackStopOutcome.LOCAL_FENCE_ESTABLISHED,
+                confirmed_through_seq=None) if terminal == 'stop' else MediaDetach(
+                    binding.lease_id, binding.generation.value, MediaDetachReason.PEER_CLOSE)
+            socket.controls.put_nowait(serialize_media_control(control))
+        if terminal == 'cancel_during_cleanup':
+            await hostile.cancel_observed.wait()
+            operation.cancel()
+        if terminal in {'caller_cancel', 'cancel_during_cleanup'}:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(operation, 0.5)
+            assert completed == []
+        else:
+            result = await asyncio.wait_for(operation, 0.5)
+            assert result.cleanup_complete is False and result.cleanup_pending_tasks == 1
+            assert result.sent_frames == 0 and result.business_cancel_count_delta == 0
+            assert completed == [result]
+        assert len(socket.close_calls) == 1 and source.close_calls == 0
+        assert hostile.cancel_observed.is_set() and source.active
+        assert owner.snapshot.in_use == owner.snapshot.retained_tasks == 1
+        assert len(stopped) == int(terminal == 'stop')
+        assert not any(isinstance(value, bytes) for value in socket.sent)
+        # Until the hostile pull settles, generator close would be unsafe. Its
+        # retained task owns that exact close and cannot send its late frame.
+        hostile.release.set()
+        assert await owner.retry_cleanup(timeout_seconds=0.5)
+        assert source.close_calls == 1 and not source.active
+        assert owner.snapshot.in_use == owner.snapshot.retained_tasks == 0
+        assert not any(isinstance(value, bytes) for value in socket.sent)
+    finally:
+        hostile.release.set()
+        if not operation.done():
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+        await owner.retry_cleanup(timeout_seconds=0.5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('terminal', ['source_eof', 'source_failure', 'caller_cancel'])
+async def test_async_downlink_hostile_receive_is_retained_after_source_and_socket_close(monkeypatch, terminal):
+    monkeypatch.setattr(route_module, '_SOCKET_CLOSE_TIMEOUT_SECONDS', 0.01)
+    binding = _downlink_binding()
+    owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    hostile = _CancellationHostileAwaitable('late control must remain unconsumed')
+
+    class Socket(_FakeDedicatedSocket):
+        async def recv(self):
+            return await hostile
+
+    class Source:
+        close_calls = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await hostile.started.wait()
+            if terminal == 'source_eof':
+                raise StopAsyncIteration
+            if terminal == 'source_failure':
+                raise DedicatedMediaDownlinkSourceFailure(MediaDetachReason.CONSUMER_FAILED)
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            self.close_calls += 1
+
+    source = Source()
+    socket = Socket([])
+    completed, stopped = [], []
+    operation = asyncio.create_task(run_dedicated_media_downlink_socket_leaf(
+        _request(binding), socket=socket, frames=source, cleanup_owner=owner,
+        on_playback_stop=stopped.append, on_complete=completed.append,
+    ))
+    try:
+        await hostile.started.wait()
+        if terminal == 'caller_cancel':
+            operation.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(operation, 0.5)
+            assert completed == []
+        else:
+            result = await asyncio.wait_for(operation, 0.5)
+            assert result.cleanup_complete is False and result.cleanup_pending_tasks == 1
+            assert result.reason_id is (MediaDetachReason.LOCAL_CLOSE if terminal == 'source_eof' else MediaDetachReason.CONSUMER_FAILED)
+            assert completed == [result]
+        assert source.close_calls == len(socket.close_calls) == 1
+        assert hostile.cancel_observed.is_set()
+        assert owner.snapshot.retained_tasks == 1
+        assert stopped == [] and not any(isinstance(value, bytes) for value in socket.sent)
+        before = list(socket.sent)
+        hostile.release.set()
+        assert await owner.retry_cleanup(timeout_seconds=0.5)
+        assert owner.snapshot.cleanup_complete
+        assert socket.sent == before and stopped == [] and source.close_calls == 1
+    finally:
+        hostile.release.set()
+        if not operation.done():
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+        await owner.retry_cleanup(timeout_seconds=0.5)
+
+
+@pytest.mark.asyncio
+async def test_async_downlink_two_hostile_reads_preserve_capacity_and_reject_new_effects(monkeypatch):
+    monkeypatch.setattr(route_module, '_SOCKET_CLOSE_TIMEOUT_SECONDS', 0.01)
+    owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    hostile_source = _CancellationHostileAwaitable(_frame())
+    hostile_receive = _CancellationHostileAwaitable('late')
+
+    class Source:
+        close_calls = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return await hostile_source
+
+        async def aclose(self):
+            self.close_calls += 1
+
+    class Socket(_FakeDedicatedSocket):
+        async def recv(self):
+            return await hostile_receive
+
+    source = Source()
+    socket = Socket([])
+    operation = asyncio.create_task(run_dedicated_media_downlink_socket_leaf(
+        _request(_downlink_binding()), socket=socket, frames=source,
+        cleanup_owner=owner, on_playback_stop=lambda _: pytest.fail('unexpected stop'),
+    ))
+    try:
+        await hostile_source.started.wait()
+        await hostile_receive.started.wait()
+        operation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(operation, 0.5)
+        assert owner.snapshot.in_use == owner.snapshot.retained_tasks == 2
+        assert len(socket.close_calls) == 1 and source.close_calls == 0
+        next_source = _ReadyDownlinkFrames(1)
+        next_socket = _ControlledDownlinkSocket()
+        with pytest.raises(MediaTransportViolation) as failure:
+            await run_dedicated_media_downlink_socket_leaf(
+                _request(_downlink_binding()), socket=next_socket, frames=next_source,
+                cleanup_owner=owner, on_playback_stop=lambda _: pytest.fail('unexpected stop'),
+            )
+        assert failure.value.reason_id == 'MEDIA_CLEANUP_CAPACITY_EXCEEDED'
+        assert next_source.next_calls == 0 and next_socket.sent == next_socket.close_calls == []
+        hostile_source.release.set()
+        hostile_receive.release.set()
+        assert await owner.retry_cleanup(timeout_seconds=0.5)
+        assert owner.snapshot.in_use == 0 and source.close_calls == 1
+    finally:
+        hostile_source.release.set()
+        hostile_receive.release.set()
+        if not operation.done():
+            operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+        await owner.retry_cleanup(timeout_seconds=0.5)
+
+
+@pytest.mark.asyncio
+async def test_async_downlink_cancel_before_source_task_runs_closes_without_pulling():
+    owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    source = _ReadyDownlinkFrames(2)
+
+    class Socket(_ControlledDownlinkSocket):
+        async def send(self, message):
+            await super().send(message)
+            if isinstance(message, str) and isinstance(deserialize_media_control(message), MediaAttach):
+                asyncio.current_task().cancel()
+
+    socket = Socket()
+    operation = asyncio.create_task(run_dedicated_media_downlink_socket_leaf(
+        _request(_downlink_binding()), socket=socket, frames=source,
+        cleanup_owner=owner, on_playback_stop=lambda _: pytest.fail('unexpected stop'),
+    ))
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(operation, 0.5)
+    assert source.next_calls == 0 and source.close_calls == 1
+    assert len(socket.close_calls) == 1 and owner.snapshot.cleanup_complete
+    assert not any(isinstance(value, bytes) for value in socket.sent)
+
+
+@pytest.mark.asyncio
+async def test_async_downlink_hostile_source_close_stays_in_same_reserved_slot(monkeypatch):
+    monkeypatch.setattr(route_module, '_SOCKET_CLOSE_TIMEOUT_SECONDS', 0.01)
+    owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    hostile_close = _CancellationHostileAwaitable(None)
+
+    class Source(_ReadyDownlinkFrames):
+        async def aclose(self):
+            self.close_calls += 1
+            await hostile_close
+
+    source = Source(0)
+    socket = _ControlledDownlinkSocket()
+    try:
+        result = await asyncio.wait_for(run_dedicated_media_downlink_socket_leaf(
+            _request(_downlink_binding()), socket=socket, frames=source,
+            cleanup_owner=owner, on_playback_stop=lambda _: pytest.fail('unexpected stop'),
+        ), 0.5)
+        assert result.cleanup_complete is False and result.cleanup_pending_tasks == 1
+        assert source.close_calls == len(socket.close_calls) == 1
+        assert not await owner.retry_cleanup(timeout_seconds=0.01)
+        assert owner.snapshot.in_use == owner.snapshot.retained_tasks == 1
+        hostile_close.release.set()
+        assert await owner.retry_cleanup(timeout_seconds=0.5)
+        assert source.close_calls == 1 and owner.snapshot.cleanup_complete
+    finally:
+        hostile_close.release.set()
+        await owner.retry_cleanup(timeout_seconds=0.5)
+
+
+@pytest.mark.asyncio
 async def test_downlink_async_source_failure_is_typed_and_never_replays_audio() -> None:
     binding = _downlink_binding()
 
@@ -2394,13 +2930,7 @@ async def test_downlink_async_source_failure_is_typed_and_never_replays_audio() 
             self.close_calls += 1
 
     frames = _FailAfterFirstFrame()
-    socket = _FakeDedicatedSocket(
-        [
-            serialize_media_control(
-                MediaAck(binding.lease_id, binding.generation.value, 0)
-            )
-        ]
-    )
+    socket = _ControlledDownlinkSocket(acknowledge_sent=True)
 
     result = await run_dedicated_media_downlink_socket_leaf(
         _request(binding),
@@ -2444,7 +2974,13 @@ async def test_downlink_transport_loss_closes_async_source_without_retry() -> No
             self.close_calls += 1
 
     frames = _OpenAsyncFrames()
-    socket = _FakeDedicatedSocket([ConnectionError("private transport loss")])
+    class _LoseAfterSend(_ControlledDownlinkSocket):
+        async def send(self, message: str | bytes) -> None:
+            await super().send(message)
+            if isinstance(message, bytes):
+                self.controls.put_nowait(ConnectionError("private transport loss"))
+
+    socket = _LoseAfterSend()
 
     result = await run_dedicated_media_downlink_socket_leaf(
         _request(binding),

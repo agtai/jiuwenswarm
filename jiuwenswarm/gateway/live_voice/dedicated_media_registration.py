@@ -7660,6 +7660,7 @@ async def handle_registered_media_socket(
                 on_complete=retain_downlink_completion,
                 max_pending_frames=8,
                 max_pending_bytes=131_072,
+                cleanup_owner=registry._media_leaf_cleanup_owner,
             )
         else:
             native_media = record.native_activation is not None

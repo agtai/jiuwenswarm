@@ -120,3 +120,34 @@ The first run sampled the normal 25ms cleanup budget and reported `closed=false`
 that missing cleanup evidence was retained. The second run gave the probe a
 bounded two-second close wait and verified all four sessions closed. Production
 cleanup settings and model/provider configuration were not changed.
+
+### P5 — Async downlink supply within the existing window
+
+The async leaf now sends ready frames within the negotiated frame/byte window
+instead of waiting one network round trip per frame. It retains at most one
+source read and one control receive; ready controls precede further sends, the
+first ready frame is immediate, and a single byte-fit pending frame is bounded.
+Completion still requires source EOF and the final exact ACK. The Registry
+supplies its existing cleanup owner, reserving two slots without increasing
+capacity. Cancellation-resistant reads/close operations remain retained; the
+socket leaf returns truthful incomplete-cleanup facts after its bounded wait.
+Generator close happens once after an active source read actually settles.
+
+The source, focused leaf tests, registration tests' send-triggered ACK helper and
+the Registry's cleanup-owner call site are the only P5 product/test changes.
+Window sizes, protocol, startup 250ms reserve and actual-playback ACK are unchanged.
+
+- Worker leaf + registration suite: 257 passed; Main's integrated repeat: 257
+  passed (`6.81s`), using isolated `logs/p5-data` and P0 pytest options.
+- The decisive eight-frames-before-first-ACK oracle fails against `ebeb5aa4`
+  loaded only inside a test process: old source sends frame 0 and then times out.
+- Initial independent review ran 112 relevant checks and found an unbounded
+  cleanup wait on hostile source/receive cancellation. Fixed using the existing
+  bounded cleanup owner; added hostile source/recv/close, second cancellation,
+  cancellation before first pull and exhausted-owner scenarios.
+- Follow-up independent review ran 36 affected leaf and 10 registered Native
+  seam checks; all passed with no remaining actionable finding. Complete scoped
+  source review, compilation and whitespace checks passed.
+
+The correction proves removal of the source-backed one-frame/ACK bottleneck and
+retained cancellation ownership. It does not prove a 0.5–1 second physical gain.
