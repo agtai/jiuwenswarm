@@ -151,3 +151,53 @@ Window sizes, protocol, startup 250ms reserve and actual-playback ACK are unchan
 
 The correction proves removal of the source-backed one-frame/ACK bottleneck and
 retained cancellation ownership. It does not prove a 0.5–1 second physical gain.
+
+### P3 — Controlled endpoint experiment; auto remains the default
+
+`LIVE_VOICE_NATIVE_VAD_EAGERNESS` accepts exactly `auto` or `high` for Native.
+Invalid values reject before Session construction; Cascade never reads the setting.
+The Web factory captures validated configuration; subsequent environment changes
+cannot replace it. `create_response=false` and `interrupt_response=false` remain
+fixed. Diagnostics label the requested strategy without claiming Provider confirmation.
+The controlled launcher accepts `-NativeVadEagerness`, records it in the runtime
+contract and permits the explicitly selected optimization branch for later clean
+candidate startup. No default model change accompanies this setting.
+
+The real comparison used the existing configured TTS voice/model to make four
+bounded stimuli, then paced identical PCM bytes into fresh `gpt-realtime-2`
+sessions at 24kHz/20ms. Eight sessions negotiated and closed; zero automatic
+responses or business effects occurred. Complete content-free observations and
+PCM digests are in [the endpoint evidence](../evidence/REALTIME_ENDPOINT_COMPARISON_20260907.json).
+
+| Same-byte stimulus | auto endpoint after PCM end | high endpoint after PCM end | Commit count auto/high |
+|---|---:|---:|---:|
+| Clear sentence end | 1440ms | 932ms | 1 / 1 |
+| 600ms mid-sentence pause | 238ms | 222ms | 1 / 1 |
+| 1200ms hesitation pause | 132ms | 123ms | 1 / 1 |
+| Complete sentence, 800ms pause, late supplement | 322ms | 396ms | 1 / 2 |
+
+High prematurely ended the first part of the late-supplement stimulus. It fails
+the no-extra-split condition, so auto remains the production default. These
+single paired samples support that conservative decision, not a general speedup
+estimate. PCM end is a known stimulus boundary, not measured human speech end;
+the observed interval includes Provider/network behavior. Browser/microphone
+acceptance remains open. Local stimulus/probe files remain in `logs/p3-stimuli`
+and `logs/p3_endpoint_probe.py`.
+
+Independent review passed 40 configuration/endpoint checks, four Web-factory
+checks and an environment-change isolation probe with no findings. Main's initial
+broader app run passed 124 and failed one existing GPT-5.6 SDK-version guard.
+The required pinned SDK was built and installed only in the optimization
+worktree's `.venv`; the original environment remains unchanged. Windows checkout
+CRLF initially prevented applying the committed SDK patch; resuming the owned
+fresh checkout with the exact LF Git blob built the prescribed wheel without
+altering its source delta. Both failed logs are retained. After processing the
+base environment's dependency path hooks, config/endpoint/app plus actual SDK
+compatibility tests pass 165/165. Final Engine/launcher regressions pass 209 with
+five explicitly POSIX-only process-group cases skipped on Windows. Scoped Ruff
+`F,E9`, `git diff --check` and the PowerShell parser pass. Independent launcher
+review found PowerShell's default case-insensitive ValidateSet could admit `HIGH`
+before the backend rejected it; the parameter now rejects case variants before
+any launcher effects, matching the backend's exact setting contract.
+The reviewer rechecked the actual parameter AST: auto/high accept, HIGH/Auto
+reject during binding, and the complete script parses. No findings remain.

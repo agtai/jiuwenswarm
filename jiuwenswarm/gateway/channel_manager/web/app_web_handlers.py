@@ -1678,6 +1678,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 return OpenAIRealtimeNativeInteractionEngine(
                     native_session_config,
                     binding=binding,
+                    vad_eagerness=interaction_selection.native_vad_eagerness,
                 )
 
         except Exception:

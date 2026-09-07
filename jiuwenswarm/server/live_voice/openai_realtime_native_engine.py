@@ -51,6 +51,9 @@ from jiuwenswarm.server.live_voice.native_business_tools import (
     NATIVE_BUSINESS_FUNCTION_NAMES, native_business_proposal_from_function_call, native_business_tools,
 )
 from jiuwenswarm.server.live_voice.native_business_encoding import compact_native_business_output
+from jiuwenswarm.server.live_voice.native_interaction_config import (
+    DEFAULT_NATIVE_VAD_EAGERNESS, validate_native_vad_eagerness,
+)
 from jiuwenswarm.server.live_voice.openai_realtime_session import (
     OpenAIRealtimeEvent,
     OpenAIRealtimeSession,
@@ -429,7 +432,7 @@ _WORK_NOTIFICATION_INSTRUCTIONS = (
 )
 
 
-def _session_update() -> dict[str, object]:
+def _session_update(vad_eagerness: str = DEFAULT_NATIVE_VAD_EAGERNESS) -> dict[str, object]:
     return {
         "type": "realtime",
         "output_modalities": ["audio"],
@@ -456,7 +459,7 @@ def _session_update() -> dict[str, object]:
                 "transcription": {"model": "gpt-live-transcribe"},
                 "turn_detection": {
                     "type": "semantic_vad",
-                    "eagerness": "auto",
+                    "eagerness": validate_native_vad_eagerness(vad_eagerness),
                     "create_response": False,
                     "interrupt_response": False,
                 },
@@ -735,6 +738,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         socket_factory: RealtimeSocketFactory | None = None,
         event_queue_capacity: int = 256,
         pending_audio_capacity: int = 64,
+        vad_eagerness: str = DEFAULT_NATIVE_VAD_EAGERNESS,
     ) -> None:
         if not isinstance(binding, NativeInteractionBinding):
             raise TypeError("binding must use NativeInteractionBinding")
@@ -744,6 +748,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         ):
             if type(value) is not int or not 0 < value <= _MAX_ENGINE_CAPACITY:
                 raise ValueError(f"{name} must be an integer in [1, 4096]")
+        self._vad_eagerness = validate_native_vad_eagerness(vad_eagerness)
         self._binding = binding
         self._session = OpenAIRealtimeSession(config, socket_factory=socket_factory,
                                              diagnostic_origin=identity_fields(binding))
@@ -980,7 +985,8 @@ class OpenAIRealtimeNativeInteractionEngine:
             )
         self._state = NativeProviderState.STARTING
         try:
-            update = _session_update()
+            update = _session_update(self._vad_eagerness)
+            self._profile_business("endpoint_strategy_requested", status=self._vad_eagerness)
             if self._business_context is not None:
                 update.update(instructions=_BUSINESS_INSTRUCTIONS, tools=native_business_tools())
             await self._session.open(session_update=update)

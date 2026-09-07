@@ -150,12 +150,15 @@ async def test_web_disconnect_unregisters_physical_subscriptions() -> None:
     assert forgotten == ["web-ws-dead"]
 
 
+@pytest.mark.parametrize("eagerness", ["auto", "high"])
 def test_web_handlers_select_native_runtime_client_once(
     monkeypatch: pytest.MonkeyPatch,
+    eagerness: str,
 ) -> None:
     monkeypatch.setenv("LIVE_VOICE_INTERACTION_ENGINE", "openai-realtime-native")
     monkeypatch.setenv("LIVE_VOICE_SPEECH_API_KEY", "private-test-key")
     monkeypatch.setenv("LIVE_VOICE_SPEECH_API_BASE", "https://api.openai.com/v1")
+    monkeypatch.setenv("LIVE_VOICE_NATIVE_VAD_EAGERNESS", eagerness)
     channel = FakeWebChannel()
     agent = FakeAgentClient()
 
@@ -168,6 +171,23 @@ def test_web_handlers_select_native_runtime_client_once(
         is channel.live_voice_native_runtime_client
     )
     assert callable(channel.live_voice_media_registry._native_engine_factory)
+    from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
+    from jiuwenswarm.server.live_voice.native_interaction_contract import NativeInteractionBinding
+    binding = NativeInteractionBinding(ScopeRef("user", "project", "session", Assurance.AUTHENTICATED),
+                                       "interaction", "activation", 1, "correlation")
+    engine = channel.live_voice_media_registry._native_engine_factory(binding)
+    assert engine._vad_eagerness == eagerness
+    assert engine._session.snapshot().client_event_count == 0
+
+
+def test_invalid_native_endpoint_setting_leaves_no_runtime_client_or_factory(monkeypatch):
+    monkeypatch.setenv("LIVE_VOICE_INTERACTION_ENGINE", "openai-realtime-native")
+    monkeypatch.setenv("LIVE_VOICE_NATIVE_VAD_EAGERNESS", "medium")
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, agent_client=FakeAgentClient()))
+    assert channel.live_voice_interaction_engine == "unavailable"
+    assert channel.live_voice_native_runtime_client is None
+    assert channel.live_voice_media_registry._native_engine_factory is None
 
 
 def test_native_engine_without_gateway_provider_secret_fails_before_activation(

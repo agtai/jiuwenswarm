@@ -38,6 +38,9 @@ have scoped automation, independent review and real selected-Provider schema/cal
 conformance; first-call accuracy improvement and physical latency remain unproved.
 P5 now uses the existing async audio window and bounded retained cleanup; scoped
 automation and independent review pass, with physical supply/continuity still open.
+P3 exposes controlled Native endpoint eagerness; same-byte real Provider trials
+found an extra late-supplement split with high, so auto remains the default.
+Configuration, launcher and endpoint checks pass; no general speedup is claimed.
 The remaining implementation continues independently
 of evidence synchronization. Original rehearsal files are absent locally; full
 optimization, measured latency and physical acceptance remain unproved. The
