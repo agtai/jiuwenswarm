@@ -55,7 +55,7 @@ tests/ · scripts/ · validation/      L5：oracle、合成语音 journey、探�
 - `develop` 集成触发仍按 D-084：feature-complete PASS 之后。瘦身在 w3 上落地后再集成，
   避免先合入约 17 万行再删。
 
-### 1.3 触发条件（待用户以 Decision 记录，建议编号 D-116）
+### 1.3 触发条件（2026-09-08 起由 D-121 选择的路线 B 取代本表的 B/C/D 期；A 期的 A0/A1 已在 `hx/0907_livevoice_slimming` 完成零 caller 退休）
 
 | 期 | 触发 | 现在状态 |
 |---|---|---|
@@ -292,7 +292,7 @@ finalize、前端 Task 呈现与 home start；理由见当前分支重分析 §3
 
 ## 7. 待用户决定
 
-1. 触发条件 Decision（§1.3），建议编号 D-116（D-115 已被“Agent-owned answers and faithful voice delivery”占用）。
+1. 触发条件 Decision（§1.3）：已由 D-121 记录为路线 B；后续包序列见[目标架构 §10](../LIVEVOICE_TARGET_ARCHITECTURE_2026-09-07.md)。
 2. 冻结 tag：建议取 A0 启动时的 w3 tip。
 3. tool hold 归属：建议 JIUWEN_KEEP（一个 rail element），不向 AgentCore 提 F4 扩展。
 4. 瘦身先于 `develop` 集成落地。

@@ -2075,3 +2075,24 @@
   configured providers/models, device profile, existing user project data or
   completed Task effects. Controlled local deployment and the designated human
   journey verify the integrated candidate after scoped checks and independent review.
+
+## D-121 选择路线 B：在两道 seam 之后重写 LiveVoice 核心
+
+- 日期：2026-09-08
+- 状态：Accepted（用户在比较路线 A"分包重构到 60–65K"与路线 B"seam 后重写到 26–29K"后明确选择 B）。
+- 决定：LiveVoice 的瘦身按[目标架构](../LIVEVOICE_TARGET_ARCHITECTURE_2026-09-07.md)执行：`session_id + seq` 的序号
+  身份、每会话一份 append-only 事件日志作为唯一对话真相、每个进程每个关注点一个 owner、三张小库（会话日志、授权
+  journal、任务四台账）、只在 wire 边界校验、结构化并发。生产代码目标 26–29K（不含 Native），测试按状态转移表与
+  录放差分重写。选择理由：路线 A 改的是数量、保留旧密度，路线 B 改的是密度；不变量各对应一个组件与一个测试；
+  E2A 方法 37 → 16；以后的功能不再按旧密度增长。
+- 授权范围：允许改变合同语义，但只限[设计简化计划](../LIVEVOICE_DESIGN_SIMPLIFICATION_PLAN_2026-09-07.md) §4 的
+  SC-1..SC-10；其 §1.2 的产品不变量与 D-098..D-115 的决定不变。Native（D-101..D-103、D-117..D-120）不在本决定内，
+  路线 B 落地后由单独 commit 采用新合同。
+- 保留复用：设计简化计划的 S0（授权与基线）、S1（schema）、S2（任务台账与执行器）、S5（provider 与媒体）、
+  S7（观测）执行卡作为路线 B 的组件设计；S3、S4、S6 由目标架构 §4–§5 与其 §10 的 B 包替代。
+- 顺序与门：S0 → S1 → 录放 harness（B2）→ B3 探针（`session/` + `authorization/`，约 4K 新代码替换约 40K 旧代码，
+  在 `live_voice.v2.*` 方法名下以 feature flag 关闭状态上线，与旧实现做录放差分）→ 探针的行数比例与差分结果决定
+  是否继续 B4–B9；旧实现保留到 B8 cutover 之后一个包周期。
+- 未决（仍需用户回答）：退休 OTel 产品观测链与 S7 探针工具（路线 B 不重写它们，默认随旧实现在 B8 退休）；
+  legacy 链与 `FEATURE_LIVE_VOICE_DEMO` 退休；错误码归并策略与 UI 文案表的维护者；Native 单独 commit 的时间点。
+- 不授予：远端更新、任何验收信用；26–29K 是规划值，B3 探针给出第一份实测。

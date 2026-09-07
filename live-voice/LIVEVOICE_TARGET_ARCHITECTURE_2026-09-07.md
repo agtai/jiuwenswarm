@@ -17,8 +17,9 @@
 3. 正确性不靠"每层都校验"，靠三个 chokepoint（会话事件日志的 append、任务台账的事务、授权 owner 的 consume）
    加两道 seam 上的录放差分测试（E2A 方法、浏览器 WS 协议）。§6 把每条已接受的产品决定映射到强制它的组件与
    证明它的测试。
-4. 两条路线并存：路线 A 是分包重构到 60–65K（现有计划 S0–S8）；路线 B 是在两道 seam 之后重写核心到 26–29K。
-   两条路线共享 S0（授权与基线）与 S1（schema），分岔点在 S2。建议先建录放差分 harness，再选路线（§7）。
+4. 两条路线曾并存：路线 A 是分包重构到 60–65K（现有计划 S0–S8）；路线 B 是在两道 seam 之后重写核心到 26–29K。
+   **2026-09-08 用户选择路线 B（D-121）**；两条路线共享的 S0、S1 与录放差分 harness 先做，B3 探针给出第一份实测后
+   再继续 B4–B9（§10）。
 
 ## 1. 必须保留的能力（从产品决定倒推）
 
@@ -278,9 +279,9 @@ wire 入口：生成的 parser 校验一次，失败 → `LiveVoiceError(invalid
 | 共享前置 | S0（授权、基线、错误码表）、S1（schema 与生成器）、录放 harness | 同左 |
 | 分岔点 | S2 开始在旧 Store 上做台账 | S2 开始在新包里做 `session/log.py` + `task/` |
 
-建议：先做 S0、S1 和录放 harness（三者两条路线都要）；harness 跑通后用它给 AgentServer 的 `session/` 与
-`authorization/` 做一次路线 B 的探针（这两个包合计约 4K 行新代码，替换约 40K 行旧代码），拿到第一份真实比例与差分
-结果再决定整体走 A 还是 B。任务台账（S2）在两条路线里是同一份设计，可以先做。
+决定（D-121，2026-09-08）：选择路线 B。先做 S0、S1 和录放 harness；harness 跑通后用它给 AgentServer 的 `session/` 与
+`authorization/` 做 B3 探针（约 4K 行新代码替换约 40K 行旧代码），探针的行数比例与差分结果决定是否继续 B4–B9。
+任务台账（S2）在两条路线里是同一份设计。包序列见 §10。
 
 ## 9. 风险与未知
 
@@ -292,3 +293,22 @@ wire 入口：生成的 parser 校验一次，失败 → `LiveVoiceError(invalid
 - Native：13.2K 不在本设计内；它依赖现在的 runtime/registry/media 内部接口，路线 B 落地后 Native 必须按新合同重做，
   否则要维持一套兼容层，那会把总量抬回 40K 以上。
 - 协议变更：16 个方法取代 37 个，浏览器与 AgentServer 必须同步切换；用 feature flag 双跑一个包周期。
+
+## 10. 路线 B 的包序列（D-121）
+
+每包独立提交、不推送；新实现在 `live_voice.v2.*` 方法名与 feature flag 之下上线，旧实现保留到 B8 之后一个包周期。
+"复用"列指设计简化计划里可以原样执行的卡片；没有复用的包按本文 §4–§5 的模块表与 §6 的不变量表执行。
+
+| 包 | 交付 | 验证 | 回滚 | 复用 |
+|---|---|---|---|---|
+| B0 授权与基线 | D-121 已记录；基线失败集、18 模块行数、错误码表、`semantic_audio_*` 回收 | S0 卡的完成判据 | revert | S0 卡 |
+| B1 schema 与记录 | `common/schema/live_voice/`（refs、envelopes、task records、errors、codec）；新增 §5.2 的 15 种事件与 16 个命令的 envelope；TS 生成器 | S1 卡的完成判据 + 事件/命令 schema 生成幂等 | 不接入即无影响 | S1 卡 |
+| B2 录放 harness | E2A 方法录放器、媒体 WS 控制对象/帧摘要录放器、差分比对器；用合成语音 journey 录制旧实现的基线 traces | 旧实现两次录制自比对零差异；每条 journey 有一份基线 trace | 无 | 新（`scripts/live_voice/replay/`） |
+| B3 会话核心探针 | `session/log.py`、`session/runtime.py`、`session/history.py`、`session/progress.py`、`authorization/*`、`rpc/handlers.py` 的会话与授权部分（`session.open/resume/close`、`input.commit`、`response.barge/interrupt`、`presentation.ack`、`events.read`、`confirmation.issue/consume`）、`composition/root.py`；flag 关闭 | §6.1 表中前 7 条不变量的测试全过；对旧实现的差分只含 SC 项；新代码 ≤ 估算 × 1.3（session ≤ 4.0K、authorization ≤ 3.3K） | 关 flag，删包 | 本文 §4.4、§5.2–5.4、§5.7–5.8；S3 卡的 symbol 处置表用于确认没有漏掉的责任 |
+| 门 | B3 的行数比例与差分结果由用户审阅后决定是否继续 | — | — | — |
+| B4 任务台账与执行器 | 四张台账、`core.py`、`admission.py`、`project_executor.py`、`worktree.py`、`importer.py`；任务事件投影进会话日志 | S2 卡的完成判据 + §6.1 表中 D-098/D-099/D-100/D-112/UNKNOWN 五条 | 旧 Store 只读 + importer 反向演练 | S2 卡（`task/events.py` 改为向会话日志投影） |
+| B5 Gateway 媒体与 provider | `media/session.py`、`route.py`、`codec.py`、`rpc.py`、`speech/*`；grant 绑定 `(session_id, turn_seq)`；Native 段以 mixin 挂载 | S5 卡的完成判据 + 媒体 seam 差分 + D-113 资源计数 | 关 flag | S5 卡 |
+| B6 浏览器 | `audio/*`、`session/session.ts`（事件流客户端）、`session/media.ts`、`session/speech.ts`、`ui/*`、`errors.ts`；legacy 链退休 | 前端 mounted 测试、三条 journey；`build` 与 `build:live-voice` 通过；`throw` ≤150 | 关 flag | S6 卡的 AudioEdge 与 legacy 退休部分 |
+| B7 观测 | `observability/observation.py`、`sink.py`、前端 `observability.ts`/`diagnosticsSink.ts`；退休 OTel 链与 S7 工具（待 §7.2 确认） | S7 卡的完成判据 | revert | S7 卡 |
+| B8 cutover | flag 默认 v2；删除旧 `server/live_voice`、`gateway/live_voice`、前端 `features/live-voice/formal` 中被替代的文件与其测试；E2A 37 → 16 | 旧 symbol grep 为零；三条 journey PASS；旧套件只剩已迁移的用例 | 一个包周期内切回 flag | — |
+| B9 验收与计量 | 物理 journey、独立评审、`anatomy_modules.py` 预算、多仓口径报告、STATUS/README 更新 | S8 卡 | — | S8 卡 |

@@ -32,8 +32,9 @@
    旧套件失败列表就是"这次改了哪些语义"的清单，逐条对照 §4 确认是预期变化还是缺陷。
 6. 需要用户的五个决定见 §7：授权语义变更、退休从未启用的 OTel 产品观测链、退休 legacy 链与其 feature flag、
    Task 家族在仓库内重写为小台账（不等 AgentCore F1–F6）、错误码归并策略。
-7. 本计划是路线 A（分包重构到 60–65K）。从能力出发的重写设计（路线 B，26–29K）见
-   [目标架构](LIVEVOICE_TARGET_ARCHITECTURE_2026-09-07.md)；两条路线共享 S0、S1 与录放差分 harness，分岔在 S2。
+7. 本计划原为路线 A（分包重构到 60–65K）。**2026-09-08 用户选择路线 B（D-121）**：按[目标架构](LIVEVOICE_TARGET_ARCHITECTURE_2026-09-07.md)
+   重写到 26–29K。本文的 S0、S1、S2、S5、S7 卡在路线 B 中原样使用（目标架构 §10 的 B0/B1/B4/B5/B7），S3、S4、S6
+   由目标架构 §4–§5 与 B3/B6 替代；§4 的 SC-1..10 仍是语义变更的授权范围。
 
 ## 1. 标准与预算
 
@@ -389,7 +390,7 @@
 
 ## 7. 需要用户决定
 
-1. **授权语义变更**：以 Decision 记录 SC-1..SC-10 与 §1.1 预算（建议编号 D-116；D-115 已被占用）。
+1. **授权语义变更**：已由 D-121（选择路线 B）记录，范围 SC-1..SC-10 与 §1.1 预算。
 2. **退休 OTel 产品观测链与 S7 探针工具**：开关 `JIUWENSWARM_LIVE_VOICE_PRODUCT_OBSERVABILITY_ENABLED` 从未在
    部署、脚本、runbook 中设置；S7 探针（`scripts/live_voice/s7_*.py` 与 Alpha 支持模块）只服务已完成的 Alpha 验证。
 3. **退休 legacy 链与 `FEATURE_LIVE_VOICE_DEMO`**。
@@ -490,7 +491,7 @@
 - **输入**：`live-voice/decisions/DECISIONS.md`；`scripts/live_voice/slimming/*`；`git show 7c7aad7b8:scripts/live_voice/`
   下的 `semantic_audio_runtime.py`、`semantic_audio_browser.py`、`semantic_audio_journey.py`、`semantic_audio_assertions.py`。
 - **目标结构**：
-  - `live-voice/decisions/DECISIONS.md` 新增 D-116（语义变更授权：SC-1..10 与 §1.1 预算）与 §7.2–7.5 的结论。
+  - `live-voice/decisions/DECISIONS.md` 已有 D-121（路线 B 与语义变更授权）；补记 §7.2、§7.3、§7.5 的结论。
   - `live-voice/slimming/BASELINE_2026-09-07.md`：后端与前端失败清单（10.2 的两条命令的输出），18 模块行数，解剖表。
   - `live-voice/slimming/ERROR_CODES.md`：目标 `ErrorCode`（≤20）与现有 reason 值的映射表。
   - `scripts/live_voice/semantic_audio_*.py` 四个文件从 `7c7aad7b8` 回收。
@@ -512,7 +513,7 @@
   4. 回收四个 `semantic_audio_*.py`：`git checkout 7c7aad7b8 -- scripts/live_voice/semantic_audio_runtime.py …`。
      验证：`python -c "import ast,io;[ast.parse(io.open(f,encoding='utf-8').read()) for f in [...]]"` 无语法错误。
   5. 提交：`docs(live-voice): authorize the design-simplification path and record its baseline`。
-- **完成判据**：四个文件存在；DECISIONS 有 D-116；BASELINE 的失败集可被后续包引用。
+- **完成判据**：四个文件存在；DECISIONS 的 D-121 之后补记了 §7.2/7.3/7.5 的结论；BASELINE 的失败集可被后续包引用。
 - **禁止**：改任何生产代码。
 - **回滚**：revert 该提交。
 
