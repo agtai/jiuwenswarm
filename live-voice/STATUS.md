@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-07 (Full Realtime optimization active; physical acceptance remains open).
+> Updated: 2026-09-07 (P0–P9 per-point candidate complete; unified acceptance remains open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -57,11 +57,21 @@ P7 prepares exact terminal notification TTS before playback arbitration, retaini
 child cancellation through actual render settlement. Scoped backend/frontend,
 independent review and real selected-TTS/registered-media-leaf checks pass; the
 physical reactivation target and complete mounted acceptance remain unproved.
-The remaining implementation continues independently
-of evidence synchronization. Original rehearsal files are absent locally; full
-optimization, measured latency and physical acceptance remain unproved. The
-packet defines per-point ownership, risk and required evidence; the Native
-boundary below supplies the baseline.
+P2 now retains complete canonical truth while reducing redundant receipt context,
+waking/coalescing observations and preparing one bounded successor behind the real
+predecessor playback ACK. Early control receipts, STOP priority, bounded observation
+retention and exact failed Task-presentation retirement have scoped regression and
+independent max/ultra review. Final cumulative backend checks pass 642 cases;
+real selected-Realtime output/truncation and selected-TTS/media-leaf probes pass
+their recorded boundaries with unchanged private configuration.
+
+P0–P9 have each been handled in one local point commit, including the explicit
+P3/P6/P9 retain-or-reject decisions. The candidate is ready for unified review;
+this does not claim all latency targets were achieved. Original rehearsal files
+are absent locally; measured overall latency, physical playback and complete
+product acceptance remain unproved. Inherited Registry and mounted failures are
+recorded in the packet and remain open. The Native boundary below supplies the
+baseline. Local integration does not update any separately pinned deployment.
 
 ### Native conversational execution
 

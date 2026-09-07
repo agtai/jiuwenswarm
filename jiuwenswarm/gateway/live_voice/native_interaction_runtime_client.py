@@ -38,6 +38,9 @@ from jiuwenswarm.server.live_voice.native_business_contract import (
     NATIVE_BUSINESS_CONTRACT_VERSION,
     NativeBusinessProposal,
 )
+from jiuwenswarm.server.live_voice.native_business_observation import (
+    NATIVE_BUSINESS_OBSERVATION_VERSION, MAX_OBSERVATION_WAIT_MS, observation_cursor,
+)
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
     MAX_NATIVE_DELEGATE_RESULT_UTF8_BYTES,
     NativeEngineEvent,
@@ -84,6 +87,7 @@ class GatewayNativeActivation:
     capability: str
     connection_id: str
     business_contract_version: str | None = None
+    observation_contract_version: str | None = None
 
 
 def _capability(value: object) -> str:
@@ -425,11 +429,36 @@ def _validate_business_context_result(result: dict[str, object]) -> dict[str, ob
         raise NativeRuntimeClientError("NATIVE_BUSINESS_CONTEXT_INVALID", "Business context is not closed bounded data") from error
 
 
+def _validate_business_observation_result(result: dict[str, object]) -> dict[str, object]:
+    try:
+        if (set(result) != {"kind", "contract_version", "cursor", "context", "work_events"}
+                or result["kind"] != "business_observation"
+                or result["contract_version"] != NATIVE_BUSINESS_OBSERVATION_VERSION):
+            raise ValueError()
+        cursor = observation_cursor(result["cursor"])
+        if cursor is None:
+            raise ValueError()
+        context = _validate_business_context_result({"kind": "business_context",
+            "contract_version": NATIVE_BUSINESS_CONTRACT_VERSION,
+            "context": result["context"], "work_events": result["work_events"]})
+        encoded = json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if len(encoded) > 524288:
+            raise ValueError()
+        return {"kind": "business_observation", "contract_version": NATIVE_BUSINESS_OBSERVATION_VERSION,
+                "cursor": cursor, "context": context["context"], "work_events": context["work_events"]}
+    except (TypeError, ValueError, UnicodeError, RecursionError, KeyError) as error:
+        raise NativeRuntimeClientError("NATIVE_BUSINESS_OBSERVATION_INVALID", "Observation is not closed bounded data") from error
+
+
 def _validate_method_result(
     method: ReqMethod, result: dict[str, object], *, allow_business: bool = False,
 ) -> dict[str, object]:
     kind = result.get("kind")
     if method is ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE:
+        if kind == "business_observation":
+            if not allow_business:
+                raise NativeRuntimeClientError("NATIVE_BUSINESS_CAPABILITY_REQUIRED", "Unnegotiated business observation")
+            return _validate_business_observation_result(result)
         if kind == "business_context":
             if not allow_business:
                 raise NativeRuntimeClientError("NATIVE_BUSINESS_CAPABILITY_REQUIRED", "Unnegotiated business result")
@@ -678,9 +707,12 @@ class GatewayNativeInteractionRuntimeClient:
             or set(descriptor) not in (
                 {"contract_version", "binding", "capability"},
                 {"contract_version", "binding", "capability", "business_contract_version"},
+                {"contract_version", "binding", "capability", "business_contract_version", "observation_contract_version"},
             )
             or ("business_contract_version" in descriptor
                 and descriptor["business_contract_version"] != NATIVE_BUSINESS_CONTRACT_VERSION)
+            or ("observation_contract_version" in descriptor
+                and descriptor["observation_contract_version"] != NATIVE_BUSINESS_OBSERVATION_VERSION)
             or descriptor.get("contract_version") != NATIVE_INTERACTION_CONTRACT_VERSION
             or type(connection_id) is not str
             or not connection_id
@@ -719,7 +751,8 @@ class GatewayNativeInteractionRuntimeClient:
         return (
             sanitized,
             result,
-            GatewayNativeActivation(binding, capability, connection_id, descriptor.get("business_contract_version")),
+            GatewayNativeActivation(binding, capability, connection_id, descriptor.get("business_contract_version"),
+                                    descriptor.get("observation_contract_version")),
         )
 
     def observe_activation_response(
@@ -815,6 +848,28 @@ class GatewayNativeInteractionRuntimeClient:
         if self._authorize(activation.binding, activation.capability) != activation:
             raise NativeRuntimeClientError("NATIVE_RUNTIME_ACTIVATION_STALE", "Context owner was replaced")
         return _validate_business_context_result(result)
+
+    async def observe_business_context(self, activation: GatewayNativeActivation, *, request_id: str,
+                                       after=None, wait_ms: int = 0) -> dict[str, object]:
+        if not isinstance(activation, GatewayNativeActivation):
+            raise NativeRuntimeClientError("NATIVE_RUNTIME_ACTIVATION_INVALID", "An exact activation is required")
+        retained = self._authorize(activation.binding, activation.capability)
+        if (retained != activation or retained.observation_contract_version != NATIVE_BUSINESS_OBSERVATION_VERSION
+                or retained.business_contract_version != NATIVE_BUSINESS_CONTRACT_VERSION):
+            raise NativeRuntimeClientError("NATIVE_OBSERVATION_CAPABILITY_REQUIRED", "Observation requires explicit negotiation")
+        try:
+            after = observation_cursor(after)
+            if type(wait_ms) is not int or not 0 <= wait_ms <= MAX_OBSERVATION_WAIT_MS:
+                raise ValueError()
+        except ValueError:
+            raise NativeRuntimeClientError("NATIVE_OBSERVATION_REQUEST_INVALID", "Observation bounds or cursor are invalid") from None
+        result = await self._request(method=ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE,
+            binding=activation.binding, capability=activation.capability, request_id=request_id,
+            extra={"contract_version": NATIVE_BUSINESS_OBSERVATION_VERSION, "after": after, "wait_ms": wait_ms},
+            allow_business=True, timeout_seconds=max(self._timeout_seconds, wait_ms / 1000 + 2))
+        if self._authorize(activation.binding, activation.capability) != activation:
+            raise NativeRuntimeClientError("NATIVE_RUNTIME_ACTIVATION_STALE", "Observation owner was replaced")
+        return _validate_business_observation_result(result)
 
     async def propose_audio_batch(
         self,

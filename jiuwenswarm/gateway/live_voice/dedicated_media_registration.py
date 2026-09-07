@@ -959,6 +959,7 @@ class _SynthesisAuthorityTransfer:
     claimed_operation_id: str | None = None
     task_notification: bool = False
     terminal_event_key: str | None = None
+    presentation_retired: bool = False
     streaming_authority: SpeechStreamAuthority | None = field(default=None, repr=False)
 
 
@@ -968,6 +969,7 @@ class _NativeNotificationSequenceFence:
 
     agent_high_water: int = 0
     native_work_state_sequence: int = 0
+    task_presentation_retired_generation: int = -1
     local_request_id: str | None = None
     local_sequence: int | None = None
     local_response: dict[str, object] | None = field(default=None, repr=False)
@@ -1016,6 +1018,11 @@ class _NativeMediaSession:
     event_task: asyncio.Task[None] | None = field(default=None, repr=False)
     delivery_task: asyncio.Task[None] | None = field(default=None, repr=False)
     business_poll_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    business_refresh_task: asyncio.Task | None = field(default=None, repr=False)
+    business_observation_cursor: dict[str, object] | None = field(default=None, repr=False)
+    business_context_result: dict[str, object] | None = field(default=None, repr=False)
+    business_read_ticket: int = 0
+    business_applied_ticket: int = 0
     business_diagnostic_context_id: str | None = None
     business_diagnostic_model: tuple[str, str] | None = None
     business_diagnostic_works: dict[str, tuple[object, object, object]] = field(default_factory=dict, repr=False)
@@ -1461,17 +1468,13 @@ class DedicatedMediaProductRegistry:
                     )) or not callable(getattr(self._native_runtime_client, "business_context", None)):
                         raise MediaTransportViolation("MEDIA_NATIVE_BUSINESS_UNAVAILABLE", "Negotiated business context is unavailable")
                     async def refresh_business_context():
-                        if session.closed:
-                            raise MediaTransportViolation("MEDIA_NATIVE_SESSION_CLOSED", "Business context route is closed")
-                        result = await self._native_runtime_client.business_context(activation,
-                            request_id=self._native_request_id(session, "business-context"))
-                        self._profile_native_business_context(session, result)
-                        self._publish_native_work_state(session, result)
-                        return result
+                        return await self._refresh_native_business_context(session)
                     business_initial = await refresh_business_context()
                     self._native_work_state_rows(business_initial["context"]["works"])
+                    optimized = getattr(activation, "observation_contract_version", None) is not None
                     engine.configure_business_context(business_initial["context"], refresh=refresh_business_context,
-                        presentation_busy=lambda: self._native_task_presentation_busy(session))
+                        presentation_busy=lambda: self._native_task_presentation_busy(session),
+                        **({"continuation_preparation": True, "receipt_projection": True} if optimized else {}))
                 await engine.start()
                 if business_initial is not None:
                     await engine.update_business_context(business_initial["context"], business_initial["work_events"])
@@ -1927,6 +1930,7 @@ class DedicatedMediaProductRegistry:
                 session.event_task,
                 session.delivery_task,
                 session.business_poll_task,
+                session.business_refresh_task,
                 *session.delegate_tasks.values(),
             )
             if task is not None and task is not current
@@ -1980,16 +1984,65 @@ class DedicatedMediaProductRegistry:
 
     async def _run_native_business_poll(self, session: _NativeMediaSession) -> None:
         while not session.closed:
-            await asyncio.sleep(_NATIVE_BUSINESS_POLL_SECONDS)
-            result = await self._native_runtime_client.business_context(session.activation,
-                request_id=self._native_request_id(session, "business-context"))
+            if getattr(session.activation, "observation_contract_version", None) is not None:
+                result = await self._read_native_business_context(session, wait_ms=1000)
+            else:
+                await asyncio.sleep(_NATIVE_BUSINESS_POLL_SECONDS)
+                result = await self._refresh_native_business_context(session)
             if session.closed:
                 return
-            self._profile_native_business_context(session, result)
-            self._publish_native_work_state(session, result)
             stops = await session.engine.update_business_context(result["context"], result["work_events"])
             for event in stops:
                 await self._handle_native_event(session, event)
+
+    async def _refresh_native_business_context(self, session: _NativeMediaSession):
+        if session.closed:
+            raise MediaTransportViolation("MEDIA_NATIVE_SESSION_CLOSED", "Business context route is closed")
+        task = session.business_refresh_task
+        if task is None:
+            task = asyncio.create_task(self._read_native_business_context(session, wait_ms=0))
+            session.business_refresh_task = task
+            def finished(done):
+                if session.business_refresh_task is done:
+                    session.business_refresh_task = None
+                if not done.cancelled():
+                    done.exception()
+            task.add_done_callback(finished)
+        return await asyncio.shield(task)
+
+    async def _read_native_business_context(self, session: _NativeMediaSession, *, wait_ms: int):
+        if session.closed:
+            raise MediaTransportViolation("MEDIA_NATIVE_SESSION_CLOSED", "Business context route is closed")
+        session.business_read_ticket += 1
+        ticket = session.business_read_ticket
+        observer = getattr(self._native_runtime_client, "observe_business_context", None)
+        if getattr(session.activation, "observation_contract_version", None) is not None:
+            if not callable(observer):
+                raise MediaTransportViolation("MEDIA_NATIVE_OBSERVATION_UNAVAILABLE", "Negotiated observer is unavailable")
+            result = await observer(session.activation, request_id=self._native_request_id(session, "business-observation"),
+                after=session.business_observation_cursor if wait_ms else None, wait_ms=wait_ms)
+        else:
+            result = await self._native_runtime_client.business_context(session.activation,
+                request_id=self._native_request_id(session, "business-context"))
+        if session.closed:
+            raise MediaTransportViolation("MEDIA_NATIVE_SESSION_CLOSED", "Business context owner closed during observation")
+        cursor = result.get("cursor")
+        prior = session.business_observation_cursor
+        stale = False
+        if cursor is not None and prior is not None:
+            stale = ((cursor["read_sequence"], cursor["sequence"]) < (prior["read_sequence"], prior["sequence"])
+                     if cursor["epoch"] == prior["epoch"]
+                     else ticket < session.business_applied_ticket)
+        elif cursor is None:
+            stale = ticket < session.business_applied_ticket
+        if stale and session.business_context_result is not None:
+            return session.business_context_result
+        session.business_applied_ticket = max(ticket, session.business_applied_ticket)
+        session.business_observation_cursor = cursor
+        session.business_context_result = result
+        self._profile_native_business_context(session, result)
+        self._publish_native_work_state(session, result)
+        return result
 
     def _native_task_presentation_busy(self, session: _NativeMediaSession) -> bool:
         """Read the existing Task synthesis handoff and media playout ownership."""
@@ -2002,7 +2055,7 @@ class DedicatedMediaProductRegistry:
             if activation is None:
                 return True
             now = self._monotonic()
-            return any(transfer.task_notification and now <= transfer.expires_at
+            return any(transfer.task_notification and not transfer.presentation_retired and now <= transfer.expires_at
                 and (response, unit_id) in parent.synthesis_content_sha256
                 and (response, unit_id) not in parent.playout_receipts
                 for (response, unit_id, _locale, _rate), transfer in activation.synthesis_content_sha256.items())
@@ -2099,6 +2152,11 @@ class DedicatedMediaProductRegistry:
     async def _run_native_events(self, session: _NativeMediaSession) -> None:
         while not session.closed:
             event = await session.engine.next_event()
+            take_failure = getattr(session.engine, "take_continuation_failure", None)
+            if callable(take_failure):
+                while (failure := take_failure()) is not None:
+                    turn_id, reason = failure
+                    self._native_request_state(session, "failed", turn_id, reason)
             if not isinstance(event, NativeEngineEvent):
                 raise MediaTransportViolation(
                     "MEDIA_NATIVE_EVENT_INVALID",
@@ -5463,6 +5521,11 @@ class DedicatedMediaProductRegistry:
                     _key, evicted = self._product_activations.popitem(last=False)
                     self._revoke_media_for_product_activation(evicted)
             return
+        if status == "presentation_failed_fallback_text":
+            self._observe_task_presentation_failure(payload, result,
+                routed_session_id=routed_session_id, connection_id=connection_id,
+                request_method=request_method)
+            return
         if status == "notification_batch":
             notifications = result.get("notifications")
             if (
@@ -5629,6 +5692,7 @@ class DedicatedMediaProductRegistry:
             retained_synthesis_content = OrderedDict(
                 activation.synthesis_content_sha256
             )
+            self._prune_synthesis_transfers(retained_synthesis_content, now)
             for record in self._records.values():
                 if (
                     record.binding.session_id != session_id
@@ -5668,6 +5732,16 @@ class DedicatedMediaProductRegistry:
                     record.binding.frame_format.sample_rate_hz,
                 )
                 existing_transfer = retained_synthesis_content.get(transfer_key)
+                if (trusted_task_audio and ref.response_generation
+                        <= activation.notification_fence.task_presentation_retired_generation
+                        and not (existing_transfer is not None
+                            and existing_transfer.task_notification
+                            and not existing_transfer.presentation_retired
+                            and existing_transfer.content_sha256 == content_sha256
+                            and existing_transfer.terminal_event_key == terminal_event_key)):
+                    # Task responses have one terminal unit and monotonic generations.
+                    # Keep existing other grants; never reissue a retired/stale one.
+                    continue
                 transfer = self._retain_synthesis_transfer(
                     retained_synthesis_content,
                     key=transfer_key,
@@ -5677,12 +5751,13 @@ class DedicatedMediaProductRegistry:
                     task_notification=trusted_task_audio,
                     terminal_event_key=terminal_event_key,
                 )
-                if transfer is not None:
+                if transfer is not None and not transfer.presentation_retired:
                     record.synthesis_content_sha256[(ref, unit_id)] = (
                         transfer.content_sha256
                     )
                 elif (
                     existing_transfer is not None
+                    and not existing_transfer.presentation_retired
                     and (existing_transfer.content_sha256 != content_sha256
                          or existing_transfer.terminal_event_key != terminal_event_key)
                 ):
@@ -5713,6 +5788,66 @@ class DedicatedMediaProductRegistry:
             self._product_activations.move_to_end(activation_key)
             self._reconcile_task_preparations()
 
+    def _observe_task_presentation_failure(self, payload: Mapping[str, object],
+            result: Mapping[str, object], *, routed_session_id: str | None,
+            connection_id: str | None, request_method: str | None) -> None:
+        """Only the server's exact settled failure releases a Task audio handoff."""
+        if (request_method != "live_voice.composition.p2.presentation.failed"
+                or not _has_formal_p2_manifest(payload)
+                or set(result) != {"status", "session_id", "correlation_id", "interaction_id",
+                    "activation_id", "activation_generation", "response_id", "response_generation",
+                    "surface", "unit_id", "failure_reason", "fallback", "replayed"}
+                or result.get("surface") != "audio" or result.get("fallback") != "text"
+                or not isinstance(result.get("failure_reason"), str)
+                or result.get("failure_reason") not in {"task_audio_playout_failed", "task_audio_owner_unavailable"}
+                or type(result.get("replayed")) is not bool):
+            return
+        try:
+            session_id = _required_id(result["session_id"], "session_id")
+            owner_connection = _required_id(connection_id, "connection_id")
+            if session_id != _required_id(routed_session_id, "routed_session_id"):
+                return
+            correlation_id = _required_id(result["correlation_id"], "correlation_id")
+            activation_id = _required_id(result["activation_id"], "activation_id")
+            generation = _safe_uint(result["activation_generation"], "activation_generation")
+            ref = ResponseRef(_required_id(result["interaction_id"], "interaction_id"),
+                _required_id(result["response_id"], "response_id"),
+                _safe_uint(result["response_generation"], "response_generation"))
+            unit_id = _required_id(result["unit_id"], "unit_id")
+        except MediaTransportViolation:
+            return
+        with self._lock:
+            now = self._monotonic()
+            self._prune(now)
+            activation = self._product_activations.get((session_id, owner_connection, ref.interaction_id))
+            if (activation is None or activation.correlation_id != correlation_id
+                    or activation.activation_id != activation_id or activation.activation_generation != generation):
+                return
+            for response, _unit, _locale, _rate in activation.synthesis_content_sha256:
+                if ((response.response_id == ref.response_id) !=
+                        (response.response_generation == ref.response_generation)):
+                    return  # A retained exact identity disproves this receipt.
+            known_units = {unit for (response, unit, _locale, _rate), transfer
+                in activation.synthesis_content_sha256.items() if response == ref and transfer.task_notification}
+            if known_units and unit_id not in known_units:
+                return
+            # The exact formal failure remains authoritative after transfer TTL
+            # or eviction. This scalar is not an active SpeechResponseAuthority.
+            fence = activation.notification_fence
+            fence.task_presentation_retired_generation = max(
+                fence.task_presentation_retired_generation, ref.response_generation)
+            for (response, unit, _locale, _rate), transfer in activation.synthesis_content_sha256.items():
+                if response == ref and unit == unit_id and transfer.task_notification:
+                    transfer.presentation_retired = True
+            for record in self._records.values():
+                if (record.binding.session_id == session_id and record.binding.connection_id == owner_connection
+                        and record.binding.correlation_id == correlation_id
+                        and record.binding.interaction_id == ref.interaction_id
+                        and record.product_activation_id == activation_id
+                        and record.product_activation_generation == generation):
+                    record.synthesis_content_sha256.pop((ref, unit_id), None)
+            self._reconcile_task_preparations()
+
     @staticmethod
     def _retain_synthesis_transfer(
         transfers: OrderedDict[
@@ -5739,7 +5874,7 @@ class DedicatedMediaProductRegistry:
                 (
                     candidate_key
                     for candidate_key, candidate in transfers.items()
-                    if candidate.claimed_subject_id is None
+                    if candidate.claimed_subject_id is None or candidate.presentation_retired
                 ),
                 None,
             )
@@ -5778,7 +5913,7 @@ class DedicatedMediaProductRegistry:
             return False
         transfer = activation.synthesis_content_sha256.get((binding.response, binding.unit_id,
             record.locale, record.binding.frame_format.sample_rate_hz))
-        return bool(transfer is not None and transfer.task_notification and now <= transfer.expires_at and
+        return bool(transfer is not None and transfer.task_notification and not transfer.presentation_retired and now <= transfer.expires_at and
                     transfer.content_sha256 == binding.content_sha256)
 
     def context_for(
@@ -5984,7 +6119,7 @@ class DedicatedMediaProductRegistry:
                         record.binding.frame_format.sample_rate_hz,
                     )
                 )
-                if transfer is None or transfer.content_sha256 != binding.content_sha256:
+                if transfer is None or transfer.presentation_retired or transfer.content_sha256 != binding.content_sha256:
                     return None
                 if transfer.claimed_subject_id is None:
                     transfer.claimed_subject_id = record.subject_id
@@ -6009,7 +6144,8 @@ class DedicatedMediaProductRegistry:
             "retention_ms": int(task_preparation.RETENTION_SECONDS * 1000)}
 
     def _task_preparation_request(self, params: object, *, routed_session_id: str,
-            connection_id: str, request_origin: str | None, with_text: bool = False
+            connection_id: str, request_origin: str | None, with_text: bool = False,
+            allow_retired: bool = False,
     ) -> tuple[task_preparation.PreparationIdentity, str, _MediaAuthority, _SynthesisAuthorityTransfer]:
         keys = {"contract_version", "preparation_id", "session_id", "subject_id", "correlation_id",
             "interaction_id", "activation_id", "activation_generation", "event_key", "response",
@@ -6059,6 +6195,8 @@ class DedicatedMediaProductRegistry:
         if (transfer is None or not transfer.task_notification or transfer.terminal_event_key != identity.event_key
                 or now >= transfer.expires_at):
             raise task_preparation.PreparationViolation("TASK_PREPARATION_SOURCE_MISMATCH")
+        if transfer.presentation_retired and not allow_retired:
+            raise task_preparation.PreparationViolation("TASK_PREPARATION_RETIRED")
         if with_text:
             text = params["text"]
             if (not isinstance(text, str) or not text.strip() or len(text) > 4000
@@ -6099,7 +6237,7 @@ class DedicatedMediaProductRegistry:
                     return bool(self._records.get(parent.record_id) is parent and not parent.route_completed
                         and native is not None and not native.closed and native.record_id == parent.record_id
                         and now < parent.authority_expires_at and self._has_retained_product_activation(parent, now)
-                        and activation is not None and now < transfer.expires_at
+                        and activation is not None and not transfer.presentation_retired and now < transfer.expires_at
                         and activation.synthesis_content_sha256.get((ref, identity.unit_id, identity.locale, identity.sample_rate_hz)) is transfer
                         and transfer.terminal_event_key == identity.event_key)
 
@@ -6183,7 +6321,8 @@ class DedicatedMediaProductRegistry:
             connection_id: str, request_origin: str | None) -> dict[str, object]:
         with self._lock:
             identity, preparation_id, _parent, _transfer = self._task_preparation_request(params,
-                routed_session_id=routed_session_id, connection_id=connection_id, request_origin=request_origin)
+                routed_session_id=routed_session_id, connection_id=connection_id, request_origin=request_origin,
+                allow_retired=True)
             self._task_preparations.cancel(identity, preparation_id)
             self._reconcile_task_preparations()
         return {"contract_version": task_preparation.CONTRACT_VERSION, "preparation_id": preparation_id,
@@ -6227,6 +6366,7 @@ class DedicatedMediaProductRegistry:
             )
             if (
                 transfer is None
+                or transfer.presentation_retired
                 or transfer.content_sha256 != binding.content_sha256
                 or transfer.claimed_subject_id != subject_id
                 or transfer.claimed_operation_id != request.operation_id
@@ -6246,6 +6386,7 @@ class DedicatedMediaProductRegistry:
                         and now <= record.authority_expires_at
                         and self._has_retained_product_activation(record, now)
                         and now <= transfer.expires_at
+                        and not transfer.presentation_retired
                         and current is not None
                         and current.streaming_response_authorities
                         and current.streaming_response_authorities[0].response

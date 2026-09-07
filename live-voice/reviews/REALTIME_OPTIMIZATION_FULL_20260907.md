@@ -369,3 +369,110 @@ and unchanged private configuration. Ready/claim take 1786/0.44ms in that sample
 but no paired reactivation benchmark or 3–4.5 second target achievement follows.
 Main logs are `logs/p7-main-*`, `logs/p7-real-integrated-leaf/` and
 `logs/p7_real_tts_probe.py`. Physical playback remains part of unified acceptance.
+
+### P2 cumulative review refinement — retire acknowledged failed Task presentation
+
+Independent review reproduced a retained Gateway Task-audio handoff after the
+canonical successful `live_voice.composition.p2.presentation.failed` response
+had already released the Runtime audio reservation and selected text fallback.
+Main owns this Tier-3 Gateway integration repair. Only the exact formal server
+receipt, current routed activation and response/unit may retire that handoff;
+bare preparation cancellation cannot do so. Retirement must fence an in-flight
+prepared source and old notification replay, preserve accepted render receipts
+and the parent capture, and retain bounded state over long sessions. Acceptance
+covers failure before/after claim, receipt rejection, replay and unaffected owners.
+No new wire protocol, fallback policy, playback ACK or business truth is created.
+
+Astra ultra verified the existing Task-response invariant: one terminal unit
+per response and strictly increasing per-interaction response generations
+(`agent_conversation_runtime.py` Task final/reservation and `conversation_runtime.py`
+response acceptance). One scalar retirement frontier in the existing activation
+notification fence prevents new stale grants after transfer TTL/eviction. Existing
+other exact grants remain usable; the active SpeechResponseAuthority is never
+fabricated or advanced. Same-activation renewal retains the frontier and activation
+replacement resets it. Retired transfer entries remain evictable under the existing
+16-entry bound, so failures do not accumulate lifetime tombstones or exhaust a session.
+
+The completed Gateway repair passes 24 exact-receipt/lifecycle cases, including
+501 failures with alternating transfer expiry and eviction while another active
+source remains valid. Negative cases also preserve the retirement frontier:
+contradictory retained response ID/generation pairs cannot suppress a future grant.
+The affected Gateway/media boundary passes 355 cases before that final validation
+guard; its 24-case module was repeated after the guard. The real Registry's
+audio-failure/text-fallback/voice-consumption boundary passes all four selected
+cases. Independent max review passes 39 affected cases and verifies the production
+registered media leaf: canonical failure after transport EOF removes the child,
+rejects a late render ACK and leaves the parent mic open. Ultra confirms closure
+of the bounded frontier and identity-contradiction findings. No scoped finding remains.
+
+### P2 — Bounded continuation, complete context and terminal wake
+
+The [P2 contract](REALTIME_P2_CONTRACT_20260907.md) records canonical receipt
+serialization/projection, explicitly negotiated internal observation, coalesced
+Gateway reads, and one unadmitted successor prepared while its exact predecessor
+drains. Complete current context and the real predecessor playback ACK still gate
+Runtime admission. Prepared output has no Agent/Tool/Task, PCM, transcript, history
+or completion authority before admission. Unknown Provider cleanup blocks retry.
+
+Independent max review repaired premature replay authority, promotion during close,
+incomplete terminal manifests and a blocked sole Provider reader. The final control
+repair retains exact early truncate ACK/cancel-error observations until the real
+send returns, rejects unmatched/malformed/failed sends and prioritizes local STOP
+and LISTEN without waiting for the wire lock. Cursor send returns also recheck close
+and ownership before further output. Astra ultra reviewed these control and cumulative
+retirement designs. Bounded observation-counter churn rotates the epoch and wakes
+old waiters without deleting business records or disturbing newly installed waiters.
+
+[Real Provider and handoff evidence](../evidence/REALTIME_P2_PROVIDER_AND_HANDOFF_20260907.json)
+preserves earlier failures and the final source hashes. The final actual
+`gpt-realtime-2` audio sample validates 20 output events, 156247 retained bytes,
+one exact zero-played truncation confirmation and helper cleanup completion.
+The observed `final_answer` / `output_audio` terminal shape is supported; mixed
+commentary/text plus function output remains deliberately unsupported. The final
+real selected-TTS sample produces 105 contiguous frames through the registered
+media leaf; after cancellation, the canonical failure receipt releases the handoff
+without an ACK or parent close. Both real routes finish cleanly and private
+configuration is unchanged. The Task/activation and failure receipt are synthetic,
+and the network ACK peer is simulated; these are not complete product journeys.
+
+The broader Registry candidate/baseline comparison retains the same 68 failures
+and 167 passes in both sources, with exact node IDs in the
+[comparison evidence](../evidence/REALTIME_REGISTRY_BASELINE_COMPARISON_20260907.json).
+Those inherited failures and the documented mounted failures remain open product
+limitations. They neither invalidate unrelated scoped checks nor establish a
+complete candidate PASS. Physical uninterrupted/interrupted handoff and measured
+latency still require unified acceptance; no saved seconds are claimed here.
+
+Main's final combined source passes **642 cases in 79.73 seconds** across the
+14 affected Native observation/Work/Runtime/Engine/Gateway/preparation modules
+(`logs/realtime-final-tests.txt`). This supersedes the earlier 585-case cumulative
+snapshot after the actual control and retirement fixes. Scoped Ruff and diff
+checks pass. The P7 frontend's 140 Native and 35 Gateway checks plus production
+build remain applicable because the subsequent P2 fixes do not change frontend
+source. The four server canonical-failure cases and real Provider probes above
+were run separately; counts are not added as distinct coverage credit.
+
+Final independent max review matches all four frozen P2 worker hashes and finds
+no remaining scoped issue. It passes 98 preparation cases and 58 selected legacy
+Engine control/close cases. Independent reverse probes confirm early ACK proof is
+deferred until send success, both cancel-error/real-terminal orders retain their
+exact gates, and complete STOP plus LISTEN finishes while a prior control write
+is still blocked. Main's Gateway observation-retention review and the max/ultra
+cumulative Task-audio retirement review are also closed. Worker logs remain in
+the separate repair worktree; Main's final cumulative/real-boundary logs are under
+this worktree's ignored `logs/` directory.
+
+### Unified candidate handoff
+
+All P0–P9 points have their own local commit, while the prior mixed first batch
+remains intact. P3 keeps `auto`; P6 rejects recovery rescheduling that repeated
+PCM and increased underrun; P9 preserves service/receipt authority. P4's observed
+answer is shorter but not faster. These are explicit outcomes, not evidence that
+all proposed savings or the imported overall target have been achieved.
+
+Unified review should use the final local w3 source, the per-point commits and
+their recorded tests/exclusions. The existing ten-user deployment is separately
+pinned and does not receive these changes through a local merge. No push,
+deployment, provider/model change or private configuration change is included.
+The project remains PARTIAL pending the existing full product/physical evidence
+and inherited regression issues; it is not described as “only human acceptance remains.”

@@ -20,6 +20,10 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import FormalCon
 from jiuwenswarm.server.runtime.session.session_history import load_history_records
 from .native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION, NativeBusinessProposal, NativeBusinessViolation
 from .native_business_context import NativeBusinessContextStore, formal_context, select_conversation_history
+from .native_business_observation import (
+    NATIVE_BUSINESS_OBSERVATION_VERSION, MAX_OBSERVATION_WAIT_MS,
+    observation_cursor, canonical_native_receipt,
+)
 from .native_interaction_contract import NativeInteractionBinding
 from .native_interaction_runtime import NativeInteractionRuntimeError
 from .voice_task_bridge import UnifiedCommittedInputRoute
@@ -39,6 +43,8 @@ class NativeBusinessRouter:
         self._executor_lock = asyncio.Lock()
         self._work_presentations = {}
         self._selected_work_events = {}
+        self._context_reads = {}
+        self._context_read_sequence = 0
 
     def require_route(self, *, binding, capability, session_id):
         from .product_p2_interaction_adapter import P2LeaseState
@@ -74,6 +80,25 @@ class NativeBusinessRouter:
             "model_identity", "model_config_version", "execution_settled"}}
 
     async def context(self, route):
+        return (await self._context_result(route))[0]
+
+    async def _context_result(self, route):
+        key = id(route)
+        operation = self._context_reads.get(key)
+        if operation is None:
+            if len(self._context_reads) >= 128:
+                raise NativeBusinessViolation("NATIVE_CONTEXT_READ_CAPACITY", code=ErrorCode.UNAVAILABLE)
+            operation = asyncio.create_task(self._read_context(route))
+            self._context_reads[key] = operation
+            def finished(task):
+                if self._context_reads.get(key) is task:
+                    self._context_reads.pop(key, None)
+                if not task.cancelled():
+                    task.exception()
+            operation.add_done_callback(finished)
+        return await asyncio.shield(operation)
+
+    async def _read_context(self, route):
         authority = await asyncio.to_thread(
             self.registry._p3_composition.prepare_production_intent_authority,
             bearer_token=None, operation="task.list", session_id=route.binding.session_id,
@@ -95,7 +120,8 @@ class NativeBusinessRouter:
         selection = self.contexts.select(scope=authority.scope,
             history=select_conversation_history(history), tasks=tasks, works=works,
             model={"model_identity": native.model_identity, "model_config_version": native.model_config_version})
-        return selection
+        self._context_read_sequence += 1
+        return selection, self._context_read_sequence
 
     def _require_context_authority(self, route):
         composition = self.registry._p3_composition
@@ -180,17 +206,35 @@ class NativeBusinessRouter:
     async def context_request(self, *, params, request_id, session_id):
         from .product_composition_registry import _success_result, _error_result
         try:
-            if set(params) != {"contract_version", "binding", "capability", "context"} or params["context"] is not True:
+            observing = params.get("contract_version") == NATIVE_BUSINESS_OBSERVATION_VERSION
+            if observing:
+                if (set(params) != {"contract_version", "binding", "capability", "after", "wait_ms"}
+                        or type(params["wait_ms"]) is not int or not 0 <= params["wait_ms"] <= MAX_OBSERVATION_WAIT_MS):
+                    raise NativeBusinessViolation("NATIVE_BUSINESS_CONTEXT_REQUEST_INVALID")
+                try:
+                    after = observation_cursor(params["after"])
+                except ValueError:
+                    raise NativeBusinessViolation("NATIVE_BUSINESS_CONTEXT_REQUEST_INVALID") from None
+            elif set(params) != {"contract_version", "binding", "capability", "context"} or params["context"] is not True:
                 raise NativeBusinessViolation("NATIVE_BUSINESS_CONTEXT_REQUEST_INVALID")
             binding = NativeInteractionBinding.from_dict(params["binding"])
             async with self.registry._lock:
                 route = self.require_route(binding=binding, capability=params["capability"], session_id=session_id)
-            context = await self.context(route)
+            owner = self.works()
+            if observing:
+                await owner.wait_for_observation(scope=binding.scope, after=after, wait_ms=params["wait_ms"])
+            # Capture the work cursor before reading facts. A transition during
+            # the read remains observable by the following wait instead of lost.
+            cursor = owner.observation_cursor(binding.scope)
+            context, read_sequence = await self._context_result(route)
+            cursor["read_sequence"] = read_sequence
             # Never return facts after the authenticated activation was retired.
             async with self.registry._lock:
                 self.require_route(binding=binding, capability=params["capability"], session_id=session_id)
                 self._require_context_authority(route)
-            return _success_result(request_id, {"kind": "business_context", "contract_version": NATIVE_BUSINESS_CONTRACT_VERSION,
+            return _success_result(request_id, {"kind": "business_observation" if observing else "business_context",
+                "contract_version": NATIVE_BUSINESS_OBSERVATION_VERSION if observing else NATIVE_BUSINESS_CONTRACT_VERSION,
+                **({"cursor": cursor} if observing else {}),
                 "context": context.payload(), "work_events": self.work_events(binding.scope)}, route.manifest)
         except Exception as error:
             return _error_result(request_id, reason=getattr(error, "reason", "NATIVE_BUSINESS_CONTEXT_UNAVAILABLE"),
@@ -408,7 +452,7 @@ class NativeBusinessRouter:
                 # Repair projection persistence from the same durable receipt;
                 # the original Task effect and replay payload remain unchanged.
                 self._record_task_origin(route, delegate, admission, result)
-            text = json.dumps(result, ensure_ascii=True, separators=(",", ":"))
+            text = canonical_native_receipt(result)
             profile_event("native_business", milestone="receipt_ready", request_id=request_id,
                 provider_call_id=delegate.provider_call_id, turn_commit_id=admission.turn_commit.commit_id,
                 output_chars=len(text), result_state=result.get("status", "observed"))
@@ -465,6 +509,7 @@ class NativeBusinessRouter:
         if event_id is not None:
             self._work_journal.mark_presented(event_id, route.binding.scope)
             self._work_presentations.pop(key, None)
+            self.works().wake_observers(route.binding.scope)
 
     def interrupt_work_presentation(self, route, response):
         key = (route.binding.scope, response)
@@ -472,13 +517,21 @@ class NativeBusinessRouter:
         if event_id is not None:
             self._work_journal.mark_suppressed(event_id, route.binding.scope, "speech_interrupted")
             self._work_presentations.pop(key, None)
+            self.works().wake_observers(route.binding.scope)
 
     def retire_activation(self, route):
+        if self._work_owner is not None:
+            self._work_owner.wake_observers(route.binding.scope)
         for scope, response in tuple(self._work_presentations):
             if scope == route.binding.scope and response.interaction_id == route.binding.interaction_id:
                 self._work_presentations.pop((scope, response), None)
 
     async def close(self):
+        reads = tuple(self._context_reads.values())
+        for read in reads:
+            read.cancel()
+        if reads:
+            await asyncio.gather(*reads, return_exceptions=True)
         if self._work_owner is not None:
             await self._work_owner.close()
         for scope, (runtime, facade) in tuple(self._executors.items()):
