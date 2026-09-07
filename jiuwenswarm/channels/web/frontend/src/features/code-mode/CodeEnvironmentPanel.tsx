@@ -24,7 +24,7 @@ export function CodeEnvironmentPanel({ project, isProcessing, diffWatch, onRevie
         <Info size={15} />
         <span>{t('codeMode.environment')}</span>
       </h3>
-      <button type="button" className="code-environment__row" onClick={onReview} title={diffWatch.summaryError || '打开代码审核'}>
+      <button type="button" className="code-environment__row" onClick={onReview} title={diffWatch.summaryError || 'Open code review'}>
         <FileDiff size={15} />
         <span>{t('codeMode.changes')}</span>
         <small className="code-environment__stats" aria-live="polite">

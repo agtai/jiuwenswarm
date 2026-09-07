@@ -37,25 +37,25 @@ export function CodeChangesCard({
   };
   const discarded = diff.status === 'discarded';
   const canChangeTurn = isLatest && (diff.status === 'completed' || discarded);
-  const actionLabel = discarded ? '重新应用' : '撤销';
-  const actionTitle = isProcessing ? '当前任务执行中，请停止后再操作' : actionLabel;
+  const actionLabel = discarded ? 'Reapply' : 'Undo';
+  const actionTitle = isProcessing ? 'Stop the running task before using this action' : actionLabel;
 
   if (files.length === 0) return null;
 
   return (
-    <section className={`code-changes-card${discarded ? ' is-discarded' : ''}`} aria-label="已编辑文件">
+    <section className={`code-changes-card${discarded ? ' is-discarded' : ''}`} aria-label="Edited files">
       <div className="code-changes-card__header">
         <span className="code-changes-card__icon">
           <FileCode2 size={20} />
         </span>
         <div className="code-changes-card__heading">
-          <strong>已编辑文件</strong>
+          <strong>Edited files</strong>
           <span>
             <b className="code-stat-added">+{diff.stats.lines_added}</b>
             <b className="code-stat-removed">-{diff.stats.lines_removed}</b>
           </span>
         </div>
-        <button type="button" className="code-changes-card__refresh" onClick={onRefresh} disabled={refreshing} title="刷新修改历史">
+        <button type="button" className="code-changes-card__refresh" onClick={onRefresh} disabled={refreshing} title="Refresh change history">
           <RefreshCw className={refreshing ? 'code-mode-spin' : undefined} size={15} />
         </button>
         {canChangeTurn ? (
@@ -68,11 +68,11 @@ export function CodeChangesCard({
             aria-busy={operation !== null}
           >
             {operation ? <LoaderCircle className="code-mode-spin" size={14} /> : null}
-            {operation ? (operation === 'discard' ? '撤销中' : '应用中') : actionLabel}
+            {operation ? (operation === 'discard' ? 'Undoing' : 'Reapplying') : actionLabel}
           </button>
         ) : null}
         <button type="button" className="code-changes-card__review" onClick={() => onReview(reviewTarget)}>
-          审核
+          Review
         </button>
       </div>
       {operationError ? (
@@ -91,7 +91,7 @@ export function CodeChangesCard({
       </div>
       {files.length > 3 ? (
         <button type="button" className="code-changes-card__expand" onClick={() => setExpanded(value => !value)}>
-          {expanded ? '收起文件' : `显示全部 ${files.length} 个文件`}
+          {expanded ? 'Show fewer files' : `Show all ${files.length} files`}
           {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
         </button>
       ) : null}

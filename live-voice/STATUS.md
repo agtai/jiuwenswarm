@@ -33,7 +33,7 @@ independent model, project and runtime data. New instances start with empty
 Agent configuration; the existing installation has administrator-supplied Agent
 settings. Native Realtime explicitly uses `gpt-realtime-2` with a separate private
 Speech credential. The authorized English interface update owns the portal
-template, English translation gaps, new-instance language default and application
+template, English translation gaps and Code Git labels, new-instance language default and application
 of the existing locale setting to retained instances (Tier 1). It excludes
 Agent/voice policy, protocol, account and task changes. Acceptance requires the
 frontend build, bootstrap preservation checks and ten authenticated English UIs

@@ -14,9 +14,9 @@ test('derives unique remote names and falls back to origin', () => {
 });
 
 test('maps known backend errors and preserves useful unknown errors', () => {
-  assert.match(gitPublishErrorMessage({ code: 'NOTHING_TO_COMMIT' }, 'fallback'), /没有可提交/);
-  assert.match(gitPublishErrorMessage({ code: 'BRANCH_ALREADY_EXISTS' }, 'fallback'), /已存在/);
-  assert.match(gitPublishErrorMessage({ code: 'BRANCH_INVALID' }, 'fallback'), /不符合 Git 规范/);
+  assert.match(gitPublishErrorMessage({ code: 'NOTHING_TO_COMMIT' }, 'fallback'), /Nothing to commit/);
+  assert.match(gitPublishErrorMessage({ code: 'BRANCH_ALREADY_EXISTS' }, 'fallback'), /already exists/);
+  assert.match(gitPublishErrorMessage({ code: 'BRANCH_INVALID' }, 'fallback'), /Invalid Git branch name/);
   assert.equal(gitPublishErrorMessage(new Error('custom failure'), 'fallback'), 'custom failure');
   assert.equal(gitPublishErrorMessage(null, 'fallback'), 'fallback');
 });

@@ -18,17 +18,17 @@ function getErrorMessage(error: unknown): string {
   const webError = error as WebError;
   switch (webError.code) {
     case 'WORKTREE_DIRTY':
-      return '工作区存在未提交修改，请处理后再切换分支。';
+      return 'Resolve uncommitted changes before switching branches.';
     case 'GIT_TRANSIENT_STATE':
-      return '仓库正在合并或变基，暂时不能切换分支。';
+      return 'Finish the merge or rebase before switching branches.';
     case 'BRANCH_NOT_FOUND':
-      return '分支不存在，请刷新后重试。';
+      return 'Branch not found. Refresh and try again.';
     case 'BRANCH_ALREADY_EXISTS':
-      return '分支名称已存在。';
+      return 'This branch name already exists.';
     case 'GIT_NOT_FOUND':
-      return '当前环境未安装 Git，无法使用代码模式分支能力。';
+      return 'Git is not installed. Branch operations are unavailable.';
     default:
-      return webError.message || 'Git 操作失败，请稍后重试。';
+      return webError.message || 'Git operation failed. Please try again.';
   }
 }
 
@@ -198,10 +198,10 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
           className='code-branch__trigger code-branch__trigger--warning'
           onClick={() => void initializeGit()}
           disabled={disabled || operating}
-          title='该目录还不是 Git 仓库'
+          title='This directory is not a Git repository'
         >
           {operating ? <LoaderCircle className='code-mode-spin' size={15} /> : <GitBranch size={15} />}
-          <span>初始化 Git</span>
+          <span>Initialize Git</span>
         </button>
       ) : (
         <button
@@ -211,10 +211,10 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
           disabled={disabled || loading || operating || !status}
           aria-haspopup='menu'
           aria-expanded={open}
-          title={currentBranch || '加载分支'}
+          title={currentBranch || 'Loading branches'}
         >
           {loading || operating ? <LoaderCircle className='code-mode-spin' size={15} /> : <GitBranch size={15} />}
-          <span>{currentBranch || '加载分支'}</span>
+          <span>{currentBranch || 'Loading branches'}</span>
           <ChevronDown size={14} className={open ? 'code-branch__chevron is-open' : 'code-branch__chevron'} />
         </button>
       )}
@@ -223,9 +223,9 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
         <div className='code-branch__menu' role='menu'>
           <label className='code-branch__search'>
             <Search size={15} />
-            <input value={search} onChange={event => setSearch(event.target.value)} placeholder='搜索分支' autoFocus />
+            <input value={search} onChange={event => setSearch(event.target.value)} placeholder='Search branches' autoFocus />
           </label>
-          <div className='code-branch__section-label'>分支</div>
+          <div className='code-branch__section-label'>Branches</div>
           <div className='code-branch__list'>
             {branches.map(branch => (
               <button
@@ -242,19 +242,19 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
                 {branch === currentBranch ? <Check size={16} /> : null}
               </button>
             ))}
-            {branches.length === 0 ? <div className='code-branch__empty'>没有匹配的本地分支</div> : null}
+            {branches.length === 0 ? <div className='code-branch__empty'>No matching local branches</div> : null}
           </div>
           {branchWritesBlocked ? (
             <div className='code-branch__menu-error' role='status'>
               <AlertCircle size={14} />
-              <span>{status.repo.transient ? '仓库正在合并或变基，暂时不能切换分支。' : '当前处于 detached HEAD，暂时不能切换分支。'}</span>
+              <span>{status.repo.transient ? 'Finish the merge or rebase before switching branches.' : 'Branch switching is unavailable in detached HEAD state.'}</span>
             </div>
           ) : null}
           {error ? (
             <div className='code-branch__menu-error' role='alert'>
               <AlertCircle size={14} />
               <span>{error}</span>
-              <button type='button' onClick={() => setError(null)} aria-label='关闭提示'>
+              <button type='button' onClick={() => setError(null)} aria-label='Dismiss message'>
                 <X size={13} />
               </button>
             </div>
@@ -266,11 +266,11 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
           >
             <button type='button' className='code-branch__create' onClick={() => setCreateOpen(true)} disabled={branchWritesBlocked || isUnbornHead}>
               <Plus size={16} />
-              <span>创建并检出新分支</span>
+              <span>Create and check out a new branch</span>
             </button>
             {isUnbornHead ? (
               <span id={unbornHintId} className='code-branch__create-hint' role='tooltip'>
-                空仓库需要完成首次提交后才能创建其他分支
+                Make the first commit before creating additional branches
               </span>
             ) : null}
           </div>
@@ -280,7 +280,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
       {!open && branchWritesBlocked ? (
         <div className='code-branch__error' role='status'>
           <AlertCircle size={14} />
-          <span>{status?.repo.transient ? '仓库正在合并或变基，暂时不能切换分支。' : '当前处于 detached HEAD，暂时不能切换分支。'}</span>
+          <span>{status?.repo.transient ? 'Finish the merge or rebase before switching branches.' : 'Branch switching is unavailable in detached HEAD state.'}</span>
         </div>
       ) : null}
 
@@ -288,7 +288,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
         <div className='code-branch__error' role='alert'>
           <AlertCircle size={14} />
           <span>{error}</span>
-          <button type='button' onClick={() => setError(null)} aria-label='关闭提示'>
+          <button type='button' onClick={() => setError(null)} aria-label='Dismiss message'>
             <X size={13} />
           </button>
         </div>
@@ -304,19 +304,19 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
             }}
           >
             <div className='code-mode-dialog__header'>
-              <h3>创建并检出分支</h3>
-              <button type='button' onClick={() => setCreateOpen(false)} aria-label='关闭'>
+              <h3>Create and check out branch</h3>
+              <button type='button' onClick={() => setCreateOpen(false)} aria-label='Close'>
                 <X size={18} />
               </button>
             </div>
-            <input value={branchDraft} onChange={event => setBranchDraft(event.target.value)} placeholder='请输入分支名称，如：feature/code-mode' autoFocus />
+            <input value={branchDraft} onChange={event => setBranchDraft(event.target.value)} placeholder='Enter a branch name, e.g. feature/code-mode' autoFocus />
             {error ? <div className='code-mode-dialog__error'>{error}</div> : null}
             <div className='code-mode-dialog__actions'>
               <button type='button' className='code-mode-button' onClick={() => setCreateOpen(false)}>
-                取消
+                Cancel
               </button>
               <button type='submit' className='code-mode-button code-mode-button--primary' disabled={!branchDraft.trim() || operating}>
-                {operating ? '创建中…' : '确定'}
+                {operating ? 'Creating…' : 'Confirm'}
               </button>
             </div>
           </form>

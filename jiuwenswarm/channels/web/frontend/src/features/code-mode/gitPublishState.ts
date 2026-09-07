@@ -13,17 +13,17 @@ export function remoteNames(remoteBranches: string[]): string[] {
 }
 
 const ERROR_MESSAGES: Record<string, string> = {
-  NOTHING_TO_COMMIT: '没有可提交的修改。若修改尚未暂存，请勾选“包含未暂存的更改”。',
-  GIT_TRANSIENT_STATE: '仓库正在合并、变基或执行其他 Git 操作，请完成后重试。',
-  DETACHED_HEAD: '当前处于 detached HEAD，请选择一个本地分支后再推送。',
-  BRANCH_ALREADY_EXISTS: '分支名称已存在，请换一个名称。',
-  BRANCH_INVALID: '分支名称不符合 Git 规范，请检查后重试。',
-  REMOTE_NOT_FOUND: '远程仓库不存在，请检查远程名称或 Git 配置。',
-  PUSH_REJECTED: '远程仓库拒绝了推送，请先同步远程修改并检查分支保护或权限。',
-  GIT_COMMAND_TIMEOUT: 'Git 操作超时，请检查仓库状态和网络后重试。',
-  NOT_GIT_REPOSITORY: '当前项目不是 Git 仓库。',
-  GIT_NOT_FOUND: '当前环境未安装 Git。',
-  PROJECT_DIR_MISSING: '项目目录不存在。',
+  NOTHING_TO_COMMIT: 'Nothing to commit. Select "Include unstaged changes" if your changes are not staged.',
+  GIT_TRANSIENT_STATE: 'Finish the current Git operation, merge or rebase before retrying.',
+  DETACHED_HEAD: 'Select a local branch before pushing from detached HEAD state.',
+  BRANCH_ALREADY_EXISTS: 'This branch name already exists. Choose another name.',
+  BRANCH_INVALID: 'Invalid Git branch name. Check it and try again.',
+  REMOTE_NOT_FOUND: 'Remote not found. Check the remote name or Git configuration.',
+  PUSH_REJECTED: 'Push rejected. Sync remote changes and check branch protection or permissions.',
+  GIT_COMMAND_TIMEOUT: 'Git operation timed out. Check repository status and the network before retrying.',
+  NOT_GIT_REPOSITORY: 'This project is not a Git repository.',
+  GIT_NOT_FOUND: 'Git is not installed.',
+  PROJECT_DIR_MISSING: 'The project directory does not exist.',
 };
 
 export function gitPublishErrorMessage(error: unknown, fallback: string): string {
