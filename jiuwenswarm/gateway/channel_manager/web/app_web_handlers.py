@@ -6654,6 +6654,46 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         await _clouddoc_call(ws, req_id, "update_doc", doc_id)
 
+    # ── personal identity (design §13 / matrix §S) ──
+
+    async def _clouddoc_add_personal_connection(ws, req_id, params, session_id):
+        p = params if isinstance(params, dict) else {}
+        await _clouddoc_call(ws, req_id, "add_personal_connection",
+                             str(p.get("brand") or "feishu"), p.get("profile"))
+
+    async def _clouddoc_adopt_docs(ws, req_id, params, session_id):
+        p = params if isinstance(params, dict) else {}
+        ids = [str(x) for x in (p.get("doc_ids") or []) if str(x)]
+        if not ids:
+            await channel.send_response(ws, req_id, ok=False, error="params.doc_ids required", code="BAD_REQUEST")
+            return
+        await _clouddoc_call(ws, req_id, "adopt_docs", p.get("connection_id"), ids)
+
+    async def _clouddoc_set_signature(ws, req_id, params, session_id):
+        p = params if isinstance(params, dict) else {}
+        await _clouddoc_call(ws, req_id, "set_signature", str(p.get("text") or ""))
+
+    async def _clouddoc_set_identity_choice(ws, req_id, params, session_id):
+        p = params if isinstance(params, dict) else {}
+        if not p.get("doc_id"):
+            await channel.send_response(ws, req_id, ok=False, error="params.doc_id required", code="BAD_REQUEST")
+            return
+        await _clouddoc_call(ws, req_id, "set_identity_choice",
+                             str(p.get("doc_id")), str(p.get("identity") or "service"))
+
+    async def _clouddoc_notices(ws, req_id, params, session_id):
+        p = params if isinstance(params, dict) else {}
+        await _clouddoc_call(ws, req_id, "notices",
+                             int(p.get("limit") or 100), bool(p.get("unread_only", True)))
+
+    async def _clouddoc_notice_ack(ws, req_id, params, session_id):
+        p = params if isinstance(params, dict) else {}
+        if not p.get("notice_id") and not p.get("doc_id"):
+            await channel.send_response(ws, req_id, ok=False,
+                                        error="params.notice_id or params.doc_id required", code="BAD_REQUEST")
+            return
+        await _clouddoc_call(ws, req_id, "notice_ack", p.get("notice_id"), p.get("doc_id"))
+
     channel.register_method("external_cli.detect", _external_cli_detect)
     channel.register_method("external_cli.codex_install_status", _external_cli_codex_install_status)
     channel.register_method("external_cli.install_status", _external_cli_install_status)
@@ -6815,6 +6855,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             watch_receipts_file(channel.broadcast_event),
             name="clouddoc.receipts_watch",
         )
+        # A personal watcher's notices are pushed the same way (S.3): the registry
+        # is built before the channel exists, so the push is bound here.
+        bind = getattr(_resolve(clouddoc_panel), "bind_notifier", None)
+        if bind is not None:
+            bind(channel.broadcast_event)
+    channel.register_method("clouddoc.add_personal_connection", _clouddoc_add_personal_connection)
+    channel.register_method("clouddoc.adopt_docs", _clouddoc_adopt_docs)
+    channel.register_method("clouddoc.set_signature", _clouddoc_set_signature)
+    channel.register_method("clouddoc.set_identity_choice", _clouddoc_set_identity_choice)
+    channel.register_method("clouddoc.notices", _clouddoc_notices)
+    channel.register_method("clouddoc.notice_ack", _clouddoc_notice_ack)
     channel.register_method("clouddoc.set_mode", _clouddoc_set_mode)
     channel.register_method("clouddoc.set_model", _clouddoc_set_model)
     channel.register_method("clouddoc.watch_set", _clouddoc_watch_set)

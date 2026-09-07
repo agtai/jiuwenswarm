@@ -1792,10 +1792,25 @@ async def _build_clouddoc_watcher(*, agent_client):
             cfg.get("dispatch_rate_window_seconds", DEFAULT_DISPATCH_RATE_WINDOW_SECONDS)
         ),
     )
+    from jiuwenswarm.agents.harness.common.tools.clouddoc.provider import (
+        identity_choice_for,
+    )
+    from jiuwenswarm.gateway.clouddoc.notices import NoticeStore
+
+    def _choice_of(doc_id: str) -> str:
+        # The per-document executing identity (S.2), read live so a choice made in
+        # the panel reaches the next call without a restart.
+        try:
+            return identity_choice_for(get_config().get("clouddoc") or {}, doc_id)
+        except Exception:  # noqa: BLE001 - an unreadable config reads as the default
+            return "service"
+
     registry = CloudDocConnections(
         store=store, dispatcher=dispatcher, watcher_cfg=watcher_cfg,
         watch_registry=watch_registry,
         base_trigger_cfg=base_trigger,
+        notice_store=NoticeStore(),
+        choice_of=_choice_of,
         # The roster is deployment policy read here, at the host layer, and handed
         # into the host-free factory as a plain argument.
         provider_factory=(lambda cf, _r=tuple(

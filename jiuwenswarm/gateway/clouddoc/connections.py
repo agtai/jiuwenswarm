@@ -4,9 +4,17 @@ Design constraints:
 
 * **One state file and one dispatcher, shared.** Sessions and state are keyed by
   doc_id, so ``add`` below enforces that **a document belongs to exactly one
-  connection**. That constraint replaced a state-key migration
+  service connection**. That constraint replaced a state-key migration
   (``doc_id`` → ``(connection, doc_id)``) and was the cheapest trade in the whole
   multi-connection change.
+* **Two kinds of connection** (design §13, matrix S.1): ``service`` -- a service
+  account or a Feishu app's bot, with the full watcher -- and ``personal`` -- a
+  person's own account, with a notify-only watcher and no work tiers. A document
+  may be adopted under one connection of **each** kind at once: the service one
+  handles the bot's summons, the personal one tells the person about theirs. The
+  personal watcher keeps its state under its own scope in the shared file, so the
+  two never consume each other's dedup keys. Which identity *executes* on such a
+  document is the person's per-document choice, service by default (S.2).
 * **Connections are immutable**: the credentials decide the address, and the
   address is the connection's identity. There is no editing, only add and
   remove -- changing the identity means deleting and re-adding.
@@ -41,6 +49,12 @@ class CloudDocConnection:
     credentials_file: str
     provider: Any
     watcher: CloudDocCommentWatcher
+    # ``service`` or ``personal`` (S.1).
+    identity_kind: str = "service"
+
+    @property
+    def personal(self) -> bool:
+        return self.identity_kind == "personal"
 
 
 class CloudDocConnections:
@@ -58,6 +72,8 @@ class CloudDocConnections:
         now_fn: Callable[[], float],
         enabled: bool = True,
         watch_registry: "object | None" = None,
+        notice_store: "object | None" = None,
+        choice_of: Callable[[str], str] | None = None,
     ) -> None:
         self._store = store
         self._dispatcher = dispatcher
@@ -66,6 +82,15 @@ class CloudDocConnections:
         self._provider_factory = provider_factory
         self._now_fn = now_fn
         self._watch_registry = watch_registry
+        # Where a personal watcher's notices land (S.3), and the live push to the
+        # web clients, bound late by the web channel once it exists. Both are
+        # optional: without a store a notice is logged; without a push the panel
+        # reads it on its next load.
+        self._notice_store = notice_store
+        self.notifier: Callable[[str, dict], Any] | None = None
+        # The per-document executing-identity choice (S.2), read live from the
+        # config; absent, service.
+        self._choice_of = choice_of or (lambda _doc: "service")
         # D2's adoption policy: "" / "off" issues nothing (default: adoption ≠
         # delegation); "reply_only" / "apply_scoped" auto-issues that level per newly
         # adopted document. The policy line in the config **is** the owner's explicit
@@ -91,13 +116,30 @@ class CloudDocConnections:
         # deployment arrives this way
         return next(iter(self._conns.values()), None)
 
+    def owners(self, doc_id: str) -> list[CloudDocConnection]:
+        """Every connection that adopted a document: at most one service and one
+        personal (``add`` keeps documents unique within a kind), service first."""
+        out = [c for c in self._conns.values() if doc_id in c.watcher._docs]
+        return sorted(out, key=lambda c: c.personal)
+
     def find_doc(self, doc_id: str) -> CloudDocConnection | None:
-        """Which connection owns a document. ``add`` keeps documents unique across
-        connections, so there is never more than one answer."""
-        for c in self._conns.values():
-            if doc_id in c.watcher._docs:
+        """The connection that **executes** on a document.
+
+        With one owner the answer is that owner. With both a service and a personal
+        owner the person's per-document choice decides, service by default (S.2):
+        the service identity is the one the document's owner signed a mandate for,
+        and the personal one acts only where the person said so.
+        """
+        found = self.owners(doc_id)
+        if not found:
+            return None
+        if len(found) == 1:
+            return found[0]
+        want_personal = self._choice_of(doc_id) == "personal"
+        for c in found:
+            if c.personal == want_personal:
                 return c
-        return None
+        return found[0]
 
     def all_docs(self) -> list[str]:
         out: list[str] = []
@@ -105,9 +147,48 @@ class CloudDocConnections:
             out += c.watcher._docs
         return out
 
+    def all_state_keys(self) -> list[str]:
+        """Every key the shared state file must keep: plain ids for the documents
+        (metadata and service state) plus the personal watchers' scoped keys."""
+        from jiuwenswarm.gateway.clouddoc.cursor_store import state_key
+
+        out: list[str] = []
+        for c in self._conns.values():
+            for d in c.watcher._docs:
+                out.append(d)
+                if c.personal:
+                    out.append(state_key(d, c.watcher._store.scope))
+        return out
+
+    def store_for(self, conn: CloudDocConnection):
+        """The state view a connection's rows read from -- scoped for personal."""
+        return conn.watcher._store
+
     @property
     def store(self):
         return self._store
+
+    @property
+    def notice_store(self):
+        return self._notice_store
+
+    async def emit_notice(self, notice: dict) -> None:
+        """Record a personal watcher's notice and push it to the web clients."""
+        row = dict(notice)
+        if self._notice_store is not None:
+            try:
+                row = await asyncio.to_thread(self._notice_store.add, notice)
+            except Exception:  # noqa: BLE001 - the push still goes out
+                logger.exception("[clouddoc] notice not recorded")
+        else:
+            logger.info("[clouddoc] notice (no store): %s", notice.get("key"))
+        if self.notifier is not None:
+            try:
+                out = self.notifier("clouddoc.notice", row)
+                if asyncio.iscoroutine(out):
+                    await out
+            except Exception:  # noqa: BLE001 - the ledger has it either way
+                logger.exception("[clouddoc] notice push failed")
 
     # ------------------------------------------------------------ writes
 
@@ -125,7 +206,10 @@ class CloudDocConnections:
         provider = self._provider_factory(credentials_file)
         ident = await provider.self_identity()
         address = ident.address or ident.display_name
-        conn_id = f"{provider.kind}:{address}"
+        personal = bool(getattr(provider, "personal", False))
+        # A personal connection's id carries its kind: the same person may also be
+        # the deployer of a service connection, and the two must not collide.
+        conn_id = f"{provider.kind}:{'personal:' if personal else ''}{address}"
         if conn_id in self._conns:
             raise ValueError(f"duplicate connection: {address}")
 
@@ -141,39 +225,76 @@ class CloudDocConnections:
             # rather than proceeding without one, which is why failing here is survivable
             # -- the writes stop, they do not go unrecorded.
             logger.exception("[clouddoc] receipt sink unavailable on the watcher path")
-        watcher = CloudDocCommentWatcher(
-            provider,
-            self._store,
-            replace(
-                self._base_trigger,
-                sa_address=address,
-                # The mention is the summons on every platform (§16.14: a mention is a
-                # pointer edge and carries no authority, so the assignment field adds
-                # no safety -- confinement and the watch grant do that). Google kept
-                # the assignment gate for one campaign after Feishu switched, and the
-                # measured cost was a person @-ing twice and hearing "assign it to me"
-                # then silence. Assignment still counts where a platform has it.
-                mention_triggers=True,
-            ),
-            self.watcher_cfg,
-            dispatch=self._dispatcher,
-            now_fn=self._now_fn,
-            registry=self._watch_registry,
+        trigger_cfg = replace(
+            self._base_trigger,
+            sa_address=address,
+            # The mention is the summons on every platform (§16.14: a mention is a
+            # pointer edge and carries no authority, so the assignment field adds
+            # no safety -- confinement and the watch grant do that). Google kept
+            # the assignment gate for one campaign after Feishu switched, and the
+            # measured cost was a person @-ing twice and hearing "assign it to me"
+            # then silence. Assignment still counts where a platform has it.
+            mention_triggers=True,
         )
-        # **Uniqueness across connections is enforced here**, not in the panel.
+        if personal:
+            # Notify-only (S.3): the same poll and trigger detection, no dispatch,
+            # no posting, no mandate registry. State lives under its own scope so
+            # a service watcher on the same document keeps its own keys.
+            from jiuwenswarm.gateway.clouddoc.personal_watcher import (
+                PERSONAL_SCOPE,
+                PersonalNoticeWatcher,
+            )
+
+            async def _title(doc_id: str) -> str:
+                # The panel's cached title first; the platform's only when the
+                # document was adopted without one. A notice is rare enough that
+                # the extra call is not a quota concern.
+                meta = (await self._store.doc_health(doc_id)).get("panel_meta") or {}
+                title = str(meta.get("title") or "")
+                if not title:
+                    try:
+                        title = str(await provider.title(doc_id) or "")
+                    except Exception:  # noqa: BLE001 - a title is decoration
+                        title = ""
+                return title
+
+            watcher: CloudDocCommentWatcher = PersonalNoticeWatcher(
+                provider,
+                self._store.scoped(PERSONAL_SCOPE),
+                trigger_cfg,
+                self.watcher_cfg,
+                notify=self.emit_notice,
+                now_fn=self._now_fn,
+                connection_id=conn_id,
+                title_of=_title,
+            )
+        else:
+            watcher = CloudDocCommentWatcher(
+                provider,
+                self._store,
+                trigger_cfg,
+                self.watcher_cfg,
+                dispatch=self._dispatcher,
+                now_fn=self._now_fn,
+                registry=self._watch_registry,
+            )
+        # **Uniqueness within a kind is enforced here**, not in the panel.
         # panel.add_doc is one of two entrances; the other is reading config at
         # startup. A hand-edited (or copied) config that puts one document under two
-        # connections gets two watchers on it: every mention answered twice, and
-        # since state is keyed by doc_id, the two overwrite each other. Leaving the
-        # check on the UI path would lock one door of two.
-        taken = {d for c in self._conns.values() for d in c.watcher._docs}
+        # service connections gets two watchers on it: every mention answered twice,
+        # and since state is keyed by doc_id, the two overwrite each other. Leaving
+        # the check on the UI path would lock one door of two. A service and a
+        # personal connection on one document is the overlap S.2 provides for.
+        taken = {
+            d for c in self._conns.values() if c.personal == personal for d in c.watcher._docs
+        }
         docs, dropped = [], []
         for d in documents or []:
             (dropped if d in taken else docs).append(d)
             taken.add(d)
         if dropped:
             logger.warning(
-                "[clouddoc] %s 跳过 %d 篇已属于其他连接的文档：%s——"
+                "[clouddoc] %s 跳过 %d 篇已属于其他同类连接的文档：%s——"
                 "一篇文档只能由一个身份纳管，否则每条 @ 会收到两份回应",
                 address, len(dropped), ", ".join(x[:12] + "…" for x in dropped),
             )
@@ -184,11 +305,13 @@ class CloudDocConnections:
             id=conn_id, kind=provider.kind, address=address,
             display_name=ident.display_name or address,
             credentials_file=credentials_file, provider=provider, watcher=watcher,
+            identity_kind="personal" if personal else "service",
         )
         self._conns[conn_id] = conn
         if start or self._started:
             watcher.start()
-        self.policy_issue(documents or [])
+        if not personal:
+            self.policy_issue(documents or [])
         return conn
 
     def policy_issue(self, doc_ids: list[str]) -> None:
@@ -266,7 +389,7 @@ class CloudDocConnections:
                 )
             self._started = True
             return
-        removed = await self._store.gc(self.all_docs())
+        removed = await self._store.gc(self.all_state_keys())
         if removed:
             logger.info("[clouddoc] GC 清除了 %d 篇不再纳管的文档状态", len(removed))
         for c in self._conns.values():

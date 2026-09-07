@@ -65,6 +65,22 @@ def _now() -> float:
     return time.time()
 
 
+# Separates a document id from a state scope in the state file's keys. A personal
+# connection's watcher keeps its dedup keys, seeding and backoff under
+# ``{doc_id}#personal`` while the service watcher on the same document keeps the
+# plain key: the two watch the same comments for different reasons, and one shared
+# ``triggered_ids`` had the first to mark a key silence the other (a mention the
+# personal watcher noted would never dispatch on the service side, or the reverse).
+# The panel metadata (title, kind, url) stays on the plain key: it is a fact about
+# the document, not about who watches it.
+STATE_SCOPE_SEP = "#"
+
+
+def state_key(doc_id: str, scope: str = "") -> str:
+    """The state-file key for ``doc_id`` under ``scope`` (plain when unscoped)."""
+    return f"{doc_id}{STATE_SCOPE_SEP}{scope}" if scope else str(doc_id)
+
+
 class CloudDocStore:
     def __init__(
         self,
@@ -72,11 +88,33 @@ class CloudDocStore:
         *,
         now_fn: Callable[[], float] = _now,
         file_lock_timeout: float = _FILE_LOCK_TIMEOUT_SEC,
+        scope: str = "",
+        _shared_lock: "asyncio.Lock | None" = None,
     ) -> None:
         self._path = path or get_clouddoc_state_path()
-        self._lock = asyncio.Lock()
+        self._lock = _shared_lock or asyncio.Lock()
         self._now_fn = now_fn
         self._file_lock_timeout = float(file_lock_timeout)
+        self._scope = scope
+
+    def scoped(self, scope: str) -> "CloudDocStore":
+        """A view of the same file whose per-document state lives under ``scope``.
+
+        Same path, same process lock, same clock; only the key changes. ``gc`` is
+        the one call that must be made on the unscoped store with every key -- see
+        ``CloudDocConnections.all_state_keys``.
+        """
+        return CloudDocStore(
+            self._path, now_fn=self._now_fn, file_lock_timeout=self._file_lock_timeout,
+            scope=scope, _shared_lock=self._lock,
+        )
+
+    @property
+    def scope(self) -> str:
+        return self._scope
+
+    def _key(self, doc_id: str) -> str:
+        return state_key(doc_id, self._scope)
 
     @property
     def path(self) -> Path:
@@ -157,8 +195,10 @@ class CloudDocStore:
             }
         entry["schema_version"] = _SCHEMA_VERSION
 
-    def _doc_unlocked(self, data: dict[str, Any], doc_id: str) -> dict[str, Any]:
-        entry = data.setdefault(doc_id, {})
+    def _doc_unlocked(self, data: dict[str, Any], doc_id: str, *, meta: bool = False) -> dict[str, Any]:
+        # ``meta`` selects the document's plain entry whatever this store's scope:
+        # panel metadata is shared between the identities watching one document.
+        entry = data.setdefault(doc_id if meta else self._key(doc_id), {})
         entry.setdefault("triggered_ids", {})
         entry.setdefault("inflight", {})
         entry.setdefault("conventions", None)
@@ -399,12 +439,13 @@ class CloudDocStore:
 
         def run(data: dict) -> dict:
             entry = self._doc_unlocked(data, doc_id)
+            meta_entry = entry if not self._scope else self._doc_unlocked(data, doc_id, meta=True)
             b = entry["backoff"]
             return {
                 "failed": bool(b.get("failed")),
                 "failed_reason": b.get("failed_reason"),
                 "until": b.get("until"),
-                "panel_meta": dict(entry.get("panel_meta") or {}),
+                "panel_meta": dict(meta_entry.get("panel_meta") or {}),
             }
 
         return await self._mutate(run)
@@ -418,7 +459,7 @@ class CloudDocStore:
         """
 
         def run(data: dict) -> None:
-            entry = self._doc_unlocked(data, doc_id)
+            entry = self._doc_unlocked(data, doc_id, meta=True)
             meta = entry.setdefault("panel_meta", {})
             meta.update({k: v for k, v in fields.items() if v is not None})
 
@@ -501,13 +542,17 @@ class CloudDocStore:
         """Drop the whole state entry for any document no longer watched, and prune
         the dedup keys of the rest."""
 
+        if self._scope:
+            raise RuntimeError("gc runs on the unscoped store with every state key")
+
         def run(data: dict) -> list[str]:
             keep = set(keep_doc_ids)
             removed = [d for d in list(data) if d not in keep]
             for d in removed:
                 data.pop(d, None)
-            for doc_id in list(data):
-                entry = self._doc_unlocked(data, doc_id)
+            for key in list(data):
+                # On the unscoped store the key is read back as it is, scoped or plain.
+                entry = self._doc_unlocked(data, key)
                 self._prune_triggered(entry)
             return removed
 

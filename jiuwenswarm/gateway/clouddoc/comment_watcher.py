@@ -355,22 +355,7 @@ class CloudDocCommentWatcher:
         summary = {"dispatched": 0, "applied": 0, "kept": 0, "rejected": 0}
         if not self._docs:
             return summary
-        # D21: only the mandate mode has an unattended path at all. In direct mode
-        # assignments stay in the document untouched -- no dispatch, no consumed
-        # triggers, no mechanical replies -- so switching back to mandate later
-        # finds them exactly where their authors left them.
-        try:
-            from jiuwenswarm.common.config import get_config
-
-            section = get_config().get("clouddoc") or {}
-            mode = str(section.get("mode") or "mandate").strip().lower()
-            live_enabled = bool(section.get("enabled", True))
-        except Exception:  # noqa: BLE001 - an unreadable config must not stop the loop
-            mode, live_enabled = "mandate", True
-        if not live_enabled or mode in ("direct", "recorded"):
-            # Uninstalling the co-scribe plugin flips enabled off mid-session;
-            # the loop keeps running until restart, so it must read the flag
-            # live rather than trust its construction-time value.
+        if not self._gate_open():
             return summary
 
         async def one(doc_id: str) -> None:
@@ -467,6 +452,28 @@ class CloudDocCommentWatcher:
             if isinstance(res, BaseException) and not isinstance(res, asyncio.CancelledError):
                 logger.exception("[clouddoc] %s tick raised", doc_id, exc_info=res)
         return summary
+
+    def _gate_open(self) -> bool:
+        """Whether this tick may do anything at all, read live from the config.
+
+        D21: only the mandate mode has an unattended path at all. In direct mode
+        assignments stay in the document untouched -- no dispatch, no consumed
+        triggers, no mechanical replies -- so switching back to mandate later
+        finds them exactly where their authors left them. Uninstalling the
+        co-scribe plugin flips ``enabled`` off mid-session; the loop keeps running
+        until restart, so it must read the flag live rather than trust its
+        construction-time value. A notify-only watcher overrides this: telling a
+        person about a mention is not unattended action.
+        """
+        try:
+            from jiuwenswarm.common.config import get_config
+
+            section = get_config().get("clouddoc") or {}
+            mode = str(section.get("mode") or "mandate").strip().lower()
+            live_enabled = bool(section.get("enabled", True))
+        except Exception:  # noqa: BLE001 - an unreadable config must not stop the loop
+            mode, live_enabled = "mandate", True
+        return live_enabled and mode not in ("direct", "recorded")
 
     async def _admit(self, doc_id: str) -> bool:
         """The admission check, run once per document per process.

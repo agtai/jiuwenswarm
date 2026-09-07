@@ -53,6 +53,10 @@ logger = logging.getLogger(__name__)
 # Display names by provider.kind. A second provider registers itself here.
 _PROVIDER_NAMES = {"google": "Google Docs", "feishu": "飞书文档"}
 
+# The personal-signature config key (S.5). The body is the person's to word; the
+# receipt number is appended by code and is not in this string.
+SIGNATURE_KEY = "personal_signature"
+
 
 def _key_stem(parsed: Any) -> str | None:
     """The file stem an uploaded key gets, from the key's own shape -- the same test
@@ -60,12 +64,30 @@ def _key_stem(parsed: Any) -> str | None:
     neither vendor's key, so the panel refuses before writing anything."""
     if not isinstance(parsed, dict):
         return None
+    if str(parsed.get("kind") or "").strip().lower() == "personal":
+        brand = str(parsed.get("brand") or "").strip().lower() or "unknown"
+        who = str(parsed.get("open_id") or parsed.get("profile") or "default")
+        return f"personal-{brand}-{who}"
     email = str(parsed.get("client_email") or "")
     if email:
         return email.split("@")[0]
     if parsed.get("app_id") and parsed.get("app_secret"):
         return str(parsed["app_id"])
     return None
+
+
+def _conn_payload(c: CloudDocConnection, **extra: Any) -> dict[str, Any]:
+    return {
+        "id": c.id,
+        "provider": c.kind,
+        "provider_name": _PROVIDER_NAMES.get(c.kind, c.kind),
+        "agent_address": c.address,
+        "agent_display": c.display_name,
+        # ``service`` or ``personal`` (S.1). The UI draws the two differently: a
+        # personal connection has no tiers, only a notify state.
+        "kind": c.identity_kind,
+        **extra,
+    }
 
 
 class CloudDocPanel:
@@ -86,15 +108,10 @@ class CloudDocPanel:
         conns = []
         for c in self._reg.list():
             summary = await self._connection_summary(c)
-            conns.append({
-                "id": c.id,
-                "provider": c.kind,
-                "provider_name": _PROVIDER_NAMES.get(c.kind, c.kind),
-                "agent_address": c.address,
-                "agent_display": c.display_name,
-                "docs_count": summary["total"],
+            conns.append(_conn_payload(
+                c, docs_count=summary["total"],
                 **{k: v for k, v in summary.items() if k != "total"},
-            })
+            ))
         first = conns[0] if conns else {}
         return {
             "enabled": True,
@@ -114,6 +131,10 @@ class CloudDocPanel:
             "approve_word": list(self._reg.watcher_cfg.approve_word),
             "keep_word": list(self._reg.watcher_cfg.keep_word),
             "connections": conns,
+            # The person's half of the personal signature (S.5); empty means the
+            # default wording. The receipt number is never part of it.
+            "personal_signature": self._current_signature(),
+            "identity_choice": self._current_choices(),
         }
 
     async def list_docs(self) -> list[dict[str, Any]]:
@@ -130,10 +151,22 @@ class CloudDocPanel:
         url_probed: set[str] = getattr(self, "_url_probed", None) or set()
         self._url_probed = url_probed
         rows = []
+        unread: dict[str, int] = {}
+        if self._reg.notice_store is not None:
+            try:
+                unread = await asyncio.to_thread(self._reg.notice_store.unread_by_doc)
+            except Exception:  # noqa: BLE001 - a missing badge is not an outage
+                unread = {}
+        choices = self._current_choices()
         for c in self._reg.list():
             for doc_id in list(c.watcher._docs):
-                health = await self._reg.store.doc_health(doc_id)
+                # Health is per identity -- the person may have lost access where the
+                # bot still has it -- so a personal row reads its own scoped entry;
+                # the metadata below is the document's and comes with it.
+                health = await self._reg.store_for(c).doc_health(doc_id)
                 meta = health.get("panel_meta") or {}
+                owners = self._reg.owners(doc_id)
+                overlap = len(owners) > 1
                 # The format, so the panel can tell a spreadsheet from a document --
                 # both in the icon it draws and in the link it opens, since a
                 # spreadsheet's editor lives at a different path. Recorded at adoption;
@@ -192,21 +225,31 @@ class CloudDocPanel:
                     "title": title or doc_id[:12] + "…",
                     "kind": kind,
                     "checked_at": meta.get("checked_at"),
-                    "status": self._status_of(health),
+                    "status": self._status_of(health, personal=c.personal),
                     "retry_at": health.get("until"),
                     "provider": c.kind,
                     "provider_name": _PROVIDER_NAMES.get(c.kind, c.kind),
                     "connection_id": c.id,
+                    # S.1/S.2/S.3 for the row: which kind of connection this row is,
+                    # whether the document is also reachable the other way, which
+                    # identity executes on it, and how many unread notices it holds.
+                    "connection_kind": c.identity_kind,
+                    "overlap": overlap,
+                    "identity": (
+                        choices.get(doc_id, "service") if overlap else c.identity_kind
+                    ),
+                    "notices": int(unread.get(doc_id, 0)) if c.personal else 0,
                 })
         return rows
 
     @staticmethod
-    def _status_of(health: dict[str, Any]) -> str:
+    def _status_of(health: dict[str, Any], *, personal: bool = False) -> str:
         if health.get("failed"):
             # comment_only is a configuration mistake the user can fix themselves, so
             # it gets its own state and its own guidance. Every other failure -- three
-            # consecutive 403s or 404s -- is simply frozen.
-            if health.get("failed_reason") == "comment_only_access":
+            # consecutive 403s or 404s -- is simply frozen. A personal row is never
+            # comment-only: the person's own comment access is enough to be told.
+            if health.get("failed_reason") == "comment_only_access" and not personal:
                 return "comment_only"
             return "frozen"
         until = health.get("until")
@@ -225,7 +268,10 @@ class CloudDocPanel:
         ones, and at that point there is no fact to judge.
         """
         docs = list(conn.watcher._docs)
-        states = [self._status_of(await self._reg.store.doc_health(d)) for d in docs]
+        states = [
+            self._status_of(await self._reg.store_for(conn).doc_health(d), personal=conn.personal)
+            for d in docs
+        ]
         counts = {
             "total": len(states),
             "ok": sum(1 for x in states if x == "ok"),
@@ -270,7 +316,28 @@ class CloudDocPanel:
             logger.warning("[clouddoc] 发现共享文档失败（%s）：%s", exc.kind, exc)
             return {"result": "unknown", "detail": exc.kind, "adopted": [], "needs_editor": []}
 
-        watched = set(self._reg.all_docs())
+        if conn.personal:
+            # S.6: a person's "shared with me" may run to hundreds of documents, and
+            # polling all of them would spend the quota on nothing. Discovery lists;
+            # the person ticks the ones to adopt (``adopt_docs``). Nothing is adopted
+            # here, and a document already under this connection is marked so.
+            mine = set(conn.watcher._docs)
+            candidates = [
+                {
+                    "doc_id": d.doc_id, "title": d.title, "kind": d.kind,
+                    "url": conn.provider.doc_url(d.doc_id, d.kind),
+                    "can_edit": bool(d.can_edit), "adopted": d.doc_id in mine,
+                }
+                for d in found
+            ]
+            return {
+                "result": "ok", "adopted": [], "needs_editor": [], "unsupported": [],
+                "candidates": candidates,
+            }
+
+        # Only a service connection's own documents count as taken: a personal
+        # connection on the same document is the overlap S.2 provides for.
+        watched = {d for c in self._reg.list() if not c.personal for d in c.watcher._docs}
         adopted: list[dict[str, Any]] = []
         needs_editor: list[dict[str, Any]] = []
         for d in found:
@@ -297,7 +364,7 @@ class CloudDocPanel:
         # (measured: 3 of 15 rows moved). Fail-soft per row, and a row's verdict is
         # updated the same way the single-row refresh does it.
         rechecked = 0
-        mine = [d for d in self._reg.all_docs() if self._reg.find_doc(d) is conn]
+        mine = list(conn.watcher._docs)
         for doc_id in mine:
             try:
                 await self.update_doc(doc_id)
@@ -332,7 +399,7 @@ class CloudDocPanel:
             doc_id = conn.provider.parse_doc_ref(url_or_id)
         except ProviderError as exc:
             return {"result": "invalid", "detail": str(exc)}
-        owner = self._reg.find_doc(doc_id)
+        owner = next((c for c in self._reg.owners(doc_id) if c.personal == conn.personal), None)
         if owner is not None:
             # Re-pasting a link is how a document adopted before URL persistence
             # heals: the token is known, only the tenant-domain link was lost.
@@ -340,10 +407,11 @@ class CloudDocPanel:
                 await self._reg.store.set_panel_meta(
                     doc_id, url=url_or_id.split("?", 1)[0].split("#", 1)[0]
                 )
-            # A document belongs to one connection: two identities on one document
-            # means every mention answered twice, and state keyed by doc_id means the
-            # two overwrite each other. The owner is returned in full so the UI can
-            # say which connection already has it.
+            # A document belongs to one connection **of a kind**: two service
+            # identities on one document means every mention answered twice, and
+            # state keyed by doc_id means the two overwrite each other. The owner is
+            # returned in full so the UI can say which connection already has it. A
+            # service and a personal connection may share a document (S.2).
             return {"result": "exists", "doc_id": doc_id, "connection_id": owner.id}
 
         probe = await self._probe(conn, doc_id)
@@ -362,20 +430,67 @@ class CloudDocPanel:
             url=url_or_id.split("?", 1)[0].split("#", 1)[0]
             if url_or_id.strip().startswith("http") else None,
         )
-        self._reg.policy_issue([doc_id])
+        if not conn.personal:
+            self._reg.policy_issue([doc_id])
         await asyncio.to_thread(self._persist)
         return {"result": "ok", "doc_id": doc_id, "title": probe.get("title")}
 
-    async def remove_doc(self, doc_id: str) -> dict[str, Any]:
-        conn = self._reg.find_doc(doc_id)
+    async def adopt_docs(
+        self, connection_id: str | None, doc_ids: list[str]
+    ) -> dict[str, Any]:
+        """Adopt the documents a person ticked in the discovery list (S.6).
+
+        Each goes through the same probe a pasted link does, so a document the
+        listing showed but the identity cannot actually read is refused with the
+        same vocabulary. Per-document outcomes come back so the UI can say which
+        of a batch landed.
+        """
+        conn = self._reg.get(connection_id)
         if conn is None:
+            return {"result": "no_connection", "adopted": [], "refused": []}
+        adopted: list[str] = []
+        refused: list[dict[str, Any]] = []
+        for raw in doc_ids or []:
+            try:
+                doc_id = conn.provider.parse_doc_ref(str(raw))
+            except ProviderError as exc:
+                refused.append({"doc_id": str(raw), "result": "invalid", "detail": str(exc)})
+                continue
+            if doc_id in conn.watcher._docs:
+                continue
+            probe = await self._probe(conn, doc_id)
+            if probe["result"] != "ok":
+                refused.append({"doc_id": doc_id, **probe})
+                continue
+            conn.watcher.watch(doc_id)
+            await self._reg.store.set_panel_meta(
+                doc_id, title=probe.get("title") or "", kind=probe.get("kind") or "",
+                checked_at=time.time(),
+            )
+            if not conn.personal:
+                self._reg.policy_issue([doc_id])
+            adopted.append(doc_id)
+        if adopted:
+            await asyncio.to_thread(self._persist)
+        return {"result": "ok", "adopted": adopted, "refused": refused}
+
+    async def remove_doc(self, doc_id: str, connection_id: str | None = None) -> dict[str, Any]:
+        """Drop a document from one connection -- the named one, or every owner when
+        none is named (the pre-overlap contract, kept for callers that have no
+        connection in hand)."""
+        owners = self._reg.owners(doc_id)
+        if connection_id:
+            owners = [c for c in owners if c.id == connection_id]
+        if not owners:
             return {"result": "not_watched"}
-        conn.watcher.unwatch(doc_id)
+        for conn in owners:
+            conn.watcher.unwatch(doc_id)
         # Removing the document ends the delegation for it, as removing the
         # connection does for every document under it: a mandate that outlived
-        # its document would meet a later re-adoption as still live.
+        # its document would meet a later re-adoption as still live. Only a
+        # service connection ever held one.
         registry = getattr(self._reg, "_watch_registry", None)
-        if registry is not None:
+        if registry is not None and any(not c.personal for c in owners):
             try:
                 registry.revoke(doc_id, reason="document_removed")
             except Exception:  # noqa: BLE001 - the document is gone either way; say so
@@ -384,7 +499,7 @@ class CloudDocPanel:
         # The state entry goes to the store's gc, the same primitive sweep uses. It is
         # cleared at once, and re-adding the document cold-starts through seeding
         # rather than replaying its comment history.
-        await self._reg.store.gc(self._reg.all_docs())
+        await self._reg.store.gc(self._reg.all_state_keys())
         return {"result": "ok"}
 
     async def update_doc(self, doc_id: str) -> dict[str, Any]:
@@ -393,11 +508,12 @@ class CloudDocPanel:
         conn = self._reg.find_doc(doc_id)
         if conn is None:
             return {"result": "not_watched"}
+        store = self._reg.store_for(conn)
         probe = await self._probe(conn, doc_id)
         if probe["result"] == "ok":
             # The facts say healthy: clear the verdict bit and the watcher re-admits it
             # on the next tick.
-            await self._reg.store.clear_failure(doc_id)
+            await store.clear_failure(doc_id)
             await self._reg.store.set_panel_meta(
                 doc_id, title=probe.get("title") or "",
                 kind=probe.get("kind") or "", checked_at=time.time(),
@@ -405,7 +521,7 @@ class CloudDocPanel:
             return {"result": "ok", "title": probe.get("title")}
         if probe["result"] == "comment_only":
             # Same verdict as admission: record it, and the UI keeps its amber light.
-            await self._reg.store.note_permanent_failure(doc_id, "comment_only_access")
+            await store.note_permanent_failure(doc_id, "comment_only_access")
             await self._reg.store.set_panel_meta(doc_id, checked_at=time.time())
         # not_shared and unknown leave state alone: a transient error is not a fact,
         # and nothing frozen gets thawed on one.
@@ -435,8 +551,9 @@ class CloudDocPanel:
             if stem is None:
                 return {
                     "result": "invalid_key",
-                    "detail": "not a Google service-account key (client_email) "
-                              "nor a Feishu app (app_id + app_secret)",
+                    "detail": "not a Google service-account key (client_email), "
+                              "not a Feishu app (app_id + app_secret), and not a "
+                              "personal connection (kind: personal, brand: feishu)",
                 }
             name = re.sub(r"[^A-Za-z0-9._-]", "_", filename or "") or (stem + ".json")
             if not name.endswith(".json"):
@@ -471,15 +588,58 @@ class CloudDocPanel:
         await asyncio.to_thread(self._persist)
         return {
             "result": "ok",
-            "connection": {
-                "id": conn.id,
-                "provider": conn.kind,
-                "provider_name": _PROVIDER_NAMES.get(conn.kind, conn.kind),
-                "agent_address": conn.address,
-                "agent_display": conn.display_name,
-                "docs_count": 0,
-                "health": "idle",
-            },
+            "connection": _conn_payload(conn, docs_count=0, health="idle"),
+        }
+
+    async def add_personal_connection(
+        self, brand: str = "feishu", profile: str | None = None,
+    ) -> dict[str, Any]:
+        """Connect as the person themselves (S.1), with no secret to upload.
+
+        The identity is whatever the platform CLI is logged in as: the file this
+        writes holds only ``kind``, ``brand``, the CLI profile and -- once the
+        identity resolved -- the open_id and name it was verified as. A missing
+        login fails here with the CLI's own hint, before anything is persisted.
+        """
+        brand = str(brand or "feishu").strip().lower()
+        if brand not in ("feishu", "lark"):
+            return {
+                "result": "unsupported",
+                "detail": "个人身份目前仅支持飞书（lark-cli 用户登录）；Google 个人身份尚未支持。",
+            }
+        keys_dir = self._keys_dir()
+        name = f"personal-feishu-{re.sub(r'[^A-Za-z0-9._-]', '_', profile or 'default')}.json"
+        path = keys_dir / name
+        if path.exists():
+            return {"result": "invalid_key", "detail": f"key file already exists: {name}"}
+        body = {"kind": "personal", "brand": "feishu"}
+        if profile:
+            body["profile"] = str(profile)
+
+        def _write(payload: dict) -> None:
+            keys_dir.mkdir(mode=0o700, exist_ok=True)
+            if not path.exists():
+                path.touch(mode=0o600)
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=1))
+
+        await asyncio.to_thread(_write, body)
+        try:
+            conn = await self._reg.add(str(path), [], start=True)
+        except ValueError as exc:            # a duplicate identity
+            await asyncio.to_thread(path.unlink)
+            return {"result": "duplicate", "detail": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - not logged in, CLI missing, and the like
+            await asyncio.to_thread(path.unlink)
+            logger.warning("[clouddoc] add_personal_connection failed: %s", exc)
+            return {"result": "not_logged_in", "detail": str(exc)}
+        # Persist the verified identity so a restart anchors on it without asking.
+        await asyncio.to_thread(
+            _write, {**body, "open_id": conn.address, "name": conn.display_name},
+        )
+        await asyncio.to_thread(self._persist)
+        return {
+            "result": "ok",
+            "connection": _conn_payload(conn, docs_count=0, health="idle"),
         }
 
     async def remove_connection(self, connection_id: str) -> dict[str, Any]:
@@ -494,7 +654,7 @@ class CloudDocPanel:
         conn = await self._reg.remove(connection_id)
         if conn is None:
             return {"result": "not_found"}
-        await self._reg.store.gc(self._reg.all_docs())
+        await self._reg.store.gc(self._reg.all_state_keys())
         await asyncio.to_thread(self._persist)
         return {"result": "ok"}
 
@@ -534,12 +694,25 @@ class CloudDocPanel:
         ``permanent=true`` is the owner's explicit word for "no expiry"; saying
         neither issues with the registry's default term. Over RPC a missing
         field and an explicit null both arrive as None, so the permanent flag
-        exists precisely to keep "said nothing" and "said forever" apart."""
-        if self._reg.find_doc(doc_id) is None:
-            # A mandate names a document this deployment manages. Issuing one for
-            # an id nobody adopted left an entry that no watcher would ever read
-            # and that the panel could not show.
+        exists precisely to keep "said nothing" and "said forever" apart.
+
+        A mandate names a document this deployment manages. Issuing one for an id
+        nobody adopted left an entry that no watcher would ever read and that the
+        panel could not show. A document reachable **only** through a personal
+        connection has no tiers to grant either (S.3): the person's own permission
+        is the whole of the authority, and the personal watcher never acts on it.
+        Both refusals are here, on the server, so a UI that offered the control
+        anyway would still be refused."""
+        reg = getattr(self, "_reg", None)
+        owners = reg.owners(doc_id) if reg is not None else []
+        if reg is not None and not owners:
             return {"ok": False, "detail": "文档未纳管，不能签发档位。"}
+        if owners and all(c.personal for c in owners):
+            return {
+                "ok": False, "doc_id": doc_id,
+                "detail": "个人连接下的文档没有值守档位：个人身份只通知，不代为处理。",
+                "reason": "personal_only",
+            }
         if expires_at is not None:
             entry = self._registry().issue(
                 doc_id, mode, issued_by="manual",
@@ -736,6 +909,11 @@ class CloudDocPanel:
 
         tasks = []
         for conn in self._reg.list():
+            if conn.personal:
+                # No mandate is ever issued under a personal connection, so its
+                # assignments are not "awaiting authorization" -- they are the
+                # person's own inbox, which the notice ledger serves.
+                continue
             me = identity_cache.get(conn.id, "")
             if not me:
                 # ``self_identity`` answers with an AgentIdentity, not a string. An
@@ -811,18 +989,24 @@ class CloudDocPanel:
         if keys_dir.is_dir():
             for f in sorted(keys_dir.glob("*.json"),
                             key=lambda x: x.stat().st_mtime, reverse=True):
+                kind = "service"
                 try:
                     data = json.loads(f.read_text())
                     email = str(data.get("client_email") or "")
                     address = email or str(data.get("app_id") or "")
+                    if str(data.get("kind") or "").lower() == "personal":
+                        kind = "personal"
+                        address = str(data.get("name") or data.get("open_id") or "personal")
                 except Exception:  # noqa: BLE001 - an unreadable key still gets listed
                     email = address = ""
                 rows.append({
                     "filename": f.name,
                     "path": str(f),
                     "client_email": email,
-                    # What the key names, whichever vendor: the SA email or the app id.
+                    # What the key names, whichever vendor: the SA email, the app id,
+                    # or the person a personal file was verified as.
                     "address": address,
+                    "kind": kind,
                     "in_use": os.path.realpath(f) in in_use,
                 })
         return {"result": "ok", "keys": rows}
@@ -858,8 +1042,10 @@ class CloudDocPanel:
             if exc.kind in ("not_found", "forbidden"):
                 return {"result": "not_shared", "detail": exc.kind}
             return {"result": "unknown", "detail": f"{exc.kind}: {exc}"}
-        if not caps.can_edit:
+        if not caps.can_edit and not conn.personal:
             return {"result": "comment_only"}
+        if conn.personal and not caps.can_read:
+            return {"result": "not_shared", "detail": "no_read_access"}
         try:
             title = await conn.provider.title(doc_id)
         except Exception:  # noqa: BLE001 - a title is decoration and must not block the
@@ -891,7 +1077,11 @@ class CloudDocPanel:
             section["enabled"] = True
             self._reg.enabled = True
         section["connections"] = [
-            {"credentials_file": c.credentials_file, "documents": list(c.watcher._docs)}
+            {
+                "credentials_file": c.credentials_file,
+                "documents": list(c.watcher._docs),
+                "kind": c.identity_kind,
+            }
             for c in self._reg.list()
         ]
         section.pop("credentials_file", None)
@@ -933,6 +1123,94 @@ class CloudDocPanel:
             return bool(((data or {}).get("clouddoc") or {}).get("enabled", True))
         except Exception:  # noqa: BLE001
             return True
+
+    def _current_signature(self) -> str:
+        try:
+            data = load_yaml_round_trip(self._config_path)
+            return str(((data or {}).get("clouddoc") or {}).get(SIGNATURE_KEY) or "")
+        except Exception:  # noqa: BLE001 - an unreadable config reads as the default
+            return ""
+
+    def _current_choices(self) -> dict[str, str]:
+        try:
+            data = load_yaml_round_trip(self._config_path)
+            raw = ((data or {}).get("clouddoc") or {}).get("identity_choice") or {}
+            return {str(k): str(v) for k, v in dict(raw).items() if str(v) == "personal"}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    async def set_signature(self, text: str) -> dict[str, Any]:
+        """Word the person's half of the personal signature (S.5). Empty restores
+        the default wording; it never removes the signature, and the receipt number
+        is not part of what can be set here."""
+        from jiuwenswarm.agents.harness.common.tools.clouddoc.signature import (
+            DEFAULT_SIGNATURE_TEMPLATE,
+            signature_body,
+        )
+
+        body = " ".join(str(text or "").split())[:120]
+
+        def mutate(data: dict) -> dict:
+            section = data.setdefault("clouddoc", {})
+            if body:
+                section[SIGNATURE_KEY] = body
+            else:
+                section.pop(SIGNATURE_KEY, None)
+            return data
+
+        self._write_config(mutate)
+        return {
+            "ok": True,
+            "personal_signature": body,
+            "preview": signature_body(body or DEFAULT_SIGNATURE_TEMPLATE, name="{name}"),
+        }
+
+    async def set_identity_choice(self, doc_id: str, choice: str) -> dict[str, Any]:
+        """Choose which identity executes on a document adopted both ways (S.2).
+        Only ``personal`` is written; ``service`` is the default and clears the entry."""
+        choice = str(choice or "").strip().lower()
+        if choice not in ("service", "personal"):
+            return {"ok": False, "detail": f"未知身份 {choice!r}（可选 service / personal）。"}
+        owners = self._reg.owners(doc_id)
+        if choice == "personal" and not any(c.personal for c in owners):
+            return {"ok": False, "detail": "这篇文档没有个人连接纳管，无法以个人身份执行。"}
+
+        def mutate(data: dict) -> dict:
+            section = data.setdefault("clouddoc", {})
+            choices = section.get("identity_choice")
+            if not isinstance(choices, dict):
+                choices = {}
+                section["identity_choice"] = choices
+            if choice == "personal":
+                choices[doc_id] = "personal"
+            else:
+                choices.pop(doc_id, None)
+            if not choices:
+                section.pop("identity_choice", None)
+            return data
+
+        self._write_config(mutate)
+        return {"ok": True, "doc_id": doc_id, "identity": choice}
+
+    def bind_notifier(self, push) -> None:
+        """Give the registry the web channel's broadcast, once the channel exists."""
+        self._reg.notifier = push
+
+    async def notices(self, limit: int = 100, unread_only: bool = True) -> dict[str, Any]:
+        store = self._reg.notice_store
+        if store is None:
+            return {"notices": []}
+        rows = await asyncio.to_thread(store.list, unread_only=unread_only, limit=limit)
+        return {"notices": rows}
+
+    async def notice_ack(
+        self, notice_id: str | None = None, doc_id: str | None = None
+    ) -> dict[str, Any]:
+        store = self._reg.notice_store
+        if store is None:
+            return {"ok": True, "acked": 0}
+        n = await asyncio.to_thread(store.ack, notice_id or None, doc_id=doc_id or None)
+        return {"ok": True, "acked": int(n)}
 
     async def set_mode(self, mode: str) -> dict[str, Any]:
         """Switch between Direct and Mandate (D21). The UI offers exactly these
@@ -1037,6 +1315,10 @@ async def discover_shared_periodically(
     while True:
         await sleep(interval_seconds)
         for conn in panel._reg.list():
+            if conn.personal:
+                # S.6: a person's share list is only ever listed, never adopted
+                # unasked -- and listing it on a timer would spend quota on nothing.
+                continue
             try:
                 out = await panel.sync_shared_docs(conn.id)
             except asyncio.CancelledError:
