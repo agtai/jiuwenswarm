@@ -20,7 +20,6 @@ const MAX_CONTROL_BYTES = 16_384;
 const MAX_PCM_F32_ABS = 3.4028234663852886e38;
 const MAX_PCM_PAYLOAD_BYTES = (MAX_SAMPLE_RATE_HZ / 50) * 4;
 const MAX_BINARY_FRAME_BYTES = WIRE_HEADER_BYTES + MAX_LEASE_ID_BYTES + MAX_PCM_PAYLOAD_BYTES;
-const MAX_LIFECYCLE_FACT_CAPACITY = 256;
 const REGISTRATION_OWNER_CONSTRUCTION_TOKEN = Symbol('browser-gateway-media-registration-owner');
 
 export type MediaDirection = 'uplink' | 'downlink';
@@ -239,10 +238,8 @@ export interface MediaActivationRequest {
   readonly provider_available: boolean;
   readonly transport_available: boolean;
   readonly on_audio_frame: (frame: MediaAudioFrame) => void;
-  readonly on_lifecycle_fact?: (fact: MediaLeafLifecycleFact) => void;
   readonly max_pending_frames?: number;
   readonly max_pending_bytes?: number;
-  readonly lifecycle_fact_capacity?: number;
 }
 
 const CONSUMER_FAILURE_REASON_PREFIXES = Object.freeze([
@@ -326,19 +323,8 @@ export interface MediaCloseResult {
   readonly business_cancel_count_delta: 0;
 }
 
-export type MediaLeafLifecycleEvent =
-  | 'activation.ready'
-  | 'sender.enqueue'
-  | 'sender.drain'
-  | 'sender.acknowledge'
-  | 'receiver.attach'
-  | 'receiver.accept_binary'
-  | 'receiver.accept_detach'
-  | 'activation.closed'
-  | 'lifecycle.snapshot';
-
 export interface MediaLeafLifecycleFact {
-  readonly event: MediaLeafLifecycleEvent;
+  readonly event: 'lifecycle.snapshot';
   readonly lease_id: string;
   readonly authority_evidence_id: string;
   readonly connection_id: string;
@@ -364,9 +350,6 @@ export interface MediaLeafLifecycleFact {
   readonly receiver_last_ack: number | null;
   readonly sender_pending_frames: number;
   readonly sender_pending_bytes: number;
-  readonly pending_lifecycle_facts: number;
-  readonly dropped_lifecycle_facts: number;
-  readonly audit_delivery_failures: number;
   readonly evidence_scope: 'browser_gateway_media_registration_leaf_only';
   readonly fact_contains_raw_payload: false;
   readonly registered_route_observed: false;
@@ -512,9 +495,7 @@ function capability(): MediaCapability {
   });
 }
 
-export function createBrowserGatewayMediaActivation(
-  request: MediaActivationRequest,
-): BrowserGatewayMediaActivation {
+export function createBrowserGatewayMediaActivation(request: MediaActivationRequest): BrowserGatewayMediaActivation {
   const inactive = (reason_id: InactiveMediaActivation['reason_id']): InactiveMediaActivation => ({
     active: false,
     reason_id,
@@ -526,36 +507,14 @@ export function createBrowserGatewayMediaActivation(
   if (request.transport_available !== true) return inactive('MEDIA_TRANSPORT_UNAVAILABLE');
   const maxFrames = request.max_pending_frames ?? 8;
   const maxBytes = request.max_pending_bytes ?? 131_072;
-  const lifecycleFactCapacity = request.lifecycle_fact_capacity ?? 32;
   if (!Number.isInteger(maxFrames) || maxFrames <= 0 || !Number.isInteger(maxBytes) || maxBytes <= 0) {
     throw new MediaTransportViolation('MEDIA_INVALID_LIMIT', 'queue bounds must be positive integers');
-  }
-  if (
-    !Number.isInteger(lifecycleFactCapacity)
-    || lifecycleFactCapacity <= 0
-    || lifecycleFactCapacity > MAX_LIFECYCLE_FACT_CAPACITY
-  ) {
-    throw new MediaTransportViolation(
-      'MEDIA_INVALID_AUDIT_CAPACITY',
-      `lifecycle fact capacity must be an integer in [1, ${MAX_LIFECYCLE_FACT_CAPACITY}]`,
-    );
   }
   if (typeof request.on_audio_frame !== 'function') {
     throw new MediaTransportViolation('MEDIA_INVALID_CONSUMER', 'audio consumer must be callable');
   }
-  if (request.on_lifecycle_fact !== undefined && typeof request.on_lifecycle_fact !== 'function') {
-    throw new MediaTransportViolation('MEDIA_INVALID_AUDIT_CALLBACK', 'lifecycle fact consumer must be callable');
-  }
   const binding = freezeBinding(request.binding);
-  const owner = new BrowserGatewayMediaRegistrationOwner(
-    binding,
-    maxFrames,
-    maxBytes,
-    request.on_audio_frame,
-    request.on_lifecycle_fact,
-    lifecycleFactCapacity,
-    REGISTRATION_OWNER_CONSTRUCTION_TOKEN,
-  );
+  const owner = new BrowserGatewayMediaRegistrationOwner(binding, maxFrames, maxBytes, request.on_audio_frame, REGISTRATION_OWNER_CONSTRUCTION_TOKEN);
   return {
     active: true,
     binding,
@@ -1322,71 +1281,38 @@ export class StrictMediaReceiver {
   }
 }
 
-/**
- * One bounded, non-formal registration owner for the existing Media contract.
- *
- * The owner opens no socket and writes no log or storage.  Its synchronous
- * close cannot be cancelled or timed out midway, and every close caller
- * observes the same retained result.  Operations only retain frozen,
- * payload-free facts in a fixed-capacity lane; an observer runs solely during
- * an explicit bounded drain and never becomes business or product authority.
- */
+/** Bounded sender/receiver owner with a current, payload-free lifecycle snapshot. */
 export class BrowserGatewayMediaRegistrationOwner {
   readonly binding: MediaAuthorityBinding;
   readonly #sender: BoundedMediaSender;
   readonly #receiver: StrictMediaReceiver;
-  readonly #onLifecycleFact: ((fact: MediaLeafLifecycleFact) => void) | undefined;
-  readonly #lifecycleFactCapacity: number;
-  readonly #lifecycleFacts: MediaLeafLifecycleFact[] = [];
   #closedState = false;
   #retainedClose: MediaRegistrationOwnerCloseResult | null = null;
-  #droppedLifecycleFactCount = 0;
-  #auditFailureCount = 0;
 
   constructor(
     binding: MediaAuthorityBinding,
     maxPendingFrames: number,
     maxPendingBytes: number,
     onAudioFrame: (frame: MediaAudioFrame) => void,
-    onLifecycleFact?: (fact: MediaLeafLifecycleFact) => void,
-    lifecycleFactCapacity = 32,
     constructionToken?: symbol,
   ) {
     if (constructionToken !== REGISTRATION_OWNER_CONSTRUCTION_TOKEN) {
-      throw new MediaTransportViolation(
-        'MEDIA_ACTIVATION_FACTORY_REQUIRED',
-        'registration owners must be created by the activation factory',
-      );
+      throw new MediaTransportViolation('MEDIA_ACTIVATION_FACTORY_REQUIRED', 'registration owners must be created by the activation factory');
     }
     if (typeof onAudioFrame !== 'function') {
       throw new MediaTransportViolation('MEDIA_INVALID_CONSUMER', 'audio consumer must be callable');
     }
-    if (onLifecycleFact !== undefined && typeof onLifecycleFact !== 'function') {
-      throw new MediaTransportViolation('MEDIA_INVALID_AUDIT_CALLBACK', 'lifecycle fact consumer must be callable');
-    }
-    if (
-      !Number.isInteger(lifecycleFactCapacity)
-      || lifecycleFactCapacity <= 0
-      || lifecycleFactCapacity > MAX_LIFECYCLE_FACT_CAPACITY
-    ) {
-      throw new MediaTransportViolation(
-        'MEDIA_INVALID_AUDIT_CAPACITY',
-        `lifecycle fact capacity must be an integer in [1, ${MAX_LIFECYCLE_FACT_CAPACITY}]`,
-      );
-    }
     this.binding = freezeBinding(binding);
     this.#sender = new BoundedMediaSender(this.binding, maxPendingFrames, maxPendingBytes);
     this.#receiver = new StrictMediaReceiver(this.binding, onAudioFrame);
-    this.#onLifecycleFact = onLifecycleFact;
-    this.#lifecycleFactCapacity = lifecycleFactCapacity;
-    this.#record('activation.ready');
   }
 
-  get closed(): boolean { return this.#closedState; }
-  get audit_delivery_failures(): number { return this.#auditFailureCount; }
-  get pending_lifecycle_facts(): number { return this.#lifecycleFacts.length; }
-  get dropped_lifecycle_facts(): number { return this.#droppedLifecycleFactCount; }
-  get consumer_failure_reason_id(): string | null { return this.#receiver.consumer_failure_reason_id; }
+  get closed(): boolean {
+    return this.#closedState;
+  }
+  get consumer_failure_reason_id(): string | null {
+    return this.#receiver.consumer_failure_reason_id;
+  }
 
   enqueue(frame: MediaAudioFrame): MediaEnqueueResult {
     if (this.#closedState) {
@@ -1396,15 +1322,11 @@ export class BrowserGatewayMediaRegistrationOwner {
       };
     }
     const result = this.#sender.enqueue(frame);
-    this.#record('sender.enqueue');
     if (this.#sender.closed) this.close(coerceDetachReason(result.reason_id));
     return result;
   }
 
-  drain(
-    trySendBinary: (binary: Uint8Array) => BinarySendDisposition,
-    onFrameSent?: (seq: number) => void
-  ): MediaDrainResult {
+  drain(trySendBinary: (binary: Uint8Array) => BinarySendDisposition, onFrameSent?: (seq: number) => void): MediaDrainResult {
     if (this.#closedState) {
       return {
         sent_frames: 0,
@@ -1422,7 +1344,6 @@ export class BrowserGatewayMediaRegistrationOwner {
         reason_id: this.#retainedClose?.reason_id ?? result.reason_id,
       };
     }
-    this.#record('sender.drain');
     if (this.#sender.closed) this.close(coerceDetachReason(result.reason_id));
     return result;
   }
@@ -1430,7 +1351,6 @@ export class BrowserGatewayMediaRegistrationOwner {
   acknowledge(control: MediaAck): MediaDetach | null {
     if (this.#closedState) return this.#retainedClose?.sender_detach ?? this.#sender.close().detach;
     const result = this.#sender.acknowledge(control);
-    this.#record('sender.acknowledge');
     if (result !== null) this.close(result.reason_id);
     return result;
   }
@@ -1438,7 +1358,6 @@ export class BrowserGatewayMediaRegistrationOwner {
   attach(control: MediaAttach): MediaDetach | null {
     if (this.#closedState) return this.#retainedClose?.receiver_detach ?? this.#receiver.close().detach;
     const result = this.#receiver.attach(control);
-    this.#record('receiver.attach');
     if (result !== null) this.close(result.reason_id);
     return result;
   }
@@ -1447,7 +1366,6 @@ export class BrowserGatewayMediaRegistrationOwner {
     if (this.#closedState) return this.#retainedClose?.receiver_detach ?? this.#receiver.close().detach!;
     const result = this.#receiver.acceptBinary(raw);
     if (this.#closedState) return this.#retainedClose?.receiver_detach ?? result;
-    this.#record('receiver.accept_binary');
     if (result.type === 'media.detach') this.close(result.reason_id);
     return result;
   }
@@ -1455,34 +1373,7 @@ export class BrowserGatewayMediaRegistrationOwner {
   acceptDetach(control: MediaDetach): MediaRegistrationOwnerCloseResult {
     if (this.#retainedClose !== null) return this.#retainedClose;
     const result = this.#receiver.acceptDetach(control);
-    this.#record('receiver.accept_detach');
     return this.close(result.reason_id);
-  }
-
-  lifecycleSnapshot(): MediaLeafLifecycleFact {
-    return this.#fact('lifecycle.snapshot');
-  }
-
-  drainLifecycleFacts(limit: number): number {
-    if (!Number.isInteger(limit) || limit <= 0) {
-      throw new MediaTransportViolation(
-        'MEDIA_INVALID_AUDIT_DRAIN_LIMIT',
-        'lifecycle fact drain limit must be a positive integer',
-      );
-    }
-    const callback = this.#onLifecycleFact;
-    if (callback === undefined) return 0;
-    let attempted = 0;
-    while (attempted < limit && this.#lifecycleFacts.length > 0) {
-      const fact = this.#lifecycleFacts.shift()!;
-      try {
-        callback(fact);
-      } catch {
-        this.#auditFailureCount += 1;
-      }
-      attempted += 1;
-    }
-    return attempted;
   }
 
   close(reasonId: MediaDetachReason = 'MEDIA_LOCAL_CLOSE'): MediaRegistrationOwnerCloseResult {
@@ -1500,17 +1391,13 @@ export class BrowserGatewayMediaRegistrationOwner {
       receiver_detach: receiver.detach,
       business_cancel_count_delta: 0,
     });
-    this.#record('activation.closed');
     return this.#retainedClose;
   }
 
-  #fact(
-    event: MediaLeafLifecycleEvent,
-    pendingLifecycleFacts = this.#lifecycleFacts.length,
-  ): MediaLeafLifecycleFact {
+  lifecycleSnapshot(): MediaLeafLifecycleFact {
     const playout = this.binding.playout;
     return Object.freeze({
-      event,
+      event: 'lifecycle.snapshot',
       lease_id: this.binding.lease_id,
       authority_evidence_id: this.binding.authority_evidence_id,
       connection_id: this.binding.connection_id,
@@ -1536,9 +1423,6 @@ export class BrowserGatewayMediaRegistrationOwner {
       receiver_last_ack: this.#receiver.last_ack,
       sender_pending_frames: this.#sender.pending_frames,
       sender_pending_bytes: this.#sender.pending_bytes,
-      pending_lifecycle_facts: pendingLifecycleFacts,
-      dropped_lifecycle_facts: this.#droppedLifecycleFactCount,
-      audit_delivery_failures: this.#auditFailureCount,
       evidence_scope: 'browser_gateway_media_registration_leaf_only',
       fact_contains_raw_payload: false,
       registered_route_observed: false,
@@ -1546,14 +1430,6 @@ export class BrowserGatewayMediaRegistrationOwner {
       route_to_disk_zero_persistence_observed: false,
       business_cancel_count_delta: 0,
     });
-  }
-
-  #record(event: MediaLeafLifecycleEvent): void {
-    if (this.#lifecycleFacts.length >= this.#lifecycleFactCapacity) {
-      this.#droppedLifecycleFactCount += 1;
-      return;
-    }
-    this.#lifecycleFacts.push(this.#fact(event, this.#lifecycleFacts.length + 1));
   }
 }
 

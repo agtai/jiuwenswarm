@@ -285,7 +285,7 @@ def _mint_verified_consumer_projection(
     )
 
 
-def _stable_consumer_scope_matches(source: ScopeRef, consumer: ScopeRef) -> bool:
+def stable_consumer_scope_matches(source: ScopeRef, consumer: ScopeRef) -> bool:
     return (
         source.assurance is Assurance.AUTHENTICATED
         and consumer.assurance is Assurance.AUTHENTICATED
@@ -521,7 +521,7 @@ class ProgressNotificationArbiter:
             type(event) is PersistentTaskEvent
             and type(binding) is ProgressNotificationBinding
             and (
-                _stable_consumer_scope_matches(event.scope, binding.scope)
+                stable_consumer_scope_matches(event.scope, binding.scope)
                 if consumer_scope is True
                 else event.scope == binding.scope
                 and event.correlation_id == binding.correlation_id
@@ -601,7 +601,7 @@ class ProgressNotificationArbiter:
             or binding.work_ref.kind is not IdentityKind.TASK
             or binding.source_work_ref != binding.work_ref
             or cursor.task_id != binding.work_ref.id
-            or not _stable_consumer_scope_matches(cursor.scope, binding.scope)
+            or not stable_consumer_scope_matches(cursor.scope, binding.scope)
         ):
             raise ProgressNotificationArbiterViolation(
                 "INVALID_CONSUMER_CURSOR_BASELINE",
@@ -620,8 +620,8 @@ class ProgressNotificationArbiter:
                 or type(boundary) is not PersistentTaskEvent
                 or lifecycle.task_id != cursor.task_id
                 or boundary.task_id != cursor.task_id
-                or not _stable_consumer_scope_matches(lifecycle.scope, binding.scope)
-                or not _stable_consumer_scope_matches(boundary.scope, binding.scope)
+                or not stable_consumer_scope_matches(lifecycle.scope, binding.scope)
+                or not stable_consumer_scope_matches(boundary.scope, binding.scope)
             ):
                 raise ProgressNotificationArbiterViolation(
                     "INVALID_CONSUMER_CURSOR_BASELINE",
@@ -752,7 +752,7 @@ class ProgressNotificationArbiter:
             or not isinstance(extension, Mapping)
             or extension.get("persistent_attempt_id") != persistent.attempt_id
             or extension.get("persistent_event_type") != persistent.event_type
-            or not _stable_consumer_scope_matches(persistent.scope, binding.scope)
+            or not stable_consumer_scope_matches(persistent.scope, binding.scope)
         ):
             return self._rejected(
                 "INVALID_CONSUMER_PROJECTION_CAPABILITY",
@@ -1516,7 +1516,7 @@ class ProgressNotificationArbiter:
                 ErrorCode.PROTOCOL_VIOLATION,
             )
         scope_matches = (
-            _stable_consumer_scope_matches(event.scope, expected.scope)
+            stable_consumer_scope_matches(event.scope, expected.scope)
             if consumer_scope
             else event.scope == expected.scope
             and event.correlation_id == expected.correlation_id

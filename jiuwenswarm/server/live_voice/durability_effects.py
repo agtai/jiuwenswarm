@@ -8,30 +8,33 @@ Tool, Executor, compensation, settlement, Store, or Task mutation.
 
 from __future__ import annotations
 
-import hashlib
+from functools import partial
+from .durability_validation import (
+    reject_duplicate_keys,
+    require_digest,
+    require_integer,
+    require_profile,
+    require_scope,
+    require_text,
+    sha256_bytes,
+)
+
 import json
-import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, TypeAlias
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
-    MAX_SAFE_INTEGER,
-    Assurance,
     ScopeRef,
     canonical_json_bytes,
 )
-from jiuwenswarm.server.live_voice.durability_identity import (
-    DurabilityIdentityViolation,
-    DurabilityProfileBinding,
-)
+from jiuwenswarm.server.live_voice.durability_identity import DurabilityProfileBinding
 
 
 EXTERNAL_EFFECT_FACT_CONTRACT_VERSION: Final = "live-voice.d2-effect-fact.v1"
 MAX_EXTERNAL_EFFECT_FACT_BYTES: Final = 65_536
 
 _MAX_TEXT_BYTES = 512
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ExternalEffectContractViolation(ValueError):
@@ -52,92 +55,53 @@ class EffectSettlementKind(StrEnum):
     MANUAL_REQUIRED = "manual_required"
 
 
-def _text(value: object, field_name: str) -> str:
-    if type(value) is not str or not value.strip():
-        raise ExternalEffectContractViolation(
-            "INVALID_EFFECT_TEXT",
-            f"{field_name} must be a non-empty exact string",
-        )
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError as error:
-        raise ExternalEffectContractViolation(
-            "INVALID_EFFECT_TEXT",
-            f"{field_name} must contain valid Unicode scalar values",
-        ) from error
-    if len(encoded) > _MAX_TEXT_BYTES:
-        raise ExternalEffectContractViolation(
-            "INVALID_EFFECT_TEXT",
-            f"{field_name} is outside the bounded range",
-        )
-    return value
+_text = partial(
+    require_text,
+    violation=ExternalEffectContractViolation,
+    reason="INVALID_EFFECT_TEXT",
+    maximum=_MAX_TEXT_BYTES,
+)
 
 
-def _positive(value: object, field_name: str) -> int:
-    if type(value) is not int or value <= 0 or value > MAX_SAFE_INTEGER:
-        raise ExternalEffectContractViolation(
-            "INVALID_EFFECT_INTEGER",
-            f"{field_name} must be one positive safe integer",
-        )
-    return value
+_positive = partial(
+    require_integer,
+    violation=ExternalEffectContractViolation,
+    reason="INVALID_EFFECT_INTEGER",
+    positive=True,
+)
 
 
-def _nonnegative(value: object, field_name: str) -> int:
-    if type(value) is not int or value < 0 or value > MAX_SAFE_INTEGER:
-        raise ExternalEffectContractViolation(
-            "INVALID_EFFECT_INTEGER",
-            f"{field_name} must be one non-negative safe integer",
-        )
-    return value
+_nonnegative = partial(
+    require_integer,
+    violation=ExternalEffectContractViolation,
+    reason="INVALID_EFFECT_INTEGER",
+)
 
 
-def _digest(value: object, field_name: str) -> str:
-    if type(value) is not str or _SHA256.fullmatch(value) is None:
-        raise ExternalEffectContractViolation(
-            "INVALID_EFFECT_DIGEST",
-            f"{field_name} must be lowercase SHA-256",
-        )
-    return value
+_digest = partial(
+    require_digest,
+    violation=ExternalEffectContractViolation,
+    reason="INVALID_EFFECT_DIGEST",
+)
 
 
-def _scope(value: object) -> ScopeRef:
-    if type(value) is not ScopeRef:
-        raise ExternalEffectContractViolation(
-            "INVALID_EFFECT_SCOPE",
-            "effect scope must be exact",
-        )
-    try:
-        checked = ScopeRef.from_dict(value.to_dict())
-    except (TypeError, ValueError) as error:
-        raise ExternalEffectContractViolation(
-            "INVALID_EFFECT_SCOPE",
-            "effect scope is invalid",
-        ) from error
-    if checked.assurance is not Assurance.AUTHENTICATED:
-        raise ExternalEffectContractViolation(
-            "INVALID_EFFECT_SCOPE",
-            "effect scope must be authenticated",
-        )
-    return checked
+_scope = partial(
+    require_scope,
+    violation=ExternalEffectContractViolation,
+    reason="INVALID_EFFECT_SCOPE",
+    subject="effect scope",
+)
 
 
-def _profile(value: object) -> DurabilityProfileBinding:
-    if type(value) is not DurabilityProfileBinding:
-        raise ExternalEffectContractViolation(
-            "INVALID_EFFECT_PROFILE",
-            "effect profile binding must be exact",
-        )
-    try:
-        return DurabilityProfileBinding.from_dict(value.to_dict())
-    except DurabilityIdentityViolation as error:
-        raise ExternalEffectContractViolation(
-            "INVALID_EFFECT_PROFILE",
-            "effect profile binding is invalid",
-        ) from error
+_profile = partial(
+    require_profile,
+    violation=ExternalEffectContractViolation,
+    reason="INVALID_EFFECT_PROFILE",
+    subject="effect profile binding",
+)
 
 
-def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+_sha256 = sha256_bytes
 
 
 def _strict(payload: object, keys: set[str], field_name: str) -> dict[str, object]:
@@ -149,18 +113,12 @@ def _strict(payload: object, keys: set[str], field_name: str) -> dict[str, objec
     return payload
 
 
-def _reject_duplicate_keys(
-    pairs: list[tuple[str, object]],
-) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ExternalEffectContractViolation(
-                "INVALID_EFFECT_FACT",
-                "effect fact JSON contains a duplicate key",
-            )
-        result[key] = value
-    return result
+_reject_duplicate_keys = partial(
+    reject_duplicate_keys,
+    violation=ExternalEffectContractViolation,
+    reason="INVALID_EFFECT_FACT",
+    message="effect fact JSON contains a duplicate key",
+)
 
 
 class _AuthorityFreeEffectFact:

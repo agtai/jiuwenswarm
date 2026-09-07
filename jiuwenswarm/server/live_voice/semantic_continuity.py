@@ -8,16 +8,10 @@ from jiuwenswarm.common.live_voice_profiling import profiled
 
 import asyncio
 import hashlib
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from datetime import datetime
 
-from jiuwenswarm.common.schema.live_voice_contract_v2 import (
-    ErrorCode,
-    ResponseRef,
-    ScopeRef,
-    TurnCommit,
-    canonical_json_bytes,
-)
+from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode, ScopeRef, TurnCommit, canonical_json_bytes
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     PresentedAgentAnalysis,
 )
@@ -29,9 +23,6 @@ from .unified_committed_input import (
     PendingSemanticContext,
     SqliteUnifiedCommittedInputJournal,
 )
-
-
-SemanticCall = Callable[..., Awaitable[TaskSemanticDecision]]
 
 
 def _fail(reason: str) -> FormalTaskViolation:
@@ -50,7 +41,6 @@ class SemanticContinuity:
 
     def __init__(self, journal: SqliteUnifiedCommittedInputJournal) -> None:
         self.journal = journal
-        self._locks: dict[bytes, tuple[asyncio.Lock, int]] = {}
 
     async def retain_analysis(
         self, analysis: PresentedAgentAnalysis
@@ -88,81 +78,6 @@ class SemanticContinuity:
             expires_at=issued + SEMANTIC_PROPOSAL_TTL_SECONDS,
         )
 
-    async def finish_analyses(self, scope: ScopeRef, resolve: SemanticCall) -> None:
-        key = canonical_json_bytes(scope.to_dict())
-        if key not in self._locks and len(self._locks) >= 32:
-            raise _fail("SEMANTIC_ANALYSIS_CAPACITY_EXCEEDED")
-        lock, users = self._locks.get(key, (asyncio.Lock(), 0))
-        self._locks[key] = (lock, users + 1)
-        try:
-            async with lock:
-                records = await asyncio.to_thread(
-                    self.journal.read_semantic_contexts, scope=scope
-                )
-                for record in records:
-                    if record.kind != "analysis":
-                        continue
-                    payload = record.payload
-                    if set(payload) != {"commit", "response", "text", "presented_at"}:
-                        raise _fail("SEMANTIC_ANALYSIS_CORRUPT")
-                    analysis = PresentedAgentAnalysis(
-                        TurnCommit.from_dict(payload["commit"]),
-                        ResponseRef(**payload["response"]),
-                        payload["text"],
-                        payload["presented_at"],
-                    )
-                    if (
-                        analysis.commit.scope != scope
-                        or analysis.source_id != record.source_id
-                    ):
-                        raise _fail("SEMANTIC_ANALYSIS_SCOPE_MISMATCH")
-                    prior = await asyncio.to_thread(
-                        self.journal.find_semantic_context,
-                        scope=scope,
-                        kind="proposal",
-                        source_id=record.source_id,
-                    )
-                    if prior is None:
-                        decision = await resolve(
-                            commit=analysis.commit,
-                            history=(),
-                            pending=(),
-                            analysis={
-                                "source_id": record.source_id,
-                                "text": analysis.text,
-                            },
-                        )
-                        if decision.route == "proposal":
-                            await asyncio.to_thread(
-                                self.journal.retain_semantic_context,
-                                scope=scope,
-                                kind="proposal",
-                                source_id=record.source_id,
-                                payload={
-                                    "operation": decision.proposal.operation,
-                                    "target": decision.proposal.target,
-                                    "target_kind": decision.proposal.target_kind,
-                                    "arguments": dict(decision.proposal.arguments),
-                                    "semantic_context_binding": decision.origin_context_binding,
-                                },
-                                issued_at=record.issued_at,
-                                expires_at=record.expires_at,
-                            )
-                    await asyncio.to_thread(
-                        self.journal.consume_semantic_context,
-                        scope=scope,
-                        context_id=record.context_id,
-                        version=record.version,
-                        commit_sha256=hashlib.sha256(
-                            analysis.commit.canonical_bytes()
-                        ).hexdigest(),
-                    )
-        finally:
-            current, users = self._locks[key]
-            if users == 1:
-                del self._locks[key]
-            else:
-                self._locks[key] = (current, users - 1)
 
     @profiled('semantic.pending', 'scope')
     async def pending(self, scope: ScopeRef) -> tuple[Mapping[str, object], ...]:

@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from .cancellable_read import cancellable_read
+
 import asyncio
 import time
 from contextvars import ContextVar
@@ -58,26 +60,9 @@ class NativeForegroundControl:
     async def read_only(
         self, operation: Awaitable[T], *, timeout: float | None = None
     ) -> T:
-        """Interrupt only work whose caller owns cancellation/settlement.
-
-        Durable Task dispatch must never use this helper. Agent completion uses
-        a shield and explicitly cancels its exact round on interruption.
-        """
-        work = asyncio.ensure_future(operation)
-        stop = asyncio.create_task(self.interrupted.wait())
-        try:
-            done, _ = await asyncio.wait(
-                {work, stop}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
-            )
-            self.check()
-            if work not in done:
-                raise TimeoutError
-            return await work
-        finally:
-            for task in (work, stop):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(work, stop, return_exceptions=True)
+        return await cancellable_read(
+            operation, stopped=self.interrupted, check=self.check, timeout=timeout
+        )
 
 
 NATIVE_FOREGROUND: ContextVar[NativeForegroundControl | None] = ContextVar(

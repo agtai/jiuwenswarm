@@ -9,23 +9,27 @@ resume, dispatch, reconciliation, or Task mutation.
 
 from __future__ import annotations
 
+from functools import partial
+from .durability_validation import (
+    reject_duplicate_keys,
+    require_digest,
+    require_integer,
+    require_profile,
+    require_scope,
+    require_text,
+    sha256_bytes,
+)
+
 import base64
-import hashlib
 import json
-import re
 from dataclasses import dataclass, field
 from typing import Final
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
-    MAX_SAFE_INTEGER,
-    Assurance,
     ScopeRef,
     canonical_json_bytes,
 )
-from jiuwenswarm.server.live_voice.durability_identity import (
-    DurabilityIdentityViolation,
-    DurabilityProfileBinding,
-)
+from jiuwenswarm.server.live_voice.durability_identity import DurabilityProfileBinding
 
 
 D1_CHECKPOINT_CONTRACT_VERSION: Final = "live-voice.d1-checkpoint.v1"
@@ -33,7 +37,6 @@ MAX_D1_CHECKPOINT_STATE_BYTES: Final = 1_048_576
 MAX_D1_CHECKPOINT_WIRE_BYTES: Final = 2_097_152
 
 _MAX_TEXT_BYTES = 512
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class DurabilityCheckpointViolation(ValueError):
@@ -42,92 +45,53 @@ class DurabilityCheckpointViolation(ValueError):
         self.reason = reason
 
 
-def _text(value: object, field_name: str) -> str:
-    if type(value) is not str or not value.strip():
-        raise DurabilityCheckpointViolation(
-            "INVALID_DURABILITY_TEXT",
-            f"{field_name} must be a non-empty exact string",
-        )
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError as error:
-        raise DurabilityCheckpointViolation(
-            "INVALID_DURABILITY_TEXT",
-            f"{field_name} must contain valid Unicode scalar values",
-        ) from error
-    if len(encoded) > _MAX_TEXT_BYTES:
-        raise DurabilityCheckpointViolation(
-            "INVALID_DURABILITY_TEXT",
-            f"{field_name} is outside the bounded range",
-        )
-    return value
+_text = partial(
+    require_text,
+    violation=DurabilityCheckpointViolation,
+    reason="INVALID_DURABILITY_TEXT",
+    maximum=_MAX_TEXT_BYTES,
+)
 
 
-def _positive(value: object, field_name: str) -> int:
-    if type(value) is not int or value <= 0 or value > MAX_SAFE_INTEGER:
-        raise DurabilityCheckpointViolation(
-            "INVALID_DURABILITY_INTEGER",
-            f"{field_name} must be one positive safe integer",
-        )
-    return value
+_positive = partial(
+    require_integer,
+    violation=DurabilityCheckpointViolation,
+    reason="INVALID_DURABILITY_INTEGER",
+    positive=True,
+)
 
 
-def _nonnegative(value: object, field_name: str) -> int:
-    if type(value) is not int or value < 0 or value > MAX_SAFE_INTEGER:
-        raise DurabilityCheckpointViolation(
-            "INVALID_DURABILITY_INTEGER",
-            f"{field_name} must be one non-negative safe integer",
-        )
-    return value
+_nonnegative = partial(
+    require_integer,
+    violation=DurabilityCheckpointViolation,
+    reason="INVALID_DURABILITY_INTEGER",
+)
 
 
-def _digest(value: object, field_name: str) -> str:
-    if type(value) is not str or _SHA256.fullmatch(value) is None:
-        raise DurabilityCheckpointViolation(
-            "INVALID_DURABILITY_DIGEST",
-            f"{field_name} must be lowercase SHA-256",
-        )
-    return value
+_digest = partial(
+    require_digest,
+    violation=DurabilityCheckpointViolation,
+    reason="INVALID_DURABILITY_DIGEST",
+)
 
 
-def _scope(value: object) -> ScopeRef:
-    if type(value) is not ScopeRef:
-        raise DurabilityCheckpointViolation(
-            "INVALID_DURABILITY_SCOPE",
-            "checkpoint scope must be exact",
-        )
-    try:
-        checked = ScopeRef.from_dict(value.to_dict())
-    except (TypeError, ValueError) as error:
-        raise DurabilityCheckpointViolation(
-            "INVALID_DURABILITY_SCOPE",
-            "checkpoint scope is invalid",
-        ) from error
-    if checked.assurance is not Assurance.AUTHENTICATED:
-        raise DurabilityCheckpointViolation(
-            "INVALID_DURABILITY_SCOPE",
-            "checkpoint scope must be authenticated",
-        )
-    return checked
+_scope = partial(
+    require_scope,
+    violation=DurabilityCheckpointViolation,
+    reason="INVALID_DURABILITY_SCOPE",
+    subject="checkpoint scope",
+)
 
 
-def _profile(value: object) -> DurabilityProfileBinding:
-    if type(value) is not DurabilityProfileBinding:
-        raise DurabilityCheckpointViolation(
-            "INVALID_DURABILITY_PROFILE",
-            "checkpoint profile binding must be exact",
-        )
-    try:
-        return DurabilityProfileBinding.from_dict(value.to_dict())
-    except DurabilityIdentityViolation as error:
-        raise DurabilityCheckpointViolation(
-            "INVALID_DURABILITY_PROFILE",
-            "checkpoint profile binding is invalid",
-        ) from error
+_profile = partial(
+    require_profile,
+    violation=DurabilityCheckpointViolation,
+    reason="INVALID_DURABILITY_PROFILE",
+    subject="checkpoint profile binding",
+)
 
 
-def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+_sha256 = sha256_bytes
 
 
 def _decode_base64(value: object) -> bytes:
@@ -151,18 +115,12 @@ def _decode_base64(value: object) -> bytes:
     return decoded
 
 
-def _reject_duplicate_keys(
-    pairs: list[tuple[str, object]],
-) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise DurabilityCheckpointViolation(
-                "INVALID_CHECKPOINT_SCHEMA",
-                "checkpoint JSON contains a duplicate key",
-            )
-        result[key] = value
-    return result
+_reject_duplicate_keys = partial(
+    reject_duplicate_keys,
+    violation=DurabilityCheckpointViolation,
+    reason="INVALID_CHECKPOINT_SCHEMA",
+    message="checkpoint JSON contains a duplicate key",
+)
 
 
 @dataclass(frozen=True, slots=True)

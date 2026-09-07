@@ -1447,7 +1447,7 @@ def _recognition_authorization_binding(
     )
 
 
-def _synthesis_authorization_binding(
+def synthesis_authorization_binding(
     request: SynthesisBatchRequest,
 ) -> SpeechAuthorizationBinding:
     content_sha256 = hashlib.sha256(
@@ -1914,7 +1914,7 @@ class FormalBatchSpeechService:
             request_id = request.request_id
             operation_id = request.operation_id
             self._authorize(
-                _synthesis_authorization_binding(request), context.assurance
+                synthesis_authorization_binding(request), context.assurance
             )
             fingerprint = hashlib.sha256(
                 canonical_json_bytes(

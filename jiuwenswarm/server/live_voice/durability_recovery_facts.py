@@ -10,7 +10,17 @@ checkpoint resumability, Executor invocation, recovery, or Task mutation.
 
 from __future__ import annotations
 
-import hashlib
+from functools import partial
+from .durability_validation import (
+    reject_duplicate_keys,
+    require_digest,
+    require_integer,
+    require_profile,
+    require_scope,
+    require_text,
+    sha256_bytes,
+)
+
 import json
 import re
 from dataclasses import dataclass
@@ -18,22 +28,16 @@ from datetime import UTC, datetime
 from typing import Final
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
-    MAX_SAFE_INTEGER,
-    Assurance,
     ScopeRef,
     canonical_json_bytes,
 )
-from jiuwenswarm.server.live_voice.durability_identity import (
-    DurabilityIdentityViolation,
-    DurabilityProfileBinding,
-)
+from jiuwenswarm.server.live_voice.durability_identity import DurabilityProfileBinding
 
 
 EXECUTOR_RECOVERY_FACTS_VERSION: Final = "live-voice.executor-recovery-facts.v1"
 MAX_EXECUTOR_RECOVERY_FACTS_BYTES: Final = 32_768
 
 _MAX_TEXT_BYTES = 512
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _UTC_TIMESTAMP = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$"
 )
@@ -45,79 +49,42 @@ class ExecutorRecoveryFactsViolation(ValueError):
         self.reason = reason
 
 
-def _text(value: object, field_name: str) -> str:
-    if type(value) is not str or not value.strip():
-        raise ExecutorRecoveryFactsViolation(
-            "INVALID_RECOVERY_TEXT",
-            f"{field_name} must be a non-empty exact string",
-        )
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError as error:
-        raise ExecutorRecoveryFactsViolation(
-            "INVALID_RECOVERY_TEXT",
-            f"{field_name} must contain valid Unicode scalar values",
-        ) from error
-    if len(encoded) > _MAX_TEXT_BYTES:
-        raise ExecutorRecoveryFactsViolation(
-            "INVALID_RECOVERY_TEXT",
-            f"{field_name} is outside the bounded range",
-        )
-    return value
+_text = partial(
+    require_text,
+    violation=ExecutorRecoveryFactsViolation,
+    reason="INVALID_RECOVERY_TEXT",
+    maximum=_MAX_TEXT_BYTES,
+)
 
 
-def _nonnegative(value: object, field_name: str) -> int:
-    if type(value) is not int or value < 0 or value > MAX_SAFE_INTEGER:
-        raise ExecutorRecoveryFactsViolation(
-            "INVALID_RECOVERY_INTEGER",
-            f"{field_name} must be one non-negative safe integer",
-        )
-    return value
+_nonnegative = partial(
+    require_integer,
+    violation=ExecutorRecoveryFactsViolation,
+    reason="INVALID_RECOVERY_INTEGER",
+)
 
 
-def _digest(value: object, field_name: str) -> str:
-    if type(value) is not str or _SHA256.fullmatch(value) is None:
-        raise ExecutorRecoveryFactsViolation(
-            "INVALID_RECOVERY_DIGEST",
-            f"{field_name} must be lowercase SHA-256",
-        )
-    return value
+_digest = partial(
+    require_digest,
+    violation=ExecutorRecoveryFactsViolation,
+    reason="INVALID_RECOVERY_DIGEST",
+)
 
 
-def _scope(value: object) -> ScopeRef:
-    if type(value) is not ScopeRef:
-        raise ExecutorRecoveryFactsViolation(
-            "INVALID_RECOVERY_SCOPE",
-            "recovery facts scope must be exact",
-        )
-    try:
-        checked = ScopeRef.from_dict(value.to_dict())
-    except (TypeError, ValueError) as error:
-        raise ExecutorRecoveryFactsViolation(
-            "INVALID_RECOVERY_SCOPE",
-            "recovery facts scope is invalid",
-        ) from error
-    if checked.assurance is not Assurance.AUTHENTICATED:
-        raise ExecutorRecoveryFactsViolation(
-            "INVALID_RECOVERY_SCOPE",
-            "recovery facts scope must be authenticated",
-        )
-    return checked
+_scope = partial(
+    require_scope,
+    violation=ExecutorRecoveryFactsViolation,
+    reason="INVALID_RECOVERY_SCOPE",
+    subject="recovery facts scope",
+)
 
 
-def _profile(value: object) -> DurabilityProfileBinding:
-    if type(value) is not DurabilityProfileBinding:
-        raise ExecutorRecoveryFactsViolation(
-            "INVALID_RECOVERY_PROFILE",
-            "recovery profile binding must be exact",
-        )
-    try:
-        return DurabilityProfileBinding.from_dict(value.to_dict())
-    except DurabilityIdentityViolation as error:
-        raise ExecutorRecoveryFactsViolation(
-            "INVALID_RECOVERY_PROFILE",
-            "recovery profile binding is invalid",
-        ) from error
+_profile = partial(
+    require_profile,
+    violation=ExecutorRecoveryFactsViolation,
+    reason="INVALID_RECOVERY_PROFILE",
+    subject="recovery profile binding",
+)
 
 
 def _timestamp_key(value: object, field_name: str) -> tuple[datetime, int]:
@@ -152,22 +119,15 @@ def _timestamp_key(value: object, field_name: str) -> tuple[datetime, int]:
     return instant, nanoseconds
 
 
-def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+_sha256 = sha256_bytes
 
 
-def _reject_duplicate_keys(
-    pairs: list[tuple[str, object]],
-) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ExecutorRecoveryFactsViolation(
-                "INVALID_RECOVERY_FACTS",
-                "recovery facts JSON contains a duplicate key",
-            )
-        result[key] = value
-    return result
+_reject_duplicate_keys = partial(
+    reject_duplicate_keys,
+    violation=ExecutorRecoveryFactsViolation,
+    reason="INVALID_RECOVERY_FACTS",
+    message="recovery facts JSON contains a duplicate key",
+)
 
 
 @dataclass(frozen=True, slots=True)

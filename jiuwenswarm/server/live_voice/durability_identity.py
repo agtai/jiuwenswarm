@@ -8,7 +8,12 @@ select a profile, prove a capability, persist admission, or authorize work.
 
 from __future__ import annotations
 
-import re
+from functools import partial
+from .durability_validation import (
+    require_digest,
+    require_text,
+)
+
 from dataclasses import dataclass
 from typing import Final
 
@@ -16,7 +21,6 @@ from typing import Final
 DURABILITY_PROFILE_BINDING_VERSION: Final = "live-voice.durability-profile-binding.v1"
 
 _MAX_DURABILITY_TEXT_BYTES = 512
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DURABILITY_LEVELS = frozenset({"D0", "D1", "D2"})
 
 
@@ -26,34 +30,19 @@ class DurabilityIdentityViolation(ValueError):
         self.reason = reason
 
 
-def _text(value: object, field_name: str) -> str:
-    if type(value) is not str or not value.strip():
-        raise DurabilityIdentityViolation(
-            "INVALID_DURABILITY_PROFILE",
-            f"{field_name} must be a non-empty exact string",
-        )
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError as error:
-        raise DurabilityIdentityViolation(
-            "INVALID_DURABILITY_PROFILE",
-            f"{field_name} must contain valid Unicode scalar values",
-        ) from error
-    if len(encoded) > _MAX_DURABILITY_TEXT_BYTES:
-        raise DurabilityIdentityViolation(
-            "INVALID_DURABILITY_PROFILE",
-            f"{field_name} is outside the bounded range",
-        )
-    return value
+_text = partial(
+    require_text,
+    violation=DurabilityIdentityViolation,
+    reason="INVALID_DURABILITY_PROFILE",
+    maximum=_MAX_DURABILITY_TEXT_BYTES,
+)
 
 
-def _digest(value: object, field_name: str) -> str:
-    if type(value) is not str or _SHA256.fullmatch(value) is None:
-        raise DurabilityIdentityViolation(
-            "INVALID_DURABILITY_PROFILE",
-            f"{field_name} must be lowercase SHA-256",
-        )
-    return value
+_digest = partial(
+    require_digest,
+    violation=DurabilityIdentityViolation,
+    reason="INVALID_DURABILITY_PROFILE",
+)
 
 
 @dataclass(frozen=True, slots=True)

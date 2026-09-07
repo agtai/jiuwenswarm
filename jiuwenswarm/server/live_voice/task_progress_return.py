@@ -20,6 +20,8 @@ effect port.
 
 from __future__ import annotations
 
+from .progress_notification_arbiter import stable_consumer_scope_matches
+
 import asyncio
 import hashlib
 import logging
@@ -403,7 +405,7 @@ class _ConsumerTaskEventSubscription:
             type(page) is not TaskEventConsumerAuthorityPage
             or page.task.task_id != self._task_id
             or page.presentation_class != self._presentation_class
-            or not _stable_consumer_scope_matches(page.task.scope, self._scope)
+            or not stable_consumer_scope_matches(page.task.scope, self._scope)
         ):
             raise FormalTaskViolation(
                 "TASK_EVENT_SOURCE_PROTOCOL_VIOLATION",
@@ -907,14 +909,6 @@ def _evidence_id(
     )
 
 
-def _stable_consumer_scope_matches(source: ScopeRef, consumer: ScopeRef) -> bool:
-    return (
-        source.assurance is Assurance.AUTHENTICATED
-        and consumer.assurance is Assurance.AUTHENTICATED
-        and source.project_id is not None
-        and source.subject_id == consumer.subject_id
-        and source.project_id == consumer.project_id
-    )
 
 
 def _project_task_progress_event(
@@ -945,7 +939,7 @@ def _project_task_progress_event(
             ErrorCode.INVALID_ARGUMENT,
         )
     binding_matches = (
-        _stable_consumer_scope_matches(event.scope, binding.scope)
+        stable_consumer_scope_matches(event.scope, binding.scope)
         if consumer_scope
         else event.scope == binding.scope
         and event.correlation_id == binding.correlation_id
@@ -1635,7 +1629,7 @@ class TaskProgressReturnBridge:
         self._last_source_evidence = _evidence_id(binding, event)
         consumer_scope = self._uses_consumer_authority_source()
         binding_matches = (
-            _stable_consumer_scope_matches(event.scope, binding.scope)
+            stable_consumer_scope_matches(event.scope, binding.scope)
             if consumer_scope
             else event.scope == binding.scope
             and event.correlation_id == binding.correlation_id

@@ -9,14 +9,21 @@ write, manage a transaction, choose recovery, or invoke an external boundary.
 
 from __future__ import annotations
 
-import hashlib
+from functools import partial
+from .durability_validation import (
+    require_digest,
+    require_profile,
+    require_scope,
+    require_text,
+    sha256_bytes,
+)
+
 import re
 from dataclasses import dataclass, field
 from typing import Final, TypeAlias
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     MAX_SAFE_INTEGER,
-    Assurance,
     ScopeRef,
     canonical_json_bytes,
 )
@@ -35,10 +42,7 @@ from jiuwenswarm.server.live_voice.durability_effects import (
     ExternalEffectSettlement,
     effect_fact_from_bytes,
 )
-from jiuwenswarm.server.live_voice.durability_identity import (
-    DurabilityIdentityViolation,
-    DurabilityProfileBinding,
-)
+from jiuwenswarm.server.live_voice.durability_identity import DurabilityProfileBinding
 
 
 DURABILITY_PREFIX_CONTRACT_VERSION: Final = "live-voice.durability-prefix.v1"
@@ -56,74 +60,39 @@ class DurabilityPrefixViolation(ValueError):
         self.reason = reason
 
 
-def _text(value: object, field_name: str) -> str:
-    if type(value) is not str or not value.strip():
-        raise DurabilityPrefixViolation(
-            "INVALID_DURABILITY_BINDING",
-            f"{field_name} must be a non-empty exact string",
-        )
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError as error:
-        raise DurabilityPrefixViolation(
-            "INVALID_DURABILITY_BINDING",
-            f"{field_name} must contain valid Unicode scalar values",
-        ) from error
-    if len(encoded) > _MAX_TEXT_BYTES:
-        raise DurabilityPrefixViolation(
-            "INVALID_DURABILITY_BINDING",
-            f"{field_name} is outside the bounded range",
-        )
-    return value
+_text = partial(
+    require_text,
+    violation=DurabilityPrefixViolation,
+    reason="INVALID_DURABILITY_BINDING",
+    maximum=_MAX_TEXT_BYTES,
+)
 
 
-def _scope(value: object) -> ScopeRef:
-    if type(value) is not ScopeRef:
-        raise DurabilityPrefixViolation(
-            "INVALID_DURABILITY_BINDING",
-            "durability read scope must be exact",
-        )
-    try:
-        checked = ScopeRef.from_dict(value.to_dict())
-    except (TypeError, ValueError) as error:
-        raise DurabilityPrefixViolation(
-            "INVALID_DURABILITY_BINDING",
-            "durability read scope is invalid",
-        ) from error
-    if checked.assurance is not Assurance.AUTHENTICATED:
-        raise DurabilityPrefixViolation(
-            "INVALID_DURABILITY_BINDING",
-            "durability read scope must be authenticated",
-        )
-    return checked
+_scope = partial(
+    require_scope,
+    violation=DurabilityPrefixViolation,
+    reason="INVALID_DURABILITY_BINDING",
+    subject="durability read scope",
+)
 
 
-def _profile(value: object) -> DurabilityProfileBinding:
-    if type(value) is not DurabilityProfileBinding:
-        raise DurabilityPrefixViolation(
-            "INVALID_DURABILITY_BINDING",
-            "durability read profile must be exact",
-        )
-    try:
-        return DurabilityProfileBinding.from_dict(value.to_dict())
-    except DurabilityIdentityViolation as error:
-        raise DurabilityPrefixViolation(
-            "INVALID_DURABILITY_BINDING",
-            "durability read profile is invalid",
-        ) from error
+_profile = partial(
+    require_profile,
+    violation=DurabilityPrefixViolation,
+    reason="INVALID_DURABILITY_BINDING",
+    subject="durability read profile",
+)
 
 
-def _digest(value: object) -> str:
-    if type(value) is not str or _SHA256.fullmatch(value) is None:
-        raise DurabilityPrefixViolation(
-            "DURABILITY_PREFIX_CORRUPT",
-            "durability row digest is invalid",
-        )
-    return value
+_digest = partial(
+    require_digest,
+    violation=DurabilityPrefixViolation,
+    reason="DURABILITY_PREFIX_CORRUPT",
+    message="durability row digest is invalid",
+)
 
 
-def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+_sha256 = sha256_bytes
 
 
 @dataclass(frozen=True, slots=True)

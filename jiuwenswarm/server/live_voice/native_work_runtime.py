@@ -9,6 +9,8 @@ and never replays tools. This is not the durable Task executor.
 
 from __future__ import annotations
 
+from .cancellable_read import cancellable_read
+
 import asyncio
 import hashlib
 import math
@@ -234,21 +236,9 @@ class NativeWorkControl:
     async def read_only(
         self, operation: Awaitable[T], *, timeout: float | None = None
     ) -> T:
-        work = asyncio.ensure_future(operation)
-        stop = asyncio.create_task(self.cancelled.wait())
-        try:
-            done, _ = await asyncio.wait(
-                {work, stop}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
-            )
-            self.check()
-            if work not in done:
-                raise TimeoutError
-            return await work
-        finally:
-            for task in (work, stop):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(work, stop, return_exceptions=True)
+        return await cancellable_read(
+            operation, stopped=self.cancelled, check=self.check, timeout=timeout
+        )
 
 
 NativeWorkRunner = Callable[[NativeWorkControl], Awaitable[str]]
