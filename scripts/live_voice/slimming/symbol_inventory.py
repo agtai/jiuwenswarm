@@ -145,7 +145,7 @@ def main() -> None:
             for s in sorted(e["symbols"], key=lambda s: -s["loc"])[:40]:
                 lines.append(f"| `{s['name']}` | {s['kind']} | {s['loc']} | {s['callers']} | {s['internal']} | {', '.join(s['caller_names'])} |")
             lines.append("")
-    text = "\n".join(lines) + "\n"
+    text = "\n".join(lines).rstrip("\n") + "\n"
     if args.out:
         io.open(args.out, "w", encoding="utf-8", newline="\n").write(text)
         print("written", args.out, len(lines), "lines")

@@ -3429,4 +3429,3 @@
 | `_reject_nonstandard_number` | function | 2 | 0 | 1 |  |
 | `_MAX_OUTPUT_UTF8_BYTES` | constant | 1 | 0 | 1 |  |
 | `_JSON_STRING` | constant | 1 | 0 | 1 |  |
-

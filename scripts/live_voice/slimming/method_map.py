@@ -87,7 +87,7 @@ def main() -> None:
         md.append("")
     if args.json:
         io.open(args.json, "w", encoding="utf-8").write(json.dumps(result, ensure_ascii=False, indent=1))
-    text = "\n".join(md) + "\n"
+    text = "\n".join(md).rstrip("\n") + "\n"
     if args.out:
         io.open(args.out, "w", encoding="utf-8", newline="\n").write(text)
         print("written", args.out, len(md), "lines")
