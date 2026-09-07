@@ -109,6 +109,26 @@ class RoutingProvider:
         earlier ``parse_doc_ref`` learned, then the first connection."""
         return self._by_docs(str(doc_ref)) or self._learned.get(str(doc_ref)) or self.default
 
+    def owners(self, doc_ref: str) -> list[Any]:
+        """Every connection that adopted ``doc_ref``, in configuration order."""
+        s = str(doc_ref or "").strip()
+        out: list[Any] = []
+        for cf, p in self._conns:
+            for d in self._docs_of(cf) or []:
+                d = str(d or "").strip()
+                if d and (d == s or d in s or s in d):
+                    out.append(p)
+                    break
+        return out
+
+    def reach(self, doc_ref: str) -> str:
+        """How the document is reachable: ``service``, ``personal`` or ``both`` (the
+        mixed inventory a person ordinarily holds), or ``""`` when nobody adopted it."""
+        kinds = {("personal" if getattr(p, "personal", False) else "service") for p in self.owners(doc_ref)}
+        if not kinds:
+            return ""
+        return "both" if len(kinds) == 2 else next(iter(kinds))
+
     def for_platform(self, kind: str) -> Any | None:
         """The first connection on ``kind`` ("google", "feishu"), or None."""
         want = (kind or "").strip().lower()

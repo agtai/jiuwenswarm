@@ -480,8 +480,8 @@ async def test_personal_discovery_lists_and_adopts_nothing_until_ticked(kit):
     got = await kit.panel.adopt_docs(conn.id, ["B"])
     assert got["adopted"] == ["B"] and conn.watcher._docs == ["B"]
     rows = await kit.panel.list_docs()
-    assert rows[0]["connection_kind"] == "personal" and rows[0]["notices"] == 0
-    assert rows[0]["overlap"] is False and rows[0]["identity"] == "personal"
+    assert rows[0]["reach"] == "personal" and rows[0]["notices"] == 0
+    assert rows[0]["identity"] == "personal" and rows[0]["connections"] == {"personal": conn.id}
     saved = (await kit.panel.get_conf())["connections"][0]
     assert saved["kind"] == "personal"
     import yaml
@@ -513,12 +513,16 @@ async def test_list_docs_shows_the_overlap_and_the_chosen_identity(kit):
     await kit.reg.add(kit.svc, [DOC])
     await kit.reg.add(kit.me, [DOC])
     rows = await kit.panel.list_docs()
-    assert [r["connection_kind"] for r in rows] == ["service", "personal"]
-    assert all(r["overlap"] and r["identity"] == "service" for r in rows)
+    assert len(rows) == 1, "one document adopted both ways is one row"
+    assert rows[0]["reach"] == "both" and rows[0]["identity"] == "service"
     out = await kit.panel.set_identity_choice(DOC, "personal")
     assert out["ok"] is True
+    # The registry reads the choice live from the config in production; this
+    # fixture's reader is a dict, so the written choice is mirrored into it.
+    kit.choices[DOC] = "personal"
     rows = await kit.panel.list_docs()
-    assert all(r["identity"] == "personal" for r in rows)
+    assert len(rows) == 1 and rows[0]["identity"] == "personal"
+    assert rows[0]["connection_id"] == kit.reg.list()[1].id, "the personal connection executes now"
     assert (await kit.panel.get_conf())["identity_choice"] == {DOC: "personal"}
     out = await kit.panel.set_identity_choice(DOC, "service")
     assert out["ok"] is True and (await kit.panel.get_conf())["identity_choice"] == {}
@@ -624,4 +628,88 @@ async def test_remove_doc_from_one_owner_leaves_the_other(kit):
     assert s.watcher._docs == [DOC] and p.watcher._docs == []
     assert (await kit.panel.remove_doc(DOC))["result"] == "ok"
     assert s.watcher._docs == []
+    await kit.reg.stop_all()
+
+
+# ------------------------------------------------------------ Google personal (OAuth) on the panel
+
+
+@pytest.mark.asyncio
+async def test_google_oauth_flow_needs_a_client_then_adds_a_personal_connection(kit, tmp_path):
+    import os
+    import yaml
+
+    assert (await kit.panel.google_oauth_start())["result"] == "not_configured"
+    out = await kit.panel.set_google_oauth("cid.apps", "shh")
+    assert out["configured"] is True
+    conf = await kit.panel.get_conf()
+    assert conf["google_oauth"] == {"configured": True, "client_id": "cid.apps"}
+    assert "shh" not in json.dumps(conf), "the secret never leaves the config"
+
+    exchanged = []
+
+    def fake_exchange(cid, secret, code, redirect_uri):
+        exchanged.append((cid, secret, code, redirect_uri))
+        return {"access_token": "at", "refresh_token": "1//rt"}
+
+    kit.panel._oauth_exchange = fake_exchange
+
+    def google_factory(path):
+        body = json.loads(open(path).read())
+        assert body["refresh_token"] == "1//rt"
+        p = FakeProvider(personal=True, address="me@x.com")
+
+        async def ident():
+            return AgentIdentity(display_name="Me", address="me@x.com")
+
+        p.self_identity = ident
+        p.kind_name = "google"
+        return p
+
+    kit.reg._provider_factory = google_factory
+    started = await kit.panel.google_oauth_start()
+    assert started["result"] == "ok" and started["auth_url"].startswith("https://accounts.google.com/")
+    assert started["redirect_uri"].startswith("http://127.0.0.1:")
+    assert (await kit.panel.google_oauth_status(started["state"]))["status"] == "pending"
+
+    # The paste-the-code fallback settles the flow without the browser.
+    done = await kit.panel.google_oauth_finish(started["state"], f"http://127.0.0.1:1/?state={started['state']}&code=4%2Fabc")
+    assert done["status"] == "done", done
+    assert done["connection"]["kind"] == "personal" and done["connection"]["agent_address"] == "me@x.com"
+    assert exchanged[0][:3] == ("cid.apps", "shh", "4/abc")
+    f = tmp_path / "clouddoc-keys" / "personal-google-me@x.com.json"
+    assert oct(os.stat(f).st_mode & 0o777) == "0o600"
+    body = json.loads(f.read_text())
+    assert body["refresh_token"] == "1//rt" and body["email"] == "me@x.com" and body["kind"] == "personal"
+    assert not list((tmp_path / "clouddoc-keys").glob("personal-google-pending-*"))
+    conns = yaml.safe_load(kit.cfg.read_text())["clouddoc"]["connections"]
+    assert conns[0]["kind"] == "personal" and conns[0]["credentials_file"] == str(f)
+    assert "1//rt" not in kit.cfg.read_text(), "the token stays in the 0600 file, not in config.yaml"
+
+    # A second grant for the same person is a duplicate, and leaves no file behind.
+    again = await kit.panel.google_oauth_start()
+    done2 = await kit.panel.google_oauth_finish(again["state"], "4/def")
+    assert done2["status"] == "error" and "duplicate" in done2["detail"]
+    assert len(list((tmp_path / "clouddoc-keys").glob("*.json"))) == 1
+    assert (await kit.panel.google_oauth_status("nope"))["status"] == "error"
+    await kit.reg.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_exchange_leaves_no_file_and_says_why(kit, tmp_path):
+    await kit.panel.set_google_oauth("cid.apps", "shh")
+
+    def bad_exchange(*a):
+        from jiuwenswarm.agents.harness.common.tools.clouddoc.provider import ProviderError
+        raise ProviderError("auth", "授权码兑换失败：invalid_grant")
+
+    kit.panel._oauth_exchange = bad_exchange
+    started = await kit.panel.google_oauth_start()
+    done = await kit.panel.google_oauth_finish(started["state"], "4/abc")
+    assert done["status"] == "error" and "invalid_grant" in done["detail"]
+    assert not (tmp_path / "clouddoc-keys").exists() or not list((tmp_path / "clouddoc-keys").glob("*.json"))
+    # A wrong-state paste is refused and the flow stays pending.
+    started = await kit.panel.google_oauth_start()
+    still = await kit.panel.google_oauth_finish(started["state"], "http://127.0.0.1:1/?state=other&code=x")
+    assert still["status"] == "pending"
     await kit.reg.stop_all()

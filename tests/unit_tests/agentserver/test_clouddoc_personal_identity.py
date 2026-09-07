@@ -164,12 +164,14 @@ def test_a_service_file_is_still_a_service_connection(tmp_path):
     assert prov._cli.identity == "bot"
 
 
-def test_google_personal_identity_is_refused_plainly_not_half_built(tmp_path):
+def test_a_google_personal_file_without_a_token_is_refused_with_the_remedy(tmp_path):
+    """Google personal identity is an OAuth user token (test_clouddoc_google_personal);
+    a personal file that has none cannot act and says so, naming the fix."""
     f = _write(tmp_path, "gp.json", {"kind": "personal", "brand": "google"})
     with pytest.raises(ProviderError) as exc:
         detect_vendor(f)
-    assert exc.value.kind == "unsupported"
-    assert "尚未支持" in str(exc.value)
+    assert exc.value.kind == "auth"
+    assert "重新完成 Google 授权" in str(exc.value)
     with pytest.raises(ProviderError):
         build_provider(f)
 

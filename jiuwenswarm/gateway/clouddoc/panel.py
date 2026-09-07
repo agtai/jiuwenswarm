@@ -135,10 +135,23 @@ class CloudDocPanel:
             # default wording. The receipt number is never part of it.
             "personal_signature": self._current_signature(),
             "identity_choice": self._current_choices(),
+            # Whether a Google OAuth client is configured for personal connections.
+            # The secret never leaves the config.
+            "google_oauth": {
+                "configured": bool(self._google_oauth_cfg()["client_id"] and self._google_oauth_cfg()["client_secret"]),
+                "client_id": self._google_oauth_cfg()["client_id"],
+            },
         }
 
     async def list_docs(self) -> list[dict[str, Any]]:
-        """A snapshot of every connection's documents, each row carrying its owner.
+        """One row per document -- the union over every connection.
+
+        A person ordinarily holds documents of three kinds at once: some only the
+        team's service identity reaches, some only they do (shared with them), some
+        both. Each row says how the document is reachable (``reach``: service /
+        personal / both) and which identity executes on it (``identity``; the
+        person's choice, service by default), with health judged for that
+        identity and the other identity's health beside it.
 
         No API calls in the steady state. The kind/title self-heals below are
         the one exception, and each probes **once per document per process**:
@@ -157,16 +170,25 @@ class CloudDocPanel:
                 unread = await asyncio.to_thread(self._reg.notice_store.unread_by_doc)
             except Exception:  # noqa: BLE001 - a missing badge is not an outage
                 unread = {}
-        choices = self._current_choices()
+        seen: set[str] = set()
         for c in self._reg.list():
             for doc_id in list(c.watcher._docs):
-                # Health is per identity -- the person may have lost access where the
-                # bot still has it -- so a personal row reads its own scoped entry;
-                # the metadata below is the document's and comes with it.
-                health = await self._reg.store_for(c).doc_health(doc_id)
-                meta = health.get("panel_meta") or {}
+                if doc_id in seen:
+                    continue
+                seen.add(doc_id)
                 owners = self._reg.owners(doc_id)
-                overlap = len(owners) > 1
+                exec_conn = self._reg.find_doc(doc_id) or c
+                by_kind = {o.identity_kind: o for o in owners}
+                reach = "both" if len(by_kind) == 2 else exec_conn.identity_kind
+                # Health is per identity -- the person may have lost access where the
+                # bot still has it -- so each owner's scoped entry is read; the
+                # metadata is the document's and comes with the executing one.
+                health = await self._reg.store_for(exec_conn).doc_health(doc_id)
+                status_by = {}
+                for kind, o in by_kind.items():
+                    h = health if o is exec_conn else await self._reg.store_for(o).doc_health(doc_id)
+                    status_by[kind] = self._status_of(h, personal=o.personal)
+                meta = health.get("panel_meta") or {}
                 # The format, so the panel can tell a spreadsheet from a document --
                 # both in the icon it draws and in the link it opens, since a
                 # spreadsheet's editor lives at a different path. Recorded at adoption;
@@ -175,7 +197,7 @@ class CloudDocPanel:
                 # document" rather than showing nothing.
                 kind = meta.get("kind") or ""
                 if not kind and doc_id not in probed:
-                    fn = getattr(c.provider, "doc_kind", None)
+                    fn = getattr(exec_conn.provider, "doc_kind", None)
                     if fn is not None:
                         try:
                             kind = await fn(doc_id)
@@ -188,9 +210,10 @@ class CloudDocPanel:
                 # known spreadsheet off the docx paths -- including the title probe
                 # right below, which would otherwise ask the wrong fetch.
                 if kind:
-                    note = getattr(c.provider, "note_kind", None)
-                    if note is not None:
-                        note(doc_id, kind)
+                    for o in owners:
+                        note = getattr(o.provider, "note_kind", None)
+                        if note is not None:
+                            note(doc_id, kind)
                 # The title heals the same way the kind does: a document adopted
                 # before titles were recorded shows its id prefix forever unless
                 # someone asks the provider once and caches the answer.
@@ -198,7 +221,7 @@ class CloudDocPanel:
                 if not title and doc_id not in probed:
                     probed.add(doc_id)
                     try:
-                        title = await c.provider.title(doc_id)
+                        title = await exec_conn.provider.title(doc_id)
                         if title:
                             await self._reg.store.set_panel_meta(doc_id, title=title)
                     except Exception:  # noqa: BLE001 - a missing name is not an outage
@@ -210,7 +233,7 @@ class CloudDocPanel:
                 url = str(meta.get("url") or "")
                 if not url.startswith("http") and doc_id not in url_probed:
                     url_probed.add(doc_id)
-                    fn = getattr(c.provider, "canonical_url", None)
+                    fn = getattr(exec_conn.provider, "canonical_url", None)
                     if fn is not None:
                         try:
                             u = str(await fn(doc_id) or "")
@@ -219,26 +242,26 @@ class CloudDocPanel:
                                 await self._reg.store.set_panel_meta(doc_id, url=u)
                         except Exception:  # noqa: BLE001 - a dead link is not an outage
                             pass
+                personal_owner = by_kind.get("personal")
                 rows.append({
                     "doc_id": doc_id,
-                    "url": url or c.provider.doc_url(doc_id, kind),
+                    "url": url or exec_conn.provider.doc_url(doc_id, kind),
                     "title": title or doc_id[:12] + "…",
                     "kind": kind,
                     "checked_at": meta.get("checked_at"),
-                    "status": self._status_of(health, personal=c.personal),
+                    "status": status_by.get(exec_conn.identity_kind, "ok"),
+                    "status_by": status_by,
                     "retry_at": health.get("until"),
-                    "provider": c.kind,
-                    "provider_name": _PROVIDER_NAMES.get(c.kind, c.kind),
-                    "connection_id": c.id,
-                    # S.1/S.2/S.3 for the row: which kind of connection this row is,
-                    # whether the document is also reachable the other way, which
+                    "provider": exec_conn.kind,
+                    "provider_name": _PROVIDER_NAMES.get(exec_conn.kind, exec_conn.kind),
+                    # The executing connection, and every owner by kind.
+                    "connection_id": exec_conn.id,
+                    "connections": {k: o.id for k, o in by_kind.items()},
+                    # S.1/S.2/S.3 for the row: how the document is reachable, which
                     # identity executes on it, and how many unread notices it holds.
-                    "connection_kind": c.identity_kind,
-                    "overlap": overlap,
-                    "identity": (
-                        choices.get(doc_id, "service") if overlap else c.identity_kind
-                    ),
-                    "notices": int(unread.get(doc_id, 0)) if c.personal else 0,
+                    "reach": reach,
+                    "identity": exec_conn.identity_kind,
+                    "notices": int(unread.get(doc_id, 0)) if personal_owner is not None else 0,
                 })
         return rows
 
@@ -322,11 +345,20 @@ class CloudDocPanel:
             # the person ticks the ones to adopt (``adopt_docs``). Nothing is adopted
             # here, and a document already under this connection is marked so.
             mine = set(conn.watcher._docs)
+
+            def adopted_by(doc_id: str) -> str:
+                # Visible so a document the team's service identity already manages
+                # is not mistaken for a new one: adopting it here too makes it
+                # reachable both ways (one row, ``reach: both``), never a duplicate.
+                kinds = {o.identity_kind for o in self._reg.owners(doc_id)}
+                return "both" if len(kinds) == 2 else (next(iter(kinds)) if kinds else "")
+
             candidates = [
                 {
                     "doc_id": d.doc_id, "title": d.title, "kind": d.kind,
                     "url": conn.provider.doc_url(d.doc_id, d.kind),
                     "can_edit": bool(d.can_edit), "adopted": d.doc_id in mine,
+                    "adopted_by": adopted_by(d.doc_id),
                 }
                 for d in found
             ]
@@ -1191,6 +1223,176 @@ class CloudDocPanel:
 
         self._write_config(mutate)
         return {"ok": True, "doc_id": doc_id, "identity": choice}
+
+    # ------------------------------------------------- Google personal identity (OAuth)
+
+    GOOGLE_OAUTH_KEY = "google_oauth"
+    # How long a started consent flow waits for the browser to come back.
+    GOOGLE_OAUTH_TIMEOUT_S = 600.0
+
+    def _google_oauth_cfg(self) -> dict[str, str]:
+        try:
+            data = load_yaml_round_trip(self._config_path)
+            raw = ((data or {}).get("clouddoc") or {}).get(self.GOOGLE_OAUTH_KEY) or {}
+            return {
+                "client_id": str(raw.get("client_id") or ""),
+                "client_secret": str(raw.get("client_secret") or ""),
+            }
+        except Exception:  # noqa: BLE001
+            return {"client_id": "", "client_secret": ""}
+
+    async def set_google_oauth(self, client_id: str, client_secret: str) -> dict[str, Any]:
+        """Register the OAuth client a self-hoster created in their own GCP project
+        (``clouddoc.google_oauth``). Empty values clear it."""
+        client_id = str(client_id or "").strip()
+        client_secret = str(client_secret or "").strip()
+
+        def mutate(data: dict) -> dict:
+            section = data.setdefault("clouddoc", {})
+            if client_id or client_secret:
+                section[self.GOOGLE_OAUTH_KEY] = {"client_id": client_id, "client_secret": client_secret}
+            else:
+                section.pop(self.GOOGLE_OAUTH_KEY, None)
+            return data
+
+        self._write_config(mutate)
+        return {"ok": True, "configured": bool(client_id and client_secret), "client_id": client_id}
+
+    def _oauth_flows(self) -> dict[str, dict[str, Any]]:
+        flows = getattr(self, "_google_flows", None)
+        if flows is None:
+            flows = {}
+            self._google_flows = flows
+        return flows
+
+    async def google_oauth_start(self) -> dict[str, Any]:
+        """Begin the consent flow: a loopback listener on an ephemeral port and the
+        link to open. The exchange and the connection follow on their own once the
+        browser comes back; ``google_oauth_status`` reports where it got to, and
+        ``google_oauth_finish`` is the paste-the-code fallback."""
+        from jiuwenswarm.agents.harness.common.tools.clouddoc.google_oauth import (
+            LoopbackReceiver,
+            build_auth_url,
+            new_state,
+        )
+
+        cfg = self._google_oauth_cfg()
+        if not cfg["client_id"] or not cfg["client_secret"]:
+            return {
+                "result": "not_configured",
+                "detail": "请先在设置里填写 Google OAuth 客户端的 client_id 与 client_secret。",
+            }
+        state = new_state()
+        receiver = LoopbackReceiver(state)
+        redirect_uri = await receiver.start()
+        auth_url = build_auth_url(cfg["client_id"], redirect_uri, state)
+        flow: dict[str, Any] = {
+            "state": state, "receiver": receiver, "redirect_uri": redirect_uri,
+            "status": "pending", "detail": "", "connection": None, "task": None,
+        }
+        self._oauth_flows()[state] = flow
+
+        async def run() -> None:
+            try:
+                code = await receiver.wait(timeout=self.GOOGLE_OAUTH_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                flow["status"], flow["detail"] = "error", "授权超时：十分钟内没有收到回调。请重新开始。"
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                flow["status"], flow["detail"] = "error", str(exc)
+                return
+            await self._google_finish(flow, code)
+
+        flow["task"] = asyncio.create_task(run(), name=f"clouddoc-google-oauth-{state[:8]}")
+        return {"result": "ok", "state": state, "auth_url": auth_url, "redirect_uri": redirect_uri}
+
+    async def google_oauth_finish(self, state: str, code_or_url: str) -> dict[str, Any]:
+        """The manual fallback: the person pastes the redirected URL or the bare
+        code (a remote browser cannot reach this machine's loopback)."""
+        from jiuwenswarm.agents.harness.common.tools.clouddoc.google_oauth import parse_code
+
+        flow = self._oauth_flows().get(str(state or ""))
+        if flow is None:
+            return {"status": "error", "detail": "没有这个授权请求；请重新开始。"}
+        if flow["status"] != "pending":
+            return await self.google_oauth_status(state)
+        try:
+            code = parse_code(code_or_url, expected_state=flow["state"])
+        except ProviderError as exc:
+            return {"status": "pending", "detail": str(exc)}
+        # Settle the listener's wait too, so the background task ends cleanly
+        # rather than finishing a second time when the browser also comes back.
+        task = flow.get("task")
+        if task is not None and not task.done():
+            task.cancel()
+        await flow["receiver"].close()
+        await self._google_finish(flow, code)
+        return await self.google_oauth_status(state)
+
+    async def google_oauth_status(self, state: str) -> dict[str, Any]:
+        flow = self._oauth_flows().get(str(state or ""))
+        if flow is None:
+            return {"status": "error", "detail": "没有这个授权请求；请重新开始。"}
+        return {"status": flow["status"], "detail": flow["detail"], "connection": flow["connection"]}
+
+    async def _google_finish(self, flow: dict[str, Any], code: str) -> None:
+        """Exchange the code, learn who the token belongs to, write the token file
+        (0600, named by email), and add the connection. Every failure lands in the
+        flow's status with a sentence the person can act on; no file survives a
+        failure."""
+        from jiuwenswarm.agents.harness.common.tools.clouddoc.google_oauth import (
+            authorized_user_info,
+            exchange_code,
+            write_authorized_user_file,
+        )
+
+        cfg = self._google_oauth_cfg()
+        exchange = getattr(self, "_oauth_exchange", None) or (
+            lambda cid, secret, c, uri: exchange_code(cid, secret, c, uri)
+        )
+        try:
+            token = await asyncio.to_thread(
+                exchange, cfg["client_id"], cfg["client_secret"], code, flow["redirect_uri"],
+            )
+        except Exception as exc:  # noqa: BLE001 - reported, never raised out of the task
+            flow["status"], flow["detail"] = "error", str(exc)
+            return
+        info = authorized_user_info(cfg["client_id"], cfg["client_secret"], token)
+        keys_dir = self._keys_dir()
+        pending = keys_dir / f"personal-google-pending-{flow['state'][:8]}.json"
+        try:
+            await asyncio.to_thread(write_authorized_user_file, pending, info)
+            provider = self._reg._provider_factory(str(pending))
+            ident = await provider.self_identity()
+            email = str(ident.address or "").strip().lower()
+            if not email:
+                raise ProviderError("auth", "无法取得授权账号的邮箱。")
+            final = keys_dir / f"personal-google-{re.sub(r'[^A-Za-z0-9._@+-]', '_', email)}.json"
+            if final.exists():
+                raise ValueError(f"duplicate connection: {email}")
+            info = {**info, "email": email, "name": ident.display_name or email}
+            await asyncio.to_thread(write_authorized_user_file, final, info)
+            await asyncio.to_thread(pending.unlink)
+        except Exception as exc:  # noqa: BLE001
+            if pending.exists():
+                await asyncio.to_thread(pending.unlink)
+            flow["status"], flow["detail"] = "error", str(exc)
+            return
+        try:
+            conn = await self._reg.add(str(final), [], start=True)
+        except ValueError as exc:
+            await asyncio.to_thread(final.unlink)
+            flow["status"], flow["detail"] = "error", f"duplicate: {exc}"
+            return
+        except Exception as exc:  # noqa: BLE001
+            await asyncio.to_thread(final.unlink)
+            flow["status"], flow["detail"] = "error", str(exc)
+            return
+        await asyncio.to_thread(self._persist)
+        flow["status"] = "done"
+        flow["connection"] = _conn_payload(conn, docs_count=0, health="idle")
 
     def bind_notifier(self, push) -> None:
         """Give the registry the web channel's broadcast, once the channel exists."""

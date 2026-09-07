@@ -6681,6 +6681,23 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await _clouddoc_call(ws, req_id, "set_identity_choice",
                              str(p.get("doc_id")), str(p.get("identity") or "service"))
 
+    async def _clouddoc_google_oauth_configure(ws, req_id, params, session_id):
+        p = params if isinstance(params, dict) else {}
+        await _clouddoc_call(ws, req_id, "set_google_oauth",
+                             str(p.get("client_id") or ""), str(p.get("client_secret") or ""))
+
+    async def _clouddoc_google_oauth_start(ws, req_id, params, session_id):
+        await _clouddoc_call(ws, req_id, "google_oauth_start")
+
+    async def _clouddoc_google_oauth_status(ws, req_id, params, session_id):
+        p = params if isinstance(params, dict) else {}
+        await _clouddoc_call(ws, req_id, "google_oauth_status", str(p.get("state") or ""))
+
+    async def _clouddoc_google_oauth_finish(ws, req_id, params, session_id):
+        p = params if isinstance(params, dict) else {}
+        await _clouddoc_call(ws, req_id, "google_oauth_finish",
+                             str(p.get("state") or ""), str(p.get("code") or ""))
+
     async def _clouddoc_notices(ws, req_id, params, session_id):
         p = params if isinstance(params, dict) else {}
         await _clouddoc_call(ws, req_id, "notices",
@@ -6865,6 +6882,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("clouddoc.set_signature", _clouddoc_set_signature)
     channel.register_method("clouddoc.set_identity_choice", _clouddoc_set_identity_choice)
     channel.register_method("clouddoc.notices", _clouddoc_notices)
+    channel.register_method("clouddoc.google_oauth_configure", _clouddoc_google_oauth_configure)
+    channel.register_method("clouddoc.google_oauth_start", _clouddoc_google_oauth_start)
+    channel.register_method("clouddoc.google_oauth_status", _clouddoc_google_oauth_status)
+    channel.register_method("clouddoc.google_oauth_finish", _clouddoc_google_oauth_finish)
     channel.register_method("clouddoc.notice_ack", _clouddoc_notice_ack)
     channel.register_method("clouddoc.set_mode", _clouddoc_set_mode)
     channel.register_method("clouddoc.set_model", _clouddoc_set_model)

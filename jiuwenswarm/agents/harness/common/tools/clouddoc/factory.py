@@ -37,13 +37,18 @@ def _load(credentials_file: str) -> dict:
 def detect_kind(credentials_file: str) -> str:
     """``"service"`` or ``"personal"``, from the file's own ``kind`` field.
 
-    A personal connection file carries **no secret**: only ``kind``, ``brand`` and
-    the identity it was verified as (open_id, name). The token lives in the
-    platform CLI's own store (``lark-cli auth login``), so a copied file grants
-    nothing by itself. Absent ``kind`` means service -- every file written before the
-    field existed.
+    A personal Feishu file carries **no secret**: only ``kind``, ``brand`` and the
+    identity it was verified as (open_id, name); the token lives in the platform
+    CLI's own store (``lark-cli auth login``), so a copied file grants nothing by
+    itself. A personal Google file is Google's ``authorized_user`` shape -- the
+    refresh token and the OAuth client that issued it -- written mode 0600.
+    Absent ``kind`` means service (or ``authorized_user``, which is personal by
+    construction) -- every file written before the field existed.
     """
-    kind = str(_load(credentials_file).get("kind") or "service").strip().lower()
+    data = _load(credentials_file)
+    kind = str(data.get("kind") or "").strip().lower()
+    if not kind:
+        kind = "personal" if data.get("type") == "authorized_user" else "service"
     if kind not in CONNECTION_KINDS:
         raise ProviderError("invalid", f"未知的连接类型 {kind!r}（可选 service / personal）。")
     return kind
@@ -57,17 +62,18 @@ def detect_vendor(credentials_file: str) -> str:
         if brand in ("feishu", "lark"):
             return "feishu"
         if brand == "google":
-            # Deliberately refused rather than half-built: the OAuth user-token flow
-            # (client registration, loopback consent, refresh-token storage) is its
-            # own piece of work and a partial one would fail at first use with a
-            # message about tokens. Saying so here is the honest state (S.1: Feishu
-            # first, Google after).
-            raise ProviderError(
-                "unsupported",
-                "Google 个人身份（OAuth 用户令牌）尚未支持；个人连接目前仅支持飞书"
-                "（lark-cli 用户登录）。Google 请继续使用服务账号连接。",
-            )
-        raise ProviderError("invalid", f"个人连接需要 brand 字段（feishu）：{credentials_file}")
+            if not data.get("refresh_token"):
+                raise ProviderError(
+                    "auth",
+                    f"Google 个人连接的令牌文件没有 refresh_token：{credentials_file}。"
+                    "请在设置里重新完成 Google 授权。",
+                )
+            return "google"
+        raise ProviderError("invalid", f"个人连接需要 brand 字段（feishu / google）：{credentials_file}")
+    if data.get("type") == "authorized_user" and data.get("refresh_token"):
+        # Google's own user-token shape without our kind marker: a person's token
+        # is a personal connection by construction.
+        return "google"
     if data.get("type") == "service_account" and data.get("client_email"):
         return "google"
     if data.get("app_id") or data.get("app_secret"):
@@ -88,7 +94,12 @@ def build_provider(credentials_file: str, *, agent_roster: tuple[str, ...] = ())
     """
     vendor = detect_vendor(credentials_file)
     if detect_kind(credentials_file) == "personal":
-        # Only Feishu reaches here; detect_vendor refused everything else.
+        if vendor == "google":
+            from jiuwenswarm.agents.harness.common.tools.clouddoc.google_provider import (
+                GoogleDocsProvider,
+            )
+
+            return GoogleDocsProvider(credentials_file, identity="user")
         from jiuwenswarm.agents.harness.common.tools.clouddoc.feishu_provider import (
             FeishuDocsProvider,
         )

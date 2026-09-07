@@ -208,13 +208,21 @@ def _unescape_quoted(value: str) -> str:
 
 
 class GoogleDocsProvider(DocProvider):
-    def __init__(self, credentials_file: str) -> None:
+    def __init__(self, credentials_file: str, *, identity: str = "service") -> None:
         # The receipt sink (PR2c, D8): injected at wiring time so the provider stays
         # gateway-free. When present, every body write records a WAL receipt around
         # the platform call -- begin before, commit after, abort on a known refusal,
         # and an unknown outcome (exception) leaves it pending for the sweep.
         self.receipt_sink = None
         self._credentials_file = credentials_file
+        # ``service`` (a service-account key) or ``user`` (an OAuth user token in
+        # Google's ``authorized_user`` shape; design §13, matrix S.1). Under a user
+        # token the provider *is* the person on the platform: its writes are theirs,
+        # ``author.me`` in a comment means them, and the address is their email.
+        if identity not in ("service", "user"):
+            raise ValueError(f"google identity must be service or user, got {identity!r}")
+        self._personal = identity == "user"
+        self._identity_email = ""
         # One client per thread. Sharing a Resource hangs: measured with 8 threads on a
         # single shared Resource, 5 of 8 timed out and the run took 60s; building one per
         # thread gave 0 failures in 0.38s.
@@ -234,21 +242,53 @@ class GoogleDocsProvider(DocProvider):
 
     # ---------------------------------------------------------------- clients
 
+    @property
+    def personal(self) -> bool:
+        """Whether this provider acts as a person rather than as a service account."""
+        return self._personal
+
+    @property
+    def identity_address(self) -> str:
+        """The account address this provider acts as, once known (the email)."""
+        if self._identity is not None:
+            return self._identity.address or ""
+        return self._identity_email
+
+    def _credentials(self) -> Any:
+        """The credentials object, by branch: a service-account key, or a user token
+        refreshed from an ``authorized_user`` file (client id and secret ride in
+        the file, as Google's own shape has it, so the library stays config-free)."""
+        try:
+            from google.oauth2 import service_account
+        except ImportError as exc:  # pragma: no cover - depends on the extras being installed
+            raise ProviderError(
+                "invalid",
+                "clouddoc 需要 google extras：pip install 'jiuwenswarm[clouddoc]'",
+            ) from exc
+        if self._personal:
+            from google.oauth2.credentials import Credentials
+
+            with open(self._credentials_file, encoding="utf-8") as fh:
+                info = json.load(fh)
+            if not info.get("refresh_token"):
+                raise ProviderError("auth", "Google 个人身份的令牌文件没有 refresh_token；请重新授权。")
+            return Credentials.from_authorized_user_info(info, scopes=list(_SCOPES))
+        return service_account.Credentials.from_service_account_file(
+            self._credentials_file, scopes=list(_SCOPES)
+        )
+
     def _clients(self) -> tuple[Any, Any]:
         got = getattr(self._local, "clients", None)
         if got is not None:
             return got
         try:
-            from google.oauth2 import service_account
             from googleapiclient.discovery import build
         except ImportError as exc:  # pragma: no cover - depends on the extras being installed
             raise ProviderError(
                 "invalid",
                 "clouddoc 需要 google extras：pip install 'jiuwenswarm[clouddoc]'",
             ) from exc
-        cred = service_account.Credentials.from_service_account_file(
-            self._credentials_file, scopes=list(_SCOPES)
-        )
+        cred = self._credentials()
         clients = (
             build("docs", "v1", credentials=cred, cache_discovery=False),
             build("drive", "v3", credentials=cred, cache_discovery=False),
@@ -269,13 +309,9 @@ class GoogleDocsProvider(DocProvider):
             self._local.extra = cache
         got = cache.get(name)
         if got is None:
-            from google.oauth2 import service_account
             from googleapiclient.discovery import build
 
-            cred = service_account.Credentials.from_service_account_file(
-                self._credentials_file, scopes=list(_SCOPES)
-            )
-            got = build(name, version, credentials=cred, cache_discovery=False)
+            got = build(name, version, credentials=self._credentials(), cache_discovery=False)
             cache[name] = got
         return got
 
@@ -362,6 +398,28 @@ class GoogleDocsProvider(DocProvider):
         if self._identity is None:
             with open(self._credentials_file, encoding="utf-8") as fh:
                 info = json.load(fh)
+            if self._personal:
+                # The person the token belongs to, from Drive's own answer. The file
+                # carries the email it was verified as at authorisation time; the
+                # platform is asked once per process so a stale file cannot lie.
+                email = str(info.get("email") or "")
+                name = str(info.get("name") or "")
+                try:
+                    _, drive = self._clients()
+                    about = await self._call(
+                        drive.about().get(fields="user(emailAddress,displayName)").execute
+                    )
+                    user = about.get("user") or {}
+                    email = str(user.get("emailAddress") or email)
+                    name = str(user.get("displayName") or name)
+                except ProviderError:
+                    if not email:
+                        raise
+                if not email:
+                    raise ProviderError("auth", "无法取得 Google 个人身份的邮箱；请重新授权。")
+                self._identity_email = email
+                self._identity = AgentIdentity(display_name=name or email, address=email)
+                return self._identity
             email = info.get("client_email") or ""
             # Drive's display name for a service account's comments happens to be the
             # full email. It still must not be used to identify anyone else.

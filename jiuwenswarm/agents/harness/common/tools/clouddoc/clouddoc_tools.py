@@ -469,6 +469,32 @@ class CloudDocToolkit:
 
     # ------------------------------------------------------------ identity
 
+    def _watched_ids(self) -> list[str]:
+        """The adopted documents, each once. A document adopted under both a service
+        and a personal connection is listed by both specs; it is still one document,
+        and counting it twice made "which of these two" a question about one file."""
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in self._watched_docs() or []:
+            s = str(raw)
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
+
+    def _reach_of(self, doc_id: str) -> str:
+        """``service`` / ``personal`` / ``both`` for a routed surface; the single
+        provider's own kind otherwise."""
+        fn = getattr(self._provider, "reach", None)
+        if fn is not None:
+            try:
+                r = str(fn(doc_id) or "")
+                if r:
+                    return r
+            except Exception:  # noqa: BLE001
+                pass
+        return "personal" if getattr(self._provider, "personal", False) else "service"
+
     def _owner(self, doc_id: str | None) -> Any:
         """The provider that actually acts on ``doc_id``: the routed surface's owner
         when there is one, else the single provider."""
@@ -1286,7 +1312,7 @@ class CloudDocToolkit:
         if self._turn_doc_id() is not None:
             return None
 
-        watched = self._watched_docs() or []
+        watched = self._watched_ids()
         if len(watched) < 2:
             return None
 
@@ -1397,11 +1423,13 @@ class CloudDocToolkit:
         useful without them, so a provider failure degrades to ids rather than an error.
         """
         ids: list[str] = []
-        for raw in self._watched_docs() or []:
+        for raw in self._watched_ids():
             try:
-                ids.append(str(self._provider.parse_doc_ref(str(raw))))
+                canonical = str(self._provider.parse_doc_ref(raw))
             except ProviderError:
                 continue
+            if canonical not in ids:
+                ids.append(canonical)
         if not ids:
             return _ok(documents=[], detail="当前连接没有纳管任何文档。")
 
@@ -1463,6 +1491,12 @@ class CloudDocToolkit:
                 host = owner(i) if owner else self._provider
                 if getattr(host, "kind", ""):
                     entry["platform"] = str(host.kind)
+                # Which identity executes on it (S.2) and how it is reachable: a
+                # person ordinarily holds documents of all three kinds at once, and
+                # the model must know that a write here lands under the person's
+                # own name (signed) or under the service account's.
+                entry["identity"] = "personal" if getattr(host, "personal", False) else "service"
+                entry["reach"] = self._reach_of(i)
             except Exception:  # noqa: BLE001 - a listing must not die on routing
                 pass
             docs.append(entry)
@@ -2152,7 +2186,7 @@ class CloudDocToolkit:
         Capped so a large deployment does not bloat the card."""
         from jiuwenswarm.agents.harness.common.tools.clouddoc.kinds import adopted_titles
 
-        titles = adopted_titles(self._watched_docs() or [])
+        titles = adopted_titles(self._watched_ids())
         if not titles:
             return ""
         shown = "、".join(f"《{x}》" for x in titles[:12])

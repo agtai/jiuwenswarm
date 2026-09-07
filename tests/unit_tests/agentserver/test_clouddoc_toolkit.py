@@ -557,7 +557,10 @@ async def test_chat_can_find_out_which_documents_it_watches(fake):
     out = await tk.list_documents()
     assert out["ok"]
     assert out["documents"] == [
-        {"doc_id": DOC, "title": "Onboarding Rollout Plan", "user_named": False, "platform": "fake"}
+        {"doc_id": DOC, "title": "Onboarding Rollout Plan", "user_named": False, "platform": "fake",
+         # Which identity executes and how the document is reachable (matrix S.2):
+         # a single service provider is service-only.
+         "identity": "service", "reach": "service"}
     ]
 
 
