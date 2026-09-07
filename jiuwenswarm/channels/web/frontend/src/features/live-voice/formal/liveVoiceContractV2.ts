@@ -451,15 +451,6 @@ export interface ConnectionEpochRef {
   readonly connection_epoch: number;
 }
 
-export function parseConnectionEpochRef(value: unknown): Readonly<ConnectionEpochRef> {
-  const data = strictRecord(value, 'connection_epoch_ref');
-  exactKeys(data, ['connection_id', 'connection_epoch'], 'connection_epoch_ref');
-  return Object.freeze({
-    connection_id: requiredText(data.connection_id, 'connection_epoch_ref.connection_id'),
-    connection_epoch: unsignedInteger(data.connection_epoch, 'connection_epoch_ref.connection_epoch'),
-  });
-}
-
 export interface ProducerRef {
   readonly component: string;
   readonly instance_id: string;
@@ -476,21 +467,6 @@ function parseProducerRef(value: unknown): Readonly<ProducerRef> {
   });
 }
 
-const EXPECTED_PARENTS: Readonly<Record<IdentityKind, readonly IdentityKind[]>> = Object.freeze({
-  connection: [],
-  media_session: ['interaction'],
-  track: ['media_session'],
-  interaction: [],
-  turn: ['interaction'],
-  response: ['interaction', 'turn'],
-  round: [],
-  task: [],
-  attempt: ['task'],
-  command: [],
-  request: [],
-  event: [],
-});
-
 export interface IdentityRecord {
   readonly ref: Readonly<IdentityRef>;
   readonly scope: Readonly<ScopeRef>;
@@ -502,111 +478,8 @@ function scopeKey(scope: Readonly<ScopeRef>): string {
   return canonicalJson(scope);
 }
 
-export class IdentityRegistry {
-  readonly #records = new Map<string, IdentityRecord>();
-  readonly #kindById = new Map<string, IdentityKind>();
-
-  register(record: IdentityRecord): IdentityRecord {
-    const data = strictRecord(record, 'identity_record');
-    exactKeys(data, ['ref', 'scope', 'parents'], 'identity_record', ['connection_epoch_ref']);
-    record = {
-      ref: parseIdentityRef(data.ref),
-      scope: parseScopeRef(data.scope),
-      parents: strictArray(data.parents, 'identity_record.parents').map(parent => parseIdentityRef(parent)),
-      connection_epoch_ref:
-        data.connection_epoch_ref === undefined || data.connection_epoch_ref === null ? null : parseConnectionEpochRef(data.connection_epoch_ref),
-    };
-    const expected = [...EXPECTED_PARENTS[record.ref.kind]].sort();
-    const actual = record.parents.map(parent => parent.kind).sort();
-    if (new Set(actual).size !== actual.length || actual.length !== expected.length || actual.some((kind, index) => kind !== expected[index])) {
-      throw violation('IDENTITY_PARENT_MISMATCH', `${record.ref.kind} requires parent kinds ${expected.join(',')}`);
-    }
-    const connectionBinding = record.connection_epoch_ref ?? null;
-    if ((record.ref.kind === 'connection' || record.ref.kind === 'media_session') && connectionBinding === null) {
-      throw violation('CONNECTION_EPOCH_BINDING_REQUIRED', `${record.ref.kind} requires connection_epoch_ref`);
-    }
-    if (record.ref.kind !== 'connection' && record.ref.kind !== 'media_session' && connectionBinding !== null) {
-      throw violation('CONNECTION_EPOCH_BINDING_FORBIDDEN', `${record.ref.kind} forbids connection_epoch_ref`);
-    }
-    if (record.ref.kind === 'connection' && connectionBinding?.connection_id !== record.ref.id) {
-      throw violation('CONNECTION_EPOCH_BINDING_MISMATCH', 'connection binding must name the registered connection');
-    }
-    const knownKind = this.#kindById.get(record.ref.id);
-    if (knownKind !== undefined && knownKind !== record.ref.kind) {
-      throw violation('IDENTITY_KIND_MISMATCH', `${record.ref.id} is already ${knownKind}`);
-    }
-    for (const parent of record.parents) {
-      const parentRecord = this.#records.get(`${parent.kind}:${parent.id}`);
-      if (parentRecord === undefined) {
-        throw violation('IDENTITY_PARENT_NOT_FOUND', `${parent.kind}:${parent.id} is unknown`);
-      }
-      if (scopeKey(parentRecord.scope) !== scopeKey(record.scope)) {
-        throw violation('IDENTITY_SCOPE_MISMATCH', 'child and parent scope must match');
-      }
-    }
-    if (record.ref.kind === 'media_session' && connectionBinding !== null) {
-      const connection = this.#records.get(`connection:${connectionBinding.connection_id}`);
-      if (connection === undefined) {
-        throw violation('IDENTITY_CONNECTION_NOT_FOUND', `connection:${connectionBinding.connection_id} is unknown`);
-      }
-      if (scopeKey(connection.scope) !== scopeKey(record.scope)) {
-        throw violation('IDENTITY_SCOPE_MISMATCH', 'media session and connection scope must match');
-      }
-      if (canonicalJson(connection.connection_epoch_ref ?? null) !== canonicalJson(connectionBinding)) {
-        throw violation('CONNECTION_EPOCH_BINDING_MISMATCH', 'media session must use the active connection epoch binding');
-      }
-    }
-    if (record.ref.kind === 'response') {
-      const interaction = record.parents.find(parent => parent.kind === 'interaction');
-      const turn = record.parents.find(parent => parent.kind === 'turn');
-      const turnRecord = turn === undefined ? undefined : this.#records.get(`turn:${turn.id}`);
-      if (
-        interaction === undefined ||
-        turnRecord === undefined ||
-        !turnRecord.parents.some(parent => parent.kind === 'interaction' && parent.id === interaction.id)
-      ) {
-        throw violation('IDENTITY_PARENT_MISMATCH', 'response interaction must own its turn');
-      }
-    }
-    const frozen = Object.freeze({
-      ref: Object.freeze({ ...record.ref }),
-      scope: Object.freeze({ ...record.scope }),
-      parents: Object.freeze(record.parents.map(parent => Object.freeze({ ...parent }))),
-      connection_epoch_ref: connectionBinding === null ? null : Object.freeze({ ...connectionBinding }),
-    });
-    const key = `${record.ref.kind}:${record.ref.id}`;
-    const existing = this.#records.get(key);
-    if (existing !== undefined) {
-      if (canonicalJson(existing) !== canonicalJson(frozen)) {
-        throw violation('IDENTITY_CONFLICT', 'identity registration is immutable', 'CONFLICT');
-      }
-      return existing;
-    }
-    this.#records.set(key, frozen);
-    this.#kindById.set(record.ref.id, record.ref.kind);
-    return frozen;
-  }
-
-  require(ref: Readonly<IdentityRef>, options: { scope?: Readonly<ScopeRef>; parent?: Readonly<IdentityRef> } = {}): IdentityRecord {
-    const normalizedRef = parseIdentityRef(ref);
-    const normalizedScope = options.scope === undefined ? undefined : parseScopeRef(options.scope);
-    const normalizedParent = options.parent === undefined ? undefined : parseIdentityRef(options.parent);
-    const record = this.#records.get(`${normalizedRef.kind}:${normalizedRef.id}`);
-    if (record === undefined) {
-      const knownKind = this.#kindById.get(normalizedRef.id);
-      if (knownKind !== undefined) {
-        throw violation('IDENTITY_KIND_MISMATCH', `${normalizedRef.id} is ${knownKind}, not ${normalizedRef.kind}`);
-      }
-      throw violation('IDENTITY_NOT_FOUND', `${normalizedRef.kind}:${normalizedRef.id} is unknown`, 'NOT_FOUND');
-    }
-    if (normalizedScope !== undefined && scopeKey(normalizedScope) !== scopeKey(record.scope)) {
-      throw violation('IDENTITY_SCOPE_MISMATCH', 'identity scope does not match');
-    }
-    if (normalizedParent !== undefined && !record.parents.some(parent => parent.kind === normalizedParent.kind && parent.id === normalizedParent.id)) {
-      throw violation('IDENTITY_PARENT_MISMATCH', 'identity parent does not match');
-    }
-    return record;
-  }
+export interface IdentityRegistry {
+  require(ref: Readonly<IdentityRef>, options?: { scope?: Readonly<ScopeRef>; parent?: Readonly<IdentityRef> }): IdentityRecord;
 }
 
 const COMMAND_TARGETS: Readonly<Record<string, IdentityKind>> = Object.freeze({

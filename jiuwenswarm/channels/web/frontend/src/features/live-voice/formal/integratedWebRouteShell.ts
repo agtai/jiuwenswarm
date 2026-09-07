@@ -58,11 +58,6 @@ export interface IntegratedWebRouteManifest {
   readonly gate_claim: 'NONE';
 }
 
-export interface IntegratedWebFaultPlan {
-  readonly unavailable_segments?: readonly IntegratedWebSegmentId[];
-  readonly fail_activation_segments?: readonly IntegratedWebSegmentId[];
-}
-
 export class IntegratedWebRouteViolation extends Error {
   constructor(
     readonly reason: string,
@@ -86,17 +81,6 @@ function adapterKey(segmentId: IntegratedWebSegmentId, implementationClass: Inte
 
 function isSegmentId(value: string): value is IntegratedWebSegmentId {
   return INTEGRATED_WEB_SEGMENTS.includes(value as IntegratedWebSegmentId);
-}
-
-function normalizeFaultSegments(values: readonly IntegratedWebSegmentId[] | undefined, field: string): ReadonlySet<IntegratedWebSegmentId> {
-  const normalized = new Set<IntegratedWebSegmentId>();
-  for (const value of values ?? []) {
-    if (!isSegmentId(value)) {
-      throw new IntegratedWebRouteViolation('INVALID_FAULT_SEGMENT', `${field} contains an unknown segment`);
-    }
-    normalized.add(value);
-  }
-  return normalized;
 }
 
 function normalizeAdapter(adapter: Readonly<IntegratedWebRouteAdapter>): Readonly<IntegratedWebRouteAdapter> {
@@ -225,24 +209,10 @@ function compositionState(enabled: boolean, segments: readonly Readonly<Integrat
 }
 
 export class IntegratedWebRouteShell {
-  static readonly DEFAULT_CLOSE_WAIT_TIMEOUT_MS = 5_000;
-  static readonly MAX_CLOSE_WAIT_TIMEOUT_MS = 60_000;
-
   readonly #enabled: boolean;
   readonly #registry: IntegratedWebAdapterRegistry;
   readonly #policy: IntegratedWebRoutePolicy;
   readonly #context: Readonly<IntegratedWebRouteContext>;
-  readonly #unavailableFaults: ReadonlySet<IntegratedWebSegmentId>;
-  readonly #activationFaults: ReadonlySet<IntegratedWebSegmentId>;
-  readonly #closeWaitTimeoutMs: number;
-  #leases: IntegratedWebRouteLease[] = [];
-  #active = false;
-  #activationPromise: Promise<boolean> | null = null;
-  #activationAbort: AbortController | null = null;
-  #closePromise: Promise<boolean> | null = null;
-  #teardownPromise: Promise<void> | null = null;
-  #teardownPending = false;
-  #lifecycleGeneration = 0;
 
   constructor(
     options: Readonly<{
@@ -250,8 +220,6 @@ export class IntegratedWebRouteShell {
       registry: IntegratedWebAdapterRegistry;
       policy: IntegratedWebRoutePolicy;
       context: IntegratedWebRouteContext;
-      fault_plan?: IntegratedWebFaultPlan;
-      close_wait_timeout_ms?: number;
     }>
   ) {
     if (typeof options.enabled !== 'boolean') {
@@ -284,13 +252,6 @@ export class IntegratedWebRouteShell {
     }
     this.#policy = Object.freeze({ ...options.policy });
     this.#context = Object.freeze({ ...options.context });
-    this.#unavailableFaults = normalizeFaultSegments(options.fault_plan?.unavailable_segments, 'unavailable_segments');
-    this.#activationFaults = normalizeFaultSegments(options.fault_plan?.fail_activation_segments, 'fail_activation_segments');
-    const closeWaitTimeoutMs = options.close_wait_timeout_ms ?? IntegratedWebRouteShell.DEFAULT_CLOSE_WAIT_TIMEOUT_MS;
-    if (!Number.isSafeInteger(closeWaitTimeoutMs) || closeWaitTimeoutMs <= 0 || closeWaitTimeoutMs > IntegratedWebRouteShell.MAX_CLOSE_WAIT_TIMEOUT_MS) {
-      throw new IntegratedWebRouteViolation('INVALID_CLOSE_WAIT_TIMEOUT', 'close_wait_timeout_ms must be a positive safe integer no greater than 60000');
-    }
-    this.#closeWaitTimeoutMs = closeWaitTimeoutMs;
   }
 
   preview(): Readonly<IntegratedWebRouteManifest> {
@@ -302,165 +263,10 @@ export class IntegratedWebRouteShell {
       observed_at: this.#context.observed_at,
       composition_state: compositionState(this.#enabled, segments),
       segments: Object.freeze(segments),
-      activation_leases_active: this.#active,
-      teardown_state:
-        this.#teardownPromise !== null ? 'pending' : this.#teardownPending || (!this.#active && this.#leases.length > 0) ? 'cleanup_required' : 'idle',
+      activation_leases_active: false,
+      teardown_state: 'idle',
       gate_claim: 'NONE' as const,
     });
-  }
-
-  activate(): Promise<boolean> {
-    if (!this.#enabled) return Promise.resolve(false);
-    if (this.#closePromise !== null || this.#teardownPromise !== null) {
-      return Promise.reject(new IntegratedWebRouteViolation('ROUTE_CLOSE_IN_PROGRESS', 'the cumulative route is closing'));
-    }
-    if (this.#teardownPending) {
-      return Promise.reject(new IntegratedWebRouteViolation('ROUTE_CLEANUP_REQUIRED', 'prior route teardown has not reached a terminal cleanup fact'));
-    }
-    if (this.#active) return Promise.resolve(false);
-    if (this.#activationPromise !== null) return this.#activationPromise;
-    if (this.#leases.length > 0) {
-      return Promise.reject(new IntegratedWebRouteViolation('ROUTE_CLEANUP_REQUIRED', 'a prior route lease must close before activation can retry'));
-    }
-
-    const generation = ++this.#lifecycleGeneration;
-    const abortController = new AbortController();
-    this.#activationAbort = abortController;
-    let activation: Promise<boolean>;
-    activation = this.#activateOnce(generation, abortController.signal).finally(() => {
-      if (this.#activationPromise === activation) this.#activationPromise = null;
-      if (this.#activationAbort === abortController) this.#activationAbort = null;
-      if (this.#teardownPending && this.#teardownPromise === null && this.#leases.length === 0 && !this.#active) this.#teardownPending = false;
-    });
-    this.#activationPromise = activation;
-    return activation;
-  }
-
-  async #activateOnce(generation: number, signal: AbortSignal): Promise<boolean> {
-    const manifest = this.preview();
-    if (manifest.composition_state === 'unsupported' || manifest.composition_state === 'shell_only') {
-      throw new IntegratedWebRouteViolation('ROUTE_NOT_ACTIVATABLE', 'every cumulative segment must be available and expose an activation seam');
-    }
-
-    const opened: IntegratedWebRouteLease[] = [];
-    try {
-      for (const route of manifest.segments) {
-        if (generation !== this.#lifecycleGeneration) {
-          throw new IntegratedWebRouteViolation('ACTIVATION_FENCED', 'route activation was fenced by a close request');
-        }
-        if (this.#activationFaults.has(route.segment_id)) {
-          throw new IntegratedWebRouteViolation('INJECTED_ACTIVATION_FAILURE', `fault injected for ${route.segment_id}`);
-        }
-        const adapter = this.#registry.find(route.segment_id, route.requested_class);
-        if (adapter?.activate === undefined) {
-          throw new IntegratedWebRouteViolation('ROUTE_NOT_ACTIVATABLE', `${route.segment_id} has no activation seam`);
-        }
-        const lease = await adapter.activate(Object.freeze({ ...this.#context, route, signal }));
-        if (lease === null || typeof lease !== 'object' || typeof lease.close !== 'function') {
-          throw new IntegratedWebRouteViolation('INVALID_ROUTE_LEASE', `${route.segment_id} returned an invalid lease`);
-        }
-        opened.push(lease);
-        if (generation !== this.#lifecycleGeneration) {
-          throw new IntegratedWebRouteViolation('ACTIVATION_FENCED', 'route activation was fenced by a close request');
-        }
-      }
-    } catch (error) {
-      const failedLeases = await this.#closeLeasesInReverseOrder(opened);
-      if (failedLeases.length > 0) {
-        this.#leases = failedLeases;
-        throw new IntegratedWebRouteViolation('ACTIVATION_ROLLBACK_FAILED', 'route activation failed and at least one opened segment did not close');
-      }
-      if (signal.aborted || generation !== this.#lifecycleGeneration) {
-        throw new IntegratedWebRouteViolation('ACTIVATION_FENCED', 'route activation was fenced by a close request');
-      }
-      throw error;
-    }
-
-    if (generation !== this.#lifecycleGeneration) {
-      throw new IntegratedWebRouteViolation('ACTIVATION_FENCED', 'route activation was fenced by a close request');
-    }
-    this.#leases = opened;
-    this.#active = true;
-    return true;
-  }
-
-  close(): Promise<boolean> {
-    if (this.#closePromise !== null) return this.#closePromise;
-    const pendingActivation = this.#activationPromise;
-    const hadWork = this.#active || this.#leases.length > 0 || pendingActivation !== null || this.#teardownPending || this.#teardownPromise !== null;
-    if (!hadWork) return Promise.resolve(false);
-
-    if (!this.#teardownPending) {
-      this.#teardownPending = true;
-      this.#lifecycleGeneration += 1;
-      this.#active = false;
-      this.#activationAbort?.abort();
-    }
-    const teardown = this.#teardownPromise ?? this.#startTeardown(pendingActivation);
-    let closing: Promise<boolean>;
-    closing = this.#waitForTeardown(teardown).finally(() => {
-      if (this.#closePromise === closing) this.#closePromise = null;
-    });
-    this.#closePromise = closing;
-    return closing;
-  }
-
-  #startTeardown(pendingActivation: Promise<boolean> | null): Promise<void> {
-    let succeeded = false;
-    let teardown: Promise<void>;
-    teardown = this.#closeOnce(pendingActivation)
-      .then(() => {
-        succeeded = true;
-      })
-      .finally(() => {
-        if (this.#teardownPromise === teardown) this.#teardownPromise = null;
-        if (succeeded && this.#activationPromise === null && this.#leases.length === 0 && !this.#active) this.#teardownPending = false;
-      });
-    this.#teardownPromise = teardown;
-    return teardown;
-  }
-
-  async #waitForTeardown(teardown: Promise<void>): Promise<boolean> {
-    let timeout: ReturnType<typeof setTimeout> | null = null;
-    const timedOut = new Promise<never>((_resolve, reject) => {
-      timeout = setTimeout(() => {
-        reject(new IntegratedWebRouteViolation('ROUTE_CLOSE_TIMEOUT', 'route teardown is still pending after the bounded close wait'));
-      }, this.#closeWaitTimeoutMs);
-    });
-    try {
-      await Promise.race([teardown, timedOut]);
-      return true;
-    } finally {
-      if (timeout !== null) clearTimeout(timeout);
-    }
-  }
-
-  async #closeOnce(pendingActivation: Promise<boolean> | null): Promise<void> {
-    if (pendingActivation !== null) {
-      try {
-        await pendingActivation;
-      } catch {
-        // The activation caller retains its error; close still retries any lease whose rollback failed.
-      }
-    }
-    const leases = this.#leases.splice(0);
-    const failedLeases = await this.#closeLeasesInReverseOrder(leases);
-    if (failedLeases.length > 0) {
-      this.#leases = failedLeases;
-      throw new IntegratedWebRouteViolation('ROUTE_CLOSE_FAILED', 'at least one cumulative segment did not close cleanly');
-    }
-  }
-
-  async #closeLeasesInReverseOrder(leasesInAcquisitionOrder: readonly IntegratedWebRouteLease[]): Promise<IntegratedWebRouteLease[]> {
-    const failed = new Set<IntegratedWebRouteLease>();
-    for (const lease of [...leasesInAcquisitionOrder].reverse()) {
-      try {
-        await lease.close();
-      } catch {
-        failed.add(lease);
-      }
-    }
-    return leasesInAcquisitionOrder.filter(lease => failed.has(lease));
   }
 
   #select(segmentId: IntegratedWebSegmentId): Readonly<IntegratedWebSegmentRoute> {
@@ -470,7 +276,6 @@ export class IntegratedWebRouteShell {
       return unsupportedRoute(this.#context, segmentId, requestedClass, 'PERSISTED_SESSION_REQUIRED');
     }
     if (requestedClass === 'unsupported') return unsupportedRoute(this.#context, segmentId, requestedClass, 'CAPABILITY_NOT_REQUESTED');
-    if (this.#unavailableFaults.has(segmentId)) return unsupportedRoute(this.#context, segmentId, requestedClass, 'INJECTED_CAPABILITY_UNAVAILABLE');
     const adapter = this.#registry.find(segmentId, requestedClass);
     if (adapter === null) return unsupportedRoute(this.#context, segmentId, requestedClass, 'REQUESTED_ROUTE_CLASS_UNAVAILABLE');
     if (!adapter.available) {
