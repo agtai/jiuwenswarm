@@ -5,6 +5,8 @@ import {
   LIVE_VOICE_AUDIO_FRAME_DURATION_MS,
   audioFrameSamples,
   createCapturedAudioFrame,
+  type AudioAcceptedCursor,
+  type AudioFrozenPrefix,
   type AudioProviderRef,
   type AudioResponseRef,
   type CapturedAudioFrame,
@@ -257,6 +259,16 @@ export interface BrowserAudioPlayoutEvent {
   readonly through_seq: number | null;
 }
 
+export interface BrowserAudioPlayoutDrainReceipt extends AudioFrozenPrefix {
+  readonly kind: 'browser_audio.playout_drain.v1';
+  readonly outcome: 'render_completed' | 'prefix_settled' | 'stopped' | 'timeout' | 'failed';
+  readonly rendered_cursor: readonly Readonly<BrowserAudioConfirmedCursor>[];
+}
+
+export interface BrowserAudioPlayoutDrain extends AudioFrozenPrefix {
+  readonly completion: Promise<Readonly<BrowserAudioPlayoutDrainReceipt>>;
+}
+
 export interface BrowserAudioPlayoutScheduledEvent {
   readonly response: Readonly<AudioResponseRef>;
   readonly unit_id: string;
@@ -401,6 +413,11 @@ interface PausedPlaybackRecord {
   readonly startOffsetSeconds: number;
 }
 
+interface QueuedPlaybackRecord extends PausedPlaybackRecord {
+  readonly arrivalTime: number;
+  readonly interarrivalSeconds: number;
+}
+
 interface FarEndPlaybackSegment {
   readonly samples: Float32Array;
   readonly sampleRateHz: number;
@@ -417,6 +434,16 @@ interface PlaybackSession {
   readonly completed: Map<string, Set<number>>;
   readonly acknowledged: Map<string, number>;
   readonly units: Set<string>;
+  readonly pending: QueuedPlaybackRecord[];
+  readonly outstandingDurations: Map<string, number>;
+  bufferWaitTimer: ReturnType<typeof setTimeout> | null;
+  flushing: boolean;
+  drain: {
+    readonly handle: Readonly<BrowserAudioPlayoutDrain>;
+    readonly resolve: (receipt: Readonly<BrowserAudioPlayoutDrainReceipt>) => void;
+    timer: ReturnType<typeof setTimeout> | null;
+    settled: boolean;
+  } | null;
   nextStartTime: number;
   lastEnqueueTime: number | null;
   firstStartTime: number | null;
@@ -443,16 +470,16 @@ interface PlaybackSourceCleanupSummary {
 }
 
 const CAPTURE_PROCESSOR_NAME = 'jiuwenswarm-live-voice-capture-v1';
-// OpenAI streaming TTS can emit a short seed chunk and then pause before the
-// first sustained burst.  Schedule the browser graph slightly ahead so that
-// ordered 20 ms sources remain contiguous instead of exposing that Provider
-// interarrival gap as a click or a short dropout.  The lead sits directly on
-// the speech-end-to-first-audible path (680 ms observed p50 at the former
-// fixed 1.0 s), so the build may tune it within closed bounds while the
-// Gateway keeps more frames in flight to cover the shorter buffer.
+// This setting is a received PCM reserve, not silence added to each late frame.
+// Transport acceptance credit remains independent of actual rendered ACK.
 export const PLAYOUT_STARTUP_LEAD_DEFAULT_MS = 250;
 export const PLAYOUT_STARTUP_LEAD_MIN_MS = 160;
 export const PLAYOUT_STARTUP_LEAD_MAX_MS = 1000;
+export const PLAYOUT_BUFFER_MAX_CHUNKS = 256;
+export const PLAYOUT_BUFFER_MAX_DURATION_MS = 5120;
+export const PLAYOUT_BUFFER_WAIT_TIMEOUT_MS = 4000;
+export const PLAYOUT_DRAIN_GRACE_MS = 2000;
+const PLAYOUT_SCHEDULE_MARGIN_SECONDS = 0.02;
 
 export const LOCAL_BARGE_IN_CONFIRMATION_WINDOW_MS = 300;
 export type LocalBargeInProfile = 'off' | 'verified_headset_aec_v1';
@@ -1449,6 +1476,11 @@ export class BrowserAudioIOAdapter {
       completed: new Map(),
       acknowledged: new Map(),
       units: new Set(),
+      pending: [],
+      outstandingDurations: new Map(),
+      bufferWaitTimer: null,
+      flushing: false,
+      drain: null,
       // Connection/Provider acquisition does not consume the PCM reserve.
       nextStartTime: context.currentTime,
       lastEnqueueTime: null,
@@ -1488,7 +1520,7 @@ export class BrowserAudioIOAdapter {
       playback.stopped ||
       context.state !== 'running'
     ) return false;
-    if (!sameResponse(playback.response, chunk.response)) return false;
+    if (!sameResponse(playback.response, chunk.response) || playback.drain !== null) return false;
     requiredText(chunk.unit_id, 'unit_id');
     if (chunk.channel_count !== 1 || !Number.isSafeInteger(chunk.sample_rate_hz) || chunk.sample_rate_hz <= 0) {
       throw new BrowserAudioIOViolation('INVALID_PLAYOUT_FORMAT', 'playout requires mono PCM with a positive sample rate');
@@ -1503,6 +1535,13 @@ export class BrowserAudioIOAdapter {
       if (!Number.isFinite(sample)) {
         throw new BrowserAudioIOViolation('INVALID_PLAYOUT_SAMPLES', 'playout samples must be finite');
       }
+    }
+    const durationSeconds = chunk.samples.length / chunk.sample_rate_hz;
+    const outstandingSeconds = [...playback.outstandingDurations.values()].reduce((total, duration) => total + duration, 0);
+    if (playback.outstandingDurations.size >= PLAYOUT_BUFFER_MAX_CHUNKS ||
+        outstandingSeconds + durationSeconds > PLAYOUT_BUFFER_MAX_DURATION_MS / 1000 + 1e-9) {
+      this.#failBufferedPlayout(playback, 'PLAYOUT_BUFFER_OVERFLOW', 'failed');
+      throw new BrowserAudioIOViolation('PLAYOUT_BUFFER_OVERFLOW', 'accepted PCM exceeded the bounded browser queue');
     }
     let buffer: BrowserAudioBufferLike;
     try {
@@ -1528,46 +1567,189 @@ export class BrowserAudioIOAdapter {
     const arrivalTime = context.currentTime;
     const interarrivalSeconds = playback.lastEnqueueTime === null ? 0 : Math.max(0, arrivalTime - playback.lastEnqueueTime);
     playback.lastEnqueueTime = arrivalTime;
-    const durationSeconds = chunk.samples.length / chunk.sample_rate_hz;
-    if (playback.tentativePause !== null) {
-      playback.tentativePause.records.push({
-        unitId: chunk.unit_id,
-        seq: chunk.seq,
-        buffer,
-        samples: chunk.samples.slice(),
-        sampleRateHz: chunk.sample_rate_hz,
-        durationSeconds,
-        startOffsetSeconds: 0,
+    const pending: QueuedPlaybackRecord = {
+      unitId: chunk.unit_id,
+      seq: chunk.seq,
+      buffer,
+      samples: chunk.samples.slice(),
+      sampleRateHz: chunk.sample_rate_hz,
+      durationSeconds,
+      startOffsetSeconds: 0,
+      arrivalTime,
+      interarrivalSeconds,
+    };
+    playback.outstandingDurations.set(`${chunk.unit_id}\u0000${chunk.seq}`, durationSeconds);
+    playback.pending.push(pending);
+    if (chunk.seq < 8 || interarrivalSeconds >= 0.08) {
+      recordAudioDiagnostic('playout_pcm_accepted', {
+        ...playback.response, unit_id: chunk.unit_id, seq: chunk.seq,
+        duration_ms: durationSeconds * 1000, frame_interarrival_ms: interarrivalSeconds * 1000,
+        queued_pcm_ms: this.#pendingDuration(playback) * 1000,
       });
-      this.#emitPlayoutState('playing', 'chunk_scheduled', playback, chunk.unit_id, chunk.seq);
-      return true;
     }
-    const sourceKey = `${chunk.unit_id}\u0000${chunk.seq}`;
+    this.#flushPlayout(playback);
+    if (this.#playback !== playback || playback.stopped) return false;
+    // Acceptance releases bounded transport credit. Only onended proves render.
+    this.#emitPlayoutState('playing', 'chunk_accepted', playback, chunk.unit_id, chunk.seq);
+    return this.#playback === playback && !playback.stopped;
+  }
+
+  #pendingDuration(playback: PlaybackSession): number {
+    return playback.pending.reduce((total, record) => total + record.durationSeconds - record.startOffsetSeconds, 0);
+  }
+
+  #flushPlayout(playback: PlaybackSession): void {
+    const context = this.#playoutContext;
+    if (this.#playback !== playback || playback.stopped || playback.flushing ||
+        context === null || context.state !== 'running' || playback.pending.length === 0) return;
+    if (playback.tentativePause !== null) {
+      this.#armBufferWait(playback);
+      return;
+    }
+    // Compare at sample precision; floating addition of contiguous 20 ms frames
+    // must not turn an exact endpoint into a new starvation episode.
+    const needsReserve = playback.firstStartTime === null || playback.nextStartTime + 1 / context.sampleRate < context.currentTime;
+    if (needsReserve && playback.drain === null && this.#pendingDuration(playback) + 1e-9 < PLAYOUT_STARTUP_LEAD_SECONDS) {
+      this.#armBufferWait(playback);
+      return;
+    }
+    if (playback.bufferWaitTimer !== null) clearTimeout(playback.bufferWaitTimer);
+    playback.bufferWaitTimer = null;
+    playback.flushing = true;
+    try {
+      let startAt = needsReserve ? context.currentTime + PLAYOUT_SCHEDULE_MARGIN_SECONDS : playback.nextStartTime;
+      while (playback.pending.length > 0 && this.#playback === playback && !playback.stopped && playback.tentativePause === null) {
+        const pending = playback.pending.shift()!;
+        this.#schedulePlayoutRecord(playback, context, pending, startAt);
+        startAt += pending.durationSeconds - pending.startOffsetSeconds;
+      }
+    } finally {
+      playback.flushing = false;
+    }
+  }
+
+  #armBufferWait(playback: PlaybackSession): void {
+    if (playback.bufferWaitTimer !== null || playback.drain !== null) return;
+    const timer = setTimeout(() => {
+      if (playback.bufferWaitTimer !== timer) return;
+      playback.bufferWaitTimer = null;
+      if (this.#playback !== playback || playback.stopped) return;
+      this.#failBufferedPlayout(playback, 'PLAYOUT_BUFFER_WAIT_TIMEOUT', 'timeout');
+    }, PLAYOUT_BUFFER_WAIT_TIMEOUT_MS);
+    playback.bufferWaitTimer = timer;
+  }
+
+  /** The caller must verify a real EOF; elapsed time or transport loss is not EOF. */
+  sealPlayoutExact(
+    response: Readonly<AudioResponseRef>,
+    acceptedCutoff: readonly Readonly<AudioAcceptedCursor>[],
+  ): Readonly<BrowserAudioPlayoutDrain> | null {
+    return this.#beginPlayoutDrain(response, acceptedCutoff);
+  }
+
+  /** Close append authority immediately, retaining only the locally accepted prefix. */
+  freezePlayoutPrefixExact(response: Readonly<AudioResponseRef>): Readonly<BrowserAudioPlayoutDrain> | null {
+    return this.#beginPlayoutDrain(response, null);
+  }
+
+  #beginPlayoutDrain(
+    response: Readonly<AudioResponseRef>,
+    acceptedCutoff: readonly Readonly<AudioAcceptedCursor>[] | null,
+  ): Readonly<BrowserAudioPlayoutDrain> | null {
+    const normalized = normalizeResponse(response);
+    const playback = this.#playback;
+    if (this.#closed || playback === null || playback.stopped || !sameResponse(playback.response, normalized)) return null;
+    let prefix: Readonly<AudioFrozenPrefix> | null;
+    try {
+      prefix = acceptedCutoff === null
+        ? this.#audioPort.freezeAcceptedPrefix(normalized)
+        : this.#audioPort.sealExact(normalized, acceptedCutoff);
+    } catch (error) {
+      throw mapBrowserFailure(error, 'PLAYOUT_FINAL_CURSOR_INVALID');
+    }
+    if (prefix === null) return null;
+    if (playback.drain !== null) return playback.drain.handle;
+    let resolve!: (receipt: Readonly<BrowserAudioPlayoutDrainReceipt>) => void;
+    const completion = new Promise<Readonly<BrowserAudioPlayoutDrainReceipt>>(accept => { resolve = accept; });
+    const handle = Object.freeze({ ...prefix, completion });
+    playback.drain = { handle, resolve, timer: null, settled: false };
+    if (playback.bufferWaitTimer !== null) clearTimeout(playback.bufferWaitTimer);
+    playback.bufferWaitTimer = null;
+    const remainingSeconds = [...playback.outstandingDurations.values()].reduce((total, duration) => total + duration, 0);
+    playback.drain.timer = setTimeout(() => {
+      if (this.#playback !== playback || playback.stopped || playback.drain?.settled) return;
+      this.#failBufferedPlayout(playback, 'PLAYOUT_DRAIN_TIMEOUT', 'timeout');
+    }, Math.ceil(remainingSeconds * 1000) + PLAYOUT_DRAIN_GRACE_MS);
+    try {
+      this.#flushPlayout(playback);
+      this.#checkPlayoutDrain(playback);
+    } catch (error) {
+      this.#settlePlayoutDrain(playback, 'failed');
+      throw error;
+    }
+    return handle;
+  }
+
+  #checkPlayoutDrain(playback: PlaybackSession): void {
+    const drain = playback.drain;
+    if (this.#playback !== playback || playback.stopped || drain === null || drain.settled ||
+        playback.pending.length > 0 || playback.sources.size > 0 || (playback.tentativePause?.records.length ?? 0) > 0) return;
+    if (drain.handle.accepted_cutoff.every(cursor =>
+      (playback.acknowledged.get(cursor.unit_id) ?? -1) === cursor.contiguous_through_seq)) {
+      this.#settlePlayoutDrain(playback, drain.handle.completion_kind === 'verified_eof' ? 'render_completed' : 'prefix_settled');
+    }
+  }
+
+  #settlePlayoutDrain(playback: PlaybackSession, outcome: BrowserAudioPlayoutDrainReceipt['outcome']): void {
+    const drain = playback.drain;
+    if (drain === null || drain.settled) return;
+    drain.settled = true;
+    if (drain.timer !== null) clearTimeout(drain.timer);
+    drain.timer = null;
+    drain.resolve(Object.freeze({
+      kind: 'browser_audio.playout_drain.v1',
+      response: drain.handle.response,
+      completion_kind: drain.handle.completion_kind,
+      accepted_cutoff: drain.handle.accepted_cutoff,
+      rendered_cursor: this.#snapshotConfirmedCursor(playback),
+      outcome,
+    }));
+  }
+
+  #failBufferedPlayout(playback: PlaybackSession, reason: string, outcome: 'timeout' | 'failed'): void {
+    if (this.#playback !== playback || playback.stopped) return;
+    this.#settlePlayoutDrain(playback, outcome);
+    this.stopPlayout(playback.response, reason);
+    // A stop observer may have installed a successor; never mark that owner failed.
+    if (this.#playback === null && !this.#closed) this.#emitPlayoutState('failed', reason, playback);
+  }
+
+  #schedulePlayoutRecord(
+    playback: PlaybackSession,
+    context: BrowserAudioContextLike,
+    pending: QueuedPlaybackRecord,
+    startAt: number,
+  ): void {
+    const sourceKey = `${pending.unitId}\u0000${pending.seq}`;
     let source: BrowserAudioBufferSourceLike | null = null;
     let sourceStartAttempted = false;
     try {
       source = context.createBufferSource();
-      source.buffer = buffer;
+      source.buffer = pending.buffer;
       source.connect(context.destination);
       const firstPcm = playback.firstStartTime === null;
-      const gapSeconds = firstPcm ? 0 : Math.max(0, context.currentTime - playback.nextStartTime);
-      // Rebuild a bounded reserve only after actual starvation. Ordinary frames
-      // stay contiguous; neither handshake time nor each new frame resets it.
-      // A longer observed supply interval gets at most three leads (750 ms at
-      // the default). Unbounded upstream stalls remain observable gaps.
-      const reserveSeconds = firstPcm ? PLAYOUT_STARTUP_LEAD_SECONDS
-        : gapSeconds > 0 ? Math.min(PLAYOUT_STARTUP_LEAD_SECONDS * 3, Math.max(PLAYOUT_STARTUP_LEAD_SECONDS, interarrivalSeconds)) : 0;
-      const startAt = reserveSeconds > 0 ? context.currentTime + reserveSeconds : playback.nextStartTime;
-      const scheduledGapMs = firstPcm ? 0 : Math.max(0, startAt - playback.nextStartTime) * 1000;
+      const gapSeconds = firstPcm ? 0 : Math.max(0, startAt - playback.nextStartTime);
+      const supplyLateSeconds = firstPcm ? 0 : Math.max(0, pending.arrivalTime - playback.nextStartTime);
+      const scheduledGapMs = gapSeconds * 1000;
       const record: PlaybackSourceRecord = {
-        unitId: chunk.unit_id,
-        seq: chunk.seq,
-        buffer,
-        samples: chunk.samples.slice(),
-        sampleRateHz: chunk.sample_rate_hz,
-        durationSeconds,
+        unitId: pending.unitId,
+        seq: pending.seq,
+        buffer: pending.buffer,
+        samples: pending.samples,
+        sampleRateHz: pending.sampleRateHz,
+        durationSeconds: pending.durationSeconds,
         scheduledStartTime: startAt,
-        startOffsetSeconds: 0,
+        startOffsetSeconds: pending.startOffsetSeconds,
         source,
         stopped: false,
       };
@@ -1584,11 +1766,11 @@ export class BrowserAudioIOAdapter {
               monotonic_ms: scheduledFromMonotonic + startDelayMs,
             });
         sourceStartAttempted = true;
-        source.start(startAt);
+        source.start(startAt, pending.startOffsetSeconds);
         this.#notifyPlayoutScheduled(
           playback,
-          chunk.unit_id,
-          chunk.seq,
+          pending.unitId,
+          pending.seq,
           startDelayMs,
           scheduledStartClock,
           () => (
@@ -1600,8 +1782,10 @@ export class BrowserAudioIOAdapter {
         );
       } else {
         sourceStartAttempted = true;
-        source.start(startAt);
+        source.start(startAt, pending.startOffsetSeconds);
       }
+      if (this.#playback !== playback || playback.stopped) return;
+      playback.nextStartTime = startAt + pending.durationSeconds - pending.startOffsetSeconds;
       if (this.#localBargeInEnabled && typeof this.#observer.onNearEndSpeechCandidate === 'function') {
         playback.farEndSegments.push({
           samples: record.samples,
@@ -1613,23 +1797,24 @@ export class BrowserAudioIOAdapter {
       }
       const diagnosticNow = performance.now();
       playback.diagnosticMaxGapMs = Math.max(playback.diagnosticMaxGapMs, scheduledGapMs);
-      if (chunk.seq < 8 || gapSeconds > 0) {
+      if (pending.seq < 8 || gapSeconds > 0) {
         recordAudioDiagnostic(gapSeconds > 0 ? 'playout_rebuffered' : 'playout_frame_scheduled', {
-          ...playback.response, unit_id: chunk.unit_id, seq: chunk.seq,
-          duration_ms: durationSeconds * 1000, frame_interarrival_ms: interarrivalSeconds * 1000,
+          ...playback.response, unit_id: pending.unitId, seq: pending.seq,
+          duration_ms: pending.durationSeconds * 1000,
+          frame_interarrival_ms: pending.interarrivalSeconds * 1000,
           buffer_ahead_ms: Math.max(0, (startAt - context.currentTime) * 1000),
-          reserve_ms: reserveSeconds * 1000, schedule_gap_ms: scheduledGapMs,
-          supply_late_ms: gapSeconds * 1000,
-          gap_start_context_ms: gapSeconds > 0 ? playback.nextStartTime * 1000 : null,
+          reserve_ms: 0, schedule_gap_ms: scheduledGapMs,
+          supply_late_ms: supplyLateSeconds * 1000,
+          gap_start_context_ms: gapSeconds > 0 ? (startAt - gapSeconds) * 1000 : null,
           gap_end_context_ms: gapSeconds > 0 ? startAt * 1000 : null,
-          scheduled_end_context_ms: (startAt + durationSeconds) * 1000,
+          scheduled_end_context_ms: playback.nextStartTime * 1000,
           scheduled_sources: playback.sources.size,
         });
       }
       if (playback.diagnosticLastMs === null || diagnosticNow - playback.diagnosticLastMs >= 1000) {
         if (playback.diagnosticLastMs === null) this.#observeDiagnosticStart(playback, context, startAt);
         recordAudioDiagnostic(playback.diagnosticLastMs === null ? 'playout_first_scheduled' : 'playout_progress', {
-          ...playback.response, seq: chunk.seq, startup_lead_ms: PLAYOUT_STARTUP_LEAD_MS,
+          ...playback.response, seq: pending.seq, startup_lead_ms: PLAYOUT_STARTUP_LEAD_MS,
           buffer_ahead_ms: Math.max(0, (startAt - context.currentTime) * 1000),
           schedule_gap_ms: playback.diagnosticMaxGapMs, scheduled_sources: playback.sources.size,
           context_state: context.state,
@@ -1637,7 +1822,6 @@ export class BrowserAudioIOAdapter {
         playback.diagnosticLastMs = diagnosticNow;
         playback.diagnosticMaxGapMs = 0;
       }
-      playback.nextStartTime = startAt + durationSeconds;
     } catch {
       playback.sources.delete(sourceKey);
       if (source !== null) {
@@ -1670,6 +1854,7 @@ export class BrowserAudioIOAdapter {
           })
         );
       }
+      this.#settlePlayoutDrain(playback, 'failed');
       this.stopPlayout(playback.response, 'source_setup_failed');
       if (this.#playoutSourceCleanupFailure !== null) {
         this.#emitPlayoutState('failed', 'source_setup_cleanup_unknown', playback);
@@ -1677,8 +1862,9 @@ export class BrowserAudioIOAdapter {
       }
       throw new BrowserAudioIOViolation('PLAYOUT_SOURCE_FAILED', 'browser playout source setup failed', true);
     }
-    this.#emitPlayoutState('playing', 'chunk_scheduled', playback, chunk.unit_id, chunk.seq);
-    return true;
+    if (this.#playback === playback && !playback.stopped) {
+      this.#emitPlayoutState('playing', 'chunk_scheduled', playback, pending.unitId, pending.seq);
+    }
   }
 
   stopPlayout(response: Readonly<AudioResponseRef>, reason = 'requested'): boolean {
@@ -1819,6 +2005,11 @@ export class BrowserAudioIOAdapter {
       }
       playback.nextStartTime = nextStartTime;
       playback.tentativePause = null;
+      this.#flushPlayout(playback);
+      if (this.#playback !== playback || playback.stopped) {
+        return this.#tentativePauseReceipt('operation_failed', candidateId, response, false);
+      }
+      this.#checkPlayoutDrain(playback);
       playback.nearEndVoiceRunFrames = 0;
       playback.nearEndEchoRunFrames = 0;
       playback.nearEndCandidateEmitted = false;
@@ -1904,6 +2095,11 @@ export class BrowserAudioIOAdapter {
   }
 
   #stopPlaybackSources(playback: PlaybackSession, reason: string, emitState = true): Readonly<PlaybackSourceCleanupSummary> {
+    this.#settlePlayoutDrain(playback, 'stopped');
+    if (playback.bufferWaitTimer !== null) clearTimeout(playback.bufferWaitTimer);
+    playback.bufferWaitTimer = null;
+    playback.pending.length = 0;
+    playback.outstandingDurations.clear();
     playback.tentativePause = null;
     playback.stopped = true;
     if (playback.diagnosticStartTimer !== null) clearTimeout(playback.diagnosticStartTimer);
@@ -2217,9 +2413,13 @@ export class BrowserAudioIOAdapter {
         return;
       }
       playback.acknowledged.set(record.unitId, through);
-      for (let seq = prior + 1; seq <= through; seq += 1) completed.delete(seq);
+      for (let seq = prior + 1; seq <= through; seq += 1) {
+        completed.delete(seq);
+        playback.outstandingDurations.delete(`${record.unitId}\u0000${seq}`);
+      }
       this.#emitPlayoutState('playing', 'render_completed', playback, record.unitId, through);
     }
+    this.#checkPlayoutDrain(playback);
   }
 
   async #attachMicrophonePermissionObservation(observation: CapturePermissionObservation): Promise<void> {
@@ -2836,7 +3036,7 @@ export class BrowserAudioIOAdapter {
     throughSeq: number | null = null
   ): void {
     this.#playoutState = state;
-    if (reason !== 'chunk_scheduled' && reason !== 'render_completed') {
+    if (reason !== 'chunk_scheduled' && reason !== 'chunk_accepted' && reason !== 'render_completed') {
       recordAudioDiagnostic('playout_state', { ...playback?.response, status: state, reason, unit_id: unitId, seq: throughSeq });
     }
     try {

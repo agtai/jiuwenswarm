@@ -34,6 +34,48 @@ test('current response queues ordered audio and acknowledgements drain it', () =
   );
 });
 
+test('verified EOF requires the exact full accepted manifest even after some PCM rendered', () => {
+  const port = new AudioPort();
+  port.begin(first);
+  port.enqueue(chunk(first, 0));
+  port.enqueue(chunk(first, 1));
+  port.enqueue(chunk(first, 0, { unit_id: 'unit-2' }));
+  port.acknowledge(first, 'unit-1', 0);
+  const exact = [{ unit_id: 'unit-1', contiguous_through_seq: 1 }, { unit_id: 'unit-2', contiguous_through_seq: 0 }];
+  for (const invalid of [[], exact.slice(0, 1), [exact[0], exact[0]], [exact[0], { ...exact[1], contiguous_through_seq: 1 }],
+    [exact[0], { ...exact[1], extra: true }], [exact[0], { ...exact[1], contiguous_through_seq: true }]]) {
+    assert.throws(() => port.sealExact(first, invalid), error => error.reason === 'INVALID_AUDIO_FINAL_CURSOR');
+  }
+  assert.equal(port.sealExact(second, exact), null);
+  const frozen = port.sealExact(first, exact);
+  assert.equal(frozen.completion_kind, 'verified_eof');
+  assert.deepEqual(frozen.accepted_cutoff, exact);
+  assert.equal(Object.isFrozen(frozen.accepted_cutoff[0]), true);
+  assert.equal(port.enqueue(chunk(first, 2)), false);
+  assert.equal(port.sealExact(first, [...exact].reverse()), frozen);
+  assert.equal(port.acknowledge(first, 'unit-1', 1), 1);
+  assert.equal(port.acknowledge(first, 'unit-2', 0), 1);
+  assert.deepEqual(port.pending(first), []);
+});
+
+test('unknown EOF freezes only the accepted prefix and cannot upgrade to completed speech', () => {
+  const port = new AudioPort();
+  port.begin(first);
+  port.enqueue(chunk(first, 0));
+  const frozen = port.freezeAcceptedPrefix(first);
+  assert.deepEqual(frozen.accepted_cutoff, [{ unit_id: 'unit-1', contiguous_through_seq: 0 }]);
+  assert.equal(port.freezeAcceptedPrefix(first), frozen);
+  assert.equal(port.enqueue(chunk(first, 1)), false);
+  assert.throws(() => port.sealExact(first, frozen.accepted_cutoff), error => error.reason === 'AUDIO_COMPLETION_KIND_CONFLICT');
+  assert.equal(port.acknowledge(first, 'unit-1', 0), 1);
+  assert.equal(port.stopLocal(first), true);
+  assert.equal(port.freezeAcceptedPrefix(first), null);
+  port.begin(second);
+  assert.equal(port.freezeAcceptedPrefix(first), null);
+  assert.deepEqual(port.freezeAcceptedPrefix(second).accepted_cutoff, []);
+  assert.equal(port.businessCancelCount(), 0);
+});
+
 test('replacement and wrong response chunks have zero playback effect', () => {
   const port = new AudioPort();
   port.begin(first);

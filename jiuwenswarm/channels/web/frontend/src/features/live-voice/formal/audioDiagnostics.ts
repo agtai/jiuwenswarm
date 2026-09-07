@@ -61,6 +61,7 @@ const VALUE_KEYS = new Set([
   'seq',
   'startup_lead_ms',
   'buffer_ahead_ms',
+  'queued_pcm_ms',
   'schedule_gap_ms',
   'frame_interarrival_ms',
   'reserve_ms',

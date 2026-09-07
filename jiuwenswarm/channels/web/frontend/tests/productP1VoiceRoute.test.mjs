@@ -225,6 +225,7 @@ class FakeAudioContext {
   peakSources = 0;
   sourceStartCount = 0;
   sourceEndCount = 0;
+  scheduledSourceStarts = [];
   onSourceEnded = null;
   deferSourceEnds = false;
   pendingSourceEnds = [];
@@ -256,7 +257,8 @@ class FakeAudioContext {
       onended: null,
       connect() {},
       disconnect() {},
-      start() {
+      start(when) {
+        context.scheduledSourceStarts.push(when);
         context.activeSources += 1;
         context.sourceStartCount += 1;
         context.peakSources = Math.max(context.peakSources, context.activeSources);
@@ -4419,7 +4421,10 @@ async function runConcurrentCaptureJourney(options = {}) {
       await new Promise(resolve => setTimeout(resolve, 1));
     }
     assert.equal(owner.status().status, 'playing');
-    environment.contexts[0].currentTime = Math.max(environment.contexts[0].currentTime, 0.26);
+    // Verified EOF can release a short tail before the normal startup reserve.
+    // Place speech inside the actual scheduled interval, not a fixed 250ms lead.
+    environment.contexts[0].currentTime = Math.max(environment.contexts[0].currentTime,
+      environment.contexts[0].scheduledSourceStarts[0] + 0.01);
     const voice = processedHeadsetVoiceFrame();
     const capturedFrameStart = environment.contexts[0].currentTime - 0.02;
     for (let seq = 1; seq <= 3; seq += 1) {
@@ -5104,14 +5109,14 @@ test('formal P1 L0 records uplink send only after the dedicated socket drains it
   );
 });
 
-test('formal P1 installs measurement hot-path hooks only on an L0 opt-in page', () => {
+test('formal P1 gates measurement while observing actual source scheduling for playing status', () => {
   assert.match(
     productP1VoiceRouteSource,
     /#l0Available = browserL0Available\(\);/,
   );
   assert.match(
     productP1VoiceRouteSource,
-    /\.\.\.\(this\.#l0Available[\s\S]*?onPlayoutScheduled:/,
+    /onPlayoutScheduled:.*this\.#observePlayoutScheduled\(event\)/,
   );
   assert.equal(
     [...productP1VoiceRouteSource.matchAll(/\.\.\.\(this\.#l0Available\s*\?\s*\{\s*on_uplink_frame_sent:/g)].length,
@@ -6439,6 +6444,26 @@ test('formal P1 aborts an in-flight idle rotation when current provider speech-s
   await journey.owner.close();
 });
 
+for (const streamingDownlink of [false, true]) {
+  for (const downlinkFrameCount of [1, 12]) {
+    test(`formal P1 verified EOF releases a short ${downlinkFrameCount * 20}ms tail (streaming=${streamingDownlink})`, async () => {
+      const journey = await runConcurrentCaptureJourney({ streamingDownlink, downlinkFrameCount });
+      try {
+        assert.equal(journey.playError, null);
+        assert.equal(journey.environment.contexts[0].sourceStartCount, downlinkFrameCount);
+        assert.equal(journey.environment.contexts[0].sourceEndCount, downlinkFrameCount);
+        const receipts = journey.calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD);
+        assert.equal(receipts.length, 1);
+        assert.equal(receipts[0][1].rendered_chunks, downlinkFrameCount);
+        assert.equal(receipts[0][1].rendered_through_seq, downlinkFrameCount - 1);
+        assert.equal(journey.calls.some(([method]) => method.includes('agent') || method.includes('task') || method.includes('history')), false);
+      } finally {
+        await journey.owner.close();
+      }
+    });
+  }
+}
+
 test('formal P1 streaming downlink derives its final rendered cursor only from expected completion', async () => {
   const journey = await runConcurrentCaptureJourney({
     streamingDownlink: true,
@@ -7168,13 +7193,13 @@ test(`formal P1 Native activation preserves continuous uplink against stale Task
           this.serverBinding = control.binding;
         } else if (
           this.serverBinding?.direction === 'downlink' &&
-          this.serverBinding.generation.value === 1 &&
           control.type === 'media.ack'
         ) {
-          if (this.nextDownlinkSequence < nativeFrameCount) {
+          const suppliedFrames = this.serverBinding.generation.value === 1 ? nativeFrameCount : 13;
+          if (this.nextDownlinkSequence < suppliedFrames) {
             this.queueDownlinkFrame(this.nextDownlinkSequence);
             this.nextDownlinkSequence += 1;
-          } else if (control.through_seq === nativeFrameCount - 1) {
+          } else if (this.serverBinding.generation.value === 1 && control.through_seq === nativeFrameCount - 1) {
             queueMicrotask(() => this.onmessage?.({
               data: serializeMediaControl({
                 type: 'media.detach',
@@ -7516,6 +7541,7 @@ test(`formal P1 Native activation preserves continuous uplink against stale Task
   activeBargeResponse = secondResponse;
   assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
   environment.contexts[0].deferSourceEnds = true;
+  const secondSourceStartIndex = environment.contexts[0].scheduledSourceStarts.length;
   const bargedPlayout = owner.playNativeAudio({
     response: secondResponse,
     presentation_unit: {
@@ -7549,7 +7575,8 @@ test(`formal P1 Native activation preserves continuous uplink against stale Task
   }
   assert.equal(owner.status().status, 'playing');
   clearAudioDiagnostics();
-  environment.contexts[0].currentTime += 0.3;
+  environment.contexts[0].currentTime = Math.max(environment.contexts[0].currentTime,
+    environment.contexts[0].scheduledSourceStarts[secondSourceStartIndex] + 0.01);
   for (let seq = 1502; seq < 1505; seq += 1) {
     sendNextFrameFromCurrentWorklet(environment, seq, processedHeadsetVoiceFrame(), environment.contexts[0].currentTime - 0.02);
   }

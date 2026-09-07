@@ -512,6 +512,22 @@ test('arbitrary detach reason is rejected before receiver state change', () => {
   assert.equal(local.sender_detach.reason_id, 'MEDIA_LOCAL_CLOSE');
 });
 
+test('the exact Native Provider transport failure reason round trips without completion or business effects', () => {
+  const activation = active();
+  activation.owner.attach({ type: 'media.attach', binding: activation.binding });
+  const control = {
+    type: 'media.detach', lease_id: activation.binding.lease_id,
+    generation: activation.binding.generation.value,
+    reason_id: 'MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED', through_seq: null, business_cancel_count_delta: 0,
+  };
+  const decoded = deserializeMediaControl(serializeMediaControl(control));
+  assert.deepEqual(decoded, control);
+  const closed = activation.owner.acceptDetach(decoded);
+  assert.equal(closed.reason_id, control.reason_id);
+  assert.equal(closed.business_cancel_count_delta, 0);
+  assert.equal(activation.owner.lifecycleSnapshot().receiver_next_seq, 0);
+});
+
 test('business cancel delta rejects boolean false before receiver state change', () => {
   const effects = { audio: 0, agent: 0, task: 0 };
   const activation = active({ effects });

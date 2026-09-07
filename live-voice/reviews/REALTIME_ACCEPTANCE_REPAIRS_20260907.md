@@ -38,16 +38,18 @@ worktrees based on the integration baseline; they may stage and commit only thei
 assigned changes on their own branch, one coherent point per commit, after scoped
 checks. Workers never switch/integrate w3, rewrite shared history or push.
 
-- Lifecycle worker: `codex/realtime-repair-lifecycle-20260907`, owns R2/R3/R4
+- Lifecycle worker: `codex/realtime-repair-lifecycle-20260907`, owns R2/R3
   Engine/Gateway/session and integrated Web route surfaces/tests; coordinate
   audio-adapter interfaces with R6 and budget fields with Main before touching.
 - Project worker: `codex/realtime-repair-project-20260907`, owns R5 authenticated
   composition, project context/Executor/journal and matching tests. Main owns
   Native intent instructions and Web Task projection; communicate seam needs.
 - Audio worker: `codex/realtime-repair-audio-20260907`, owns R6 browser audio I/O,
-  audio port/transport EOF-consumer surfaces and matching tests. Backend source
-  and media protocol changes require Main/lifecycle coordination before edits.
-- Main owns R1, intent/projection, shared decisions/STATUS, supply hot-path work,
+  audio port/transport EOF-consumer surfaces and matching tests. Main additionally
+  delegated the measured Gateway control-reader hot path and its existing leaf
+  tests after a separate implementation checkpoint; Main reviewed that return.
+  Other backend source and media protocol changes require coordination first.
+- Main owns R1/R4, intent/projection, shared decisions/STATUS, R3 product UI,
   independent reviews and cumulative verification. Shared files are integrated
   by Main; worker evidence goes to point-specific review files, not this packet.
 

@@ -809,6 +809,32 @@ test('local playback stop maps the exact confirmed unit and never escalates busi
   );
 });
 
+test('only exact authoritative EOF marks completion; Native transport failure and foreign final cursors cannot', () => {
+  for (const mutation of [
+    control => control,
+    control => ({ ...control, lease_id: 'foreign-lease' }),
+    control => ({ ...control, generation: control.generation + 1 }),
+    control => ({ ...control, reason_id: 'MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED' }),
+  ]) {
+    const terminals = [];
+    const route = active({ exactBinding: binding({ direction: 'downlink' }), deferDownlinkAck: true,
+      onTerminal: event => terminals.push(event) });
+    attach(route);
+    route.socket.message(encodeAudioFrame(route.activation.binding, mediaFrame(0)));
+    route.activation.leaf.acknowledgeDownlinkThrough(0);
+    const control = mutation({ type: 'media.detach', lease_id: route.activation.binding.lease_id,
+      generation: route.activation.binding.generation.value, reason_id: 'MEDIA_LOCAL_CLOSE',
+      through_seq: 0, business_cancel_count_delta: 0 });
+    route.socket.message(serializeMediaControl(control));
+    assert.equal(terminals.length, 1);
+    const exact = control.lease_id === route.activation.binding.lease_id &&
+      control.generation === route.activation.binding.generation.value && control.reason_id === 'MEDIA_LOCAL_CLOSE';
+    assert.equal(terminals[0].source, exact ? 'expected_completion' : 'peer_detach');
+    if (control.reason_id === 'MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED') assert.equal(terminals[0].reason_id, control.reason_id);
+    assert.equal(route.effects.agent + route.effects.tool + route.effects.task + route.effects.history, 0);
+  }
+});
+
 test('active leaf rejects forged or contradictory BrowserAudio stop truth before socket and state effects', () => {
   const route = active({ exactBinding: binding({ direction: 'downlink' }) });
   attach(route);

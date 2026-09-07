@@ -15,6 +15,7 @@ import {
   type BrowserAudioPlayoutEvent,
   type BrowserAudioPlayoutMetadata,
   type BrowserAudioPlayoutScheduledEvent,
+  type BrowserAudioPlayoutDrain,
 } from './adapters/browserAudioIOAdapter.js';
 import {
   createBrowserDedicatedMediaRoute,
@@ -144,6 +145,7 @@ type ProductP1Request = (
 interface PendingProductPlayout {
   readonly native: boolean;
   nativeStopping?: boolean;
+  drain?: Readonly<BrowserAudioPlayoutDrain>;
   readonly response: Readonly<AudioResponseRef>;
   readonly unitId: string;
   readonly chunks: Readonly<BrowserAudioPcmChunk>[];
@@ -727,9 +729,7 @@ export class ProductP1VoiceRouteOwner {
           }
         },
         onPlayoutState: event => this.#observePlayout(event),
-        ...(this.#l0Available
-          ? { onPlayoutScheduled: (event: Readonly<BrowserAudioPlayoutScheduledEvent>) => this.#observePlayoutScheduled(event) }
-          : {}),
+        onPlayoutScheduled: (event: Readonly<BrowserAudioPlayoutScheduledEvent>) => this.#observePlayoutScheduled(event),
       },
     });
     this.#publish();
@@ -3025,29 +3025,25 @@ export class ProductP1VoiceRouteOwner {
             reason: 'PLAYOUT_CHUNK_REJECTED',
           });
         }
-        // Product `playing` is a claim about browser-owned scheduled audio,
-        // not about completed Agent text or an allocated TTS descriptor.
-        if (this.#status !== 'playing') {
-          this.#setStatus('playing', this.#successorCaptureReadinessReason ?? pending.degradationReason);
-          // Provider speech-start may arrive before the first Native frame.
-          // Deliver it at the exact transition that makes the response
-          // locally playable; retaining it earlier is not sufficient because
-          // the normal observer path intentionally ignores non-playing state.
-          this.#deliverBargeInSpeechStart(this.#operationGeneration, this.#route);
-          this.#deliverBargeInEndOfTurn(this.#operationGeneration, this.#route);
-          if (this.#pendingPlayout !== pending) return;
-        }
-        // Media ACK is the bounded transport-pressure signal. The separate
-        // media.playout_receipt below remains the authoritative proof that the
-        // exact chunks actually rendered. Waiting for each 20 ms source to
-        // finish before its ACK forced a network round trip between adjacent
-        // frames and made otherwise clean Provider PCM sound broken.
+        // Media ACK releases transport pressure once bounded browser ownership
+        // accepts PCM. It does not claim source scheduling or actual rendering.
         if (pending.downlinkRoute !== null) this.#scheduleDownlinkAck(pending, chunk.seq);
         pending.peakDepth = Math.max(pending.peakDepth, depthAfterEnqueue);
       }
+      this.#sealAcceptedPlayout(pending);
     } finally {
       pending.filling = false;
     }
+  }
+
+  #sealAcceptedPlayout(pending: PendingProductPlayout): void {
+    if (pending.drain !== undefined || pending.nativeStopping || this.#failureCleanupPromise !== null
+        || pending.expected.size === 0 || pending.nextChunkIndex !== pending.chunks.length
+        || [...pending.expected.values()].reduce((count, seq) => count + seq + 1, 0) !== pending.chunks.length) return;
+    const manifest = [...pending.expected].map(([unit_id, contiguous_through_seq]) => ({ unit_id, contiguous_through_seq }));
+    const drain = this.#audio.sealPlayoutExact(pending.response, manifest);
+    if (drain === null) throw Object.assign(new Error('Exact playout EOF lost browser ownership'), { reason: 'PLAYOUT_EOF_OWNER_MISMATCH' });
+    pending.drain = drain;
   }
 
   async #acknowledgePlayout(
@@ -3142,8 +3138,8 @@ export class ProductP1VoiceRouteOwner {
   #scheduleDownlinkAck(pending: PendingProductPlayout, throughSeq: number): void {
     // The media receiver publishes its frame callback before it retains the
     // corresponding deferred ACK. Cross that re-entrant boundary by one
-    // microtask, then acknowledge the exact frame that is already scheduled in
-    // Web Audio. Render completion remains separately observed below.
+    // microtask, then acknowledge the exact frame accepted by the bounded
+    // browser queue. Render completion remains separately observed below.
     Promise.resolve().then(() => {
       const route = pending.downlinkRoute;
       if (
@@ -3308,6 +3304,13 @@ export class ProductP1VoiceRouteOwner {
   }
 
   #observePlayoutScheduled(event: Readonly<BrowserAudioPlayoutScheduledEvent>): void {
+    const pending = this.#pendingPlayout;
+    if (pending !== null && !pending.nativeStopping && this.#failureCleanupPromise === null
+        && l0ResponseKey(pending.response) === l0ResponseKey(event.response) && this.#status !== 'playing') {
+      this.#setStatus('playing', this.#successorCaptureReadinessReason ?? pending.degradationReason);
+      this.#deliverBargeInSpeechStart(this.#operationGeneration, this.#route);
+      this.#deliverBargeInEndOfTurn(this.#operationGeneration, this.#route);
+    }
     if (!this.#l0Available || event.seq !== 0) return;
     const key = l0ResponseKey(event.response);
     if (this.#l0ScheduledResponseKey === key) return;
@@ -3373,6 +3376,7 @@ export class ProductP1VoiceRouteOwner {
       ) {
         const finalSeq = pending.chunks.length - 1;
         pending.expected.set(pending.unitId, finalSeq);
+        this.#sealAcceptedPlayout(pending);
         if (
           pending.nextChunkIndex === pending.chunks.length
           && pending.renderedChunks === pending.chunks.length
@@ -3391,7 +3395,7 @@ export class ProductP1VoiceRouteOwner {
           }
         }
         // Transport completion may precede browser rendering because media ACK
-        // now means safely scheduled, not physically rendered. Keep the exact
+        // now means safely accepted, not physically rendered. Keep the exact
         // final cursor and let onended observations drive the product receipt.
         return;
       }

@@ -18,6 +18,18 @@ export interface AudioChunk {
   readonly provider: Readonly<AudioProviderRef>;
 }
 
+/** Accepted contiguous PCM, independent of whether any sample has rendered. */
+export interface AudioAcceptedCursor {
+  readonly unit_id: string;
+  readonly contiguous_through_seq: number;
+}
+
+export interface AudioFrozenPrefix {
+  readonly response: Readonly<AudioResponseRef>;
+  readonly completion_kind: 'verified_eof' | 'accepted_prefix';
+  readonly accepted_cutoff: readonly Readonly<AudioAcceptedCursor>[];
+}
+
 export const LIVE_VOICE_AUDIO_FRAME_DURATION_MS = 20;
 
 export interface AudioCaptureRef {
@@ -198,6 +210,7 @@ interface PlaybackState {
   readonly chunks: AudioChunk[];
   readonly nextSeq: Map<string, number>;
   readonly acknowledgedSeq: Map<string, number>;
+  frozenPrefix: Readonly<AudioFrozenPrefix> | null;
   stopped: boolean;
 }
 
@@ -227,6 +240,7 @@ export class AudioPort {
       chunks: [],
       nextSeq: new Map(),
       acknowledgedSeq: new Map(),
+      frozenPrefix: null,
       stopped: false,
     });
   }
@@ -234,7 +248,7 @@ export class AudioPort {
   enqueue(input: Readonly<AudioChunk>): boolean {
     const ref = normalizeRef(input.response);
     const state = this.#byInteraction.get(ref.interaction_id);
-    if (state === undefined || refKey(state.ref) !== refKey(ref) || state.stopped) return false;
+    if (state === undefined || refKey(state.ref) !== refKey(ref) || state.stopped || state.frozenPrefix !== null) return false;
     requiredText(input.unit_id, 'unit_id');
     const expected = state.nextSeq.get(input.unit_id) ?? 0;
     if (!Number.isSafeInteger(input.seq) || input.seq !== expected) {
@@ -271,6 +285,49 @@ export class AudioPort {
     const state = this.#byInteraction.get(ref.interaction_id);
     if (state === undefined || refKey(state.ref) !== refKey(ref) || state.stopped) return Object.freeze([]);
     return Object.freeze(state.chunks.map(chunk => Object.freeze({ ...chunk, audio: chunk.audio.slice() })));
+  }
+
+  /** Caller owns EOF verification; this layer checks the entire accepted manifest. */
+  sealExact(input: Readonly<AudioResponseRef>, cutoff: readonly Readonly<AudioAcceptedCursor>[]): Readonly<AudioFrozenPrefix> | null {
+    return this.#freeze(input, cutoff);
+  }
+
+  freezeAcceptedPrefix(input: Readonly<AudioResponseRef>): Readonly<AudioFrozenPrefix> | null {
+    return this.#freeze(input, null);
+  }
+
+  #freeze(input: Readonly<AudioResponseRef>, cutoff: readonly Readonly<AudioAcceptedCursor>[] | null): Readonly<AudioFrozenPrefix> | null {
+    const ref = normalizeRef(input);
+    const state = this.#byInteraction.get(ref.interaction_id);
+    if (state === undefined || refKey(state.ref) !== refKey(ref) || state.stopped) return null;
+    const completionKind = cutoff === null ? 'accepted_prefix' : 'verified_eof';
+    const accepted = [...state.nextSeq].map(([unitId, nextSeq]) => Object.freeze({ unit_id: unitId, contiguous_through_seq: nextSeq - 1 }));
+    if (cutoff !== null) {
+      if (!Array.isArray(cutoff) || cutoff.length === 0 || cutoff.length !== accepted.length) {
+        throw new AudioPortViolation('INVALID_AUDIO_FINAL_CURSOR', 'EOF requires the full non-empty accepted manifest');
+      }
+      const units = new Set<string>();
+      for (const cursor of cutoff) {
+        if (
+          cursor === null || typeof cursor !== 'object' || Array.isArray(cursor) ||
+          Object.keys(cursor).length !== 2 ||
+          !Object.prototype.hasOwnProperty.call(cursor, 'unit_id') ||
+          !Object.prototype.hasOwnProperty.call(cursor, 'contiguous_through_seq') ||
+          typeof cursor.unit_id !== 'string' || units.has(cursor.unit_id) ||
+          !Number.isSafeInteger(cursor.contiguous_through_seq) || cursor.contiguous_through_seq < 0 ||
+          state.nextSeq.get(cursor.unit_id) !== cursor.contiguous_through_seq + 1
+        ) throw new AudioPortViolation('INVALID_AUDIO_FINAL_CURSOR', 'EOF cursor does not equal the accepted contiguous prefix');
+        units.add(cursor.unit_id);
+      }
+    }
+    if (state.frozenPrefix !== null) {
+      if (state.frozenPrefix.completion_kind !== completionKind) {
+        throw new AudioPortViolation('AUDIO_COMPLETION_KIND_CONFLICT', 'a frozen prefix cannot change completion authority');
+      }
+      return state.frozenPrefix;
+    }
+    state.frozenPrefix = Object.freeze({ response: state.ref, completion_kind: completionKind, accepted_cutoff: Object.freeze(accepted) });
+    return state.frozenPrefix;
   }
 
   acknowledge(input: Readonly<AudioResponseRef>, unitId: string, throughSeq: number): number {

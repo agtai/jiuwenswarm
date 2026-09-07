@@ -80,6 +80,7 @@ const DETACH_REASONS: ReadonlySet<string> = new Set([
   'MEDIA_SEQUENCE_VIOLATION',
   'MEDIA_STALE_GENERATION',
   'MEDIA_TRANSPORT_CLOSED',
+  'MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED',
   'MEDIA_TRANSPORT_PROTOCOL_ERROR',
   'MEDIA_TRANSPORT_SEND_FAILED',
 ]);
@@ -1146,6 +1147,9 @@ export class BrowserDedicatedMediaSocketLeaf {
       const expectedCompletion =
         this.binding.direction === 'downlink' &&
         this.#deferDownlinkAck &&
+        control.lease_id === this.binding.lease_id &&
+        control.generation === this.binding.generation.value &&
+        closed.reason_id === 'MEDIA_LOCAL_CLOSE' &&
         control.reason_id === 'MEDIA_LOCAL_CLOSE' &&
         this.#lastDeferredDownlinkAck >= 0 &&
         control.through_seq === this.#lastDeferredDownlinkAck &&
