@@ -354,7 +354,10 @@
    `tests/unit_tests/gateway/test_agent_client.py`，它连接真实 websocket 会挂起）与前端 `package.json` 里
    `test:live-voice-*`、`test:task-notification-*` 的失败清单存入 `live-voice/slimming/BASELINE_2026-09-07.md`。
    已知基线失败：前端 `test:live-voice-gateway-batch-speech`（用例调用系统 Python，缺 `httpx`）与
-   `test:live-voice-integrated-web`（三个 mounted 用例）；后端以 S0 实际运行结果为准。
+   `test:live-voice-integrated-web`（三个 mounted 用例）；后端在 w3 tip `d8ee9e6d3` 上 106 个失败（7,731 通过），主要在
+   `test_product_composition_registry.py` 68、`agentserver/test_debug_trace.py` 8、`test_semantic_registry.py` 7、
+   `test_task_progress_return.py` 5、`test_p3_authenticated_composition.py` 4、`gateway/test_native_business_observation_gateway.py` 4；
+   本分支与基线失败集相同（`test_p3_8a_sli_privacy_contracts.py` 随其两个已退休模块一起退役）。S0 重跑一次并存档。
 3. **失败分类**：包切换后旧套件的新增失败逐条对照 §4：属于本包声明的语义变更 → 删除或改写该用例；
    不属于 → 缺陷，先修再继续。分类结果写进包的提交说明。
 4. **新测试预算**：目标生产 60–65K，按 Hermes 的测试/生产比 1.24 约 75–80K；分层：每包合同测试（成功路径必须
@@ -464,6 +467,19 @@
 4. `git grep -n "<被删 symbol>"` 为零（卡片给出清单）。
 5. 提交说明按 10.3 第 1 条写完整。
 
+### 10.5 执行者需要做什么判断
+
+本文把每个包的意图、范围、去向、验证固定下来，但不能替执行者做设计。按可机械执行的程度分三档：
+
+| 档 | 包 | 执行者要做的判断 |
+|---|---|---|
+| 机械 | S0、S7、S1 的删除项与生成器 | 只需按步骤操作；唯一的判断是 10.3 第 2 条的 grep 复核 |
+| 有界设计 | S1 的记录字段、S2 的四张台账、S5 的 provider 与 route lifecycle | 卡片给出保留的方法名、状态集合、行数上限、必须移植的用例；执行者要设计字段与内部状态机，并让移植的用例通过 |
+| 合并设计 | S3 的授权 owner、S4 的 runtime/fence、S6 的 owner hook | 卡片给出输入 owner、保留的公开方法、退役的值类型与验收用例；执行者要决定内部结构，并在旧套件失败集里逐条分类（10.3 第 5 条） |
+
+执行者遇到卡片没写的选择时，按 §1.2 的不变量与 §4 的 SC 编号决定：能归到某条 SC 的是允许的变更，归不到的必须保持行为。
+无法归类时停下记录，不猜。
+
 ## 11. S0 授权与基线
 
 - **目的**：把执行的前提固定下来：决定、基线失败集、错误码表、oracle 回收。
@@ -543,7 +559,7 @@
 | `TaskEvent` + `Cursor` | `PersistentTaskEvent`(9)、`TaskUnreadPage`(3)、`TaskEventConsumerAuthorityPage`(2)、`TaskEventAuthoritySnapshot`(2)、`TaskEventConsumerCursorBaseline`(3) |
 | `OutboxItem` | `PersistentOutboxItem`(4)、`OutboxKind`(5)、`OutboxState`(2) |
 | 枚举保留 | `FormalTaskState`(5) 改名 `TaskState`（吸收 `task_core.TaskState`）、`FormalAttemptState`(4) 改名 `AttemptState`、`AdmissionDisposition`、`AdmissionPriority`(2)、`ReconciliationState`(1)、`ExecutorResolution`(3)、`TaskAdjustmentState`(3) |
-| 函数保留到 `codec.py` | `command_result_extensions`(2)、`require_exact_payload`(1)、`canonical_task_adjustment_rejection_reason`(1)、`utc_now`(8) |
+| 函数保留到 `codec.py` | `command_result_extensions`(2)、`require_exact_payload`(1)、`canonical_task_adjustment_rejection_reason`(1)、`utc_now`(8)、常量 `TASK_RETRY_PRODUCT_REQUEST_EXTENSION`（只被本文件的 4 处用，随 `Precondition` 迁入 `task_records.py`） |
 | 删除 | `AdmissionPolicy`(3，归 S2 `admission.py`)、`safe_json_value`(0)、`FormalTaskViolation` → `LiveVoiceError`；`task_core.py` 的 `TaskCore`、`project_work_progress`、`TaskCoreSnapshot`、`TaskQuery`、`DispatchIntent`、`CancelIntent`、`WorkProgress`、`AuthorizationContext`、`TaskCoreViolation`（`TaskCommand`(1)、`TaskSpec`(1) 的两个 caller 改用 `Command`/`Task`） |
 
   `__post_init__` 的校验只保留"外部输入边界"一类：非空、长度上限、枚举成员；删除"字段之间一致性"与"版本一致"
@@ -588,7 +604,7 @@
 | `delivery.py` | `DeliveryLedger`：outbox 行；`enqueue(idempotent by command_id)`、`claim_next`、`renew_claim`、`complete/reject/release`、`recover_abandoned → unknown`、`reset_expired_claims` | 700 |
 | `events.py` | `EventLog`：per-task 单调 `sequence`，`append/page/unread_page/ack`；`Subscription(consumer_id)` 一行 cursor，`next_event` | 700 |
 | `facts.py` | `FactLedger`：append-only `Fact(kind=checkpoint\|effect, digest, size, codec_version, payload_ref)`；`claim_mutator/release_mutator`；`latest_settled_effect(project_root)`；reconcile 决策函数 | 600 |
-| `core.py` | `TaskCore` facade：`execute/query/reconcile/reconcile_status/drain_inflight_adjustments/read_applied_retry_replay/read_consumer_task/read_consumer_task_result/read_current_retry_authority`（保留这些名字，它们被 `p3_authenticated_composition` 调用） | 800 |
+| `core.py` | `TaskCore` facade：`execute/query/reconcile/reconcile_status/drain_inflight_adjustments/read_applied_retry_replay/read_consumer_task/read_consumer_task_result/read_current_retry_authority`（保留这些名字，它们被 `p3_authenticated_composition` 调用）；原 `FormalExecutor` Protocol 改名 `Executor`、`ReconciliationEventSink`(1 caller) 保留；`project_task_event`(0) 删除 | 800 |
 | `admission.py` | 原 `task_admission.py` + `AdmissionPolicy` | 300 |
 | `executor_profile.py` | 原 `executor_capabilities.py`，去掉 schema 版本常量与 `__post_init__` 一致性校验 | 250 |
 | `project_executor.py` | 原 `DirectProjectCodeExecutorAdapter` 的 `dispatch/adjust/settle_adjustment/cancel/status/prepare_startup/capability_profiles/construction_capability_profiles`；所有权改用 `ExecutionLedger.claim_task/renew` | 1,500 |
@@ -623,8 +639,10 @@
      （`grep -n "def test_" tests/unit_tests/live_voice/test_persistent_task_core.py | grep -E "restart|race|concurrent|corrupt|crash|unknown|before_dispatch|unbound"`），
      改写为对台账 API 的断言。验证：新测试通过。
   2. `delivery.py` + 测试：移植 `claim/renew/reject/release/reset_expired` 用例；新增"死 owner → unknown，不重放"用例。
-  3. `events.py` + 测试：移植 `events_page/unread/ack` 用例；`Subscription` 替代 `TaskEventSubscription` 的 live 模式，
-     authority replay 模式删除（SC-4）。
+  3. `events.py` + 测试：移植 `events_page/unread/ack` 用例；`Subscription` 替代 `TaskEventSubscription` 的 live 与
+     authority replay 两种模式（SC-4）。硬要求：从 cursor 起的事件流必须连续无缺口（`task_progress_return.py` 的 docstring
+     写明通知仲裁需要 complete, contiguous lifecycle stream，语音进度只在这个前提下激活）；测试里加一条
+     "cursor 之后追加 N 条、崩溃重启、再读到的序列连续且不重复"的用例。
   4. `facts.py` + 测试：移植 `test_p3_4_durability_store.py`、`test_durability_effects.py` 的 codec 往返与 reconcile 决策表。
   5. `core.py`：以旧 `PersistentTaskCore` 的 13 个公开方法为签名，内部改调台账；`drain_outbox/drain_outbox_once/
      read_current_retry_admission/recover_durable_attempt` 四个零 caller 方法删除。验证：
@@ -724,8 +742,9 @@
   `formal_history_writer.py`（279）、`task_control_presentation.py`（47）、`progress_notification_arbiter.py`（2,228）、
   `task_progress_return.py`（2,291）、`product_p3_text_adapter.py`（1,207）；`live_voice_contract_v2.py` shim 里的
   owner 类；测试 `test_agent_conversation_runtime*.py`、`test_generation_time_interruption.py`、
-  `test_conversation_runtime*.py`、`test_interaction_engine.py`、`test_speculative_dialogue.py`、`test_agent_bridge*.py`、
-  `test_jiuwenswarm_round_harness*.py`、`test_presentation_*.py`、`test_task_presentation_consumption.py`、
+  `test_conversation_runtime*.py`、`test_interaction_engine.py`、`test_speculative_dialogue.py`、`test_agent_bridge*.py`
+  （round harness 的用例在 `test_agent_conversation_runtime.py` 与 `test_generation_time_interruption.py` 里，没有独立文件）、
+  `test_presentation_*.py`、`test_task_presentation_consumption.py`、
   `test_running_notification_policy.py`、`test_task_notification_ownership.py`、`test_task_progress_return.py`、
   `test_progress_notification_arbiter*.py`、`test_product_p3_text_adapter*.py`。
 - **目标结构**（新包 `jiuwenswarm/server/live_voice/conversation/`）：
@@ -747,9 +766,14 @@
   `persist_native_assistant_history`、`persist_native_user_history`、`fail_task_presentation`、`execute_native_work`、
   `acknowledge_presentation`、`commit_turn`、`presented_agent_analysis`、`interrupt_generation`、
   `task_notification_foreground_safe`、`start_turn`、`next_notification`、`barge_in`、`request_response_cancel`、
-  `open_interaction`；以及 loop 上被 `native_interaction_runtime.py` 调用的 `accept_response`、`transition_response`、
-  `transition_interaction`、`commit_native_turn`、`cancel_response_if_running`、`seal_presentation`、`presentation_complete`、
-  `enqueue_unit`、`produce_unit`、`claim_effects`、`invalidate_presentation`、`acknowledge_presentation_with_history`。
+  `open_interaction`、`response_fence_state`；以及 loop 上被 `native_interaction_runtime.py` 调用的 13 个：`accept_response`、
+  `transition_response`、`transition_interaction`、`commit_native_turn`、`cancel_response_if_running`、`seal_presentation`、
+  `presentation_complete`、`enqueue_unit`、`produce_unit`、`barge_in`、`acknowledge_presentation`、`start_turn`、
+  `open_interaction`（`grep -o -E "\.[a-z_]+\(" native_interaction_runtime.py` 复核）。`claim_effects`、`invalidate_presentation`、
+  `acknowledge_presentation_with_history` 只被 runtime 自己调用，合并后成为内部方法。构造函数必须保留
+  `native_business_router.py` 与 `product_composition_registry.py` 里 `AgentConversationRuntime(scope=…, instance_id=…, …)`
+  用到的关键字参数；类名改为 `ConversationRuntime` 时在新模块里导出别名 `AgentConversationRuntime = ConversationRuntime`，
+  Native 文件只改 import 路径。
   其余 `post_*`、`drain_notifications_for`、`attach/detach_notification_consumer`、`schedule_native_assistant_history`、
   `retry_*_history`、`accept_task_origin`、`accept_task_progress_notification`、`claim_conversation_effects`、
   `acknowledge_conversation_effects`、`begin_speculative_dialogue`、`speculation_snapshot`、
@@ -767,8 +791,8 @@
   `TaskProgressHandoffKind`、`TaskProgressSourceDecision` → `ProgressDecision`；`ProductP3TextReason`(15) → `ErrorCode`。
 - **步骤**：
   1. `fence.py` + 测试：播放期插话、生成期打断、无响应时打断、exact response 取消、重复打断幂等。验证：通过。
-  2. `round.py` + 测试：reserve→commit→deliver、cancel、rollback、abort；从 `test_agent_bridge*.py` 与
-     `test_jiuwenswarm_round_harness*.py` 移植成功路径用例。
+  2. `round.py` + 测试：reserve→commit→deliver、cancel、rollback、abort；从 `test_agent_bridge*.py`、
+     `test_agent_conversation_runtime.py`（名字含 `round`、`reserve`、`harness` 的用例）移植成功路径用例。
   3. `presentation.py` + 测试：ACK 后才写历史、seal、一次性消费；移植 `test_presentation_*.py`、
      `test_task_presentation_consumption.py` 的用例。
   4. `progress_policy.py` + `text_progress.py` + 测试：通知/ACK/replay；前台忙时静默与恢复；移植
@@ -776,8 +800,11 @@
   5. `runtime.py`：以保留方法表为签名合并两层；`native_interaction_runtime.py` 只改 import。验证：
      `test_generation_time_interruption.py`、`test_agent_conversation_runtime*.py` 的成功路径用例通过（改 import 后运行；
      断言已删 reason/snapshot 字段的用例删除）；`tests/unit_tests/live_voice/test_native_*.py` 全部与基线相同。
-  6. 删除旧文件与 shim 里的 owner 类；`live_voice_contract_v2.py` 若只剩 re-export 则删除并把 caller 改到新包
-     （`grep -rln "live_voice_contract_v2" jiuwenswarm` 逐个改）。验证：后端套件失败集 = 基线 ∪ 退役文件。
+  6. 删除旧文件与 shim 里的 owner 类。三处 owner 使用点改到 `fence.py`：`conversation_runtime.py`（`TurnCommitLedger`、
+     `ResponseFence`、`validate_transition`，随文件合并消失）、`agent_bridge_runtime.py`（`EventSequenceTracker`，随文件消失）、
+     `agent_ws_server.py` 的 `_start_live_voice_product_composition` 里 `commit_ledger = TurnCommitLedger()`（改为
+     `ResponseFence`/`ConversationRuntime` 提供的 commit 记录）。`live_voice_contract_v2.py` 若只剩 re-export 则删除并把 caller
+     改到新包（`grep -rln "live_voice_contract_v2" jiuwenswarm` 逐个改）。验证：后端套件失败集 = 基线 ∪ 退役文件。
   7. 提交：`refactor(live-voice): one conversation runtime, one response fence, one round owner (SC-3)`。
 - **完成判据**：模块 5 ≤4,000、6 ≤1,300、12 ≤1,800、11 的策略部分 ≤1,700；模块 5 只有 1 个 owner 类，守卫 ≤500；
   `git grep -n "class .*Fence\|class .*Ledger" jiuwenswarm/server/live_voice` 各 ≤1 处。
@@ -804,7 +831,7 @@
 | 文件 | 内容 | 行数上限 |
 |---|---|---:|
 | `gateway/live_voice/media/session.py` | `MediaSession`：原 registry 的注册/票据/authority/downlink 分配/ACK 转发/通知准备；保留外部调用名 `activate`、`authorize`、`revoke`、`observe_agent_response`、`try_streaming_synthesis`、`configure_streaming_synthesis`、`configure_streaming_recognition`、`from_environment`、`set_provider_available`；吸收 `task_notification_preparation.py` | 1,800 |
-| `gateway/live_voice/media/native_segment.py` | registry 里名字含 `native` 的 14 个方法与 `_NativeMediaSession`、`_NativePlayoutReplay`、`_NativeNotificationSequenceFence` 原样搬入（不改逻辑，只改 self 引用） | 原样（约 1,300） |
+| `gateway/live_voice/media/native_segment.py` | `NativeMediaMixin`：registry 里名字含 `native` 的 54 个方法（15 个公开 + 39 个私有）与 `_NativeMediaSession`、`_NativePlayoutReplay`、`_NativeNotificationSequenceFence` 原样搬入，作为 `MediaSession` 的 mixin 基类；它们引用 65 个 `self._*` 字段，这些字段仍由 `MediaSession.__init__` 初始化，名字不改 | 原样（约 1,500） |
 | `gateway/live_voice/media/route_lifecycle.py` | `RouteLifecycle`：`begin/offer/finish/abort/wait_speech_start/wait_end_of_turn/next_chunk/cancel/available/close`，三条 route 共用；原 `StreamingRecognitionRouteOwner`、`StreamingSynthesisRouteOwner`、`run_dedicated_media_socket_leaf`、`run_dedicated_media_downlink_socket_leaf`、`DedicatedMediaLeafCleanupOwner`、`ProductStreamingSynthesisSource` | 1,200 |
 | `gateway/live_voice/media/codec.py` | `LVM1` 帧：`encode_audio_frame/decode_audio_frame/serialize_media_control/deserialize_media_control`、`MediaFrameFormat`、`MediaAudioFrame` | 400 |
 | `gateway/live_voice/media/control.py` | 六个控制对象 `MediaAttach/MediaAck/MediaDetach/MediaSpeechStart/MediaEndOfTurn/MediaPlaybackStop` + `MediaAuthorityBinding` + `MediaDetachReason`（6 值） | 250 |
@@ -824,10 +851,11 @@
   `mark_downlink_started`、`accept_frame`、`observe_uplink_frame_accepted`、`observe_uplink_ack_sent`、`complete_route`、
   `abort_route`、`context_for`、`consume_ticket`；搬入 `session.py` 的通知准备：`prepare_task_notification`、
   `claim_task_notification`、`cancel_task_notification`、`task_preparation_capabilities`、`acknowledge_playout`；
-  搬入 `native_segment.py`：`acknowledge_native_playout`、`take_native_notification_response`、`accept_native_playback_stop`、
+  搬入 `native_segment.py`（mixin）：`acknowledge_native_playout`、`take_native_notification_response`、`accept_native_playback_stop`、
   `stop_native_playout`、`mark_native_notification_forwarded`、`accept_native_frame`、`begin_native_interaction`、
   `read_native_text`、`close_native_interaction`、`wait_native_speech_start`、`wait_native_end_of_turn`、
-  `abort_native_activation`、`take_native_notification`、`next_native_notification`、`native_runtime_client`；删除：
+  `abort_native_activation`、`take_native_notification`、`next_native_notification`、`native_runtime_client` 与全部
+  `_*native*` 私有方法（用 `grep -n "def .*native" dedicated_media_registration.py` 取完整清单）；删除：
   `close_streaming_diagnostics`、`close_streaming_observability`、`streaming_observability`、`streaming_diagnostics_cleanup_complete`、
   `retry_media_leaf_cleanup`、`close_media_leaf_cleanup`、`media_leaf_cleanup_snapshot`（诊断归 S7 sink；leaf cleanup 归
   `RouteLifecycle.close`）。
@@ -873,8 +901,9 @@
   `formalP3TaskExperience.ts` 972、`formalTaskControlLeaf.ts` 952、`integratedWebRouteShell.ts` 587、
   `productP3ProgressGenerationJournal.ts` 236、`productP3TaskTargetJournal.ts` 148、`useProductVoiceSessionStart.ts` 99、
   `RecentTasksPanel.tsx` 70、`createLiveVoiceConversation.ts` 55、`taskNotificationIdentity.ts` 47）、模块 11 的
-  `productTextProgress.ts` 870、模块 17 全部、`components/ChatPanel/index.tsx` 的 legacy 段（第 19–23、66–67、1240、
-  1366–1416、1557、1626 行附近）、`src/featureFlags.ts` 的 `FEATURE_LIVE_VOICE_DEMO`、`package.json` 的
+  `productTextProgress.ts` 870、模块 17 全部、`components/ChatPanel/index.tsx` 的 legacy 段（用
+  `grep -n "useLiveVoiceDemo\|LiveVoiceDemoBar\|FEATURE_LIVE_VOICE_DEMO\|legacyLiveVoiceDemoProps" index.tsx` 定位：import、
+  `useLiveVoiceDemo(` 构造、`<LiveVoiceDemoBar {...legacyLiveVoiceDemoProps} />`、两处 `FEATURE_LIVE_VOICE_DEMO && liveVoiceDemoBar`）、`src/featureFlags.ts` 的 `FEATURE_LIVE_VOICE_DEMO`、`package.json` 的
   `test:live-voice-core/-turn-lifecycle/-streaming-speech/-message-gate/-browser-speech-adapters` 与对应 `tests/*.test.mjs`。
 - **目标结构**（`features/live-voice/`）：
 
@@ -930,7 +959,9 @@
   `scripts/live_voice/s7_*.py`（7 个，3,479）、`scripts/live_voice/l0_*.py`；前端 `liveVoiceObservability.ts`（1,598）、
   `liveVoiceRouteTelemetry.ts`（257）、`audioDiagnostics.ts`（371）、`audioDiagnosticJournal.ts`（109）、
   `webPlatformDiagnostics.ts`（326）、`l0Measurement.ts`（390）、`l0OrdinaryChromeBatch.ts`（645）、
-  `L0OrdinaryChromeBatchPanel.tsx`（105）；`agent_ws_server.py` 第 1414–1483 行的观测启动块与第 9565 行的 import；
+  `L0OrdinaryChromeBatchPanel.tsx`（105）；`agent_ws_server.py` 里 `_start_live_voice_product_composition` 内的观测启动块
+  （`observability_enabled`…`observability_runtime.close()`）与使用 `ProductDiagnosticIdentity/ProductDiagnosticSeam` 的方法
+  （`grep -n "ProductDiagnostic" agent_ws_server.py`）；
   registry 的 `consume_product_observation/consume_product_metric`、`_observability_runtime`、
   `activate_product_observability_adapter` 调用；测试 `test_observability*.py`、`test_product_observability_*.py`、
   `test_latency_measurement.py`、`test_alpha_benchmark.py`、`test_s7_alpha_verification.py`、`test_s7_real_probes.py`、
@@ -948,8 +979,9 @@
 | `scripts/live_voice/l0/` | `l0Measurement.ts`、`l0OrdinaryChromeBatch.ts`、`L0OrdinaryChromeBatchPanel.tsx` 与 `scripts/live_voice/l0_*.py` 一起搬出生产树（按总计划 §7.6 的决定；若决定保留面板则只搬 `.py` 与 `l0Measurement.ts`） | 原样 |
 
 - **步骤**：
-  1. 退休 OTel 链：删除五个文件与其五个测试文件；`agent_ws_server.py` 删除 1414–1483 行的块与 9565 行的 import
-     （改为不注入 `observability_runtime`）；registry 删除 `consume_product_observation/consume_product_metric`、
+  1. 退休 OTel 链：删除五个文件与其五个测试文件；`agent_ws_server.py` 删除 `_start_live_voice_product_composition` 里的
+     观测启动块（从 `observability_enabled = …` 到 `observability_runtime = None` 的 try/except 整块）与 `ProductDiagnostic*`
+     的 import 及其使用（改为不注入 `observability_runtime`）；registry 删除 `consume_product_observation/consume_product_metric`、
      `_observability_runtime` 字段与 `activate_product_observability_adapter` 调用及 `observability_holder`；
      `ProductDiagnosticSeam/ProductDiagnosticIdentity` 的三处使用改为 `sink.emit`。验证：
      `git grep -n "product_observability\|observability_exporter\|observability_otel_codec\|observability_correlation_contract" jiuwenswarm tests` 为零；
