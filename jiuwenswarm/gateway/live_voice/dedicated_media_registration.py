@@ -181,6 +181,7 @@ _MAX_DOWNLINK_FRAMES = 9_000
 _PRODUCT_PLAYOUT_QUEUE_CAPACITY = 256
 _NATIVE_INPUT_QUEUE_CAPACITY = 800
 _NATIVE_BUSINESS_POLL_SECONDS = 1.0
+_NATIVE_STARTUP_CLOSE_WAIT_SECONDS = 0.1
 _NATIVE_NOTIFICATION_QUEUE_CAPACITY = 256
 _NATIVE_SPEECH_START_QUEUE_CAPACITY = 8
 _NATIVE_END_OF_TURN_QUEUE_CAPACITY = 8
@@ -1019,6 +1020,9 @@ class _NativeMediaSession:
     speech_start_queue: asyncio.Queue[int] = field(repr=False)
     end_of_turn_queue: asyncio.Queue[tuple[int, int]] = field(repr=False)
     delivery_queue: asyncio.Queue[NativeEngineEvent] = field(repr=False)
+    start_record: _MediaAuthority | None = field(default=None, repr=False)
+    start_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    startup_retired: bool = False
     input_task: asyncio.Task[None] | None = field(default=None, repr=False)
     event_task: asyncio.Task[None] | None = field(default=None, repr=False)
     delivery_task: asyncio.Task[None] | None = field(default=None, repr=False)
@@ -1286,6 +1290,9 @@ class DedicatedMediaProductRegistry:
         self._native_sessions: dict[
             tuple[str, str, str, str, int], _NativeMediaSession
         ] = {}
+        self._native_pending_starts: dict[
+            tuple[str, str, str, str, int], _NativeMediaSession
+        ] = {}
         self._native_close_capacity_reservations: set[
             tuple[str, str, str, str, int]
         ] = set()
@@ -1420,122 +1427,172 @@ class DedicatedMediaProductRegistry:
             )
         key = self._native_session_key(record)
         async with self._native_session_lock:
-            prior = self._native_sessions.get(key)
+            self._require_native_start_owner(record)
+            prior = self._native_sessions.get(key) or self._native_pending_starts.get(key)
             if prior is not None:
                 if prior.record_id == record.record_id and not prior.closed:
-                    return False
-                raise MediaTransportViolation(
-                    "MEDIA_NATIVE_SESSION_ALREADY_ACTIVE",
-                    "Native activation already owns one Provider session",
-                )
-            engine = factory(activation.binding)
-            if engine is None or not all(
-                callable(getattr(engine, method, None))
-                for method in (
-                    "start",
-                    "offer_audio",
-                    "next_event",
-                    "admit_response",
-                    "acknowledge_presentation",
-                    "cancel_response",
-                    "fence_response",
-                    "stop_foreground",
-                    "send_delegate_result",
-                    "close",
-                )
-            ):
-                raise MediaTransportViolation(
-                    "MEDIA_NATIVE_PROVIDER_UNAVAILABLE",
-                    "Native Provider factory returned no exact Engine",
-                )
-            session = _NativeMediaSession(
-                key=key,
-                record_id=record.record_id,
-                activation=activation,
-                engine=engine,
-                input_queue=asyncio.Queue(maxsize=_NATIVE_INPUT_QUEUE_CAPACITY),
-                speech_start_queue=asyncio.Queue(
-                    maxsize=_NATIVE_SPEECH_START_QUEUE_CAPACITY
-                ),
-                end_of_turn_queue=asyncio.Queue(
-                    maxsize=_NATIVE_END_OF_TURN_QUEUE_CAPACITY
-                ),
-                delivery_queue=asyncio.Queue(
-                    maxsize=_NATIVE_PROVIDER_EVENT_QUEUE_CAPACITY
-                ),
+                    session = prior
+                    created = False
+                else:
+                    raise MediaTransportViolation(
+                        "MEDIA_NATIVE_SESSION_ALREADY_ACTIVE",
+                        "Native activation already owns one Provider session",
+                    )
+            else:
+                session = self._retain_native_start(record, activation, factory)
+                created = True
+        task = session.start_task
+        try:
+            if task is not None:
+                await asyncio.shield(task)
+            self._require_native_start_owner(record, session, allow_started=True)
+        except BaseException as error:
+            self._schedule_native_close(record)
+            with suppress(BaseException):
+                await self.close_native_interaction(record)
+            if isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                raise
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_PROVIDER_START_FAILED",
+                "Native Provider session did not start",
+            ) from error
+        return created
+
+    def _require_native_start_owner(
+        self,
+        record: _MediaAuthority | None,
+        session: _NativeMediaSession | None = None,
+        *,
+        allow_started: bool = False,
+    ) -> None:
+        """Recheck retained authority after every bootstrap suspension."""
+
+        with self._lock:
+            now = self._monotonic()
+            current = bool(
+                record is not None
+                and self._records.get(record.record_id) is record
+                and self._subjects.get((record.binding.session_id, record.subject_id))
+                == record.record_id
+                and record.ticket_consumed
+                and not record.route_completed
+                and now <= record.authority_expires_at
+                and self._has_retained_product_activation(record, now)
             )
-            try:
-                business_initial = None
-                if activation.business_contract_version is not None:
-                    if not all(callable(getattr(engine, method, None)) for method in (
-                        "configure_business_context", "update_business_context", "acknowledge_business_turn",
-                        "acknowledge_business_stop", "defer_work_response",
-                    )) or not callable(getattr(self._native_runtime_client, "business_context", None)):
-                        raise MediaTransportViolation("MEDIA_NATIVE_BUSINESS_UNAVAILABLE", "Negotiated business context is unavailable")
-                    async def refresh_business_context():
-                        return await self._refresh_native_business_context(session)
-                    business_initial = await refresh_business_context()
-                    self._native_work_state_rows(business_initial["context"]["works"])
-                    optimized = getattr(activation, "observation_contract_version", None) is not None
-                    engine.configure_business_context(business_initial["context"], refresh=refresh_business_context,
-                        presentation_busy=lambda: self._native_task_presentation_busy(session),
-                        **({"continuation_preparation": True, "receipt_projection": True} if optimized else {}))
-                await engine.start()
-                if business_initial is not None:
-                    await engine.update_business_context(business_initial["context"], business_initial["work_events"])
-            except BaseException as error:
-                close_complete = False
-                with suppress(BaseException):
-                    close_complete = await engine.close() is True
-                if not close_complete:
-                    session.closed = True
-                    self._native_sessions[key] = session
-                    self._native_session_keys_by_record[record.record_id] = key
-                if isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit)):
-                    raise
+            if current and session is not None:
+                current = bool(
+                    not session.closed
+                    and record is session.start_record
+                    and record.native_activation is session.activation
+                    and self._native_session_key(record) == session.key
+                    and self._native_session_keys_by_record.get(record.record_id)
+                    == session.key
+                    and (
+                        self._native_pending_starts.get(session.key) is session
+                        or (allow_started and self._native_sessions.get(session.key) is session)
+                    )
+                )
+            if not current:
                 raise MediaTransportViolation(
-                    "MEDIA_NATIVE_PROVIDER_START_FAILED",
-                    "Native Provider session did not start",
-                ) from error
+                    "MEDIA_NATIVE_ACTIVATION_UNAVAILABLE",
+                    "Native startup no longer owns the exact media authority",
+                )
+
+    def _retain_native_start(self, record, activation, factory) -> _NativeMediaSession:
+        """Reserve one exact pending owner before starting any async operation."""
+
+        key = self._native_session_key(record)
+        engine = factory(activation.binding)
+        if engine is None or not all(
+            callable(getattr(engine, method, None))
+            for method in (
+                "start", "offer_audio", "next_event", "admit_response",
+                "acknowledge_presentation", "cancel_response", "fence_response",
+                "stop_foreground", "send_delegate_result", "close",
+            )
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_PROVIDER_UNAVAILABLE",
+                "Native Provider factory returned no exact Engine",
+            )
+        session = _NativeMediaSession(
+            key=key, record_id=record.record_id, activation=activation, engine=engine,
+            start_record=record,
+            input_queue=asyncio.Queue(maxsize=_NATIVE_INPUT_QUEUE_CAPACITY),
+            speech_start_queue=asyncio.Queue(maxsize=_NATIVE_SPEECH_START_QUEUE_CAPACITY),
+            end_of_turn_queue=asyncio.Queue(maxsize=_NATIVE_END_OF_TURN_QUEUE_CAPACITY),
+            delivery_queue=asyncio.Queue(maxsize=_NATIVE_PROVIDER_EVENT_QUEUE_CAPACITY),
+        )
+        self._native_pending_starts[key] = session
+        self._native_session_keys_by_record[record.record_id] = key
+        session.start_task = asyncio.create_task(
+            self._run_native_session_start(record, session),
+            name=f"live-voice-native-start:{record.record_id}",
+        )
+        # The caller can be cancelled while an external operation ignores its
+        # cancellation. Retain and consume that task until it actually settles.
+        session.start_task.add_done_callback(
+            lambda done: None if done.cancelled() else done.exception()
+        )
+        return session
+
+    async def _run_native_session_start(self, record, session) -> None:
+        activation, engine = session.activation, session.engine
+        self._require_native_start_owner(record, session)
+        business_initial = None
+        if activation.business_contract_version is not None:
+            if not all(callable(getattr(engine, method, None)) for method in (
+                "configure_business_context", "update_business_context", "acknowledge_business_turn",
+                "acknowledge_business_stop", "defer_work_response",
+            )) or not callable(getattr(self._native_runtime_client, "business_context", None)):
+                raise MediaTransportViolation("MEDIA_NATIVE_BUSINESS_UNAVAILABLE", "Negotiated business context is unavailable")
+            async def refresh_business_context():
+                return await self._refresh_native_business_context(session)
+            business_initial = await refresh_business_context()
+            self._require_native_start_owner(record, session)
+            self._native_work_state_rows(business_initial["context"]["works"])
+            optimized = getattr(activation, "observation_contract_version", None) is not None
+            engine.configure_business_context(business_initial["context"], refresh=refresh_business_context,
+                presentation_busy=lambda: self._native_task_presentation_busy(session),
+                **({"continuation_preparation": True, "receipt_projection": True} if optimized else {}))
+        await engine.start()
+        self._require_native_start_owner(record, session)
+        if business_initial is not None:
+            await engine.update_business_context(business_initial["context"], business_initial["work_events"])
+            self._require_native_start_owner(record, session)
+        # Promotion and consumers have no suspension between the final authority
+        # check and publication. Pending owners cannot consume or publish media.
+        with self._lock:
+            self._require_native_start_owner(record, session)
+            self._native_pending_starts.pop(session.key)
+            self._native_sessions[session.key] = session
             notification_key = (
-                record.binding.session_id,
-                record.binding.interaction_id,
+                record.binding.session_id, record.binding.interaction_id,
                 record.binding.connection_id,
             )
             self._native_notifications.setdefault(
-                notification_key,
-                asyncio.Queue(maxsize=_NATIVE_NOTIFICATION_QUEUE_CAPACITY),
+                notification_key, asyncio.Queue(maxsize=_NATIVE_NOTIFICATION_QUEUE_CAPACITY),
             )
-            self._native_sessions[key] = session
-            self._native_session_keys_by_record[record.record_id] = key
             if business_initial is not None:
+                self._profile_native_business_context(session, business_initial)
                 self._publish_native_work_state(session, business_initial)
             session.input_task = asyncio.create_task(
-                self._run_native_input(session),
-                name="live-voice-native-media-input",
+                self._run_native_input(session), name="live-voice-native-media-input",
             )
             session.delivery_task = asyncio.create_task(
-                self._run_native_delivery(session),
-                name="live-voice-native-media-delivery",
+                self._run_native_delivery(session), name="live-voice-native-media-delivery",
             )
             session.event_task = asyncio.create_task(
-                self._run_native_events(session),
-                name="live-voice-native-media-events",
+                self._run_native_events(session), name="live-voice-native-media-events",
             )
             if activation.business_contract_version is not None:
                 session.business_poll_task = asyncio.create_task(
                     self._run_native_business_poll(session), name="live-voice-native-business-context")
-            for task in (
-                session.input_task,
-                session.event_task,
-                session.delivery_task,
-                session.business_poll_task,
-            ):
+            for task in (session.input_task, session.event_task, session.delivery_task, session.business_poll_task):
                 if task is not None:
                     task.add_done_callback(
                         lambda retained, owner=record: self._consume_native_task(owner, retained)
                     )
-            return True
 
     def accept_native_frame(
         self, record: _MediaAuthority, frame: MediaAudioFrame
@@ -1874,9 +1931,10 @@ class DedicatedMediaProductRegistry:
         if key is None:
             return False
         async with self._native_session_lock:
-            session = self._native_sessions.get(key)
-            if session is None:
+            session = self._native_sessions.get(key) or self._native_pending_starts.get(key)
+            if session is None or session.record_id != record.record_id:
                 return False
+            self._fence_native_start(session)
             task = session.close_task
             if task is None or task.done():
                 if session.failure_reason in _NATIVE_PROVIDER_TRANSPORT_FAILURES:
@@ -1892,7 +1950,27 @@ class DedicatedMediaProductRegistry:
                 session.close_task = task
                 self._native_cleanup_tasks.add(task)
                 task.add_done_callback(self._native_cleanup_tasks.discard)
+                task.add_done_callback(
+                    lambda done: None if done.cancelled() else done.exception()
+                )
+        if session.startup_retired:
+            # A cancellation-resistant bootstrap retains one cleanup owner and
+            # its capacity. It cannot hold the close caller or the registry lock.
+            done, _ = await asyncio.wait({task}, timeout=_NATIVE_STARTUP_CLOSE_WAIT_SECONDS)
+            return task.result() if task in done else False
         return await asyncio.shield(task)
+
+    def _fence_native_start(self, session: _NativeMediaSession) -> None:
+        if self._native_pending_starts.get(session.key) is not session:
+            return
+        session.startup_retired = True
+        self._native_close_capacity_reservations.add(session.key)
+        if session.closed:
+            return
+        session.closed = True
+        for task in (session.start_task, session.business_refresh_task):
+            if task is not None and not task.done():
+                task.cancel()
 
     async def _run_native_session_close(
         self,
@@ -1944,7 +2022,19 @@ class DedicatedMediaProductRegistry:
                 self._release_stream_source(candidate)
                 candidate.downlink_overlap_record_id = None
                 candidate.pcm.clear()
-            self._native_notifications.pop(notification_key, None)
+            # A pending owner never published this queue. A newer activation
+            # sharing the interaction may have created it while old start drains.
+            if not session.startup_retired:
+                self._native_notifications.pop(notification_key, None)
+        if session.startup_retired:
+            startup_tasks = tuple(
+                task for task in (session.start_task, session.business_refresh_task)
+                if task is not None
+            )
+            # Do not run Engine.close concurrently with start: an implementation
+            # can swallow cancellation and still write READY before returning.
+            if startup_tasks:
+                await asyncio.gather(*startup_tasks, return_exceptions=True)
         current = asyncio.current_task()
         tasks = tuple(
             task
@@ -1996,13 +2086,15 @@ class DedicatedMediaProductRegistry:
             session.provider_close_complete = await session.engine.close() is True
         if not (session.runtime_close_complete and session.provider_close_complete):
             return False
-        with self._lock:
-            self._native_close_capacity_reservations.discard(key)
         async with self._native_session_lock:
-            if self._native_sessions.get(key) is session:
-                self._native_sessions.pop(key, None)
-            if self._native_session_keys_by_record.get(record.record_id) == key:
-                self._native_session_keys_by_record.pop(record.record_id, None)
+            with self._lock:
+                if self._native_sessions.get(key) is session:
+                    self._native_sessions.pop(key, None)
+                if self._native_pending_starts.get(key) is session:
+                    self._native_pending_starts.pop(key, None)
+                if self._native_session_keys_by_record.get(record.record_id) == key:
+                    self._native_session_keys_by_record.pop(record.record_id, None)
+                self._native_close_capacity_reservations.discard(key)
         return True
 
     async def _run_native_business_poll(self, session: _NativeMediaSession) -> None:
@@ -2049,6 +2141,8 @@ class DedicatedMediaProductRegistry:
                 request_id=self._native_request_id(session, "business-context"))
         if session.closed:
             raise MediaTransportViolation("MEDIA_NATIVE_SESSION_CLOSED", "Business context owner closed during observation")
+        if self._native_pending_starts.get(session.key) is session:
+            self._require_native_start_owner(session.start_record, session)
         cursor = result.get("cursor")
         prior = session.business_observation_cursor
         stale = False
@@ -2063,8 +2157,9 @@ class DedicatedMediaProductRegistry:
         session.business_applied_ticket = max(ticket, session.business_applied_ticket)
         session.business_observation_cursor = cursor
         session.business_context_result = result
-        self._profile_native_business_context(session, result)
-        self._publish_native_work_state(session, result)
+        if self._native_sessions.get(session.key) is session:
+            self._profile_native_business_context(session, result)
+            self._publish_native_work_state(session, result)
         return result
 
     def _native_task_presentation_busy(self, session: _NativeMediaSession) -> bool:
@@ -7811,14 +7906,17 @@ class DedicatedMediaProductRegistry:
         key = self._native_session_keys_by_record.get(record.record_id)
         if key is None:
             return
+        with self._lock:
+            if self._native_session_keys_by_record.get(record.record_id) != key:
+                return
+            session = self._native_pending_starts.get(key)
+            if session is not None and session.record_id == record.record_id:
+                self._fence_native_start(session)
+            self._native_close_capacity_reservations.add(key)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        with self._lock:
-            if self._native_session_keys_by_record.get(record.record_id) != key:
-                return
-            self._native_close_capacity_reservations.add(key)
 
         async def close_retained() -> None:
             try:

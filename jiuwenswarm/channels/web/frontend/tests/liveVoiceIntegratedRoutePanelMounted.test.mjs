@@ -453,6 +453,7 @@ function installP1BrowserEnvironment({
   closeAudioContext: closeAudioContextOverride = null,
   startAudioSource: startAudioSourceOverride = null,
   stallMediaSockets = 0,
+  mediaAttachDelayMs = 0,
 } = {}) {
   const originalWindow = globalThis.window;
   const originalDocument = globalThis.document;
@@ -650,11 +651,13 @@ function installP1BrowserEnvironment({
         const control = JSON.parse(value);
         if (control.type === 'media.auth') {
           this.binding = control.binding;
-          queueMicrotask(() => {
+          const attach = () => {
             this.onmessage?.({
               data: serializeMediaControl({ type: 'media.attach', binding: this.binding }),
             });
-          });
+          };
+          if (mediaAttachDelayMs > 0) setTimeout(attach, mediaAttachDelayMs);
+          else queueMicrotask(attach);
           return;
         }
         if (control.type === 'media.detach') {
@@ -16243,7 +16246,7 @@ for (const outcome of ['recovered', 'persistent', 'exit']) {
 }
 
 
-for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while_active', 'model_missing_confirmation', 'task', 'task_keep_selection', 'task_foreign', 'task_retry', 'task_repeated_failure', 'task_retired_read', 'text', 'barge_success', 'barge_failure', 'barge_fatal', 'fatal_before', 'fatal_after', 'fatal_overlap', 'fatal_audio', 'fatal_unobserved', 'next_failure', 'provider_tail_drain', 'provider_tail_stop', 'provider_tail_close', 'provider_tail_retry']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
+for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while_active', 'model_missing_confirmation', 'task', 'task_keep_selection', 'task_foreign', 'task_retry', 'task_repeated_failure', 'task_retired_read', 'text', 'barge_success', 'barge_failure', 'barge_fatal', 'fatal_before', 'fatal_after', 'fatal_overlap', 'fatal_audio', 'fatal_unobserved', 'next_failure', 'provider_tail_drain', 'provider_tail_stop', 'provider_tail_close', 'provider_tail_retry', 'startup_delayed']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
   const i18n = await createI18n();
   const states = [], messages = [], calls = [], waiters = [], ended = [], sources = [];
   let activeMediaBinding = null, binding = null, renderer, textSnapshot = null, settleTaskFailure;
@@ -16251,7 +16254,8 @@ for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while
   let selectedAgentModelName = verify.startsWith('model_') ? 'GPT' : undefined;
   const activationModels = [];
   const controlRef = { current: null };
-  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding, holdDownlinkDetach: true, startAudioSource: ({ source }) => sources.push(source) });
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding, holdDownlinkDetach: true,
+    mediaAttachDelayMs: verify === 'startup_delayed' ? 4_000 : 0, startAudioSource: ({ source }) => sources.push(source) });
   const activateP2 = createMountedP2ActivationResponder();
   const facts = mountedUnifiedTaskFixture('mounted-native-state-session');
   const otherFacts = mountedUnifiedTaskFixture('mounted-native-state-session');
@@ -16355,7 +16359,17 @@ for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while
     }
     await waitForMountedEffects(() => states.at(-1)?.p1_status === 'starting', 'Native capture did not start');
     await act(async () => { await browser.emitFirstFrame(0); });
-    await waitForMountedEffects(() => states.at(-1)?.p1_status === 'capturing', 'Native capture not ready');
+    await waitForMountedEffects(() => states.at(-1)?.p1_status === 'capturing', 'Native capture not ready',
+      verify === 'startup_delayed' ? 7_000 : undefined);
+    if (verify === 'startup_delayed') {
+      assert.equal(calls.filter(method => method === 'live_voice.media.activate').length, 1, 'slow initial Provider attach must not trigger recovery/recreation');
+      assert.equal(states.some(state => state.p1_status === 'failed' || state.p1_status === 'cleanup_pending'), false);
+      assert.equal(browser.counts.stoppedTracks, 0);
+      assert.equal(browser.counts.socketOpens, 1);
+      assert.equal(calls.some(method => /unified.submit|speech.recognize|playout_receipt|presentation.ack|task.create|task.cancel/u.test(method)), false);
+      assert.equal(messages.length, 0);
+      return;
+    }
     if (verify.startsWith('model_')) {
       const expected = verify === 'model_before_start' ? 'DeepSeek' : 'GPT';
       assert.equal(activationModels.at(-1).model, expected);

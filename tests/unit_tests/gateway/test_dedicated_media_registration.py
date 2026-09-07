@@ -1188,11 +1188,439 @@ async def test_native_start_failure_retains_incomplete_provider_close_owner() ->
     assert rejected.value.reason_id == "MEDIA_NATIVE_PROVIDER_START_FAILED"
     assert engine.close_calls == 1
     assert uplink.record_id in registry._native_session_keys_by_record
-    assert len(registry._native_sessions) == 1
+    assert registry._native_sessions == {}
+    assert len(registry._native_pending_starts) == 1
+    assert next(iter(registry._native_pending_starts.values())).closed
     assert await registry.close_native_interaction(uplink) is True
     assert engine.close_calls == 2
     assert registry._native_sessions == {}
+    assert registry._native_pending_starts == {}
     assert registry._native_session_keys_by_record == {}
+
+
+class _NativeStartupGate:
+    """An external operation that can complete after cancellation was requested."""
+
+    def __init__(self):
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.settled = False
+
+    async def wait(self):
+        self.entered.set()
+        while not self.release.is_set():
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+        self.settled = True
+
+
+def _pending_native_fixture(stage, *, capacity=8, monotonic=None, consume=True):
+    from jiuwenswarm.server.live_voice.native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION
+
+    gate = _NativeStartupGate()
+    activation = replace(_native_activation(), business_contract_version=NATIVE_BUSINESS_CONTRACT_VERSION)
+    context = {"context_id": "b" * 64, "history": [], "tasks": [], "works": [],
+               "model": {"model_identity": "agent", "model_config_version": "v1"}}
+    order = []
+
+    class Client(_FakeNativeRuntimeClient):
+        async def business_context(self, retained, *, request_id):
+            assert retained is activation and request_id
+            if stage == "context":
+                await gate.wait()
+            return {"context": context, "work_events": []}
+
+    class Engine(_CountingCloseNativeEngine):
+        def configure_business_context(self, value, **kwargs):
+            order.append("configure")
+
+        async def start(self):
+            if stage == "provider":
+                await gate.wait()
+            await super().start()
+            order.append("ready")
+
+        async def update_business_context(self, value, events):
+            if stage == "context_update":
+                await gate.wait()
+            order.append("update")
+            return ()
+
+        async def acknowledge_business_turn(self, turn_id):
+            raise AssertionError("startup must not acknowledge a business turn")
+
+        async def acknowledge_business_stop(self, response):
+            raise AssertionError("startup must not acknowledge a business stop")
+
+        async def defer_work_response(self, response):
+            raise AssertionError("startup must not defer a business response")
+
+        async def close(self):
+            assert gate.settled, "Engine.close raced the unfinished startup operation"
+            order.append("closed")
+            return await super().close()
+
+    client, engine = Client(activation), Engine()
+    options = {} if monotonic is None else {"monotonic": monotonic}
+    registry = DedicatedMediaProductRegistry(
+        enabled=True, capacity=capacity, native_runtime_client=client,
+        native_engine_factory=lambda _: engine, **options,
+    )
+    activated = _activate(registry, params=_params(sample_rate_hz=24_000),
+                          request_origin=ORIGIN, connection_id="connection-1")
+    uplink = (registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+              if consume else _pending_record(registry, _media_ticket(activated)))
+    return registry, client, engine, gate, uplink, activated, order
+
+
+def _revoke_native_fixture(registry, activated):
+    return registry.revoke(
+        params={"session_id": "session-1", "subject_id": activated["subject_id"],
+                "correlation_id": "correlation-1", "interaction_id": "interaction-1",
+                "activation_id": "activation-1", "activation_generation": 1},
+        routed_session_id="session-1", connection_id="connection-1", user_id="user-1",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["context", "provider", "context_update"])
+@pytest.mark.parametrize("retirement", [
+    "revoke", "caller_cancel", "record_replaced", "subject_replaced",
+    "activation_replaced", "media_expired", "activation_expired",
+])
+async def test_native_pending_start_rechecks_retired_owner_after_each_await(stage, retirement):
+    now = [10.0]
+    registry, client, engine, gate, uplink, activated, order = _pending_native_fixture(
+        stage, monotonic=lambda: now[0],
+    )
+    begin = asyncio.create_task(registry.begin_native_interaction(uplink))
+    await asyncio.wait_for(gate.entered.wait(), 1)
+    key = registry._native_session_keys_by_record[uplink.record_id]
+    session = registry._native_pending_starts[key]
+    prior_context = session.business_context_result
+    assert registry._native_sessions == {}
+    assert registry._native_notifications == {}
+    try:
+        if retirement == "revoke":
+            _revoke_native_fixture(registry, activated)
+            assert session.closed and session.startup_retired
+        elif retirement == "caller_cancel":
+            begin.cancel()
+        elif retirement == "record_replaced":
+            registry._records[uplink.record_id] = replace(uplink)
+        elif retirement == "subject_replaced":
+            registry._subjects[("session-1", uplink.subject_id)] = "replacement-record"
+        elif retirement == "activation_replaced":
+            authority_key = ("session-1", "connection-1", "interaction-1")
+            registry._product_activations[authority_key] = replace(
+                registry._product_activations[authority_key],
+                activation_id="activation-2", activation_generation=2,
+            )
+        elif retirement == "media_expired":
+            uplink.authority_expires_at = now[0] - 1
+        else:
+            authority = registry._product_activations[("session-1", "connection-1", "interaction-1")]
+            now[0] = authority.expires_at + 1
+        if retirement in {"revoke", "caller_cancel"}:
+            await asyncio.wait_for(gate.cancelled.wait(), 1)
+            assert session.closed
+            assert await registry.close_native_interaction(uplink) is False
+        assert engine.close_calls == 0
+        assert all(task is None for task in (
+            session.input_task, session.event_task, session.delivery_task, session.business_poll_task,
+        ))
+        gate.release.set()
+        result = (await asyncio.wait_for(asyncio.gather(begin, return_exceptions=True), 1))[0]
+        assert isinstance(result, MediaTransportViolation)
+        assert result.reason_id == "MEDIA_NATIVE_PROVIDER_START_FAILED"
+        await asyncio.wait_for(engine.close_event.wait(), 1)
+        await asyncio.gather(*tuple(registry._native_cleanup_tasks))
+        assert order[-1] == "closed"
+        assert engine.close_calls == 1
+        assert session.business_context_result is prior_context
+        assert session.business_work_state_sequence == 0
+        assert session.generated_text == {}
+        assert session.delegate_tasks == {}
+        assert client.proposals == [] and client.audio_batches == []
+        assert engine.offered_audio == [] and engine.delegate_results == []
+        assert engine.presentation_acknowledgements == []
+        assert all(task is None for task in (
+            session.input_task, session.event_task, session.delivery_task, session.business_poll_task,
+        ))
+        assert registry._native_sessions == {} and registry._native_pending_starts == {}
+        assert registry._native_notifications == {}
+        assert registry._native_session_keys_by_record == {}
+        assert registry._native_close_capacity_reservations == set()
+    finally:
+        gate.release.set()
+        await asyncio.gather(begin, return_exceptions=True)
+        await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
+async def test_native_pending_start_is_retained_once_and_delayed_success_becomes_active():
+    registry, client, engine, gate, uplink, activated, _ = _pending_native_fixture("provider")
+    begin = asyncio.create_task(registry.begin_native_interaction(uplink))
+    await asyncio.wait_for(gate.entered.wait(), 1)
+    duplicate = asyncio.create_task(registry.begin_native_interaction(uplink))
+    second = _activate(registry, params=_params(capture_id="capture-2", sample_rate_hz=24_000),
+                       request_origin=ORIGIN, connection_id="connection-1")
+    successor = registry.consume_ticket(_media_ticket(second), request_origin=ORIGIN)
+    try:
+        with pytest.raises(MediaTransportViolation) as rejected:
+            await asyncio.wait_for(registry.begin_native_interaction(successor), .2)
+        assert rejected.value.reason_id == "MEDIA_NATIVE_SESSION_ALREADY_ACTIVE"
+        assert len(registry._native_pending_starts) == 1
+        assert registry._media_capacity_in_use() == 2
+        assert registry._native_sessions == {} and registry._native_notifications == {}
+        gate.release.set()
+        assert await asyncio.wait_for(begin, 1) is True
+        assert await asyncio.wait_for(duplicate, 1) is False
+        assert registry._native_pending_starts == {}
+        session = next(iter(registry._native_sessions.values()))
+        assert all(task is not None for task in (
+            session.input_task, session.event_task, session.delivery_task, session.business_poll_task,
+        ))
+        assert session.business_work_state_sequence == 1
+        registry.accept_native_frame(uplink, MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.0,) * 480))
+        for _ in range(20):
+            if engine.offered_audio:
+                break
+            await asyncio.sleep(0)
+        assert len(engine.offered_audio) == 1
+        assert client.proposals == []
+    finally:
+        gate.release.set()
+        await asyncio.gather(begin, duplicate, return_exceptions=True)
+        await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unknown", [False, None, "exception"])
+async def test_native_pending_start_unknown_close_retains_capacity_until_exact_retry(unknown):
+    registry, client, engine, gate, uplink, activated, _ = _pending_native_fixture("provider", capacity=1)
+    provider_close = engine.close
+    permit_close = False
+    attempts = []
+
+    async def uncertain_close():
+        assert gate.settled
+        attempts.append(True)
+        if not permit_close:
+            if unknown == "exception":
+                raise RuntimeError("close outcome unavailable")
+            return unknown
+        return await provider_close()
+
+    engine.close = uncertain_close
+    begin = asyncio.create_task(registry.begin_native_interaction(uplink))
+    await asyncio.wait_for(gate.entered.wait(), 1)
+    _revoke_native_fixture(registry, activated)
+    await asyncio.wait_for(gate.cancelled.wait(), 1)
+    try:
+        assert await asyncio.wait_for(registry.close_native_interaction(uplink), .5) is False
+        assert attempts == [] and registry._media_capacity_in_use() == 1
+        with pytest.raises(MediaTransportViolation) as full:
+            _activate(registry, params=_params(capture_id="capture-2", sample_rate_hz=24_000),
+                      request_origin=ORIGIN, connection_id="connection-1")
+        assert full.value.reason_id == "MEDIA_ROUTE_CAPACITY_EXCEEDED"
+        gate.release.set()
+        await asyncio.wait_for(asyncio.gather(begin, return_exceptions=True), 1)
+        await asyncio.gather(*tuple(registry._native_cleanup_tasks), return_exceptions=True)
+        assert attempts and registry._native_sessions == {} and registry._records == {}
+        assert len(registry._native_pending_starts) == 1
+        assert registry._media_capacity_in_use() == 1
+        assert registry._native_notifications == {} and client.proposals == []
+        assert engine.offered_audio == [] and engine.presentation_acknowledgements == []
+        permit_close = True
+        assert await registry.close_native_interaction(uplink) is True
+        assert registry._native_pending_starts == {}
+        assert registry._native_session_keys_by_record == {}
+        assert registry._native_close_capacity_reservations == set()
+        assert registry._media_capacity_in_use() == 0
+        assert len(set(client.close_request_ids)) == 1
+    finally:
+        permit_close = True
+        gate.release.set()
+        await asyncio.gather(begin, return_exceptions=True)
+        await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
+async def test_native_pending_start_finalization_cancellation_keeps_capacity_and_exact_retry():
+    registry, _, engine, gate, uplink, activated, _ = _pending_native_fixture("provider", capacity=1)
+    begin = asyncio.create_task(registry.begin_native_interaction(uplink))
+    await asyncio.wait_for(gate.entered.wait(), 1)
+    session = next(iter(registry._native_pending_starts.values()))
+    _revoke_native_fixture(registry, activated)
+    await asyncio.wait_for(gate.cancelled.wait(), 1)
+    # Let the abandoned browser caller finish its bounded cleanup wait before
+    # the Provider returns, so only the retained cleanup task owns finalization.
+    begin.cancel()
+    await asyncio.wait_for(asyncio.gather(begin, return_exceptions=True), 1)
+    for _ in range(20):
+        if session.close_task is not None:
+            break
+        await asyncio.sleep(0)
+    assert session.close_task is not None
+    await registry._native_session_lock.acquire()
+    try:
+        gate.release.set()
+        await asyncio.wait_for(engine.close_event.wait(), 1)
+        assert registry._media_capacity_in_use() == 1
+        assert len(registry._native_close_capacity_reservations) == 1
+        assert not session.close_task.done()
+        session.close_task.cancel()
+        await asyncio.gather(session.close_task, return_exceptions=True)
+        assert len(registry._native_pending_starts) == 1
+        assert registry._media_capacity_in_use() == 1
+        assert len(registry._native_close_capacity_reservations) == 1
+    finally:
+        registry._native_session_lock.release()
+        gate.release.set()
+    await asyncio.gather(begin, return_exceptions=True)
+    assert await registry.close_native_interaction(uplink) is True
+    assert engine.close_calls == 1
+    assert registry._native_pending_starts == {} and registry._native_session_keys_by_record == {}
+    assert registry._native_close_capacity_reservations == set()
+    assert registry._media_capacity_in_use() == 0
+
+
+@pytest.mark.asyncio
+async def test_native_pending_start_retirement_does_not_block_or_clear_new_activation():
+    registry, client, engine, gate, uplink, activated, _ = _pending_native_fixture("provider")
+    begin = asyncio.create_task(registry.begin_native_interaction(uplink))
+    await asyncio.wait_for(gate.entered.wait(), 1)
+    old_session = next(iter(registry._native_pending_starts.values()))
+    old_activation = client.activation
+    successor_activation = replace(old_activation,
+        binding=replace(old_activation.binding, activation_id="activation-2", activation_generation=2),
+        business_contract_version=None,
+    )
+    client.activation = successor_activation
+    closed_bindings = []
+
+    async def exact_close(*, binding, capability, request_id):
+        closed_bindings.append(binding)
+        return {"kind": "close", "status": "closed", "accepted": True}
+
+    client.close = exact_close
+    successor_engine = _FakeNativeEngine()
+    registry._native_engine_factory = lambda _: successor_engine
+    descriptor = _activate(registry,
+        params=_params(activation_id="activation-2", activation_generation=2,
+                       capture_id="capture-2", sample_rate_hz=24_000),
+        request_origin=ORIGIN, connection_id="connection-1")
+    successor = registry.consume_ticket(_media_ticket(descriptor), request_origin=ORIGIN)
+    try:
+        assert old_session.closed and old_session.startup_retired
+        assert await asyncio.wait_for(registry.begin_native_interaction(successor), .2) is True
+        notification_key = ("session-1", "interaction-1", "connection-1")
+        successor_queue = registry._native_notifications[notification_key]
+        marker = {"current_activation_only": True}
+        successor_queue.put_nowait(marker)
+        assert closed_bindings == [] and engine.close_calls == 0
+        gate.release.set()
+        await asyncio.wait_for(asyncio.gather(begin, return_exceptions=True), 1)
+        await asyncio.gather(*tuple(registry._native_cleanup_tasks))
+        assert closed_bindings == [old_activation.binding]
+        assert registry._native_notifications[notification_key] is successor_queue
+        assert successor_queue.get_nowait() is marker
+        assert not successor.route_completed and not successor_engine.closed
+        assert registry._records[successor.record_id] is successor
+        assert len(registry._native_sessions) == 1 and registry._native_pending_starts == {}
+        assert next(iter(registry._native_sessions.values())).activation is successor_activation
+        assert client.proposals == [] and engine.offered_audio == []
+    finally:
+        gate.release.set()
+        await asyncio.gather(begin, return_exceptions=True)
+        await registry.close_native_interaction(uplink)
+        await registry.close_native_interaction(successor)
+
+
+@pytest.mark.asyncio
+async def test_native_pending_start_rechecks_revoke_after_waiting_for_registry_lock():
+    registry, client, engine, gate, uplink, activated, _ = _pending_native_fixture("provider")
+    factories = []
+    registry._native_engine_factory = lambda binding: factories.append(binding) or engine
+    await registry._native_session_lock.acquire()
+    begin = asyncio.create_task(registry.begin_native_interaction(uplink))
+    await asyncio.sleep(0)
+    _revoke_native_fixture(registry, activated)
+    registry._native_session_lock.release()
+    result = (await asyncio.gather(begin, return_exceptions=True))[0]
+    assert isinstance(result, MediaTransportViolation)
+    assert result.reason_id == "MEDIA_NATIVE_ACTIVATION_UNAVAILABLE"
+    assert factories == [] and not gate.entered.is_set() and not engine.started
+    assert engine.close_calls == 0 and client.close_calls == 0 and client.proposals == []
+    assert registry._native_pending_starts == {} and registry._native_sessions == {}
+    assert registry._native_session_keys_by_record == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_native_pending_start_registered_socket_delayed_attach_or_cancel_has_exact_effects(cancelled):
+    registry, client, engine, gate, record, descriptor, _ = _pending_native_fixture("provider", consume=False)
+    frame = MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.0,) * 480)
+    detach = MediaDetach(
+        lease_id=record.binding.lease_id, generation=record.binding.generation.value,
+        reason_id=MediaDetachReason.PEER_CLOSE, through_seq=0,
+    )
+
+    class Socket(_AuthOnlySocket):
+        def __init__(self):
+            super().__init__(descriptor)
+            self.incoming = [self._auth_frame, encode_audio_frame(record.binding, frame),
+                             serialize_media_control(detach)]
+            self.sent = []
+
+        async def recv(self):
+            if len(self.incoming) == 1:
+                for _ in range(20):
+                    if engine.offered_audio:
+                        break
+                    await asyncio.sleep(0)
+            if self.incoming:
+                return self.incoming.pop(0)
+            await asyncio.Event().wait()
+
+        async def send(self, message):
+            self.sent.append(message)
+
+        async def close(self, *args, **kwargs):
+            pass
+
+    socket = Socket()
+    route = asyncio.create_task(handle_registered_media_socket(registry, socket, descriptor["endpoint_path"]))
+    await asyncio.wait_for(gate.entered.wait(), 1)
+    assert socket.sent == [] and registry._native_sessions == {}
+    try:
+        if cancelled:
+            route.cancel()
+            await asyncio.wait_for(gate.cancelled.wait(), 1)
+            result = (await asyncio.wait_for(asyncio.gather(route, return_exceptions=True), 1))[0]
+            assert isinstance(result, MediaTransportViolation)
+            assert socket.sent == [] and engine.offered_audio == [] and client.proposals == []
+            assert record.route_completed and engine.close_calls == 0
+            assert registry._native_pending_starts and not registry._native_sessions
+            gate.release.set()
+            await asyncio.wait_for(engine.close_event.wait(), 1)
+            await asyncio.gather(*tuple(registry._native_cleanup_tasks))
+        else:
+            gate.release.set()
+            assert await asyncio.wait_for(route, 2) is True
+            assert socket.sent and len(engine.offered_audio) == 1
+            assert record.route_completed and engine.closed
+        assert registry._native_pending_starts == {} and registry._native_sessions == {}
+        assert registry._native_session_keys_by_record == {}
+        assert engine.presentation_acknowledgements == [] and engine.delegate_results == []
+    finally:
+        gate.release.set()
+        await asyncio.gather(route, return_exceptions=True)
+        await registry.close_native_interaction(record)
 
 
 async def _present_native_test_audio_unit(

@@ -70,4 +70,14 @@ is excluded. The [candidate record](REALTIME_ACCEPTANCE_CANDIDATE_20260907.md)
 owns the consolidated evidence and user acceptance instructions. Main integrates
 six local commits into w3, preserving the original twelve, and deploys through
 the existing controlled launcher. No remote update or physical-hearing claim is
-included. The worker source returns are closed; user acceptance remains open.
+included. The six worker source returns are closed; user acceptance remains open.
+
+Actual Native startup after that deployment exposed an older pending-start
+reservation gap plus an insufficient initial browser attachment budget. The
+[startup checkpoint and repair](REALTIME_NATIVE_STARTUP_REPAIR_20260907.md)
+owns this necessary additional lifecycle repair and its verification. Main owns
+the browser readiness change, integration and deployment; the lifecycle worker
+owns only registration, matching tests and its evidence file. Independent Astra
+ultra review passed both final boundaries. Preserve the six existing commits and
+add one coherent startup repair commit; no remote update or expansion into new
+business/protocol policy is authorized by this supplementary repair.

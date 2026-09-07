@@ -862,6 +862,98 @@ test('formal P1 binds media activation to the exact product P2 activation', asyn
   assert.equal(calls[1][0], PRODUCT_P1_MEDIA_CLOSE_METHOD);
 });
 
+for (const scenario of ['native_delayed', 'native_expired', 'cascade_expired', 'native_closed', 'native_ack_expired', 'native_device_failed']) {
+  test(`formal P1 startup budget ${scenario} keeps exact bounded capture ownership`, async context => {
+    context.mock.timers.enable({ apis: ['Date'], now: 100_000 });
+    const calls = [], statuses = [];
+    const binding = serverBinding(), socket = new FakeSocket(), environment = audioEnvironment();
+    let socketCreated = false;
+    const owner = new ProductP1VoiceRouteOwner({
+      enabled: true, expected_origin: 'https://voice.example.test', audio_environment: environment,
+      on_status: status => statuses.push(status),
+      socket_factory: () => { socketCreated = true; return socket; },
+      request: async (method, params) => {
+        calls.push(method);
+        if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+        assert.equal(method, PRODUCT_P1_MEDIA_ACTIVATE_METHOD);
+        return scenario.startsWith('native') ? nativeMediaActivation(binding) : streamingMediaActivation(binding);
+      },
+    });
+    const starting = startCaptureWithFirstFrame(owner, environment, {
+      session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+      activation_id: 'activation-1', activation_generation: 7,
+    });
+    const result = starting.then(() => null, error => error);
+    try {
+      for (let turn = 0; turn < 100 && !socketCreated; turn += 1) await new Promise(resolve => setImmediate(resolve));
+      assert.equal(socketCreated, true);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      if (scenario === 'native_delayed') {
+        // A nearly full initial bootstrap interval remains below both the
+        // browser's 1500-frame cap and Gateway's 800-frame Native input cap.
+        for (let seq = 1; seq < 750; seq += 1) environment.worklet.port.onmessage({ data: {
+          kind: 'frame', capture_generation: environment.worklet.captureGeneration, seq,
+          sample_rate_hz: 48_000, sample_cursor: seq * 960, context_time_s: seq * 0.02,
+          samples: new Float32Array(960),
+        } });
+      }
+      context.mock.timers.setTime(100_000 + (scenario === 'native_expired' ? 15_001 : scenario === 'native_delayed' ? 14_999 : 5_000));
+      await new Promise(resolve => setTimeout(resolve, 25));
+      if (scenario === 'native_delayed') {
+        assert.equal(owner.status().status, 'starting', 'normal Provider bootstrap must outlive the old three-second media deadline');
+        assert.equal(socket.binarySendCount, 0, 'unattached media must not receive capture PCM');
+        socket.open(binding);
+        assert.equal(await result, null);
+        assert.equal(owner.status().status, 'capturing');
+        assert.ok(socket.binarySendCount > 0 && socket.binarySendCount <= 750);
+      } else if (scenario === 'native_ack_expired') {
+        socket.acknowledgeBinary = false;
+        socket.open(binding);
+        await new Promise(resolve => setTimeout(resolve, 25));
+        context.mock.timers.setTime(106_001);
+        assert.equal((await result)?.reason, 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED');
+        assert.equal(owner.status().status, 'failed');
+        assert.equal(statuses.includes('capturing'), false);
+      } else if (scenario === 'native_closed') {
+        await owner.close();
+        assert.ok(await result);
+        socket.open(binding); // A late old attach cannot revive capture or send PCM.
+        await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(owner.status().status, 'closed');
+        assert.equal(socket.binarySendCount, 0);
+        assert.equal(statuses.includes('capturing'), false);
+      } else if (scenario === 'native_device_failed') {
+        environment.track.emit('mute');
+        const promptlyFailed = await Promise.race([
+          result, new Promise(resolve => setTimeout(() => resolve({ reason: 'TEST_DEVICE_FAILURE_NOT_SETTLED' }), 500)),
+        ]);
+        assert.equal(promptlyFailed?.reason, 'AUDIO_INPUT_MUTED');
+        assert.equal(owner.status().status, 'failed');
+        socket.open(binding);
+        await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(socket.binarySendCount, 0);
+        assert.equal(statuses.includes('capturing'), false);
+      } else {
+        assert.equal((await result)?.reason, 'AUDIO_CAPTURE_MEDIA_ROUTE_NOT_ATTACHED');
+        assert.equal(owner.status().status, 'failed');
+        assert.equal(statuses.includes('capturing'), false);
+        assert.equal(socket.binarySendCount, 0);
+        assert.equal(environment.track.readyState, 'ended');
+        socket.open(binding);
+        await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(socket.binarySendCount, 0, 'late attach after timeout cannot send PCM');
+        assert.equal(statuses.includes('capturing'), false);
+      }
+      assert.equal(calls.filter(method => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length, 1);
+      assert.equal(calls.every(method => [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, PRODUCT_P1_MEDIA_CLOSE_METHOD].includes(method)), true);
+    } finally {
+      await owner.close();
+      await result;
+      context.mock.timers.reset();
+    }
+  });
+}
+
 test('formal P1 requires one real AIO frame before publishing capture readiness', async () => {
   const calls = [];
   const statuses = [];

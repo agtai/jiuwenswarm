@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-07 (six repairs implemented and independently reviewed; scoped checks complete).
+> Updated: 2026-09-07 (six repairs and the exposed startup repair independently reviewed).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -34,13 +34,19 @@ owns independent worker worktrees, point commits, review, integration and local
 deployment. D-120 records the accepted changes, including authorized dirty input
 snapshots and bounded fault-tail playback; these are not merely parameter edits.
 All six points now have implementation, scoped verification and independent
-review. Main's final cumulative Native/Gateway run passed 757 checks; the complete
-Web script passed 681 of 706, retaining the exact 24 baseline failures and one
-skip. No new failing case was found; this is not a full-green claim. The
+review. Their cumulative checks retain the exact 24 baseline Web failures and one
+skip; this is not a full-green claim. The actual deployment then exposed a Native
+startup defect: the browser retired the initial media owner before Provider
+bootstrap finished, and a late completion revived the retired session. A separate
+[startup repair](reviews/REALTIME_NATIVE_STARTUP_REPAIR_20260907.md) gives initial
+Native attachment a finite 15-second allowance and fences pending startup through
+real settlement. Its frontend/backend checks and independent Astra ultra review
+pass the module boundary. The
 [candidate and user acceptance record](reviews/REALTIME_ACCEPTANCE_CANDIDATE_20260907.md)
 lists the point commits, evidence and remaining limits. The prior candidate did
-not pass unified acceptance. Controlled local deployment must bind the actual
-clean w3 source and assets in `logs/live_voice_runtime_contract.json`; physical
+not pass unified acceptance. Controlled redeployment and actual Native listening
+must bind the repaired source; clean w3 source and assets are recorded in
+`logs/live_voice_runtime_contract.json`; physical
 playback, exact A-to-AA output and the full current-source journey remain required.
 
 ### Retained Realtime optimization baseline

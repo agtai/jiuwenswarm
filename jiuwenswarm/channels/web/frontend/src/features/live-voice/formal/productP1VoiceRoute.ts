@@ -87,6 +87,10 @@ export const PRODUCT_P1_PLAYOUT_QUEUE_CAPACITY = 256;
 export const PRODUCT_P1_STREAMING_PLAYOUT_MAX_DURATION_MS = 180_000;
 const MAX_STREAMING_PLAYOUT_FRAMES = PRODUCT_P1_STREAMING_PLAYOUT_MAX_DURATION_MS / LIVE_VOICE_AUDIO_FRAME_DURATION_MS;
 const ROUTE_READY_TIMEOUT_MS = 3_000;
+// Initial Native attach also opens the real Provider (5 s connect budget) and
+// negotiates its session/context. Keep this bounded separately from local media
+// attachment and first-frame/ACK readiness; capture storage remains capped.
+const NATIVE_ROUTE_READY_TIMEOUT_MS = 15_000;
 const PLAYOUT_FIRST_FRAME_TIMEOUT_MS = 8_000;
 const ROUTE_DRAIN_TIMEOUT_MS = 3_000;
 const ROUTE_COMPLETION_TIMEOUT_MS = 3_000;
@@ -3649,8 +3653,12 @@ export class ProductP1VoiceRouteOwner {
   }
 
   async #awaitCaptureReadiness(route: ActiveBrowserDedicatedMediaRoute, operationGeneration: number): Promise<void> {
-    const routeDeadline = Date.now() + ROUTE_READY_TIMEOUT_MS;
-    while (!route.leaf.attached && !route.leaf.closed && Date.now() < routeDeadline) await waitTurn();
+    const routeDeadline = Date.now() + (this.#nativeInteraction !== null && this.#captureReadinessPurpose === 'initial'
+      ? NATIVE_ROUTE_READY_TIMEOUT_MS : ROUTE_READY_TIMEOUT_MS);
+    while (!route.leaf.attached && !route.leaf.closed && Date.now() < routeDeadline) {
+      await waitTurn();
+      this.#requireHealthyCaptureReadiness(operationGeneration);
+    }
     this.#requireHealthyCaptureReadiness(operationGeneration);
     if (route.leaf.closed) {
       throw Object.assign(new Error('formal dedicated media route closed before capture readiness'), {
