@@ -7,6 +7,7 @@ import pytest
 from jiuwenswarm.common import live_voice_audio_diagnostics as sink
 from jiuwenswarm.common import live_voice_profiling as profile
 from jiuwenswarm.server.live_voice import openai_realtime_native_engine as native
+from jiuwenswarm.server.live_voice import openai_realtime_session as transport
 from scripts.live_voice.analyze_demo_profile import sanitize_record
 from tests.unit_tests.live_voice.test_native_business_contract import action
 from tests.unit_tests.live_voice.test_openai_realtime_native_engine import (
@@ -119,6 +120,41 @@ async def test_timeline_distinguishes_send_confirmation_audio_and_actual_ack(mon
         assert milestones.count("provider_first_audio") == 1
         assert milestones.count("presentation_acknowledged") == 1
         assert "PRIVATE" not in repr(records)
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_sink", [False, True])
+async def test_audio_supply_timing_joins_provider_delta_without_changing_pcm_or_ack(monkeypatch, failing_sink):
+    rows = []
+    def observe(event, snapshot, **fields):
+        if failing_sink:
+            raise RuntimeError("PRIVATE_SINK_ERROR")
+        rows.append({**snapshot, **fields})
+    monkeypatch.setattr(native, "profile_snapshot_event", observe)
+    monkeypatch.setattr(transport, "profile_snapshot_event", observe)
+    engine, socket, _ = await admitted_business_engine()
+    try:
+        audio = []
+        for index in range(2):
+            socket.push(output_audio_delta(f"audio-{index}", "p1", "audio-item", 0))
+            audio.append((await engine.next_event()).audio)
+        assert [item.sequence for item in audio] == [0, 1]
+        assert all(item.pcm16 == b"\x01\x00" * 480 for item in audio)
+        assert not engine._responses["p1"].presentation_acknowledged
+        assert not engine._delegates
+        assert "PRIVATE" not in repr(rows)
+        if not failing_sink:
+            mapped = [row for row in rows if row["milestone"] == "provider_audio_mapped"]
+            received = [row for row in rows if row.get("status") == "response.output_audio.delta"]
+            assert [row["source_event_id"] for row in mapped] == ["audio-0", "audio-1"]
+            assert [row["source_event_id"] for row in received] == ["audio-0", "audio-1"]
+            assert [(row["frame_seq"], row["frame_count"]) for row in mapped] == [(0, 1), (1, 1)]
+            assert all(row["received_monotonic_ms"] > 0 for row in received)
+            assert not any(key in row for row in rows for key in ("delta", "pcm16", "text"))
+        else:
+            assert rows == []
     finally:
         await engine.close()
 

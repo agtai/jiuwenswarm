@@ -2123,7 +2123,14 @@ class DedicatedMediaProductRegistry:
                 if not done.cancelled():
                     done.exception()
             task.add_done_callback(finished)
-        return await asyncio.shield(task)
+        await asyncio.shield(task)
+        if session.closed:
+            raise MediaTransportViolation("MEDIA_NATIVE_SESSION_CLOSED", "Business context owner closed during refresh")
+        # The shared read can finish before this waiter resumes. An intervening
+        # observation may already have advanced the cursor-ordered cache.
+        if session.business_context_result is None:
+            raise MediaTransportViolation("MEDIA_NATIVE_OBSERVATION_UNAVAILABLE", "Business context refresh produced no snapshot")
+        return session.business_context_result
 
     async def _read_native_business_context(self, session: _NativeMediaSession, *, wait_ms: int):
         if session.closed:
@@ -2431,12 +2438,14 @@ class DedicatedMediaProductRegistry:
                 "MEDIA_NATIVE_RUNTIME_UNAVAILABLE",
                 "Native Runtime audio batch admission disappeared",
             )
+        request_id = self._native_request_id(session, "propose")
+        started = time.perf_counter()
         try:
             results = await propose_audio_batch(
                 binding=session.activation.binding,
                 capability=session.activation.capability,
                 events=tuple(admitted),
-                request_id=self._native_request_id(session, "propose"),
+                request_id=request_id,
             )
         except NativeRuntimeClientError as error:
             if error.reason == "NATIVE_AUDIO_RESPONSE_STALE" and all(
@@ -2446,6 +2455,8 @@ class DedicatedMediaProductRegistry:
             ):
                 return
             raise
+        finally:
+            self._profile_native_audio_admission(session, admitted[0].audio, request_id, len(admitted), started)
         if type(results) is not tuple or len(results) != len(admitted):
             raise MediaTransportViolation(
                 "MEDIA_NATIVE_AUDIO_ADMISSION_INVALID",
@@ -2463,6 +2474,20 @@ class DedicatedMediaProductRegistry:
                 continue
             await self._allocate_native_downlink(session, audio, result)
 
+    @staticmethod
+    def _profile_native_audio_admission(session, audio, request_id, count, started):
+        try:
+            profile_event(
+                "native_audio_supply", **identity_fields(session.activation.binding, audio.response),
+                stage="gateway_runtime_admission", request_id=request_id,
+                provider_response_id=audio.provider_response_id, provider_item_id=audio.provider_item_id,
+                source_event_id=audio.provider_event_id, frame_seq=audio.sequence, frame_count=count,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                queue_frames=session.delivery_queue.qsize(),
+            )
+        except Exception:
+            pass
+
     async def _deliver_native_audio(
         self, session: _NativeMediaSession, event: NativeEngineEvent
     ) -> None:
@@ -2474,12 +2499,14 @@ class DedicatedMediaProductRegistry:
             )
         audio = event.audio
         assert audio is not None
+        request_id = self._native_request_id(session, "propose")
+        started = time.perf_counter()
         try:
             result = await client.propose(
                 binding=session.activation.binding,
                 capability=session.activation.capability,
                 event=event,
-                request_id=self._native_request_id(session, "propose"),
+                request_id=request_id,
             )
         except NativeRuntimeClientError as error:
             if (
@@ -2488,6 +2515,8 @@ class DedicatedMediaProductRegistry:
             ):
                 return
             raise
+        finally:
+            self._profile_native_audio_admission(session, audio, request_id, 1, started)
         if not self._native_response_is_barge_fenced(session, audio.response):
             await self._allocate_native_downlink(session, audio, result)
 

@@ -1,5 +1,9 @@
 import asyncio
 import json
+import threading
+from copy import copy
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from dataclasses import replace
 
 import pytest
@@ -144,6 +148,116 @@ async def test_scope_churn_rotates_bounded_observations_without_losing_or_removi
 async def finish(env):
     await env.registry.stop()
     await env.harness.composition.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["current", "closed", "replaced", "expired"])
+async def test_slow_context_authority_keeps_audio_lock_available_and_rechecks_retirement(
+    tmp_path, monkeypatch, change,
+):
+    env = await make_registry(tmp_path, monkeypatch)
+    router = env.registry._native_business
+    route = env.registry._p2_routes[("session-1", "interaction-1")]
+    release, entered = threading.Event(), threading.Event()
+    pending = None
+    try:
+        selected = await router._context_result(route)
+        async def retained_context(unused):
+            return selected
+        monkeypatch.setattr(router, "_context_result", retained_context)
+        composition = env.harness.composition
+        resolve = composition._resolve_native_activation_authority
+        def slow_resolve(*args, **kwargs):
+            current = resolve(*args, **kwargs)
+            entered.set()
+            # Bound the red-path stall as well as worker cleanup on assertion failure.
+            release.wait(2)
+            return current
+        monkeypatch.setattr(composition, "_resolve_native_activation_authority", slow_resolve)
+        before = composition._core.store.counts()
+        origins = dict(env.registry._voice_task_origins)
+        pending = asyncio.create_task(env.client.observe_business_context(
+            activation(env), request_id="slow-authority"))
+        assert await asyncio.to_thread(entered.wait, 2)
+        assert not pending.done(), "Synchronous authority I/O blocked the event loop"
+        # Audio admission uses this same registry lock and must stay schedulable.
+        await asyncio.wait_for(env.registry._lock.acquire(), .2)
+        env.registry._lock.release()
+        if change == "closed":
+            route.native_closed = True
+        elif change == "replaced":
+            env.registry._p2_routes[("session-1", "interaction-1")] = copy(route)
+        elif change == "expired":
+            composition._clock = lambda: (datetime.now(UTC) + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+        release.set()
+        if change == "current":
+            observed = await asyncio.wait_for(pending, 1)
+            assert observed["context"] == selected[0].payload()
+        else:
+            with pytest.raises(NativeRuntimeClientError):
+                await asyncio.wait_for(pending, 1)
+        assert composition._core.store.counts() == before
+        assert env.registry._voice_task_origins == origins
+        assert env.manager.agent.executions == []
+        assert router.works().list(scope=env.binding.scope) == ()
+    finally:
+        release.set()
+        if pending is not None:
+            await asyncio.gather(pending, return_exceptions=True)
+        env.registry._p2_routes[("session-1", "interaction-1")] = route
+        await finish(env)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["observation", "projection"])
+async def test_context_expiring_while_waiting_for_registry_lock_has_zero_effects(tmp_path, monkeypatch, boundary):
+    env = await make_registry(tmp_path, monkeypatch)
+    router = env.registry._native_business
+    route = env.registry._p2_routes[("session-1", "interaction-1")]
+    ready, resume = asyncio.Event(), asyncio.Event()
+    waiting = None
+    held = False
+    try:
+        selected = await router._context_result(route)
+        async def retained_context(unused):
+            return selected
+        monkeypatch.setattr(router, "_context_result", retained_context)
+        require = router._require_context_authority
+        async def resolved_then_wait(candidate):
+            current = await require(candidate)
+            ready.set()
+            await resume.wait()
+            return current
+        monkeypatch.setattr(router, "_require_context_authority", resolved_then_wait)
+        monkeypatch.setattr(router, "task_origins", lambda scope: ("retained-task",))
+        before = env.harness.composition._core.store.counts()
+        origins = dict(env.registry._voice_task_origins)
+        operation = (env.client.observe_business_context(activation(env), request_id="expiry-lock")
+            if boundary == "observation" else router._restore_task_projection(
+                route, env.binding.scope, [SimpleNamespace(task_id="retained-task")]))
+        waiting = asyncio.create_task(operation)
+        await asyncio.wait_for(ready.wait(), 1)
+        await env.registry._lock.acquire()
+        held = True
+        resume.set()
+        await asyncio.sleep(0)
+        assert not waiting.done() and env.registry._lock._waiters
+        env.harness.composition._clock = lambda: (datetime.now(UTC) + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+        env.registry._lock.release()
+        held = False
+        with pytest.raises(Exception) as rejected:
+            await asyncio.wait_for(waiting, 1)
+        assert "EXPIRED" in getattr(rejected.value, "reason", "")
+        assert env.harness.composition._core.store.counts() == before
+        assert env.registry._voice_task_origins == origins
+        assert env.manager.agent.executions == [] and router.works().list(scope=env.binding.scope) == ()
+    finally:
+        if held:
+            env.registry._lock.release()
+        resume.set()
+        if waiting is not None:
+            await asyncio.gather(waiting, return_exceptions=True)
+        await finish(env)
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,7 @@ routes are not selected, replaced, or reclassified by this module.
 
 from __future__ import annotations
 
-from jiuwenswarm.common.live_voice_profiling import profiled, identity_fields
+from jiuwenswarm.common.live_voice_profiling import profiled, identity_fields, profile_event
 from jiuwenswarm.server.live_voice.native_foreground import NATIVE_FOREGROUND, NativeForegroundControl
 
 import asyncio
@@ -5231,6 +5231,19 @@ class AgentServerProductCompositionRegistry:
             released.append(projection)
         return released
 
+    @staticmethod
+    def _profile_native_audio_admission(binding, audio, request_id, count, lock_wait_ms, started):
+        try:
+            profile_event(
+                "native_audio_supply", **identity_fields(binding, audio.response),
+                stage="registry_runtime_admission", request_id=request_id,
+                provider_response_id=audio.provider_response_id, provider_item_id=audio.provider_item_id,
+                source_event_id=audio.provider_event_id, frame_seq=audio.sequence, frame_count=count,
+                lock_wait_ms=lock_wait_ms, duration_ms=(time.perf_counter() - started) * 1000,
+            )
+        except Exception:
+            pass
+
     async def handle_native_propose(
         self,
         *,
@@ -5369,7 +5382,9 @@ class AgentServerProductCompositionRegistry:
                 routed_session=routed_session,
             )
 
+        lock_started = time.perf_counter()
         async with self._lock:
+            lock_wait_ms = (time.perf_counter() - lock_started) * 1000
             if self._stopped:
                 return _error_result(request_id, reason="PRODUCT_COMPOSITION_STOPPED")
             route = self._p2_routes.get((routed_session, binding.interaction_id))
@@ -5427,13 +5442,14 @@ class AgentServerProductCompositionRegistry:
                         candidate.audio_observation for candidate in audio_batch
                     )
                     assert all(observation is not None for observation in observations)
-                    admissions = await owner.accept_audio_observations(
-                        tuple(
-                            observation
-                            for observation in observations
-                            if observation is not None
+                    admission_started = time.perf_counter()
+                    try:
+                        admissions = await owner.accept_audio_observations(
+                            tuple(observation for observation in observations if observation is not None)
                         )
-                    )
+                    finally:
+                        self._profile_native_audio_admission(binding, observations[0], parsed_request_id,
+                            len(observations), lock_wait_ms, admission_started)
                     if admissions is None:
                         raise NativeInteractionRuntimeError(
                             "NATIVE_AUDIO_RESPONSE_STALE",
@@ -5679,9 +5695,12 @@ class AgentServerProductCompositionRegistry:
                             "NATIVE_AUDIO_PROPOSAL_INVALID",
                             "Native audio metadata must be a standalone observation",
                         )
-                    audio_admission = await owner.accept_audio_observation(
-                        proposal.audio_observation
-                    )
+                    admission_started = time.perf_counter()
+                    try:
+                        audio_admission = await owner.accept_audio_observation(proposal.audio_observation)
+                    finally:
+                        self._profile_native_audio_admission(binding, proposal.audio_observation, parsed_request_id,
+                            1, lock_wait_ms, admission_started)
                     if audio_admission is None:
                         raise NativeInteractionRuntimeError(
                             "NATIVE_AUDIO_RESPONSE_STALE",

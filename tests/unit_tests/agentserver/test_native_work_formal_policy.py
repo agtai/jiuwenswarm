@@ -14,6 +14,7 @@ from openjiuwen.harness.tools.filesystem import (
     GlobTool,
     GrepTool,
 )
+from openjiuwen.harness.tools.web import WebFreeSearchTool, WebFetchWebpageTool
 
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
     JiuSwarmStreamEventRail,
@@ -44,6 +45,8 @@ from tests.unit_tests.agentserver.test_formal_live_voice_adapter import (
         "send_file",
         "unknown",
         "Read_File",
+        "free_Search",
+        "paid_search",
     ],
 )
 async def test_native_read_only_policy_aborts_actual_sdk_callback_before_tool_effect(
@@ -87,6 +90,7 @@ async def test_exact_sdk_read_tools_remain_available_and_no_tool_override_stays_
         tool(operation=SimpleNamespace())
         for tool in (ReadFileTool, ListDirTool, GlobTool, GrepTool)
     ]
+    registered.extend([WebFreeSearchTool(), WebFetchWebpageTool()])
     assert {tool.card.name for tool in registered} == NATIVE_READ_ONLY_TOOL_NAMES
     rail = JiuSwarmStreamEventRail()
     session = "lv-formal-native-work"
@@ -121,7 +125,7 @@ async def test_exact_sdk_read_tools_remain_available_and_no_tool_override_stays_
                 extra={rail._SID_KEY: session},
             )
         )
-    assert len(capture.drain()) == 8
+    assert len(capture.drain()) == 2 * len(registered)
     rail.close_formal_tool_event_capture(session, capture, abort=True)
 
     capture = rail.open_formal_tool_event_capture(
@@ -139,6 +143,30 @@ async def test_exact_sdk_read_tools_remain_available_and_no_tool_override_stays_
             )
         )
     assert capture.drain() == ()
+    rail.close_formal_tool_event_capture(session, capture, abort=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["free_search", "fetch_webpage"])
+@pytest.mark.parametrize("restriction", ["no_tools", "name_mismatch"])
+async def test_native_web_reads_cannot_bypass_tool_disable_or_callback_identity(name, restriction):
+    rail = JiuSwarmStreamEventRail()
+    session = "lv-formal-native-web"
+    capture = rail.open_formal_tool_event_capture(session,
+        allow_tools=restriction != "no_tools", read_only_tools=True)
+    framework = AsyncCallbackFramework()
+    await framework.register("before-tool", rail.before_tool_call)
+    call = SimpleNamespace(id="web-1", name=name, arguments={"query": "weather"})
+    context = SimpleNamespace(inputs=ToolCallInputs(tool_call=call,
+        tool_name=name if restriction == "no_tools" else "write_file", tool_args=call.arguments),
+        session=AsyncMock(), extra={rail._SID_KEY: session})
+    effects = []
+    @framework.emit_before("before-tool")
+    async def invoke(_context):
+        effects.append("forbidden")
+    with pytest.raises(AbortError, match="FORMAL_READ_ONLY_TOOL_FORBIDDEN"):
+        await invoke(context)
+    assert effects == [] and capture.drain() == () and rail._inflight_tool_calls == {}
     rail.close_formal_tool_event_capture(session, capture, abort=True)
 
 

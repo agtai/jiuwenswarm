@@ -402,6 +402,68 @@ async def test_projected_sibling_receipts_keep_exact_replay_and_one_fresh_comple
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("observation", ["equivalent", "newer", "refresh_newer", "interrupted"])
+async def test_receipt_refresh_observation_preserves_one_current_successor(observation):
+    from jiuwenswarm.server.live_voice.native_business_observation import canonical_native_receipt
+    entered, release = asyncio.Event(), asyncio.Event()
+    latest = {"context": business_context(), "work_events": []}
+    async def refresh():
+        entered.set()
+        await release.wait()
+        return latest
+    engine, socket, _ = active_engine(speech_started("s1", "u1", 0), speech_stopped("e1", "u1", 500),
+        input_committed("c1", "u1"), response_created("r1", "p1"),
+        business_function("f1", "p1", "call1"), response_done("d1", "p1"))
+    engine.configure_business_context(business_context(), refresh=refresh,
+        receipt_projection=True, continuation_preparation=True)
+    await engine.start()
+    send = observer = None
+    try:
+        _, _, commit = await accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        await engine.next_event()
+        await engine.admit_response("p1", response_ref(1))
+        await engine.next_event()
+        await engine.next_event()
+        canonical = canonical_native_receipt({"contract_version": "live-voice.native-business.v1",
+            "operation": "work.start", "work": {"state": "running", "revision": 1},
+            "context": business_context()})
+        send = asyncio.create_task(engine.send_delegate_result("call1", response_ref(1), canonical))
+        await asyncio.wait_for(entered.wait(), .5)
+        observed = business_context()
+        if observation in {"newer", "refresh_newer"}:
+            observed["context_id"] = "b" * 64
+            observed["history"] = [{"role": "user", "content": "latest fact", "delivery": "committed"}]
+        observer = asyncio.create_task(engine.update_business_context(observed, []))
+        await asyncio.sleep(0)
+        latest["context"] = observed
+        if observation == "refresh_newer":
+            latest["context"] = {**observed, "context_id": "c" * 64,
+                "history": [{"role": "user", "content": "newest receipt fact", "delivery": "committed"}]}
+        if observation == "interrupted":
+            socket.push(speech_started("s2", "u2", 700))
+            assert (await engine.next_event()).action.operation == "STOP"
+            await engine.stop_foreground(response_ref(1))
+        release.set()
+        await asyncio.wait_for(asyncio.gather(send, observer), .5)
+        for _ in range(3):
+            await engine._request_pending_provider_response()
+        assert len(requests(socket)) == (1 if observation == "interrupted" else 2)
+        outputs = [e["item"] for e in socket.sent if e["type"] == "conversation.item.create"]
+        assert len([i for i in outputs if i["type"] == "function_call_output"]) == 1
+        if observation != "interrupted":
+            snapshots = [json.loads(i["content"][0]["text"])["native_business_context"]
+                         for i in outputs if i["type"] == "message"]
+            assert snapshots[-1] == latest["context"]
+        assert engine.snapshot().released_audio_count == 0
+        assert engine.snapshot().delegate_count == 1
+    finally:
+        release.set()
+        await asyncio.gather(*(t for t in (send, observer) if t is not None), return_exceptions=True)
+        await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_cancel_before_prepared_created_keeps_late_successor_unadmitted():
     engine, socket, _ = await preparing_engine(confirm=False)
     try:

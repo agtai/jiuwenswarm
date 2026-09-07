@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-07 (Shenzhen rehearsal exposed further playback and delegation defects).
+> Updated: 2026-09-07 (Shenzhen receipt, authority scheduling and dialogue repairs; physical acceptance remains open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -53,9 +53,14 @@ The subsequent [Shenzhen rehearsal diagnosis](reviews/SHENZHEN_REHEARSAL_DIAGNOS
 records actual playback starvation, an itinerary misrouted to read-only work and
 a lost receipt successor with repeated presentation-busy rejection. The primary
 human script is now [Shenzhen business travel](demo/PRODUCT_READINESS_SHOWCASE.md#4-current-shenzhen-business-trip-showcase).
-That showcase is BLOCKED on these defects and grounded current-information lookup.
-The diagnosis and script do not claim a product repair or supersede retained
-candidate acceptance requirements.
+The [scoped Shenzhen repairs](reviews/SHENZHEN_REPAIRS_20260907.md) preserve receipt
+successors across concurrent observations, move blocking project-authority reads
+off the audio event loop, clarify Task/lookup routing and shorten Native replies.
+Existing free web readers are now available to the read-only Agent. A fresh
+Shenzhen project is registered for deployment; machine-local runtime evidence
+owns the running commit and configuration. The showcase remains PARTIAL pending
+the real microphone/playback/background-file journey. These repairs and their
+focused evidence do not supersede retained candidate acceptance requirements.
 
 ### Retained Realtime optimization baseline
 
