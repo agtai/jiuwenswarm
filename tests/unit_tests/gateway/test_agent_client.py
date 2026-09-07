@@ -8,7 +8,6 @@ from websockets.legacy.server import serve
 
 from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-from jiuwenswarm.common.e2a.gateway_normalize import message_to_e2a
 from jiuwenswarm.common.e2a.wire_codec import (
     encode_agent_chunk_for_wire,
     encode_agent_response_for_wire,
@@ -16,7 +15,6 @@ from jiuwenswarm.common.e2a.wire_codec import (
 from jiuwenswarm.gateway.routing import agent_client
 from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
-from jiuwenswarm.common.schema.message import Message, ReqMethod
 
 
 class FakeWebSocket:
@@ -451,119 +449,6 @@ async def test_send_request_fails_pending_request_when_receiver_stops():
     with pytest.raises(RuntimeError, match="AgentServer WebSocket connection closed"):
         await asyncio.wait_for(task, timeout=0.1)
     assert client.has_message_queue_for_test("rid-fatal-close") is False
-
-
-@pytest.mark.asyncio
-async def test_send_request_coalesces_exact_inflight_unary_replay():
-    client = AgentClientHarness()
-    ws = FakeWebSocket()
-    client.set_ws_for_test(ws)
-    first_env = message_to_e2a(
-        Message(
-            id="rid-exact-replay",
-            type="req",
-            channel_id="web",
-            session_id="sess-exact-replay",
-            params={"notification_sequence": 1},
-            timestamp=1.0,
-            ok=True,
-            req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
-            metadata={"ws_id": "websocket-before-replay"},
-        )
-    )
-    replay_env = message_to_e2a(
-        Message(
-            id="rid-exact-replay",
-            type="req",
-            channel_id="web",
-            session_id="sess-exact-replay",
-            params={"notification_sequence": 1},
-            timestamp=2.0,
-            ok=True,
-            req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
-            metadata={"ws_id": "websocket-after-replay"},
-        )
-    )
-
-    first = asyncio.create_task(client.send_request(first_env))
-    for _ in range(100):
-        if ws.sent_payloads:
-            break
-        await asyncio.sleep(0.001)
-    second = asyncio.create_task(client.send_request(replay_env))
-    await asyncio.sleep(0)
-
-    assert len(ws.sent_payloads) == 1
-    queue = client.get_message_queue_for_test("rid-exact-replay")
-    await queue.put(
-        encode_agent_response_for_wire(
-            AgentResponse(
-                request_id="rid-exact-replay",
-                channel_id="web",
-                ok=True,
-                payload={"status": "notification"},
-            ),
-            response_id="rid-exact-replay",
-        )
-    )
-
-    first_response, second_response = await asyncio.gather(first, second)
-    assert first_response.payload == {"status": "notification"}
-    assert second_response.payload == first_response.payload
-    assert client.has_message_queue_for_test("rid-exact-replay") is False
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("application_ok", [True, False])
-async def test_completed_unary_replay_uses_real_websocket_receiver(
-    monkeypatch, application_ok
-):
-    # A completed observation must reach the server again to authorize new media.
-    # Injecting directly into the waiter's queue misses receiver tombstone drops.
-    monkeypatch.setattr(agent_client, "_UNARY_REQUEST_TIMEOUT_SECONDS", 0.5)
-    received = []
-
-    async def server(ws):
-        await ws.send(json.dumps({"type": "event", "event": "connection.ack"}))
-        async for raw in ws:
-            request = json.loads(raw)
-            received.append(request)
-            await ws.send(json.dumps(encode_agent_response_for_wire(
-                AgentResponse(
-                    request_id=request["request_id"],
-                    channel_id="web",
-                    ok=application_ok,
-                    payload={"observation": len(received)},
-                ),
-                response_id=request["request_id"],
-            )))
-
-    client = WebSocketAgentServerClient()
-    async with serve(server, "127.0.0.1", 0) as endpoint:
-        port = endpoint.sockets[0].getsockname()[1]
-        await client.connect(f"ws://127.0.0.1:{port}")
-        try:
-            env = message_to_e2a(Message(
-                id="rid-completed-notification-replay",
-                type="req",
-                channel_id="web",
-                session_id="sess-completed-notification-replay",
-                params={"notification_sequence": 1},
-                timestamp=1.0,
-                ok=True,
-                req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
-            ))
-            first = await client.send_request(env)
-            second = await client.send_request(env)
-
-            assert first.ok is application_ok
-            assert second.ok is application_ok
-            assert first.payload == {"observation": 1}
-            assert second.payload == {"observation": 2}
-            assert len(received) == 2
-            assert received[0] == received[1]
-        finally:
-            await client.disconnect()
 
 
 @pytest.mark.asyncio

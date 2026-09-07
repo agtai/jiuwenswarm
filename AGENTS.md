@@ -51,10 +51,6 @@ the required action and recommendation while continuing unblocked work.
 
 ### Parallel ownership
 
-For an active D-060/D-062 parallel packet, Main assigns coherent non-overlapping
-work within tool capacity and remains the Integration Owner and shared semantic
-owner. Historical lane assignments are dormant without a current packet.
-
 Separate-worktree workers may commit only their task branch when their packet
 grants that authority; they cannot change the integration branch, rewrite shared
 history or integrate their own return. A shared-worktree subagent may edit only
@@ -62,40 +58,3 @@ its assigned files while holding the sole active filesystem-writer lease, and
 cannot switch branches, stage, commit or integrate. Main reviews and performs
 shared-worktree Git operations; semantic conflicts stay with Main and the owning
 module. Generic worker templates do not override these limits.
-
-## Live Voice routing and facts
-
-Start a Live Voice task with `live-voice/README.md` and the judgement/current
-packet in `live-voice/STATUS.md`; read capability rows and other sections only as
-the task requires. Choose one primary README route and add only sections needed
-by the touched boundaries. Reuse unchanged guidance already read in this session.
-Links are conditional; historical snapshots, closed packets, numbered plans and
-past runs are not a default reading list or current queue. Documentation structure
-work also uses `live-voice/DOCUMENTATION_RULES.md`.
-
-At resume verify `git status --short --branch`, `git rev-parse HEAD`, and
-`git rev-list --left-right --count 'HEAD...@{upstream}'`; report an absent upstream.
-Git/source is implementation fact; accepted decisions own intended behavior.
-Record and repair document drift without treating existing code as final design.
-Private credentials, provider/model setup, project registration, device/browser
-state, runtime data and network availability are not restored by Git.
-
-The Demo must send committed final speech to the real JiuwenSwarm Agent/tools.
-ASR/TTS-only paths and other shortcuts cannot claim the full product boundary.
-
-## Module and test closure
-
-Use STATUS's capability/dependency model and D-084 completion boundaries. Before
-implementation record intended behavior, owned product/test surfaces, risk,
-dependencies, exclusions and acceptance, scaled to the change. A new classifier
-or product policy, shared protocol/schema/migration, module owner or materially
-broader behavior needs explicit re-scoping and re-tiering before that expansion.
-Diff size is a warning signal, not a semantic acceptance criterion.
-
-Read only applicable `TESTING.md` sections before changing code/tests. Positive
-business scenarios must succeed; rejection/stale/wrong-scope paths must fail
-closed with zero forbidden Agent/Tool/Task/audio/history/protected-state effects.
-Missing required evidence leaves the affected scope PARTIAL/BLOCKED. Test counts
-and coverage alone do not close it. Review findings are triaged when received;
-only affected checks/reviews need repeating. D-071/D-072 keep signed W2 evidence
-Gate tooling retired unless the user explicitly requests a new audit requirement.

@@ -6,7 +6,6 @@ description: 使用现成 Playwright 脚本验证 JiuwenSwarm 的 Todo 或 Cron 
 # UI E2E
 
 复用本目录现成脚本，按改动选择 Todo 或 Cron 场景；两者都受影响时再跑合集。
-Live Voice 任务从其[项目入口](../../live-voice/README.md)选择测试路线。
 
 ## 使用脚本
 
