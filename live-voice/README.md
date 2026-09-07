@@ -17,6 +17,7 @@ read in this session; links are conditional, not a recursive reading list.
 | Documentation change | [Documentation rules](DOCUMENTATION_RULES.md), root `TESTING.md` documentation-only section and only the authorities changed by the edit |
 | Architecture/authority/protocol/security/durability change | Exact ACG and governing decision sections; full design only if the long-term boundary itself changes or is ambiguous |
 | Git/review/parallel work | Root `AGENTS.md`, applicable root `TESTING.md` sections and only the active packet named by STATUS |
+| LiveVoice slimming / AgentCore downshift | [Slimming master plan](roadmap/LIVEVOICE_SLIMMING_MASTER_PLAN.md) is the single entry; open its linked reviews only for the package being executed. Slimming is not activated until the trigger decision in its §1.3 is recorded. The behaviour-preserving floor is about 135–140K lines; the [design-simplification plan](LIVEVOICE_DESIGN_SIMPLIFICATION_PLAN_2026-09-07.md) is the semantic-change path to 60–65K and needs its own authorization. For "what does this LiveVoice module correspond to in Hermes" read the [official Hermes voice comparison](reviews/OPENJIUWEN_LIVEVOICE_OFFICIAL_HERMES_VOICE_COMPARISON_2026-09-06.md) |
 | Historical/migration/forensic work | One route from the conditional [reference index](REFERENCE_INDEX.md); never use historical priority/status as the current queue |
 
 ## Section rules
