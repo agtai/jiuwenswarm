@@ -255,6 +255,60 @@ function authoritativeFixture({
   return { taskA, taskB, calls, request, store: memoryStorage(selectedHint) };
 }
 
+test('live Task refresh converges without a voice notification and stops reading when all Tasks are terminal', async () => {
+  const fixture = authoritativeFixture();
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, request: fixture.request, store: fixture.store });
+  await owner.refresh(sessionId);
+  assert.equal(owner.snapshot().tasks.find(task => task.task_id === 'task-b').canonical_state, 'running');
+  fixture.taskB.state = 'terminal';
+  fixture.taskB.outcome = 'completed';
+  const settled = await owner.refreshLiveTasks(sessionId);
+  assert.equal(settled.tasks.find(task => task.task_id === 'task-b').display_state, 'completed');
+  assert.equal(settled.selected_task_id, 'task-a');
+  const readCount = fixture.calls.length;
+  await owner.refreshLiveTasks(sessionId);
+  assert.equal(fixture.calls.length, readCount);
+  assert.equal(fixture.calls.some(call => [FORMAL_P3_TASK_METHODS.intent, FORMAL_P3_TASK_METHODS.confirmation, FORMAL_P3_TASK_METHODS.mutate].includes(call.method)), false);
+});
+
+test('live Task refresh retries a read failure without losing the need to settle its formerly running Task', async () => {
+  const fixture = authoritativeFixture();
+  let fail = false;
+  const owner = new FormalP3TaskExperienceOwner({ enabled: true, store: fixture.store, request: async (...args) => {
+    if (fail) throw new Error('read unavailable');
+    return fixture.request(...args);
+  } });
+  await owner.refresh(sessionId);
+  fail = true;
+  await assert.rejects(owner.refreshLiveTasks(sessionId), /read unavailable/);
+  assert.equal(owner.snapshot().status, 'failed');
+  fail = false;
+  fixture.taskB.state = 'terminal';
+  fixture.taskB.outcome = 'completed';
+  const recovered = await owner.refreshLiveTasks(sessionId);
+  assert.equal(recovered.status, 'ready');
+  assert.equal(recovered.tasks.find(task => task.task_id === 'task-b').outcome, 'completed');
+});
+
+test('live Task fallback cannot cross Session, closed/disconnected ownership or an unresolved command', async () => {
+  for (const condition of ['wrong-session', 'stale', 'closed', 'disconnected', 'confirmation']) {
+    const fixture = authoritativeFixture();
+    const owner = new FormalP3TaskExperienceOwner({ enabled: true, request: fixture.request, store: fixture.store });
+    await owner.refresh(sessionId);
+    if (condition === 'closed') owner.close();
+    if (condition === 'disconnected') owner.disconnect();
+    if (condition === 'confirmation') {
+      await owner.select('task-b');
+      await owner.issue({ operation: 'task.adjust', task_id: 'task-b', adjustment: 'Keep the afternoon free' });
+    }
+    const before = owner.snapshot();
+    const readCount = fixture.calls.length;
+    await owner.refreshLiveTasks(condition === 'wrong-session' ? 'another-session' : sessionId, () => condition !== 'stale');
+    assert.equal(fixture.calls.length, readCount, condition);
+    assert.equal(owner.snapshot(), before, condition);
+  }
+});
+
 test('refresh exposes two exact Tasks, hint-only selection, lineage, replay and immutable result truth without inventing unread state', async () => {
   const fixture = authoritativeFixture();
   const owner = new FormalP3TaskExperienceOwner({ enabled: true, request: fixture.request, store: fixture.store });

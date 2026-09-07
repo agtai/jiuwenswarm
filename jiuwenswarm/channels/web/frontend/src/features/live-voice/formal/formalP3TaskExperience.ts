@@ -514,6 +514,7 @@ export class FormalP3TaskExperienceOwner {
   #rpc: RetainedMutationRpc | null = null;
   #mutationFlight: Promise<FormalP3TaskExperienceSnapshot> | null = null;
   #epoch = 0;
+  #liveRefreshNeeded = false;
 
   constructor(input: Readonly<{
     enabled: boolean;
@@ -529,6 +530,17 @@ export class FormalP3TaskExperienceOwner {
   }
 
   snapshot(): FormalP3TaskExperienceSnapshot { return this.#state; }
+
+  async refreshLiveTasks(sessionId: string, isCurrent: () => boolean = () => true): Promise<FormalP3TaskExperienceSnapshot> {
+    // Task execution survives speech retirement. Its collection therefore needs
+    // an independent read fallback when a terminal notification is not adopted.
+    // Never interfere with a selection/read already in flight or an unresolved
+    // mutation; this operation cannot issue or recover a command.
+    if (!this.#enabled || !isCurrent() || this.#state.session_id !== sessionId
+      || !this.#liveRefreshNeeded || !['ready', 'failed'].includes(this.#state.status)
+      || this.#pending !== null || this.#rpc !== null || this.#mutationFlight !== null) return this.#state;
+    return this.refresh(sessionId, isCurrent);
+  }
 
   async refresh(sessionIdInput: string, isCurrent: () => boolean = () => true): Promise<FormalP3TaskExperienceSnapshot> {
     if (!this.#enabled) throw new Error('formal P3 Task experience is disabled');
@@ -943,6 +955,12 @@ export class FormalP3TaskExperienceOwner {
   }
 
   #publish(next: FormalP3TaskExperienceSnapshot): FormalP3TaskExperienceSnapshot {
+    if (next.status === 'ready') {
+      this.#liveRefreshNeeded = next.tasks.some(task => task.canonical_state !== 'terminal');
+    } else if (next.status === 'closed' || next.status === 'disabled'
+      || next.session_id !== this.#state.session_id) {
+      this.#liveRefreshNeeded = false;
+    }
     this.#state = Object.freeze({
       ...next,
       tasks: Object.freeze([...next.tasks]),

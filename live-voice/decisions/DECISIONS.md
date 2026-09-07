@@ -2058,7 +2058,10 @@
   apply only Task changes. Snapshot/read/write conflict validation and D2 recovery
   use the same baseline. Where complete read dependencies cannot be proven,
   retain a conservative dependency scope and report conflicts accurately. Never
-  auto commit/stash/reset/clean the user's project or partially overwrite it.
+  auto commit/stash/reset/clean the user's project. Detected conflicts reject
+  before applying any Task delta. Existing D2 UNKNOWN/manual handling covers
+  operating-system failure or process loss during writeback, with no automatic
+  effect retry; this does not introduce a multi-file filesystem transaction.
   Exact scope, root/HEAD, permissions, link safety and canonical Task authority
   remain required. Derive-and-save-as is one coherent Task: preserve input,
   apply all requested changes to the new output, and do not separately alter input.

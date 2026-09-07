@@ -6141,6 +6141,23 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
   }, [props.isConnected]);
 
+  useEffect(() => {
+    const owner = taskExperienceOwnerRef.current;
+    const sessionId = props.activeSessionId;
+    if (!props.isConnected || owner === null || sessionId === null) return;
+    let closed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const isCurrent = () => !closed && mountedRef.current && isConnectedRef.current
+      && activeSessionRef.current === sessionId && taskExperienceOwnerRef.current === owner;
+    const refresh = async () => {
+      if (!isCurrent()) return;
+      try { await owner.refreshLiveTasks(sessionId, isCurrent); } catch { /* Owner retains the authoritative read failure. */ }
+      if (isCurrent()) timer = setTimeout(() => { void refresh(); }, owner.snapshot().status === 'failed' ? 15_000 : 5_000);
+    };
+    timer = setTimeout(() => { void refresh(); }, 5_000);
+    return () => { closed = true; clearTimeout(timer); };
+  }, [productRequest, props.activeSessionId, props.isConnected]);
+
   const refreshUnifiedTaskProjection = async (value: Readonly<Record<string, unknown>>, sessionId: string, isCurrentActivation: () => boolean = () => true, selectDiscoveredTask = true): Promise<void> => {
     const result = value.result;
     const taskId = result !== null && typeof result === 'object' && !Array.isArray(result)

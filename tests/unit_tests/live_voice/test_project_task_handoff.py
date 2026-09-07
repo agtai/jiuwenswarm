@@ -210,8 +210,8 @@ async def test_accepted_task_waits_through_apply_and_canonical_settlement(handof
 
 
 @pytest.mark.asyncio
-async def test_queued_task_still_rejects_unrelated_dirty_file_after_settlement(handoff):
-    """Catches treating all dirty trees as retryable or accepting unknown files."""
+async def test_queued_task_snapshots_user_edits_after_previous_settlement(handoff):
+    """The queued attempt captures authorized current files only when it starts."""
     h = handoff
     h.finish_body.set()
     await asyncio.wait_for(h.applied.wait(), timeout=15)
@@ -222,12 +222,14 @@ async def test_queued_task_still_rejects_unrelated_dirty_file_after_settlement(h
     await h.core.reconcile_status()
     (h.project / "user-notes.md").write_text("keep my notes\n", encoding="utf-8")
     assert await h.core.drain_outbox_once(worker_id="dirty", observed_at=h.advance())
-    assert h.store.get_task(h.second.task_id, _scope()).outcome is TerminalOutcome.FAILED
-    assert h.executor.calls == 1
-    assert h.adapter._journal.get(h.second.attempt_id) is None
+    await _wait_direct_settled(h.adapter)
+    await h.core.reconcile_status()
+    assert h.store.get_task(h.second.task_id, _scope()).outcome is TerminalOutcome.COMPLETED
+    assert h.executor.calls == 2
+    assert h.adapter._journal.get(h.second.attempt_id) is not None
     assert (h.project / "user-notes.md").read_text(encoding="utf-8") == "keep my notes\n"
     assert (h.project / "result-1.md").read_text(encoding="utf-8") == "result 1\n"
-    assert not (h.project / "result-2.md").exists()
+    assert (h.project / "result-2.md").read_text(encoding="utf-8") == "result 2\n"
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,10 @@ No remote update is authorized. Root [TESTING](../../TESTING.md) owns checks.
 Applicable P/N/B/S/T/C/R/I/F/K/X dimensions are owned by each boundary above;
 physical microphone/speaker evidence belongs to unified candidate acceptance.
 Tests and real Provider/Agent/Executor seams do not claim user-perceived playback.
+R5 conflict detection rejects the whole Task delta before writeback. An OS write
+failure or process crash within writeback retains existing D2 UNKNOWN/manual,
+zero automatic effect retry semantics; no new filesystem transaction is claimed.
+The current conservative dependency domain covers the whole Git-visible project.
 Preserve existing user acceptance Session, private configuration, Agent selection,
 project files, Task state and credentials. Probes use disposable isolated fixtures.
 No automatic commit/stash/reset/clean of user project files, new classifier,

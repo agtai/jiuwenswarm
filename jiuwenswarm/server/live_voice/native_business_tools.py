@@ -42,9 +42,9 @@ _DESCRIPTIONS = {
     "task.list": "Read the current background Task overview. Use this for an overview instead of one status call per Task.",
     "task.status": "Read the status of an exact background Task from server facts.",
     "task.result": "Read the actual result of an exact background Task. Accepted or running does not mean completed.",
-    "task.create": "Create background artifact work only when the user explicitly delegates it. Preserve all requirements.",
-    "task.create_successor": "Create a successor to an exact Task only on the user's explicit request, preserving requirements.",
-    "task.adjust": "Apply the user's explicit change to the exact background Task. A new question alone is not an adjustment.",
+    "task.create": "Create one background artifact Task for an explicitly delegated deliverable. For a changed copy of a project file, include source, all changes, exact destination and preservation of the source in this one Task.",
+    "task.create_successor": "Create one successor to an exact Task on the user's explicit request. A changed result saved under a new filename belongs in this one Task: read the predecessor result, apply every change to the new output, and preserve the source. Do not also adjust the predecessor.",
+    "task.adjust": "Apply the user's explicit change to the exact existing background Task itself. A request for a changed copy saved as a new file uses a new Task instead. A new question alone is not an adjustment.",
     "task.cancel": "Cancel the exact background Task only on the user's explicit request. Speech interruption is not cancellation.",
     "work.start": "Use real Jiuwen Agent/tools for a project or file question or analysis. Call promptly without announcing a plan. This does not create a background Task.",
     "work.list": "Read the current independent analysis work overview.",
@@ -78,7 +78,7 @@ def _property(field: str, operation: str) -> dict[str, object]:
         }
     meaning = {
         "name": "A concise name for the new background Task",
-        "instruction": "The complete analysis or artifact requirements, retaining every relevant user constraint",
+        "instruction": "The complete analysis or artifact requirements, retaining every relevant user constraint. For derived artifacts, specify the source input, all requested transformations, exact output filename and which originals must remain unchanged",
         "adjustment": "The user's requested change to the existing background Task",
     }[field]
     maximum = 256 if field == "name" else 4096

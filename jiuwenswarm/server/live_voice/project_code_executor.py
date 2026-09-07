@@ -496,8 +496,10 @@ def _timestamp_due(value: str, now: str) -> bool:
 
 
 def _git_output(root: Path, *args: str) -> bytes:
+    # Inspection must preserve the user's index bytes, including its stat cache.
+    # Explicit writes (only in the isolated attempt worktree) still take locks.
     completed = subprocess.run(
-        ["git", "-C", str(root), *args],
+        ["git", "--no-optional-locks", "-C", str(root), *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -1349,6 +1351,31 @@ def _applied_result_artifacts(
     return tuple(applied)
 
 
+def _applied_checkpoint_state(root: Path, payload: bytes) -> bytes:
+    """Bind result byte hashes only after proving the complete applied state.
+
+    Git may normalize text bytes during apply. The original pre-dispatch
+    checkpoint stays immutable; the new effect-bound checkpoint records the
+    proven target bytes, using the existing state schema and artifact paths.
+    """
+    state = _decode_d2_checkpoint_state(payload)
+
+    def require_applied() -> None:
+        if (
+            _git_head(root) != state["before_head"]
+            or _target_support_fingerprints(root) != state["protected_support"]
+            or not _expected_project_state_matches(root, str(state["expected_tree"]))
+        ):
+            raise RuntimeError("PROJECT_CHANGE_ATTRIBUTION_FAILED")
+
+    require_applied()
+    artifacts = _applied_result_artifacts(root, state["result_artifacts"])
+    require_applied()
+    encoded = json.loads(payload.decode("utf-8"))
+    encoded["result_artifacts"] = [artifact.to_dict() for artifact in artifacts]
+    return canonical_json_bytes(encoded)
+
+
 def _decode_result_artifacts(value: str | None) -> tuple[TaskResultArtifact, ...]:
     if value is None:
         return ()
@@ -1377,11 +1404,9 @@ def _decode_result_artifacts(value: str | None) -> tuple[TaskResultArtifact, ...
         raise RuntimeError("DIRECT_EXECUTOR_RESULT_CORRUPT") from exc
 
 
-def _apply_attempt_patch(
+def _require_attempt_target_unchanged(
     root: Path,
-    patch: bytes,
     *,
-    expected_tree: str,
     before_tree: str,
     before_head: str,
     protected_support: Mapping[str, str],
@@ -1392,6 +1417,21 @@ def _apply_attempt_patch(
         or _target_support_fingerprints(root) != dict(protected_support)
     ):
         raise RuntimeError("EXECUTION_TARGET_CHANGED_DURING_ATTEMPT")
+
+
+def _apply_attempt_patch(
+    root: Path,
+    patch: bytes,
+    *,
+    expected_tree: str,
+    before_tree: str,
+    before_head: str,
+    protected_support: Mapping[str, str],
+) -> None:
+    _require_attempt_target_unchanged(
+        root, before_tree=before_tree, before_head=before_head,
+        protected_support=protected_support,
+    )
     _git_run_with_input(root, ("apply", "--check", "--binary", "-"), patch)
     _git_run_with_input(root, ("apply", "--binary", "-"), patch)
     if _expected_project_state_matches(root, expected_tree):
@@ -1410,7 +1450,7 @@ def _is_within(path: Path, root: Path) -> bool:
 
 
 def _runtime_support_governance(root: Path) -> dict[str, object]:
-    """Resolve the exact clean-workspace ownership policy for a formal Agent."""
+    """Resolve protected runtime-support ownership for a formal Agent snapshot."""
 
     agent_workspace = get_agent_workspace_dir().resolve(strict=False)
     application_paths = {
@@ -3992,6 +4032,7 @@ class DirectProjectCodeExecutorAdapter:
                 intent.binding,
                 final_prefix,
                 lineage_attempt_id=item.attempt_id,
+                applied_root=root,
             )
             result_artifacts = state["result_artifacts"]
             if result_artifacts:
@@ -4214,7 +4255,8 @@ class DirectProjectCodeExecutorAdapter:
             observed_at=self._clock(),
         )
         await self._append_effect_bound_checkpoint(
-            binding, prefix, lineage_attempt_id=item.attempt_id
+            binding, prefix, lineage_attempt_id=item.attempt_id,
+            applied_root=Path(item.spec.context.file_path),
         )
 
     async def _append_effect_bound_checkpoint(
@@ -4223,6 +4265,7 @@ class DirectProjectCodeExecutorAdapter:
         effect_prefix: VerifiedEffectPrefix,
         *,
         lineage_attempt_id: str,
+        applied_root: Path | None = None,
     ) -> None:
         assert self._durability_store is not None
         read_binding = await asyncio.to_thread(
@@ -4241,6 +4284,11 @@ class DirectProjectCodeExecutorAdapter:
                 ErrorCode.STALE,
             )
         prior = checkpoints.records[-1]
+        state_bytes = prior.state_bytes
+        if applied_root is not None:
+            state_bytes = await asyncio.to_thread(
+                _applied_checkpoint_state, applied_root, state_bytes
+            )
         checkpoint = D1Checkpoint.create(
             checkpoint_id=f"checkpoint-{lineage_attempt_id}-{prior.checkpoint_sequence + 1}",
             scope=prior.scope,
@@ -4256,7 +4304,7 @@ class DirectProjectCodeExecutorAdapter:
             input_digest=prior.input_digest,
             state_schema_id=prior.state_schema_id,
             state_schema_version=prior.state_schema_version,
-            state_bytes=prior.state_bytes,
+            state_bytes=state_bytes,
             effect_head=effect_prefix.head,
             effect_prefix_digest=effect_prefix.prefix_digest,
         )
@@ -4443,6 +4491,7 @@ class DirectProjectCodeExecutorAdapter:
             intent.binding,
             final_prefix,
             lineage_attempt_id=origin_attempt_id,
+            applied_root=root if kind is EffectObservationKind.APPLIED else None,
         )
         return (
             kind.value if kind is EffectObservationKind.APPLIED else "manual_required"
@@ -5398,17 +5447,24 @@ class DirectProjectCodeExecutorAdapter:
                     now=self._clock(),
                 )
                 return
-            target_status = await asyncio.to_thread(
-                _git_output,
-                target_root,
-                "status",
-                "--porcelain=v2",
-                "-z",
-                "--untracked-files=all",
-            )
+            # The expected state includes the accepted user snapshot plus the
+            # task's changes. Its HEAD-relative proof handles Git's text/EOL
+            # normalization even when the input was dirty. Only `patch`, the
+            # delta against the isolated seed index, is ever applied to target.
+            expected_patch = await asyncio.to_thread(_git_visible_patch, worktree)
             expected_tree = _encode_expected_project_state(
                 expected_content,
-                patch=patch if not target_status else None,
+                patch=expected_patch,
+            )
+            # A conflict already observed before intent/dispatch is a known
+            # failed attempt, not an ambiguous external effect requiring repair.
+            # Apply rechecks this after the durable checkpoint is persisted.
+            await asyncio.to_thread(
+                _require_attempt_target_unchanged,
+                target_root,
+                before_tree=record.before_tree,
+                before_head=record.before_head,
+                protected_support=before_support,
             )
             durable_effect = await self._prepare_d2_project_effect(
                 item=item,

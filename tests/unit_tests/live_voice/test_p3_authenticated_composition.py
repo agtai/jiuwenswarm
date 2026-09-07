@@ -67,7 +67,6 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AuthenticatedPrincipal,
     NativeP3ActivationAuthority,
     P3AuthenticatedComposition,
-    PreparedProductionIntentAuthority,
     P3_MUTATIONS,
     P3_OPERATIONS,
     P3_PRODUCTION_OPERATIONS,
@@ -5117,7 +5116,7 @@ async def test_product_registry_uses_real_authority_and_agent_runtime_for_p2(
 
 
 @pytest.mark.asyncio
-async def test_task_dirty_worktree_allows_reads_and_exact_cancel_but_blocks_new_create(
+async def test_task_dirty_worktree_allows_reads_cancel_and_new_create(
     tmp_path: Path,
 ) -> None:
     harness = _harness(tmp_path)
@@ -5156,7 +5155,6 @@ async def test_task_dirty_worktree_allows_reads_and_exact_cancel_but_blocks_new_
         )
         assert cancelled.ok is True
         await _wait_until(lambda: len(harness.executor.cancels) == 1)
-        before_new_create = _store_counts(harness.database)
 
         denied = await harness.composition.handle(
             operation="task.create",
@@ -5165,24 +5163,10 @@ async def test_task_dirty_worktree_allows_reads_and_exact_cancel_but_blocks_new_
             session_id="session-1",
         )
 
-        assert denied.payload["error"]["reason"] == "TASK_CONTEXT_WORKTREE_DIRTY"
-        assert _store_counts(harness.database) == before_new_create
-        assert len(harness.executor.dispatches) == 1
+        assert denied.ok is True, denied.payload
+        await _wait_until(lambda: len(harness.executor.dispatches) == 2)
         assert len(harness.executor.cancels) == 1
-        assert harness.authority.calls[0] == ("session-1", True)
-        assert [
-            require_clean for _session, require_clean in harness.authority.calls
-        ] == [
-            True,
-            False,
-            False,
-            False,
-            True,
-            False,
-            False,
-            True,
-        ]
-        assert harness.authority.calls[-1] == ("session-1", True)
+        assert all(not require_clean for _, require_clean in harness.authority.calls)
     finally:
         await harness.composition.stop()
 
@@ -7372,7 +7356,7 @@ def test_server_resolver_checks_allow_list_before_project_storage(
     assert project_calls == ["project-1"]
 
 
-def test_server_resolver_rejects_false_clean_reader_result(tmp_path: Path) -> None:
+def test_server_resolver_accepts_dirty_input_without_clean_reader_authority(tmp_path: Path) -> None:
     resolver = ServerSessionProjectAuthorityResolver(
         session_reader=lambda _session_id: {
             "project_id": "project-1",
@@ -7388,15 +7372,12 @@ def test_server_resolver_rejects_false_clean_reader_result(tmp_path: Path) -> No
         worktree_clean_reader=lambda _project_dir: False,
     )
 
-    with pytest.raises(FormalTaskViolation) as raised:
-        resolver.resolve(
-            _principal(), session_id="session-1", now=NOW, require_clean=True
-        )
-
-    assert raised.value.reason == "TASK_CONTEXT_WORKTREE_DIRTY"
+    assert resolver.resolve(
+        _principal(), session_id="session-1", now=NOW, require_clean=True
+    ).scope == _scope()
 
 
-def test_server_resolver_accepts_only_exact_scope_managed_worktree(
+def test_server_resolver_does_not_require_managed_baseline_for_user_input(
     tmp_path: Path,
 ) -> None:
     observed: list[tuple[str, ScopeRef]] = []
@@ -7426,7 +7407,7 @@ def test_server_resolver_accepts_only_exact_scope_managed_worktree(
     )
 
     assert resolved.scope == _scope()
-    assert observed == [(str(tmp_path), _scope())]
+    assert observed == []
 
 
 def test_persisted_context_revalidation_uses_current_grant_expiry_and_redaction(
@@ -7494,7 +7475,7 @@ def test_persisted_context_revalidation_uses_current_grant_expiry_and_redaction(
     assert hidden.value.reason == "TASK_CONTEXT_REDACTED"
 
 
-def test_default_server_revision_preserves_dirty_worktree_reason(
+def test_default_server_revision_accepts_authorized_dirty_worktree(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
@@ -7533,31 +7514,13 @@ def test_default_server_revision_preserves_dirty_worktree_reason(
     ).context
     (project / "untracked.txt").write_text("dirty\n", encoding="utf-8")
 
-    with pytest.raises(FormalTaskViolation) as raised:
-        resolver.resolve(
-            _principal(), session_id="session-1", now=NOW, require_clean=True
-        )
-
-    # Authentication and the exact project allow-list were already verified,
-    # so the D-069 retry contract keeps the server-derived Context reason.
-    assert raised.value.reason == "TASK_CONTEXT_WORKTREE_DIRTY"
-    assert (
-        resolver.revalidate(
-            clean_context,
-            principal=_principal(),
-            now=NOW,
-            for_dispatch=False,
-        ).project_id
-        == "project-1"
-    )
-    with pytest.raises(FormalTaskViolation) as dispatch:
-        resolver.revalidate(
-            clean_context,
-            principal=_principal(),
-            now=NOW,
-            for_dispatch=True,
-        )
-    assert dispatch.value.reason == "TASK_CONTEXT_WORKTREE_DIRTY"
+    assert resolver.resolve(
+        _principal(), session_id="session-1", now=NOW, require_clean=True
+    ).context == clean_context
+    for for_dispatch in (False, True):
+        assert resolver.revalidate(
+            clean_context, principal=_principal(), now=NOW, for_dispatch=for_dispatch
+        ).project_id == "project-1"
 
 
 @pytest.mark.asyncio
@@ -8130,7 +8093,7 @@ async def _terminal_task(
 
 
 @pytest.mark.asyncio
-async def test_status_retry_admission_rejects_dirty_context_without_mutation(
+async def test_status_retry_admission_accepts_dirty_context_without_mutation(
     tmp_path: Path,
 ) -> None:
     harness = _harness(tmp_path)
@@ -8173,13 +8136,7 @@ async def test_status_retry_admission_rejects_dirty_context_without_mutation(
         )
 
         assert dirty.ok is True, dirty.payload
-        assert dirty.payload["result"]["retry_admission"] == {
-            "eligible": False,
-            "reason": "TASK_CONTEXT_WORKTREE_DIRTY",
-            "task_id": task_id,
-            "attempt_id": None,
-            "attempt_number": None,
-        }
+        assert dirty.payload["result"]["retry_admission"] == clean.payload["result"]["retry_admission"]
         assert (
             await harness.composition.read_product_status_retry_admission(
                 bearer_token=TOKEN,
@@ -8660,38 +8617,23 @@ async def test_retry_rejects_forged_predecessor_lineage_confirmation(
 
 
 @pytest.mark.asyncio
-async def test_retry_requires_a_clean_checkout_and_performs_no_git_operation(
+async def test_retry_accepts_authorized_dirty_checkout(
     tmp_path: Path,
 ) -> None:
     harness = _harness(tmp_path)
     await harness.composition.start()
     try:
         task_id = await _terminal_task(harness)
-        before = await _effects(harness)
         harness.authority.dirty = True
         harness.authority.calls.clear()
-
-        with pytest.raises(FormalTaskViolation) as prepared:
-            await harness.composition.prepare_mutation_confirmation(
-                operation="task.retry",
-                params=_retry_params(task_id),
-                session_id="session-1",
-            )
-        assert prepared.value.reason == "TASK_CONTEXT_WORKTREE_DIRTY"
-        assert prepared.value.code is ErrorCode.PERMISSION_DENIED
-
+        params = await _issued_retry_params(harness, _retry_params(task_id))
         routed = await harness.composition.handle(
-            operation="task.retry",
-            params=_retry_params(task_id),
-            request_id="request-retry-dirty",
-            session_id="session-1",
+            operation="task.retry", params=params,
+            request_id="request-retry-dirty", session_id="session-1",
         )
-        assert routed.ok is False
-        assert routed.payload["error"]["reason"] == "TASK_CONTEXT_WORKTREE_DIRTY"
-
-        # Every retry authority resolution demanded the clean-worktree guard.
-        assert harness.authority.calls == [("session-1", True), ("session-1", True)]
-        assert await _effects(harness) == before
+        assert routed.ok is True, routed.payload
+        await _wait_until(lambda: len(harness.executor.dispatches) == 2)
+        assert all(not require_clean for _, require_clean in harness.authority.calls)
     finally:
         await harness.composition.stop()
 

@@ -1831,6 +1831,64 @@ function mountedUnifiedTaskFixture(sessionId) {
   return fixture;
 }
 
+test('mounted known Task converges to canonical completion with voice idle and no terminal notification', { timeout: 15000 }, async () => {
+  const i18n = await createI18n('en');
+  const browser = installP1BrowserEnvironment();
+  const sessionId = 'task-refresh-without-voice';
+  const facts = mountedUnifiedTaskFixture(sessionId);
+  facts.visible = true;
+  const states = [], calls = [];
+  let renderer;
+  const request = async (method, params, options) => {
+    calls.push(method);
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.composition.p2.activate') return createMountedP2ActivationResponder()(params);
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p3.progress.activate') return { ok: true,
+      result: mountedProgressActivation(params, { task_id: facts.task.task_id, attempt_id: facts.task.attempt_id }) };
+    if (method === 'live_voice.composition.p3.progress.close') return { ok: true, result: { status: 'closed', ...params } };
+    const reply = facts.read(method, params, options?.requestId);
+    if (facts.task.state === 'terminal' && method === 'live_voice.task.status') {
+      reply.result.attempt.state = 'terminal';
+      reply.result.attempt.outcome = 'completed';
+    }
+    if (facts.task.state === 'terminal' && method === 'live_voice.task.events') {
+      reply.result.head_seq = 1;
+      reply.result.events.push({ ...reply.result.events[0], event_id: 'unified-completed-event', seq: 1,
+        event_type: 'task.terminal', state: 'terminal', outcome: 'completed' });
+    }
+    if (facts.task.state === 'terminal' && method === 'live_voice.task.result') {
+      reply.result.availability = 'unavailable';
+      reply.result.reason = 'TASK_RESULT_UNAVAILABLE';
+    }
+    return reply;
+  };
+  try {
+    await act(async () => { renderer = create(mountedFullyEnabledElement(i18n, sessionId, request, true, {
+      onProductVoiceStateChange: state => states.push(state),
+    })); });
+    await waitForMountedEffects(() => states.at(-1)?.task_experience.status === 'ready'
+      && states.at(-1)?.task_experience.tasks.length === 1, 'initial Task collection missing');
+    const listsBefore = calls.filter(method => method === 'live_voice.task.list').length;
+    facts.task.state = 'terminal';
+    facts.task.outcome = 'completed';
+    facts.task.event_head = 1;
+    try {
+      await waitForMountedEffects(() => calls.filter(method => method === 'live_voice.task.list').length > listsBefore
+        && states.at(-1)?.task_experience.status === 'ready'
+        && states.at(-1)?.task_experience.tasks[0]?.outcome === 'completed', 'Task did not converge without voice', 7000);
+    } catch (error) {
+      throw new Error(`${error.message}; calls=${calls.join(',')}; task=${JSON.stringify(states.at(-1)?.task_experience)}`);
+    }
+    assert.equal(calls.some(method => /(?:submit|intent|mutate|presentation\.ack|speech)/.test(method)), false);
+    await act(async () => renderer.unmount());
+    renderer = null;
+    const readsAtClose = calls.length;
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(calls.length, readsAtClose, 'unmounted Task projection performed another read');
+  } finally { if (renderer) await act(async () => renderer.unmount()); browser.restore(); }
+});
+
 test('mounted unified typed two-turn confirmation discovers the exact authenticated Task without voice origin', { timeout: 20000 }, async () => {
   const i18n = await createI18n('en');
   const browser = installP1BrowserEnvironment();

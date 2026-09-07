@@ -543,7 +543,12 @@ class _ProjectSnapshot:
 
 
 class ServerSessionProjectAuthorityResolver:
-    """Resolve an exact project from persisted server session/registry state."""
+    """Resolve project authority independently of the user's working-tree edits.
+
+    The legacy ``require_clean`` argument is retained for resolver compatibility.
+    Direct execution snapshots and rechecks the authorized current tree; its
+    exclusive project admission and writeback checks own content conflicts.
+    """
 
     def __init__(
         self,
@@ -721,23 +726,9 @@ class ServerSessionProjectAuthorityResolver:
             session_key = _path_key(session_dir)
             root, revision = self._revision_reader(project_dir)
             root_key = _path_key(root)
-            if require_clean:
-                self._require_admissible_worktree(
-                    project_dir,
-                    ScopeRef(
-                        subject_id,
-                        project_id,
-                        session_id,
-                        Assurance.AUTHENTICATED,
-                    ),
-                )
         except FormalTaskViolation:
-            # The authenticated caller already passed the exact project
-            # allow-list before any project storage was consulted. Preserve
-            # negotiated Context/revision reasons such as
-            # TASK_CONTEXT_WORKTREE_DIRTY instead of folding them into a
-            # generic scope denial; D-069 makes those stable reasons part of
-            # retry admission and mutation recovery.
+            # Preserve exact revision/inspection failures after authenticating
+            # the project. Existing user edits are execution input, not denial.
             raise
         except (OSError, RuntimeError, ValueError) as exc:
             raise self._deny_scope() from exc
@@ -813,7 +804,7 @@ class ServerSessionProjectAuthorityResolver:
             session_id=context.scope.session_id or "",
             subject_id=principal.principal_id,
             allowed_project_ids=principal.allowed_project_ids,
-            require_clean=for_dispatch,
+            require_clean=False,
         )
         if context.scope.project_id != snapshot.project_id or _path_key(
             context.file_path or ""
@@ -2765,7 +2756,7 @@ class P3AuthenticatedComposition:
                 principal,
                 session_id=session_id,
                 now=now,
-                require_clean=True,
+                require_clean=False,
             )
             authority.context.require_usable(
                 scope=authority.scope,
@@ -3650,9 +3641,8 @@ class P3AuthenticatedComposition:
                 principal,
                 session_id=clean["session_id"],
                 now=now,
-                # A retry may only start from a clean checkout: D-069 forbids
-                # relaxing TASK_CONTEXT_WORKTREE_DIRTY for the new attempt.
-                require_clean=operation in {"task.create", "task.retry"},
+                # Snapshot content is fixed by exclusive Executor admission.
+                require_clean=False,
             )
             authority.context.require_usable(
                 scope=authority.scope,
@@ -3919,7 +3909,7 @@ class P3AuthenticatedComposition:
                 operation=operation,
                 session_id=_required_text(session_id, "session_id", maximum=256),
                 now=now,
-                require_clean=operation in {"task.create", "task.create_successor"},
+                require_clean=False,
                 native_authority=native_authority,
             )
             destructive = operation in P3_PRODUCTION_MUTATIONS
@@ -4638,7 +4628,7 @@ class P3AuthenticatedComposition:
                     operation=operation,
                     session_id=str(session_id or "").strip(),
                     now=now,
-                    require_clean=operation in {"task.create", "task.retry"},
+                    require_clean=False,
                 )
                 principal = _native_authority.principal
             clean = self._validate_params(
@@ -4652,9 +4642,8 @@ class P3AuthenticatedComposition:
                 principal,
                 session_id=clean["session_id"],
                 now=now,
-                # A retry may only start from a clean checkout: D-069 forbids
-                # relaxing TASK_CONTEXT_WORKTREE_DIRTY for the new attempt.
-                require_clean=operation in {"task.create", "task.retry"},
+                # Snapshot content is fixed by exclusive Executor admission.
+                require_clean=False,
             )
             destructive = operation in P3_MUTATIONS
             authority.context.require_usable(
