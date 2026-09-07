@@ -729,7 +729,11 @@ async def test_business_session_seeds_json_facts_and_only_explicit_tool():
     engine, socket, _ = await started_business_engine()
     try:
         update = socket.sent[0]["session"]
-        assert [tool["name"] for tool in update["tools"]] == ["jiuwen_business"]
+        assert {tool["name"] for tool in update["tools"]} == {
+            "jiuwen_context_get", "jiuwen_task_list", "jiuwen_task_status", "jiuwen_task_result",
+            "jiuwen_task_create", "jiuwen_task_create_successor", "jiuwen_task_adjust", "jiuwen_task_cancel",
+            "jiuwen_work_start", "jiuwen_work_list", "jiuwen_work_get", "jiuwen_work_update", "jiuwen_work_cancel",
+        }
         assert update["tool_choice"] == "auto"
         seed = socket.sent[1]["item"]
         assert json.loads(seed["content"][0]["text"]) == {"native_business_context": business_context()}

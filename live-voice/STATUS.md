@@ -33,6 +33,9 @@ Main owns parallel work, shared semantics, review and local integration. The
 automation/review credit for passive diagnostics, argument descriptions and
 equivalent receipt encoding. P0 transport/argument/endpoint observations and
 offline identity-safe timing now have scoped automation and independent review.
+P1 operation-specific Provider tools retain the authoritative v1 carrier and
+have scoped automation, independent review and real selected-Provider schema/call
+conformance; first-call accuracy improvement and physical latency remain unproved.
 The remaining implementation continues independently
 of evidence synchronization. Original rehearsal files are absent locally; full
 optimization, measured latency and physical acceptance remain unproved. The

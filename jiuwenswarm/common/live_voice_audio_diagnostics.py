@@ -115,7 +115,8 @@ FAILURE_CODES = frozenset({
 _LABELS = {
     "argument_field": frozenset({"arguments", "request_text", "action", "action.operation",
         "action.context_id", "action.target_id", "action.expected_revision", "action.name",
-        "action.instruction", "action.adjustment"}),
+        "action.instruction", "action.adjustment", "context_id", "target_id",
+        "expected_revision", "name", "instruction", "adjustment"}),
     "argument_type": frozenset({"missing", "null", "string", "boolean", "integer",
         "number", "object", "array", "unknown"}),
     "proxy_route_hint": frozenset({"direct", "http", "https", "socks5", "socks5h", "socks4", "socks4a", "unknown"}),

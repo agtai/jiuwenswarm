@@ -76,3 +76,47 @@ These observations enable a new comparison; they do not restore the missing
 rehearsal, determine actual speech end from a Provider offset, establish factual
 answer quality or prove any latency reduction. Source-qualified fact policy is
 also part of P4's formal answer boundary.
+
+### P1 — Operation-specific Provider tools
+
+The Provider receives 13 simple flat tools. Their names select existing operations;
+the adapter fills only internal unused null fields and invokes unchanged action,
+proposal and carrier validation. Legacy `jiuwen_business` input remains readable
+but is not advertised alongside the new tools. Unsupported names, unknown fields,
+duplicate JSON keys, malformed/oversized/deep input and invalid required text
+reject without inferred values. Flat rejection metadata survives the real sink.
+The Engine keeps its original call fingerprint, sibling settlement, two-round
+correction limit, target/context authority and cancellation behavior.
+
+The complete schema grows from 3,386 to 13,123 UTF-8 bytes; representative generated
+arguments shrink (`work.start` 345→237, `task.adjust` 316→248, `task.status` 279→168).
+These are synthetic serialization sizes. The change removes irrelevant generated
+fields; it does not claim lower total input cost or improved first-call accuracy.
+
+Checks use root Python, isolated `logs/p1-data`, and the P0 pytest options:
+
+- New tools + existing contract/carrier in the worker: 104 passed.
+- Integrated tools, contract, Engine and business diagnostics: 273 passed.
+- New `test_native_named_tools_engine.py`: 16 passed, including all 13 operations,
+  same-turn invalid adjustment correction alongside accepted work, original call-ID
+  conflict and cancelled-response zero business/audio effects.
+- Independent review: 113 tools/Engine/diagnostic checks and 24 existing correction,
+  conflict/recovery/compatibility checks passed. An additional in-memory probe
+  rejected all 13 tools with business disabled and zero delegate/audio/receipt/ACK
+  or new Provider-send effects. No actionable findings. Scoped Ruff `F,E9` and
+  `git diff --check` passed.
+
+Real selected-Provider conformance used the existing private Speech configuration
+and `gpt-realtime-2`, with synthetic server facts and user requests. No Registry,
+Agent, Tool or Task was executed. Both named and legacy schemas negotiated, and
+both `work.start` and `task.adjust` produced valid first calls with the expected
+operation/context/target/revision in two runs. This is Provider→production-decoder
+evidence, not the full business or physical journey. First-call times vary between
+samples; four cases per run are insufficient for a latency/success-rate claim.
+
+The local probe is retained at `logs/p1_provider_probe.py`, with content-free
+`logs/p1-provider-evidence-initial.json` and `logs/p1-provider-evidence.json`.
+The first run sampled the normal 25ms cleanup budget and reported `closed=false`;
+that missing cleanup evidence was retained. The second run gave the probe a
+bounded two-second close wait and verified all four sessions closed. Production
+cleanup settings and model/provider configuration were not changed.
