@@ -2172,6 +2172,8 @@
       "routeLabel": "P1 · Gateway Speech · 正式路线",
       "editorLabel": "语音识别文本",
       "recoveryFailed": "语音连接恢复失败",
+      "replyFailedListening": "刚才的回答遇到问题，麦克风仍在聆听。",
+      "failureDetails": "查看详情",
       "replacementRecognitionFailed": "刚才的回答已被打断，但没有成功识别新的问题。请再说一次。",
       "processingListening": "正在处理，可随时打断",
       "preparingAudio": "正在准备语音播放",

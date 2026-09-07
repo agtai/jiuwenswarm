@@ -1335,29 +1335,18 @@ export function ChatPanel({
 
   const { status: formalVoiceVisualState, label_key: formalActivityLabel } = formalProductVoiceActivity(productVoiceState);
   const inputAvailableAfterReplyFailure = productVoiceInputAvailableAfterReplyFailure(productVoiceState);
-  const recoveryDiagnostic = inputAvailableAfterReplyFailure ? null : productVoiceState?.recovery_diagnostic ?? null;
-  const recoveryGeneration = recoveryDiagnostic?.response_generation ?? recoveryDiagnostic?.activation_generation ?? '-';
+  const recoveryDiagnostic = productVoiceState?.recovery_diagnostic ?? null;
   const formalStatusLabel = productVoiceState?.replacement_recognition_failed
     ? t('liveVoice.formal.replacementRecognitionFailed')
     : recoveryDiagnostic
-    ? t(
-        recoveryDiagnostic.disposition === 'retrying'
-          ? 'liveVoice.formal.recoveryRetryingWithContext'
-          : 'liveVoice.formal.recoveryTerminalWithContext',
-        {
-          seam: t(`liveVoice.formal.recoverySeam.${recoveryDiagnostic.seam}`),
-          correlationId: recoveryDiagnostic.correlation_id,
-          generation: recoveryGeneration,
-          reason: recoveryDiagnostic.reason,
-        },
-      )
+    ? t(formalActivityLabel)
     : productVoiceState?.interruption_degraded_reason
       ? t('liveVoice.formal.interruptionDegraded', {
           reason: productVoiceState.interruption_degraded_reason,
         })
     : t(formalActivityLabel);
   const formalVoiceErrorReason =
-    inputAvailableAfterReplyFailure ? null : recoveryDiagnostic?.disposition === 'terminal'
+    recoveryDiagnostic?.disposition === 'terminal'
       ? recoveryDiagnostic.reason
       : productVoiceState?.text_status === 'failed' && productVoiceState.text_reason
       ? productVoiceState.text_reason
@@ -1377,14 +1366,11 @@ export function ChatPanel({
     interimTranscript: '',
     committedTranscript: productVoiceState?.input || '',
     errorMessage:
-      formalVoiceVisualState === 'error'
-        ? formalVoiceErrorReason
-          ? t('liveVoice.formal.recoveryFailedWithReason', {
-              phase: formalVoiceErrorPhase,
-              reason: formalVoiceErrorReason,
-            })
-          : t('liveVoice.formal.recoveryFailed')
+      recoveryDiagnostic?.disposition === 'terminal' || formalVoiceVisualState === 'error'
+        ? t(inputAvailableAfterReplyFailure ? 'liveVoice.formal.replyFailedListening' : 'liveVoice.formal.recoveryFailed')
         : '',
+    errorDetails: formalVoiceErrorReason
+      ? t('liveVoice.formal.recoveryFailedWithReason', { phase: formalVoiceErrorPhase, reason: formalVoiceErrorReason }) : '',
     statusLabel: formalStatusLabel,
     handsFree: true,
     onEnable: () => {

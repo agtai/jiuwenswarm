@@ -2174,6 +2174,8 @@
       "routeLabel": "P1 · Gateway Speech · formal",
       "editorLabel": "Recognized speech",
       "recoveryFailed": "Voice connection recovery failed",
+      "replyFailedListening": "The last reply encountered a problem. The microphone is still listening.",
+      "failureDetails": "View details",
       "replacementRecognitionFailed": "The previous answer was interrupted, but the new question could not be recognized. Please say it again.",
       "processingListening": "Processing — you can interrupt",
       "preparingAudio": "Preparing audio playback",

@@ -10003,6 +10003,7 @@ test('mounted hands-free error stays separate from transcript, retries listening
             ...common,
             active: true,
             errorMessage: 'Voice connection recovery failed.',
+            errorDetails: 'response_generation: REALTIME_TRANSPORT_SEND_FAILED',
           }),
         ),
       );
@@ -10012,6 +10013,10 @@ test('mounted hands-free error stays separate from transcript, retries listening
     });
     assert.equal(transcript.children[0], 'Move dinner to 19:00.');
     assert.equal(renderer.root.findByProps({ role: 'alert' }).findByType('span').children[0], 'Voice connection recovery failed.');
+    const details = renderer.root.findByType('details');
+    assert.notEqual(details.props.open, true);
+    assert.equal(details.findByType('summary').children[0], 'View details');
+    assert.equal(details.findByType('div').children[0], 'response_generation: REALTIME_TRANSPORT_SEND_FAILED');
     const retry = renderer.root.findAllByProps({ className: 'live-voice-demo__primary' })[0];
     assert.equal(retry.findByProps({ className: 'live-voice-demo__primary-label' }).children[0], 'Listen again');
     await act(async () => retry.props.onClick());
@@ -16449,9 +16454,7 @@ for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while
       assert.equal(states.at(-1).recovery_diagnostic.seam, 'response_generation');
       assert.equal(states.at(-1).recovery_diagnostic.disposition, 'terminal');
       assert.equal(states.at(-1).text_reason, 'NATIVE_RUNTIME_RESPONSE_INVALID');
-      assert.equal(messages.length, 1,
-        'only the authoritative Native turn failure may insert the chat message');
-      assert.match(messages.at(-1).message.content, /NATIVE_RUNTIME_RESPONSE_INVALID/u);
+      assert.equal(messages.length, 0, 'Native faults belong to status details, not assistant messages');
       if (verify === 'fatal_audio') assert.ok(browser.counts.sourceStarts > 0);
       else assert.equal(browser.counts.sourceStarts, 0);
       assert.equal(calls.some(method => /unified.submit|speech.recognize|presentation.ack|task.create|task.cancel/u.test(method)), false);
@@ -16463,15 +16466,14 @@ for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while
     assert.equal(states.at(-1).p1_status, 'capturing');
     assert.equal(states.at(-1).recovery_diagnostic.disposition, 'terminal');
     assert.equal(formalProductVoiceActivity(states.at(-1)).status, 'listening');
-    assert.equal(messages.length, 1);
-    assert.match(messages[0].message.id, /^live-voice-failure:/);
+    assert.equal(messages.length, 0);
     if (verify === 'next_failure') {
       await deliver(notification(3, 'processing'));
       await deliver(notification(4, 'failed'));
-      assert.equal(messages.length, 2);
-      assert.notEqual(messages[0].message.id, messages[1].message.id);
+      assert.equal(messages.length, 0);
+      assert.equal(states.at(-1).recovery_diagnostic.reason, 'NATIVE_DELEGATE_AGENT_TIMEOUT');
       await deliver(notification(4, 'failed'));
-      assert.equal(messages.length, 2, 'replayed terminal cannot add a third failure');
+      assert.equal(messages.length, 0, 'replayed terminal cannot insert a failure answer');
       return;
     }
     await act(async () => { await controlRef.current.start(); });
@@ -16491,7 +16493,7 @@ for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while
     await deliver(audio);
     assert.equal(states.at(-1).text_status, 'acknowledged');
     assert.equal(states.at(-1).p1_status, 'capturing');
-    assert.equal(messages.length, 1); // failure remains visible; obsolete audio produced no reply
+    assert.equal(messages.length, 0); // interruption and obsolete audio produce no extra reply
     assert.equal(calls.filter(method => method === 'live_voice.media.activate').length, 1);
     assert.equal(calls.some(method => /unified.submit|speech.recognize|presentation.ack|task.create|task.cancel/u.test(method)), false);
     if (verify === 'text') {

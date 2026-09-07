@@ -78,6 +78,7 @@ export interface LiveVoiceDemoBarProps {
   interimTranscript: string;
   committedTranscript?: string;
   errorMessage?: string;
+  errorDetails?: string;
   unavailableMessage?: string;
   routeLabel?: string;
   /** Always-visible warning shown before any task command can dispatch. */
@@ -372,6 +373,7 @@ export function LiveVoiceDemoBar({
   interimTranscript,
   committedTranscript = '',
   errorMessage = '',
+  errorDetails = '',
   unavailableMessage,
   routeLabel,
   taskSafetyDisclosure,
@@ -516,6 +518,12 @@ export function LiveVoiceDemoBar({
           <div className="live-voice-demo__error" role="alert" aria-live="assertive">
             <AlertCircle size={15} strokeWidth={2} aria-hidden="true" />
             <span>{visibleError}</span>
+            {errorDetails && (
+              <details>
+                <summary>{t('liveVoice.formal.failureDetails')}</summary>
+                <div>{errorDetails}</div>
+              </details>
+            )}
           </div>
         )}
 

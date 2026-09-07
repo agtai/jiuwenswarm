@@ -2406,11 +2406,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const isNative = p1VoiceOwnerRef.current?.interactionEngine() === 'openai-realtime-native' ||
       (input.binding != null && nativeRequestStateRef.current?.binding ===
         JSON.stringify([sessionId, input.binding.activation_id, input.binding.activation_generation]));
-    if (input.disposition === 'terminal' && input.seam === 'response_generation' &&
-        (!isNative || input.nativeTurnId !== undefined)) {
-      // Only the authoritative Native request failure owns the chat message.
-      // Media errors can precede its turn notification; retain those diagnostics
-      // without guessing a turn or inserting a competing failure message.
+    if (!isNative && input.disposition === 'terminal' && input.seam === 'response_generation') {
+      // Native failures belong to the status area. Its original generated row
+      // retains the interruption state without inserting an assistant answer.
       const failureIdentity = input.nativeTurnId !== undefined
         ? `native:${diagnostic.activation_generation}:${input.nativeTurnId}`
         : `${diagnostic.response_id ?? diagnostic.reason}:${diagnostic.response_generation ?? 0}`;

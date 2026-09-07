@@ -1262,7 +1262,15 @@ class OpenAIRealtimeNativeInteractionEngine:
                 response.terminal_status = prepared.output.terminal_status
             self._locally_fenced.add(response.provider_response_id)
             self._profile_business("continuation_discarded", response=response, reason=reason)
-            self._continuation_failures.append((prepared.request.turn_id, reason))
+            # Unpublished preparation is routinely retired by user speech or
+            # fresher work. Keep cancellation/cleanup and diagnostics, without
+            # turning the accepted user request into a presentation failure.
+            if reason not in {
+                "NATIVE_PREPARED_RESPONSE_INTERRUPTED",
+                "NATIVE_PREPARED_RESPONSE_SUPERSEDED",
+                "NATIVE_PREPARED_ADMISSION_RETIRED",
+            }:
+                self._continuation_failures.append((prepared.request.turn_id, reason))
             self._local_output_ready.set()
         elif not retry:
             prepared.retry = False

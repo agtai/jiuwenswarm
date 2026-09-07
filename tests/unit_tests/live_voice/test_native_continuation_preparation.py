@@ -274,6 +274,7 @@ async def test_unadmitted_function_cleanup_is_explicitly_unsupported_and_no_new_
         while (failure := engine.take_continuation_failure()) is not None:
             failures.append(failure[1])
         assert "NATIVE_PREPARED_CONTEXT_CLEANUP_UNSUPPORTED" in failures
+        assert "NATIVE_PREPARED_RESPONSE_INTERRUPTED" not in failures
         await feed(engine, socket, speech_stopped("e2", "u2", 1200))
         commit = await feed(engine, socket, input_committed("c2", "u2"))
         await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
@@ -309,6 +310,7 @@ async def test_work_revision_removed_during_refresh_cannot_promote():
         assert engine._prepared.output.discarded
         assert engine._responses["p2"].runtime_ref is None
         assert engine.snapshot().released_audio_count == 1
+        assert engine.take_continuation_failure() is None
     finally:
         await engine.close()
 
@@ -327,6 +329,29 @@ async def test_membership_loss_between_speak_and_admission_cleans_unpublished_bu
         with pytest.raises(OpenAIRealtimeNativeInteractionError):
             await engine.admit_response("p2", response_ref(2))
         assert engine.snapshot().released_audio_count == 1
+        assert engine.take_continuation_failure() is None
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_normal_speech_interrupt_retires_prepared_audio_without_request_failure():
+    engine, socket, _ = await preparing_engine()
+    try:
+        await feed(engine, socket, output_audio_delta("a2", "p2", "audio2", 0))
+        stop = await feed(engine, socket, speech_started("s2", "u2", 700))
+        assert stop.action.operation == "STOP"
+        assert action_payload(stop)["provider_response_id"] == "p1"
+        assert engine.take_continuation_failure() is None
+        assert engine._prepared.output.discarded
+        assert engine._responses["p2"].runtime_ref is None
+        assert engine.snapshot().released_audio_count == 1
+        assert not engine._delegates
+        await engine.stop_foreground(response_ref(1))
+        assert (await engine.next_event()).action.operation == "LISTEN"
+        await feed(engine, socket, response_done("d2", "p2", status="cancelled"))
+        assert engine.take_continuation_failure() is None
+        assert len(requests(socket)) == 2
     finally:
         await engine.close()
 
