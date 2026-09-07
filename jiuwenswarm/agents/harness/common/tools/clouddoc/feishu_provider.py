@@ -199,10 +199,20 @@ class FeishuDocsProvider(DocProvider):
         binary: str = "lark-cli",
         self_open_id: str = "",
         agent_roster: tuple[str, ...] = (),
+        identity: str = "bot",
+        display_name: str = "",
     ) -> None:
         # The app's secret is registered with the CLI once (``config init``) and lives
         # in its store; a connection names a profile, never a secret.
-        self._cli = LarkCli(binary=binary, profile=profile)
+        #
+        # ``identity`` is ``bot`` for a service connection and ``user`` for a personal
+        # one (design §13 / matrix S.1). A personal provider acts as the logged-in
+        # person: its writes are that person's on the platform, and ``self_open_id``
+        # is then the person's own open_id -- which makes ``author_is_self`` mean
+        # "written by me or by my agent", the two being one identity there.
+        self._cli = LarkCli(binary=binary, profile=profile, identity=identity)
+        self._personal = identity == "user"
+        self._preset_name = display_name
         # The bot's own open_id, which is how its own comments are recognised. Left
         # empty it is fetched once on first use; see self_identity.
         self._self_open_id = self_open_id
@@ -247,6 +257,23 @@ class FeishuDocsProvider(DocProvider):
     @property
     def kind(self) -> str:
         return "feishu"
+
+    @property
+    def personal(self) -> bool:
+        """Whether this provider acts as a person rather than as a service identity.
+
+        Read by the toolkit (which signs replies and names the executor after the
+        person), by the routing layer (which prefers the service identity where a
+        document is reachable both ways) and by the registry (which gives a personal
+        connection a notify-only watcher). A provider without the attribute is a
+        service one -- every provider written before this flag existed.
+        """
+        return self._personal
+
+    @property
+    def identity_address(self) -> str:
+        """The account address this provider acts as, once known (the open_id)."""
+        return self._self_open_id or ""
 
     @property
     def text_domain(self) -> TextDomain:
@@ -303,6 +330,8 @@ class FeishuDocsProvider(DocProvider):
     async def self_identity(self) -> AgentIdentity:
         if self._identity is not None:
             return self._identity
+        if self._personal:
+            return await self._self_identity_as_user()
         # `whoami` is a top-level command and reports the effective identity, which
         # under --as bot is the app. ASSUMPTION (spike 9): the open_id it returns is
         # the one that appears as the author of the bot's own comments. Falsified if
@@ -319,6 +348,52 @@ class FeishuDocsProvider(DocProvider):
         self._identity = AgentIdentity(
             display_name=name or "bot", address=self._self_open_id or None
         )
+        return self._identity
+
+    async def _self_identity_as_user(self) -> AgentIdentity:
+        """The logged-in person's identity, for a personal connection.
+
+        ``whoami --as user`` reports the token state and, on some CLI versions, the
+        open_id; where it does not, the platform's own ``authen/v1/user_info`` is the
+        authoritative answer (it is what the user access token *is* the token of). A
+        missing login surfaces as the CLI's ``auth`` error, whose hint names the
+        command to run -- the person reads "lark-cli auth login" rather than a bare
+        failure.
+
+        The open_id is the address: it is what a mention names and what a comment's
+        ``user_id`` carries, so it is the one value that lets "written by me" be
+        decided by id rather than by display name.
+        """
+        data = await self._cli.json(["whoami"])
+        if not isinstance(data, dict):
+            data = {}
+        if data.get("available") is False or str(data.get("tokenStatus") or "") == "missing":
+            raise ProviderError(
+                "auth",
+                "飞书个人身份未登录：请在本机运行 `lark-cli auth login`（选择 docs、drive 域），"
+                "扫码登录后再添加个人连接。",
+            )
+        open_id = str(_first(data, "open_id", "openId", "user_open_id", default="") or "")
+        name = str(_first(data, "name", "user_name", "display_name", default="") or "")
+        email = str(_first(data, "email", "enterprise_email", default="") or "")
+        if not open_id or not name:
+            info = await self._cli.json(["api", "GET", "/open-apis/authen/v1/user_info"])
+            if isinstance(info, dict):
+                open_id = open_id or str(_first(info, "open_id", default="") or "")
+                name = name or str(_first(info, "name", "en_name", default="") or "")
+                email = email or str(_first(info, "email", "enterprise_email", default="") or "")
+        # A preset open_id (from the connection file) wins, as it does for the bot:
+        # the file is the identity the registry anchored the connection on.
+        self._self_open_id = self._self_open_id or open_id
+        if not self._self_open_id:
+            raise ProviderError(
+                "auth", "无法取得个人身份的 open_id；请确认 lark-cli 已以用户身份登录。"
+            )
+        self._identity = AgentIdentity(
+            display_name=name or self._preset_name or self._self_open_id,
+            address=self._self_open_id,
+        )
+        self._identity_email = email
         return self._identity
 
     async def _title_from_meta(self, doc_ref: DocRef) -> str:
@@ -414,13 +489,24 @@ class FeishuDocsProvider(DocProvider):
         members = _first(data, "items", "members", default=[]) or []
         app_id = str(_first(data, "app_id", default="") or "") or self._app_id_hint()
         perm = ""
-        for m in members:
-            mid = str(_first(m, "member_id", "open_id", "id", default="") or "")
-            mtype = str(_first(m, "member_type", "type", default="") or "").lower()
-            if mtype in ("appid", "app") or mid.startswith("cli_"):
-                perm = str(_first(m, "perm", "permission", "role", default="") or "").lower()
-                if not app_id or mid == app_id:
+        if self._personal:
+            # A person's own row is the one carrying their open_id. The app-row
+            # heuristic below would find the *bot* of whichever app the CLI is bound
+            # to, which is not who is acting here.
+            me = (self._self_open_id or "").strip()
+            for m in members:
+                mid = str(_first(m, "member_id", "open_id", "id", default="") or "")
+                if me and mid == me:
+                    perm = str(_first(m, "perm", "permission", "role", default="") or "").lower()
                     break
+        else:
+            for m in members:
+                mid = str(_first(m, "member_id", "open_id", "id", default="") or "")
+                mtype = str(_first(m, "member_type", "type", default="") or "").lower()
+                if mtype in ("appid", "app") or mid.startswith("cli_"):
+                    perm = str(_first(m, "perm", "permission", "role", default="") or "").lower()
+                    if not app_id or mid == app_id:
+                        break
         if not perm and members:
             # A single-member list is the bot's own view of its own access.
             perm = str(_first(members[0], "perm", "permission", "role", default="") or "").lower()
@@ -1146,9 +1232,9 @@ class FeishuDocsProvider(DocProvider):
             if exc.kind in ("forbidden", "unsupported", "invalid"):
                 if self._discovery_available is not False:
                     logger.info(
-                        "[clouddoc] 飞书应用无法枚举共享文件（%s），发现功能降级；"
+                        "[clouddoc] 飞书%s无法枚举共享文件（%s），发现功能降级；"
                         "请在面板中粘贴文档链接纳管。",
-                        exc.kind,
+                        "个人身份" if self._personal else "应用", exc.kind,
                     )
                 self._discovery_available = False
                 return []

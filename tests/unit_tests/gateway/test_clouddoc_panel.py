@@ -350,10 +350,13 @@ def test_legacy_single_connection_config_still_reads():
     so a deployed config needs no edit."""
     legacy = {"credentials_file": "/k.json", "documents": ["a", "b"]}
     assert read_connection_specs(legacy) == [
-        {"credentials_file": "/k.json", "documents": ["a", "b"]}
+        {"credentials_file": "/k.json", "documents": ["a", "b"], "kind": "service"}
     ]
+    # An entry written before ``kind`` existed reads as a service connection.
     new = {"connections": [{"credentials_file": "/k2.json", "documents": []}]}
-    assert read_connection_specs(new) == [{"credentials_file": "/k2.json", "documents": []}]
+    assert read_connection_specs(new) == [
+        {"credentials_file": "/k2.json", "documents": [], "kind": "service"}
+    ]
     assert read_connection_specs({}) == []
 
 

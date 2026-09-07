@@ -9099,6 +9099,10 @@ class JiuWenSwarmDeepAdapter:
                         build_routed_provider,
                     )
 
+                    from jiuwenswarm.agents.harness.common.tools.clouddoc.provider import (
+                        identity_choice_for,
+                    )
+
                     provider, credentials_file = build_routed_provider(
                         specs,
                         build=build_provider,
@@ -9107,6 +9111,11 @@ class JiuWenSwarmDeepAdapter:
                         ),
                         agent_roster=_roster,
                         log=logger,
+                        # S.2: which identity executes on a document adopted both
+                        # ways, read live from the config; service by default.
+                        choice_of=lambda d: identity_choice_for(
+                            get_config().get("clouddoc") or {}, d
+                        ),
                     )
             except Exception:  # noqa: BLE001 - a corrupt key must not end session setup
                 logger.exception("[clouddoc] provider 初始化失败，跳过工具注册")
@@ -9212,6 +9221,9 @@ class JiuWenSwarmDeepAdapter:
                 # must resolve the same path, so both read the same config key.
                 workmode_file=str(clouddoc_cfg.get("workmode_file") or ""),
                 workmode_prefer_zh=_workmode_prefer_zh(clouddoc_cfg),
+                # S.5: the person's half of the personal-identity signature. The
+                # receipt number is appended by the toolkit and is not in this string.
+                signature_template=str(clouddoc_cfg.get("personal_signature") or ""),
             )
 
 
@@ -15937,7 +15949,12 @@ def _clouddoc_self_address(credentials_file: str) -> str:
 
     try:
         with open(credentials_file, encoding="utf-8") as fh:
-            return str(_json.load(fh).get("client_email") or "")
+            data = _json.load(fh)
+        # A Google key names its SA; a Feishu file names the bot (``bot_open_id``)
+        # or, for a personal connection, the person (``open_id``).
+        return str(
+            data.get("client_email") or data.get("open_id") or data.get("bot_open_id") or ""
+        )
     except Exception:  # noqa: BLE001 - a missing address only weakens filtering
         return ""
 

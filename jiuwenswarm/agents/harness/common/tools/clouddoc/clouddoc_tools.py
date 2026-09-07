@@ -390,7 +390,15 @@ class CloudDocToolkit:
         ask_channel: bool | None = None,
         grant_checker: Callable[[str], bool] | None = None,
         harness_mode: str = "mandate",
+        signature_template: str | None = None,
     ) -> None:
+        # The person's half of the personal-identity signature (S.5). Read here as a
+        # plain string so the library stays host-free; the host reads the config key.
+        # An empty value is not "no signature" -- see signature.py.
+        self._signature_template = signature_template
+        # Display names by provider, so the signature is rendered once per identity
+        # rather than asking the platform on every reply.
+        self._identity_names: dict[int, str] = {}
         # IC-3's pre-write query point, as a protocol rather than a registry class:
         # the mechanism needs "is this document's write authority still live", not a
         # particular storage. None keeps today's default (the gateway's cross-process
@@ -458,6 +466,54 @@ class CloudDocToolkit:
         # arguments would prove nothing: the model picks a doc_id and passes it, which
         # looks identical whether the user named the document or the model guessed.
         self._user_text = user_text or (lambda: "")
+
+    # ------------------------------------------------------------ identity
+
+    def _owner(self, doc_id: str | None) -> Any:
+        """The provider that actually acts on ``doc_id``: the routed surface's owner
+        when there is one, else the single provider."""
+        owner = getattr(self._provider, "owner", None)
+        if owner is None or not doc_id:
+            return self._provider
+        try:
+            return owner(str(doc_id))
+        except Exception:  # noqa: BLE001 - routing must not take a tool down
+            return self._provider
+
+    def _is_personal(self, doc_id: str | None) -> bool:
+        """Whether the identity acting on ``doc_id`` is a person's own (S.1)."""
+        return bool(getattr(self._owner(doc_id), "personal", False))
+
+    def _executor_for(self, doc_id: str | None) -> str:
+        """Who commissions a write on ``doc_id``, for the receipt ledger.
+
+        A service identity records the surface's label (``chat``, or ``mcp:<client>``).
+        A personal identity records ``chat:<address>`` -- the person, by the address
+        the platform knows them by -- because the receipt is the one place the
+        executing identity is written down at all: on the platform the edit is simply
+        the person's (S.2, "the receipt records the identity that actually executed").
+        """
+        host = self._owner(doc_id)
+        if bool(getattr(host, "personal", False)):
+            address = str(getattr(host, "identity_address", "") or "").strip()
+            return f"chat:{address}" if address else "chat:personal"
+        return self._executor_label
+
+    async def _identity_name(self, host: Any) -> str:
+        key = id(host)
+        cached = self._identity_names.get(key)
+        if cached:
+            return cached
+        name = ""
+        try:
+            ident = await host.self_identity()
+            name = str(getattr(ident, "display_name", "") or "")
+        except Exception:  # noqa: BLE001 - the signature falls back to the address
+            name = ""
+        name = name or str(getattr(host, "identity_address", "") or "")
+        if name:
+            self._identity_names[key] = name
+        return name
 
     # ------------------------------------------------------------ authorization
 
@@ -871,11 +927,58 @@ class CloudDocToolkit:
                 "这条评论已解决；回复它会把它重新打开。如果确实要继续这条线程，"
                 "请让文档里的人先重新打开它。"
             )
+        if self._is_personal(canonical):
+            return await self._reply_as_person(canonical, comment_id, content)
         try:
             reply_id = await self._provider.reply_comment(canonical, comment_id, content)
         except ProviderError as exc:
             return _fail(f"回复失败（{exc.kind}）：{exc}")
         return _ok(reply_id=reply_id)
+
+    async def _reply_as_person(self, doc_id: str, comment_id: str, content: str) -> dict:
+        """A reply under a personal identity: ledger entry first, signature last.
+
+        On the platform this post is the person's own -- nothing marks it as an
+        agent's -- so the signature line is the only in-document signal, and the
+        receipt number in it is what ties the line to the ledger (S.5). The order is
+        write-ahead like every other receipt: the entry exists before the post, so a
+        crash between the two leaves a pending receipt rather than an unsigned post
+        nobody can trace. Without a ledger there is nothing to sign with, and the
+        reply is refused rather than posted bare.
+        """
+        from jiuwenswarm.agents.harness.common.tools.clouddoc.signature import sign_reply
+
+        host = self._owner(doc_id)
+        sink = getattr(host, "receipt_sink", None)
+        if sink is None:
+            return _fail(
+                "个人身份回帖需要回执通道，而当前没有；回帖未发出。"
+                "请检查部署配置（clouddoc.mode 为 direct 时没有回执）。"
+            )
+        executor = self._executor_for(doc_id)
+        name = await self._identity_name(host)
+        try:
+            rid = sink.begin(
+                doc_id, [], highlight=False, executor=executor, source="reply_comment",
+                op="reply", subject={"comment_id": comment_id, "signed_as": name},
+            )
+        except Exception as exc:  # noqa: BLE001 - no entry, no signature, no post
+            logger.exception("[clouddoc] reply receipt failed doc=%s", doc_id)
+            return _fail(f"回执写入失败，回帖未发出：{exc}")
+        signed = sign_reply(content, self._signature_template, name=name, receipt_id=rid)
+        try:
+            reply_id = await host.reply_comment(doc_id, comment_id, signed)
+        except ProviderError as exc:
+            try:
+                sink.abort(rid, reason=f"{exc.kind}: {exc}")
+            except Exception:  # noqa: BLE001
+                logger.exception("[clouddoc] reply receipt abort failed rid=%s", rid)
+            return _fail(f"回复失败（{exc.kind}）：{exc}")
+        try:
+            sink.commit(rid, revision_after=None)
+        except Exception:  # noqa: BLE001 - the post landed; the ledger line is the loss
+            logger.exception("[clouddoc] reply receipt commit failed rid=%s", rid)
+        return _ok(reply_id=reply_id, receipt_id=rid, signed=True)
 
     async def _is_resolved(self, doc_id: str, comment_id: str) -> bool:
         try:
@@ -1079,8 +1182,8 @@ class CloudDocToolkit:
             "source": "batch_edit",
             # A chat write is commissioned by the principal in person; naming the turn
             # that way separates it from a comment-triggered one when the history is
-            # read back.
-            "executor": self._executor_label,
+            # read back. Under a personal identity the label names the person (S.2).
+            "executor": self._executor_for(canonical),
             "for_comment_ids_by_old": by_old,
         }
         try:
@@ -1469,6 +1572,7 @@ class CloudDocToolkit:
         # document with no receipt in the account's Drive, which discovery lists.)
         create_rid = _lifecycle_receipt(
             sink, str(doc_id), "create", {"title": title.strip()},
+            executor=self._executor_for(str(doc_id)),
         )
         shared: list[str] = []
         failed: list[str] = []
@@ -1476,7 +1580,7 @@ class CloudDocToolkit:
         for email in emails:
             rid = _lifecycle_receipt(
                 sink, str(doc_id), "share", {"email": email, "role": "writer"},
-                commit=False,
+                commit=False, executor=self._executor_for(str(doc_id)),
             )
             try:
                 await target.share_document(doc_id, email)
@@ -1548,6 +1652,7 @@ class CloudDocToolkit:
         for email in emails:
             rid = _lifecycle_receipt(
                 sink, str(doc_id), "share", {"email": email, "role": "writer"}, commit=False,
+                executor=self._executor_for(str(doc_id)),
             )
             try:
                 await self._provider.share_document(doc_id, email)
@@ -1580,7 +1685,10 @@ class CloudDocToolkit:
         if err:
             return err
         sink = getattr(self._provider, "receipt_sink", None)
-        rid = _lifecycle_receipt(sink, str(doc_id), "trash", {}, commit=False)
+        rid = _lifecycle_receipt(
+            sink, str(doc_id), "trash", {}, commit=False,
+            executor=self._executor_for(str(doc_id)),
+        )
         try:
             await self._provider.trash_document(doc_id)
         except ProviderError as exc:
@@ -1976,7 +2084,7 @@ class CloudDocToolkit:
         # the chat -- the same ``chat`` that batch_edit records.
         self._provider.receipt_meta = {
             "source": "write_region",
-            "executor": self._executor_label,
+            "executor": self._executor_for(canonical),
             "for_comment_ids_by_old": {},
         }
         try:

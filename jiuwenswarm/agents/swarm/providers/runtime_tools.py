@@ -386,9 +386,15 @@ def build_clouddoc_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list
             build_routed_provider,
         )
 
+        from jiuwenswarm.agents.harness.common.tools.clouddoc.provider import (
+            identity_choice_for,
+        )
+        from jiuwenswarm.common.config import get_config as _get_config
+
         provider, _ = build_routed_provider(
             specs, build=build_provider, live_specs=_live_specs, log=logger,
             agent_roster=tuple(str(x) for x in (cfg.get("agent_roster") or [])),
+            choice_of=lambda d: identity_choice_for(_get_config().get("clouddoc") or {}, d),
         )
     except Exception as exc:  # noqa: BLE001 - a corrupt key must not end member setup
         logger.warning("[swarm.clouddoc] provider 初始化失败：%s", exc)
@@ -426,6 +432,7 @@ def build_clouddoc_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list
             # Routed across every connection, so the "partial list" note never applies.
             connection_count=lambda: 1,
             workmode_file=str(cfg.get("workmode_file") or ""),
+            signature_template=str(cfg.get("personal_signature") or ""),
         )
         from jiuwenswarm.agents.harness.common.tools.clouddoc_bridge import (
             to_openjiuwen,

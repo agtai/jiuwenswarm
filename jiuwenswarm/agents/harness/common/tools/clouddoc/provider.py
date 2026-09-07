@@ -64,6 +64,10 @@ def read_connection_specs(cfg: dict) -> list[dict]:
             {
                 "credentials_file": str(c.get("credentials_file") or ""),
                 "documents": list(c.get("documents") or []),
+                # ``service`` (the default, and every entry written before the field
+                # existed) or ``personal``. Recorded beside the file so a host can tell
+                # the two apart without opening the key.
+                "kind": str(c.get("kind") or "service"),
             }
             for c in conns
             if isinstance(c, dict)
@@ -72,8 +76,26 @@ def read_connection_specs(cfg: dict) -> list[dict]:
         return [{
             "credentials_file": str(cfg["credentials_file"]),
             "documents": list(cfg.get("documents") or []),
+            "kind": "service",
         }]
     return []
+
+
+# Which identity executes on a document reachable through both a service and a
+# personal connection (matrix S.2). Per document, chosen by the person, **default
+# service**; the config holds ``clouddoc.identity_choice: {doc_id: "personal"}`` and
+# only the non-default value is ever written.
+IDENTITY_CHOICES = ("service", "personal")
+
+
+def identity_choice_for(cfg: dict, doc_id: str) -> str:
+    """The chosen executing identity for ``doc_id``, ``"service"`` unless the person
+    said otherwise. Read live from the config section, like the connection specs."""
+    choices = cfg.get("identity_choice") or {}
+    if not isinstance(choices, dict):
+        return "service"
+    value = str(choices.get(str(doc_id)) or "").strip().lower()
+    return value if value in IDENTITY_CHOICES else "service"
 
 
 @dataclass(frozen=True)

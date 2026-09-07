@@ -46,11 +46,15 @@ class RoutingProvider:
         self,
         connections: list[tuple[str, Any]],
         docs_of: Callable[[str], list[str]],
+        choice_of: Callable[[str], str] | None = None,
     ) -> None:
         if not connections:
             raise ValueError("RoutingProvider needs at least one connection")
         self._conns = list(connections)
         self._docs_of = docs_of
+        # Which identity executes where a document is adopted under both a service
+        # and a personal connection (matrix S.2): per document, **default service**.
+        self._choice_of = choice_of or (lambda _doc: "service")
         self._learned: dict[str, Any] = {}
         self._receipt_meta: Any = None
 
@@ -68,14 +72,28 @@ class RoutingProvider:
         s = (ref or "").strip()
         if not s:
             return None
+        owners: list[Any] = []
         for cf, p in self._conns:
             for d in self._docs_of(cf) or []:
                 d = str(d or "").strip()
                 if not d:
                     continue
                 if d == s or d in s or s in d:
-                    return p
-        return None
+                    owners.append(p)
+                    break
+        if not owners:
+            return None
+        if len(owners) == 1:
+            return owners[0]
+        # Reachable through more than one connection. The person's per-document
+        # choice decides between the service and the personal identity; with no
+        # choice recorded the service identity executes (S.2), and among several of
+        # one kind the first configured wins, as before.
+        want_personal = self._choice_of(s) == "personal"
+        for p in owners:
+            if bool(getattr(p, "personal", False)) == want_personal:
+                return p
+        return owners[0]
 
     def _by_host(self, ref: str) -> Any | None:
         low = (ref or "").lower()
@@ -269,6 +287,7 @@ def build_routed_provider(
     live_specs: Callable[[], list[dict]],
     agent_roster: tuple[str, ...] = (),
     log: Any = None,
+    choice_of: Callable[[str], str] | None = None,
 ) -> tuple[Any, str]:
     """The attended-path provider over every connection, built in one place.
 
@@ -286,7 +305,9 @@ def build_routed_provider(
     provider is returned, so nothing changes for a one-account deployment.
 
     ``live_specs`` is read on every ownership question, so a document the panel adopts
-    mid-session is routed correctly without rebuilding anything.
+    mid-session is routed correctly without rebuilding anything. ``choice_of`` answers
+    the per-document identity choice (S.2) for a document adopted under both a
+    service and a personal connection; absent, the service identity executes.
     """
     if not specs:
         raise ValueError("no clouddoc connections configured")
@@ -308,7 +329,7 @@ def build_routed_provider(
             (sp["documents"] for sp in live_specs() if sp["credentials_file"] == cf), []
         )
 
-    return RoutingProvider(children, docs_of), first_cf
+    return RoutingProvider(children, docs_of, choice_of), first_cf
 
 
 def all_adopted_documents(live_specs: Callable[[], list[dict]]) -> list:

@@ -10,10 +10,17 @@ written for a model to read -- and handing a model 200 commands is an open set. 
 the same reason MCP was dropped in §3.4, and more so here: the closed tool set is
 what makes an unattended turn safe to run, and it cannot be closed around a shell.
 
-**Every command is issued ``--as bot``.** Acting as a user would misattribute the
-write, and the loop prohibition depends on the agent recognising its own events by
-author -- an event the agent produced under a person's identity is indistinguishable
-from one that person produced.
+**A service connection issues every command ``--as bot``.** Acting as a user
+would misattribute the write, and the loop prohibition depends on the agent
+recognising its own events by author -- an event the agent produced under a person's
+identity is indistinguishable from one that person produced.
+
+**A personal connection issues every command ``--as user``**, and that
+indistinguishability is the point rather than the hazard: the agent *is* the person
+on the platform (design §13, personal agency). What keeps it safe is not identity
+but role -- a personal connection's watcher never posts (it only notifies the
+person), and the chat path signs every reply it makes. The identity is fixed at
+construction and is not a per-call choice; nothing above this seam can switch it.
 
 Credentials are not passed per call. ``lark-cli`` has no ``--app-id`` flag: an app is
 registered once with ``config init --app-id --app-secret-stdin``, which stores the
@@ -49,6 +56,10 @@ logger = logging.getLogger(__name__)
 # Long enough for a document fetch on a slow tenant, short enough that a hung
 # subprocess does not hold a watcher tick open indefinitely.
 DEFAULT_TIMEOUT_SECONDS = 60.0
+
+# The two identities the CLI can act as. A service connection is the bot; a personal
+# connection is the logged-in user (``lark-cli auth login``).
+IDENTITIES = ("bot", "user")
 
 
 @dataclass(frozen=True)
@@ -145,11 +156,18 @@ class LarkCli:
         binary: str = "lark-cli",
         profile: str = "",
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        identity: str = "bot",
     ) -> None:
         self._binary = binary
         # Which registered app to act as, when a deployment has more than one. The
         # secret lives in the CLI's own store and never passes through here.
         self._profile = profile
+        # ``bot`` (a service connection) or ``user`` (a personal connection). Closed
+        # set, fixed for the life of the object: an unknown value is a construction
+        # error, never a fallback to the more privileged of the two.
+        if identity not in IDENTITIES:
+            raise ValueError(f"lark identity must be one of {IDENTITIES}, got {identity!r}")
+        self._identity = identity
         self._timeout = timeout_seconds
         # One command at a time. The CLI keeps its own token cache on disk, and two
         # processes refreshing it concurrently is the kind of race whose symptom is an
@@ -165,9 +183,13 @@ class LarkCli:
         """
         return shutil.which(self._binary) is not None
 
+    @property
+    def identity(self) -> str:
+        return self._identity
+
     def _base_args(self) -> list[str]:
-        # --as bot is not a default to be overridden: see the module docstring.
-        args = [self._binary, "--as", "bot"]
+        # --as is fixed at construction, never per call: see the module docstring.
+        args = [self._binary, "--as", self._identity]
         if self._profile:
             args += ["--profile", self._profile]
         return args
