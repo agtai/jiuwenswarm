@@ -595,6 +595,23 @@ def test_arbitrary_detach_reason_is_rejected_before_receiver_state_change() -> N
     )
 
 
+@pytest.mark.parametrize("reason", ["MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED", "MEDIA_NATIVE_INPUT_FENCE_REJECTED"])
+def test_native_provider_fault_is_the_only_consumer_cause_preserved_on_wire(reason):
+    def consume(_frame):
+        raise MediaTransportViolation(reason, "private provider text is not a wire field")
+    activation = create_gateway_media_activation(
+        MediaActivationRequest(enabled=True, binding=_binding(), provider_available=True, transport_available=True),
+        on_audio_frame=consume)
+    assert isinstance(activation, ActiveMediaActivation)
+    assert activation.receiver.attach(MediaAttach(activation.binding)) is None
+    result = activation.receiver.accept_binary(encode_audio_frame(activation.binding, _frame()))
+    assert isinstance(result, MediaDetach)
+    assert result.reason_id == (reason if reason == "MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED" else "MEDIA_CONSUMER_FAILED")
+    wire = serialize_media_control(result)
+    assert deserialize_media_control(wire) == result
+    assert "private" not in wire and result.business_cancel_count_delta == 0
+
+
 @pytest.mark.parametrize("invalid_zero", [False, 0.0])
 def test_business_cancel_delta_requires_canonical_integer_zero(
     invalid_zero: object,

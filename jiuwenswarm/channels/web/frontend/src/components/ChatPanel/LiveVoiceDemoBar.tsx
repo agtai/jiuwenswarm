@@ -104,11 +104,14 @@ export interface LiveVoiceDemoBarProps {
   /** Optional bounded controls for the formal hands-free playout state. */
   onInterruptAndSpeak?: () => void;
   onStopPlayback?: () => void;
+  /** Exact local fault tail remains stoppable while remote cleanup runs. */
+  faultTailPlaying?: boolean;
 }
 
 export type FormalProductTaskPresentationState = Readonly<{
   native_work?: NativeWorkStateSnapshot | null;
   p1_status?: ProductLiveVoiceSurfaceState['p1_status'];
+  p1_fault_tail_playing?: boolean;
   terminal_notification: string | null;
   adjustment_notification: string | null;
   task_progress_state: string | null;
@@ -394,6 +397,7 @@ export function LiveVoiceDemoBar({
   onRetryListening,
   onInterruptAndSpeak,
   onStopPlayback,
+  faultTailPlaying = false,
 }: LiveVoiceDemoBarProps) {
   const { t } = useTranslation();
   const unavailableHintId = useId();
@@ -572,11 +576,11 @@ export function LiveVoiceDemoBar({
               <span className="live-voice-demo__primary-label">{t('liveVoice.actions.speaking')}</span>
             </button>
           )}
-          {handsFree && status === 'speaking' && onStopPlayback && (
+          {handsFree && (status === 'speaking' || faultTailPlaying) && onStopPlayback && (
             <button
               type="button"
               className="live-voice-demo__stop"
-              disabled={!available}
+              disabled={!available && !faultTailPlaying}
               aria-label={t('liveVoice.formal.actions.stopPlayback')}
               title={t('liveVoice.formal.actions.stopPlayback')}
               onClick={onStopPlayback}
@@ -628,5 +632,6 @@ export function FormalProductLiveVoiceDemoBar({ surfaceState, ...props }: Formal
     ? Object.freeze({ event: progressEvent, nodeRef: surfaceState.task_progress_node_ref })
     : null;
   return <LiveVoiceDemoBar {...props} taskActivity={taskActivity} taskProgressPresentation={taskProgressPresentation}
+    faultTailPlaying={surfaceState?.p1_fault_tail_playing ?? false}
     nativeWork={surfaceState?.native_work ?? null} nativeWorkCanSpeak={surfaceState?.p1_status === 'capturing' || surfaceState?.p1_status === 'playing'} />;
 }

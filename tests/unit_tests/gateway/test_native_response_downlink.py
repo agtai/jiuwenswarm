@@ -16,6 +16,7 @@ from jiuwenswarm.gateway.live_voice.native_response_downlink import (
     NativeDownlinkPresentationUnit,
     NativeResponseDownlinkSource,
 )
+from jiuwenswarm.gateway.live_voice.dedicated_media_route import DedicatedMediaDownlinkSourceFailure
 
 
 def _unit(response: ResponseRef, sequence: int, pcm16: bytes) -> NativeDownlinkPresentationUnit:
@@ -209,3 +210,47 @@ async def test_full_native_source_times_out_without_unbounded_control_stall() ->
     assert source.appended_frames == 1
     assert source.emitted_frames == 0
     assert source.buffered_frames == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("queued", [False, True])
+async def test_provider_fault_wakes_reader_and_drops_unsent_pcm_without_eof(queued):
+    response = ResponseRef("interaction-1", "response-1", 1)
+    source = NativeResponseDownlinkSource(response=response, sample_rate_hz=24_000,
+                                         capacity=2, max_frames=4)
+    if queued:
+        pcm16 = b"\x01\x00" * 480
+        await source.append(MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.0,) * 480),
+                            _unit(response, 0, pcm16), pcm16=pcm16)
+    with pytest.raises(MediaTransportViolation):
+        await source.fail_provider_transport(ResponseRef("foreign", "response-1", 1))
+    assert source.buffered_frames == int(queued)
+    blocked = None if queued else asyncio.create_task(anext(source))
+    await asyncio.sleep(0)
+    if blocked is not None:
+        assert not blocked.done()
+    await source.fail_provider_transport(response)
+    await source.aclose()
+    with pytest.raises(DedicatedMediaDownlinkSourceFailure) as failure:
+        await asyncio.wait_for(blocked if blocked is not None else anext(source), 1)
+    assert failure.value.reason_id == "MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED"
+    assert not source.completed and source.buffered_frames == 0
+    assert source.emitted_frames == 0
+
+
+@pytest.mark.asyncio
+async def test_provider_fault_preserves_already_verified_source_eof():
+    response = ResponseRef("interaction-1", "response-1", 1)
+    source = NativeResponseDownlinkSource(response=response, sample_rate_hz=24_000,
+                                         capacity=2, max_frames=4)
+    pcm16 = b"\x01\x00" * 480
+    await source.append(MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.0,) * 480),
+                        _unit(response, 0, pcm16), pcm16=pcm16)
+    await source.seal(response)
+    assert (await anext(source)).seq == 0
+    with pytest.raises(StopAsyncIteration):
+        await anext(source)
+    await source.fail_provider_transport(response)
+    assert source.completed
+    with pytest.raises(StopAsyncIteration):
+        await anext(source)

@@ -43,6 +43,7 @@ from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
 )
 from jiuwenswarm.gateway.live_voice.dedicated_media_route import (
     DedicatedMediaSocketLeafResult,
+    DedicatedMediaDownlinkSourceFailure,
 )
 from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import (
     GatewayNativeActivation,
@@ -829,6 +830,91 @@ async def test_silent_terminal_ack_waits_for_runtime_while_provider_control_rema
         assert engine.presentation_acknowledgements == [] and engine.delegate_results == []
     finally:
         release.set()
+        await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_reason", [
+    "REALTIME_TRANSPORT_SEND_FAILED", "REALTIME_TRANSPORT_RECEIVE_FAILED",
+    "REALTIME_PROVIDER_TIMEOUT", "UNRECOGNIZED_FAILURE",
+])
+async def test_provider_fault_cause_precedes_closed_fence_and_survives_session_removal(monkeypatch, failure_reason):
+    activation = _native_activation()
+    client, engine = _FakeNativeRuntimeClient(activation), _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine)
+    activated = _activate(registry, params=_params(sample_rate_hz=24_000),
+                          request_origin=ORIGIN, connection_id="connection-1")
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    await registry.begin_native_interaction(uplink)
+    session = registry._native_sessions[registry._native_session_keys_by_record[uplink.record_id]]
+    session.failure_reason = failure_reason
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_close = registry._run_native_session_close
+    async def held_close(record, current):
+        entered.set()
+        await release.wait()
+        return await original_close(record, current)
+    monkeypatch.setattr(registry, "_run_native_session_close", held_close)
+    closing = asyncio.create_task(registry.close_native_interaction(uplink))
+    expected = ("MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED" if failure_reason != "UNRECOGNIZED_FAILURE"
+                else "MEDIA_NATIVE_INPUT_FENCE_REJECTED")
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert session.closed
+        with pytest.raises(MediaTransportViolation) as early:
+            registry.accept_native_frame(uplink, MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.0,) * 480))
+        assert early.value.reason_id == expected
+        release.set()
+        assert await asyncio.wait_for(closing, 1)
+        assert registry._native_sessions == {}
+        with pytest.raises(MediaTransportViolation) as late:
+            registry.accept_native_frame(uplink, MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.0,) * 480))
+        assert late.value.reason_id == expected
+        assert engine.offered_audio == [] and client.proposals == []
+        assert uplink.accepted_frames == 0 and engine.presentation_acknowledgements == []
+    finally:
+        release.set()
+        await closing
+
+
+@pytest.mark.asyncio
+async def test_provider_task_fault_reaches_retained_downlink_source_without_fabricated_eof():
+    activation = _native_activation()
+    client, engine = _FakeNativeRuntimeClient(activation), _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine)
+    activated = _activate(registry, params=_params(sample_rate_hz=24_000),
+                          request_origin=ORIGIN, connection_id="connection-1")
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    await registry.begin_native_interaction(uplink)
+    response = ResponseRef("interaction-1", "faulted-response", 1)
+    try:
+        await engine.events.put(NativeEngineEvent(audio=NativeAudioOutput(
+            provider_event_id="faulted-audio", provider_response_id="provider-faulted",
+            provider_item_id="faulted-item", content_index=0, sequence=0,
+            pcm16=b"\x01\x00" * 480, response=response)))
+        await asyncio.wait_for(client.audio_proposed.wait(), 1)
+        notification = registry.take_native_notification(session_id="session-1",
+            interaction_id="interaction-1", connection_id="connection-1")
+        downlink = registry.consume_ticket(_media_ticket(notification["audio"]), request_origin=ORIGIN)
+        source = downlink.downlink_stream_source
+        assert source.buffered_frames == 1 and not source.completed
+        failure = RuntimeError("synthetic transport fault")
+        failure.reason = "REALTIME_TRANSPORT_RECEIVE_FAILED"
+        await engine.events.put(failure)
+        async def closed():
+            while registry._native_sessions:
+                await asyncio.sleep(0)
+        await asyncio.wait_for(closed(), 1)
+        with pytest.raises(DedicatedMediaDownlinkSourceFailure) as rejected:
+            await anext(source)
+        assert rejected.value.reason_id == "MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED"
+        assert source.buffered_frames == 0 and source.emitted_frames == 0 and not source.completed
+        assert uplink.native_transport_failure and downlink.native_transport_failure
+        assert engine.presentation_acknowledgements == [] and engine.delegate_results == []
+        assert client.close_calls == 1
+    finally:
         await registry.close_native_interaction(uplink)
 
 

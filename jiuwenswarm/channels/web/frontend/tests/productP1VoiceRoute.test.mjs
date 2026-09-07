@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 import { audioDiagnosticSnapshot, clearAudioDiagnostics } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/audioDiagnostics.js';
+import { BrowserDedicatedMediaSocketLeaf } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/adapters/browserDedicatedMediaRoute.js';
 
 import {
   PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
@@ -7140,6 +7141,243 @@ test(`P7 prepared terminal TTS retains Native input and claims only after arbitr
   await owner.close();
 });
 }
+
+async function nativeFaultTailScenario(frameCount, { knownEof = false } = {}) {
+  const calls = [], sockets = [], states = [];
+  const environment = audioEnvironment();
+  environment.deferSourceEnds = true;
+  const response = Object.freeze({ interaction_id: 'interaction-1', response_id: 'fault-tail-response', response_generation: 1 });
+  const unitId = 'fault-tail-unit';
+  const downlinkBinding = { ...serverBinding(), direction: 'downlink',
+    lease_id: 'fault-tail-downlink', authority_evidence_id: 'fault-tail-authority',
+    media_session_id: 'fault-tail-session', track_id: 'fault-tail-track',
+    generation: { kind: 'response', id: response.response_id, value: response.response_generation },
+    playout: { response_id: response.response_id, response_generation: 1, unit_id: unitId } };
+  class FaultTailSocket extends FakeSocket {
+    nextFrame = 0;
+    acked = -1;
+    sendFrame(seq) {
+      this.onmessage?.({ data: encodeAudioFrame(this.binding, {
+        seq, sample_cursor: seq * 960, samples: new Float32Array(960).fill(0.1),
+      }) });
+    }
+    send(value) {
+      if (typeof value === 'string') {
+        const control = JSON.parse(value);
+        if (control.type === 'media.auth') this.binding = control.binding;
+        if (control.type === 'media.ack' && this.binding?.direction === 'downlink') {
+          this.acked = control.through_seq;
+          if (this.nextFrame < frameCount) {
+            const seq = this.nextFrame++;
+            queueMicrotask(() => this.sendFrame(seq));
+          } else if (knownEof && control.through_seq === frameCount - 1) {
+            queueMicrotask(() => this.onmessage?.({ data: serializeMediaControl({
+              type: 'media.detach', lease_id: this.binding.lease_id, generation: 1,
+              reason_id: 'MEDIA_LOCAL_CLOSE', through_seq: control.through_seq, business_cancel_count_delta: 0,
+            }) }));
+          }
+        }
+      }
+      super.send(value);
+    }
+  }
+  let owner;
+  owner = new ProductP1VoiceRouteOwner({ enabled: true, expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    on_status: (status, reason) => states.push({ status, reason, faultTailResponse: owner?.frozenFaultTailResponse() ?? null }),
+    socket_factory: () => {
+      const socket = new FaultTailSocket();
+      sockets.push(socket);
+      queueMicrotask(() => {
+        socket.readyState = 1; socket.protocol = 'live-voice.media.v1'; socket.onopen?.({});
+        assert.ok(socket.binding);
+        socket.onmessage?.({ data: serializeMediaControl({ type: 'media.attach', binding: socket.binding }) });
+        if (socket.binding.direction === 'downlink') {
+          while (socket.nextFrame < Math.min(frameCount, 8)) {
+            const seq = socket.nextFrame++;
+            queueMicrotask(() => socket.sendFrame(seq));
+          }
+        }
+      });
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) return nativeMediaActivation(serverBinding());
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      throw new Error(`Fault-tail path must not perform ${method}`);
+    },
+  });
+  const captureInput = { session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7, locale: 'zh-CN' };
+  await startCaptureWithFirstFrame(owner, environment, captureInput, { samples: new Float32Array(960) });
+  const input = { response, presentation_unit: { response, surface: 'audio', unit_id: unitId, seq: 0,
+    source_start_utf8: 0, source_end_utf8: 480, content_ref: `sha256:${'0'.repeat(64)}` },
+    audio: { format: 'pcm_f32_mono_20ms', sample_rate_hz: 48_000, channel_count: 1, frame_count: null,
+      delivery: 'dedicated_media_downlink', endpoint_path: '/ws/live-voice/media', media_ticket: 'D'.repeat(43),
+      subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000, binding: downlinkBinding,
+      max_pending_frames: 8, max_pending_bytes: 131_072, streaming: true, degradation_reason: null } };
+  const played = owner.playNativeAudio(input).then(value => ({ value }), error => ({ error }));
+  for (let turn = 0; turn < 100 && sockets[1]?.acked !== frameCount - 1; turn++) await new Promise(resolve => setImmediate(resolve));
+  const uplink = sockets[0], downlink = sockets[1], context = environment.contexts[0];
+  assert.equal(downlink.acked, frameCount - 1);
+  assert.equal(context.sourceEndCount, 0);
+  const fault = (direction = 'downlink', reason = 'MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED') => {
+    const socket = direction === 'uplink' ? uplink : downlink;
+    socket.onmessage?.({ data: serializeMediaControl({ type: 'media.detach', lease_id: socket.binding.lease_id,
+      generation: socket.binding.generation.value, reason_id: reason,
+      through_seq: direction === 'uplink' ? 0 : (frameCount > 0 ? frameCount - 1 : null), business_cancel_count_delta: 0 }) });
+  };
+  return { owner, played, response, input, captureInput, calls, states, environment, context, uplink, downlink, fault };
+}
+
+for (const frameCount of [0, 1, 256]) {
+for (const direction of ['uplink', 'downlink']) {
+test(`formal P1 provider fault drains only accepted prefix: ${frameCount} frames via ${direction}`, async () => {
+  const fixture = await nativeFaultTailScenario(frameCount);
+  const { owner, played, context, downlink, calls, states, response, fault } = fixture;
+  try {
+    clearAudioDiagnostics();
+    const staleDownlinkCallback = downlink.onmessage;
+    fault(direction);
+    assert.equal(owner.status().status, 'cleanup_pending');
+    assert.equal(context.sourceStartCount, frameCount, 'fault may schedule the short accepted reserve');
+    assert.equal(context.activeSources, frameCount, 'actual rendering remains outstanding after transport termination');
+    assert.deepEqual(owner.frozenFaultTailResponse(), response, 'UI STOP retains an exact local owner after Provider failure');
+    assert.equal(states.at(-1).status, 'cleanup_pending', 'freeze callback must not republish playing');
+    assert.deepEqual(states.at(-1).faultTailResponse, response);
+    staleDownlinkCallback?.({ data: encodeAudioFrame(downlink.binding, {
+      seq: frameCount, sample_cursor: frameCount * 960, samples: new Float32Array(960).fill(0.2),
+    }) });
+    assert.equal(context.sourceStartCount, frameCount, 'late frame never joins the immutable prefix');
+    assert.equal(owner.stopAgentPlayout({ ...response, response_generation: 2 }), false);
+    await assert.rejects(owner.startCapture({ ...fixture.captureInput, activation_generation: 8 }),
+      /already active/, 'a new capture cannot silently overlap or recover the old fault-tail owner');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(context.activeSources, frameCount, 'capture/authority cleanup must not stop the local finite tail');
+    assert.equal(calls.some(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD), false);
+    context.releaseSourceEnds();
+    const result = await played;
+    assert.equal(result.error?.reason, 'MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED');
+    assert.equal(context.sourceEndCount, frameCount);
+    assert.equal(owner.status().status, 'failed');
+    assert.equal(owner.frozenFaultTailResponse(), null);
+    assert.equal(states.at(-1).faultTailResponse, null, 'settlement must publish the cleared UI STOP owner');
+    assert.ok(audioDiagnosticSnapshot().some(record => record.event === 'native_fault_tail_settled'
+      && record.fields.stage === 'accepted_prefix' && record.fields.outcome === 'prefix_settled'));
+    assert.equal(downlink.acked, frameCount - 1, 'faulted prefix cannot ACK a late frame');
+    assert.equal(calls.some(([method]) => /playout_receipt|agent|history|task\./.test(method)), false);
+    assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length, 1);
+  } finally { await owner.close(); }
+});
+}
+}
+
+for (const action of ['stop', 'close']) {
+test(`formal P1 provider fault tail yields immediately to ${action}`, async () => {
+  const { owner, played, response, context, fault, calls, states } = await nativeFaultTailScenario(13);
+  try {
+    fault();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(context.activeSources, 13);
+    const closing = action === 'close' ? owner.close() : null;
+    if (action === 'stop') assert.equal(owner.stopAgentPlayout(response), true);
+    if (action === 'stop') assert.equal(states.at(-1).faultTailResponse, null, 'STOP publishes its synchronous local fence');
+    assert.equal(context.activeSources, 0);
+    const starts = context.sourceStartCount;
+    context.releaseSourceEnds();
+    await closing;
+    assert.ok((await played).error);
+    assert.equal(owner.frozenFaultTailResponse(), null);
+    assert.equal(states.at(-1).faultTailResponse, null);
+    assert.equal(context.sourceStartCount, starts, 'old onended cannot restart cancelled PCM');
+    assert.equal(calls.some(([method]) => /playout_receipt|agent|history|task\./.test(method)), false);
+  } finally { await owner.close(); }
+});
+}
+
+test('formal P1 provider fault after known EOF does not publish successful history', async () => {
+  const { owner, played, context, fault, calls } = await nativeFaultTailScenario(1, { knownEof: true });
+  try {
+    clearAudioDiagnostics();
+    fault('uplink');
+    assert.equal(context.activeSources, 1);
+    context.releaseSourceEnds();
+    assert.equal((await played).error?.reason, 'MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED');
+    assert.ok(audioDiagnosticSnapshot().some(record => record.event === 'native_fault_tail_settled'
+      && record.fields.stage === 'verified_eof' && record.fields.outcome === 'render_completed'));
+    assert.equal(calls.some(([method]) => /playout_receipt|agent|history|task\./.test(method)), false);
+  } finally { await owner.close(); }
+});
+
+test('formal P1 unknown media closure cuts audio without a fault-tail exception', async () => {
+  const { owner, played, context, fault } = await nativeFaultTailScenario(13);
+  try {
+    clearAudioDiagnostics();
+    fault('downlink', 'MEDIA_PEER_CLOSE');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(context.activeSources, 0);
+    assert.equal((await played).error?.reason, 'MEDIA_PEER_CLOSE');
+    assert.equal(audioDiagnosticSnapshot().some(record => record.event === 'native_fault_tail_frozen'), false);
+  } finally { await owner.close(); }
+});
+
+test('formal P1 provider fault short-tail scheduling cannot restore a synchronously closed owner', async () => {
+  const { owner, played, response, context, fault, calls, states } = await nativeFaultTailScenario(1);
+  const createSource = context.createBufferSource.bind(context);
+  let closing;
+  context.createBufferSource = () => {
+    const source = createSource();
+    const start = source.start.bind(source);
+    source.start = when => {
+      start(when);
+      closing = owner.close();
+    };
+    return source;
+  };
+  try {
+    clearAudioDiagnostics();
+    fault();
+    assert.ok(closing);
+    await closing;
+    assert.ok((await played).error);
+    assert.equal(context.activeSources, 0);
+    assert.equal(owner.status().status, 'closed');
+    assert.equal(owner.stopAgentPlayout(response), false, 'freeze return cannot reattach a closed owner');
+    assert.equal(states.slice(states.findIndex(state => state.status === 'cleanup_pending'))
+      .some(state => state.status === 'playing'), false);
+    context.releaseSourceEnds();
+    assert.equal(context.sourceStartCount, 1);
+    assert.equal(calls.some(([method]) => /playout_receipt|agent|history|task\./.test(method)), false);
+  } finally { await owner.close(); }
+});
+
+test('formal P1 provider fault queued by final capture flush cannot send a completed playout receipt', async () => {
+  const { owner, played, context, fault, calls } = await nativeFaultTailScenario(1, { knownEof: true });
+  let faultQueued = false;
+  const originalFlush = BrowserDedicatedMediaSocketLeaf.prototype.flush;
+  BrowserDedicatedMediaSocketLeaf.prototype.flush = function () {
+    const result = originalFlush.call(this);
+    // The final synchronous socket flush succeeds. Its already queued fault
+    // wins the microtask before the async caller may send a render receipt.
+    if (!faultQueued && this.binding.direction === 'uplink' && context.sourceEndCount === 1 && result.pending_frames === 0) {
+      faultQueued = true;
+      queueMicrotask(() => fault('uplink'));
+    }
+    return result;
+  };
+  try {
+    context.releaseSourceEnds();
+    assert.equal((await played).error?.reason, 'MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED');
+    assert.ok(faultQueued, 'exercise the successful final capture flush boundary');
+    assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 0);
+    assert.equal(context.sourceEndCount, 1);
+    assert.equal(owner.status().status, 'failed');
+  } finally {
+    BrowserDedicatedMediaSocketLeaf.prototype.flush = originalFlush;
+    await owner.close();
+  }
+});
 
 for (const staleTask of ['none', 'success', 'failure']) {
 test(`formal P1 Native activation preserves continuous uplink against stale Task synthesis: ${staleTask}`, async () => {

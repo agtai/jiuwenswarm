@@ -74,3 +74,8 @@ records; it now flushes the queue before installing its sink. The final targeted
 49 tests passed, including real diagnostic sink, silent/partial terminal cases,
 held Runtime acceptance/rejection, finite EOF and wrong-scope controls. No provider
 calls, real sessions or services were used.
+
+Main's independent review is closed after those two repairs. The cumulative
+R1–R6 Native/Gateway run passed 757 checks, including the final R3 typed-fault
+bridge and R6 persistent control reader (`logs/integration-backend-final.txt`).
+Physical playback remains a separate user-acceptance boundary.

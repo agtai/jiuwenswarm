@@ -191,6 +191,9 @@ _NATIVE_END_OF_TURN_QUEUE_CAPACITY = 8
 # WebSocket library and keep the reader free to observe STOP/VAD events.
 _NATIVE_PROVIDER_EVENT_QUEUE_CAPACITY = 4096
 _NATIVE_AUDIO_PROPOSAL_BATCH = 16
+_NATIVE_PROVIDER_TRANSPORT_FAILURES = frozenset({
+    "REALTIME_TRANSPORT_SEND_FAILED", "REALTIME_TRANSPORT_RECEIVE_FAILED", "REALTIME_PROVIDER_TIMEOUT",
+})
 _NATIVE_ORDERED_CONTROL_OPERATIONS = frozenset(
     {"LISTEN", "REVISE", "SILENCE", "TURN_COMMIT", "SPEAK"}
 )
@@ -896,6 +899,7 @@ class _MediaAuthority:
     native_final_unit_id: str | None = None
     native_final_unit_seq: int | None = None
     native_generation_completed: bool | None = None
+    native_transport_failure: bool = False
     downlink_content_sha256: str | None = field(default=None, repr=False)
     downlink_overlap_record_id: str | None = None
     downlink_overlap_observed: bool = False
@@ -1567,6 +1571,11 @@ class DedicatedMediaProductRegistry:
                 f":expected={record.binding.frame_format.samples_per_channel}"
             )
         if fence_detail is not None:
+            if record.native_transport_failure and fence_detail in {"session_missing", "session_closed", "route_completed"}:
+                raise MediaTransportViolation(
+                    MediaDetachReason.NATIVE_PROVIDER_TRANSPORT_FAILED.value,
+                    "The exact Native Provider transport failed",
+                )
             raise MediaTransportViolation(
                 "MEDIA_NATIVE_INPUT_FENCE_REJECTED",
                 "Native input frame does not match the exact open uplink cursor "
@@ -1870,6 +1879,10 @@ class DedicatedMediaProductRegistry:
                 return False
             task = session.close_task
             if task is None or task.done():
+                if session.failure_reason in _NATIVE_PROVIDER_TRANSPORT_FAILURES:
+                    parent = self._records.get(session.record_id)
+                    if parent is not None:
+                        parent.native_transport_failure = True
                 session.closed = True
                 self._reconcile_task_preparations()
                 task = asyncio.create_task(
@@ -1887,6 +1900,15 @@ class DedicatedMediaProductRegistry:
         session: _NativeMediaSession,
     ) -> bool:
         key = session.key
+        if session.failure_reason in _NATIVE_PROVIDER_TRANSPORT_FAILURES:
+            record.native_transport_failure = True
+            for candidate in tuple(self._records.values()):
+                if candidate.native_session_key != key:
+                    continue
+                candidate.native_transport_failure = True
+                source = candidate.downlink_stream_source
+                if isinstance(source, NativeResponseDownlinkSource):
+                    await source.fail_provider_transport(source.response)
         notification_key = (
             session.activation.binding.scope.session_id or "",
             session.activation.binding.interaction_id,

@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-07 (real acceptance exposed defects; six-point repairs authorized).
+> Updated: 2026-09-07 (six repairs implemented and independently reviewed; scoped checks complete).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -33,9 +33,15 @@ Task dirty-workspace admission and intent errors, and startup underruns. Main
 owns independent worker worktrees, point commits, review, integration and local
 deployment. D-120 records the accepted changes, including authorized dirty input
 snapshots and bounded fault-tail playback; these are not merely parameter edits.
-Implementation and scoped verification are in progress. The prior candidate did
-not pass the user's unified acceptance. Physical playback, exact A-to-AA output
-intent and the full current-source journey remain required.
+All six points now have implementation, scoped verification and independent
+review. Main's final cumulative Native/Gateway run passed 757 checks; the complete
+Web script passed 681 of 706, retaining the exact 24 baseline failures and one
+skip. No new failing case was found; this is not a full-green claim. The
+[candidate and user acceptance record](reviews/REALTIME_ACCEPTANCE_CANDIDATE_20260907.md)
+lists the point commits, evidence and remaining limits. The prior candidate did
+not pass unified acceptance. Controlled local deployment must bind the actual
+clean w3 source and assets in `logs/live_voice_runtime_contract.json`; physical
+playback, exact A-to-AA output and the full current-source journey remain required.
 
 ### Retained Realtime optimization baseline
 

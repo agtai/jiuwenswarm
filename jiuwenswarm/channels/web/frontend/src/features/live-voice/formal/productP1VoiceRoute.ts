@@ -588,6 +588,7 @@ export class ProductP1VoiceRouteOwner {
   #closePromise: Promise<void> | null = null;
   #failureCleanupPromise: Promise<void> | null = null;
   #failureCleanupReason: string | null = null;
+  #faultTail: Readonly<BrowserAudioPlayoutDrain> | null = null;
   #pendingPlayout: PendingProductPlayout | null = null;
   #settlingPlayout: PendingProductPlayout | null = null;
   #nativeStoppingRoutes = new Set<ActiveBrowserDedicatedMediaRoute>();
@@ -1871,6 +1872,7 @@ export class ProductP1VoiceRouteOwner {
       let chatProjection: ProductP1NativeChatMessage | null = null;
       if (continuousNative) {
         await this.#freezeNativeCaptureReceipt(pendingPlayout, operationGeneration);
+        this.#requireCurrent(operationGeneration);
         try {
           chatProjection = await this.#acknowledgePlayout(pendingPlayout, native);
         } finally {
@@ -2146,8 +2148,23 @@ export class ProductP1VoiceRouteOwner {
     this.#tentativeBargeInPause = null;
   }
 
+  /** Local STOP visibility after Provider authority has already been fenced. */
+  frozenFaultTailResponse(): Readonly<AudioResponseRef> | null {
+    return this.#faultTail?.response ?? null;
+  }
+
   stopAgentPlayout(response: Readonly<AudioResponseRef>): boolean {
     this.#diagnose('p1_stop_requested', { ...response });
+    const faultTail = this.#faultTail;
+    if (faultTail !== null && l0ResponseKey(faultTail.response) === l0ResponseKey(response)) {
+      const stopped = this.#audio.stopPlayoutExact(response, 'formal_product_barge_in');
+      this.#diagnose('native_fault_tail_stopped', { ...response, outcome: stopped.outcome });
+      if (stopped.local_fence_established && this.#faultTail === faultTail) {
+        this.#faultTail = null;
+        this.#publish();
+      }
+      return stopped.local_fence_established;
+    }
     const pending = this.#pendingPlayout;
     if (
       pending === null ||
@@ -3050,6 +3067,13 @@ export class ProductP1VoiceRouteOwner {
     pending: PendingProductPlayout,
     allowNativeChatProjection: boolean,
   ): Promise<ProductP1NativeChatMessage | null> {
+    if ((this.#pendingPlayout ?? this.#settlingPlayout) !== pending || pending.nativeStopping
+        || this.#closed || this.#closeRequested || this.#failureCleanupPromise !== null
+        || this.#failureCleanupReason !== null) {
+      throw Object.assign(new Error('Exact playout ownership retired before its receipt'), {
+        reason: this.#failureCleanupReason ?? 'FORMAL_PLAYOUT_BARGED',
+      });
+    }
     const authority = pending.receiptAuthority;
     const throughSeq = pending.expected.get(pending.unitId);
     if (
@@ -3204,6 +3228,7 @@ export class ProductP1VoiceRouteOwner {
       this.#l0Record('discarded_work', pending.response);
       return;
     }
+    if (pending.nativeStopping) return;
     if (event.state === 'failed' || event.state === 'stopped' || event.state === 'closed') {
       if (this.#nativeInteraction !== null) {
         this.#nativePlayoutFailureReason ??= stableCaptureStopReason(event.reason);
@@ -3760,6 +3785,39 @@ export class ProductP1VoiceRouteOwner {
     );
   }
 
+  #freezeProviderFaultTail(reason: string): Readonly<BrowserAudioPlayoutDrain> | null {
+    const pending = this.#pendingPlayout ?? this.#settlingPlayout;
+    const authority = this.#mediaCloseBinding;
+    if (reason !== 'MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED' || this.#nativeInteraction === null
+        || pending === null || !pending.native || pending.nativeStopping || authority === null
+        || this.#closed || this.#closeRequested
+        || authority.activation_id !== pending.receiptAuthority.activation_id
+        || authority.activation_generation !== pending.receiptAuthority.activation_generation
+        || authority.session_id !== pending.receiptAuthority.session_id
+        || authority.interaction_id !== pending.response.interaction_id) return null;
+    try {
+      // Freeze may synchronously start a sub-reserve tail and publish callbacks.
+      // Revoke ordinary append/status/receipt eligibility before that re-entry.
+      pending.nativeStopping = true;
+      // Known EOF keeps its exact finite manifest. Unknown EOF freezes only
+      // browser-accepted contiguous PCM; it cannot become a full completion.
+      const tail = pending.drain ?? this.#audio.freezePlayoutPrefixExact(pending.response);
+      if (tail === null) return null;
+      if ((this.#pendingPlayout ?? this.#settlingPlayout) !== pending || this.#closed || this.#closeRequested) {
+        this.#audio.stopPlayoutExact(pending.response, 'formal_fault_owner_retired');
+        return null;
+      }
+      this.#faultTail = tail;
+      this.#diagnose('native_fault_tail_frozen', { ...pending.response, reason,
+        stage: tail.completion_kind, frame_count: pending.nextChunkIndex,
+        seq: pending.renderedChunks > 0 ? pending.renderedChunks - 1 : null });
+      return tail;
+    } catch {
+      // Lost identity or an incompatible local fence retains immediate cleanup.
+      return null;
+    }
+  }
+
   async #fail(error: unknown): Promise<void> {
     this.cancelPreparedTaskNotification();
     if (this.#closed) {
@@ -3786,8 +3844,9 @@ export class ProductP1VoiceRouteOwner {
       this.#operationGeneration += 1;
       this.#reason = failureReason;
       this.#status = 'cleanup_pending';
+      const tail = this.#freezeProviderFaultTail(failureReason);
       const retained = Promise.resolve()
-        .then(() => this.#releaseResources('formal_route_failed', failureReason))
+        .then(() => this.#releaseResources('formal_route_failed', failureReason, null, null, tail))
         .finally(() => {
           if (this.#failureCleanupPromise === retained) {
             this.#failureCleanupPromise = null;
@@ -3839,6 +3898,7 @@ export class ProductP1VoiceRouteOwner {
     pendingFailureReason: string | null = null,
     startedRecognitionFence: Promise<void> | null = null,
     startedAuthorityCleanup: Promise<readonly PromiseSettledResult<void>[]> | null = null,
+    faultTail: Readonly<BrowserAudioPlayoutDrain> | null = null,
   ): Promise<void> {
     this.#discardNearEndCandidate();
     this.#operationGeneration += 1;
@@ -3868,7 +3928,7 @@ export class ProductP1VoiceRouteOwner {
     this.#settlingPlayout = null;
     if (pending !== null) {
       pending.downlinkRoute?.leaf.close('MEDIA_LOCAL_CLOSE');
-      this.#audio.stopPlayout(pending.response, reason);
+      if (faultTail === null) this.#audio.stopPlayout(pending.response, reason);
       pending.reject(
         pendingFailureReason === null
           ? new Error('formal P1 route closed during playout')
@@ -3897,6 +3957,20 @@ export class ProductP1VoiceRouteOwner {
       await this.#audio.stopCapture(reason);
     } catch {
       /* close remains authoritative */
+    }
+    if (faultTail !== null) {
+      try {
+        const receipt = await faultTail.completion;
+        this.#diagnose('native_fault_tail_settled', { ...faultTail.response,
+          stage: receipt.completion_kind, outcome: receipt.outcome });
+      } catch {
+        this.#diagnose('native_fault_tail_settled', { ...faultTail.response, outcome: 'failed' });
+      } finally {
+        if (this.#faultTail === faultTail) {
+          this.#faultTail = null;
+          this.#publish();
+        }
+      }
     }
     await this.#audio.close();
     if (startedAuthorityCleanup !== null) await startedAuthorityCleanup;

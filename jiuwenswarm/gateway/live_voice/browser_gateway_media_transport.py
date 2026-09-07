@@ -75,6 +75,7 @@ class MediaDetachReason(str, Enum):
     BINDING_MISMATCH = "MEDIA_BINDING_MISMATCH"
     CANCEL_SCOPE_VIOLATION = "MEDIA_CANCEL_SCOPE_VIOLATION"
     CONSUMER_FAILED = "MEDIA_CONSUMER_FAILED"
+    NATIVE_PROVIDER_TRANSPORT_FAILED = "MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED"
     CURSOR_MISMATCH = "MEDIA_CURSOR_MISMATCH"
     DUPLICATE_ATTACH = "MEDIA_DUPLICATE_ATTACH"
     DUPLICATE_OR_OUT_OF_ORDER = "MEDIA_DUPLICATE_OR_OUT_OF_ORDER"
@@ -1340,6 +1341,10 @@ class StrictMediaReceiver:
             return self._terminal("MEDIA_CURSOR_MISMATCH")
         try:
             self._on_audio_frame(frame)
+        except MediaTransportViolation as error:
+            if error.reason_id == MediaDetachReason.NATIVE_PROVIDER_TRANSPORT_FAILED.value:
+                return self._terminal(error.reason_id)
+            return self._terminal("MEDIA_CONSUMER_FAILED")
         except Exception:
             return self._terminal("MEDIA_CONSUMER_FAILED")
         self._last_ack = frame.seq

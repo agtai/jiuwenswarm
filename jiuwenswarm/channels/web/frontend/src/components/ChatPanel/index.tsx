@@ -1263,6 +1263,7 @@ export function ChatPanel({
         previous.available === next.available &&
         previous.p1_status === next.p1_status &&
         previous.p1_reason === next.p1_reason &&
+        previous.p1_fault_tail_playing === next.p1_fault_tail_playing &&
         previous.interruption_degraded_reason === next.interruption_degraded_reason &&
         previous.input === next.input &&
         previous.output === next.output &&

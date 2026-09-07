@@ -894,12 +894,12 @@ function installP1BrowserEnvironment({
       });
       await new Promise(resolve => setImmediate(resolve));
     },
-    async emitNativeConsumerFailure() {
+    async emitNativeConsumerFailure(reason = 'MEDIA_CONSUMER_FAILED') {
       const socket = sockets.filter(candidate => candidate.binding?.direction === 'uplink').at(-1);
       assert.ok(socket);
       socket.onmessage?.({ data: serializeMediaControl({ type: 'media.detach',
         lease_id: socket.binding.lease_id, generation: socket.binding.generation.value,
-        reason_id: 'MEDIA_CONSUMER_FAILED', through_seq: 0, business_cancel_count_delta: 0 }) });
+        reason_id: reason, through_seq: 0, business_cancel_count_delta: 0 }) });
       await new Promise(resolve => setImmediate(resolve));
     },
     async emitSpeechStart() {
@@ -9976,6 +9976,30 @@ test('mounted P3 feature-off composition allocates no Task experience transport'
   }
 });
 
+test('mounted formal fault tail keeps local STOP enabled during unavailable remote cleanup', async () => {
+  const i18n = await createI18n('en');
+  let renderer, stops = 0;
+  const element = faultTail => React.createElement(I18nextProvider, { i18n },
+    React.createElement(MountedFormalProductLiveVoiceDemoBar, {
+      active: true, available: false, status: 'error', handsFree: true, interimTranscript: '',
+      errorMessage: 'Voice connection recovery failed.', onEnable() {}, onExit() {}, onPrimaryAction() {},
+      onStopPlayback() { stops += 1; },
+      surfaceState: { p1_status: 'cleanup_pending', p1_fault_tail_playing: faultTail },
+    }));
+  try {
+    await act(async () => { renderer = create(element(true)); });
+    const stop = renderer.root.findByProps({ 'aria-label': i18n.t('liveVoice.formal.actions.stopPlayback') });
+    assert.equal(stop.props.disabled, false);
+    assert.equal(renderer.root.findByProps({ role: 'alert' }).findByType('span').children[0], 'Voice connection recovery failed.');
+    await act(async () => stop.props.onClick());
+    assert.equal(stops, 1);
+    await act(async () => { renderer.update(element(false)); });
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': i18n.t('liveVoice.formal.actions.stopPlayback') }).length, 0);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+  }
+});
+
 test('mounted hands-free error stays separate from transcript, retries listening, and retains task activity after exit', async () => {
   const i18n = await createI18n('en');
   let retries = 0;
@@ -16219,7 +16243,7 @@ for (const outcome of ['recovered', 'persistent', 'exit']) {
 }
 
 
-for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while_active', 'model_missing_confirmation', 'task', 'task_keep_selection', 'task_foreign', 'task_retry', 'task_repeated_failure', 'task_retired_read', 'text', 'barge_success', 'barge_failure', 'barge_fatal', 'fatal_before', 'fatal_after', 'fatal_overlap', 'fatal_audio', 'fatal_unobserved', 'next_failure']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
+for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while_active', 'model_missing_confirmation', 'task', 'task_keep_selection', 'task_foreign', 'task_retry', 'task_repeated_failure', 'task_retired_read', 'text', 'barge_success', 'barge_failure', 'barge_fatal', 'fatal_before', 'fatal_after', 'fatal_overlap', 'fatal_audio', 'fatal_unobserved', 'next_failure', 'provider_tail_drain', 'provider_tail_stop', 'provider_tail_close', 'provider_tail_retry']) test(`mounted Native request lifecycle and ${verify} projection keep exact ownership`, async () => {
   const i18n = await createI18n();
   const states = [], messages = [], calls = [], waiters = [], ended = [], sources = [];
   let activeMediaBinding = null, binding = null, renderer, textSnapshot = null, settleTaskFailure;
@@ -16415,6 +16439,51 @@ for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while
       assert.equal(states.at(-1).text_status, 'waiting');
       assert.equal(states.at(-1).p1_status, 'capturing');
       assert.equal(formalProductVoiceActivity(states.at(-1)).status, 'thinking');
+    }
+    if (verify.startsWith('provider_tail_')) {
+      const response = oldResponse(), unitId = 'provider-fault-tail-unit';
+      const audioNotice = notification(1, 'processing', { kind: 'native.audio', response,
+        presentation_unit: { response, surface: 'audio', unit_id: unitId, seq: 0, source_start_utf8: 0, source_end_utf8: 480, content_ref: `sha256:${'a'.repeat(64)}` },
+        audio: { format: 'pcm_f32_mono_20ms', sample_rate_hz: 48000, channel_count: 1, frame_count: null,
+          delivery: 'dedicated_media_downlink', endpoint_path: '/ws/live-voice/media', media_ticket: 'D'.repeat(43),
+          subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30000, binding: mountedDownlinkBinding(response, unitId, 2, activeMediaBinding),
+          max_pending_frames: 8, max_pending_bytes: 131072, streaming: true, degradation_reason: null } });
+      delete audioNotice.request_state;
+      await act(async () => { waiters.shift()({ ok: true, result: audioNotice }); });
+      await act(async () => { for (let seq = 0; seq < 256; seq += 1) await browser.emitDownlinkFrame(seq); });
+      assert.equal(browser.counts.sourceStarts, 256, 'all 5.12 seconds must be accepted once before fault');
+      const oldEnds = sources.map(source => source.onended);
+      await act(async () => { await browser.emitNativeConsumerFailure('MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED'); });
+      await waitForMountedEffects(() => states.at(-1)?.p1_fault_tail_playing === true, 'fault tail never reached product surface');
+      assert.equal(states.at(-1).p1_status, 'cleanup_pending');
+      assert.equal(browser.counts.sourceStops, 0, 'the Panel must not close accepted audio on its failure callback');
+      assert.ok(browser.counts.stoppedTracks > 0, 'capture must retire independently of local playout');
+      assert.ok(calls.includes('live_voice.media.close'), 'remote media retirement cannot wait for tail rendering');
+      assert.equal(calls.includes('live_voice.media.playout_receipt'), false);
+      await act(async () => { await browser.emitDownlinkFrame(256); });
+      assert.equal(browser.counts.sourceStarts, 256, 'late PCM must not extend the frozen tail');
+      if (verify === 'provider_tail_drain') {
+        await act(async () => { for (const ended of oldEnds) ended?.(); });
+        await waitForMountedEffects(() => states.at(-1)?.p1_status === 'failed' && !states.at(-1).p1_fault_tail_playing,
+          'fully rendered local prefix did not settle the failed owner');
+        assert.equal(browser.counts.sourceStops, 0);
+      } else if (verify === 'provider_tail_retry') {
+        await act(async () => { void controlRef.current.start(); });
+        await waitForMountedEffects(() => browser.counts.sourceStops === 256, 'explicit retry did not revoke the old tail');
+        await waitForMountedEffects(() => states.at(-1)?.p1_status === 'starting', 'explicit retry did not start a fresh capture');
+        await act(async () => { await browser.emitFirstFrame(0); });
+        await waitForMountedEffects(() => states.at(-1)?.p1_status === 'capturing', 'explicit retry capture did not become ready');
+      } else {
+        await act(async () => { await controlRef.current[verify === 'provider_tail_stop' ? 'stop' : 'close'](); });
+        assert.equal(browser.counts.sourceStops, 256, 'user action must synchronously fence every old source');
+        await waitForMountedEffects(() => !states.at(-1)?.p1_fault_tail_playing, 'stopped tail remained visible');
+      }
+      const afterAction = browser.counts.sourceStarts;
+      await act(async () => { for (const ended of oldEnds) ended?.(); });
+      assert.equal(browser.counts.sourceStarts, afterAction, 'stale onended must not restart audio');
+      assert.equal(calls.some(method => /unified.submit|speech.recognize|playout_receipt|presentation.ack|task.create|task.cancel|p3.mutate/u.test(method)), false);
+      assert.equal(messages.length, 0, 'a transport fault must not insert an assistant failure bubble');
+      return;
     }
     if (verify.startsWith('fatal_')) {
       if (verify === 'fatal_audio') {

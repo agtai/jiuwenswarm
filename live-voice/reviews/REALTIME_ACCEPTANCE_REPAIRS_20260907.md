@@ -58,3 +58,16 @@ Use the user-authorized Astra max/ultra review for difficult lifecycle/authority
 conflicts. Keep test failures and limitations visible; no point is complete merely
 because its code exists. User acceptance remains open until the current-source
 journey succeeds in the designated browser Session.
+
+## Candidate integration result
+
+All six repairs have coherent point changes and independent review. The final
+Native/Gateway cumulative run passed 757 checks. The complete Web script reported
+706 tests / 681 passed / 24 failed / 1 skipped; all 24 failure names reproduce on
+the exact baseline. Twenty-three first errors are byte-identical; the remaining
+state-dump error differs only by the new false local-tail field. No new failure
+is excluded. The [candidate record](REALTIME_ACCEPTANCE_CANDIDATE_20260907.md)
+owns the consolidated evidence and user acceptance instructions. Main integrates
+six local commits into w3, preserving the original twelve, and deploys through
+the existing controlled launcher. No remote update or physical-hearing claim is
+included. The worker source returns are closed; user acceptance remains open.

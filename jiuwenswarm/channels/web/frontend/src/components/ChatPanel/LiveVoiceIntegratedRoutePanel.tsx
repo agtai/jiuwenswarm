@@ -195,6 +195,8 @@ export type ProductLiveVoiceSurfaceState = Readonly<{
   available: boolean;
   p1_status: ProductP1VoiceStatus;
   p1_reason: string | null;
+  /** Local accepted PCM may still drain after the Provider transport failed. */
+  p1_fault_tail_playing?: boolean;
   interruption_degraded_reason: string | null;
   input: string;
   output: string | null;
@@ -1981,6 +1983,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   } | null>(null);
   const [recoveryDiagnostic, setRecoveryDiagnostic] = useState<ProductLiveVoiceRecoveryDiagnostic | null>(null);
   const [p1VoiceStatus, setP1VoiceStatus] = useState<ProductP1VoiceStatus>(FEATURE_LIVE_VOICE_INTEGRATED_P1 ? 'idle' : 'closed');
+  const [p1FaultTailPlaying, setP1FaultTailPlaying] = useState(false);
   const [p1VoiceReason, setP1VoiceReason] = useState<string | null>(null);
   const [interruptionDegradedReason, setInterruptionDegradedReason] = useState<string | null>(null);
   const [deviceSelection, setDeviceSelection] = useState<Readonly<BrowserAudioDeviceSelectionSnapshot>>({
@@ -4556,6 +4559,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         });
     }
     setP1VoiceStatus(FEATURE_LIVE_VOICE_INTEGRATED_P1 ? 'idle' : 'closed');
+    setP1FaultTailPlaying(false);
     setP1VoiceReason(null);
     pendingProductTurnRef.current = null;
     pendingPresentationAttemptRef.current = null;
@@ -7056,6 +7060,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             }
             setP1VoiceStatus(publishedStatus);
             setP1VoiceReason(publishedReason);
+            setP1FaultTailPlaying(callbackOwner.frozenFaultTailResponse() !== null);
             const replacement = replacementRecognitionRef.current;
             if (replacement?.owner === callbackOwner &&
               replacement.loop_generation === loopGeneration &&
@@ -7090,9 +7095,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                   retiredFailure.activation_generation !== null &&
                   retiredFailure.activation_generation < binding.activation_generation &&
                   pendingForegroundPresentationRef.current === null && pendingUnifiedFinalRef.current === null) {
-                // Actual successor capture proves recovery. Keep the earlier
-                // diagnostic message in the transcript, but do not label the
-                // now-listening successor as the retired audio failure.
+                // Actual successor capture proves recovery. Retire the old
+                // status diagnostic from this now-listening successor.
                 clearProductRecoveryDiagnostic();
                 setProductTextReason(null);
                 setProductTextStatus('idle');
@@ -8944,8 +8948,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     });
     if (p1VoiceOwnerRef.current?.status().status === 'capturing'
         && recoveryDiagnosticRef.current?.seam === 'response_generation') {
-      // Input is already available. The failed reply remains in the transcript;
-      // retry acknowledges that failure without replaying its business request.
+      // Input is already available. Retry clears the status diagnostic without
+      // replaying the failed business request.
       clearProductRecoveryDiagnostic();
       setProductTextReason(null);
       setProductTextStatus('idle');
@@ -9034,6 +9038,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         available: productVoiceAvailable,
         p1_status: p1VoiceStatus,
         p1_reason: p1VoiceReason,
+        p1_fault_tail_playing: p1FaultTailPlaying,
         interruption_degraded_reason: interruptionDegradedReason,
         input: productInput,
         output: productOutput,
@@ -9068,6 +9073,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   }, [
     p1VoiceReason,
     p1VoiceStatus,
+    p1FaultTailPlaying,
     interruptionDegradedReason,
     productInput,
     productOperationRetained,
@@ -9099,7 +9105,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   useEffect(() => {
     const control = Object.freeze<ProductLiveVoiceSurfaceControl>({
       start: startProductVoiceLoop,
-      stop: () => (p1VoiceOwnerRef.current?.status().status === 'playing' ? stopProductVoicePlayout() : stopProductVoiceCapture()),
+      stop: () => {
+        const owner = p1VoiceOwnerRef.current;
+        const faultTail = owner?.frozenFaultTailResponse() ?? null;
+        if (owner !== null && faultTail !== null) {
+          // Cleanup already owns remote retirement. This local exact STOP must
+          // remain available without capture, an active P2 route or a new RPC.
+          owner.stopAgentPlayout(faultTail);
+          return Promise.resolve();
+        }
+        return owner?.status().status === 'playing' ? stopProductVoicePlayout() : stopProductVoiceCapture();
+      },
       setL0CaptureStreamFactory: factory => {
         l0CaptureStreamFactoryRef.current = factory;
       },

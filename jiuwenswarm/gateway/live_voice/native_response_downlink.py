@@ -18,8 +18,10 @@ import re
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAudioFrame,
+    MediaDetachReason,
     MediaTransportViolation,
 )
+from jiuwenswarm.gateway.live_voice.dedicated_media_route import DedicatedMediaDownlinkSourceFailure
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -128,6 +130,7 @@ class NativeResponseDownlinkSource:
         self._digest = hashlib.sha256()
         self._sealed = False
         self._closed = False
+        self._provider_transport_failed = False
 
     def __aiter__(self) -> NativeResponseDownlinkSource:
         return self
@@ -263,6 +266,8 @@ class NativeResponseDownlinkSource:
     async def __anext__(self) -> MediaAudioFrame:
         async with self._condition:
             while not self._frames:
+                if self._provider_transport_failed:
+                    raise DedicatedMediaDownlinkSourceFailure(MediaDetachReason.NATIVE_PROVIDER_TRANSPORT_FAILED)
                 if self._sealed:
                     self.completed = True
                     self._closed = True
@@ -275,6 +280,21 @@ class NativeResponseDownlinkSource:
             self.emitted_frames += 1
             self._condition.notify_all()
             return frame
+
+    async def fail_provider_transport(self, response: ResponseRef) -> None:
+        """Fence all unsent PCM and wake the exact media peer without false EOF."""
+        if response != self.response:
+            raise MediaTransportViolation(
+                "MEDIA_NATIVE_STREAM_RESPONSE_MISMATCH", "Native failure does not match the source response"
+            )
+        async with self._condition:
+            if self._closed:
+                return
+            self._provider_transport_failed = True
+            self._closed = True
+            self._sealed = False
+            self._frames.clear()
+            self._condition.notify_all()
 
     async def aclose(self) -> None:
         async with self._condition:
