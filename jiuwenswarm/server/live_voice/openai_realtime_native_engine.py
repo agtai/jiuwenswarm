@@ -22,6 +22,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from jiuwenswarm.common.live_voice_profiling import identity_fields, profile_snapshot_event
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     MAX_SAFE_INTEGER,
     ResponseRef,
@@ -47,6 +48,7 @@ from jiuwenswarm.server.live_voice.native_business_contract import (
     NATIVE_BUSINESS_TOOL_NAME, NativeBusinessProposal, NativeBusinessViolation,
     native_business_tool,
 )
+from jiuwenswarm.server.live_voice.native_business_encoding import compact_native_business_output
 from jiuwenswarm.server.live_voice.openai_realtime_session import (
     OpenAIRealtimeEvent,
     OpenAIRealtimeSession,
@@ -677,6 +679,46 @@ def _digest_id(prefix: str, value: Mapping[str, object]) -> str:
     return f"{prefix}:{digest}"
 
 
+def _business_argument_shape(arguments: object, field_name: str) -> dict[str, object]:
+    """Observe only a known rejected field's shape, never its value or keys."""
+    fields: dict[str, object] = {}
+    try:
+        allowed = {"arguments", "request_text", "action", "action.operation",
+                   "action.context_id", "action.target_id", "action.expected_revision",
+                   "action.name", "action.instruction", "action.adjustment"}
+        field_name = field_name if field_name in allowed else "arguments"
+        fields["argument_field"] = field_name
+        value = arguments
+        present = True
+        if field_name != "arguments":
+            # The contract already bounds ordinary calls. Do not parse oversized
+            # rejected payloads again or infer a value from malformed JSON.
+            if type(arguments) is not str or len(arguments) > 16384:
+                return {**fields, "argument_type": "unknown"}
+            value = json.loads(arguments)
+            for key in field_name.split("."):
+                if type(value) is not dict or key not in value:
+                    present = False
+                    value = None
+                    break
+                value = value[key]
+        fields["argument_present"] = present
+        fields["argument_type"] = "missing" if not present else {
+            type(None): "null", str: "string", bool: "boolean", int: "integer",
+            float: "number", dict: "object", list: "array",
+        }.get(type(value), "unknown")
+        if type(value) is str:
+            fields.update(argument_chars=len(value), argument_blank=not value.strip(),
+                          argument_has_nul="\x00" in value)
+            try:
+                fields.update(argument_utf8_bytes=len(value.encode("utf-8")), argument_utf8_valid=True)
+            except UnicodeEncodeError:
+                fields["argument_utf8_valid"] = False
+    except Exception:
+        fields["argument_type"] = "unknown"
+    return fields
+
+
 class OpenAIRealtimeNativeInteractionEngine:
     """Map one official Realtime session to bounded Native proposals."""
 
@@ -759,6 +801,32 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._work_seen: dict[str, bytes] = {}
         self._work_stop_pending: set[str] = set()
         self._work_retry_after: float = 0.0
+        self._last_business_wait: tuple[object, ...] | None = None
+
+    def _profile_business(self, milestone: str, *, response=None, request=None, **fields) -> None:
+        """Passive local observations; a failed sink cannot affect Native state."""
+        if self._business_context is None:
+            return
+        try:
+            observed = identity_fields(self._binding, response.runtime_ref if response else None)
+            observed.update(turn_id=response.turn_id if response else (
+                request.turn_id if request else self._current_turn_id))
+            if response is not None:
+                observed["provider_response_id"] = response.provider_response_id
+            if request is not None:
+                observed["provider_call_id"] = request.delegate_call_id
+            profile_snapshot_event("native_business_timeline", observed, milestone=milestone, **fields)
+        except Exception:
+            pass
+
+    def _profile_business_wait(self, reason: str, *, response=None) -> None:
+        # One record per change, not one record per audio frame or polling tick.
+        if self._business_context is None:
+            return
+        key = (self._current_turn_id, response.provider_response_id if response else None, reason)
+        if key != self._last_business_wait:
+            self._last_business_wait = key
+            self._profile_business("response_wait", response=response, reason=reason)
 
     def configure_business_context(self, context: Mapping[str, object], *, refresh=None, presentation_busy=None) -> None:
         """Opt into the negotiated business capability before opening Provider media."""
@@ -1000,15 +1068,18 @@ class OpenAIRealtimeNativeInteractionEngine:
         # A slow context RPC must not stall Provider speech/STOP delivery. The
         # scheduler holding this lock rechecks queued user requests after refresh.
         if self._response_request_lock.locked():
+            self._profile_business_wait("scheduler_lock")
             return
         async with self._response_request_lock:
             if self._inflight_response_request is not None:
+                self._profile_business_wait("provider_response_confirmation")
                 return
             current = self._current_response()
             if current is not None and (not current.done or (
                 current.presentable and not current.cancelled and not current.presentation_acknowledged
                 and any(item.received_samples > 0 for item in current.audio_items.values())
             )):
+                self._profile_business_wait("response_generation" if not current.done else "actual_playback", response=current)
                 return
             self._queue_business_successors()
             if not self._response_request_queue:
@@ -1016,8 +1087,10 @@ class OpenAIRealtimeNativeInteractionEngine:
                     return
                 # Read again immediately before creation; periodic polling is not
                 # sufficient authority for a queued result from an old revision.
+                self._profile_business("context_refresh_started")
                 fresh = await self._business_refresh()
                 self._replace_business_context(fresh["context"], fresh["work_events"])
+                self._profile_business("context_refresh_completed")
                 if self._response_request_queue:
                     request = self._response_request_queue.popleft()
                     self._inflight_response_request = request
@@ -1041,6 +1114,8 @@ class OpenAIRealtimeNativeInteractionEngine:
                 request = self._response_request_queue.popleft()
                 self._inflight_response_request = request
         try:
+            self._last_business_wait = None
+            self._profile_business("response_send_started", request=request)
             event_id = await self._session.send_event(
                 "response.create", request.payload
             )
@@ -1060,6 +1135,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         if request.sent is not None and not request.sent.done():
             request.sent.set_result(event_id)
         self._state = NativeProviderState.RESPONSE_PENDING
+        self._profile_business("response_sent", request=request, source_event_id=event_id)
         return request, event_id
 
     def _user_input_pending(self) -> bool:
@@ -1084,6 +1160,8 @@ class OpenAIRealtimeNativeInteractionEngine:
 
     def _queue_business_successors(self) -> None:
         if self._business_context is None or self._user_input_pending():
+            if self._business_context is not None:
+                self._profile_business_wait("user_input")
             return
         for source in self._responses.values():
             if (not source.business_calls or source.business_successor_requested or not source.done
@@ -1091,6 +1169,10 @@ class OpenAIRealtimeNativeInteractionEngine:
                     or source.turn_id != self._business_accepted_turn
                     or not all(call in self._delegate_results or self._business_call_records[call].output_event_id is not None
                                for call in source.business_calls)):
+                if (source.business_calls and not source.business_successor_requested and source.done
+                        and not source.cancelled and source.turn_id == self._current_turn_id
+                        and source.turn_id == self._business_accepted_turn):
+                    self._profile_business_wait("business_results", response=source)
                 continue
             rounds = self._business_rounds.get(source.turn_id, 0)
             if rounds >= 16:
@@ -1113,6 +1195,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                 payload={"response": {"instructions": instructions, "max_output_tokens": 1024,
                                       "tool_choice": tool_choice}},
             ))
+            self._profile_business("successor_queued", response=source)
 
     async def _send_pending_business_errors(self) -> None:
         # These are exact local argument errors, never business admission or
@@ -1207,10 +1290,17 @@ class OpenAIRealtimeNativeInteractionEngine:
         except (ValueError, TypeError):
             raise OpenAIRealtimeNativeInteractionError("NATIVE_BUSINESS_OUTPUT_INVALID", "Business output must be JSON data") from None
         self._delegate_output_started.add(parsed)
+        source = self._find_response(ref)
+        self._profile_business("receipt_prepare_started", response=source, provider_call_id=parsed)
+        provider_output = compact_native_business_output(output)
+        self._profile_business("receipt_send_started", response=source, provider_call_id=parsed,
+                               canonical_receipt_bytes=len(output.encode("utf-8")),
+                               provider_output_bytes=len(provider_output.encode("utf-8")))
         output_id = await self._session.send_event("conversation.item.create", {"item": {
-            "type": "function_call_output", "call_id": parsed, "output": output,
+            "type": "function_call_output", "call_id": parsed, "output": provider_output,
         }})
         self._delegate_results[parsed] = _DelegateResult(ref, digest, (output_id, None))
+        self._profile_business("receipt_sent", response=source, provider_call_id=parsed, source_event_id=output_id)
         sent = await self._request_pending_provider_response()
         if sent is not None and sent[0].delegate_call_id in self._find_response(ref).business_calls:
             self._delegate_results[parsed] = _DelegateResult(ref, digest, (output_id, sent[1]))
@@ -1502,6 +1592,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         if response.presentation_acknowledged:
             return False
         response.presentation_acknowledged = True
+        self._profile_business("presentation_acknowledged", response=response)
         await self._request_pending_provider_response()
         return True
 
@@ -2189,7 +2280,9 @@ class OpenAIRealtimeNativeInteractionEngine:
             response.cancelled = True
             self._locally_fenced.add(provider_id)
             self._pending_unpresented_cancels.append(provider_id)
+            self._profile_business("response_created_retired", response=response, source_event_id=event.event_id)
             return []
+        self._profile_business("response_created", response=response, request=request, source_event_id=event.event_id)
         payload = [
             ("provider_response_id", provider_id),
             ("turn_id", response_turn_id),
@@ -2386,7 +2479,11 @@ class OpenAIRealtimeNativeInteractionEngine:
         audio_item.audio_buffer = bytearray(remainder)
         audio_item.audio_buffer_event_id = event.event_id if remainder else None
         response.next_audio_sequence += frame_count
+        first_audio = not any(item.received_samples for item in response.audio_items.values())
         audio_item.received_samples += len(pcm16) // 2
+        if first_audio:
+            self._profile_business("provider_first_audio", response=response, source_event_id=event.event_id,
+                                   audio_bytes=len(pcm16))
         if response.runtime_ref is None:
             self._pending_audio.extend(buffered_frames)
             return []
@@ -2627,6 +2724,9 @@ class OpenAIRealtimeNativeInteractionEngine:
                 raise OpenAIRealtimeNativeInteractionError("NATIVE_BUSINESS_CALL_LEDGER_FULL", "Business call ledger is full")
         try:
             proposal_type = NativeBusinessProposal if business else NativeDelegateProposal
+            if business:
+                self._profile_business("arguments_completed", response=response, provider_call_id=call_id,
+                                       source_event_id=event.event_id)
             proposal = proposal_type.from_function_call(
                 binding=self._binding,
                 turn_id=response.turn_id,
@@ -2641,6 +2741,9 @@ class OpenAIRealtimeNativeInteractionEngine:
                 field = getattr(exc, "field", "request_text")
                 expected = getattr(exc, "expected", "The user's nonempty current request within the tool schema bounds")
                 operation = getattr(exc, "operation", None)
+                self._profile_business("arguments_rejected", response=response, provider_call_id=call_id,
+                                       reason=exc.reason, stage=operation,
+                                       **_business_argument_shape(data["arguments"], field))
                 output = json.dumps({"kind": "invalid_business_arguments", "reason": exc.reason,
                     "field": field, "expected": expected, "operation": operation, "execution_started": False,
                     "recovery": "reread_tool_schema_and_correct_arguments"}, separators=(",", ":"))
@@ -2671,6 +2774,9 @@ class OpenAIRealtimeNativeInteractionEngine:
                 response.business_calls.append(call_id)
                 self._business_call_records[call_id] = _BusinessCallRecord(fingerprint)
             self._delegate_count += 1
+            if business:
+                self._profile_business("arguments_validated", response=response, provider_call_id=call_id,
+                                       stage=retained.business.operation)
         self._state = NativeProviderState.DELEGATE_WAIT
         action = self._action(
             event.event_id,

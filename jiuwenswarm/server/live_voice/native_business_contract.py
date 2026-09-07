@@ -196,7 +196,9 @@ def native_business_tool() -> dict[str, object]:
         operations = sorted(operation for operation, fields in _TEXT_ARGUMENTS.items() if field in fields)
         return {"type": ["string", "null"], "description": (
             meaning + " Required only for " + ", ".join(operations)
-            + "; must be null for every other operation."
+            + "; must be null for every other operation. When required, use a non-null string "
+            + "with at least one non-whitespace character and no null characters, at most "
+            + str(256 if field == "name" else 4096) + " UTF-8 bytes."
         )}
 
     return {
@@ -213,7 +215,10 @@ def native_business_tool() -> dict[str, object]:
         ),
         "parameters": {"type": "object", "additionalProperties": False,
             "required": ["request_text", "action"], "properties": {
-                "request_text": {"type": "string", "description": "The user's current request, preserving intent and requirements."},
+                "request_text": {"type": "string", "description": (
+                    "The user's current request, preserving intent and requirements. This does not replace "
+                    "the required action.instruction or action.adjustment for the selected operation."
+                )},
                 "action": {"type": "object", "additionalProperties": False,
                     "required": sorted(_FIELDS), "properties": {
                         "operation": {"type": "string", "enum": sorted(NATIVE_BUSINESS_OPERATIONS)},
@@ -232,8 +237,15 @@ def native_business_tool() -> dict[str, object]:
                             + "; must be null for every other operation."
                         )},
                         "name": text_argument("name", "A concise name for the new background Task."),
-                        "instruction": text_argument("instruction", "The complete work requirements, retaining relevant user constraints."),
-                        "adjustment": text_argument("adjustment", "The user's requested change to the existing Task."),
+                        "instruction": text_argument("instruction", (
+                            "The complete work requirements, retaining relevant user constraints. For work.start, "
+                            "put the analysis requirements here; target_id, expected_revision, name and adjustment must be null."
+                        )),
+                        "adjustment": text_argument("adjustment", (
+                            "The user's requested change to the existing Task. For task.adjust, put the change here, "
+                            "copy the server task_id into target_id and its integer revision_number into expected_revision, "
+                            "and set name and instruction to null."
+                        )),
                     }},
             }},
     }

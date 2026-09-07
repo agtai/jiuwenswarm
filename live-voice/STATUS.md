@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-06 (Native conversational implementation and scoped verification recorded; physical acceptance remains open).
+> Updated: 2026-09-07 (Realtime optimization first batch has scoped verification; physical acceptance remains open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -23,6 +23,20 @@ appear through the scoped Registry in the right panel. Old candidate PASS on
 history, not acceptance of this candidate.
 
 ## Current execution packet
+
+### Realtime optimization first batch
+
+The user authorized isolated development and Main-owned parallel acceptance and
+local w3 integration in the [Realtime optimization packet](reviews/REALTIME_OPTIMIZATION_20260907.md).
+Its first batch owns passive Native wait/argument diagnostics, descriptions that
+match existing argument validation, and equivalent Provider receipt encoding.
+Shared scheduling, schema, authority and model selection retain their current
+contracts. Implementation, scoped automation and independent module review pass;
+canonical receipt/digest/replay and actual playback ACK remain unchanged. Original
+rehearsal files are absent locally and there is no verified current Native runtime.
+The next optimization trigger is evidence synchronization and controlled Native
+startup for a fresh comparison. Full P0/P1/P2 scope, measured latency and physical
+acceptance remain unproved. The Native boundary below supplies the baseline.
 
 ### Native conversational execution
 
@@ -183,7 +197,7 @@ whole-project audit for every bounded task.
 | Executor & Durability | Direct D0/D2 v2 admission/reconciliation, sealed results/checkpoints, dedicated memory repair; v1 cannot dispatch v2 | Required review and real result/control acceptance; outside-checkout files or additional Executor/D1 capability need separate scope; no D1/host-crash claim |
 | Voice–Task Bridge | Unified committed semantics and Native structured dispatch through existing production policy, exact local create/successor/adjust/cancel consent, authorized target/revision checks and durable projection repair | Real modification/query acceptance, generalization/retirement; update/reprioritize retain confirmation; pause/resume/provide-input remain unsupported |
 | Integrated Web product experience | Right-panel Registry Tasks, operation-driven refresh, passive Native work state, confirmed model selection, text/notification ownership and processing state independent of capture | Current-source busy-to-idle terminal delivery, stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh; projectless backend authority |
-| Observability, benchmark and latency | Scoped timing/error export, Native call/context/work/model milestones, critical-event retention and true terminal outcomes | Current physical reproduction, interruption/first-audible baseline and SLOs; clock gaps/dropped data remain explicit |
+| Observability, benchmark and latency | Scoped timing/error export, Native call/context/work/model and response/wait/argument/receipt milestones, critical-event retention and true terminal outcomes | Current physical reproduction, interruption/first-audible baseline and SLOs; clock gaps/dropped data remain explicit |
 | Automated verification and acceptance | Focused regressions and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative review/human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, semantic cutover, bounded removals and prompt/config isolation | Complete reachability/retirement audit and remaining manifest rows; keep private artifacts/runtime data out of integration |
 | Production operations | Privacy/preflight/observability foundations | Auth/tenancy, public deployment, operations, retention, security, compatibility and release support after separate scope |
