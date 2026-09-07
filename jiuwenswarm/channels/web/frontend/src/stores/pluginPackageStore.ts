@@ -298,6 +298,7 @@ export const usePluginPackageStore = create<PluginPackageState>((set) => ({
     }));
     try {
       await pluginPackagesApi.install(id);
+      if (id === 'co-scribe') window.dispatchEvent(new Event('jiuwen:clouddoc-connections-changed'));
       set((state) => {
         const nextInstalled = { ...state.installed, [id]: true };
         persistLocalState({ installed: nextInstalled });
@@ -340,6 +341,7 @@ export const usePluginPackageStore = create<PluginPackageState>((set) => ({
     set({ busyId: id, error: null, successMessage: null });
     try {
       const { notice } = await pluginPackagesApi.uninstall(id);
+      if (id === 'co-scribe') window.dispatchEvent(new Event('jiuwen:clouddoc-connections-changed'));
       set((state) => {
         const nextInstalled = { ...state.installed, [id]: false };
         persistLocalState({ installed: nextInstalled });

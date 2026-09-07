@@ -115,6 +115,16 @@
 }
 
 /* Spacer pushes bottom items down */
+/* The rule between the built-in pages and the pages an installed plugin adds.
+   Inset so it reads as a separator inside the rail rather than a border of it. */
+.icon-rail-divider {
+  width: 32px;
+  height: 1px;
+  flex: 0 0 auto;
+  margin: 6px 0;
+  background: var(--color-border-default, rgba(0, 0, 0, 0.12));
+}
+
 .icon-rail-spacer {
   flex: 1 1;
   min-height: 8px;

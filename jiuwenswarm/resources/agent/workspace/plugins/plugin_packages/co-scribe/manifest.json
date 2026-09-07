@@ -1,0 +1,38 @@
+{
+  "version": "1.0.0",
+  "package_type": "plugin",
+  "id": "co-scribe",
+  "name": "云文档协同编辑",
+  "description": "Cloud-document co-editing on a mandate harness: receipts with before-images, one-click revert, permission floors, unattended comment handling.",
+  "display_name": {
+    "en": "Co-scribe for Cloud Docs",
+    "zh": "云文档协同编辑"
+  },
+  "display_description": {
+    "en": "Install to add cloud-document co-editing (Google Docs/Sheets, Feishu) with its mandate harness: every write leaves a receipt, any batch reverts in one click, assigned comments can run unattended. After installing, wire a connection in Settings → Cloud Docs; safeguards switch on the Docs panel.",
+    "zh": "安装后获得云文档协同编辑（Google 文档/表格、飞书）及其委托机制：每笔写入留回执、一键整批回退、批注指派可无人值守处理。装好后到 Settings → Cloud Docs 接入连接；保障开关在 Docs 面板。"
+  },
+  "category": "Efficiency",
+  "avatar": "avatars/avatar.png",
+  "source": "builtin",
+  "tags": [
+    {
+      "en": "Shared Docs",
+      "zh": "共享文档"
+    },
+    {
+      "en": "Receipts & Revert",
+      "zh": "回执与回退"
+    },
+    {
+      "en": "Unattended",
+      "zh": "无人值守"
+    }
+  ],
+  "skills": [
+    {
+      "dir": "./skills/co-scribe-collab",
+      "mode": "all"
+    }
+  ]
+}
