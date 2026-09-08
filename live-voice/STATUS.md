@@ -12,8 +12,9 @@ feature complete or a newly accepted controlled candidate.**
 The user accepted audible tearing and the earlier browser first-sound metric
 for the scoped repair. The later human recheck confirms request-specific early
 feedback, a completed file Task and an acknowledged completion announcement.
-The interruption/query-lock repairs are implemented and awaiting local deployment
-and real-path recheck. Full A/B/A2 control,
+The interruption/query-lock repairs are deployed and passed a controlled real
+browser/Provider/Agent recheck, with new human hearing acceptance still missing.
+Full A/B/A2 control,
 offline recovery, artifact quality and the complete physical/device matrix are
 still unproved. Code-project authorization remains required; Work/projectless
 support has been discussed, not implemented.
@@ -31,12 +32,13 @@ query-lock repairs below, including affected verification and controlled local
 deployment. The broad backlog, model changes and local URL implementation remain
 outside that scope.
 
-The last deployment identified by the
-[human recheck](reviews/REALTIME_HUMAN_RECHECK_20260908.md) used code
-`fff2fe15b7`, gpt-realtime-2.1, speed 1.25, minimal reasoning, server-vad-450 and
-selected Agent deepseek-v4-flash#0. This is dated evidence, not a live process
-check. Read Git for source identity and the actual runtime contract/processes
-before runtime work; documentation HEAD is not the deployed product version.
+Latest controlled deployment: `f85f0e33f2`, gpt-realtime-2.1, speed 1.25,
+minimal reasoning, server-vad-450 and selected Agent deepseek-v4-flash. The
+[interruption/query repair record](reviews/REALTIME_INTERRUPTION_QUERY_ROOT_CAUSE_20260908.md)
+owns this browser/Provider/Agent recheck; the earlier
+[human recheck](reviews/REALTIME_HUMAN_RECHECK_20260908.md) used `fff2fe15b7`.
+These are dated evidence. Read the actual runtime contract/processes before
+runtime work; later documentation HEAD is not the deployed product version.
 
 ### Current repair consequences
 
@@ -54,16 +56,20 @@ before runtime work; documentation HEAD is not the deployed product version.
   the Native receiver, and P3 queries holding the Registry lock across external
   reads. One human interruption closed media; queries also delayed audio.
   Commits `d1beb113` and `5cd46346` synchronize receive/output retirement and give
-  queries an owned lifetime outside the shared voice lock. Focused checks and
-  independent review passed; broad comparison retains the same 55 Registry and
-  7 Semantic baseline failures. Deployment, real-path recheck and new human
-  regression remain pending; no full-suite or physical acceptance claim.
+  queries an owned lifetime outside the shared voice lock. Focused checks,
+  independent review, controlled deployment and real browser recheck passed:
+  interrupted receipt, subsequent responses, real Agent read_file and parallel
+  task.list succeeded; 1304 audio admissions waited at most 0.244 ms for the
+  Registry lock. Broad comparison retains the same 55 Registry and 7 Semantic
+  baseline failures. Human regression remains pending; no full-suite or physical
+  acceptance claim.
 - **Local connection diagnosis and entry convention recorded:** use the
   [127.0.0.1 local entry](runbooks/E2E_RUNBOOK.md#local-entry-origin).
   Browser probes isolate roughly 300 ms of localhost IPv6-to-IPv4 fallback.
-  The current launcher still generates localhost links; its code and services
-  were not changed. The convention is recorded, but full voice latency gains
-  after changing the page origin remain unmeasured.
+  The current launcher still generates localhost links; its code was not changed.
+  The later repair recheck used a 127.0.0.1 page and same-origin media: six downlink
+  connections opened in 6.6–27.7 ms. This is transport evidence; an overall voice
+  latency A/B or physical improvement claim remains unmeasured.
 
 ### Measurement and acceptance limits
 
