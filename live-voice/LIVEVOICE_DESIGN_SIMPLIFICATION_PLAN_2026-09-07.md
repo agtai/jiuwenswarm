@@ -422,6 +422,65 @@
 
 ## 10. 通用规程
 
+### 10.0 新会话启动（另一台机器，从零到全部完成）
+
+本节给一个全新会话用：它只拿到分支 `hx/0907_livevoice_slimming`，目标是把路线 B 做完。读完本节再读下面列的文档，然后
+从目标架构 §10 的 B0 开始。
+
+**前提（由用户提供）**
+
+- 分支已在 `agtai/hx/0907_livevoice_slimming`。新机器：`git fetch agtai` 后
+  `git checkout -b hx/0907_livevoice_slimming agtai/hx/0907_livevoice_slimming`。基线 `agtai/hx/0812_live_voice_w3` 可能已
+  前进，先 `git log --oneline HEAD..agtai/hx/0812_live_voice_w3` 看差距；rebase 与否由用户定，不自行 rebase。
+- Python ≥3.11 与 uv、Node LTS、Git。独立 clone 里允许 `uv sync` 与 `npm ci`（§10.1 的 `uv sync` 禁令只针对共享 venv 的
+  worktree）。测试命令见 §10.2；`--no-cov`、不传 `-o addopts=''`。
+- 私有配置按 runbook `live-voice/runbooks/E2E_RUNBOOK.md` §3、§4.1、§4.2：固定依赖、隔离数据目录、provider 凭据与设备。
+  没有凭据时 B2 只能录 fake provider 的 journey，真实 provider 的差分等凭据到位后补录。
+- 物理验收（B9 的 demo journey）需要带麦克风与扬声器的机器和人；服务器会话只准备证据绑定与报告，不宣称 PASS。
+
+**读什么，按顺序（约 2,000 行）**
+
+1. root `AGENTS.md`（每次 push 单独批准、worker 不推）与 `TESTING.md` 的分级。
+2. `live-voice/decisions/DECISIONS.md` 的 D-121、D-122、D-123：授权范围、退休边界、错误模型。
+3. `live-voice/LIVEVOICE_TARGET_ARCHITECTURE_2026-09-07.md` 全文：§1 能力与不变量、§3 原则、§4–§5 设计、§6 正确性、
+   §10 包序列。
+4. 本文 §10.1–10.5、§4（SC-1..10）、§1.2（不变量）；然后只读正在执行的卡：S0（§11）、S1（§12）、S2（§13）、S5（§16）、
+   S7（§18）、S8（§19）。S3/S4/S6 只用其 symbol 处置表做完整性核对。
+5. 附录 INVENTORY 与 METHOD_MAP 只查不读。官方 Hermes 对比与总计划只作背景，不作指令。
+
+**执行顺序与每包的第一件事**
+
+按目标架构 §10 的 B0 → B9。文档已足够直接执行的包：B0、B1、B4、B5、B7、B9（复用卡片）。下列包的线级规格尚未写，
+执行者在编码前先写规格，本地提交交用户审阅，审阅通过再编码：
+
+| 包 | 先写的规格 | 落点 |
+|---|---|---|
+| B1 | 15 种事件的 payload 字段与折叠规则；16 个方法的请求、响应、错误码；服务与前端的构建标识字段（D-122） | schema 包 docstring、生成的 TS、`live-voice/slimming/EVENTS_AND_METHODS.md` |
+| B2 | 录放 harness：录什么、摘要怎么算、差异如何分类为 SC 项或回归、常驻 canary 断言 | `scripts/live_voice/replay/README.md` |
+| B3 | 会话、响应围栏、任务尝试、媒体会话、浏览器视图五张状态转移表；旧责任台账（旧机制 → 新组件，或按哪条 SC 放弃） | `live-voice/slimming/STATE_TABLES.md`、`RESPONSIBILITY_LEDGER.md` |
+| B6 | 界面必须呈现的状态与文案键（含未配置状态）；旧演示模式中需迁移的能力清单 | `live-voice/slimming/UI_STATES.md` |
+| B8 | flag 形态、新旧并跑期的数据处理、Native mixin 需要的 `MediaSession` 接口 | `live-voice/slimming/CUTOVER.md` |
+
+**门与批准**
+
+- B3 完成后停下，交用户审阅行数比例与差分结果，再进入 B4。
+- 每包按 §10.4 收尾，本地提交；任何 push 先按 `AGENTS.md` 报出 remote、ref、commits、mode，等批准。
+- D-122 的退休前检查 1–2 由用户或运维给结果；执行者只记录，不等待。
+- 模型与强度：规格写作与 B3 探针用最高推理强度；按卡执行的 B0/B4/B5/B7 可用较低强度。
+
+**完成的定义**：目标架构 §6.3 的三条 journey PASS、anatomy 预算达标、B8 的旧 symbol grep 为零、B9 报告与 STATUS 更新；
+其中物理 journey 由用户在有设备的机器上跑。
+
+**启动提示词**（粘贴给新会话）：
+
+```text
+你是 LiveVoice 路线 B 的执行者。分支 hx/0907_livevoice_slimming。先读
+live-voice/LIVEVOICE_DESIGN_SIMPLIFICATION_PLAN_2026-09-07.md 的 §10.0，按它列的顺序读完文档，再从
+live-voice/LIVEVOICE_TARGET_ARCHITECTURE_2026-09-07.md §10 的 B0 开始。规则：每包本地提交，不 push；
+B1/B2/B3/B6/B8 先写规格交我审阅再编码；B3 之后停下等我审阅；不改 D-098..D-115 的不变量；
+语义变更只限计划 §4 的 SC-1..10；Native 不动。目标是做完 B0–B9。
+```
+
 ### 10.1 环境
 
 - 工作区：本仓库的 git worktree，分支 `hx/0907_livevoice_slimming`；所有命令在仓库根目录运行。
