@@ -1592,7 +1592,7 @@ async def test_native_session_direct_audio_does_not_require_transcript_or_bridge
         in socket.sent[0]["session"]["instructions"]
     )
     assert (
-        "MUST emit only the function call and no speech or audio"
+        "phrased naturally for their specific request rather than a fixed script"
         in socket.sent[0]["session"]["instructions"]
     )
     await engine.close()

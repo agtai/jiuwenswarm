@@ -68,8 +68,8 @@ async def test_real_task_and_journal_receipt_return_before_blocked_optional_cont
     router = env.registry._native_business
     task_accepted, release = asyncio.Event(), asyncio.Event()
     original_task, original_context = router._task, router.context
-    async def task(*args):
-        result = await original_task(*args)
+    async def task(*args, **kwargs):
+        result = await original_task(*args, **kwargs)
         assert result["status"] == "dispatched", result
         task_accepted.set()
         return result
@@ -165,8 +165,8 @@ async def test_real_work_keeps_router_context_and_journal_without_task_mutation(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("continuation", ["forbidden_mutation", "fresh_context"])
 @pytest.mark.parametrize("bound", [False, True])
-@pytest.mark.parametrize("kind", ["task", "work"])
-async def test_acceptance_speech_does_not_wait_and_dependent_steps_require_fresh_context(continuation, bound, kind):
+@pytest.mark.parametrize("kind,projection", [("task", True), ("work", True), ("status", True), ("adjust", True), ("status", False), ("adjust", False)])
+async def test_acceptance_speech_does_not_wait_and_dependent_steps_require_fresh_context(continuation, bound, kind, projection):
     refresh_entered, release = asyncio.Event(), asyncio.Event()
     async def refresh():
         refresh_entered.set()
@@ -180,20 +180,31 @@ async def test_acceptance_speech_does_not_wait_and_dependent_steps_require_fresh
         function["name"] = "jiuwen_work_start"
         function["arguments"] = json.dumps({"request_text": "Look up tomorrow's weather", "context_id": "a" * 64,
                                            "instruction": "Look up tomorrow's weather"})
+    elif kind in {"status", "adjust"}:
+        function["name"] = "jiuwen_task_" + kind
+        function["arguments"] = json.dumps({"request_text": "Check the task" if kind == "status" else "Update the task",
+            "context_id": "a" * 64, "target_id": "task-1",
+            **({"adjustment": "Add a lunch stop", "expected_revision": 1} if kind == "adjust" else {})})
     engine, socket, _ = f.active_engine(f.speech_started("s1", "u1", 0),
         f.speech_stopped("e1", "u1", 500), f.input_committed("c1", "u1"),
         f.response_created("r1", "p1"), function, f.response_done("d1", "p1"))
     engine.configure_business_context(f.business_context(), refresh=refresh,
-        receipt_projection=True, continuation_preparation=True)
+        receipt_projection=projection, continuation_preparation=True)
     await engine.start()
     try:
         _, _, commit = await f.accept_basic_turn(engine)
         await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
         await engine.next_event()
         await engine.admit_response("p1", f.response_ref(1))
-        assert (await engine.next_event()).delegate.business.operation == ("task.create" if kind == "task" else "work.start")
+        assert (await engine.next_event()).delegate.business.operation == {
+            "task": "task.create", "work": "work.start", "status": "task.status", "adjust": "task.adjust"}[kind]
         await engine.next_event()
-        canonical = canonical_native_receipt(accepted_receipt() if kind == "task" else work_receipt())
+        receipt = accepted_receipt() if kind == "task" else work_receipt()
+        if kind in {"status", "adjust"}:
+            receipt = {"contract_version": "live-voice.native-business.v1", "operation": "task." + kind,
+                "status": "dispatched", "task_id": "task-1",
+                "receipt": {"task_id": "task-1", "state": "running", **({"adjustment_state": "pending"} if kind == "adjust" else {})}}
+        canonical = canonical_native_receipt(receipt)
         result = await asyncio.wait_for(engine.send_delegate_result("call1", f.response_ref(1), canonical), .3)
         assert result[1] is not None and not refresh_entered.is_set()
         requests = [event for event in socket.sent if event["type"] == "response.create"]
@@ -201,9 +212,11 @@ async def test_acceptance_speech_does_not_wait_and_dependent_steps_require_fresh
         assert [tool["name"] for tool in requests[-1]["response"]["tools"]] == ["jiuwen_bound_context_get"]
         if kind == "task":
             assert "one brief natural sentence" in requests[-1]["response"]["instructions"]
-        else:
+        elif kind == "work":
             assert "This is not durable Task" in requests[-1]["response"]["instructions"]
             assert "Do not poll work.get" in requests[-1]["response"]["instructions"]
+        else:
+            assert "as-of observations" in requests[-1]["response"]["instructions"]
         before = tuple(socket.sent)
         assert await engine.send_delegate_result("call1", f.response_ref(1), canonical) == result
         assert tuple(socket.sent) == before
@@ -234,7 +247,7 @@ async def test_acceptance_speech_does_not_wait_and_dependent_steps_require_fresh
             await engine.send_delegate_result("call2", f.response_ref(2), canonical_native_receipt({
                 "contract_version": "live-voice.native-business.v1", "operation": "context.get",
                 "status": "observed", "context": f.business_context()}))
-            assert refresh_entered.is_set()
+            assert refresh_entered.is_set() is projection
             request = [event for event in socket.sent if event["type"] == "response.create"][-1]
             assert request["response"]["tool_choice"] == "auto"
             assert "tools" not in request["response"]  # Restores session's complete tool set.

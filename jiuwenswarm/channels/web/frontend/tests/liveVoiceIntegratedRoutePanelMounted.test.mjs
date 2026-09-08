@@ -16802,7 +16802,7 @@ for (const verify of ['work', 'work_cascade', 'model_before_start', 'model_while
 });
 
 
-for (const finish of ['played', 'close_pending']) test(`P7 mounted terminal preparation keeps Native speaker priority and readiness creates no presentation effects: ${finish}`, async () => {
+for (const finish of ['played', 'close_pending', 'yield_while_preparing']) test(`P7 mounted terminal preparation keeps Native speaker priority and readiness creates no presentation effects: ${finish}`, async () => {
   const i18n = await createI18n();
   const version = 'live-voice.task-notification-preparation.v1';
   const sessionId = `mounted-p7-${finish}`, taskText = 'Prepared terminal Task result.';
@@ -16868,7 +16868,7 @@ for (const finish of ['played', 'close_pending']) test(`P7 mounted terminal prep
     await act(async () => { await browser.emitFirstFrame(0); });
     await waitForMountedEffects(() => states.at(-1)?.p1_status === 'capturing', 'P7 capture missing');
     const taskResponse = { interaction_id: binding.interaction_id, response_id: 'p7-task-response', response_generation: 3 };
-    await act(async () => { await browser.emitSpeechStart(); });
+    if (finish !== 'yield_while_preparing') await act(async () => { await browser.emitSpeechStart(); });
     const source = taskNotificationSource(sessionId, 'p7-task');
     source.extensions = { 'jiuwenswarm.task_progress_return': { persistent_attempt_id: 'p7-attempt' } };
     const taskNotice = { status: 'notification', ...binding, kind: 'agent.output', response: taskResponse, source_event: source,
@@ -16876,6 +16876,7 @@ for (const finish of ['played', 'close_pending']) test(`P7 mounted terminal prep
       presentation_unit: { surface: 'audio', unit_id: 'p7-task-unit', seq: 0, content_ref: `sha256:${'c'.repeat(64)}` } };
     await deliver(taskNotice);
     await waitForMountedEffects(() => calls.some(call => call.method.endsWith('task_preparation_prepare')), 'P7 did not prepare while speaker owned capture');
+    if (finish === 'yield_while_preparing') await act(async () => { await browser.emitSpeechStart(); ready.resolve(); });
     await waitForMountedEffects(() => states.at(-1)?.terminal_announcement_state === 'queued', 'P7 did not yield to speaker');
     assert.equal(calls.filter(call => call.method.endsWith('task_preparation_prepare')).length, 1);
     assert.equal(calls.some(call => /task_preparation_claim|playout_receipt|presentation.ack/.test(call.method)), false);
@@ -16894,6 +16895,8 @@ for (const finish of ['played', 'close_pending']) test(`P7 mounted terminal prep
       return;
     }
     await act(async () => { ready.resolve(); await new Promise(resolve => setImmediate(resolve)); });
+    if (finish === 'yield_while_preparing') await waitForMountedEffects(
+      () => calls.some(call => call.method.endsWith('task_preparation_cancel')), 'Unplayed yield did not cancel its exact child');
     assert.equal(browser.counts.sourceStarts, startedBeforeReady);
     assert.equal(calls.some(call => call.method.endsWith('task_preparation_claim')), false);
     assert.equal(messages.length, previewMessages);

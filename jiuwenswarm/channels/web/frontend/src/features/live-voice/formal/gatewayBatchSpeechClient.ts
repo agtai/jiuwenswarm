@@ -620,6 +620,7 @@ export class GatewayBatchSpeechClient {
   readonly #seenCaptures = new Map<string, number>();
   readonly #responses = new Map<string, ActiveOperation>();
   readonly #responseGenerations = new Map<string, number>();
+  readonly #cancelledTaskPreparations = new Map<string, Readonly<FormalTaskPreparationInput>>();
 
   constructor(
     options: Readonly<{
@@ -1346,9 +1347,17 @@ export class GatewayBatchSpeechClient {
     }
     const synthesis = this.#parseSynthesisResult({ ...result, operation: 'speech.synthesize.batch' }, input);
     const last = this.#responseGenerations.get(input.response.interaction_id) ?? -1;
-    if (input.response.response_generation <= last) {
+    const cancelled = this.#cancelledTaskPreparations.get(input.response.interaction_id);
+    const exactRetry = cancelled !== undefined && cancelled.preparationId !== input.preparationId &&
+      sameResponse(cancelled.response, input.response) && cancelled.unitId === input.unitId &&
+      cancelled.eventKey === input.eventKey && cancelled.textSha256 === input.textSha256 &&
+      cancelled.activationId === input.activationId && cancelled.activationGeneration === input.activationGeneration &&
+      cancelled.correlationId === input.correlationId && cancelled.locale === input.locale &&
+      cancelled.requiredSampleRateHz === input.requiredSampleRateHz;
+    if (input.response.response_generation < last || (input.response.response_generation === last && !exactRetry)) {
       throw new GatewayBatchSpeechError('STALE', 'TASK_PREPARATION_STALE', 'Task preparation response is stale');
     }
+    this.#cancelledTaskPreparations.delete(input.response.interaction_id);
     this.#boundedSet(this.#responseGenerations, input.response.interaction_id, input.response.response_generation);
     return synthesis;
   }
@@ -1357,6 +1366,7 @@ export class GatewayBatchSpeechClient {
     const result = await this.#transport!.request('live_voice.speech.task_preparation_cancel',
       this.#taskPreparationParams(input), { timeoutMs: 2000 });
     this.#requireTaskPreparationState(result, input.preparationId, 'cancelled');
+    this.#boundedSet(this.#cancelledTaskPreparations, input.response.interaction_id, input);
   }
 
   #requireTaskPreparationState(value: unknown, id: string, status: string): void {

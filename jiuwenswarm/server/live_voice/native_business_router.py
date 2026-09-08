@@ -22,7 +22,7 @@ from .native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION, NativeBu
 from .native_business_context import NativeBusinessContextStore, formal_context, select_conversation_history
 from .native_business_observation import (
     NATIVE_BUSINESS_OBSERVATION_VERSION, MAX_OBSERVATION_WAIT_MS,
-    observation_cursor, canonical_native_receipt, is_task_acceptance_receipt,
+    observation_cursor, canonical_native_receipt, is_task_acceptance_receipt, is_task_feedback_receipt,
 )
 from .native_interaction_contract import NativeInteractionBinding
 from .native_interaction_runtime import NativeInteractionRuntimeError
@@ -163,7 +163,10 @@ class NativeBusinessRouter:
         """
         from .product_composition_registry import _VoiceTaskOrigin
         from .product_p2_interaction_adapter import P2LeaseState
-        origins = set(self.task_origins(scope))
+        # Recovery scans the durable input journal. It must not block the
+        # audio/RPC event loop while another Task is writing that same store.
+        self.works()
+        origins = set(await asyncio.to_thread(self.task_origins, scope))
         restored = [task.task_id for task in tasks if task.task_id in origins]
         current = await self._require_context_authority(route)
         async with self.registry._lock:
@@ -441,12 +444,21 @@ class NativeBusinessRouter:
                 or any(value is not None for value in (proposal.turn_commit, proposal.input_transcript, proposal.audio_observation, proposal.provider_done))):
                 raise NativeBusinessViolation("NATIVE_BUSINESS_PROPOSAL_INVALID")
             route.activation_lease.propose_action(route.binding, proposal.action)
-            fresh = await self.context(route)
             invalid = None
             try:
-                selection = fresh if delegate.business.operation == "context.get" else self.contexts.require(route.binding.scope, delegate.business)
+                if delegate.business.operation == "context.get":
+                    selection = await self.context(route)
+                else:
+                    # The proposal names an immutable, already-observed context.
+                    # Fresh authority and the operation's own Task reader still
+                    # validate current scope/revision before any real effect.
+                    await self._require_context_authority(route)
+                    selection = self.contexts.require(route.binding.scope, delegate.business)
             except NativeBusinessViolation as error:
-                selection, invalid = fresh, error.reason
+                if error.reason != "NATIVE_BUSINESS_CONTEXT_STALE" and error.reason not in {
+                    "NATIVE_BUSINESS_TARGET_NOT_OBSERVED", "NATIVE_BUSINESS_REVISION_NOT_OBSERVED"}:
+                    raise
+                selection, invalid = await self.context(route), error.reason
             entries = selection.formal.entries
             if invalid is None and delegate.business.operation in {"work.start", "work.update"}:
                 specification = formal_context(route.binding.scope, {"instruction": delegate.business.instruction,
@@ -505,10 +517,10 @@ class NativeBusinessRouter:
                     result["task_origin_reason"] = origin_reason
                 # A failed optional context refresh cannot rewrite a committed
                 # Task receipt as a rejected operation or invite a new mutation.
-                if is_task_acceptance_receipt(result):
-                    # The durable Task has already accepted this exact command.
-                    # Observation refresh runs separately; it cannot delay or
-                    # redefine the acceptance receipt or its journal sealing.
+                if is_task_acceptance_receipt(result) or is_task_feedback_receipt(result):
+                    # Speak this exact operation's receipt without rebuilding
+                    # all Task/history context. A later dependent operation
+                    # still requires fresh context and its own authority read.
                     result["context_refresh_reason"] = "NATIVE_BUSINESS_CONTEXT_REQUIRES_REFRESH"
                 else:
                     try:

@@ -600,6 +600,29 @@ def test_response_activation_retains_only_bounded_live_authority():
     assert_zero_authority_effects(runtime)
 
 
+def test_issuer_unplayed_retry_retires_exact_predecessor_without_general_generation_reuse():
+    runtime = StreamingSpeechConformance(native_capability(), enabled=True)
+    prior = response_authority(response())
+    runtime.activate_response(prior)
+    with pytest.raises(StreamingSpeechViolation, match="generation must advance"):
+        runtime.activate_response(type(prior)(prior.response, lambda: True))
+    successor = prior.retry_unplayed()
+    with pytest.raises(StreamingSpeechViolation):
+        prior.check()
+    # Cancellation before provider admission must retain the exact predecessor,
+    # without an unbounded chain of retired permits.
+    latest = successor.retry_unplayed()
+    assert latest._unplayed_predecessor is prior
+    assert successor._unplayed_predecessor is None
+    runtime.activate_response(latest)
+    assert latest._unplayed_predecessor is None
+    runtime.activate_response(latest)
+    for stale in (prior, successor, type(prior)(prior.response, lambda: True)):
+        with pytest.raises(StreamingSpeechViolation):
+            runtime.activate_response(stale)
+    assert_zero_authority_effects(runtime)
+
+
 def test_unavailable_provider_rejects_without_session_side_effects() -> None:
     runtime = StreamingSpeechConformance(
         native_capability(available=False), enabled=True

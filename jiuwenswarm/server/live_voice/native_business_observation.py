@@ -42,6 +42,23 @@ def is_nonterminal_work_start_receipt(value: object) -> bool:
             and work.get("reason") is None and "result_text" not in work)
 
 
+def is_task_feedback_receipt(value: object) -> bool:
+    """A status/adjustment result can be spoken without another context read.
+
+    This only permits receipt speech. Any subsequent business call must still
+    fetch fresh context; it grants no Task mutation or current-state authority.
+    """
+    if (not isinstance(value, Mapping)
+            or value.get("contract_version") != "live-voice.native-business.v1"
+            or value.get("operation") not in {"task.status", "task.adjust"}):
+        return False
+    if value.get("status") == "rejected":
+        return (type(value.get("reason")) is str and bool(value["reason"])) or isinstance(value.get("error"), Mapping)
+    task_id, receipt = value.get("task_id"), value.get("receipt")
+    return (value.get("status") == "dispatched" and type(task_id) is str and 0 < len(task_id) <= 256
+            and isinstance(receipt, Mapping) and receipt.get("task_id") == task_id)
+
+
 def observation_cursor(value):
     if value is None:
         return None

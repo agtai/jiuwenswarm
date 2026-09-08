@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-08 (human-session tearing passed; latency, notification/recovery and broader acceptance remain open).
+> Updated: 2026-09-08 (human-session tearing/ordinary latency accepted; three requested fixes in verification; broader acceptance remains open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -26,12 +26,25 @@ history, not acceptance of this candidate.
 
 ## Current execution packet
 
-### Six-hour measured latency and continuity repair
+### Three requested repairs after human acceptance
+
+The user accepted audible tearing and ordinary first-sound latency using the
+observed browser EOT-to-start criterion (P50 1.199 s), then authorized the
+[three-fix boundary](reviews/REALTIME_THREE_FIXES_20260908.md): notification replay,
+voice Task-operation delay including observation-timeout disconnects, and truthful
+tool preambles. Implementation and independent review are complete: 586 Python
+checks pass; frontend has 705 pass / 11 known baseline failures / 1 skip,
+including passing new notification replay cases. Controlled deployment and
+real Provider measurements are the current remaining work. Item 4 (Task
+intent/result semantics) is explicitly excluded. The
+measurement definition is preserved; no broader acoustic/device metric is claimed.
+
+### Prior six-hour measured latency and continuity repair
 
 Repair execution is paused at the user's September 8 request after closing the current
 isolated lock investigation. The user explicitly withdrew the requirement to
 continue toward 100% completion now and requested a progress discussion before
-further work. The production deployment remains clean 0c89d8b940; the pause adds
+further work. At that checkpoint the production deployment was clean 0c89d8b940; the pause added
 documentation and retained diagnostic evidence only. No lock implementation fix
 or further deployment was started. Outstanding acceptance remains PARTIAL and is
 not an active authorization to continue autonomously during this pause. The
@@ -43,7 +56,8 @@ browser EOT to playback start, and adjustment never started playback. An unplaye
 completion announcement fell back to text and consumed its event. Single-frame
 microphone energy during TTS preparation strongly matches the code's temporary
 yield path being treated as terminal failure; the original exception was not
-exported. Broad repair/deployment remains paused for discussion.
+exported. The earlier broad backlog remains paused; only the three fixes above
+have been resumed by the user.
 
 The [September 8 execution boundary](reviews/REALTIME_SIX_HOUR_REPAIR_20260908.md)
 uses this checkout. Main implemented and reviewed prepared sample-credit supply,
@@ -93,10 +107,12 @@ Clean 0c89d8b9 repeats six ordinary inputs with received-PCM P50 1.915 s /
 P95 2.062 s; these are not speaker
 times. Removing routine Native RPC log flushes does not establish a meaningful
 end-to-end gain. A retained 525 ms local descriptor-delivery tail and missing
-current aligned physical measurement leave ordinary first-sound acceptance open.
+current aligned physical measurement limited that earlier acceptance claim.
 The human session's eight no-tool browser EOT-to-AudioContext-start observations
 have P50 1.199 s, but exclude acoustic tail/VAD and device output delay. They
 cannot replace the CLI measurement or establish a strict 3.3-to-1.199 s comparison.
+The user subsequently accepted this browser metric and closed ordinary first-sound
+work for the current repair scope.
 
 ### Realtime acceptance repairs
 

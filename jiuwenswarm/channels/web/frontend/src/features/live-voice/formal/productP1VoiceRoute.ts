@@ -614,6 +614,7 @@ export class ProductP1VoiceRouteOwner {
   #nativeCaptureSendPaused = false;
   #nativeTaskNotification: { readonly response: Readonly<AudioResponseRef>; speechObserved: boolean } | null = null;
   #taskPreparationSequence = 0;
+  #taskPreparationCancellation: Promise<void> = Promise.resolve();
   #taskPreparationCapability: Promise<boolean> | null = null;
   #taskPreparation: {
     input: Readonly<FormalTaskPreparationInput>;
@@ -1542,6 +1543,7 @@ export class ProductP1VoiceRouteOwner {
       timer: null as ReturnType<typeof setTimeout> | null, requested: false, cancelled: false, claimed: false };
     this.#taskPreparation = slot;
     slot.ready = (async () => {
+      await this.#taskPreparationCancellation;
       this.#taskPreparationCapability ??= speech.taskPreparationAvailable();
       if (!await this.#taskPreparationCapability) return false;
       if (slot.cancelled || this.#taskPreparation !== slot || this.#speech !== speech ||
@@ -1551,7 +1553,19 @@ export class ProductP1VoiceRouteOwner {
       slot.requested = true;
       slot.timer = setTimeout(() => this.cancelPreparedTaskNotification(preparedInput.response), 30_000);
       (slot.timer as unknown as { unref?: () => void }).unref?.();
-      await speech.prepareTaskNotification(preparedInput);
+      for (let attempt = 0; ; attempt += 1) {
+        if (slot.cancelled || this.#taskPreparation !== slot || this.#speech !== speech ||
+            this.#operationGeneration !== operationGeneration || this.#closeRequested) {
+          throw Object.assign(new Error('Task preparation owner changed'), { reason: 'TASK_PREPARATION_STALE' });
+        }
+        try { await speech.prepareTaskNotification(preparedInput); break; }
+        catch (error) {
+          // The old zero-playback producer can still own its cleanup slot.
+          // Retry only that explicit transient refusal, within a fixed budget.
+          if (stableFailureReason(error) !== 'TASK_PREPARATION_BUSY' || attempt >= 2) throw error;
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
       if (slot.cancelled || this.#taskPreparation !== slot || this.#speech !== speech ||
           this.#operationGeneration !== operationGeneration || this.#closeRequested) {
         void speech.cancelTaskNotification(preparedInput).catch(() => undefined);
@@ -1572,7 +1586,7 @@ export class ProductP1VoiceRouteOwner {
     slot.cancelled = true;
     if (slot.timer !== null) clearTimeout(slot.timer);
     slot.timer = null;
-    if (slot.requested) void slot.speech.cancelTaskNotification(slot.input).catch(() => undefined);
+    if (slot.requested) this.#taskPreparationCancellation = slot.speech.cancelTaskNotification(slot.input).catch(() => undefined);
   }
 
   prepareNativeTaskNotification(response: Readonly<AudioResponseRef>):
@@ -1581,7 +1595,7 @@ export class ProductP1VoiceRouteOwner {
     if (this.#nativeInteraction === null) return { status: 'not_native' };
     if (this.#closed || this.#closeRequested || this.#failureCleanupPromise !== null ||
         this.#status !== 'capturing' || this.#route === null || this.#route.leaf.closed ||
-        this.#captureSpeechObserved || this.#captureProviderSpeechStartObserved || this.#nativeTaskNotification !== null) {
+        this.#captureLocalActivityRecencyFrames > 0 || this.#captureProviderSpeechStartObserved || this.#nativeTaskNotification !== null) {
       return { status: 'speaker_active' };
     }
     if (response.interaction_id !== this.#interactionId) {
@@ -1662,6 +1676,9 @@ export class ProductP1VoiceRouteOwner {
           throw Object.assign(new Error('Task preparation source changed'), { reason: 'TASK_PREPARATION_SOURCE_CHANGED' });
         }
         if (await prepared.ready) {
+          if (taskLease !== null && (this.#captureLocalActivityRecencyFrames > 0 || this.#captureProviderSpeechStartObserved)) {
+            taskLease.speechObserved = true;
+          }
           if (prepared.cancelled || prepared.claimed || this.#taskPreparation !== prepared ||
               this.#nativeTaskNotification !== taskLease || taskLease?.speechObserved) {
             throw Object.assign(new Error('Task preparation no longer owns claim'), { reason: 'TASK_PREPARATION_STALE' });
@@ -1685,6 +1702,9 @@ export class ProductP1VoiceRouteOwner {
         });
       this.#requireCurrent(operationGeneration);
       if (result === null) throw new Error('formal synthesis was fenced');
+      if (taskLease !== null && (this.#captureLocalActivityRecencyFrames > 0 || this.#captureProviderSpeechStartObserved)) {
+        taskLease.speechObserved = true;
+      }
       if (prepared !== null && taskLease !== null &&
           (this.#nativeTaskNotification !== taskLease || taskLease.speechObserved)) {
         this.cancelPreparedTaskNotification(input.response);
@@ -1932,7 +1952,13 @@ export class ProductP1VoiceRouteOwner {
       if (taskLease !== null && (this.#nativeTaskNotification !== taskLease || taskLease.speechObserved)) {
         // This Task no longer owns playback. Its late synthesis result/error
         // cannot unfreeze or close a newer Native response's capture receipt.
-        throw Object.assign(new Error('Task announcement yielded to the speaker'), { reason: 'FORMAL_PLAYOUT_BARGED' });
+        const unplayedYield = playoutResponse === null && this.#nativeTaskNotification === taskLease &&
+          taskLease.speechObserved && !this.#closed && !this.#closeRequested &&
+          this.#operationGeneration === operationGeneration;
+        if (prepared !== null && this.#taskPreparation === prepared) this.cancelPreparedTaskNotification(input.response);
+        throw Object.assign(new Error('Task announcement yielded to the speaker'), {
+          reason: unplayedYield ? 'PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER' : 'FORMAL_PLAYOUT_BARGED',
+        });
       }
       this.#nativeCaptureSendPaused = false;
       if (continuousNative) this.#drainCaptureFrames();
@@ -3546,10 +3572,13 @@ export class ProductP1VoiceRouteOwner {
         // state. The sticky observation below only guards the notification
         // pause path; rotation eligibility uses the decaying recency counter.
         this.#captureSpeechObserved = true;
-        if (this.#nativeTaskNotification !== null) this.#nativeTaskNotification.speechObserved = true;
         this.#captureLocalActivityRecencyFrames = CAPTURE_LOCAL_ACTIVITY_DECAY_FRAMES;
       } else if (this.#captureLocalActivityRecencyFrames > 0) {
         this.#captureLocalActivityRecencyFrames -= 1;
+        if (this.#nativeInteraction !== null && this.#captureLocalActivityRecencyFrames === 0 &&
+            !this.#captureProviderSpeechStartObserved) {
+          this.#onCaptureActivitySettled?.();
+        }
       }
     }
     if (

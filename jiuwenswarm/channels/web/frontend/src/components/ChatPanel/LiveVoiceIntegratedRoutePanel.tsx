@@ -3941,16 +3941,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             // acknowledge an announcement that was never spoken. The retained
             // attempt is the only identity that matters here -- media start
             // authority is not required to *not* play something.
-            if (pendingPresentationAttemptRef.current !== presentationAttempt) return;
-            // Release the active-response claim: while it stands the route
-            // counts as foreground-busy, and the arbitration that has to replay
-            // this announcement would defer forever.
-            if (activeVoiceResponseRef.current?.response_id === disposition.response_id) {
-              activeVoiceResponseRef.current = null;
-            }
-            presentationAttempt.deferred_to_speaker = true;
-            terminalAnnouncementSpeechOwnerRef.current = voiceOwner;
-            updateTerminalAnnouncementState('queued');
+            deferTaskAnnouncementToSpeaker(presentationAttempt, voiceOwner);
             return;
           }
           if (foregroundPlayoutLease !== null) {
@@ -7540,6 +7531,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
       if (pendingPresentationAttemptRef.current === retained) {
         const reason = stableProductTextReason(error, 'PRODUCT_TERMINAL_ANNOUNCEMENT_AUDIO_FAILED');
+        if (playoutDeferredToSpeaker(error)) {
+          deferTaskAnnouncementToSpeaker(retained, p1VoiceOwnerRef.current);
+          return;
+        }
         if (reason === 'FORMAL_PLAYOUT_BARGED') {
           void settleTaskPresentationFailure(retained, 'task_audio_playout_failed');
           return;
@@ -7613,6 +7608,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (voiceOwner.interactionEngine() !== 'openai-realtime-native') p1VoiceCaptureBindingRef.current = null;
       updateTerminalAnnouncementState('playing');
       activeVoiceResponseRef.current = terminal.disposition.response;
+      prepareTerminalTaskNotification(activationOwner, terminal.disposition);
       await awaitProductTaskNotificationPlayout(
         voiceOwner.playAgentText({
           response: terminal.disposition.response,
@@ -7650,6 +7646,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         activeVoiceResponseRef.current = null;
       }
       if (pendingPresentationAttemptRef.current === retained) {
+        if (playoutDeferredToSpeaker(error)) {
+          deferTaskAnnouncementToSpeaker(retained, p1VoiceOwnerRef.current);
+          return;
+        }
         // A resumed AUDIO failure uses the same Registry TEXT fallback as an
         // initial Task playout failure, not the retired local TTS retry path.
         const reason = stableProductTextReason(error, 'PRODUCT_TERMINAL_ANNOUNCEMENT_AUDIO_FAILED');
@@ -8014,6 +8014,24 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
    * The caller treats `speaker_active` as an ordinary unplayed presentation, so
    * Task notifications keep their existing retained-recovery path.
    */
+  const deferTaskAnnouncementToSpeaker = (
+    attempt: PendingProductPresentationAttempt, voiceOwner: ProductP1VoiceRouteOwner | null,
+  ): void => {
+    if (pendingPresentationAttemptRef.current !== attempt) return;
+    if (activeVoiceResponseRef.current?.response_id === attempt.response.response_id &&
+        activeVoiceResponseRef.current.response_generation === attempt.response.response_generation) {
+      activeVoiceResponseRef.current = null;
+    }
+    attempt.release_notification_capture?.();
+    attempt.release_notification_capture = undefined;
+    attempt.deferred_to_speaker = true;
+    const capture = voiceOwner?.captureDiagnostics();
+    terminalAnnouncementSpeechOwnerRef.current = voiceOwner?.interactionEngine() === 'openai-realtime-native' &&
+      !capture?.provider_speech_start_observed && (capture?.local_activity_recency_frames ?? 0) === 0 ? null : voiceOwner;
+    updateTerminalAnnouncementState('queued');
+    setTerminalAnnouncementArbitrationEpoch(epoch => epoch + 1);
+  };
+
   const prepareTaskNotificationCapture = async (
     owner: ProductP1VoiceRouteOwner, attempt: PendingProductPresentationAttempt, recovering = false,
   ): Promise<'ready' | 'speaker_active'> => {

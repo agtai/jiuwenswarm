@@ -116,6 +116,7 @@ class SpeechResponseAuthority:
         self._next_unit_seq = 0
         self._used_units: set[str] = set()
         self._activated_by: object | None = None
+        self._unplayed_predecessor: SpeechResponseAuthority | None = None
         self._lock = threading.RLock()
 
     def check(self) -> None:
@@ -155,6 +156,29 @@ class SpeechResponseAuthority:
                     "response belongs to another provider owner",
                 )
             self._activated_by = owner
+
+    def retry_unplayed(self) -> "SpeechResponseAuthority":
+        """Issuer-only handoff after an exact unplayed source fully retires.
+
+        The Media issuer must prove no attach, emitted frame or receipt and
+        retain its current notification identity. No provider may infer this
+        permit from matching response IDs.
+        """
+        with self._lock:
+            self.check()
+            successor = SpeechResponseAuthority(self.response, self._is_current)
+            successor._activated_by = self._activated_by
+            successor._unplayed_predecessor = self._unplayed_predecessor or self
+            self._unplayed_predecessor = None
+            self.revoke()
+            return successor
+
+    def claim_unplayed_predecessor(self, prior: "SpeechResponseAuthority") -> bool:
+        with self._lock:
+            matches = self._unplayed_predecessor is prior and prior._revoked and self.response == prior.response
+            if matches:
+                self._unplayed_predecessor = None
+            return matches
 
     def revoke(self) -> None:
         with self._lock:
@@ -1103,7 +1127,8 @@ class StreamingSpeechConformance:
             if prior is authority:
                 return
             if prior is not None:
-                if response.response_generation <= prior.response.response_generation:
+                if (response.response_generation <= prior.response.response_generation
+                        and not authority.claim_unplayed_predecessor(prior)):
                     raise StreamingSpeechViolation(
                         "STALE_RESPONSE_GENERATION", "response generation must advance"
                     )

@@ -967,6 +967,7 @@ class _SynthesisAuthorityTransfer:
     terminal_event_key: str | None = None
     presentation_retired: bool = False
     streaming_authority: SpeechStreamAuthority | None = field(default=None, repr=False)
+    unplayed_preparation: tuple[task_preparation.PreparationIdentity, str] | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True)
@@ -2101,11 +2102,22 @@ class DedicatedMediaProductRegistry:
 
     async def _run_native_business_poll(self, session: _NativeMediaSession) -> None:
         while not session.closed:
-            if getattr(session.activation, "observation_contract_version", None) is not None:
-                result = await self._read_native_business_context(session, wait_ms=1000)
-            else:
+            try:
+                if getattr(session.activation, "observation_contract_version", None) is not None:
+                    result = await self._read_native_business_context(session, wait_ms=1000)
+                else:
+                    await asyncio.sleep(_NATIVE_BUSINESS_POLL_SECONDS)
+                    result = await self._refresh_native_business_context(session)
+            except NativeRuntimeClientError as error:
+                if error.reason != "NATIVE_RUNTIME_TIMEOUT":
+                    raise
+                # An observation performs no business effect. Keep the last
+                # cursor and retry; never apply stale facts or close healthy
+                # media because this independent read exceeded its deadline.
+                record_audio_diagnostic("native_business_observation_retry",
+                    reason=error.reason, session_id=session.activation.binding.scope.session_id)
                 await asyncio.sleep(_NATIVE_BUSINESS_POLL_SECONDS)
-                result = await self._refresh_native_business_context(session)
+                continue
             if session.closed:
                 return
             stops = await session.engine.update_business_context(result["context"], result["work_events"])
@@ -6395,6 +6407,18 @@ class DedicatedMediaProductRegistry:
 
     async def prepare_task_notification(self, *, params: object, routed_session_id: str,
             connection_id: str, request_origin: str | None) -> dict[str, object]:
+        # A yielding browser cancels the exact unplayed child before retrying.
+        # Keep cleanup strongly owned and wait outside the Registry lock.
+        with self._lock:
+            identity, preparation_id, _parent, transfer = self._task_preparation_request(params,
+                routed_session_id=routed_session_id, connection_id=connection_id, request_origin=request_origin, with_text=True)
+            previous = self._task_preparations.active(identity.activation_key)
+            cleanup = (previous.producer if previous is not None
+                and previous.identity == identity and not previous.attached and previous.emitted_frames == 0
+                and previous.preparation_id != preparation_id and previous.reason == "TASK_PREPARATION_CANCELLED"
+                else None)
+        if cleanup is not None and not cleanup.done():
+            await asyncio.wait({cleanup}, timeout=2.0)
         with self._lock:
             self._prune(self._monotonic())
             identity, preparation_id, parent, transfer = self._task_preparation_request(params,
@@ -6439,6 +6463,21 @@ class DedicatedMediaProductRegistry:
                 request = parse_synthesis_batch_request(payload, context)
                 binding = _synthesis_authorization_binding(request)
                 with self._lock:
+                    retry = transfer.unplayed_preparation
+                    if (current() and retry is not None and retry[0] == identity
+                            and retry[1] != preparation_id
+                            and transfer.claimed_subject_id == identity.subject_id
+                            and transfer.claimed_operation_id == retry[1]):
+                        # start() admitted a fresh identity only after the old
+                        # producer and its unplayed tickets retired completely.
+                        authorities = self._product_activations[key].streaming_response_authorities
+                        if authorities and authorities[0].response == request.response:
+                            authorities[0] = authorities[0].retry_unplayed()
+                        if transfer.streaming_authority is not None:
+                            transfer.streaming_authority.revoke()
+                        transfer.claimed_operation_id = preparation_id
+                        transfer.streaming_authority = None
+                        transfer.unplayed_preparation = None
                     if not current() or self.authorize(binding) != binding:
                         raise task_preparation.PreparationViolation("TASK_PREPARATION_STALE")
                     stream = self._admit_streaming_synthesis(request, identity.session_id, identity.subject_id,
@@ -6504,9 +6543,15 @@ class DedicatedMediaProductRegistry:
     def cancel_task_notification(self, *, params: object, routed_session_id: str,
             connection_id: str, request_origin: str | None) -> dict[str, object]:
         with self._lock:
-            identity, preparation_id, _parent, _transfer = self._task_preparation_request(params,
+            identity, preparation_id, _parent, transfer = self._task_preparation_request(params,
                 routed_session_id=routed_session_id, connection_id=connection_id, request_origin=request_origin,
                 allow_retired=True)
+            slot = self._task_preparations.active(identity.activation_key)
+            if (slot is not None and slot.identity == identity and slot.preparation_id == preparation_id
+                    and not slot.attached and slot.emitted_frames == 0 and not slot.settled
+                    and slot.reason in {None, "TASK_PREPARATION_CANCELLED"}
+                    and transfer.claimed_operation_id == preparation_id):
+                transfer.unplayed_preparation = (identity, preparation_id)
             self._task_preparations.cancel(identity, preparation_id)
             self._reconcile_task_preparations()
         return {"contract_version": task_preparation.CONTRACT_VERSION, "preparation_id": preparation_id,

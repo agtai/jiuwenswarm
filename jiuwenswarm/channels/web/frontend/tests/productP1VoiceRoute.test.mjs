@@ -7020,13 +7020,13 @@ test(`Native Task TTS preserves input and exact unplayed settlement: ${scenario}
   const outcome = played.then(value => ({ value }), error => ({ error }));
   const frames = () => socket.sent.filter(value => typeof value !== 'string').map(value => decodeAudioFrame(binding, value));
   for (let seq = 1; seq <= 1600; seq += 1) {
-    sendNextFrameFromCurrentWorklet(environment, seq, scenario === 'speech_during_synthesis' && seq === 1
+    sendNextFrameFromCurrentWorklet(environment, seq, scenario === 'speech_during_synthesis' && seq === 1600
       ? processedHeadsetVoiceFrame() : new Float32Array(960));
     await new Promise(resolve => setImmediate(resolve));
   }
   assert.equal(frames().length, 1601);
   assert.ok(frames().every((frame, index) => frame.seq === index && frame.sample_cursor === index * 960));
-  if (scenario === 'speech_during_synthesis') assert.ok(frames()[1].samples.some(sample => sample !== 0));
+  if (scenario === 'speech_during_synthesis') assert.ok(frames().at(-1).samples.some(sample => sample !== 0));
   assert.equal(owner.yieldNativeTaskNotification({ ...response, response_id: 'foreign' }), false);
   if (scenario === 'native_response_during_synthesis') assert.equal(owner.yieldNativeTaskNotification(response), true);
   releaseSynthesis();
@@ -7045,7 +7045,8 @@ test(`Native Task TTS preserves input and exact unplayed settlement: ${scenario}
     assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
     assert.equal(calls.find(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD)[1].capture_frames_acked, 1601);
   } else {
-    assert.equal(result.error?.reason, 'FORMAL_PLAYOUT_BARGED');
+    assert.equal(result.error?.reason, scenario === 'speech_during_playout'
+      ? 'FORMAL_PLAYOUT_BARGED' : 'PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER');
     assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 0);
     assert.equal(environment.contexts[0].sourceEndCount, 0);
     if (scenario !== 'speech_during_playout') assert.equal(environment.contexts[0].sourceStartCount, 0);
@@ -7097,7 +7098,7 @@ test('formal P1 exposes recognition-stream failure only for negotiated uplink ca
   );
 });
 
-for (const preparationCase of ['complete', 'cancel', 'changed_text', 'close_while_preparing', 'speech_during_claim', 'lost_claim', 'unsupported']) {
+for (const preparationCase of ['complete', 'local_noise', 'cleanup_busy', 'cancel', 'changed_text', 'close_while_preparing', 'speech_during_claim', 'lost_claim', 'unsupported']) {
 test(`P7 prepared terminal TTS retains Native input and claims only after arbitration: ${preparationCase}`, async () => {
   const environment = audioEnvironment();
   const calls = [], sockets = [];
@@ -7142,6 +7143,8 @@ test(`P7 prepared terminal TTS retains Native input and claims only after arbitr
       if (method === 'live_voice.speech.task_preparation_capabilities') return {
         contract_version: version, available: preparationCase !== 'unsupported', max_frames: 750, max_bytes: 3 * 1024 * 1024, retention_ms: 30_000 };
       if (method === 'live_voice.speech.task_preparation_prepare') {
+        if (preparationCase === 'cleanup_busy' && calls.filter(([name]) => name === method).length < 3)
+          throw Object.assign(new Error('Old producer cleanup pending'), { code: 'TASK_PREPARATION_BUSY' });
         await preparedReady.promise;
         return { contract_version: version, preparation_id: params.preparation_id, status: 'ready', presented: false };
       }
@@ -7197,11 +7200,19 @@ test(`P7 prepared terminal TTS retains Native input and claims only after arbitr
     return;
   }
   if (preparationCase === 'cancel') owner.cancelPreparedTaskNotification(response);
-  preparedReady.resolve();
   const lease = owner.prepareNativeTaskNotification(response);
   assert.equal(lease.status, 'ready');
   const played = owner.playAgentText({ response, unit_id: 'task-unit',
     text: preparationCase === 'changed_text' ? 'Changed text.' : input.text, capture_during_playout: false });
+  if (preparationCase === 'local_noise') {
+    sendNextFrameFromCurrentWorklet(environment, 2, new Float32Array(960).fill(0.016));
+    for (let frame = 3; frame < 84; frame += 1) {
+      sendNextFrameFromCurrentWorklet(environment, frame, new Float32Array(960));
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal(owner.captureDiagnostics().local_activity_recency_frames, 0);
+  }
+  preparedReady.resolve();
   if (preparationCase !== 'changed_text') {
     assert.equal(owner.playAgentText({ response, unit_id: 'task-unit', text: input.text, capture_during_playout: false }), played,
       'Concurrent exact continuations must share one claim/play/receipt result');
@@ -7211,10 +7222,18 @@ test(`P7 prepared terminal TTS retains Native input and claims only after arbitr
       await new Promise(resolve => setImmediate(resolve));
     assert.equal(owner.yieldNativeTaskNotification(response), true);
     claimReady.resolve();
-    await assert.rejects(played, error => error.reason === 'FORMAL_PLAYOUT_BARGED');
+    await assert.rejects(played, error => error.reason === 'PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER');
     assert.equal(sockets.length, 1, 'Stale claim cannot open a child audio socket');
     assert.equal(environment.contexts[0].sourceStartCount, 0);
     assert.equal(calls.some(([method]) => method.includes('receipt') || method.includes('synthesize_batch')), false);
+    lease.release();
+    owner.prepareTaskNotification(input);
+    const replayLease = owner.prepareNativeTaskNotification(response);
+    assert.equal(replayLease.status, 'ready');
+    await owner.playAgentText({ response, unit_id: 'task-unit', text: input.text, capture_during_playout: false });
+    replayLease.release();
+    assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1,
+      'The exact unplayed announcement must replay once after yielding, without an early ACK');
   } else if (['cancel', 'changed_text', 'lost_claim'].includes(preparationCase)) {
     await assert.rejects(played, error => error.reason.startsWith('TASK_PREPARATION_'));
     assert.equal(calls.some(([method]) => method.includes('receipt') || method.includes('synthesize_batch')), false);
@@ -7223,7 +7242,7 @@ test(`P7 prepared terminal TTS retains Native input and claims only after arbitr
   } else {
     await played;
     assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
-    assert.equal(calls.filter(([method]) => method.includes('task_preparation_claim')).length, preparationCase === 'complete' ? 1 : 0);
+    assert.equal(calls.filter(([method]) => method.includes('task_preparation_claim')).length, ['complete', 'local_noise', 'cleanup_busy'].includes(preparationCase) ? 1 : 0);
     assert.equal(calls.filter(([method]) => method.includes('synthesize_batch')).length, preparationCase === 'unsupported' ? 1 : 0);
   }
   assert.equal(owner.status().status, 'capturing');
@@ -7801,7 +7820,7 @@ test(`formal P1 Native activation preserves continuous uplink against stale Task
     assert.equal(beforeStatus.status, 'playing');
     const sentBefore = uplink.sent.filter(value => typeof value !== 'string').length;
     releaseTaskSynthesis();
-    assert.equal((await taskOutcome).error?.reason, 'FORMAL_PLAYOUT_BARGED');
+    assert.equal((await taskOutcome).error?.reason, 'PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER');
     assert.deepEqual(owner.status(), beforeStatus, 'old Task cannot change the Native ACK wait');
     sendNextFrameFromCurrentWorklet(environment, 1502, new Float32Array(960));
     await new Promise(resolve => setImmediate(resolve));

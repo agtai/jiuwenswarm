@@ -227,8 +227,20 @@ async def cleanup(registry, owner, parent):
 
 
 @pytest.mark.asyncio
-async def test_real_registry_synthesis_media_seam_prepares_without_ticket_then_claims_once_and_requires_real_receipt():
+@pytest.mark.parametrize("retry", [False, True])
+async def test_real_registry_synthesis_media_seam_prepares_without_ticket_then_claims_once_and_requires_real_receipt(retry, monkeypatch):
     registry, owner, provider, parent, params, _ = await registry_fixture()
+    release_cleanup = asyncio.Event()
+    if retry:
+        from jiuwenswarm.gateway.live_voice.product_streaming_synthesis import ProductStreamingSynthesisSource
+        original_close = ProductStreamingSynthesisSource.aclose
+        async def held_close(source):
+            await original_close(source)
+            try:
+                await release_cleanup.wait()
+            except asyncio.CancelledError:
+                await release_cleanup.wait()
+        monkeypatch.setattr(ProductStreamingSynthesisSource, "aclose", held_close)
     try:
         before_records = set(registry._records)
         ready, duplicate = await asyncio.gather(registry.prepare_task_notification(**arguments(params)),
@@ -246,6 +258,25 @@ async def test_real_registry_synthesis_media_seam_prepares_without_ticket_then_c
         assert len(registry._pending_tickets) == 1
         downlink = registry._records[registry._pending_tickets[claimed["audio"]["media_ticket"]]]
         source = downlink.downlink_stream_source
+        if retry:
+            old_control, old_ticket = control, claimed["audio"]["media_ticket"]
+            assert registry.cancel_task_notification(**arguments(control))["status"] == "cancelled"
+            assert old_ticket not in registry._pending_tickets and downlink.record_id not in registry._records
+            assert source.emitted_frames == 0 and not source.attached and not parent.playout_receipts
+            params = {**params, "preparation_id": "prepare-task-retry"}
+            replacement = asyncio.create_task(registry.prepare_task_notification(**arguments(params)))
+            await asyncio.sleep(.01)
+            assert not replacement.done() and len(provider.requests) == 1
+            assert registry._task_preparations.retained_count == 1
+            release_cleanup.set()
+            assert (await asyncio.wait_for(replacement, 1))["status"] == "ready"
+            assert len(provider.requests) == 2
+            with pytest.raises(PreparationViolation):
+                await registry.claim_task_notification(**arguments(old_control))
+            control = {key: value for key, value in params.items() if key != "text"}
+            claimed = await registry.claim_task_notification(**arguments(control))
+            downlink = registry._records[registry._pending_tickets[claimed["audio"]["media_ticket"]]]
+            source = downlink.downlink_stream_source
         assert not parent.playout_receipts
         registry.accept_frame(parent, MediaAudioFrame(0, 0, (0.0,) * 480))
         socket = _AutoAckDownlinkSocket(claimed["audio"])
@@ -267,6 +298,39 @@ async def test_real_registry_synthesis_media_seam_prepares_without_ticket_then_c
         assert registry._task_preparations.retained_count == 0 and source.settled
         assert registry.cancel_task_notification(**arguments(control))["status"] == "cancelled"
         assert len(parent.playout_receipts) == 1
+    finally:
+        release_cleanup.set()
+        await cleanup(registry, owner, parent)
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_retry_producer_keeps_actual_consumed_authority_and_fences_attached_retry():
+    registry, owner, provider, parent, params, _ = await registry_fixture()
+    try:
+        await registry.prepare_task_notification(**arguments(params))
+        control = {key: value for key, value in params.items() if key != "text"}
+        registry.cancel_task_notification(**arguments(control))
+        await eventually(lambda: registry._task_preparations.retained_count == 0)
+        next_params = {**params, "preparation_id": "cancel-before-producer"}
+        preparing = asyncio.create_task(registry.prepare_task_notification(**arguments(next_params)))
+        await asyncio.sleep(0)
+        registry.cancel_task_notification(**arguments({key: value for key, value in next_params.items() if key != "text"}))
+        with pytest.raises(PreparationViolation):
+            await preparing
+        await eventually(lambda: registry._task_preparations.retained_count == 0)
+        assert len(provider.requests) == 1 and not parent.playout_receipts
+        final_params = {**params, "preparation_id": "retry-after-early-cancel"}
+        await registry.prepare_task_notification(**arguments(final_params))
+        control = {key: value for key, value in final_params.items() if key != "text"}
+        claimed = await registry.claim_task_notification(**arguments(control))
+        child = registry._records[registry._pending_tickets[claimed["audio"]["media_ticket"]]]
+        child.downlink_stream_source.attach()
+        registry.cancel_task_notification(**arguments(control))
+        await eventually(lambda: registry._task_preparations.retained_count == 0)
+        with pytest.raises(PreparationViolation):
+            await registry.prepare_task_notification(**arguments({**params, "preparation_id": "forbidden-after-attach"}))
+        assert len(provider.requests) == 2 and not parent.playout_receipts
+        assert not registry._pending_tickets and not parent.route_completed
     finally:
         await cleanup(registry, owner, parent)
 
