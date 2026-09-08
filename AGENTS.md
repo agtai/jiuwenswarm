@@ -65,28 +65,25 @@ module. Generic worker templates do not override these limits.
 
 ## Live Voice routing and facts
 
-Start a Live Voice task with `live-voice/README.md` and the judgement/current
-packet in `live-voice/STATUS.md`; read capability rows and other sections only as
-the task requires. Choose one primary README route and add only sections needed
-by the touched boundaries. Reuse unchanged guidance already read in this session.
-Links are conditional; historical snapshots, closed packets, numbered plans and
-past runs are not a default reading list or current queue. Documentation structure
-work also uses `live-voice/DOCUMENTATION_RULES.md`.
+Start a Live Voice task with [README](live-voice/README.md), then only
+[Project judgement](live-voice/STATUS.md#project-judgement) and
+[Current execution packet](live-voice/STATUS.md#current-execution-packet).
+Stop at Completion boundaries unless wider scope is needed. README owns further
+task-specific reading; reuse unchanged guidance. Historical packets and the
+cumulative backlog do not reactivate paused work or dormant worker assignments.
 
 For local Live Voice access on the browser's own machine, always give/open
 `http://127.0.0.1:<frontend-port>/...` (default port `5173`), including chat and
 acceptance links; do not substitute `localhost`. Keep browser API and media
-WebSocket endpoints on that page's origin. This convention applies to new
-sessions and rebuilt environments using this repository. See the
+WebSocket endpoints on that page's origin. See the
 [local entry convention](live-voice/runbooks/E2E_RUNBOOK.md#local-entry-origin)
 for rationale, verification and the separate remote-server case.
 
 At resume verify `git status --short --branch`, `git rev-parse HEAD`, and
 `git rev-list --left-right --count 'HEAD...@{upstream}'`; report an absent upstream.
 Git/source is implementation fact; accepted decisions own intended behavior.
-Record and repair document drift without treating existing code as final design.
-Private credentials, provider/model setup, project registration, device/browser
-state, runtime data and network availability are not restored by Git.
+Repair document drift without treating existing code as final design. Git does
+not restore private configuration, credentials, runtime data or browser/device state.
 
 The Demo must send committed final speech to the real JiuwenSwarm Agent/tools.
 ASR/TTS-only paths and other shortcuts cannot claim the full product boundary.

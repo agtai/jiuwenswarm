@@ -159,7 +159,7 @@ truth, the adjustment does not reach the authoritative path, the result is lost
 or fabricated, or terminal speech targets the wrong response/task.
 
 For the current candidate, STATUS also requires the A/B/A2 extension in
-[showcase §4](../demo/PRODUCT_READINESS_SHOWCASE.md#4-current-aba2-journey):
+[showcase §4.1](../demo/PRODUCT_READINESS_SHOWCASE.md#41-retained-aba2-candidate-regression-journey):
 separate task control, offline completion, unread/ACK/refresh and preserved
 predecessor/new revision. Record that accepted extension in the candidate's
 scope before running it. A narrower module rehearsal does not require all

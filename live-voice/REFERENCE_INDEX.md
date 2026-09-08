@@ -18,6 +18,35 @@
 | 2026-08-17 Post-Alpha hands-free Demo defects | [completed defect-discovery record](evidence/POST_ALPHA_DEMO_20260817_95b26308_WORKTREE.md), then current [STATUS](STATUS.md) and only the implicated D119/source boundary |
 | Current controlled product-candidate acceptance | [product-readiness contract](validation/PRODUCT_READINESS_ACCEPTANCE.md), [complete human Journey](demo/PRODUCT_READINESS_SHOWCASE.md), current [STATUS](STATUS.md) and only the required runbook sections |
 
+<a id="september-repair-records"></a>
+
+## September repair records
+
+These records replace the chronological repair narratives formerly embedded in
+STATUS. Open only the implicated boundary. Their old execution instructions,
+worker assignments, deployment settings and test totals are exact-run history;
+current scope and acceptance remain in STATUS. The pre-cleanup text is retained
+in Git (STATUS at `234b1517`), not a second mutable status file.
+
+| Need / boundary | Conditional evidence |
+|---|---|
+| Earlier human failures and six-hour repair | [Human-session diagnosis](reviews/REALTIME_HUMAN_ACCEPTANCE_DIAGNOSIS_20260908.md), [repair scope](reviews/REALTIME_SIX_HOUR_REPAIR_20260908.md), [acceptance including failures](reviews/REALTIME_SIX_HOUR_ACCEPTANCE_20260908.md), [same-frame supply measurements](evidence/REALTIME_SUPPLY_DIAGNOSTICS_20260908.md) |
+| Original Task speech and file preservation | [D-122 source retention](decisions/DECISIONS.md#d-122-retain-original-native-task-speech-independently-of-model-proposals), [D-123 file effects](decisions/DECISIONS.md#d-123-bind-native-task-file-effects-before-writes-and-across-recovery); scoped successful samples do not erase earlier preservation failures |
+| Six-point acceptance repairs and startup | [Repair packet](reviews/REALTIME_ACCEPTANCE_REPAIRS_20260907.md), [startup repair](reviews/REALTIME_NATIVE_STARTUP_REPAIR_20260907.md), [candidate/user acceptance record](reviews/REALTIME_ACCEPTANCE_CANDIDATE_20260907.md) |
+| Shenzhen routing, starvation and receipts | [Diagnosis](reviews/SHENZHEN_REHEARSAL_DIAGNOSIS_20260907.md), [scoped repairs](reviews/SHENZHEN_REPAIRS_20260907.md); use the [current human script](demo/PRODUCT_READINESS_SHOWCASE.md#4-current-shenzhen-business-trip-showcase) only for an applicable rehearsal |
+| P0–P9 optimization decisions | [Full packet](reviews/REALTIME_OPTIMIZATION_FULL_20260907.md), [first bounded batch](reviews/REALTIME_OPTIMIZATION_20260907.md); P3/P6/P9 include retain/reject decisions, not achieved latency targets |
+| Native business/work composition | [Conversational execution](reviews/NATIVE_CONVERSATION_EXECUTION_20260906.md) |
+| Delegate return, recovery and notification ownership | [Delegate client repair](reviews/NATIVE_DELEGATE_CLIENT_REPAIR_20260906.md), [session lifecycle repair](reviews/NATIVE_SESSION_LIFECYCLE_REPAIR_20260906.md) |
+| Provider transcript metadata | [Native schema compatibility](reviews/NATIVE_EVENT_SCHEMA_REPAIR_20260906.md) |
+| Generated text, Task UI and foreground interruption | [Rehearsal repair](reviews/NATIVE_REHEARSAL_REPAIR_20260906.md), [foreground repair](reviews/NATIVE_FOREGROUND_REPAIR_20260906.md), [earlier Demo repairs](reviews/DEMO_THREE_REPAIRS_20260906.md) |
+| Headset interruption and generation defaults | [Physical barge-in gaps](evidence/VAD_PLAYOUT_ACCEPTANCE_AND_BARGE_IN_DIAGNOSIS_20260904.md), [formal default change](reviews/FORMAL_GENERATION_DEFAULT_20260905.md); verified-headset profile evidence does not cover speakers/Bluetooth, and old settings are not the current Native runtime configuration |
+| Answer hardcodes and spoken-answer ownership | [Retirement](reviews/ANSWER_HARDCODE_RETIREMENT_20260905.md), [D-115 answer ownership](reviews/SPOKEN_ANSWER_VERIFICATION_20260905.md) |
+| Agent streaming, SDK and project serialization | [Stream lifecycle](reviews/SPECULATIVE_STREAM_LIFECYCLE_20260905.md), [OpenAI AgentModel integration](reviews/OPENAI_AGENTMODEL_INTEGRATION_20260905.md), [serial project Task handoff](reviews/PROJECT_TASK_HANDOFF_20260905.md) |
+| Profiling/export and speech lifetime | [Profiling deployment](evidence/DEMO_PROFILING_DEPLOYMENT_20260904.md), [speech lifetime](evidence/SPEECH_LIFECYCLE_REPAIR_20260904.md); current export commands belong to [runbook §7.7](runbooks/E2E_RUNBOOK.md#77-普通-demo-的性能记录与故障报告) |
+| Adjustment application and notification policies | [Control repair](reviews/REHEARSAL_REPAIR_20260905.md), [running silence](reviews/RUNNING_NOTIFICATION_POLICY_20260905.md), [cancellation silence](reviews/CANCELLED_NOTIFICATION_POLICY_20260906.md), [rehydration/origin follow-up](reviews/REHEARSAL_RECOVERY_FOLLOWUP_20260905.md) |
+| Segmentation, literal content and artifact quality | [Segmentation diagnostics](evidence/SEGMENT_AND_DIALOGUE_DIAGNOSTICS_20260904.md), [artifact quality including failures](evidence/ARTIFACT_QUALITY_REHEARSAL_CHECK_20260903.md) |
+| Project-home startup and memory | [Home entry](evidence/HOME_SESSION_VOICE_START_20260903.md), [real voice/memory follow-up](evidence/PROJECT_HOME_REAL_VOICE_AND_MEMORY_REPAIR_20260903.md) |
+
 ## Module and integration history
 
 | Boundary | Primary frozen reference |
