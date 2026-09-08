@@ -158,6 +158,7 @@ class _RuntimeResponse:
     speaking: bool = False
     done: NativeProviderDone | None = None
     cancelled: bool = False
+    playback_stopped: bool = False
     history: NativeHistoryAdmission | None = None
 
 
@@ -324,12 +325,38 @@ class NativeInteractionRuntimeOwner:
                 raise NativeInteractionRuntimeError("NATIVE_STOP_RESPONSE_STALE", "STOP requires a known exact response")
             self._interrupted_delegate_sources.add(source)
             self._delegate_holds = {call: ref for call, ref in self._delegate_holds.items() if ref != source}
-            successors: set[ResponseRef] = set()
+            targets = {source: f"{action_id}:source"}
             for call_id, admission in self._delegates_by_call.items():
                 result = self._delegate_results.get(call_id)
-                if admission.source_response == source and result is not None and result.response not in successors:
-                    successors.add(result.response)
-                    await self._runtime.cancel_response_if_running(f"{action_id}:delegate:{call_id}", result.response)
+                if admission.source_response == source and result is not None:
+                    targets.setdefault(result.response, f"{action_id}:delegate:{call_id}")
+            for target, command_id in targets.items():
+                retained = self._responses_by_ref.get(target)
+                if retained is None:
+                    continue
+                # An interruption cannot revoke already played history. It can
+                # retire output whose generation ended before playback did.
+                if retained.done is not None and await self._runtime.presentation_complete(
+                    target, PresentationSurface.AUDIO
+                ):
+                    continue
+                await self._stop_response_locked(retained, command_id, playback=False)
+
+    async def _stop_response_locked(self, retained, action_id, *, playback):
+        # Close Native receive admission before awaiting the Runtime fence, so
+        # caller cancellation cannot leave late PCM/done/ACK admissible. Playback
+        # stop is separate: the browser's exact cursor may arrive afterwards.
+        retained.cancelled = True
+        response = retained.admission.response
+        if playback:
+            result = await self._runtime.barge_in(
+                action_id, response, cancel_response=retained.done is None,
+            )
+            retained.playback_stopped = True
+            return result
+        if retained is self._current_response:
+            await self._runtime.cancel_response_if_running(action_id, response)
+        return None
 
     async def start(self) -> bool:
         async with self._lock:
@@ -1343,7 +1370,7 @@ class NativeInteractionRuntimeOwner:
                 retained is None
                 or retained is not self._current_response
                 or cursor.response != response
-                or retained.cancelled
+                or retained.playback_stopped
             ):
                 raise NativeInteractionRuntimeError(
                     "NATIVE_BARGE_RESPONSE_STALE",
@@ -1369,11 +1396,7 @@ class NativeInteractionRuntimeOwner:
                     "NATIVE_BARGE_CURSOR_AHEAD",
                     "played cursor cannot exceed received Native audio",
                 )
-            result = await self._runtime.barge_in(
-                parsed_action_id,
-                response,
-                cancel_response=retained.done is None,
-            )
+            result = await self._stop_response_locked(retained, parsed_action_id, playback=True)
             admission = NativeBargeAdmission(
                 applied=result.applied,
                 response=response,
@@ -1381,8 +1404,6 @@ class NativeInteractionRuntimeOwner:
                 cancel_command_id=parsed_action_id,
             )
             self._barges[parsed_action_id] = (response, cursor, admission)
-            if result.applied:
-                retained.cancelled = True
             return admission
 
     async def fence_response(
@@ -1413,7 +1434,7 @@ class NativeInteractionRuntimeOwner:
             if (
                 retained is None
                 or retained is not self._current_response
-                or retained.cancelled
+                or retained.playback_stopped
             ):
                 raise NativeInteractionRuntimeError(
                     "NATIVE_BARGE_RESPONSE_STALE",
@@ -1426,11 +1447,7 @@ class NativeInteractionRuntimeOwner:
                     "NATIVE_BARGE_RESPONSE_STALE",
                     "cursorless fence cannot change a fully presented response",
                 )
-            result = await self._runtime.barge_in(
-                parsed_action_id,
-                response,
-                cancel_response=retained.done is None,
-            )
+            result = await self._stop_response_locked(retained, parsed_action_id, playback=True)
             admission = NativeBargeAdmission(
                 applied=result.applied,
                 response=response,
@@ -1438,8 +1455,6 @@ class NativeInteractionRuntimeOwner:
                 cancel_command_id=parsed_action_id,
             )
             self._barges[parsed_action_id] = (response, None, admission)
-            if result.applied:
-                retained.cancelled = True
             return admission
 
     async def close(self) -> None:

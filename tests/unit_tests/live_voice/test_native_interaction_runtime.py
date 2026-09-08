@@ -1277,3 +1277,152 @@ async def test_completed_audio_ack_without_transcript_can_admit_prepared_success
     assert result.response.response_generation > source.response.response_generation
     assert owner.snapshot().history_count == 0
     await owner.close()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("frames,finished", [(0, False), (1, False), (1, True)])
+async def test_delegate_stop_retires_receive_before_playback_stop(frames, finished):
+    owner, runtime = await active_owner()
+    try:
+        source = await owner.accept_provider_response("source", "source")
+        _, delegate = await owner.admit_delegate(
+            delegate_proposal(source.response), committed_at="2026-08-25T10:00:00Z"
+        )
+        await owner.prepare_delegate_result(
+            delegate, canonical_text="Task accepted.",
+            route=UnifiedCommittedInputRoute.BACKGROUND_CREATE,
+        )
+        await owner.accept_provider_done(replace(
+            done(source.response, source.provider_response_id),
+            transcript=None, transcript_event_id=None,
+        ))
+        successor = await owner.accept_delegate_provider_response(
+            "receipt", delegate.proposal.provider_call_id, delegate.proposal.turn_id,
+        )
+        output = audio(successor.response, successor.provider_response_id, 0)
+        if frames:
+            assert await owner.accept_audio(output)
+        if finished:
+            assert await owner.accept_provider_done(done(successor.response, "receipt"))
+        await owner.interrupt_delegate_source(action_id="stop-work", response=successor.response)
+        before = runtime.snapshot()
+        late = audio(successor.response, "receipt", frames)
+        observation = NativeAudioObservation(
+            response=late.response, provider_response_id=late.provider_response_id,
+            provider_event_id=late.provider_event_id, provider_item_id=late.provider_item_id,
+            content_index=late.content_index, sequence=late.sequence,
+            content_sha256=hashlib.sha256(late.pcm16).hexdigest(), sample_count=len(late.pcm16) // 2,
+        )
+        assert await owner.accept_audio_observations((observation,)) is None
+        assert await owner.accept_audio(late) is False
+        assert await owner.accept_provider_done(done(successor.response, "receipt")) is False
+        if frames:
+            assert await owner.acknowledge_audio(ack_for(runtime, successor.response, 0)) is None
+        assert await owner.history_admission(successor.response) is None
+        await owner.interrupt_delegate_source(action_id="stop-work-again", response=source.response)
+        assert runtime.snapshot() == before
+        if frames:
+            kwargs = dict(action_id="stop-playback", response=successor.response,
+                cursor=NativePresentationCursor(response=successor.response,
+                    provider_item_id=output.provider_item_id, content_index=0, audio_end_ms=10))
+            stopped = await owner.barge_in(**kwargs)
+            assert await owner.barge_in(**kwargs) == stopped
+        else:
+            kwargs = dict(action_id="stop-playback", response=successor.response)
+            stopped = await owner.fence_response(**kwargs)
+            assert await owner.fence_response(**kwargs) == stopped
+        assert stopped.applied
+        effects = [record.effect.effect_type for record in runtime.snapshot().effects]
+        assert effects.count("playback.stop") == 1
+        assert effects.count("response.cancel") == (0 if finished else 1)
+        await owner.accept_turn(turn_commit(2))
+        newer = await owner.accept_provider_response("newer", "newer")
+        assert await owner.accept_audio(audio(newer.response, "newer", 0))
+        assert await owner.accept_provider_done(done(newer.response, "newer"))
+        assert await owner.acknowledge_audio(ack_for(runtime, newer.response, 0)) is not None
+    finally:
+        await owner.close()
+
+@pytest.mark.asyncio
+async def test_delegate_stop_preserves_fully_presented_history():
+    owner, runtime = await active_owner()
+    try:
+        source = await owner.accept_provider_response("source", "source")
+        _, delegate = await owner.admit_delegate(
+            delegate_proposal(source.response), committed_at="2026-08-25T10:00:00Z",
+        )
+        await owner.prepare_delegate_result(delegate, canonical_text="Task accepted.",
+            route=UnifiedCommittedInputRoute.BACKGROUND_CREATE)
+        await owner.accept_provider_done(replace(done(source.response, "source"),
+            transcript=None, transcript_event_id=None))
+        successor = await owner.accept_delegate_provider_response(
+            "receipt", delegate.proposal.provider_call_id, delegate.proposal.turn_id)
+        assert await owner.accept_audio(audio(successor.response, "receipt", 0))
+        assert await owner.accept_provider_done(done(successor.response, "receipt"))
+        history = await owner.acknowledge_audio(ack_for(runtime, successor.response, 0))
+        assert history is not None
+        before = runtime.snapshot()
+        await owner.interrupt_delegate_source(action_id="late-stop", response=source.response)
+        assert await owner.history_admission(successor.response) == history
+        with pytest.raises(NativeInteractionRuntimeError) as rejected:
+            await owner.fence_response(action_id="late-playback-stop", response=successor.response)
+        assert rejected.value.reason == "NATIVE_BARGE_RESPONSE_STALE"
+        assert runtime.snapshot() == before
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stop_waiter_cannot_reopen_native_receive(monkeypatch):
+    owner, runtime = await active_owner()
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = runtime._await_future
+    async def delayed(future):
+        entered.set()
+        await release.wait()
+        return await original(future)
+
+    try:
+        source = await owner.accept_provider_response("source", "source")
+        assert await owner.accept_audio(audio(source.response, "source", 0))
+        monkeypatch.setattr(runtime, "_await_future", delayed)
+        pending = asyncio.create_task(owner.interrupt_delegate_source(
+            action_id="cancelled-waiter", response=source.response))
+        await asyncio.wait_for(entered.wait(), 1)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        monkeypatch.setattr(runtime, "_await_future", original)
+        release.set()
+        stopped = await owner.fence_response(action_id="playback-after-cancel", response=source.response)
+        assert stopped.applied
+        before = runtime.snapshot()
+        assert not await owner.accept_audio(audio(source.response, "source", 1))
+        assert not await owner.accept_provider_done(done(source.response, "source"))
+        assert await owner.acknowledge_audio(ack_for(runtime, source.response, 0)) is None
+        assert runtime.snapshot() == before
+    finally:
+        release.set()
+        monkeypatch.setattr(runtime, "_await_future", original)
+        await owner.close()
+
+@pytest.mark.asyncio
+async def test_delegate_stop_retries_runtime_fence_after_full_control_queue():
+    runtime = ConversationRuntimeLoop(_SCOPE, control_capacity=1)
+    owner = NativeInteractionRuntimeOwner(binding(), runtime=runtime)
+    try:
+        await owner.start()
+        await owner.accept_turn(turn_commit())
+        source = await owner.accept_provider_response("source", "source")
+        occupied = runtime._post(lambda: None, control=True)
+        with pytest.raises(Exception) as full:
+            await owner.interrupt_delegate_source(action_id="retry-stop", response=source.response)
+        assert full.value.reason == "CONTROL_QUEUE_FULL"
+        await occupied
+        assert not await owner.accept_audio(audio(source.response, "source", 0))
+        assert runtime.snapshot().effects == ()
+        await owner.interrupt_delegate_source(action_id="retry-stop", response=source.response)
+        await owner.interrupt_delegate_source(action_id="retry-stop", response=source.response)
+        assert [row.effect.effect_type for row in runtime.snapshot().effects] == ["response.cancel"]
+        assert (await owner.fence_response(action_id="stop-playback", response=source.response)).applied
+    finally:
+        await owner.close()
