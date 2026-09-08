@@ -1,5 +1,9 @@
 # September 8 human recheck after the three repairs
 
+> September 8 supplement: the [bilingual per-operation timing breakdown](REALTIME_OPERATION_TIMING_BREAKDOWN_20260908.md)
+> expands this same run into first-audio, tool/receipt, execution and notification
+> stages. It adds no new product or physical acceptance claim.
+
 ## Scope and evidence
 
 Read-only diagnosis requested by the user for Session
