@@ -579,3 +579,32 @@ review closed all four override conflicts and found no other unconditional
 content-compression override. The three identical cached-audio restatements on
 082b64a2 each retained every requested condition; this small generated-text and
 received-audio sample does not establish general correctness or physical delivery.
+
+## Native adjustment observation seam — Tier 3 scope checkpoint
+
+The real final customer-draft adjustment was accepted while TaskCore still saw
+running, then rejected when the earlier Executor completion arrived. Its outbox
+was suppressed with zero deliveries, but Native sealed the original pending
+receipt alongside completed Task context. Own only the first Native task.adjust
+receipt presentation: after context refresh and before initial journal completion,
+read the existing authenticated exact Task/Attempt/adjustment control snapshot.
+Append a bounded as-of observation; preserve the actual original receipt and
+dispatched status. Do not infer application from Task completion, introduce a
+second mutation, refresh a sealed replay, or change canonical replay bytes.
+
+Unknown, expired-window, failed or mismatched reads remain unconfirmed; they do
+not erase a prior confirmed applied/rejected receipt. Keep cancellation and
+current-route final checks. No TaskCore, outbox, Executor, durable schema or
+permissions change. Own Router projection, spoken-grounding instructions and
+real Registry/SQLite seam tests. Required cases: terminal wins, applied wins,
+pending/unknown, failure/wrong scope/attempt, single-flight/replay and zero other
+Task/Agent/audio/history effects. Independent review and actual local rerun are
+required; this does not retroactively rewrite the earlier failed adjustment.
+The new 14 cases exercise real Registry/SQLite terminal-vs-application outcomes,
+exact identity, unavailable/unknown observations, concurrent duplicate requests,
+byte-identical replay, cancellation, and close/project-rebind at the new await.
+The terminal fixture initially violated paired result/artifact validation; the
+corrected legal no-result completion produces the actual TaskCore rejection.
+Affected Registry/authority/encoding/Engine regression: 251 passed. Independent
+complete-diff review approved; original durable commands, unrelated Task, Agent,
+audio/history and replay bytes retain their respective checked boundaries.

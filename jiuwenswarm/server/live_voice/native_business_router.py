@@ -390,6 +390,40 @@ class NativeBusinessRouter:
                 "task_id": formal.payload.get("result", {}).get("task_id", action.target_id),
                 "receipt": formal.payload.get("result")}
 
+    async def _adjustment_observation(self, route, result):
+        """Seal one as-of control read without changing the durable command receipt."""
+        receipt = result.get("receipt")
+        unknown = {"state": "unknown", "observation_reason": "NATIVE_ADJUSTMENT_RECEIPT_INVALID"}
+        if (type(receipt) is not dict or receipt.get("task_id") != result.get("task_id")
+                or any(type(receipt.get(key)) is not str or not receipt[key]
+                       or len(receipt[key].encode("utf-8")) > 256
+                       for key in ("task_id", "attempt_id", "adjustment_id"))):
+            return unknown
+        identity = {key: receipt[key] for key in ("task_id", "attempt_id", "adjustment_id")}
+        unknown = {**identity, "state": "unknown", "observation_reason": "NATIVE_ADJUSTMENT_OBSERVATION_UNAVAILABLE"}
+        try:
+            facts = await self.registry._p3_composition.read_task_control_snapshot(
+                bearer_token=None, session_id=route.binding.session_id,
+                native_authority=route.native_p3_authority,
+                task_id=identity["task_id"], adjustment_id=identity["adjustment_id"],
+            )
+            state = facts.get("requested_adjustment_state")
+            head = facts.get("event_head")
+            if (facts.get("task_id") != identity["task_id"] or facts.get("attempt_id") != identity["attempt_id"]
+                    or type(state) is not str or state not in {"pending", "applied", "rejected", "unknown"}
+                    or type(head) is not int or not 0 <= head <= 9_007_199_254_740_991
+                    or (receipt.get("adjustment_state") in {"applied", "rejected"}
+                        and state not in {receipt["adjustment_state"], "unknown"})):
+                return {**unknown, "observation_reason": "NATIVE_ADJUSTMENT_OBSERVATION_MISMATCH"}
+            # Only the observed terminal-race reason is needed for this surface.
+            # Other rejection details remain with the authenticated Task owner.
+            reason = facts.get("requested_adjustment_reason")
+            return {**identity, "state": state, "event_head": head,
+                    "timing": "observed_before_receipt_sealed",
+                    "reason": reason if reason == "TASK_TERMINAL_BEFORE_ADJUSTMENT" else None}
+        except Exception:
+            return unknown
+
     async def handle(self, *, owner, proposal, request_id, retained_route, **unused):
         from .product_composition_registry import _success_result, _error_result, _VoiceTaskOrigin
         delegate = proposal.delegate
@@ -469,6 +503,8 @@ class NativeBusinessRouter:
                         result["context"] = (await self.context(route)).payload()
                     except Exception as error:
                         result["context_refresh_reason"] = getattr(error, "reason", "NATIVE_BUSINESS_CONTEXT_UNAVAILABLE")
+                if delegate.business.operation == "task.adjust" and result.get("status") == "dispatched":
+                    result["adjustment_observation"] = await self._adjustment_observation(route, result)
                 if (len(canonical_json_bytes(result)) > 262144
                     or len(json.dumps(result, ensure_ascii=True, separators=(",", ":")).encode()) > 524288):
                     result.pop("context", None)
