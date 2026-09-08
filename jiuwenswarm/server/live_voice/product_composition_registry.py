@@ -1039,6 +1039,7 @@ class AgentServerProductCompositionRegistry:
         )
         self._lock = ObservedAsyncLock("product_composition")
         self._p3_operation_lock = asyncio.Lock()
+        self._p3_query_tasks: set[asyncio.Task[P3RouteResult]] = set()
         self._stopped = False
         self._p2_routes: dict[tuple[str, str], _P2Route] = {}
         self._closed_p2_routes: dict[tuple[str, str], _ClosedP2Route] = {}
@@ -11793,12 +11794,30 @@ class AgentServerProductCompositionRegistry:
                 code=ErrorCode.UNSUPPORTED,
             )
         async with self._lock:
-            return await self._handle_p3_query_locked(
-                operation=operation,
-                params=params,
-                request_id=request_id,
-                session_id=session_id,
+            try:
+                self._ensure_running()
+            except FormalTaskViolation as exc:
+                return _error_result(request_id, reason=exc.reason, code=exc.code, message=str(exc))
+            if len(self._p3_query_tasks) >= self._PRODUCT_OPERATION_CAPACITY:
+                return _error_result(request_id, reason="PRODUCT_OPERATION_LEDGER_FULL", code=ErrorCode.UNAVAILABLE)
+            task = asyncio.create_task(
+                self._handle_p3_query(
+                    operation=operation, params=dict(params),
+                    request_id=request_id, session_id=session_id,
+                ),
+                name="live-voice-product-p3-query",
             )
+            self._p3_query_tasks.add(task)
+            task.add_done_callback(self._p3_query_finished)
+        # Client disconnect/cancellation releases only the waiter. Keep the
+        # entire read and lease cleanup owned until even to_thread work settles;
+        # stop drains these tasks before closing the resources they use.
+        return await asyncio.shield(task)
+
+    def _p3_query_finished(self, task: asyncio.Task[P3RouteResult]) -> None:
+        self._p3_query_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("[LiveVoiceProduct] retained P3 query failed", exc_info=task.exception())
 
     def _intent_rejected_result(
         self,
@@ -14031,7 +14050,7 @@ class AgentServerProductCompositionRegistry:
                 message="production Task intent failed closed",
             )
 
-    async def _handle_p3_query_locked(
+    async def _handle_p3_query(
         self,
         *,
         operation: str,
@@ -14191,7 +14210,8 @@ class AgentServerProductCompositionRegistry:
                 registrations=registrations,
             ).activate(ProductCompositionContext(routed_session, correlation_id))
         except ProductCompositionActivationError as exc:
-            self._retain_root_cleanup(exc.cleanup_lease)
+            async with self._lock:
+                self._retain_root_cleanup(exc.cleanup_lease)
             logger.exception("[LiveVoiceProduct] P3 query failed closed")
             return _error_result(request_id, reason="PRODUCT_P3_QUERY_FAILED")
         except Exception:
@@ -14587,7 +14607,8 @@ class AgentServerProductCompositionRegistry:
                 try:
                     await activation.lease.close()
                 except ProductCompositionLeaseCloseError as exc:
-                    self._retain_root_cleanup(exc.lease)
+                    async with self._lock:
+                        self._retain_root_cleanup(exc.lease)
                     logger.exception("[LiveVoiceProduct] P3 query cleanup failed")
 
     async def handle_p3_progress_activate(
@@ -16003,8 +16024,11 @@ class AgentServerProductCompositionRegistry:
         # same lock; otherwise a waiter could mint authority after shutdown.
         self._stopped = True
         async with self._lock:
+            query_tasks = tuple(self._p3_query_tasks)
             analysis_tasks = tuple(self._semantic_analysis_tasks.values())
             self._semantic_dialogue_commits.clear()
+        if query_tasks:
+            await asyncio.shield(asyncio.gather(*query_tasks, return_exceptions=True))
         for task in analysis_tasks:
             task.cancel()
         if analysis_tasks:
