@@ -1188,6 +1188,16 @@ class P2ActivationLease:
                 )
             return True
 
+    def wake_notification(self, binding: P2InteractionBinding) -> None:
+        """Signal the current exact consumer without granting presentation effects."""
+        with self._state_lock:
+            self._require_open_exact_binding(binding)
+            wake = getattr(self._runtime, "wake_notification_for", None)
+            if self._notification_lease is None or not callable(wake):
+                raise _violation("PRODUCT_NOTIFICATION_UNAVAILABLE",
+                    "retained runtime has no wakeable notification owner", ErrorCode.UNAVAILABLE)
+            wake(self._notification_lease)
+
     async def next_notification(
         self, binding: P2InteractionBinding
     ) -> AgentConversationNotification:

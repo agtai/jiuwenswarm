@@ -1028,6 +1028,7 @@ class _NativeMediaSession:
     delivery_task: asyncio.Task[None] | None = field(default=None, repr=False)
     business_poll_task: asyncio.Task[None] | None = field(default=None, repr=False)
     business_refresh_task: asyncio.Task | None = field(default=None, repr=False)
+    notification_wake_tasks: set[asyncio.Task[None]] = field(default_factory=set, repr=False)
     business_observation_cursor: dict[str, object] | None = field(default=None, repr=False)
     business_context_result: dict[str, object] | None = field(default=None, repr=False)
     business_read_ticket: int = 0
@@ -2044,6 +2045,7 @@ class DedicatedMediaProductRegistry:
                 session.delivery_task,
                 session.business_poll_task,
                 session.business_refresh_task,
+                *session.notification_wake_tasks,
                 *session.delegate_tasks.values(),
             )
             if task is not None and task is not current
@@ -3444,6 +3446,36 @@ class DedicatedMediaProductRegistry:
                 "MEDIA_NATIVE_NOTIFICATION_BACKPRESSURE",
                 "Native notification queue is saturated",
             ) from None
+
+        # The local descriptor must be visible before the remote poll is woken.
+        # This control RPC is session-owned and never stalls subsequent PCM.
+        wake = getattr(self._native_runtime_client, "wake_native_notification", None)
+        if callable(wake) and not session.closed:
+            if len(session.notification_wake_tasks) < 8:
+                task = asyncio.create_task(self._wake_native_notification(session, response),
+                    name="live-voice-native-notification-wake")
+                session.notification_wake_tasks.add(task)
+                task.add_done_callback(session.notification_wake_tasks.discard)
+            else:
+                _LOGGER.warning("live_voice_native_notification_wake_failed reason=CAPACITY")
+
+    async def _wake_native_notification(self, session: _NativeMediaSession, response: ResponseRef) -> None:
+        started = time.perf_counter()
+        try:
+            if session.closed:
+                return
+            await self._native_runtime_client.wake_native_notification(
+                session.activation, response=response,
+                request_id=self._native_request_id(session, "notification-wake"))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A failed optimization retains the existing poll's ownership and
+            # outcome. No discarded descriptor, audio failure or fabricated ACK.
+            _LOGGER.warning("live_voice_native_notification_wake_failed reason=UNAVAILABLE")
+        finally:
+            _LOGGER.info("live_voice_native_notification_wake duration_ms=%.1f",
+                (time.perf_counter() - started) * 1000)
 
     async def _seal_native_downlink(
         self,

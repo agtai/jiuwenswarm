@@ -1411,6 +1411,13 @@ class NativeInteractionRuntimeOwner:
                 await self._runtime.close()
             self._closed = True
 
+    def has_current_admitted_audio(self, response: ResponseRef) -> bool:
+        """Passive event-loop observation; it grants neither audio nor playout."""
+        current = self._current_response
+        return (not self._closed and current is not None and not current.cancelled
+                and current.admission.response == response
+                and bool(current.audio_units_by_sequence))
+
     def snapshot(self) -> NativeInteractionRuntimeSnapshot:
         return NativeInteractionRuntimeSnapshot(
             started=self._started,

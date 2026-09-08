@@ -42,6 +42,16 @@ from jiuwenswarm.server.live_voice.openai_realtime_native_engine import (
 )
 
 
+NATIVE_NOTIFICATION_WAKE_VERSION = "live-voice.native-notification-wake.v1"
+
+
+def notification_wake_response(value: object, binding: NativeInteractionBinding) -> ResponseRef:
+    response = _response_from_dict(value)
+    if response.interaction_id != binding.interaction_id:
+        raise NativeCarrierViolation("NATIVE_RUNTIME_BINDING_MISMATCH",
+            "notification wake must match the exact interaction", ErrorCode.PERMISSION_DENIED)
+    return response
+
 _PROPOSAL_KEYS = frozenset(
     {
         "contract_version",

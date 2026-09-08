@@ -12,7 +12,7 @@ import secrets
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timezone
 from enum import StrEnum
 from typing import Protocol
@@ -259,6 +259,10 @@ class _NotificationConsumerDetached(RuntimeError):
     pass
 
 
+class AgentConversationNotificationWake(RuntimeError):
+    """An exact transport owner was woken without consuming a notification."""
+
+
 class _BoundedNotificationBuffer:
     """Lossy observer lane plus a bounded, non-blocking critical reserve."""
 
@@ -324,10 +328,14 @@ class _BoundedNotificationBuffer:
         *,
         lease_active: Callable[[], bool] | None = None,
         detached: asyncio.Event | None = None,
+        wake: asyncio.Event | None = None,
     ) -> AgentConversationNotification:
         while True:
             if lease_active is not None and not lease_active():
                 raise _NotificationConsumerDetached
+            if wake is not None and wake.is_set():
+                wake.clear()
+                raise AgentConversationNotificationWake
             queued = self._pop_next()
             if queued is not None:
                 self._delivered_total += 1
@@ -335,23 +343,22 @@ class _BoundedNotificationBuffer:
                 return queued.notification
             if self._closed:
                 raise _NotificationBufferClosed
-            if detached is None:
+            if detached is None and wake is None:
                 await self._ready.wait()
                 continue
-            ready_wait = asyncio.create_task(self._ready.wait())
-            detached_wait = asyncio.create_task(detached.wait())
+            waiters = tuple(asyncio.create_task(event.wait())
+                            for event in (self._ready, detached, wake) if event is not None)
             try:
                 await asyncio.wait(
-                    (ready_wait, detached_wait),
+                    waiters,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
             finally:
-                for waiter in (ready_wait, detached_wait):
+                for waiter in waiters:
                     if not waiter.done():
                         waiter.cancel()
                 await asyncio.gather(
-                    ready_wait,
-                    detached_wait,
+                    *waiters,
                     return_exceptions=True,
                 )
 
@@ -605,6 +612,7 @@ class _PresentationAckEntry:
 class _NotificationLeaseRecord:
     lease: AgentConversationNotificationLease
     detached: asyncio.Event
+    wake: asyncio.Event = field(default_factory=asyncio.Event)
     active: bool = True
     drain_after_close: bool = False
 
@@ -3061,6 +3069,7 @@ class AgentConversationRuntime:
                     )
                 ),
                 detached=record.detached,
+                wake=record.wake,
             )
         except _NotificationConsumerDetached as error:
             raise AgentConversationRuntimeViolation(
@@ -3074,6 +3083,11 @@ class AgentConversationRuntime:
                 "the notification producer is closed and its retained buffer is empty",
                 ErrorCode.UNAVAILABLE,
             ) from error
+
+    def wake_notification_for(self, lease: AgentConversationNotificationLease) -> None:
+        """Wake only the current transport lease; all business state is retained."""
+        record = self._require_notification_lease(lease, require_active=True)
+        record.wake.set()
 
     async def drain_notifications_for(
         self,

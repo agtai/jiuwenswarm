@@ -53,6 +53,7 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
 )
 
 from .agent_conversation_runtime import (
+    AgentConversationNotificationWake,
     AgentConversationRuntime,
     AuthoritativePresentationHandle,
     PresentationAckResult,
@@ -86,6 +87,7 @@ from .formal_task_models import (
 from .task_store import TaskDurabilityDiagnosticSnapshot
 from .interaction_engine import INTERACTION_ACTION_OPERATIONS, InteractionEnginePort
 from .native_interaction_carrier import (
+    NATIVE_NOTIFICATION_WAKE_VERSION, notification_wake_response,
     NativeCarrierViolation,
     NativeInteractionProposal,
 )
@@ -484,6 +486,7 @@ class _P2Route:
     native_capability: str | None = field(default=None, repr=False)
     native_close_retry: tuple[str, bytes] | None = field(default=None, repr=False)
     native_closed: bool = False
+    native_notification_woken_response: ResponseRef | None = None
     native_business_enabled: bool = False
     native_agent_model_confirmation: dict[str, object] | None = None
     native_user_history_turns: set[str] = field(default_factory=set, repr=False)
@@ -5265,13 +5268,15 @@ class AgentServerProductCompositionRegistry:
             batch_keys = frozenset(
                 {"contract_version", "binding", "capability", "proposals"}
             )
-            if keys not in {single_keys, batch_keys}:
+            wake_keys = frozenset({"contract_version", "binding", "capability", "response"})
+            is_wake = params.get("contract_version") == NATIVE_NOTIFICATION_WAKE_VERSION
+            if keys not in ({wake_keys} if is_wake else {single_keys, batch_keys}):
                 raise FormalTaskViolation(
                     "NATIVE_PROPOSAL_INVALID",
                     "Native proposal fields must match one closed shape",
                     ErrorCode.INVALID_ARGUMENT,
                 )
-            if params.get("contract_version") != NATIVE_INTERACTION_CONTRACT_VERSION:
+            if not is_wake and params.get("contract_version") != NATIVE_INTERACTION_CONTRACT_VERSION:
                 raise FormalTaskViolation(
                     "NATIVE_CONTRACT_VERSION_UNSUPPORTED",
                     "Native proposal contract version is unsupported",
@@ -5284,7 +5289,10 @@ class AgentServerProductCompositionRegistry:
             business_capability = candidate_route is not None and candidate_route.native_business_enabled
             proposal: NativeInteractionProposal | None = None
             audio_batch: tuple[NativeInteractionProposal, ...] | None = None
-            if keys == single_keys:
+            wake_response = None
+            if is_wake:
+                wake_response = notification_wake_response(params.get("response"), binding)
+            elif keys == single_keys:
                 proposal = NativeInteractionProposal.from_dict(params.get("proposal"), business_capability=business_capability)
             else:
                 raw_proposals = params.get("proposals")
@@ -5437,6 +5445,26 @@ class AgentServerProductCompositionRegistry:
                 )
             owner = route.native_runtime_owner
             assert owner is not None
+            if wake_response is not None:
+                if not owner.has_current_admitted_audio(wake_response):
+                    return _error_result(request_id, reason="NATIVE_AUDIO_RESPONSE_STALE",
+                        code=ErrorCode.STALE, manifest=route.manifest)
+                if route.native_notification_woken_response != wake_response:
+                    try:
+                        route.activation_lease.wake_notification(route.binding)
+                    except Exception as exc:
+                        return _error_result(request_id,
+                            reason=getattr(exc, "reason", "PRODUCT_NOTIFICATION_UNAVAILABLE"),
+                            code=getattr(exc, "code", ErrorCode.UNAVAILABLE), manifest=route.manifest)
+                    route.native_notification_woken_response = wake_response
+                result = _success_result(request_id,
+                    {"kind": "notification_wake", "status": "observed", "accepted": True}, route.manifest)
+                if len(self._native_propose_operations) >= self._PRODUCT_OPERATION_CAPACITY:
+                    expired_request_id = next(iter(self._native_propose_operations))
+                    self._native_propose_operations.pop(expired_request_id)
+                    self._mark_evicted_product_request("native.propose", expired_request_id)
+                self._native_propose_operations[parsed_request_id] = _NativeProductOperation(fingerprint, result)
+                return result
             if audio_batch is not None:
                 try:
                     observations = tuple(
@@ -9669,7 +9697,7 @@ class AgentServerProductCompositionRegistry:
                 payload,
                 retained.manifest,
             )
-        except TimeoutError:
+        except (TimeoutError, AgentConversationNotificationWake):
             keepalive = self._bind_p2_notification(
                 self._p2_keepalive(request_id), retained.binding
             )

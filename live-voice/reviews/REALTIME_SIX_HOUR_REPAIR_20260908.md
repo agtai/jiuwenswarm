@@ -79,6 +79,53 @@ at initial inspection. Integrate this task baseline locally after the C checkpoi
 preserving A/B/C, then rebind tests and deployment to the resulting candidate.
 No remote update is authorized or performed.
 
+Local baseline integration passed 494 coherent module checks and independent
+merge review; A/B/C remain intact. Actual Provider speed is still unverified.
+
+### D implementation checkpoint
+
+Tier 3 refinement of the authorized notification-wake boundary: introduce one
+closed Gateway-to-AgentServer `live-voice.native-notification-wake.v1` request
+over the existing private Native carrier. It carries exact activation capability
+and response identity, no PCM, task action or browser authority. Only a current
+Native response with admitted audio can set one idempotent wake per response.
+Gateway queues its local audio descriptor before scheduling this bounded,
+session-owned wake. Audio supply does not await the wake RPC.
+
+The existing exact Conversation Runtime consumer receives a wake signal in its
+notification buffer wait. It returns the existing transport keepalive without
+popping any business notification; the browser's next serialized request can
+take the already queued Native descriptor. No second consumer, retained result
+queue, shortened poll, fabricated ACK or history write is introduced. Close and
+generation replacement fence both the consumer and wake. Required checks cover
+simultaneous business readiness, idle and active polls, duplicate/invalid/stale
+wakes, cancelled callers, exact sequence replay, bounded Gateway helper cleanup
+and unchanged playback authority. Owned surfaces: private Native carrier/client,
+Registry, P2 lease, Conversation notification buffer, Native runtime observation,
+Gateway session lifecycle and their focused tests. Real RPC timing remains a
+separate required measurement.
+
+D checks: 51 core/client cases pass; six-file boundary run reaches 376 passes
+with two new Gateway cases blocked by a missing test Origin configuration.
+After adding that explicit fixture, all 3 new Gateway cases pass, giving 378
+distinct passing boundary cases. The first combined collection also exposed a
+duplicate test basename; renamed the Gateway test before boundary execution.
+Independent review found no product blocker. Tests prove the retained poll can
+wake within a 150 ms test deadline, simultaneous business notifications remain
+queued, duplicate/stale/foreign wakes have no new effect, and a blocked/failed
+wake does not stop three real fixture PCM frames or session cleanup. These are
+controlled tests, not real network or physical latency results.
+
+Provider configuration probe: all four real sessions confirm model
+`gpt-realtime-2.1`, speed `1.25`, `inf` output budget, and semantic VAD with
+automatic response creation/interruption disabled. Provider accepted omitted,
+minimal and low reasoning, plus auto/high VAD. The omitted effort is returned
+as absent, not inferred to be low. Every session's retained close completes on
+retry with no close error; the first 25 ms wait alone is not closure evidence.
+Raw whitelisted observations: `logs/repair-20260908/provider-configuration.json`.
+No credentials, Provider IDs or prompts are copied to that evidence. No latency
+or semantic-quality credit is assigned to these negotiation-only probes.
+
 The input's September 8 latency directory, 292-second clip, diarized audio,
 original project and data directory are absent on this host. Its 15 timestamps
 and baseline figures are supplied historical evidence, not independently

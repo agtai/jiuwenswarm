@@ -25,6 +25,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.live_voice.native_interaction_carrier import (
+    NATIVE_NOTIFICATION_WAKE_VERSION,
     NativeInteractionProposal,
 )
 from jiuwenswarm.server.live_voice.native_interaction_contract import (
@@ -463,7 +464,7 @@ def _validate_method_result(
             if not allow_business:
                 raise NativeRuntimeClientError("NATIVE_BUSINESS_CAPABILITY_REQUIRED", "Unnegotiated business result")
             return _validate_business_context_result(result)
-        elif kind in {"action", "turn", "done"}:
+        elif kind in {"action", "turn", "done", "notification_wake"}:
             _closed_result(result, frozenset({"kind", "status", "accepted"}))
             valid = (
                 result.get("status") == "observed"
@@ -870,6 +871,21 @@ class GatewayNativeInteractionRuntimeClient:
         if self._authorize(activation.binding, activation.capability) != activation:
             raise NativeRuntimeClientError("NATIVE_RUNTIME_ACTIVATION_STALE", "Observation owner was replaced")
         return _validate_business_observation_result(result)
+
+    async def wake_native_notification(
+        self, activation: GatewayNativeActivation, *, response: ResponseRef, request_id: str,
+    ) -> dict[str, object]:
+        if self._authorize(activation.binding, activation.capability) != activation:
+            raise NativeRuntimeClientError("NATIVE_RUNTIME_ACTIVATION_STALE", "Wake owner was replaced")
+        result = await self._request(method=ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE,
+            binding=activation.binding, capability=activation.capability, request_id=request_id,
+            extra={"contract_version": NATIVE_NOTIFICATION_WAKE_VERSION, "response": {
+                "interaction_id": response.interaction_id, "response_id": response.response_id,
+                "response_generation": response.response_generation}})
+        if (self._authorize(activation.binding, activation.capability) != activation
+                or result != {"kind": "notification_wake", "status": "observed", "accepted": True}):
+            raise NativeRuntimeClientError("NATIVE_RUNTIME_RESPONSE_INVALID", "Wake receipt is not exact")
+        return result
 
     async def propose_audio_batch(
         self,
