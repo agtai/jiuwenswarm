@@ -608,3 +608,21 @@ corrected legal no-result completion produces the actual TaskCore rejection.
 Affected Registry/authority/encoding/Engine regression: 251 passed. Independent
 complete-diff review approved; original durable commands, unrelated Task, Agent,
 audio/history and replay bytes retain their respective checked boundaries.
+
+The actual 800235d9 multi-file handoff Task also reached the six-round identical
+read guard and failed, after its adjustment was genuinely adopted. This validates
+the bounded failure/zero-partial-application path but leaves positive convergence
+open. It did write the requested header in the isolated checkout, then repeated
+the same output-verification window six times; this was not zero lifetime progress.
+Tier 1 extension owns only the dedicated background Code prompt: reuse
+source windows already available, move from sufficient facts to writing, and
+verify requested output without repeatedly reading the same source for length,
+finish after a successful check, or fix a concrete discrepancy before rechecking.
+Changed files, missing windows and output verification still permit reads. No
+guard relaxation or forced successful result is introduced. Check background
+mode/checkpoint boundaries and rerun the same substantive handoff under a new
+output path, retaining the failed original Task and artifact absence.
+
+Exact final prompt: 14 background-mode checks passed (66 deselected); independent
+read-only review found no blocking issue. Real positive convergence is still
+pending and is not credited from these checks.
