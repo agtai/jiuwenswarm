@@ -749,3 +749,19 @@ Task path made an additional context.get call. Exact same-Gateway-clock raw
 Provider PCM→sent joins were 23.964 and 24.150 ms. N=2 is not a new percentile
 acceptance sample. No physical speaker, microphone or browser acceptance is
 claimed. Ignored source-real-* and native-source-real-* preserve raw evidence.
+
+### Receipt follow-up clarification — Tier 1 checkpoint
+
+The real source-validation Task returned durable acceptance, then the Native
+model requested context.get before acknowledging it. Own only the existing
+receipt-only response instructions: accepted background work, future result
+contents and confirmation of acceptance do not themselves require a fresh query.
+An additional operation outside that accepted work still requires fresh context.
+No tool is removed, no acceptance is fabricated and no multi-Task dependency is
+silently dropped. Keep current receipt/ack/cancel/dependent-call checks; compare
+actual Provider receipt turns and latency after the clean local deployment.
+
+Seven affected Engine receipt/feedback/acceptance checks passed (190 deselected).
+Independent complete-diff review found no blocking issue: context.get, fresh
+context, extra Task operations, and no-audio-with-tool-call rules are retained.
+Any measured improvement still requires the real Provider trial.
