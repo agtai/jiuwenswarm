@@ -930,6 +930,10 @@ type PendingProductPresentationAttempt = {
   } | null;
   notification_repoll_before_capture?: boolean;
   failure_reason?: ProductTaskPresentationFailureReason;
+  /** Local unplayed foreground retirement is never evidence for an ACK. */
+  unplayed_foreground_retired?: boolean;
+  /** Retry only this failed presentation's exact P1 close and fence retirement. */
+  close_unplayed_foreground?: () => Promise<void>;
   settlement?: Promise<void>;
   /**
    * Set when playout yielded to a live speaker. The announcement is retained
@@ -1863,6 +1867,17 @@ function productResponseGenerationIdentity(response: Readonly<{
   return `${response.response_generation}:${response.response_id}`;
 }
 
+function productForegroundPresentationIdentity(
+  binding: Readonly<ProductWebP2ActivationBinding>,
+  response: Readonly<{ response_id: string; response_generation: number }>,
+): string {
+  return JSON.stringify([
+    binding.session_id, binding.correlation_id, binding.interaction_id,
+    binding.activation_id, binding.activation_generation,
+    response.response_id, response.response_generation,
+  ]);
+}
+
 function browserSpeechCompatibilityAvailable(): boolean {
   if (typeof window === 'undefined') return false;
   const browserWindow = window as Window & {
@@ -2286,6 +2301,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   // flight from the server, so exact response id + generation, not timing, is
   // what refuses it.
   const interruptedProductResponsesRef = useRef(new Map<string, true>());
+  const localRetiredForegroundPresentationsRef = useRef(new Map<string, true>());
   const interruptProductGenerationHandlerRef = useRef<() => Promise<void>>(async () => undefined);
 
   /**
@@ -2941,6 +2957,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   };
 
   const settleProductPresentationAck = (retained: NonNullable<typeof pendingPresentationAttemptRef.current>): Promise<void> => {
+    if (retained.unplayed_foreground_retired === true) return Promise.resolve();
     const ownsForeground = () => retained.native_foreground_epoch === nativeForegroundEpochRef.current;
     const updateForegroundReason = (value: Parameters<typeof setProductTextReason>[0]) => { if (ownsForeground()) setProductTextReason(value); };
     const updateForegroundStatus = (value: Parameters<typeof setProductTextStatus>[0]) => { if (ownsForeground()) setProductTextStatus(value); };
@@ -2960,6 +2977,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       isCurrentPresentationOwner() && voiceLoopP2RefreshAfterGenerationRef.current === null;
     let ackAttemptStarted = false;
     const canAttemptPresentationAck = () =>
+      retained.unplayed_foreground_retired !== true &&
       isCurrentPresentationOwner() &&
       (voiceLoopP2RefreshAfterGenerationRef.current === null || !ackAttemptStarted);
     let settlement: Promise<void>;
@@ -3200,6 +3218,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     // and `retireOwnerGenerationInterrupt` drops it once that activation
     // closes and no replay through it is possible any more.
     interruptedProductResponsesRef.current.clear();
+    localRetiredForegroundPresentationsRef.current.clear();
     p2ActivationJournalRef.current = null;
     if (!FEATURE_LIVE_VOICE_INTEGRATED_WEB || !hasDurableProductVoiceSession(sessionId)) {
       setP2JournalState(null);
@@ -3304,7 +3323,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           : null;
     if (
       interruptedResponse !== null &&
-      interruptedProductResponsesRef.current.has(productResponseGenerationIdentity(interruptedResponse))
+      (interruptedProductResponsesRef.current.has(productResponseGenerationIdentity(interruptedResponse)) ||
+        (presentationBinding !== null && localRetiredForegroundPresentationsRef.current.has(
+          productForegroundPresentationIdentity(presentationBinding, interruptedResponse),
+        )))
     ) {
       // The speaker already interrupted this exact answer. Its expected
       // cancellation terminal and any late output belong to the predecessor,
@@ -3561,7 +3583,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         activeSessionRef.current === presentationBinding.session_id &&
         voiceLoopGenerationRef.current === playoutLoopGeneration &&
         p1VoiceOwnerRef.current === voiceOwner &&
-        !interruptedProductResponsesRef.current.has(productResponseGenerationIdentity(disposition.response));
+        !interruptedProductResponsesRef.current.has(productResponseGenerationIdentity(disposition.response)) &&
+        !localRetiredForegroundPresentationsRef.current.has(
+          productForegroundPresentationIdentity(presentationBinding, disposition.response),
+        );
       activeVoiceResponseRef.current = disposition.response;
       setProductTextReason(null);
       setProductTextStatus('waiting');
@@ -3808,6 +3833,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         p1VoiceOwnerRef.current !== voiceOwner ||
         voiceLoopGenerationRef.current !== foregroundPlayoutLease.voice_loop_generation)
     ) {
+      presentationAttempt.unplayed_foreground_retired = true;
+      if (presentationBinding !== null) retainBoundedPresentedProductResponse(
+        localRetiredForegroundPresentationsRef.current,
+        productForegroundPresentationIdentity(presentationBinding, disposition.response),
+      );
       presentationAttempt.markPlayoutSettled();
       if (activeVoiceResponseRef.current?.response_id === disposition.response_id) {
         activeVoiceResponseRef.current = null;
@@ -3885,6 +3915,26 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           retainAck();
         })
         .catch(error => {
+          if (foregroundPlayoutLease !== null && playoutDeferredToSpeaker(error) &&
+              isCurrentVoicePlayout() && presentationBinding !== null) {
+            // A new utterance owns this capture. Retire only the unplayed old
+            // answer before waking any settlement waiter, preserving that owner.
+            presentationAttempt.unplayed_foreground_retired = true;
+            retainBoundedPresentedProductResponse(localRetiredForegroundPresentationsRef.current,
+              productForegroundPresentationIdentity(presentationBinding, disposition.response));
+            if (pendingPresentationAttemptRef.current === presentationAttempt) pendingPresentationAttemptRef.current = null;
+            if (pendingForegroundPresentationRef.current === foregroundPlayoutLease) pendingForegroundPresentationRef.current = null;
+            if (activeVoiceResponseRef.current?.response_id === disposition.response_id &&
+                activeVoiceResponseRef.current.response_generation === disposition.response.response_generation) {
+              activeVoiceResponseRef.current = null;
+            }
+            setPendingPresentationAck(null);
+            presentationAttempt.markPlayoutSettled();
+            setProductTextReason(PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER);
+            setProductTextStatus('presented');
+            setP2NotificationWakeEpoch(epoch => epoch + 1);
+            return;
+          }
           if (disposition.task_notification && playoutDeferredToSpeaker(error)) {
             // Standing down is not a playout failure and must be decided before
             // anything settles: settling the playout here would let cleanup
@@ -3903,7 +3953,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             updateTerminalAnnouncementState('queued');
             return;
           }
-          presentationAttempt.markPlayoutSettled();
+          if (foregroundPlayoutLease !== null) {
+            presentationAttempt.unplayed_foreground_retired = true;
+            if (presentationBinding !== null) retainBoundedPresentedProductResponse(
+              localRetiredForegroundPresentationsRef.current,
+              productForegroundPresentationIdentity(presentationBinding, disposition.response),
+            );
+          }
+          // Foreground failure keeps its settlement barrier until the exact P1
+          // close has retired the foreground fence. Otherwise a concurrent P2
+          // recovery can rotate owners first and strand that fence forever.
+          if (foregroundPlayoutLease === null) presentationAttempt.markPlayoutSettled();
           if (disposition.task_notification && disposition.ack.surface === 'audio') {
             if (!isCurrentPresentationAttempt()) return;
             if (activeVoiceResponseRef.current?.response_id === disposition.response_id) activeVoiceResponseRef.current = null;
@@ -3926,6 +3986,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             return;
           }
           if (!isCurrentVoicePlayout()) {
+            presentationAttempt.markPlayoutSettled();
             if (
               isCurrentPresentationAttempt() &&
               (foregroundPlayoutLease === null || foregroundLeaseRetiredByExit())
@@ -3947,8 +4008,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             // Retire failed audio without inventing a presentation ACK. Close
             // the exact P1 owner before refreshing P2; the existing activation
             // recovery keeps detached Tasks and fences late predecessor audio.
-            void voiceOwner.close().then(() => {
+            presentationAttempt.close_unplayed_foreground = async () => {
+              await voiceOwner.close();
               if (!isCurrentVoicePlayout() || presentationBinding === null) {
+                presentationAttempt.markPlayoutSettled();
                 console.info(`live_voice_foreground_recovery_retired activation_current=${activationOwnerRef.current === owner} attempt_current=${pendingPresentationAttemptRef.current === presentationAttempt} foreground_current=${pendingForegroundPresentationRef.current === foregroundPlayoutLease} voice_current=${p1VoiceOwnerRef.current === voiceOwner} loop_current=${voiceLoopGenerationRef.current === playoutLoopGeneration} enabled=${voiceLoopEnabledRef.current}`);
                 return;
               }
@@ -3960,8 +4023,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               if (p1VoiceOwnerRef.current === voiceOwner) p1VoiceOwnerRef.current = null;
               p1VoiceCaptureBindingRef.current = null;
               setPendingPresentationAck(null);
+              presentationAttempt.markPlayoutSettled();
               requestVoiceLoopP2Refresh();
-            }).catch(() => {
+            };
+            void presentationAttempt.close_unplayed_foreground().catch(() => {
               // Cleanup remains visibly failed; never acquire a successor
               // while the old media authority is unresolved.
             });
@@ -4100,11 +4165,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       setPendingPresentationAck(null);
       updateTerminalAnnouncementState('idle');
     } else if (pendingPresentation?.owner === owner) {
+      if (pendingPresentation.unplayed_foreground_retired === true && pendingPresentation.close_unplayed_foreground) {
+        await pendingPresentation.close_unplayed_foreground();
+      }
       await pendingPresentation.playoutSettlement;
       // Normal playout settlement and P2 recovery share one exact retained
       // operation. A failed Task AUDIO playout reports failure; it must never
       // be converted into an accepted Presentation ACK during recovery.
-      if (pendingPresentation.failure_reason !== undefined) {
+      if (pendingPresentation.unplayed_foreground_retired === true) {
+        if (pendingPresentationAttemptRef.current === pendingPresentation) pendingPresentationAttemptRef.current = null;
+        setPendingPresentationAck(null);
+      } else if (pendingPresentation.failure_reason !== undefined) {
         await settleTaskPresentationFailure(pendingPresentation, pendingPresentation.failure_reason);
         if (pendingPresentationAttemptRef.current === pendingPresentation && owner.hasPendingPresentationFailure()) {
           throw new Error('presentation failure result remains unknown');
@@ -5687,6 +5758,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               if (activeSessionRef.current === binding.session_id && activationOwnerRef.current === successor) {
                 setP2Activation(successorSnapshot);
                 setProductTextReason(null);
+                clearProductRecoveryDiagnostic({ seam: 'activation', binding });
                 if (successorSnapshot.binding !== null) resumeVoiceLoopAfterP2Successor(successorSnapshot.binding);
               }
               return successor;
@@ -5816,7 +5888,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             previewDisposition.session_id === binding.session_id && previewDisposition.correlation_id === binding.correlation_id &&
             previewDisposition.interaction_id === binding.interaction_id && previewDisposition.activation_id === binding.activation_id &&
             previewDisposition.activation_generation === binding.activation_generation;
-          if (cancelled && !exactForegroundDelivery && !exactNativeStateDelivery) {
+          const exactTaskPresentationDelivery = previewDisposition.kind === 'presentation' && previewDisposition.task_notification &&
+            mountedRef.current && isConnectedRef.current && voiceLoopEnabledRef.current &&
+            activationOwnerRef.current === owner && activeSessionRef.current === binding.session_id &&
+            voiceLoopP2RefreshAfterGenerationRef.current === null &&
+            voiceLoopGenerationRef.current === notificationAdmission.voice_loop_generation &&
+            outcome.notification.session_id === binding.session_id && outcome.notification.correlation_id === binding.correlation_id &&
+            outcome.notification.interaction_id === binding.interaction_id && outcome.notification.activation_id === binding.activation_id &&
+            outcome.notification.activation_generation === binding.activation_generation;
+          if (cancelled && !exactForegroundDelivery && !exactNativeStateDelivery && !exactTaskPresentationDelivery) {
             // A poll opened before submit may finish with the interrupted old
             // answer. Its obsolete effect must release a wake for the current
             // foreground; otherwise the successor stays listening forever.

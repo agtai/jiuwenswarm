@@ -313,3 +313,87 @@ H scoped self-review found no changed authority/state path. The affected Native
 Engine/bound tools/receipt-only boundary passed 227 tests. This proves preserved
 mapping and fences, not that the model obeys the feedback instruction; the next
 real trial will measure that separately.
+# Foreground speaker preservation and unplayed retirement (Tier 2)
+
+Current-policy regression migration additionally exposed a retained clarification
+after exact local cancellation had already dispatched. Tier 2 ownership is the
+Registry's direct local-consent continuation replacement: retire the exact prior
+clarification before replacing the local variable with the issued confirmation,
+using the existing retirement helper, without changing D-116 consent or durable
+confirmation semantics. Verify before/after durable-issue failures, exact target
+and binding, immutable other Task, single-use continuation and zero duplicate
+commands on replay. P3 running-notification oracles follow the already accepted
+silent-running policy while retaining authoritative Store events.
+
+The current recovery batch also owns the mounted Cascade foreground presentation
+catch/cleanup seam. When an already-settled answer arrives during a new utterance,
+retain its visible text, retire only its unplayed presentation, and preserve the
+current capture and exact next committed input. Locally retired unplayed audio
+must never acquire an ACK during delayed callbacks, notification replay or Exit.
+Keep Task deferred-announcement replay, server interruption semantics, protocols,
+Task state and Native admission unchanged. Acceptance covers positive next speech,
+same-owner capture, bounded exact activation/response identity, late duplicates,
+TTS failure/Exit zero ACK, and existing Task fallback. Independent read-only review
+identified the capture-close and cleanup-ACK defects; mounted evidence is not
+physical microphone/speaker acceptance.
+
+## Recovery closure checkpoint — 2026-09-08 02:46 UTC
+
+- Fixed the lost new utterance on already-settled foreground speaker deferral,
+  false cleanup ACK after unplayed TTS, P1/P2 close ordering, exact remote-close
+  retry barrier, and obsolete-effect Task notification loss. An exact predecessor
+  activation diagnostic is cleared only after its successor actually activates.
+- Current mounted focus: 14/14 before the final retry addition; the final four
+  extended journeys pass, including failed media revocation followed by Exit
+  retry. Broader affected pattern: 23 passed plus one retained obsolete Task-intent
+  control fixture failure. TypeScript check passes. Full mounted discovery before
+  the final fixture completion: 140 passed, 11 failed, 1 skipped; ten failures
+  require the removed Task-intent UI, and the Exit failure is now repaired.
+  These overlapping runs are not added into a synthetic total.
+- P3's four previously failing current-policy scenarios now pass. Migrated exact
+  local-cancel consent and silent-running oracles exposed and repaired a real
+  orphaned prior clarification. Replay compares the complete result and verifies
+  Store counts and Executor dispatch/cancel lists are unchanged. Broader P3,
+  semantic Registry and bound-tool run: 286 passed, seven failed, all seven in
+  the historical Native pre-business-capability path (six explicit unsupported
+  capability rejections and one wait for that retired path). Failures remain
+  recorded rather than relabeled as passes.
+- Independent read-only complete scoped review approved the frontend retirement,
+  retry and notification seams and the Registry continuation repair. Main cold
+  diff review and diff whitespace check completed. Browser AudioContext/source
+  cleanup whose outcome is unknown retains its existing fail-closed policy;
+  the retry test injects recoverable exact remote-media transport failure.
+
+## Real G/H checkpoint on deployed 5b0f816d, minimal/auto
+
+- Actual Agent Task `task-8f3c3ebd6c954c75aea00e39abd549ef` completed
+  `深圳出差行程.md`; its Task instruction and file preserve dates September 12/13,
+  Guangzhou South departure, day-one 10:00 Shenzhen North meeting, two people,
+  and 1500 yuan budget, with transport/lodging/food sections.
+- Actual successor `task-6ba16c599da341d795ef5d223aeef0f0` completed a beach
+  variant with day-two Dameisha and preserved the source SHA-256
+  `dec773102201c15cbbce1dbd1f77f1d36d0a5dd9c3415e932999e3ce6821a875`.
+  Destination was `深圳出差行程-海边版.md`, not requested
+  `深圳出差行程_海边版.md`: exact filename acceptance FAILED. Do not repair the
+  artifact manually and claim a successful speech journey. Further spoken
+  punctuation verification is required.
+- From actual acoustic end to received PCM: creation 7611.576 ms; successor
+  4478.574 ms. The earlier absolute 31-second derivative receive timestamp is
+  not a 31-second post-utterance latency. Both Task confirmations miss 3 seconds.
+- Six ordinary minimal/auto samples: 1537.625–1994.313 ms, median 1868.563 ms;
+  six low/auto samples median 1809.312 ms. Small n does not establish minimal
+  as faster. No measured physical first-audible result is available.
+- The repeated Shenzhen weather query reused a completed work via work.get;
+  its 4093.944 ms output is not evidence of a new running-work improvement.
+  Four subsequent fresh weather lookups really used work.start and spoke a
+  factual underway response without work.get loops. First received PCM:
+  3811.511, 3280.662, 3392.102, 3677.203 ms. All remain above the early-feedback
+  target. Separate real task.result file query returned the correct 300 yuan
+  high-speed rail budget at 4841.630 ms.
+- These are authenticated RPC/dedicated PCM/actual Provider + Agent measurements.
+  Output transcripts are ASR of recorded received audio, not human listening.
+  Record-only enqueue ACKs never create playout receipts or heard-history ACKs.
+  A 1959 ms received-frame interval in one ordinary stream was also present at
+  Provider ingress; with a simulated 250 ms reserve its previously delivered
+  audio covered that interval. It is not evidence of an audible gap or proof
+  of audible continuity. Physical browser/device acceptance remains missing.

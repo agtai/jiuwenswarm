@@ -13723,6 +13723,10 @@ class AgentServerProductCompositionRegistry:
                     replacing_token=None if pending is None else pending.token,
                     clarification_answer_fingerprint=(None if clarification_answer is None else clarification_answer.fingerprint),
                 )
+                await self._retire_prior_production_continuation(
+                    pending=pending,
+                    current_commit=commit,
+                )
                 async with self._lock:
                     pending = self._pending_production_task_intents[token]
                 record = await asyncio.to_thread(

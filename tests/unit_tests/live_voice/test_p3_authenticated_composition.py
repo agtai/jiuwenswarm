@@ -1861,22 +1861,10 @@ async def test_registry_production_classifier_bridge_store_and_core_without_hint
     assert cancel_pending.ok is True, cancel_pending.payload
     cancel_pending_result = cancel_pending.payload["result"]
     assert isinstance(cancel_pending_result, dict)
-    cancel_token = cancel_pending_result["confirmation_token"]
-    assert isinstance(cancel_token, str)
-    cancelled = await registry.handle_p3_intent(
-        params=_production_registry_text_params(
-            stem="cancel-confirm",
-            text=f"confirm task request {cancel_token}",
-            continuation_id=cancel_token,
-        ),
-        request_id="production-intent-cancel-confirm",
-        session_id="session-1",
-    )
-    assert cancelled.ok is True, cancelled.payload
-    cancelled_result = cancelled.payload["result"]
-    assert isinstance(cancelled_result, dict)
-    assert cancelled_result["status"] == "dispatched"
-    assert cancelled_result["task_id"] == task_id
+    # D-116: the exact committed local cancellation is consent; the existing
+    # confirmation consumer still binds and consumes that one operation.
+    assert cancel_pending_result["status"] == "dispatched"
+    assert cancel_pending_result["task_id"] == task_id
     assert registry._pending_production_task_intents == {}
 
     await registry.stop()
@@ -2813,83 +2801,55 @@ async def test_registry_production_clarification_is_owner_bound_and_single_use(
     committed_clarification_token = committed_issue_result["confirmation_token"]
     assert isinstance(committed_clarification_token, str)
 
+    issued_bindings: list[P3ConfirmationBinding] = []
+    observed_confirmation_bindings: list[P3ConfirmationBinding] = []
+    original_validate = owner.validate_for_forwarding
+
     def fail_after_issue(*args: object, **kwargs: object) -> None:
+        issued_bindings.append(args[0].binding)
         original_issue(*args, **kwargs)
         raise RuntimeError("injected post-commit confirmation response loss")
 
+    def capture_confirmation_binding(confirmation_id, binding, owner_context, *, now):
+        observed_confirmation_bindings.append(binding)
+        return original_validate(confirmation_id, binding, owner_context, now=now)
+
     monkeypatch.setattr(owner, "issue", fail_after_issue)
+    monkeypatch.setattr(owner, "validate_for_forwarding", capture_confirmation_binding)
+    untouched_task = harness.composition._core.store.get_task(first_task, _scope())
+    cancel_params = _production_registry_text_params(
+        stem="ambiguous-cancel-committed-answer",
+        text=f"cancel {second_task}",
+        continuation_id=committed_clarification_token,
+    )
     reconciled_issue = await registry.handle_p3_intent(
-        params=_production_registry_text_params(
-            stem="ambiguous-cancel-committed-answer",
-            text=f"cancel {second_task}",
-            continuation_id=committed_clarification_token,
-        ),
+        params=cancel_params,
         request_id="duplicate-cancel-committed-answer",
         session_id="session-1",
     )
     monkeypatch.setattr(owner, "issue", original_issue)
+    monkeypatch.setattr(owner, "validate_for_forwarding", original_validate)
     assert reconciled_issue.ok is True, reconciled_issue.payload
     reconciled_result = reconciled_issue.payload["result"]
-    assert isinstance(reconciled_result, dict)
-    assert reconciled_result["status"] == "clarification"
-    assert reconciled_result["reason"] == "TASK_CONFIRMATION_REQUIRED"
-    reconciled_token = reconciled_result["confirmation_token"]
-    assert isinstance(reconciled_token, str)
-    assert committed_clarification_token not in (
-        registry._pending_production_task_intents
-    )
-    assert reconciled_token in registry._pending_production_task_intents
-    assert harness.composition._core.store.counts() == before
-
-    retained_reconciled = registry._pending_production_task_intents[reconciled_token]
-    retained_binding = retained_reconciled.resolution.confirmation_binding
-    assert retained_binding is not None
-    expected_p3_binding = P3ConfirmationBinding(
-        principal_id=retained_binding.principal_id,
-        scope=retained_binding.scope,
-        operation=retained_binding.operation,
-        command_id=retained_binding.command_id,
-        target_task_id=retained_binding.target_task_id,
-        intent_fingerprint=retained_binding.fingerprint,
-    )
-    original_validate = owner.validate_for_forwarding
-    observed_confirmation_bindings: list[P3ConfirmationBinding] = []
-
-    def capture_confirmation_binding(
-        confirmation_id: str,
-        binding: P3ConfirmationBinding,
-        owner_context: P3ConfirmationOwnerContext,
-        *,
-        now: str,
-    ):
-        observed_confirmation_bindings.append(binding)
-        return original_validate(
-            confirmation_id,
-            binding,
-            owner_context,
-            now=now,
-        )
-
-    monkeypatch.setattr(owner, "validate_for_forwarding", capture_confirmation_binding)
-
-    cancelled = await registry.handle_p3_intent(
-        params=_production_registry_text_params(
-            stem="ambiguous-cancel-committed-confirm",
-            text=f"confirm task request {reconciled_token}",
-            continuation_id=reconciled_token,
-        ),
-        request_id="duplicate-cancel-committed-confirm",
-        session_id="session-1",
-    )
-    monkeypatch.setattr(owner, "validate_for_forwarding", original_validate)
-    assert observed_confirmation_bindings[-1] == expected_p3_binding
-    assert cancelled.ok is True, cancelled.payload
-    cancelled_result = cancelled.payload["result"]
-    assert isinstance(cancelled_result, dict)
-    assert cancelled_result["status"] == "dispatched"
-    assert cancelled_result["task_id"] == second_task
+    assert reconciled_result["status"] == "dispatched"
+    assert reconciled_result["task_id"] == second_task
+    assert len(issued_bindings) == 1
+    assert observed_confirmation_bindings[-1] == issued_bindings[0]
+    assert issued_bindings[0].target_task_id == second_task
+    assert issued_bindings[0].operation == "task.cancel"
+    assert harness.composition._core.store.get_task(first_task, _scope()) == untouched_task
     assert registry._pending_production_task_intents == {}
     before = harness.composition._core.store.counts()
+    executor_before_replay = (tuple(harness.executor.dispatches), tuple(harness.executor.cancels))
+    replay = await registry.handle_p3_intent(
+        params=cancel_params,
+        request_id="duplicate-cancel-committed-answer",
+        session_id="session-1",
+    )
+    assert replay.ok is True, replay.payload
+    assert replay.payload["result"] == reconciled_result
+    assert (tuple(harness.executor.dispatches), tuple(harness.executor.cancels)) == executor_before_replay
+    assert harness.composition._core.store.counts() == before
 
     ambiguous = await registry.handle_p3_intent(
         params=_production_registry_text_params(
@@ -5027,7 +4987,9 @@ async def test_product_registry_replays_terminal_p3_authority_after_clean_checkp
         assert activated.payload["result"]["voice_progress"] == "unavailable"
         assert [
             message["payload"]["source_event"]["event_type"] for message in pushed
-        ] == ["task.accepted", "task.running", "task.terminal"]
+        ] == ["task.accepted", "task.terminal"]
+        assert any(event.event_type == "task.running"
+                   for event in harness.composition._core.store.events(task_id, _scope()))
         assert pushed[-1]["payload"]["source_event"]["payload"] == {
             "state": "terminal",
             "outcome": outcome.value,

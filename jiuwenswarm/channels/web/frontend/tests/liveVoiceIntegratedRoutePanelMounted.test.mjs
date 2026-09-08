@@ -1696,7 +1696,8 @@ async function waitForMountedDefault(predicate, message, timeoutMs = 2_000) {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) assert.fail(message);
-    await new Promise(resolve => setTimeout(resolve, 5));
+    // Flush React effects while awaiting asynchronously delivered owner state.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)); });
   }
 }
 
@@ -5652,7 +5653,7 @@ test('mounted Task AUDIO failure adopts server TEXT fallback through visible run
     }
     if (method === 'live_voice.composition.p3.progress.ack') {
       if (params.seq === 2) {
-        assert.equal(messages.filter(entry => entry.message.content === 'The background task is complete and its result is ready.').length, 1,
+        assert.equal(messages.filter(entry => entry.message.content === 'Task "mounted-task-audio-text-fallback-task" is complete and its result is ready.').length, 1,
           'terminal fallback ACK preceded its formal chat projection');
       }
       return {
@@ -5829,7 +5830,7 @@ test('mounted Task AUDIO failure adopts server TEXT fallback through visible run
       progressListener({ ...terminal, generation: terminal.generation + 1 });
       await new Promise(resolve => setTimeout(resolve, 25));
       assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length, 2);
-      assert.equal(messages.filter(entry => entry.message.content === 'The background task is complete and its result is ready.').length, 1);
+      assert.equal(messages.filter(entry => entry.message.content === 'Task "mounted-task-audio-text-fallback-task" is complete and its result is ready.').length, 1);
     });
 
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
@@ -5845,7 +5846,7 @@ test('mounted Task AUDIO failure adopts server TEXT fallback through visible run
     assert.equal(textAcks.every(call => call.params.task_id === taskId), true);
     assert.equal(
       states.at(-1)?.output,
-      'The background task is complete and its result is ready.',
+      'Task "mounted-task-audio-text-fallback-task" is complete and its result is ready.',
       'terminal TEXT fallback must replace the primary Live Voice output before consumption',
     );
     assert.equal(states.at(-1)?.terminal_notification, states.at(-1)?.output);
@@ -10351,7 +10352,8 @@ test('mounted terminal notification replays its exact P2 observation after Live 
   }
 });
 
-test('mounted TTS failure and ACK transport loss keep text visible, replay one ACK identity, and resume one capture', async () => {
+for (const failFirstClose of [false, true]) {
+test(`mounted TTS failure keeps text visible, retires unplayed audio without ACK, and resumes one capture${failFirstClose ? ' after close failure and Exit retry' : ''}`, async () => {
   const i18n = await createI18n('zh');
   const sessionId = 'mounted-tts-failure-recovery-session';
   const controlRef = { current: null };
@@ -10365,6 +10367,8 @@ test('mounted TTS failure and ACK transport loss keep text visible, replay one A
   let presentationAckAttempts = 0;
   let rejectSynthesis = null;
   let renderer;
+  let closeAttempts = 0;
+  let allowMediaClose = !failFirstClose;
   const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
   const activateP2 = createMountedP2ActivationResponder();
   const publishNotification = notification => {
@@ -10430,6 +10434,11 @@ test('mounted TTS failure and ACK transport loss keep text visible, replay one A
         binding: activeMediaBinding,
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
+    }
+    if (method === 'live_voice.media.close') {
+      closeAttempts += 1;
+      if (!allowMediaClose) throw Object.assign(new Error('injected exact media close transport failure'),
+        { code: 'WS_DISCONNECTED', retriable: true });
     }
     if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
     if (method === 'live_voice.speech.recognize_batch') return mountedRecognition(params, '请用中文简短介绍杭州。', 1);
@@ -10507,10 +10516,16 @@ test('mounted TTS failure and ACK transport loss keep text visible, replay one A
       assert.equal(states.some(state => state.p1_status === 'playing'), false);
       assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
       rejectSynthesis(Object.assign(new Error('mounted synthesis unavailable'), { reason: 'SPEECH_PROVIDER_UNAVAILABLE' }));
-      await waitForMounted(
-        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length === 2,
-        `TTS failure did not retain the text presentation ACK; states=${states.map(state => `${state.p1_status}/${state.p1_reason}/${state.text_status}/${state.text_reason}/retained=${state.operation_retained}`).join(',')}; methods=${calls.map(call => call.method).join(',')}`,
-      );
+      if (failFirstClose) {
+        await waitForMounted(() => states.at(-1)?.p1_status === 'cleanup_pending' &&
+          states.at(-1)?.p1_reason === 'FORMAL_P1_CLEANUP_PENDING', 'exact failed P1 close not settled');
+        await new Promise(resolve => setImmediate(resolve));
+        allowMediaClose = true;
+        await controlRef.current.close();
+        await waitForMounted(() => states.at(-1)?.p1_status === 'closed', 'Exit retry did not settle the retired P1');
+        assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
+        void controlRef.current.start();
+      }
       await waitForMounted(
         () => calls.filter(call => call.method === 'live_voice.media.activate').length === 2,
         `TTS failure did not allocate one bounded successor: ${states.map(state => `${state.p1_status}/${state.p1_reason}/${state.text_status}/${state.text_reason}`).join(',')}; methods=${calls.map(call => call.method).join(',')}`,
@@ -10525,8 +10540,8 @@ test('mounted TTS failure and ACK transport loss keep text visible, replay one A
     ]);
     assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 1);
     const presentationAcks = calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack');
-    assert.equal(presentationAcks.length, 2);
-    assert.equal(new Set(presentationAcks.map(call => call.requestId)).size, 1);
+    assert.equal(presentationAcks.length, 0, 'failed synthesis has no voice presentation to acknowledge');
+    const submitted = calls.find(call => call.method === 'live_voice.composition.unified.submit').params;
     assert.equal(browser.counts.getUserMedia, 2);
     const ttsDiagnostic = states.find(
       state =>
@@ -10539,30 +10554,27 @@ test('mounted TTS failure and ACK transport loss keep text visible, replay one A
       disposition: 'terminal',
       reason: 'SPEECH_PROVIDER_UNAVAILABLE',
       session_id: sessionId,
-      correlation_id: presentationAcks[0].params.correlation_id,
-      interaction_id: presentationAcks[0].params.interaction_id,
-      activation_id: presentationAcks[0].params.activation_id,
-      activation_generation: presentationAcks[0].params.activation_generation,
+      correlation_id: submitted.correlation_id,
+      interaction_id: submitted.interaction_id,
+      activation_id: submitted.activation_id,
+      activation_generation: submitted.activation_generation,
       response_id: 'mounted-tts-failure-response',
       response_generation: 1,
     });
-    const ackDiagnostic = states.find(
-      state => state.recovery_diagnostic?.seam === 'presentation_ack' && state.recovery_diagnostic.disposition === 'retrying',
-    )?.recovery_diagnostic;
-    assert.equal(ackDiagnostic?.correlation_id, ttsDiagnostic.correlation_id);
-    assert.equal(ackDiagnostic?.response_id, ttsDiagnostic.response_id);
-    assert.equal(ackDiagnostic?.response_generation, ttsDiagnostic.response_generation);
-    assert.equal(ackDiagnostic?.reason, 'PRODUCT_PRESENTATION_ACK_RECOVERY_REQUIRED');
+    assert.equal(states.some(state => state.recovery_diagnostic?.seam === 'presentation_ack'), false);
     assert.equal(states.at(-1).recovery_diagnostic, null);
     assert.equal(
       calls.some(call => call.method.includes('task.cancel') || call.method.includes('task.mutate') || call.method === 'live_voice.composition.p3.mutate'),
       false,
     );
   } finally {
+    allowMediaClose = true;
     if (renderer) await act(async () => renderer.unmount());
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0, 'cleanup must not invent a heard ACK');
     browser.restore();
   }
 });
+}
 
 test('mounted terminal-response barge converges without voice failure and keeps zero Task mutation', async () => {
   const i18n = await createI18n();
@@ -12420,6 +12432,16 @@ test('mounted Exit retires a deferred stale Task AUDIO owner before same-Session
         'current post-re-enable response was not ACKed after Task fallback',
       );
     });
+    // A repoll is required after Task arbitration. No presentation is available
+    // from this fixture at this point; complete its exact pending poll normally.
+    await waitForMountedEffects(() => hasPendingNotificationForGeneration(successorGeneration + 1),
+      'post-playout Task repoll missing');
+    await act(async () => {
+      publishNotificationForGeneration(successorGeneration + 1, { ok: true, result: {
+        status: 'notification', ...unifiedParams, kind: 'transport.keepalive', response: null,
+        agent_event: null, presentation_unit: null,
+      } });
+    });
     await waitForMountedEffects(
         () => ['starting', 'capturing'].includes(states.at(-1)?.p1_status),
         'current post-re-enable playout did not resume listening',
@@ -12455,7 +12477,10 @@ test('mounted Exit retires a deferred stale Task AUDIO owner before same-Session
     assert.equal(browser.counts.getUserMedia, 5);
     assert.equal(new Set(projectedMessages.map(entry => entry.message.id)).size, projectedMessages.length);
     assert.equal(projectedMessages.filter(entry => entry.message.role === 'user').length, 3);
-    assert.equal(projectedMessages.filter(entry => entry.message.role === 'assistant').length, 1);
+    assert.deepEqual(projectedMessages.filter(entry => entry.message.role === 'assistant').map(entry => entry.message.content), [
+      'This reply did not complete (PRODUCT_AGENT_TERMINAL_WITHOUT_FINAL_COMPLETED). You can continue speaking or ask the question again.',
+      '这是重新启用后的当前回答。',
+    ], 'only the exact failed-response notice and current answer are visible; unplayed Task AUDIO is absent');
     await act(async () => controlRef.current.close());
     await waitForMounted(() => states.at(-1)?.p1_status === 'closed', 'final Exit did not publish closed capture state');
     assert.equal(browser.counts.stoppedTracks, browser.counts.getUserMedia, 'final Exit leaked a microphone track');
@@ -15503,11 +15528,11 @@ test('mounted already-settled interruption retains its answer without claiming p
   const sessionId = 'mounted-generation-already-settled-session';
   const controlRef = { current: null };
   const states = [];
-  const utterances = ['帮我讲一个很长的故事。'];
+  const utterances = ['帮我讲一个很长的故事。', '算了，先告诉我现在几点。'];
   const responder = generationInterruptResponder({
     utterances,
     hold_answer_for: utterances,
-    answer_for: () => '很久很久以前，有一座山。',
+    answer_for: text => text === utterances[0] ? '很久很久以前，有一座山。' : '现在是下午三点。',
   });
   // The server fenced nothing because the answer had already finished. Its
   // presentation is therefore still legitimate and must not be dropped by the
@@ -15538,6 +15563,8 @@ test('mounted already-settled interruption retains its answer without claiming p
           ['live_voice.composition.p2.presentation.ack', 'live_voice.composition.p2.presentation.failed'].includes(call.method) &&
           call.params.response_id === settledResponse.response_id,
       ).length;
+    const captureCount = browser.counts.getUserMedia;
+    const mediaCloses = responder.calls.filter(call => call.method === 'live_voice.media.close').length;
     await act(async () => {
       responder.releaseHeldAnswer(utterances[0]);
       // W3 binds a foreground voice answer to its exact playout owner. The
@@ -15547,12 +15574,37 @@ test('mounted already-settled interruption retains its answer without claiming p
       await waitForMounted(
         () =>
           states.at(-1)?.output === '很久很久以前，有一座山。' &&
-          states.at(-1)?.text_status === 'failed',
+          states.at(-1)?.text_status === 'presented',
         'the already-settled answer was not retained under the exact playout fence',
       );
     });
-    assert.equal(states.at(-1)?.text_reason, 'PRODUCT_PLAYOUT_DEFERRED_TO_SPEAKER');
+    assert.equal(browser.counts.getUserMedia, captureCount, 'the active utterance must keep its microphone');
+    assert.equal(responder.calls.filter(call => call.method === 'live_voice.media.close').length, mediaCloses);
+    assert.equal(browser.counts.sourceStarts, 0);
     assert.equal(closures(), 0, 'speaker-active foreground playout must not receive a forged settlement');
+    await act(async () => {
+      responder.publishAgentAnswer(settledResponse, '迟到的旧回答。', responder.submits[0].params);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      await browser.emitSpeechEndOfTurnOnly();
+      await waitForMounted(() => responder.submits.length === 2, 'the same active utterance was lost');
+    });
+    assert.equal(responder.submits[1].params.text, utterances[1]);
+    assert.equal(closures(), 0);
+    assert.equal(browser.counts.sourceStarts, 0);
+    await act(async () => {
+      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'second generation capture missing');
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'second generation capture not ready');
+      responder.releaseHeldAnswer(utterances[1]);
+      await waitForMounted(() => browser.counts.sourceStarts === 1, 'new answer did not play');
+      browser.endLatestSource();
+      await waitForMounted(() => responder.calls.some(call => call.method === 'live_voice.composition.p2.presentation.ack' &&
+        call.params.response_id === responder.submits[1].response.response_id), 'new answer was not acknowledged');
+    });
+    await act(async () => { await controlRef.current.close(); });
+    assert.equal(closures(), 0, 'Exit must not acknowledge retired unplayed audio');
+    assert.equal(responder.submits.length, 2, 'the second utterance must submit exactly once');
+    assert.equal(responder.calls.some(call => call.method.includes('task.cancel') || call.method.includes('p3.mutate')), false);
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();
