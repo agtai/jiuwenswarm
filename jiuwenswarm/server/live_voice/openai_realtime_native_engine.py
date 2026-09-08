@@ -54,6 +54,7 @@ from jiuwenswarm.server.live_voice.native_business_encoding import compact_nativ
 from jiuwenswarm.server.live_voice.native_interaction_config import (
     DEFAULT_NATIVE_VAD_EAGERNESS, validate_native_vad_eagerness,
     DEFAULT_NATIVE_MAX_OUTPUT_TOKENS, validate_native_max_output_tokens,
+    DEFAULT_NATIVE_AUDIO_SPEED, validate_native_audio_speed,
 )
 from jiuwenswarm.server.live_voice.native_business_observation import project_native_receipt
 from jiuwenswarm.server.live_voice.native_continuation_preparation import (
@@ -429,10 +430,24 @@ _DELEGATE_SUCCESSOR_INSTRUCTIONS = (
 )
 
 _BUSINESS_INSTRUCTIONS = (
-    "Converse naturally by voice. For Jiuwen project, file, Agent, Task or work facts and actions, "
+    "For a request requiring a tool, immediately output only the function call. "
+    "Do not say 'let me check', 'I will arrange it', or any spoken preamble in that response. "
+    "Wait for the tool result before speaking; the server creates that separate response. "
+    "Converse naturally by voice. Start with the answer; normally use one or two complete sentences, "
+    "adding only a decisive reason or necessary qualification. Match the number of choices requested. "
+    "For follow-ups, answer only the new question. Omit greetings, restating the question, long lists, "
+    "repeated summaries and routine offers. Expand when the user asks for detail; never cut off a sentence. "
+    "For Jiuwen project, file, Agent, Task or work facts and actions, "
     "call the corresponding jiuwen_* tool promptly with actual IDs, context_id and revisions returned by the server. "
     "Use jiuwen_context_get when information is missing or stale, then continue with the necessary structured call. "
     "Do not announce a long plan before a needed call. Clarify ambiguous intent or targets; never guess required fields. "
+    "When the user delegates a deliverable to the background, including preparing an itinerary or plan, "
+    "use jiuwen_task_create, even if they did not specify a filename. Do not send that request to "
+    "jiuwen_work_start or ask the read-only analysis Agent to create a Task. "
+    "Use jiuwen_work_start for read-only analysis and real tool lookup, including current weather, "
+    "forecasts, venue opening hours, ticket conditions and other changing external facts. "
+    "Never substitute seasonal knowledge for a forecast or claim lookup is unavailable without a real tool result. "
+    "Resolve ambiguous trip dates or necessary locations with one concise clarification; do not invent them. "
     "Keep a request to derive a changed document and save it under a new name in one artifact Task. "
     "Its instruction must identify the source to read, every requested change, the exact destination filename, "
     "and that the source is preserved. Do not split that request into an unchanged copy and a separate source adjustment. "
@@ -443,7 +458,9 @@ _BUSINESS_INSTRUCTIONS = (
     "Only history marked heard was delivered to the user; generated text is not delivery. "
     "Never invent an operation, completion, consent or capability limitation. "
     "A response with a function call must have no speech or audio; after all outputs, the server starts a new response. "
-    "Report real receipts faithfully and concisely. Speech interruption stops speech; accepted work continues."
+    "Report real receipts faithfully in one short sentence, distinguishing accepted, running and completed. "
+    "Keep full deliverable details in the result; do not read the plan aloud unasked. "
+    "Speech interruption stops speech; accepted work continues."
 )
 
 _BUSINESS_ARGUMENT_CORRECTION_INSTRUCTIONS = (
@@ -474,13 +491,17 @@ _WORK_NOTIFICATION_INSTRUCTIONS = (
 def _session_update(
     vad_eagerness: str = DEFAULT_NATIVE_VAD_EAGERNESS,
     max_output_tokens: int | str = DEFAULT_NATIVE_MAX_OUTPUT_TOKENS,
+    audio_speed: float = DEFAULT_NATIVE_AUDIO_SPEED,
 ) -> dict[str, object]:
     return {
         "type": "realtime",
         "output_modalities": ["audio"],
         "max_output_tokens": validate_native_max_output_tokens(max_output_tokens),
         "instructions": (
-            "Respond by voice. You may answer directly only for casual conversation "
+            "Respond by voice. Start with the answer and normally use one or two complete sentences. "
+            "Answer only the question asked; omit restatements, repeated summaries and routine offers. "
+            "Expand when explicitly asked. Current external facts require real tool lookup. "
+            "You may answer directly only for casual conversation "
             "or self-contained information that needs no Jiuwen Agent, Task, tool, "
             "project, or file action. You MUST call jiuwen_delegate for every request "
             "to create, start, modify, adjust, cancel, check the status of, or inspect "
@@ -510,6 +531,7 @@ def _session_update(
             "output": {
                 "format": {"type": "audio/pcm", "rate": NATIVE_PCM_SAMPLE_RATE},
                 "voice": "marin",
+                "speed": validate_native_audio_speed(audio_speed),
             },
         },
         "tools": [
@@ -783,6 +805,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         pending_audio_capacity: int = 64,
         vad_eagerness: str = DEFAULT_NATIVE_VAD_EAGERNESS,
         max_output_tokens: int | str = DEFAULT_NATIVE_MAX_OUTPUT_TOKENS,
+        audio_speed: float = DEFAULT_NATIVE_AUDIO_SPEED,
     ) -> None:
         if not isinstance(binding, NativeInteractionBinding):
             raise TypeError("binding must use NativeInteractionBinding")
@@ -794,6 +817,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                 raise ValueError(f"{name} must be an integer in [1, 4096]")
         self._vad_eagerness = validate_native_vad_eagerness(vad_eagerness)
         self._max_output_tokens = validate_native_max_output_tokens(max_output_tokens)
+        self._audio_speed = validate_native_audio_speed(audio_speed)
         self._binding = binding
         self._session = OpenAIRealtimeSession(config, socket_factory=socket_factory,
                                              diagnostic_origin=identity_fields(binding))
@@ -1058,7 +1082,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             )
         self._state = NativeProviderState.STARTING
         try:
-            update = _session_update(self._vad_eagerness, self._max_output_tokens)
+            update = _session_update(self._vad_eagerness, self._max_output_tokens, self._audio_speed)
             self._profile_business("endpoint_strategy_requested", status=self._vad_eagerness)
             if self._business_context is not None:
                 update.update(instructions=_BUSINESS_INSTRUCTIONS, tools=native_business_tools())
@@ -1706,16 +1730,13 @@ class OpenAIRealtimeNativeInteractionEngine:
             if (self._receipt_projection and not facts_sent and (request.delegate_call_id is not None
                     or request.business_recovery or request.work_event_id is not None)):
                 if self._business_refresh is not None and not context_refreshed:
-                    refresh_context = self._business_context
                     fresh = await self._business_refresh()
                     if not self._inflight_request_current(request):
                         self._retire_unsent_request(request)
                         return
-                    if self._business_context is not refresh_context:
-                        # A concurrently applied authoritative context wins over
-                        # this older read, even if its contents happen to match.
-                        self._retire_unsent_request(request)
-                        return
+                    # Gateway returns its latest cursor-ordered snapshot after
+                    # the shared read. Object replacement by an observer is not
+                    # a STOP and must not discard an accepted receipt successor.
                     self._replace_business_context(fresh["context"], fresh["work_events"])
                 if not self._inflight_request_current(request):
                     self._retire_unsent_request(request)
@@ -3283,6 +3304,14 @@ class OpenAIRealtimeNativeInteractionEngine:
         audio_item.audio_buffer = bytearray(remainder)
         audio_item.audio_buffer_event_id = event.event_id if remainder else None
         response.next_audio_sequence += frame_count
+        self._profile_business(
+            "provider_audio_mapped", response=response,
+            source_event_id=event.event_id, provider_item_id=item_id,
+            frame_seq=response.next_audio_sequence - frame_count,
+            frame_count=frame_count, audio_bytes=len(pcm16),
+            audio_duration_ms=len(pcm16) / (NATIVE_PCM_SAMPLE_RATE * 2) * 1000,
+            event_queue_frames=len(self._pending_events),
+        )
         first_audio = not any(item.received_samples for item in response.audio_items.values())
         audio_item.received_samples += len(pcm16) // 2
         if first_audio and not response.first_audio_observed:

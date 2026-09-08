@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -15,6 +17,8 @@ INTERACTION_ENGINE_ENV = "LIVE_VOICE_INTERACTION_ENGINE"
 NATIVE_REALTIME_MODEL_ENV = "LIVE_VOICE_NATIVE_REALTIME_MODEL"
 NATIVE_VAD_EAGERNESS_ENV = "LIVE_VOICE_NATIVE_VAD_EAGERNESS"
 NATIVE_MAX_OUTPUT_TOKENS_ENV = "LIVE_VOICE_NATIVE_MAX_OUTPUT_TOKENS"
+NATIVE_AUDIO_SPEED_ENV = "LIVE_VOICE_NATIVE_AUDIO_SPEED"
+DEFAULT_NATIVE_AUDIO_SPEED = 1.0
 DEFAULT_NATIVE_REALTIME_MODEL = "gpt-realtime-2.1-mini"
 DEFAULT_NATIVE_VAD_EAGERNESS = "auto"
 DEFAULT_NATIVE_MAX_OUTPUT_TOKENS: Literal["inf"] = "inf"
@@ -39,6 +43,24 @@ class NativeInteractionSelection:
     native_model: str | None
     native_vad_eagerness: str | None = None
     native_max_output_tokens: int | Literal["inf"] = DEFAULT_NATIVE_MAX_OUTPUT_TOKENS
+    native_audio_speed: float = DEFAULT_NATIVE_AUDIO_SPEED
+
+
+def validate_native_audio_speed(value: object) -> float:
+    """Bound the Provider's audio output speed; never alter local media clocks."""
+    if type(value) in (int, float) and 0.25 <= value <= 1.5 and math.isfinite(value):
+        return float(value)
+    raise NativeInteractionConfigurationError(
+        "NATIVE_AUDIO_SPEED_INVALID", "Native audio speed must be a number from 0.25 to 1.5",
+    )
+
+
+def _audio_speed_environment(value: object) -> float:
+    if type(value) is str and len(value) <= 32 and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value):
+        return validate_native_audio_speed(float(value))
+    raise NativeInteractionConfigurationError(
+        "NATIVE_AUDIO_SPEED_INVALID", "Native audio speed must be a decimal string from 0.25 to 1.5",
+    )
 
 
 def validate_native_max_output_tokens(value: object) -> int | Literal["inf"]:
@@ -148,10 +170,16 @@ def select_interaction_engine_environment(
         native_max_output_tokens=_output_tokens_environment(
             environ.get(NATIVE_MAX_OUTPUT_TOKENS_ENV, DEFAULT_NATIVE_MAX_OUTPUT_TOKENS)
         ),
+        native_audio_speed=_audio_speed_environment(
+            environ.get(NATIVE_AUDIO_SPEED_ENV, str(DEFAULT_NATIVE_AUDIO_SPEED))
+        ),
     )
 
 
 __all__ = [
+    "DEFAULT_NATIVE_AUDIO_SPEED",
+    "NATIVE_AUDIO_SPEED_ENV",
+    "validate_native_audio_speed",
     "DEFAULT_NATIVE_REALTIME_MODEL",
     "DEFAULT_NATIVE_VAD_EAGERNESS",
     "DEFAULT_NATIVE_MAX_OUTPUT_TOKENS",

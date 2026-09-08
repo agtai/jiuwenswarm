@@ -33,6 +33,7 @@ _TIMED_PROVIDER_EVENTS = frozenset({
     "session.created", "session.updated", "response.created", "response.done",
     "input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped",
     "input_audio_buffer.committed", "response.function_call_arguments.done",
+    "response.output_audio.delta",
 })
 
 _TRANSPORT_EXCEPTION_NAMES = frozenset({

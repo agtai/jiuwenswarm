@@ -56,9 +56,50 @@ clarification/rejection requirements; other mutation policies are unchanged.
 Record measured latency from the actual trace/corpus. One presentation cannot
 supply a reliable p50/p95 or prove physical stability.
 
-## 4. Current A/B/A2 journey
+## 4. Current Shenzhen business-trip showcase
 
-The current extension exercises two independent real background Tasks and a
+The user selected this primary demonstration on 2026-09-07: natural voice
+conversation about a Shenzhen business trip, real information lookup, one
+background itinerary, continued conversation and an explicit adjustment.
+Use the real JiuwenSwarm Agent/tools and Task executor; Native small talk alone
+cannot establish this boundary. This scoped showcase does not remove the
+retained candidate regressions in §4.1. These prompts are not routing rules.
+
+Record the actual travel date in Asia/Shanghai, hotel/starting area, available
+hours and user-supplied constraints. Resolve “下周” and “周日” to an explicit date;
+do not import constraints from the old Beijing/Shanghai fixture. Put trip facts
+in the Session/project brief, not permanent USER.md. Keep an unrelated uncommitted
+file in the authorized project and record its hash and the initial Task count.
+
+| Step | 可以直接说的问题 / 操作 | 核对重点 |
+|---|---|---|
+| 1. Weather | “我下周去深圳出差，周日有一天空闲。先帮我查一下那几天深圳的天气，简单说对出行有什么影响。” Answer one necessary date clarification with the intended date. | Real dated lookup through Agent/tools. Distinguish forecast from seasonal experience; briefly identify an unsupported forecast horizon. No claim of successful lookup before evidence arrives. |
+| 2. Attractions | “空闲只有一天，最值得去的三个地方是哪三个？每个一句理由。” | Three concise choices, no unsolicited full itinerary. Current access/booking claims require current verification. |
+| 3. Follow-ups | “深圳湾公园在哪里？” Then “需要门票吗？” | Answer only the location or ticket question; hear complete beginnings and endings. Avoid an unsolicited list of weather, equipment and follow-up offers. |
+| 4. Food | “深圳有什么值得吃的？给我两种就够了。” Then “我住在〔真实区域〕，晚餐更推荐哪一种？” | Respect supplied area and requested count. Current venue hours/prices require verification. These steps supply at least five mixed-length turns. |
+| 5. Delegate A | “你在后台帮我制定〔明确日期〕周日深圳一天的行程，包括早餐、午餐、晚餐和游玩安排。上午九点从〔真实地点〕出发，晚上八点回到那里，交通衔接合理。整理成《深圳周日行程.md》。” | One real artifact Task with actual ID/state. Brief receipt after real acceptance; accepted is not completed. Natural “后台制定行程” must not depend on saying an internal tool name. Filename makes file acceptance observable. |
+| 6. Continue and interrupt | While A is unfinished: “南头古城和深圳湾公园，哪个更适合傍晚去？先说结论。” During speech: “等一下，我只想看海。” | Foreground dialogue remains responsive. Interruption stops old speech and answers the correction without cancelling or duplicating A. |
+| 7. Adjust A | While legally adjustable: “刚才那份行程改一下：下午以看海为主，午餐不要海鲜，其他要求保持不变，继续做同一个任务。” | Exact A ID/revision; distinguish pending/applied/rejected. An applied change appears in the actual result. If already completed, state that and clarify revision versus separate copy; do not silently create A2. |
+| 8. Status and completion | “行程现在做到哪了？” Later hear completion and open the file. In a separate unfinished sample, turn voice off and watch the panel. | Real status, automatic refresh with voice off, one truthful completion notice. No speculative progress or repeated notice. |
+| 9. Preserve and derive | After completion: “原来那份保留，再做一个下雨天的室内版本，另存《深圳周日雨天行程.md》。” | Exactly one successor. Inspect both actual filenames/contents, source preservation, changed conditions and Task count. |
+| 10. Stop and reopen | During speech click Stop; separately Exit and reopen voice. Ask “现在用一句话告诉我行程准备好了吗？” | No old audio revival/repetition; microphone released and reusable. Reply uses persisted real state. |
+
+Also interrupt a fresh question during generation **before first sound**; record
+it separately from playback interruption. Do not manufacture adjustment/exit
+windows with artificial delays. Repeat a missed window as an identified sample.
+Retain explicit long-answer completeness separately: “请完整比较两个方案，说明主要
+费用、时间和结论，最后一句说完整。”
+
+Aim for one or two complete sentences by default, lists of the requested size,
+and full itinerary detail in the deliverable. This presentation target is not a
+token cutoff or permission to skip verification. Measure end-of-speech → first
+useful sound, acceptance → spoken receipt, playback gaps and interruption → old
+sound stopping. Performance targets require separate agreement and measurement;
+a scripted smooth take is not an SLO claim.
+
+### 4.1 Retained A/B/A2 candidate regression journey
+
+The retained candidate extension exercises two independent real background Tasks and a
 preserved successor revision. These scenario requirements are owned here;
 STATUS records whether they have passed. The travel utterances below are the
 user's rehearsal fixture, not product routing rules. Use the registered project's

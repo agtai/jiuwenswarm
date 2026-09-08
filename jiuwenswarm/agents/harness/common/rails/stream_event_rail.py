@@ -51,9 +51,11 @@ from jiuwenswarm.common.utils import logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
 _FORMAL_TOOL_EVENT_CAPACITY = 192
-# Trusted registered local file readers only. No shell, network, task_tool,
+# Trusted registered file readers and the existing free web readers. No shell, task_tool,
 # arbitrary connector, mutable wiki/memory or tool-loader capability is admitted.
-NATIVE_READ_ONLY_TOOL_NAMES = frozenset({"read_file", "list_files", "glob", "grep"})
+NATIVE_READ_ONLY_TOOL_NAMES = frozenset({
+    "read_file", "list_files", "glob", "grep", "free_search", "fetch_webpage",
+})
 _TOOL_OUTCOME_MAX_DEPTH = 32
 _TOOL_OUTCOME_MAX_NODES = 2048
 _INVALID_TOOL_OUTCOME = object()

@@ -123,13 +123,32 @@ class NativeBusinessRouter:
         self._context_read_sequence += 1
         return selection, self._context_read_sequence
 
-    def _require_context_authority(self, route):
+    def _require_current_context_route(self, route):
+        from .product_p2_interaction_adapter import P2LeaseState
         composition = self.registry._p3_composition
         if self.registry._stopped or not composition._accepting:
             raise NativeBusinessViolation("NATIVE_WORK_AUTHORITY_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
+        if (self.registry._p2_routes.get((route.binding.session_id, route.binding.interaction_id)) is not route
+            or route.native_closed or route.native_close_retry is not None
+            or route.activation_lease.snapshot().state is not P2LeaseState.OPEN):
+            raise NativeBusinessViolation("NATIVE_RUNTIME_CAPABILITY_REJECTED", code=ErrorCode.PERMISSION_DENIED)
+
+    async def _require_context_authority(self, route):
+        self._require_current_context_route(route)
+        composition = self.registry._p3_composition
         now = composition._clock()
-        current = composition._resolve_native_activation_authority(route.native_p3_authority,
+        # The resolver reads project/session files and executes Git. Never run
+        # this blocking I/O on the audio event loop or under the registry lock.
+        current = await asyncio.to_thread(composition._resolve_native_activation_authority, route.native_p3_authority,
             operation="task.list", session_id=route.binding.session_id, now=now, require_clean=False)
+        self._recheck_context_authority(route, current)
+        return current
+
+    def _recheck_context_authority(self, route, current):
+        """Pure in-memory fence, including time spent waiting for a shared lock."""
+        self._require_current_context_route(route)
+        now = self.registry._p3_composition._clock()
+        route.native_p3_authority.principal.require_usable(operation="task.list", now=now)
         current.context.require_usable(scope=route.binding.scope,
             required_permissions=frozenset(), destructive=False, now=now)
 
@@ -144,8 +163,9 @@ class NativeBusinessRouter:
         from .product_p2_interaction_adapter import P2LeaseState
         origins = set(self.task_origins(scope))
         restored = [task.task_id for task in tasks if task.task_id in origins]
+        current = await self._require_context_authority(route)
         async with self.registry._lock:
-            self._require_context_authority(route)
+            self._recheck_context_authority(route, current)
             if (self.registry._stopped or route.native_closed
                 or self.registry._p2_routes.get((route.binding.session_id, route.binding.interaction_id)) is not route
                 or route.activation_lease.snapshot().state is not P2LeaseState.OPEN):
@@ -229,9 +249,10 @@ class NativeBusinessRouter:
             context, read_sequence = await self._context_result(route)
             cursor["read_sequence"] = read_sequence
             # Never return facts after the authenticated activation was retired.
+            current = await self._require_context_authority(route)
             async with self.registry._lock:
+                self._recheck_context_authority(route, current)
                 self.require_route(binding=binding, capability=params["capability"], session_id=session_id)
-                self._require_context_authority(route)
             return _success_result(request_id, {"kind": "business_observation" if observing else "business_context",
                 "contract_version": NATIVE_BUSINESS_OBSERVATION_VERSION if observing else NATIVE_BUSINESS_CONTRACT_VERSION,
                 **({"cursor": cursor} if observing else {}),
@@ -275,7 +296,7 @@ class NativeBusinessRouter:
         action = delegate.business
         # Admission/journal I/O can yield after context selection. Query and
         # cancellation, as well as execution, need authority at their effect.
-        self._require_context_authority(route)
+        await self._require_context_authority(route)
         owner, scope = self.works(), route.binding.scope
         if action.operation == "work.list":
             return {"works": [{key: value for key, value in self._work_fact(item).items() if key != "instruction"}
@@ -470,7 +491,7 @@ class NativeBusinessRouter:
                             activation_id=route.binding.activation_id, activation_generation=route.binding.activation_generation,
                             correlation_id=route.binding.correlation_id, response_ref=prepared.response)
 
-            self._require_context_authority(route)
+            await self._require_context_authority(route)
             return _success_result(request_id, {"kind": "delegate", "status": "prepared", "accepted": accepted,
                 "provider_call_id": delegate.provider_call_id, "route": result_route.value,
                 "turn_commit_id": admission.turn_commit.commit_id, "canonical_text": text,

@@ -92,10 +92,11 @@ async def test_client_rechecks_activation_after_observation_completion():
 
 
 def coordinator(monkeypatch, observer):
-    session = SimpleNamespace(closed=False, business_read_ticket=0, business_applied_ticket=0,
+    session = SimpleNamespace(key=("session", "interaction", "connection"), closed=False, business_read_ticket=0, business_applied_ticket=0,
         business_observation_cursor=None, business_context_result=None, business_refresh_task=None,
         activation=SimpleNamespace(observation_contract_version=NATIVE_BUSINESS_OBSERVATION_VERSION))
     registry = DedicatedMediaProductRegistry(enabled=True)
+    registry._native_sessions[session.key] = session
     registry._native_runtime_client = SimpleNamespace(observe_business_context=observer)
     monkeypatch.setattr(registry, "_native_request_id", lambda *args: "context-request")
     monkeypatch.setattr(registry, "_profile_native_business_context", lambda *args: None)
@@ -162,3 +163,30 @@ async def test_closed_gateway_observer_releases_no_work_state(monkeypatch):
         await waiting
     assert error.value.reason_id == "MEDIA_NATIVE_SESSION_CLOSED"
     assert not published and session.business_context_result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["newer", "closed"])
+async def test_refresh_waiter_rechecks_current_cache_after_shared_read_finishes(monkeypatch, change):
+    old, newer = observation(read_sequence=1), observation(read_sequence=2)
+    async def observer(*args, **kwargs):
+        return old
+    registry, session, published = coordinator(monkeypatch, observer)
+    read = asyncio.create_task(registry._read_native_business_context(session, wait_ms=0))
+    session.business_refresh_task = read
+    # An observer/close callback can run after this read completes but before
+    # its shielded receipt waiter resumes. Never return the retained old value.
+    def concurrent_update(unused):
+        if change == "closed":
+            session.closed = True
+        else:
+            session.business_context_result = newer
+            session.business_observation_cursor = newer["cursor"]
+    read.add_done_callback(concurrent_update)
+    if change == "closed":
+        with pytest.raises(Exception) as error:
+            await registry._refresh_native_business_context(session)
+        assert error.value.reason_id == "MEDIA_NATIVE_SESSION_CLOSED"
+    else:
+        assert await registry._refresh_native_business_context(session) == newer
+    assert len(published) == 1
