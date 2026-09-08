@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-08 (three requested fixes deployed and service-verified; refreshed-browser acceptance and broader acceptance remain open).
+> Updated: 2026-09-08 (refreshed-browser recheck confirms early feedback and completion announcement; one media race and broader acceptance remain open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -13,7 +13,9 @@ Real Cascade analysis → explicit delegation → one Task → sealed file has s
 evidence. Complete A/B/A2 control, offline recovery, artifact correctness and a
 complete current-source microphone/speaker journey remain unproved. One actual
 September 8 session has user-confirmed no-tearing credit; its Task feedback and
-completion announcement failed. Result arithmetic,
+completion announcement failed. A later repaired-browser session confirms early
+feedback and actual completion-announcement ACK, with one media interruption race
+and query-related supply gaps still observed. Result arithmetic,
 cost consistency, literal filenames, spoken feasibility and brevity remain open
 in the [artifact evidence](evidence/ARTIFACT_QUALITY_REHEARSAL_CHECK_20260903.md).
 
@@ -39,8 +41,16 @@ locally deployed with gpt-realtime-2.1 / speed 1.25. Real Task create/status/adj
 first feedback PCM was 1.270/0.876/1.165 s after Provider EOT; real receipts
 returned in 0.542/0.602/0.653 s after complete arguments. Actual notification
 cancel/re-prepare/claim succeeded against the real TTS Provider with no fake ACK.
-Refreshed-browser playback and complete audible-result timing remain for human
-acceptance. Actual adjustment application still waited 18.328 s for a checkpoint;
+The [refreshed-browser recheck](reviews/REALTIME_HUMAN_RECHECK_20260908.md) now
+confirms create/adjust/weather first spoken feedback at 1.763/1.545/1.287 s,
+successful Task completion and a played, durably acknowledged completion
+announcement after foreground work. Ordinary chat has a 1.755 s median across
+five samples. One interrupted create-confirmation batch fails with
+STALE_RESPONSE_OUTPUT and closes media; capture resumes about 10.94 s later.
+Adjustment-receipt speech still starts at 9.985 s, includes an English internal
+receipt, and four scheduling gaps coincide with query-held Registry locks.
+Voice task.status and all notification failure/replay variants remain untested
+by this human journey. Earlier isolated adjustment application waited 18.328 s for a checkpoint;
 the fast receipt is not application completion. Item 4 (Task intent/result
 semantics) is explicitly excluded. The
 measurement definition is preserved; no broader acoustic/device metric is claimed.
