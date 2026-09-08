@@ -5583,6 +5583,7 @@ class DirectProjectCodeExecutorAdapter:
                 "EXECUTOR_INITIALIZATION_MUTATED_TARGET",
                 "PROJECT_AGENT_CLEANUP_PENDING",
                 "PROJECT_EXECUTOR_AGENT_ERROR",
+                "BACKGROUND_TASK_READ_NO_PROGRESS",
                 "PROJECT_EXECUTOR_INCOMPLETE",
                 "FORBIDDEN_GIT_HEAD_CHANGE",
                 "RUNTIME_SUPPORT_PATH_MUTATED",

@@ -491,3 +491,48 @@ test files pass 316 tests. Independent re-review closed both P2 findings and ran
 eight race/fallback probes, including actual speech-start STOP while a downgraded
 request waits for refresh: no successor, extra facts, PCM or ACK survived.
 Router logic is unchanged; only the Engine refresh portion is optimized.
+
+## Background read convergence extension — Tier 2 scope checkpoint
+
+The real server300 Shenzhen-bay attempt made 198 successful read/list requests
+over 100 model rounds (332 seconds), without a write. The requested evening
+section is absent and the protected source already ends in Guangzhou at 15:30.
+Tool results were delivered; no evidence establishes why the model continued
+reading. This execution convergence gap is included explicitly in the repair.
+
+Own the process-local background Task model checkpoint, its dedicated adapter
+binding, a stable Executor failure reason, and focused SDK/Executor tests. Before
+the next model call, six consecutive completed rounds with the identical bounded
+plain-text read_file batch (tool names, effective arguments and hashes of each
+complete returned window) fail as
+BACKGROUND_TASK_READ_NO_PROGRESS. Writes, changed results/arguments, new accepted
+user requirements, missing/incomplete tool batches and non-file tools reset this
+narrow detector. Only original SDK message types with the context identity
+metadata and exact consecutive cat_n line prefixes qualify. list_files, PDF,
+Notebook, empty, error/interruption, offloaded/compressed and unknown results
+are excluded and reset it. It is active only in the exact isolated background Task session;
+ordinary chat, Native dialogue and general Code sessions are unchanged. Retain
+existing Task identity, admission, cancellation, adjustment, durability and cleanup
+owners. A guard stop must use the existing failure path and never apply even a
+partial checkout patch or report a successful forced answer. No tool permission,
+model/provider, global runtime configuration or durable schema changes are owned.
+
+Acceptance includes real SDK callback rejection before another model call;
+duplicate callbacks, reordered tool completions, changed output, normal read/write/
+verify and adjustment/cancel isolation; actual Executor failed outcome with zero
+target/artifact application; and a real conflicting request plus a satisfiable
+file transformation. The detector only covers the repeated batch observed here,
+not every possible non-progressing model trajectory. Independent review required.
+
+The real SDK/context callback suite passes 16 checks; the real production
+Resolver/Manager/Facade/Executor seam passes all five outcomes (normal completion,
+wrapped exception, chat.error, swallowed successful answer, cancellation). All
+guard cases trigger through six complete controlled read batches in real SDK
+context (the tests do not invoke a physical file tool). Failed attempts
+retain BACKGROUND_TASK_READ_NO_PROGRESS and do not apply an isolated partial.txt;
+cancellation retains its original outcome. Normal completion still writes and
+seals the expected target file. Full Executor/checkpoint regression: 161 passed,
+2 host-dependent skips in 217.20 seconds. The background Code-mode boundary passes
+14 tests. Independent complete-diff review closed the placeholder/context identity/
+exception-mapping findings and approved the bounded implementation. Real Provider
+conflict/control runs remain required.

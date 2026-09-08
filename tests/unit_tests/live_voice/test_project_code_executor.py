@@ -3024,9 +3024,11 @@ async def test_attempt_factory_without_owner_evidence_never_deletes_checkout(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("progress_outcome", ["normal", "wrapped_error", "swallowed", "chat_error", "cancelled"])
 async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    progress_outcome: str,
 ) -> None:
     project = tmp_path / "project"
     _git_project(project)
@@ -3071,6 +3073,9 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
             return self if session_id in self.sessions else None
 
         async def process_message_stream_impl(self, request, inputs):
+            from openjiuwen.core.context_engine import ContextEngineConfig
+            from openjiuwen.core.context_engine.context.context import SessionModelContext
+            from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage
             callback = self._stream_event_rail.background_model_checkpoint
             assert callback is not None
             from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
@@ -3083,12 +3088,34 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
             owner.adopt = observed_adopt
             await callback(SimpleNamespace(agent=object(), context=None))
             assert adoptions == [], "a subagent in the same session must not consume root adjustments"
-            await callback(SimpleNamespace(agent=self._instance._react_agent, context=SimpleNamespace()))
+            context = SessionModelContext("facade-progress", request.session_id, ContextEngineConfig(
+                enable_openrouter_model_context_window_tokens=False), history_messages=[], processors=[])
+            await callback(SimpleNamespace(agent=self._instance._react_agent, context=context))
             assert len(adoptions) == 1
             self.retained_callback = callback
             requested = Path(request.params["project_dir"]).resolve()
             assert requested == Path(self._project_dir).resolve()
             assert Path(inputs["project_dir"]).resolve() == requested
+            if progress_outcome != "normal":
+                (requested / "partial.txt").write_text("must never reach target", encoding="utf-8")
+                try:
+                    for number in range(6):
+                        await context.add_messages(AssistantMessage(content="", tool_calls=[ToolCall(
+                            id=f"read-{number}", name="read_file", type="function",
+                            arguments='{"file_path":"README.md"}')]))
+                        await context.add_messages(ToolMessage(tool_call_id=f"read-{number}", content="     1\tunchanged"))
+                        await callback(SimpleNamespace(agent=self._instance._react_agent, context=context))
+                    pytest.fail("six identical completed read rounds did not stop")
+                except RuntimeError as error:
+                    assert str(error) == "BACKGROUND_TASK_READ_NO_PROGRESS"
+                    if progress_outcome == "wrapped_error":
+                        raise RuntimeError("child wrapped callback failure") from error
+                    if progress_outcome == "cancelled":
+                        raise asyncio.CancelledError()
+                    yield AgentResponseChunk(request.request_id, request.channel_id,
+                        payload={"event_type": "chat.error" if progress_outcome == "chat_error" else "chat.final",
+                                 "content": "must never become successful", "error": "wrapped"}, is_complete=True)
+                    return
             (requested / "result.txt").write_text("done", encoding="utf-8")
             yield AgentResponseChunk(
                 request.request_id,
@@ -3157,8 +3184,17 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
     terminal = await adapter.status(task, attempt)
 
     assert isinstance(terminal, ExecutorDeliveryResult)
-    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
-    assert (project / "result.txt").read_text(encoding="utf-8") == "done"
+    if progress_outcome == "normal":
+        assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+        assert (project / "result.txt").read_text(encoding="utf-8") == "done"
+    else:
+        assert terminal.observations[-1].attempt_outcome is (
+            TerminalOutcome.CANCELLED if progress_outcome == "cancelled" else TerminalOutcome.FAILED)
+        assert terminal.observations[-1].error == (
+            "TASK_CANCEL_ACKNOWLEDGED" if progress_outcome == "cancelled" else "BACKGROUND_TASK_READ_NO_PROGRESS")
+        assert not (project / "result.txt").exists()
+        assert not (project / "partial.txt").exists()
+        assert _git(project, "status", "--porcelain") == ""
     assert len(created_adapters) == 2
     canonical, isolated = created_adapters
     assert Path(canonical._project_dir).resolve() == project.resolve()  # type: ignore[attr-defined]

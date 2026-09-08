@@ -1101,6 +1101,7 @@ class JiuWenSwarm:
         await prepare_session(background_request.session_id)
         checkpoint_rail = None
         checkpoint_callback = None
+        checkpoint = None
         try:
             from .background_task_checkpoint import current_background_task_checkpoint
 
@@ -1119,6 +1120,7 @@ class JiuWenSwarm:
                         raise RuntimeError("BACKGROUND_TASK_CHECKPOINT_STALE")
                     if ctx.agent is root_agent:
                         await checkpoint.adopt(ctx.context)
+                        checkpoint.check_model_progress(ctx.context)
 
                 if getattr(checkpoint_rail, "background_model_checkpoint", None) is not None:
                     raise RuntimeError("BACKGROUND_TASK_CHECKPOINT_ALREADY_BOUND")
@@ -1127,7 +1129,15 @@ class JiuWenSwarm:
                 background_request,
                 inputs,
             ):
+                if checkpoint is not None:
+                    checkpoint.raise_if_failed()
                 yield chunk
+            if checkpoint is not None:
+                checkpoint.raise_if_failed()
+        except Exception:
+            if checkpoint is not None:
+                checkpoint.raise_if_failed()
+            raise
         finally:
             if (checkpoint_rail is not None and checkpoint_callback is not None
                     and checkpoint_rail.background_model_checkpoint is checkpoint_callback):
