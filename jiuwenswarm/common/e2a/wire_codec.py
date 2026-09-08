@@ -292,7 +292,10 @@ def encode_agent_response_for_wire(
                 error_reason,
             )
         else:
-            logger.info(
+            # Successful Native carrier batches already have bounded audio
+            # diagnostics; errors above retain production visibility.
+            logger.log(
+                logging.DEBUG if resp.channel_id == "live_voice_native_gateway" else logging.INFO,
                 "[E2A][wire][out] unary request_id=%s response_id=%s response_kind=%s legacy_stashed=false",
                 rid,
                 response_id,

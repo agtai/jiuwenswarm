@@ -1813,7 +1813,8 @@ class AgentWebSocketServer:
                     raise ValueError("legacy_agent_request missing or not a dict")
                 request = _payload_to_request(legacy)
             else:
-                logger.info(
+                logger.log(
+                    logging.DEBUG if env.channel == "live_voice_native_gateway" else logging.INFO,
                     "[E2A][in] request_id=%s channel=%s method=%s is_stream=%s",
                     env.request_id,
                     env.channel,
@@ -1822,7 +1823,8 @@ class AgentWebSocketServer:
                 )
                 request = e2a_to_agent_request(env)
 
-        logger.info(
+        logger.log(
+            logging.DEBUG if request.channel_id == "live_voice_native_gateway" else logging.INFO,
             "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
             request.request_id,
             request.channel_id,

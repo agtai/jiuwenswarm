@@ -37,6 +37,34 @@ class _AgentWsTestHarness(AgentWebSocketServer):
         await self._handle_message(ws, raw, send_lock)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel, level", [
+    ("web", logging.INFO), ("live_voice_native_gateway", logging.DEBUG),
+])
+async def test_native_request_receipt_logging_preserves_dispatch(monkeypatch, channel, level):
+    server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
+    records, requests = [], []
+    monkeypatch.setattr(agent_ws_server_module.logger, "log",
+                        lambda severity, template, *args: records.append((severity, template % args)))
+
+    async def before(request):
+        pass
+
+    async def handle(ws, request, send_lock):
+        requests.append(request)
+
+    monkeypatch.setattr(server, "_trigger_before_chat_request_hook", before)
+    monkeypatch.setattr(server, "_handle_live_voice_native_request", handle)
+    envelope = e2a_from_agent_fields(request_id="native-log-check", channel_id=channel,
+        session_id="session-1", req_method=ReqMethod.LIVE_VOICE_INTERNAL_NATIVE_PROPOSE,
+        params={"content": "PRIVATE_PCM_SENTINEL"}, is_stream=False)
+    await server.handle_message_for_test(FakeWebSocket(), json.dumps(envelope.to_dict()), asyncio.Lock())
+    assert len(requests) == 1 and requests[0].params == {"content": "PRIVATE_PCM_SENTINEL"}
+    assert requests[0].channel_id == channel
+    assert len(records) == 2 and all(severity == level for severity, _ in records)
+    assert all("PRIVATE_PCM_SENTINEL" not in message for _, message in records)
+
+
 class ClosedDuringUnaryServer(_AgentWsTestHarness):
     async def _handle_unary(self, ws, request, send_lock) -> None:
         raise ConnectionClosedError(None, None)

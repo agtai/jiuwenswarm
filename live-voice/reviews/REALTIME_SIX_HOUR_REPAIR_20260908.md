@@ -903,3 +903,44 @@ The scoped profiling/Native Registry/Source regression command passed 83 tests
 (receipt-profile-tests.txt). Main's complete diff review confirms that the new
 spans only read the existing identity allowlist and retain exception/cancellation
 behavior; no request text, file bytes or secret is added to these spans.
+
+The clean da09c452 trial's two actual Tasks (receipt_j.md / receipt_k.md) completed
+and preserved existing file hashes, but acceptance PCM took 9453.449 / 8256.659 ms.
+Inclusive same-call spans identify Native business handling at 6039.974 / 4359.567
+ms, Task intent at 3911.147 / 3507.891 ms and nested formal invocation at
+1805.686 / 1575.687 ms. Source waits were only 4.798 / 1.801 ms. The first call
+also waited 1581.756 ms for its current context read. Inclusive spans overlap and
+must not be added together. This identifies remaining work, not a successful
+receipt-latency repair (receipt-profile-real-result.json / receipt-stages.json).
+
+### Ordinary audible latency — continuing transport repair (Tier 1)
+
+The user clarified that the reported approximately 3.3 seconds is ordinary chat,
+from acoustic speech end to hearing an answer. This remains a primary failed
+experience boundary. On clean da09c452, three real ordinary rounds received PCM
+after 2017.081, 1657.457 and 1738.337 ms; these are recordings, not speaker
+measurements. Their exact Provider ingress-to-Gateway-send intervals were
+187.977, 142.977 and 117.467 ms. The browser still requires 250 ms of real queued
+PCM and a 20 ms scheduling margin; this is not a fixed 250 ms wall-clock delay.
+No current browser/device measurement can be inferred from these CLI recordings.
+
+The actual Native RPC path logs four routine success/receipt messages through
+synchronous rotating-file and console handlers for every admission. Move only
+these routine Native-carrier messages to DEBUG, keeping errors, fallback,
+business state and bounded passive audio diagnostics. Owned surfaces are the
+Gateway client, AgentServer request receipt and shared unary codec's Native
+channel branch, with their transport/logging regressions. No wire bytes,
+authorization, replay, redaction, Task or playback semantics change. Verify
+Native/non-Native logging and error visibility, then repeat the same real speech
+on a clean controlled deployment. Any measured gain is limited to this transport
+boundary; audible P50/P95 and continuity remain unaccepted without physical
+evidence. Keep 450 ms endpoint, model, speed, Agent and reserve unchanged.
+
+All 63 client/codec/server transport regressions pass (native-rpc-logging-tests.txt).
+Main reviewed the complete scoped diff: only the fixed Native channel changes
+routine log level; all other channels, failure records, wire payloads, dispatch,
+replay and source redaction retain their behavior. Local configured-sink timing
+for 100 batches of four records, repeated twice, had INFO medians 0.759 / 0.796 ms
+and maxima 14.784 / 7.110 ms; filtered DEBUG medians were 0.0011 / 0.0012 ms.
+This is a small synchronous overhead reduction, not evidence explaining the
+seconds-long delay. A same-speech before/after real transport trial follows.

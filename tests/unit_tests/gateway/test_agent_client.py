@@ -194,9 +194,14 @@ def test_agent_client_log_json_redacts_auth_token_without_mutating_payload():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("channel, expected_log_level", [
+    ("web", logging.INFO), ("live_voice_native_gateway", logging.DEBUG),
+])
 async def test_send_request_logs_bounded_metadata_without_rendering_audio_payload(
     caplog,
     monkeypatch,
+    channel,
+    expected_log_level,
 ):
     target_logger = logging.getLogger(agent_client.__name__)
     previous_level = target_logger.level
@@ -210,7 +215,7 @@ async def test_send_request_logs_bounded_metadata_without_rendering_audio_payloa
     audio_sentinel = "AUDIO_BASE64_SENTINEL_" + ("A" * 20_000)
     env = e2a_from_agent_fields(
         request_id="rid-native-audio-log",
-        channel_id="web",
+        channel_id=channel,
         session_id="sess-native-audio-log",
         params={
             "content": audio_sentinel,
@@ -239,7 +244,7 @@ async def test_send_request_logs_bounded_metadata_without_rendering_audio_payloa
             encode_agent_response_for_wire(
                 AgentResponse(
                     request_id="rid-native-audio-log",
-                    channel_id="web",
+                    channel_id=channel,
                     ok=True,
                     payload={"status": "accepted"},
                 ),
@@ -257,6 +262,8 @@ async def test_send_request_logs_bounded_metadata_without_rendering_audio_payloa
     assert "rid-native-audio-log" in caplog.text
     assert audio_sentinel not in caplog.text
     assert "formal-route-secret" not in caplog.text
+    sent_records = [record for record in caplog.records if "[E2A][out][nostream]" in record.getMessage()]
+    assert len(sent_records) == 1 and sent_records[0].levelno == expected_log_level
     assert max(len(record.getMessage()) for record in caplog.records) < 512
 
 

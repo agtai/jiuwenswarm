@@ -558,7 +558,10 @@ class WebSocketAgentServerClient(AgentServerClient):
         rid = _wire_request_id_key(envelope.request_id)
         payload = _e2a_to_wire(envelope)
         fingerprint = _unary_replay_fingerprint(payload)
-        logger.info(
+        # Native PCM admission has bounded passive timing diagnostics. Routine
+        # per-batch transport logs must not synchronously flush production sinks.
+        logger.log(
+            logging.DEBUG if envelope.channel == "live_voice_native_gateway" else logging.INFO,
             "[E2A][out][nostream] request_id=%s channel=%s method=%s is_stream=%s",
             rid,
             envelope.channel,
