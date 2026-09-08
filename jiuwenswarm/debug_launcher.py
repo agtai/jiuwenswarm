@@ -41,11 +41,12 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from importlib import metadata
 from pathlib import Path
 
 from jiuwenswarm.instance_manager import is_process_alive, stop_process_by_pid
-from jiuwenswarm.common.openai_responses_dependency import SDK_VERSION
+from jiuwenswarm.common.agentcore_source import (
+    AgentCoreSourceError, verify_installed_source, verify_source,
+)
 
 # Package source root: <repo>/jiuwenswarm in source mode.
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -572,6 +573,18 @@ def run_debug(skip_build: bool = False) -> int:
     if error is not None:
         return error
 
+    project_environment = Path(os.environ.get("UV_PROJECT_ENVIRONMENT") or ".venv")
+    if not project_environment.is_absolute():
+        project_environment = REPO_ROOT / project_environment
+    if Path(sys.prefix).resolve() != project_environment.resolve():
+        logging.error("[debug] Run the launcher with the project environment's Python: %s", project_environment)
+        return 1
+    try:
+        verify_source(REPO_ROOT)
+    except AgentCoreSourceError as error:
+        logging.error("[debug] %s", error)
+        return 1
+
     if skip_build:
         error = _check_prebuilt_frontend()
         if error is not None:
@@ -588,22 +601,17 @@ def run_debug(skip_build: bool = False) -> int:
         logging.info("[debug] Install uv (https://docs.astral.sh/uv/), then retry.")
         return 1
 
-    sync_command = [uv_path, "sync"]
-    try:
-        pinned_sdk_installed = metadata.version("openjiuwen") == SDK_VERSION
-    except metadata.PackageNotFoundError:
-        pinned_sdk_installed = False
-    project_environment = Path(os.environ.get("UV_PROJECT_ENVIRONMENT") or ".venv")
-    if not project_environment.is_absolute():
-        project_environment = REPO_ROOT / project_environment
-    if pinned_sdk_installed and Path(sys.prefix).resolve() == project_environment.resolve():
-        # This source-built dependency is installed explicitly by the SDK guide.
-        # A normal sync would replace it with the unpatched upstream VCS package.
-        # --inexact is also needed: exact sync otherwise uninstalls excluded packages.
-        sync_command.extend(["--inexact", "--no-install-package", "openjiuwen"])
+    # Retain independently installed test/acceptance tooling while enforcing
+    # the locked source and all declared project dependencies.
+    sync_command = [uv_path, "sync", "--frozen", "--inexact"]
     code = _run_step("uv sync", sync_command, REPO_ROOT)
     if code != 0:
         return code
+    try:
+        verify_installed_source(REPO_ROOT)
+    except AgentCoreSourceError as error:
+        logging.error("[debug] %s", error)
+        return 1
 
     log_path = build_debug_log_path()
     state = _spawn_background_service(log_path)

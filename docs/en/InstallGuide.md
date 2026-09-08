@@ -155,8 +155,13 @@ cd jiuwenswarm
 
 # Create venv and install dependencies with uv
 uv venv
-uv pip install -e .
+python scripts/install_agentcore_source.py --prepare-only
+uv sync --frozen
 ```
+
+This source branch requires the pinned AgentCore checkout described in the
+[source dependency guide](../../scripts/sdk_patches/README.md). Prepare it before
+dependency sync; do not replace it with a standalone AgentCore package.
 
 #### 3. Build the front end
 
@@ -184,7 +189,7 @@ cd ../../..
 
 **Notes:**
 
-- `uv pip install -e .` is an editable install that points at your source tree.
+- `uv sync --frozen` installs JiuwenSwarm and pinned AgentCore from their source trees.
 - `web/dist` is ignored by `.gitignore` and is not shipped in the repo.
 - You must build and copy artifacts to `~/.jiuwenswarm/channels/web/frontend/dist`.
 
@@ -251,8 +256,14 @@ git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
 # Enter project directory
 cd jiuwenswarm
 
-# Install dependencies
+# Prepare and install AgentCore from source in the active environment
+python scripts/install_agentcore_source.py --prepare-only
+pip uninstall -y openjiuwen
+pip install -e .deps/agent-core
+
+# Install JiuwenSwarm and verify its source dependency
 pip install -e .
+python scripts/install_agentcore_source.py --check
 ```
 
 #### 4. Build the front end

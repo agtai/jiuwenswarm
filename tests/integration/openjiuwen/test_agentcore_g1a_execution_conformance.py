@@ -16,9 +16,7 @@ acceptance.
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
-from importlib.metadata import distribution
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -35,8 +33,7 @@ from openjiuwen.core.session.config.base import Config
 from openjiuwen.core.session.internal.agent import AgentSession
 
 from tests.integration.openjiuwen.test_agentcore_g0_conformance import (
-    LOCKED_AGENTCORE_COMMIT,
-    LOCKED_AGENTCORE_VERSION,
+    assert_agentcore_source_is_exact,
     MemoryKVStore,
     build_scheduler,
     make_agent_session,
@@ -45,21 +42,11 @@ from tests.integration.openjiuwen.test_agentcore_g0_conformance import (
 )
 
 
-class LockedSourceMismatch(RuntimeError):
-    """The conformance result is invalid because its dependency drifted."""
-
-
 @pytest.fixture(scope="module", autouse=True)
 def _exact_locked_agentcore_source() -> None:
     """Prevent every standalone G1-A result from drifting to another build."""
 
-    dist = distribution("openjiuwen")
-    direct_url = json.loads(dist.read_text("direct_url.json") or "{}")
-    if dist.version != LOCKED_AGENTCORE_VERSION:
-        raise LockedSourceMismatch(f"expected {LOCKED_AGENTCORE_VERSION}, got {dist.version}")
-    commit_id = direct_url.get("vcs_info", {}).get("commit_id")
-    if commit_id != LOCKED_AGENTCORE_COMMIT:
-        raise LockedSourceMismatch(f"expected {LOCKED_AGENTCORE_COMMIT}, got {commit_id}")
+    assert_agentcore_source_is_exact()
 
 
 @dataclass(frozen=True, slots=True)

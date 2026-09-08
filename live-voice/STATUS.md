@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-10 — Task adjustment continuation repair; user acceptance pending.
+> Updated: 2026-09-10 — AgentCore cherry-pick integration; user acceptance pending.
 > Default bootstrap reads only Project judgement and Current execution packet.
 > Stop at Completion boundaries unless the task needs wider planning or acceptance.
 
@@ -77,6 +77,21 @@ support has been discussed, not implemented.
 ## Current execution packet
 
 ### Continuation boundary
+
+**Current integration (2026-09-10):** cherry-pick the user-selected AgentCore
+commits `66833d5c`, `20915742` and `1108e8ec` into this W3 branch. Preserve
+Mini/VAD300 defaults, D-125 instructions, D-126 result presentation ownership and
+D-127 adjustment continuation/saved-result truth. Source/dependency integration
+and shared authority are Tier 3; the existing result/context/retirement seams
+are Tier 2. Verify source provenance, shared runtime and the affected Native,
+Task and frontend regressions. No service restart, dependency replacement in a
+running deployment, remote update or new browser/voice/Agent acceptance is part
+of this integration. Original branch evidence remains historical; it does not
+establish acceptance of this combined source. No historical worker packet is
+reactivated. The imported AgentCore policy is D-128 in this branch.
+
+The following source repair and deployment paragraphs retain the W3 baseline
+and its acceptance limits; they are not additional execution orders.
 
 **Current source packet (2026-09-10):** the user authorizes a compact root repair
 of adjustment admission, late execution, final-state feedback and result-grounded

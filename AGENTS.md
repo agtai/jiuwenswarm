@@ -85,6 +85,11 @@ Git/source is implementation fact; accepted decisions own intended behavior.
 Repair document drift without treating existing code as final design. Git does
 not restore private configuration, credentials, runtime data or browser/device state.
 
+For Live Voice, install AgentCore from the pinned source following
+[the source guide](scripts/sdk_patches/README.md). Preserve that checkout and its
+reviewed patches; do not substitute a standalone AgentCore package or wheel.
+Verify source and actual import origin before launching a changed runtime.
+
 The Demo must send committed final speech to the real JiuwenSwarm Agent/tools.
 ASR/TTS-only paths and other shortcuts cannot claim the full product boundary.
 

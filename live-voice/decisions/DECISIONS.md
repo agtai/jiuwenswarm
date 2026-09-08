@@ -2265,3 +2265,31 @@
   Do not downgrade while deferred work remains. Offline SQLite/Git/file and
   serialized gateway tests establish those local seams, not Provider/model/audio
   acceptance. WebSocket and model/VAD settings are outside this change.
+
+## D-128 Source-installed AgentCore and unified capability execution
+
+- Date: 2026-09-09. The user accepts implementation of direct reuse, adapter
+  reuse and generic code downshift under the Native Realtime architecture,
+  followed by complete common-capability integration and automated real-scenario
+  acceptance. The [execution plan](../reviews/AGENTCORE_UNIFIED_EXECUTION_20260909.md)
+  records the three commit boundaries and risk-based verification.
+- AgentCore is installed from the currently locked upstream source plus reviewed
+  source changes. Preserve the Responses metadata repair. Record reproducible
+  source identity and use it for subsequent installation and dependency sync;
+  do not return to a separately downloaded AgentCore installation package.
+- Reuse existing Agent, Tool, Team, Goal and Workflow authorities. Define the
+  complete capability/consumer mapping before retirement. Use a thin adapter
+  where semantics differ, and extend AgentCore only for a demonstrated shared
+  execution/persistence gap. Moving Live Voice files alone is insufficient.
+- Generic execution and task truth belong in the shared runtime. JiuwenSwarm
+  retains authenticated project/session/model/tool configuration, permissions,
+  user interaction and project/Git/file-effect policy. Native Realtime retains
+  media, response ownership, committed input and actual presentation/history.
+- Cancellation, restart and replay preserve exact targets and real settlement;
+  speech retirement never implicitly terminates detached work. Existing distinct
+  Team, Goal and Workflow semantics are not collapsed into a second universal
+  Task state machine. Any advertised operation must reach its actual owner.
+- One coherent JiuwenSwarm commit per numbered task, with explicit paired
+  AgentCore commits as necessary. Run corresponding checks/review per task, then
+  one applicable full verification and automated real-scenario acceptance at
+  final closure. Physical hearing and production/remote acceptance are separate.

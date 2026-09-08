@@ -100,3 +100,6 @@ vendor/node/
 
 # JiuwenSwarm runtime file operation logs
 .agent_history/
+
+# Pinned, source-installed AgentCore checkout (has its own Git history).
+/.deps/

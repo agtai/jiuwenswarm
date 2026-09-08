@@ -1,0 +1,7 @@
+{
+  "upstream": "https://gitcode.com/openJiuwen/agent-core.git",
+  "base_commit": "94e10cb6102c36fe78a64547957c0def97299273",
+  "source_tree": "d55cd0baeea72c1219231b355ad8069ecd73bd1c",
+  "version": "0.1.16+jiuwenswarm.responses2",
+  "patches": ["openjiuwen-responses-metadata.patch"]
+}

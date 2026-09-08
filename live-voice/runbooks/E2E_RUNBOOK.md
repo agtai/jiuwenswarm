@@ -99,11 +99,16 @@ git rev-list --left-right --count HEAD...agtai/hx/0803_live_voice
 ```
 
 `GIT_LFS_SKIP_SMUDGE=1` 当前是必要绕过：agtai 的 LFS 端点缺少与 Live Voice 无关的 `docs/assets/videos/compression.mp4`，普通 checkout 会收到 404。跳过该媒体不影响 Live Voice 源码、文档、tests、依赖或运行；在对象补传前不要执行全仓 `git lfs pull`。如果仓库已经由其他方式 clone，确保本地 `hx/0803_live_voice` 跟踪正确的 `agtai`/`origin` 分支并 `pull --ff-only`。验收前记录 `git rev-parse HEAD`，upstream 差异必须 `0 0`，工作区不得有意外修改。
-Python 依赖以根目录 `uv.lock` 为准：
+Python 依赖以根目录 `uv.lock` 为准。当前 AgentCore 必须先按
+[源码安装指南](../../scripts/sdk_patches/README.md)准备锁定源码；首次 checkout
+不包含被 Git 忽略的 `.deps/agent-core`。已有环境使用同一指南显式卸载旧包、
+从源码安装并检查来源。以下为新环境步骤：
 
 ```powershell
-uv sync --python 3.12.9 --frozen
+python scripts/install_agentcore_source.py --prepare-only
+uv sync --python 3.11 --frozen
 & .\.venv\Scripts\python.exe --version
+& .\.venv\Scripts\python.exe scripts/install_agentcore_source.py --check
 ```
 
 前端依赖以 `package-lock.json` 为准：

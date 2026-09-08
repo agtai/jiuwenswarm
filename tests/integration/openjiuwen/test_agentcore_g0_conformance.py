@@ -1,7 +1,7 @@
 """OJ-G0 module-composition conformance against the locked AgentCore build.
 
-This suite deliberately uses the real ``openjiuwen==0.1.16`` modules installed
-from commit ``94e10cb6``.  Passing tests record capabilities that can already be
+This suite uses the real source-installed AgentCore pinned by the reviewed source
+manifest (upstream base ``94e10cb6``). Passing tests record capabilities that can already be
 composed.  Strict xfails are red conformance oracles for missing generic
 capabilities; an implementation that turns one into XPASS must remove the
 marker and make the oracle an ordinary passing test.
@@ -13,10 +13,9 @@ browser presentation, migration safety, or product acceptance.
 from __future__ import annotations
 
 import asyncio
-import json
 from contextlib import asynccontextmanager
 from dataclasses import fields
-from importlib.metadata import distribution
+from importlib.util import find_spec
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -47,8 +46,12 @@ from openjiuwen.core.session.internal.agent import AgentSession
 from openjiuwen.core.single_agent import AgentCard
 
 
-LOCKED_AGENTCORE_VERSION = "0.1.16"
-LOCKED_AGENTCORE_COMMIT = "94e10cb6102c36fe78a64547957c0def97299273"
+from jiuwenswarm.common.agentcore_source import verify_installed_source
+
+
+def assert_agentcore_source_is_exact() -> None:
+    source = verify_installed_source(Path(__file__).resolve().parents[3])
+    assert Path(find_spec("openjiuwen").origin).resolve() == source / "openjiuwen/__init__.py"
 
 
 class MemoryKVStore(BaseKVStore):
@@ -221,10 +224,7 @@ def make_agent_session(session_id: str, *, checkpoint: dict) -> AgentSession:
 def test_locked_agentcore_source_is_exact() -> None:
     """K/I: prevent a passing result from silently drifting to another build."""
 
-    dist = distribution("openjiuwen")
-    direct_url = json.loads(dist.read_text("direct_url.json") or "{}")
-    assert dist.version == LOCKED_AGENTCORE_VERSION
-    assert direct_url["vcs_info"]["commit_id"] == LOCKED_AGENTCORE_COMMIT
+    assert_agentcore_source_is_exact()
 
 
 @pytest.mark.asyncio

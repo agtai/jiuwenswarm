@@ -104,10 +104,14 @@ jiuwenswarm-tui
 git clone https://github.com/openJiuwen-ai/jiuwenswarm.git
 cd jiuwenswarm
 uv venv
-uv pip install -e .
+python scripts/install_agentcore_source.py --prepare-only
+uv sync --frozen
 ```
 
 > For detailed installation instructions, see: [Install Guide](docs/en/InstallGuide.md)
+> This source branch uses a pinned AgentCore checkout. See the
+> [AgentCore source guide](scripts/sdk_patches/README.md) for source preparation,
+> replacement of an existing package installation and provenance verification.
 
 ## Quick Start
 
