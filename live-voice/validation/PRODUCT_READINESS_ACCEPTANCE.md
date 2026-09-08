@@ -29,6 +29,12 @@ authoritative result or terminal-notification changes. Conversely, defects in a
 later candidate do not rewrite that historical result.
 
 A pass here is not feature-complete, productized or RC/Production approval.
+
+The [September 8 measured acceptance record](../reviews/REALTIME_SIX_HOUR_ACCEPTANCE_20260908.md)
+records the current six-hour repair candidate as PARTIAL. Real latency, semantic
+and file-preservation failures remain alongside missing human playback evidence;
+reviewed code, received PCM and maintenance recovery do not grant candidate PASS.
+
 Complete P1/P2/P3, multiple addressed Tasks, full Task operations, supported
 D1/D2 durability, generalization, cleanup, latency closure, competitor
 comparison and independent cumulative review remain in the feature-complete

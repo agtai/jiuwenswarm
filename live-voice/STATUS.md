@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-07 (Shenzhen receipt, authority scheduling and dialogue repairs; physical acceptance remains open).
+> Updated: 2026-09-08 (six-hour measured repair; latency, semantic/file preservation and physical acceptance remain open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -26,23 +26,26 @@ history, not acceptance of this candidate.
 
 ### Six-hour measured latency and continuity repair
 
-The active user request is the [September 8 execution boundary](reviews/REALTIME_SIX_HOUR_REPAIR_20260908.md),
-using this checkout instead of the input snapshot's machine. Main owns the
-prepared supply, production diagnostics, media admission/notification and
-authentic receipt critical-path repairs, applicable independent review and
-controlled local deployment with preserved project/data. The initial runtime
-differs from the input snapshot; requested gpt-realtime-2.1 / speed 1.25 require
-explicit implementation and Provider confirmation. Original September 8 media
-and latency evidence are absent on this host. Current-source physical latency,
-continuity and the full Agent/Task/file journey remain unproved; judgement is
-PARTIAL. The earlier packets below provide retained implementation context and
-do not activate historical worker assignments.
+The [September 8 execution boundary](reviews/REALTIME_SIX_HOUR_REPAIR_20260908.md)
+uses this checkout. Main implemented and reviewed prepared sample-credit supply,
+production diagnostic cost, Registry lock release, exact notification wake,
+durable receipt continuation, bound business arguments, foreground recovery,
+explicit restatement and adjustment observations. The real Provider confirms
+gpt-realtime-2.1 / speed 1.25; the selected Jiuwen Agent is preserved. Controlled
+local deployment and actual Agent/Task/file journeys have scoped evidence in the
+[six-hour acceptance record](reviews/REALTIME_SIX_HOUR_ACCEPTANCE_20260908.md),
+including failed samples and [same-frame supply measurements](evidence/REALTIME_SUPPLY_DIAGNOSTICS_20260908.md).
 
-Prepared sample-credit delivery and privacy-preserving diagnostic-cost repairs
-have scoped automated and independent review credit, with current-host
-[same-frame supply measurements](evidence/REALTIME_SUPPLY_DIAGNOSTICS_20260908.md).
-This does not close media admission/notification, authentic receipt latency,
-real Provider configuration or the physical product journey.
+Judgement remains PARTIAL. Task acceptance/feedback latency, a media-attachment
+tail, transcription/literal-path drift, report length and convergence remain
+open. A final Task overwrote a preserved file after the model changed D to C;
+both versions were recovered, and an additional conflict prompt was reviewed,
+but prompt compliance is not an atomic preservation guarantee. Actual states,
+files and maintenance recovery remain distinct from product success. The final
+controlled endpoint returns to 450 ms after the 300 ms comparison exposed more
+speech splits; this does not prove semantic failures disappear. The original
+15-point media and current microphone/speaker/browser acceptance are missing.
+The earlier packets below retain context without activating historical workers.
 
 ### Realtime acceptance repairs
 
@@ -208,12 +211,11 @@ complete. An admitted durable Task and its discovery/voice origin survive
 foreground interruption. Existing wider regression failures retain their baseline
 evidence; full Native business-audio and physical acceptance remain open.
 
-Use the controlled launcher after clean local commits; verify its new runtime
-contract, real Speech probe and live process before rehearsal. Keep NoBrowser so
-startup does not consume retained notifications. Use `openai-realtime-native`
-with `gpt-realtime-2`; preserve the user's Agent model selection, registered project,
-headset profile and historical results/ACK. No new classifier, Task authority,
-model tuning or broad performance optimization is included. The
+That retained repair used `openai-realtime-native` with `gpt-realtime-2` and did
+not authorize model tuning or broader optimization. The September 8 packet now
+owns the controlled configuration; use the actual runtime contract and current
+acceptance record. Keep NoBrowser and preserve the user's Agent selection,
+registered project, headset profile and historical results/ACK. The
 [three earlier Demo repairs](reviews/DEMO_THREE_REPAIRS_20260906.md) retain scoped
 credit for timers, Task notification ownership and PCM startup/continuity.
 Actual headset continuity and same-session busy-to-idle terminal notification
@@ -281,16 +283,16 @@ whole-project audit for every bounded task.
 |---|---|---|
 | Audio Device & browser I/O | Capture/playout, media wiring, exact-owner fencing; home-entry transcription; PCM-anchored lead and bounded starvation recovery with scoped evidence in the [three repairs](reviews/DEMO_THREE_REPAIRS_20260906.md) | Current-source headset continuity, listening/recovery/playback, permission/device coverage, AEC/NS/AGC, double-talk and loss/stop targets |
 | Speech Recognition | Streaming/batch finals, typed failure, bounded capture retry and lifetime repair | Long/paused speech, fallback/cancel, device/network and physical lifetime evidence |
-| Speech Synthesis | Streaming/batch TTS, response ownership, playback ACK | Interrupted/long answers, first-audio, underrun, pronunciation and stale-output proof |
-| Realtime Media | Dedicated transport, registration/rotation, bounded P2 pull | Backpressure/load, loss/order/corruption/reconnect and truthful recovery |
+| Speech Synthesis | Streaming/batch TTS, response ownership, playback ACK; sample-credit prepared delivery and production diagnostic-cost repair with same-frame evidence | Physical long-answer continuity, first-audio, underrun, pronunciation and stale-output proof |
+| Realtime Media | Dedicated transport, registration/rotation, bounded P2 pull; lock-free external notification authorization and exact Native wake with reviewed race checks | Media-attachment tail, browser backpressure/load, loss/order/corruption/reconnect and truthful physical recovery |
 | Conversation Runtime | Commit/generation fencing, Stop/Exit, playout and Cascade generation interruption; Native analysis independent of speech, exact revision cancellation, response-group arbitration and ACK ownership | Combined physical listening/notification/Task races, no old-audio revival or detached-Task miscontrol |
 | Interaction Intelligence | Cascade semantic routing; Native typed business calls with bounded argument correction and Provider-confirmed interruption | Full Native business-audio journey, endpoint/false-interruption evaluation, language/device scope |
-| Agent Bridge and dialogue truth | Real Agent/file tools, independently owned read-only Native work, bound model/context, restart-unknown checkpoints and canonical heard history | Broader real-model/physical verification, arithmetic/feasibility reliability, literal names/paths and concise speech |
+| Agent Bridge and dialogue truth | Real Agent/file tools, independently owned read-only Native work, bound model/context, explicit reply continuations, restart-unknown checkpoints and canonical heard history | Actual receipt/feedback latency, transcription and literal-path drift, arithmetic/feasibility reliability and physical speech |
 | Task Control Core and Store | Canonical multi-Task state, durable commands/replay, exact targets/CAS, bounded adjustment delivery | Current concurrency/restart integration and full Task-operation coverage |
-| Executor & Durability | Direct D0/D2 v2 admission/reconciliation, sealed results/checkpoints, dedicated memory repair; v1 cannot dispatch v2 | Required review and real result/control acceptance; outside-checkout files or additional Executor/D1 capability need separate scope; no D1/host-crash claim |
-| Voice–Task Bridge | Unified committed semantics and Native structured dispatch through existing production policy, exact local create/successor/adjust/cancel consent, authorized target/revision checks and durable projection repair | Real modification/query acceptance, generalization/retirement; update/reprioritize retain confirmation; pause/resume/provide-input remain unsupported |
+| Executor & Durability | Direct D0/D2 v2 admission/reconciliation, sealed results/checkpoints; reviewed repeated-read failure and preservation-conflict prompts; real failure prevents partial apply in scoped cases | Reliable preservation despite model path drift, long-report convergence/length and full result/control acceptance; no D1/host-crash claim |
+| Voice–Task Bridge | Unified committed semantics, exact local create/successor/adjust/cancel consent, authorized target/revision checks, durable receipt continuation and exact as-of adjustment observations | Reliable literal target/intent and positive result queries, full modification/generalization; update/reprioritize retain confirmation; pause/resume/provide-input remain unsupported |
 | Integrated Web product experience | Right-panel Registry Tasks, operation-driven refresh, passive Native work state, confirmed model selection, text/notification ownership and processing state independent of capture | Current-source busy-to-idle terminal delivery, stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh; projectless backend authority |
-| Observability, benchmark and latency | Scoped timing/error export, Native call/context/work/model and response/wait/argument/receipt milestones, critical-event retention and true terminal outcomes | Current physical reproduction, interruption/first-audible baseline and SLOs; clock gaps/dropped data remain explicit |
+| Observability, benchmark and latency | Exact event/call joins, real mixed ordinary/tool groups under running Tasks, production-log supply A/B and truthful receipt/file milestones | Actual audible P50 and Task/feedback targets, media tail and physical reproduction; received/generated audio is not heard history |
 | Automated verification and acceptance | Focused regressions and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative review/human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, semantic cutover, bounded removals and prompt/config isolation | Complete reachability/retirement audit and remaining manifest rows; keep private artifacts/runtime data out of integration |
 | Production operations | Privacy/preflight/observability foundations | Auth/tenancy, public deployment, operations, retention, security, compatibility and release support after separate scope |
@@ -300,15 +302,16 @@ whole-project audit for every bounded task.
 | Gate | Missing proof / current conclusion |
 |---|---|
 | HARDCODE_RETIREMENT | PARTIAL: complete production reachability and unique-oracle migration remain open |
-| SEMANTIC_AND_EXECUTION | PARTIAL: scoped creation/continuity/execution pass; result quality and broader behavior remain open |
-| AUDIO_E2E_DIGITAL | PARTIAL: complete A/B/A2, offline/non-travel and current Native business-audio journeys remain unproved |
+| SEMANTIC_AND_EXECUTION | PARTIAL: real create/adjust/query/file evidence includes path drift, preservation violation, missing/short artifacts and correct rejection; recovery does not erase failed acceptance |
+| AUDIO_E2E_DIGITAL | PARTIAL: actual Native PCM/Agent/Task mixed groups and interruption/reopen evidence exist; complete A/B/A2 and physical consumption/ACK remain unproved |
 | HUMAN_PHYSICAL_ACCEPTANCE | FAIL / INCOMPLETE: later rehearsals exposed defects; current cumulative microphone/speaker journey has not passed |
 | REGRESSION_AND_REVIEW | PARTIAL: inherited Registry/Web failures, affected migration and cumulative review remain open |
 
 ## Dependency route to feature complete
 
-1. Fix confirmed defects within their owners: results and reproduced startup,
-   listening, interruption or notification failures; preserve failed evidence.
+1. Fix the retained measured failures within their owners: literal intent and
+   file preservation, report convergence/length, Task/feedback latency and media
+   tail; preserve both failed originals and separately labeled recovery evidence.
 2. Complete affected positive/rejection/stale/replay/isolation checks and review.
    Verify authoritative Task/Attempt state, files and actual audio as applicable;
    classify remaining Registry/Web failures. Native conversational module evidence
