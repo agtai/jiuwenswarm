@@ -36,8 +36,9 @@ For the applicable candidate scope, verify microphone grant/denial/revocation,
 device loss/change/recovery, user activation/autoplay, hidden/background/resume
 and refresh/reconnect. Text Chat remains usable; there must be no duplicate
 dispatch, retained unauthorized microphone, stale capture/playout revival or
-foreign target. Non-localhost deployment also requires the applicable
-HTTPS/WSS/proxy/CSP/CORS checks; record localhost as a bounded exception.
+foreign target. Non-loopback deployment also requires the applicable
+HTTPS/WSS/proxy/CSP/CORS checks; record local loopback as a bounded exception
+and follow the [local entry convention](../runbooks/E2E_RUNBOOK.md#local-entry-origin).
 
 ## 3. Real voice conversation
 

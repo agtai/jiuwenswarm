@@ -1,6 +1,6 @@
 # Live Voice 固定环境与真实 E2E 运行手册
 
-- 当前入口同步：2026-09-05；历史环境和运行记录保留原日期。
+- 当前入口同步：2026-09-08；历史环境和运行记录保留原日期。
 - 历史 V0 复现分支：`hx/0803_live_voice`；`d4c3e32a` 在 V0 Gate 3 FAIL，`ee2896a4afb186e693c720476b6de10797e66f72` 已完成 V0 Gate 0–6 并标记 `V0 Released / 已冻结`。当前开发分支和拉取命令只由 [README](../README.md) 与 Git 决定，不得从该历史分支行恢复当前 Alpha。
 - 最终脱敏证据：[evidence/V0_20260802_ee2896a4.md](../evidence/V0_20260802_ee2896a4.md)；本文仍是以后重建相同受控环境的操作手册
 - 当前交付解释：Integrated Web Alpha 已作为精确源码的历史产品基线验收；旧的编号交付计划和 W2/W3/W4 只保留为 Git 历史，不再定义当前任务、进度或优先级。当前能力完成度、阻塞和下一步只看 [STATUS](../STATUS.md)；当前候选按 [产品准备度验收](../validation/PRODUCT_READINESS_ACCEPTANCE.md) 与 [完整人工 Journey](../demo/PRODUCT_READINESS_SHOWCASE.md) 判定。下述 V0/稳定句/Task 三种旧模式仍按现有代码诚实记录；默认关闭的产品组合代码不等于当前能力闭环或可运行验收。
@@ -14,6 +14,29 @@
 V0/W2 的流程用于历史复现，不是当前预演步骤。
 V0 专属语料/验收和话术分别保留在 [V0_ACCEPTANCE](../validation/V0_ACCEPTANCE.md)
 与 [DEMO_SHOWCASE](../demo/DEMO_SHOWCASE.md)。
+
+<a id="local-entry-origin"></a>
+
+### 本机页面入口约定（2026-09-08）
+
+本节是用户接受的本机访问约定，由根目录 [AGENTS.md](../../AGENTS.md) 引用，
+适用于后续 session 和另一台机器上重建本仓库环境后的本机访问：
+
+- 浏览器与前端服务在同一台机器时，只给出或打开
+  `http://127.0.0.1:5173/`、`http://127.0.0.1:5173/chat/<实际会话 ID>` 等入口。
+  前端端口以实际部署为准；不要自行改回 `localhost`，包括交接说明和验收链接。
+- 整个页面入口使用同一主机名；API 使用页面同源地址，媒体 WebSocket 跟随页面
+  origin，例如 `ws://127.0.0.1:5173/ws/live-voice/media`。不要只替换媒体地址而
+  让页面仍停留在 `localhost`，也不要为此放宽 Origin 或媒体票据校验。
+- 原因：2026-09-08 本机前端仅监听 IPv4；Chrome 对 `localhost` 先尝试 `::1`，
+  约 300 ms 后回退 IPv4。同源媒体 WebSocket 打开探针各 5 次成功，中位数分别为
+  `localhost` 319.3 ms、`127.0.0.1` 23.5 ms。这是连接阶段证据，未包含媒体认证、
+  完整语音播放或物理出声，不得据此宣称完整首音验收完成。
+- 更换 origin 后，在新页面核对麦克风权限、登录/浏览器存储状态、媒体票据及重连，
+  再验证普通聊天、打断和通知播放；文档约定不会自动迁移现有浏览器页面或配置。
+- 浏览器访问另一台服务器时，`127.0.0.1` 指向浏览器所在机器，不能指代远端。
+  此时使用已配置的实际 HTTPS 部署地址及同源 WSS。历史记录中的 `localhost`
+  保留为当时证据，不作为新 session 的本机入口推荐。
 
 ## 1. 为什么必须固定环境
 
@@ -57,7 +80,7 @@ Live Voice 同时依赖浏览器语音能力、麦克风权限、音频设备、
 
 - 产品载体是 JiuwenSwarm 桌面 Web 前端。D-058 已冻结单一桌面 Google Chrome Alpha 基线；每次 candidate 必须记录精确 Chrome 版本、OS、origin、设备和网络标签。Edge 或其他浏览器结果只能作为探索证据，不能获得 Alpha credit 或扩大产品承诺。
 - 前端 `AGENTS.md` 要求修改后的代码兼容 Chrome/Chromium 107 及以上，这是实现下限；它不替代 D-058 的单 Chrome 范围或实际 Alpha candidate 的精确 Chrome 版本证据。
-- `localhost` 可以用于本地开发和受控验证；非 localhost 的 Alpha 部署必须使用 HTTPS/WSS 或等价安全上下文，并验证 Gateway/AgentServer 反向代理、CSP、CORS 和实时连接路由。
+- 本机开发和受控验证遵循 [本机页面入口约定](#local-entry-origin)，使用 `127.0.0.1`；非回环地址的 Alpha 部署必须使用 HTTPS/WSS 或等价安全上下文，并验证 Gateway/AgentServer 反向代理、CSP、CORS 和实时连接路由。
 - 浏览器必须分别验证麦克风允许、拒绝、撤销，设备变化/丢失，autoplay/user-activation，页面隐藏/后台/恢复，以及 refresh/reconnect 后无陈旧音频、重复提交或静默失败。
 - Speech/模型 Provider 凭据只存在 Gateway/服务端；浏览器 storage、URL、日志和 bundle 中不得出现长期 Provider 密钥。原始音频默认不持久化。
 - D-058 已选择 `getUserMedia + AudioWorklet` 产生 20ms mono `pcm_f32` 正式浏览器音频帧，并排除 MediaRecorder 作为 realtime-frame fallback。Wire codec/resampling、WebSocket/WebTransport 和 Speech Provider 仍由对应 RM/SR/SS B/C 包在接线前决定；运行手册只记录候选实际采用且通过 review 的路线，不提前给计划路线写成功命令。
@@ -359,6 +382,11 @@ Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 真实任务测试必须保存脱敏的 task ID、原始状态、请求顺序和目标环境说明；不能用 UI 反馈代替后台事实。已接受的 2026-08-05 样本格式见 [D-031 project-bound evidence](../evidence/D031_20260805_PROJECT_BOUND.md)。
 
 ### 7.5 当前受控 Live Voice 启动与预演
+
+服务就绪后，按 [本机页面入口约定](#local-entry-origin) 打开
+`http://127.0.0.1:5173/` 或对应的 `/chat/<实际会话 ID>`，端口随实际配置调整。
+若启动器、控制台或旧快捷方式显示 `localhost`，给用户的链接仍使用 `127.0.0.1`；
+此处只规范入口和同源连接，不把打开页面等同于完成语音验收。
 
 Realtime 播报语速可通过启动器 `-NativeAudioSpeed 1.5` 设置；范围为 0.25–1.5，默认 1.0。
 `-SaveConfiguration` 保存该选择，后续未显式传参时复用。它通过

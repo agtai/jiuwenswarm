@@ -73,6 +73,14 @@ Links are conditional; historical snapshots, closed packets, numbered plans and
 past runs are not a default reading list or current queue. Documentation structure
 work also uses `live-voice/DOCUMENTATION_RULES.md`.
 
+For local Live Voice access on the browser's own machine, always give/open
+`http://127.0.0.1:<frontend-port>/...` (default port `5173`), including chat and
+acceptance links; do not substitute `localhost`. Keep browser API and media
+WebSocket endpoints on that page's origin. This convention applies to new
+sessions and rebuilt environments using this repository. See the
+[local entry convention](live-voice/runbooks/E2E_RUNBOOK.md#local-entry-origin)
+for rationale, verification and the separate remote-server case.
+
 At resume verify `git status --short --branch`, `git rev-parse HEAD`, and
 `git rev-list --left-right --count 'HEAD...@{upstream}'`; report an absent upstream.
 Git/source is implementation fact; accepted decisions own intended behavior.
