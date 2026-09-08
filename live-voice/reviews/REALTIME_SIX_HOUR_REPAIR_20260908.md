@@ -439,3 +439,22 @@ policy. Reuse bound-call contract tests for byte-preserving executable arguments
 only a real spoken create/derive with correct files can close semantic fidelity.
 Bound tool and Native engine regression: 223 passed. Main reviewed the complete
 prompt diff; it adds no server-side text transformation or expanded authority.
+
+Real 5cf391d6/450-ms rerun: task-e18d9b72f0a54e5caf7dd903e385b8dd completed
+the exact requested 深圳出差行程_海边版.md (SHA-256
+3a6203d43d107082e1fce2dc0e7b1765a7366857998fd38e8653d92ed6bb62a0),
+with dates, meeting, two-person budget, unchanged source and prior variant.
+Its 9560.550 ms first received PCM still fails confirmation latency. Real trace
+shows context.get then task.result before task.create, about 5.49 seconds of
+query loops even though the user named the source file. After the actual Task
+receipt, response.create took about 1 ms; optional refresh is no longer that wait.
+
+Extend this Tier 1 prompt boundary to distinguish a completely specified project
+file transformation from an explicit Task result/adjustment request. Submit the
+file instruction directly; the artifact executor performs source reading. Retain
+context/result lookup when the required source, target ID or revision is actually
+missing, all server admission, and the existing Task-vs-file routing policy.
+This removes redundant model-led reconnaissance, not authority checks.
+The affected Engine/bound-tool suite passes 223 tests; independent read-only
+trace review confirmed the query cycle and the existing schema's direct file
+operation. Actual rerun remains required before claiming the latency gain.
