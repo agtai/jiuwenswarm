@@ -1182,7 +1182,9 @@ class OpenAIRealtimeNativeInteractionEngine:
         receiver = self._provider_receive_task
         if receiver is None:
             receiver = self._provider_receive_task = asyncio.create_task(self._session.receive_event())
-            await asyncio.sleep(0)
+        # A ready prepared source can otherwise run synchronously for an entire
+        # credit window and starve the sole Provider reader (including STOP).
+        await asyncio.sleep(0)
         remaining = self._prepared_next_audio_at - asyncio.get_running_loop().time()
         if remaining > 0 and not receiver.done():
             await asyncio.wait((receiver,), timeout=remaining)
@@ -3752,7 +3754,14 @@ class OpenAIRealtimeNativeInteractionEngine:
                 samples = event.audio.provider_sample_count
                 if samples is None:
                     samples = len(event.audio.pcm16) // 2
-                self._prepared_next_audio_at = asyncio.get_running_loop().time() + samples / NATIVE_PCM_SAMPLE_RATE
+                # Spend sample credit against an absolute deadline. Processing
+                # and timer overshoot must not be added to every 20 ms frame.
+                # Cap credit after a long downstream stall at one 16-frame
+                # window; downstream queue/transport credit remains binding.
+                now = asyncio.get_running_loop().time()
+                self._prepared_next_audio_at = max(
+                    self._prepared_next_audio_at, now - 0.320
+                ) + samples / NATIVE_PCM_SAMPLE_RATE
         return event
 
     def _require_response(self, value: object) -> _ProviderResponse:

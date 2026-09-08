@@ -24,6 +24,26 @@ history, not acceptance of this candidate.
 
 ## Current execution packet
 
+### Six-hour measured latency and continuity repair
+
+The active user request is the [September 8 execution boundary](reviews/REALTIME_SIX_HOUR_REPAIR_20260908.md),
+using this checkout instead of the input snapshot's machine. Main owns the
+prepared supply, production diagnostics, media admission/notification and
+authentic receipt critical-path repairs, applicable independent review and
+controlled local deployment with preserved project/data. The initial runtime
+differs from the input snapshot; requested gpt-realtime-2.1 / speed 1.25 require
+explicit implementation and Provider confirmation. Original September 8 media
+and latency evidence are absent on this host. Current-source physical latency,
+continuity and the full Agent/Task/file journey remain unproved; judgement is
+PARTIAL. The earlier packets below provide retained implementation context and
+do not activate historical worker assignments.
+
+Prepared sample-credit delivery and privacy-preserving diagnostic-cost repairs
+have scoped automated and independent review credit, with current-host
+[same-frame supply measurements](evidence/REALTIME_SUPPLY_DIAGNOSTICS_20260908.md).
+This does not close media admission/notification, authentic receipt latency,
+real Provider configuration or the physical product journey.
+
 ### Realtime acceptance repairs
 
 The user accepted the [six-point repair packet](reviews/REALTIME_ACCEPTANCE_REPAIRS_20260907.md)

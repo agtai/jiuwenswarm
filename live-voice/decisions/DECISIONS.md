@@ -2075,3 +2075,26 @@
   configured providers/models, device profile, existing user project data or
   completed Task effects. Controlled local deployment and the designated human
   journey verify the integrated candidate after scoped checks and independent review.
+
+## D-121 Measured Realtime supply and latency repair
+
+- Date: 2026-09-08. The user authorizes necessary latency/continuity repair and
+  controlled local deployment within the existing project's data and authority.
+  The [current execution boundary](../reviews/REALTIME_SIX_HOUR_REPAIR_20260908.md)
+  records independently tiered A–H modules; historical baseline figures are
+  hypotheses to reproduce on the current host, never current acceptance.
+- Prepared Native output uses accumulated Provider sample deadlines and at most
+  320 ms supply credit. Downstream queue/transport credit still bounds admission;
+  the sole reader gets control priority before each buffered frame. A current-
+  task timeout preserves receive cancellation/idle behavior without per-event
+  child-task scheduling. Actual browser render remains the playback authority.
+- Production diagnostics keep bounded queues and credential/PII redaction.
+  Reuse only a LogRecord's identical already-masked immutable strings, invalidating
+  on subsequent message/arguments/exception changes. Boundary-aware key matching
+  retains existing sensitive-key behavior. No credential, payload or raw audio
+  is added to diagnostic output.
+- Provider/Agent/Task/file and physical experience credit require those exact
+  boundaries to run. First feedback, durable acceptance, acceptance speech and
+  artifact completion cannot substitute for each other. No push, existing-
+  history rewrite, GUI automation, user-data reset or unapproved authority
+  expansion is granted. Subsequent C–H choices are recorded before implementation.

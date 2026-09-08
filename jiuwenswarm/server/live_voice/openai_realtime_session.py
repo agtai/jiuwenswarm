@@ -792,10 +792,12 @@ class OpenAIRealtimeSession:
             wire: str | bytes | None = None
             while wire is None:
                 try:
-                    wire = await asyncio.wait_for(
-                        socket.recv(),
-                        timeout=self._config.operation_timeout_seconds,
-                    )
+                    # Keep recv in the single reader task. A per-event child
+                    # task adds scheduler handoffs before an already-ready
+                    # control can preempt prepared PCM. The timeout retains
+                    # the same cancellation and idle-retry boundary.
+                    async with asyncio.timeout(self._config.operation_timeout_seconds):
+                        wire = await socket.recv()
                 except asyncio.CancelledError:
                     raise
                 except (KeyboardInterrupt, SystemExit, GeneratorExit):

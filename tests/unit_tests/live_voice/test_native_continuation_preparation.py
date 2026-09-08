@@ -445,7 +445,7 @@ async def test_paced_drain_observes_speech_before_next_pcm_and_fences_all_remain
         await engine.next_event()
         await engine.admit_response("p2", response_ref(2))
         assert (await engine.next_event()).audio.sequence == 0
-        # The next PCM frame is due in 20ms. A socket control is ready first.
+        # Credit is available immediately, but socket control must win first.
         socket.push(speech_started("s2", "u2", 700))
         stop = await engine.next_event()
         assert stop.action.operation == "STOP" and action_payload(stop)["provider_response_id"] == "p2"
@@ -461,7 +461,7 @@ async def test_paced_drain_observes_speech_before_next_pcm_and_fences_all_remain
 
 
 @pytest.mark.asyncio
-async def test_prepared_pcm_releases_at_sample_cadence_instead_of_gateway_burst():
+async def test_prepared_pcm_uses_bounded_startup_credit_without_per_frame_wait():
     engine, socket, _ = await preparing_engine()
     try:
         await feed(engine, socket, output_audio_delta("a2", "p2", "audio2", 0, pcm16=b"\x01\x00" * 480 * 4))
@@ -471,7 +471,9 @@ async def test_prepared_pcm_releases_at_sample_cadence_instead_of_gateway_burst(
         await engine.admit_response("p2", response_ref(2))
         start = asyncio.get_running_loop().time()
         assert [(await engine.next_event()).audio.sequence for _ in range(4)] == [0, 1, 2, 3]
-        assert asyncio.get_running_loop().time() - start >= .05
+        # All four frames fit the 320 ms window. Their sample deadline remains
+        # behind now; no timer sleeps were required to replenish the player.
+        assert engine._prepared_next_audio_at <= start
         assert (await next_output(engine)).provider_done.completed
     finally:
         await engine.close()

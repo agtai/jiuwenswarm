@@ -1762,7 +1762,7 @@ _KV_SENSITIVE_PATTERN = re.compile(
 # 3) 值内容（非贪婪）
 # 4) 结束引号（通过 (\2) 强制与起始引号一致）
 _NAMED_SENSITIVE_KV_PATTERN = re.compile(
-    r"(?i)([\"']?[A-Za-z0-9_.-]*"
+    r"(?i)(?<![A-Za-z0-9_.-])([\"']?[A-Za-z0-9_.-]*"
     r"(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|"
     r"credential|private[_-]?key|user[_-]?id|userid)"
     r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)([\"'])(.*?)(\2)"
@@ -1880,9 +1880,7 @@ class SensitiveDataFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            message = record.getMessage()
-            record.msg = _sanitize_log_text(message)
-            record.args = ()
+            _sanitize_record_message(record)
         except Exception:
             # Never block logging because of desensitization failure.
             pass
@@ -1905,12 +1903,23 @@ class SensitiveDataFilter(logging.Filter):
                 formatted = "".join(_traceback.format_exception(exc_info[1]))
                 record.exc_text = _sanitize_log_text(formatted)
                 record.exc_info = None
-            elif record.exc_text:
+            elif record.exc_text and record.exc_text is not getattr(record, "_masked_exc_text", None):
                 record.exc_text = _sanitize_log_text(record.exc_text)
+            record._masked_exc_text = record.exc_text
         except Exception:
             # 同样不因脱敏失败而阻断日志输出。
             pass
         return True
+
+
+def _sanitize_record_message(record: logging.LogRecord) -> None:
+    # Cache only this record's already-sanitized immutable string. A later
+    # handler changing msg or args invalidates it; unrelated records never
+    # inherit a trust flag or bypass privacy filters.
+    if record.args or record.msg is not getattr(record, "_masked_message", None):
+        record.msg = _sanitize_log_text(record.getMessage())
+        record.args = ()
+        record._masked_message = record.msg
 
 
 class JsonOnlyFormatter(logging.Formatter):
@@ -1955,9 +1964,7 @@ def install_source_record_masking() -> None:
         record = old_factory(*args, **kwargs)
         try:
             # message 脱敏（含 %s/format 格式化后的最终文本）。
-            msg = record.getMessage()
-            record.msg = _sanitize_log_text(msg)
-            record.args = ()
+            _sanitize_record_message(record)
             # traceback 脱敏：traceback 由 Formatter.formatException 从
             # record.exc_text 单独渲染，getMessage 覆盖不到。此处提前渲染并脱敏，
             # 清空 exc_info 使 Formatter 复用已脱敏的 exc_text。
@@ -1970,6 +1977,7 @@ def install_source_record_masking() -> None:
                 record.exc_info = None
             elif record.exc_text:
                 record.exc_text = _sanitize_log_text(record.exc_text)
+            record._masked_exc_text = record.exc_text
         except Exception:
             # 永不因脱敏失败而阻断日志输出。但记录失败（计数 + 首次 stderr 提示），
             # 避免静默吞掉异常导致 api_key 在无感知下明文泄露。
