@@ -3269,6 +3269,31 @@ async def _wait_until(predicate, *, attempts: int = 100) -> None:
 
 
 @pytest.mark.asyncio
+async def test_presentation_metadata_is_scoped_read_without_terminal_attempt_authority(tmp_path):
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        created = await harness.composition.handle(operation="task.create", params=_issued_create_params(harness),
+            request_id="metadata-create", session_id="session-1")
+        assert created.ok
+        task_id = created.payload["result"]["task_id"]
+        await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        task = harness.composition._core.store.get_task(task_id, _scope())
+        counts = _store_counts(harness.database)
+        metadata = await harness.composition.read_task_presentation_metadata(task_id=task_id, scope=_scope())
+        assert metadata == (task.spec.name, task.spec.instruction)
+        with pytest.raises(FormalTaskViolation) as rejected:
+            await harness.composition.read_task_notification_facts(task_id=task_id, attempt_id="old-attempt", scope=_scope())
+        assert rejected.value.reason == "TASK_NOTIFICATION_ATTEMPT_MISMATCH"
+        with pytest.raises(FormalTaskViolation):
+            await harness.composition.read_task_presentation_metadata(task_id=task_id, scope=_scope(project_id="project-2", session_id="session-2"))
+        assert _store_counts(harness.database) == counts
+        assert len(harness.executor.dispatches) == 1
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
 async def test_authenticated_six_operation_journey_is_exactly_scoped_and_idempotent(
     tmp_path: Path,
 ) -> None:

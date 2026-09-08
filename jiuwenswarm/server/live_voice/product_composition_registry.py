@@ -2655,13 +2655,12 @@ class AgentServerProductCompositionRegistry:
                 raise RuntimeError("completed Task presentation has no legal result")
         outcome = event.task_event.outcome
         if retained_progress.notification_chinese is None:
-            task, _availability, _result, _reason = await self._p3_composition.read_task_notification_facts(
+            name, instruction = await self._p3_composition.read_task_presentation_metadata(
                 task_id=event.task_event.task_id,
-                attempt_id=event.task_event.attempt_id,
                 scope=event.task_event.scope,
             )
-            retained_progress.notification_chinese = self._is_chinese_voice_text(task.spec.instruction)
-            retained_progress.notification_name = task.spec.name
+            retained_progress.notification_chinese = self._is_chinese_voice_text(instruction)
+            retained_progress.notification_name = name
         subject = self._task_notification_subject(
             retained_progress.notification_name or event.task_event.task_id,
             chinese=retained_progress.notification_chinese,

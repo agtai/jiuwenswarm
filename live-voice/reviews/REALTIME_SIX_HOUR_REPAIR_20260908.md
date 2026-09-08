@@ -176,6 +176,40 @@ and the six product requirements are those in the user-supplied execution prompt
 
 ## Physical acceptance preparation
 
+### Recovery regression checkpoint
+
+Tier 3, existing foreground/notification durability boundary. Independent review
+of the 68 Registry and 24 frontend baseline failures found actual recovery bugs:
+an unknown unified text input is mistaken for an already accepted foreground on
+reconnect; an exact failed response can be popped and discarded when its polling
+effect retires; and notification label lookup incorrectly requires an unread
+historical event to belong to the Task's current attempt. Repair these within
+existing identities and authority. Replay the exact retained unified input
+without retiring its accepted foreground; admit an exact current failed response
+through the existing response fence; read scoped Task label metadata separately
+from exact terminal result/attempt authority. No new intent classifier, guessed
+ACK or event watermark is allowed. Owned product surfaces: integrated React
+panel, Registry and authenticated P3 metadata read; tests retain wrong-scope,
+duplicate, retry, unread predecessor, no-ACK/no-history and current-owner oracles.
+Tests with obsolete fake signatures or removed UI controls need explicit current
+contract replacements; baseline failure alone is not an exemption.
+
+The three product repairs and exact history fake binding pass independent
+read-only review. Review caught and fixed the Task projection callback missing
+its post-await activation fence and an initially misplaced history assertion.
+Final affected checks: 15 backend and 30 frontend Native/reconnect/failed-response
+cases pass, including explicit zero effects for foreign response/generation
+failures and no P2 close during unified replay. TypeScript typecheck passes.
+Broader current runs: Registry/P3 346 pass, 59 fail; frontend 692 pass, 20 fail,
+1 skip. The 59 include 55 Registry semantic/retired-entry fixture cases and four
+P3 cases. Existing lifecycle model fixtures default to dialogue and supply no
+Task facts; they cannot prove the requested Task scenarios. The independent
+audit identifies current semantic-model/SQLite migration anchors, not an
+exemption. Remaining frontend cases include removed natural Task controls,
+instantaneous-state assumptions and unresolved composite recovery scenarios.
+These broad scopes remain PARTIAL. Raw commands/results are retained under
+`logs/repair-20260908/recovery-*`.
+
 ### E controlled configuration checkpoint
 
 Tier 1 configuration boundary: expose optional Provider reasoning effort for the

@@ -2012,6 +2012,8 @@ for (const failure of ['unknown', 'malformed', 'transport']) {
       const submits = calls.filter(c => c.method === 'live_voice.composition.unified.submit');
       assert.deepEqual(submits[1], submits[0]);
       assert.equal(effects.size, 1);
+      assert.equal(calls.filter(c => c.method === 'live_voice.composition.p2.close').length, 0,
+        'recovering one unified outcome must not retire its accepted foreground');
       assert.equal(calls.some(c => c.method === 'live_voice.composition.p2.submit'), false);
       assert.equal([...storage.values()].some(value => value.includes('Read the supplied records')), false);
     } finally {
@@ -14163,10 +14165,10 @@ function generationInterruptResponder(options) {
       },
     });
   };
-  state.failHeldAnswer = text => {
+  state.failHeldAnswer = (text, responseOverride = {}, retire = true) => {
     const held = state.heldResponses.get(text);
     assert.ok(held, `no held answer for ${text}`);
-    state.heldResponses.delete(text);
+    if (retire) state.heldResponses.delete(text);
     publishNotification({
       ok: true,
       result: {
@@ -14177,7 +14179,7 @@ function generationInterruptResponder(options) {
         activation_id: held.params.activation_id,
         activation_generation: held.params.activation_generation,
         kind: 'agent.error',
-        response: held.response,
+        response: { ...held.response, ...responseOverride },
         agent_event: { event_type: 'agent.failed', error_reason: 'AGENT_PROVIDER_FAILURE' },
         presentation_unit: null,
       },
@@ -16116,6 +16118,20 @@ test('mounted a failed answer retires its listening window so the next answer ge
     await act(async () => {
       renderer = await driveGenerationListening(i18n, sessionId, responder, browser, extraProps);
     });
+
+    // A well-formed failure from a different response/generation cannot retire
+    // this answer, render an error, acknowledge audio, or create Task work.
+    for (const override of [{ response_id: 'foreign-failed-response' }, { response_generation: 999 }]) {
+      const before = responder.calls.length;
+      const stateBefore = states.at(-1);
+      await act(async () => {
+        responder.failHeldAnswer(utterances[0], override, false);
+        await new Promise(resolve => setTimeout(resolve, 60));
+      });
+      assert.equal(states.at(-1).text_status, stateBefore.text_status);
+      assert.equal(states.at(-1).p1_status, stateBefore.p1_status);
+      assert.equal(responder.calls.slice(before).some(call => /presentation\.ack|task\.(create|cancel)|p3\.mutate|unified\.submit|media\.close/.test(call.method)), false);
+    }
 
     // The answer this window was listening against fails outright. There is
     // nothing left to interrupt or replace, so the window must be retired --

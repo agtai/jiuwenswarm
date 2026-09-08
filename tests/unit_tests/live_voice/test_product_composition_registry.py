@@ -401,6 +401,7 @@ class _HistoryWriter:
     def __init__(self, *, fail_native_once: bool = False) -> None:
         self.users: list[object] = []
         self.assistants: list[object] = []
+        self.assistant_task_event_bindings: list[object] = []
         self.native_assistants: list[object] = []
         self.native_users: list[object] = []
         self.native_order: list[str] = []
@@ -413,8 +414,14 @@ class _HistoryWriter:
         return True
 
     async def persist_assistant(
-        self, intent, *, session_id: str, channel_id: str
+        self, intent, *, session_id: str, channel_id: str, task_event_binding=None,
     ) -> tuple[bool, ...]:
+        if task_event_binding is not None:
+            assert set(task_event_binding) == {"scope", "task_id", "attempt_id", "event_id"}
+            assert ScopeRef.from_dict(task_event_binding["scope"]).session_id == session_id
+            assert all(type(task_event_binding[k]) is str and task_event_binding[k].strip()
+                       for k in ("task_id", "attempt_id", "event_id"))
+        self.assistant_task_event_bindings.append(task_event_binding)
         self.assistants.append((intent, session_id, channel_id))
         return tuple(True for _ in intent.contents)
 
@@ -445,12 +452,12 @@ class _BlockingHistoryWriter(_HistoryWriter):
         self.assistant_release = asyncio.Event()
 
     async def persist_assistant(
-        self, intent, *, session_id: str, channel_id: str
+        self, intent, *, session_id: str, channel_id: str, task_event_binding=None,
     ) -> tuple[bool, ...]:
         self.assistant_started.set()
         await self.assistant_release.wait()
         return await super().persist_assistant(
-            intent, session_id=session_id, channel_id=channel_id
+            intent, session_id=session_id, channel_id=channel_id, task_event_binding=task_event_binding,
         )
 
 
@@ -763,6 +770,11 @@ class _P3Composition(P3AuthenticatedComposition):
         return self._presentation_delegate._read_product_task_result(
             authority, **kwargs
         )
+
+    async def read_task_presentation_metadata(self, *, task_id, scope):
+        assert self._presentation_store is not None
+        task = self._presentation_store.get_task(task_id, scope)
+        return task.spec.name, task.spec.instruction
 
     async def read_task_notification_facts(self, *, task_id, attempt_id, scope):
         assert self._presentation_store is not None
@@ -1187,6 +1199,13 @@ class _UnifiedP3Composition(_P3Composition):
                 ErrorCode.NOT_FOUND,
             )
         return retained
+
+    async def read_task_presentation_metadata(self, *, task_id, scope):
+        task = await self.read_background_task(
+            bearer_token="trusted-token", session_id=scope.session_id or "", task_id=task_id,
+        )
+        assert task.scope == scope
+        return task.spec.name, task.spec.instruction
 
     async def read_task_notification_facts(
         self,
@@ -4353,6 +4372,7 @@ async def test_exit_during_agent_generation_retires_predecessor_and_opens_succes
     )
     assert acknowledged.ok
     assert len(successor_history.assistants) == 1
+    assert successor_history.assistant_task_event_bindings == [None]
     assert predecessor_history.assistants == []
     assert blocking.calls == 2
     await registry.stop()
@@ -5082,7 +5102,7 @@ async def test_unified_presentation_crash_rebuilds_runtime_with_same_effect_iden
             return await super().persist_user(commit, channel_id=channel_id)
 
         async def persist_assistant(
-            self, intent, *, session_id: str, channel_id: str
+            self, intent, *, session_id: str, channel_id: str, task_event_binding=None,
         ) -> tuple[bool, ...]:
             key = (
                 intent.ref.interaction_id,
@@ -5099,6 +5119,7 @@ async def test_unified_presentation_crash_rebuilds_runtime_with_same_effect_iden
                 intent,
                 session_id=session_id,
                 channel_id=channel_id,
+                task_event_binding=task_event_binding,
             )
 
     first, composition, first_manager = _unified_registry(
@@ -6687,6 +6708,11 @@ async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_repla
     assert history.users == []
     assert history.assistants == []
     assert len(successor_history.assistants) == 1
+
+    assert successor_history.assistant_task_event_bindings == [{
+        "scope": task_event.scope.to_dict(), "task_id": task_event.task_id,
+        "attempt_id": task_event.attempt_id, "event_id": task_event.event_id,
+    }]
 
     retained_route = next(iter(registry._p2_routes.values()))
     notification_buffer = retained_route.activation_lease._runtime._notifications
@@ -11242,7 +11268,10 @@ async def test_real_store_voice_replays_unread_predecessor_before_retry_attempt(
         event.seq
         for event in source_events
         if event.event_type in TASK_PROGRESS_PRESENTABLE_EVENTS
+        and not (event.event_type == "task.terminal" and event.outcome == "cancelled")
     ]
+    cancelled_ids = {event.event_id for event in source_events
+                     if event.event_type == "task.terminal" and event.outcome == "cancelled"}
     composition = _P3Composition(project, presentation_store=store)
     manager = _AgentManager()
 
@@ -11311,6 +11340,7 @@ async def test_real_store_voice_replays_unread_predecessor_before_retry_attempt(
             await asyncio.sleep(0.005)
         assert mapped_presentation is not None
         assert mapped_presentation.presentation_class == "voice"
+        assert mapped_presentation.event_id not in cancelled_ids
 
         notification = None
         for _ in range(8):

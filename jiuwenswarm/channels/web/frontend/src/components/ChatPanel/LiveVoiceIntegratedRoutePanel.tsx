@@ -3455,6 +3455,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         presentationBinding,
         disposition.response ?? null,
       );
+      if (pendingForegroundPresentationRef.current !== null && disposition.response !== undefined &&
+          !settlesForegroundPresentation) {
+        // A current poll can also carry a delayed predecessor failure. Keep
+        // the accepted foreground and release the poll for its own response.
+        setP2NotificationWakeEpoch(epoch => epoch + 1);
+        return disposition;
+      }
       const deferredTaskSettlementStarted = settlesForegroundPresentation
         ? settleDeferredTaskPresentation(owner)
         : false;
@@ -4024,17 +4031,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     return disposition;
   };
 
-  const settleRetainedP2Operations = async (
-    owner: ProductWebP2ActivationOwner,
-    options: Readonly<{ abandon_pending_notification?: boolean }> = {},
-  ) => {
+  const settleRetainedUnifiedInput = async (owner: ProductWebP2ActivationOwner) => {
     const ownerSession = owner.snapshot().binding?.session_id;
-    const isCurrent = () => activationOwnerRef.current === owner && ownerSession !== undefined && activeSessionRef.current === ownerSession;
+    const unified = unifiedInputOwnerRef.current;
+    const isCurrent = () => activationOwnerRef.current === owner && ownerSession !== undefined &&
+      activeSessionRef.current === ownerSession && unifiedInputOwnerRef.current === unified && isConnectedRef.current;
     const pendingTurn = pendingProductTurnRef.current;
     if (pendingTurn?.owner === owner) {
       try {
         const binding = owner.snapshot().binding;
-        const unified = unifiedInputOwnerRef.current;
         if (!binding || !unified) throw new Error('exact unified input owner unavailable');
         // A legacy synthetic Task origin is never translated into a new final.
         if (pendingTurn.input.dispatch_target === 'task') throw new Error('legacy Task origin is retired');
@@ -4047,13 +4052,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           }),
           is_current: isCurrent,
         });
+        if (!isCurrent()) return;
         if (pendingProductTurnRef.current === pendingTurn) {
           pendingProductTurnRef.current = null;
           setProductInput('');
           setProductTextStatus('waiting');
         }
-        if (isCurrent()) await refreshUnifiedTaskProjection(submitted, binding.session_id);
+        if (isCurrent()) await refreshUnifiedTaskProjection(submitted, binding.session_id, isCurrent);
       } catch (error) {
+        if (!isCurrent()) return;
         if (unifiedInputOwnerRef.current?.hasPending() || owner.hasPendingSubmission() ||
             pendingTurn.input.dispatch_target === 'task') throw error;
         if (pendingProductTurnRef.current === pendingTurn) {
@@ -4062,6 +4069,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
       }
     }
+  };
+
+  const settleRetainedP2Operations = async (
+    owner: ProductWebP2ActivationOwner,
+    options: Readonly<{ abandon_pending_notification?: boolean }> = {},
+  ) => {
+    const ownerSession = owner.snapshot().binding?.session_id;
+    const isCurrent = () => activationOwnerRef.current === owner && ownerSession !== undefined && activeSessionRef.current === ownerSession;
+    await settleRetainedUnifiedInput(owner);
     if (owner.hasPendingNotification() && options.abandon_pending_notification !== true) {
       try {
         const notification = await retryRetainedProductOperation({
@@ -4671,6 +4687,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             !ownerHasUnsettledGenerationInterrupt(previous) &&
             (ownedInput || (foreground !== null && sameProductP2ActivationBinding(foreground, snapshot.binding)))
           ) {
+            if (pendingProductTurnRef.current?.owner === previous && unifiedInputOwnerRef.current?.hasPending()) {
+              try {
+                // The unified owner coalesces the exact retained request. Its
+                // unknown outcome is not an accepted foreground and must replay.
+                await settleRetainedUnifiedInput(previous);
+              } catch {
+                if (!isCurrentRun() || activationOwnerRef.current !== previous) return;
+                publishProductRecoveryDiagnostic({ seam: 'activation', disposition: 'retrying',
+                  reason: PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED, binding: snapshot.binding });
+                scheduleRecovery(snapshot.binding);
+                return;
+              }
+              if (!isCurrentRun() || activationOwnerRef.current !== previous) return;
+              setP2NotificationWakeEpoch(epoch => epoch + 1);
+            }
             // Reconnecting the transport does not revoke the accepted answer.
             // Its exact notification/ACK owners settle it; ordinary recovery
             // must not consume its final and then close the route before audio.
@@ -5771,11 +5802,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             (
               previewDisposition.kind === 'presentation' &&
               !previewDisposition.task_notification
-            ) || previewDisposition.kind === 'native_audio'
+            ) || previewDisposition.kind === 'native_audio' || previewDisposition.kind === 'failed'
               ? foregroundPresentationFenceMatchesResponse(
                   pendingForegroundPresentationRef.current,
                   owner.snapshot().binding,
-                  previewDisposition.response,
+                  previewDisposition.response ?? null,
                 )
               : false;
           if (readPendingUnifiedFinal() !== null && !exactForegroundDelivery) return;

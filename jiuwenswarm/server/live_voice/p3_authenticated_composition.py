@@ -3105,6 +3105,24 @@ class P3AuthenticatedComposition:
         finally:
             await self._leave_operation()
 
+    async def read_task_presentation_metadata(
+        self, *, task_id: str, scope: ScopeRef,
+    ) -> tuple[str, str]:
+        """Read scoped labels without imposing current-attempt result authority.
+
+        Unread historical events retain their own authenticated event/attempt
+        proof. A Task's current name/instruction supplies labels only.
+        """
+        entered = False
+        try:
+            await self._enter_operation()
+            entered = True
+            task = await self._run_blocking(self._core.store.get_task, task_id, scope)
+            return task.spec.name, task.spec.instruction
+        finally:
+            if entered:
+                await self._leave_operation()
+
     async def read_task_notification_facts(
         self,
         *,
