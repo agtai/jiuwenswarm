@@ -2123,3 +2123,34 @@
 - This contract does not authorize overwrites or close file preservation, ASR
   semantics, latency or physical acceptance. Those require their own enforcement
   and observed journeys under the unchanged selected models and project authority.
+
+## D-123 Bind Native Task file effects before writes and across recovery
+
+- Date: 2026-09-08. The continuing repair's
+  [execution decision](../reviews/REALTIME_SIX_HOUR_REPAIR_20260908.md#fileeffectplan-execution-decision--tier-3)
+  adds a separate file-effect restriction to source-bearing Native Tasks. The
+  existing selected Code Agent proposes paths and operations under current Task
+  authority. A model's replacement proposal or a hash is not overwrite consent
+  and does not prove correct interpretation of the original speech.
+- The server freezes scope, Task, attempt, original source, adopted requirement
+  head, revision chain, baseline hashes, exact operations and required outputs.
+  The owned declaration tool admits at most 32 canonical relative file paths;
+  ambiguous/link/reparse, home expansion, short-name and protected-path forms
+  reject. SDK writes and the complete candidate delta must match the plan.
+  Formal apply first checks regular-file operations in a private Git index;
+  the real project and index are unchanged on a rejected preflight.
+- An adopted adjustment invalidates the old plan before further writes. When a
+  replacement plan excludes earlier paths, the server restores only this
+  attempt's isolated changes on those paths to the verified original baseline.
+  A background worker owns that filesystem work through completion; cancel and
+  close cannot release its checkout early or publish a stale plan.
+- D2 checkpoint state version 2 retains the frozen plan, and the intended
+  effect digest includes its digest. Verified recovery lineage binds the plan
+  to the logical original attempt while each fork keeps its own checkpoint
+  producer. Recovery reuses the same plan and effect without another Agent
+  interpretation. Legacy version 1 remains explicit and gains no new protection.
+- These checks do not create deletion tools, a new language classifier or new
+  user authority. They are not an OS-wide transaction against arbitrary external
+  writers and do not prove multi-file crash atomicity. Unknown post-write effects
+  retain the existing D2 reconciliation/manual boundary. Speech semantics,
+  exact requested output, latency and physical acceptance still need real evidence.

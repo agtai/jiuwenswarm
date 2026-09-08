@@ -765,3 +765,86 @@ Seven affected Engine receipt/feedback/acceptance checks passed (190 deselected)
 Independent complete-diff review found no blocking issue: context.get, fresh
 context, extra Task operations, and no-audio-with-tool-call rules are retained.
 Any measured improvement still requires the real Provider trial.
+
+The clean f598cc90 deployment's real Provider trial did not meet latency targets.
+Task E's first received PCM was 8,990.471 ms after acoustic speech end and still
+used context.get after task.create. Task F used task.create alone but took
+5,168.662 ms. Actual read-only Work feedback took 3,854.183 ms. The corresponding
+same-frame raw-PCM-to-send intervals were 23.250/29.340/24.883 ms; these are three
+samples, not a new percentile acceptance. Both real selected-Agent Tasks completed:
+task-52cacc2ef9f34fa5aaae9c2bf42d9983 produced receipt_e.md (850 total, 650 remaining),
+and task-49181136a0984fbb92818a1cc3ba9da4 produced receipt_f.md (18:00/22:30, 09:00
+and adjusted 08:40). All 26 prior Markdown files retained their hashes. Full
+identities and hashes are in ignored receipt-followup-real-result.json and the
+per-round receipt-followup-* evidence. Work final-result presentation and physical
+playback remain unverified. Prompt clarification is not credited as a reliable
+latency repair.
+
+### FileEffectPlan execution decision — Tier 3
+
+Independent design review identified no existing per-path overwrite grant. Keep
+the current noninteractive Task project.write authority: the existing selected
+Code Agent interprets retained user requirements and proposes an exact plan.
+Server-frozen identity, source/requirement head, baseline hashes, operations and
+required outputs constrain actual effects; they are not new permission grants
+or proof that natural language was understood. In particular, a model-selected
+replace operation cannot itself establish the user's overwrite consent. Record
+this residual semantic boundary explicitly in real D/C, edit and derive checks.
+Do not add another classifier or make every Task create-only.
+
+The plan is separate from immutable TaskSpec and is required on the newly
+protected execution path. Bind revision, prior-plan digest, exact adopted
+adjustment head and source digest. Server observes baseline existence/hash;
+the Agent supplies only proposed paths/operations and required outputs. A
+newly created output may be edited during the same attempt without converting
+it into an originally existing file. A plan cannot acquire tools that the
+current background Task does not have, including deletion tools.
+
+Check both write_file/edit_file before execution and the complete isolated
+delta before D2 preparation and every apply/recovery/reconcile path. Invalidating
+a plan after an adopted adjustment must not wait for a model response inside
+the before-model callback: allow reads and a fresh exact plan, fence writes.
+Persist that plan with the D2 checkpoint and intended effect; recovery never
+reinterprets it through a model. Retain explicit legacy checkpoint handling
+without assigning the new protection to old records.
+
+The existing baseline-plus-Git-apply path is not an OS-wide file transaction.
+All observed target changes must reject; an attempt lock does not exclude an
+uncooperative external editor. Do not claim arbitrary concurrent-write atomicity
+or multi-file crash atomicity. Any stronger OS-specific publication guarantee
+needs its own implementation/evidence; existing D2 UNKNOWN/manual handling stays
+truthful for failures after an external write has started.
+
+Implementation and module evidence: the source-bearing Native execution path
+now supplies the owned declaration tool through the actual background facade.
+Legacy source-absent execution and checkpoint state v1 retain their old path;
+state v2 includes the plan and binds the effect digest. Actual SDK ReAct tool
+dispatch, WriteFileTool and local FsOperation pass a positive file write and
+four negative owner/path/session/closed cases. Rejection can add an SDK error
+diagnostic to the isolated model context; it emits no successful facade chunk
+and changes no project file or user Chat history.
+
+Independent review found and closed four P2 issues: formal operation checks
+previously ran after apply; forked checkpoint producers were confused with the
+logical effect origin; excluded prior isolated changes had no rollback path;
+and rollback I/O initially blocked the event loop. Private-index preflight,
+verified logical origin, server-owned isolated restoration and a drained
+background worker now cover those boundaries. Controlled callback tests keep
+the event loop responsive during blocked restore I/O and exercise repeated
+cancellation, close and new requirements without publishing a stale plan.
+
+Focused evidence is retained in ignored file-plan-*.txt logs. SDK tests: 5
+passed. Restore ownership tests: 4 passed. Initial review fixes including true
+Store fork/reconcile/fork/recover: 25 passed. Boundaries include 32 paths, required
+outputs, duplicate/case aliases, protected paths, tilde expansion and Windows
+short names. Source-bearing recovery tests also inject a foreign Task/attempt
+plan and require unchanged Store checkpoints/effects/counts and project bytes.
+The broader Executor/D2/Source batch reported 234 passed, 2 Windows symlink
+skips and one old cancellation test failure: it required immediate binding
+release although cancellation may settle before cleanup. Its standalone rerun
+passed. The corrected oracle waits for actual owned-worker settlement, checks
+independent cleanup raw_status and exercises normal/short cancel windows; its
+final rerun passed all 4 selected cancellation/late-write cases in 13.78 seconds
+(file-plan-cancel-settlement-tests.txt). The final path negatives passed 14 cases;
+the 32-path boundary check passed. Rails regressions: 150 passed. These counts do
+not replace the real Native create/edit/derive trial or physical acceptance.

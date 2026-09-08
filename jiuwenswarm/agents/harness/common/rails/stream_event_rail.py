@@ -986,6 +986,14 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if sid in self._formal_no_tool_sessions:
             raise RuntimeError("FORMAL_TOOL_EXECUTION_FORBIDDEN")
 
+        file_checkpoint = getattr(self, "background_file_checkpoint", None)
+        if file_checkpoint is not None:
+            try:
+                await file_checkpoint(ctx)
+            except Exception as error:
+                from openjiuwen.core.runner.callback.errors import AbortError
+                raise AbortError("BACKGROUND_FILE_EFFECT_REJECTED", cause=error) from error
+
         session = ctx.session
         if session is not None and isinstance(ctx.inputs, ToolCallInputs):
             tc = ctx.inputs.tool_call

@@ -475,7 +475,7 @@ _CODE_PLAN_ALLOWED_TOOLS: list[str] = [
     "edit_file",
 ]
 _BACKGROUND_PROJECT_FILE_TOOLS = frozenset(
-    {"read_file", "grep", "list_files", "ls", "glob", "write_file", "edit_file"}
+    {"read_file", "grep", "list_files", "ls", "glob", "write_file", "edit_file", "declare_file_effect_plan"}
 )
 
 

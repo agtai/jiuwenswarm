@@ -99,6 +99,7 @@ class BackgroundTaskCheckpoint:
     session_id: str
     adopt: Callable[[Any], Awaitable[None]]
     closed: bool = False
+    file_plan: Any | None = None
     failure_reason: str | None = field(default=None, init=False)
     _read_progress: BackgroundReadProgress = field(default_factory=BackgroundReadProgress, init=False)
 
@@ -121,8 +122,8 @@ _current: ContextVar[BackgroundTaskCheckpoint | None] = ContextVar(
 
 
 @contextmanager
-def background_task_checkpoint(session_id: str, adopt: Callable[[Any], Awaitable[None]]) -> Iterator[None]:
-    owner = BackgroundTaskCheckpoint(session_id, adopt)
+def background_task_checkpoint(session_id: str, adopt: Callable[[Any], Awaitable[None]], *, file_plan=None) -> Iterator[None]:
+    owner = BackgroundTaskCheckpoint(session_id, adopt, file_plan=file_plan)
     token = _current.set(owner)
     try:
         yield
@@ -136,3 +137,45 @@ def current_background_task_checkpoint(session_id: str) -> BackgroundTaskCheckpo
     if owner is not None and (owner.closed or owner.session_id != session_id):
         raise RuntimeError("BACKGROUND_TASK_CHECKPOINT_BINDING_MISMATCH")
     return owner
+
+
+def file_effect_plan_tool():
+    """An owned tool whose invocation uses only the exact live checkpoint."""
+    from openjiuwen.core.foundation.tool import Tool, ToolCard
+    from openjiuwen.harness.tools.base_tool import ToolOutput
+
+    class DeclareFileEffectPlan(Tool):
+        def __init__(self):
+            super().__init__(ToolCard(id="declare_file_effect_plan", name="declare_file_effect_plan",
+                parallel_safe=False,
+                description="Propose the complete exact file effects of this authorized Task before any write. "
+                    "This only narrows existing authority. Do not treat a replacement as user consent. "
+                    "Use the current requirement_head provided by the server. Call alone and wait for acceptance.",
+                input_params={"type": "object", "additionalProperties": False,
+                    "properties": {"requirement_head": {"type": "string"},
+                        "preserve_existing": {"type": "boolean", "description": "True when all original files must remain unchanged."},
+                        "effects": {"type": "array", "minItems": 1, "maxItems": 32,
+                            "items": {"type": "object", "additionalProperties": False,
+                                "properties": {"path": {"type": "string", "description": "Exact relative file path using / separators."},
+                                    "operation": {"type": "string", "enum": ["create", "replace", "delete"]}},
+                                "required": ["path", "operation"]}},
+                        "required_outputs": {"type": "array", "maxItems": 32, "items": {"type": "string"}}},
+                    "required": ["requirement_head", "preserve_existing", "effects", "required_outputs"]}))
+
+        async def invoke(self, inputs, **kwargs):
+            owner = _current.get()
+            if owner is None or owner.closed or owner.file_plan is None:
+                raise RuntimeError("FILE_EFFECT_PLAN_OWNER_REQUIRED")
+            owner.raise_if_failed()
+            try:
+                plan = await owner.file_plan.seal(inputs)
+            except ValueError as error:
+                return ToolOutput(success=False, error=str(error))
+            return ToolOutput(success=True, data={"status": "accepted", "revision": plan.revision,
+                "plan_digest": plan.digest, "requirement_head": plan.requirement_head,
+                "effects": [effect.to_dict() for effect in plan.effects], "required_outputs": list(plan.required_outputs)})
+
+        async def stream(self, inputs, **kwargs):
+            yield await self.invoke(inputs, **kwargs)
+
+    return DeclareFileEffectPlan()

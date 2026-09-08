@@ -348,7 +348,13 @@ async def test_direct_worker_injects_create_and_applied_adjustment_sources(tmp_p
             self.requests.append(request)
             self.started.set()
             await self.release.wait()
-            await current_background_task_checkpoint(request.session_id).adopt(self)
+            checkpoint = current_background_task_checkpoint(request.session_id)
+            await checkpoint.adopt(self)
+            if checkpoint.file_plan is not None:
+                await checkpoint.file_plan.seal({"requirement_head": checkpoint.file_plan.requirement_head,
+                    "preserve_existing": True, "effects": [{"path": "source.txt", "operation": "create"}],
+                    "required_outputs": ["source.txt"]})
+                await checkpoint.file_plan.before_tool("write_file", {"file_path": "source.txt"})
             (Path(request.params["project_dir"]) / "source.txt").write_text("retained\n", encoding="utf-8")
             yield AgentResponseChunk(request.request_id, request.channel_id,
                 payload={"event_type": "chat.final", "content": "Saved source.txt."}, is_complete=True)
@@ -370,7 +376,7 @@ async def test_direct_worker_injects_create_and_applied_adjustment_sources(tmp_p
         await core.drain_outbox_once()
         await asyncio.wait_for(agent.started.wait(), 5)
         request_text = agent.requests[0].params["query"]
-        evidence = json.loads(request_text.split("\n", 1)[1])
+        evidence, _ = json.JSONDecoder().raw_decode(request_text.split("\n", 1)[1])
         assert evidence["current_anchor"]["text"] == ORIGINAL and evidence["model_proposal"] == PROPOSAL
         task = store.get_task(task_id, retained.anchor.binding.scope)
         command, grant = _adjust(task_id, PROPOSAL)

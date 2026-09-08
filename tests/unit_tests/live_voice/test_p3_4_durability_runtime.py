@@ -74,6 +74,19 @@ def _durability_binding(store: SqliteTaskStore, task_id: str, attempt_id: str):
     )
 
 
+def _enable_file_plan(executor):
+    from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
+    original_stream = executor.process_background_code_task_stream
+    async def planned_stream(request):
+        owner = current_background_task_checkpoint(request.session_id).file_plan
+        await owner.seal({"requirement_head": owner.requirement_head, "preserve_existing": True,
+            "effects": [{"path": "result.txt", "operation": "create"}], "required_outputs": ["result.txt"]})
+        await owner.before_tool("write_file", {"file_path": "result.txt"})
+        async for chunk in original_stream(request):
+            yield chunk
+    executor.process_background_code_task_stream = planned_stream
+
+
 def _create_selected_task(
     store: SqliteTaskStore,
     core: PersistentTaskCore,
@@ -81,8 +94,13 @@ def _create_selected_task(
     adapter: DirectProjectCodeExecutorAdapter,
     *,
     identity_suffix: str = "",
+    native_source: bool = False,
 ):
     invocation = _create(project, identity_suffix=identity_suffix)
+    envelope = invocation.envelope
+    if native_source:
+        from tests.unit_tests.live_voice.test_native_task_source import source, with_source
+        envelope = with_source(envelope, source(scope=envelope.scope))
     candidates = adapter.capability_profiles()
     assert tuple(profile.durability_level for profile in candidates) == ("D0", "D2")
     profile = candidates[-1]
@@ -101,7 +119,7 @@ def _create_selected_task(
         execution_requirements=selected.requirements.to_dict(),
     )
     created = core.execute(
-        invocation.envelope,
+        envelope,
         invocation.authorization,
         context=invocation.context,
         now=NOW,
@@ -377,22 +395,26 @@ async def test_store_diagnostic_snapshot_projects_current_reconcile_without_cont
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("native_source", [False, True])
 async def test_core_operator_recovery_uses_fresh_direct_quiescence_and_linked_attempt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    native_source: bool,
 ) -> None:
     project = tmp_path / "project"
     _git_project(project)
     database = tmp_path / "tasks.sqlite3"
     store = SqliteTaskStore(database)
     executor = _DirectProjectExecutor(project)
+    if native_source:
+        _enable_file_plan(executor)
     adapter = DirectProjectCodeExecutorAdapter(
         _Resolver(_direct_binding(project, executor)),
         database,
         durability_store=store,
     )
     core = PersistentTaskCore(store, adapter)
-    _selection, task = _create_selected_task(store, core, project, adapter)
+    _selection, task = _create_selected_task(store, core, project, adapter, native_source=native_source)
     entered = Event()
     release = Event()
     real_reserve = adapter._journal.reserve_completion
@@ -436,6 +458,22 @@ async def test_core_operator_recovery_uses_fresh_direct_quiescence_and_linked_at
     historical_effects = restarted._durability_store.read_durability_effects(
         historical_binding
     )
+    if native_source:
+        from jiuwenswarm.server.live_voice import project_code_executor
+        state = project_code_executor._decode_d2_checkpoint_state(historical_checkpoints.records[-1].state_bytes)
+        before_counts = restarted._durability_store.counts()
+        before_tree = project_code_executor._project_tree_fingerprint(project)
+        for wrong_identity in ({"task_id": "another-task"}, {"attempt_id": "unrelated-attempt"}):
+            forged = {**state, "file_effect_plan": replace(state["file_effect_plan"], **wrong_identity)}
+            with monkeypatch.context() as guarded:
+                guarded.setattr(project_code_executor, "_decode_d2_checkpoint_state", lambda _payload: forged)
+                with pytest.raises(RuntimeError, match="FILE_EFFECT_CHECKPOINT_IDENTITY_MISMATCH"):
+                    await restarted.reconcile_durable_effects(scope=task.scope, task_id=task.task_id,
+                        origin_attempt_id=task.attempt_id, observed_at="2026-08-05T12:04:00Z")
+            assert restarted._durability_store.counts() == before_counts
+            assert restarted._durability_store.read_durability_effects(historical_binding) == historical_effects
+            assert restarted._durability_store.read_durability_checkpoints(historical_binding) == historical_checkpoints
+            assert project_code_executor._project_tree_fingerprint(project) == before_tree
     assert (
         await restarted.reconcile_durable_effects(
             scope=task.scope,
@@ -801,25 +839,42 @@ async def test_core_operator_recovery_uses_fresh_direct_quiescence_and_linked_at
     assert recovery_executor.requests == []
     assert recovery_apply_calls == 1
     assert (project / "result.txt").read_text(encoding="utf-8") == "done"
+    if native_source:
+        from jiuwenswarm.server.live_voice.project_code_executor import _decode_d2_checkpoint_state
+        plans = []
+        for attempt_id in (producer.attempt_id, linked.attempt_id, second_linked.attempt_id):
+            branch = _durability_binding(restarted._durability_store, task.task_id, attempt_id)
+            checkpoints = restarted._durability_store.read_durability_checkpoints(branch)
+            assert {record.producer_attempt_id for record in checkpoints.records} == {attempt_id}
+            assert {record.state_schema_version for record in checkpoints.records} == {2}
+            plans.extend(_decode_d2_checkpoint_state(record.state_bytes)["file_effect_plan"]
+                         for record in checkpoints.records)
+        assert {plan.attempt_id for plan in plans} == {producer.attempt_id}
+        assert len({plan.digest for plan in plans}) == 1
     await restarted.close()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("native_source", [False, True])
 async def test_direct_restart_reconciles_crash_after_apply_without_duplicate_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    native_source: bool,
 ) -> None:
     project = tmp_path / "project"
     _git_project(project)
     database = tmp_path / "tasks.sqlite3"
     store = SqliteTaskStore(database)
+    executor = _DirectProjectExecutor(project)
+    if native_source:
+        _enable_file_plan(executor)
     adapter = DirectProjectCodeExecutorAdapter(
-        _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+        _Resolver(_direct_binding(project, executor)),
         database,
         durability_store=store,
     )
     core = PersistentTaskCore(store, adapter)
-    _selection, task = _create_selected_task(store, core, project, adapter)
+    _selection, task = _create_selected_task(store, core, project, adapter, native_source=native_source)
     real_append = store.append_durability_effect_fact
     apply_calls = 0
 

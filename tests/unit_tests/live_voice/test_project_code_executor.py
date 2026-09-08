@@ -4342,15 +4342,17 @@ def test_reserve_completion_at_deadline_cannot_publish_or_apply_result(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_timeout", [1.0, 0.01])
 async def test_direct_dispatch_retry_reuses_attempt_and_task_cancel_is_exact(
     tmp_path: Path,
+    cancel_timeout: float,
 ) -> None:
     project = tmp_path / "project"
     _git_project(project)
     executor = _DirectProjectExecutor(project, "wait")
     releases: list[str] = []
     resolver = _Resolver(_direct_binding(project, executor, releases=releases))
-    adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "p3.sqlite3")
+    adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "p3.sqlite3", cancel_timeout=cancel_timeout)
     item = _item(project)
 
     first = await adapter.dispatch(item)
@@ -4366,7 +4368,16 @@ async def test_direct_dispatch_retry_reuses_attempt_and_task_cancel_is_exact(
     assert resolver.calls == [True]
     assert len(executor.requests) == 1
     assert cancelled.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
+    assert cancelled.observations[-1].raw_status in {
+        "cancelled", "cancelled_cleanup_pending", "cancelled_cleanup_resolved",
+    }
+    # Terminal cancellation and actual resource release are separate boundaries.
+    # Cleanup truth is carried by raw_status, independently of the cancel reason.
+    await _wait_direct_settled(adapter)
     assert releases == ["released"]
+    assert not adapter._running and adapter.retained_cleanup_attempt_ids() == ()
+    assert _git(project, "status", "--porcelain") == ""
+    await adapter.close()
 
 
 @pytest.mark.asyncio

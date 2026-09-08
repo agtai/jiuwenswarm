@@ -53,8 +53,14 @@ proposal through durable creation, retry, successor and adjustment. Source-aware
 execution and bounded query projections have scoped automated evidence. A clean
 deployment and real selected-Agent Task produced source_d.md with correct 850/650
 budget figures and preserved all 25 existing Markdown files. Confirmation latency
-still failed; full original-source semantics are not proved by one run. File-effect enforcement remains
-a separate open boundary. No source-only credit closes the overwrite failure.
+still failed; full original-source semantics are not proved by one run.
+[File-effect enforcement](decisions/DECISIONS.md#d-123-bind-native-task-file-effects-before-writes-and-across-recovery)
+now checks source-bearing Native Task writes, isolated deltas and D2 recovery
+against a frozen plan. Actual SDK/file operations and repeated Store recovery
+have scoped evidence; current-source real Native create/edit/derive verification
+is pending. Model interpretation of preservation, arbitrary concurrent external
+writes and physical acceptance remain open. No source-only or plan-only credit
+closes the original overwrite failure.
 
 ### Realtime acceptance repairs
 
