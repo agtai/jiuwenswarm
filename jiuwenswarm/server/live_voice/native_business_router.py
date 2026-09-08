@@ -15,7 +15,7 @@ import json
 from datetime import UTC, datetime
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode, canonical_json_bytes
-from jiuwenswarm.common.live_voice_profiling import profile_event, error_fields
+from jiuwenswarm.common.live_voice_profiling import profile_event, error_fields, profiled, ProfileSpan
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import FormalContextSnapshot
 from jiuwenswarm.server.runtime.session.session_history import load_history_records
 from .native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION, NativeBusinessProposal, NativeBusinessViolation
@@ -98,6 +98,7 @@ class NativeBusinessRouter:
             operation.add_done_callback(finished)
         return await asyncio.shield(operation)
 
+    @profiled("native.context_read", "route.binding")
     async def _read_context(self, route):
         authority = await asyncio.to_thread(
             self.registry._p3_composition.prepare_production_intent_authority,
@@ -133,6 +134,7 @@ class NativeBusinessRouter:
             or route.activation_lease.snapshot().state is not P2LeaseState.OPEN):
             raise NativeBusinessViolation("NATIVE_RUNTIME_CAPABILITY_REJECTED", code=ErrorCode.PERMISSION_DENIED)
 
+    @profiled("native.authority_reread", "route.binding", require_context=True)
     async def _require_context_authority(self, route):
         self._require_current_context_route(route)
         composition = self.registry._p3_composition
@@ -343,6 +345,7 @@ class NativeBusinessRouter:
         if current.context.file_path != route.native_p3_authority.context.file_path:
             raise NativeBusinessViolation("EXECUTION_CONTEXT_SCOPE_MISMATCH", code=ErrorCode.PERMISSION_DENIED)
 
+    @profiled("native.task_intent", "route.binding", "delegate", require_context=True)
     async def _task(self, route, delegate, request_id, *, native_source=None):
         from .production_task_intent import (ProductionTaskIntentRequest, ProductionIntentOrigin,
             build_production_origin_binding, ProductionTaskPolicyOutcome)
@@ -425,6 +428,7 @@ class NativeBusinessRouter:
         except Exception:
             return unknown
 
+    @profiled("native.business", "retained_route.binding", "proposal.delegate")
     async def handle(self, *, owner, proposal, request_id, retained_route, **unused):
         from .product_composition_registry import _success_result, _error_result, _VoiceTaskOrigin
         delegate = proposal.delegate
@@ -473,8 +477,9 @@ class NativeBusinessRouter:
                         facts = {"status": "observed"}
                     elif delegate.business.operation.startswith("task."):
                         from .native_task_source import SOURCE_OPERATIONS
-                        source = (await owner.task_source(admission)
-                                  if delegate.business.operation in SOURCE_OPERATIONS else None)
+                        with ProfileSpan("native.task_source_wait"):
+                            source = (await owner.task_source(admission)
+                                      if delegate.business.operation in SOURCE_OPERATIONS else None)
                         # A source wait is not permission to dispatch after close
                         # or project rebind. Recheck before any Task mutation.
                         await self._require_context_authority(route)

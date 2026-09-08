@@ -848,3 +848,58 @@ final rerun passed all 4 selected cancellation/late-write cases in 13.78 seconds
 (file-plan-cancel-settlement-tests.txt). The final path negatives passed 14 cases;
 the 32-path boundary check passed. Rails regressions: 150 passed. These counts do
 not replace the real Native create/edit/derive trial or physical acceptance.
+
+### File-plan real selected-Agent trial on fb516c24
+
+The clean fb516c24f1 deployment rebuilt the frontend and passed the launcher's
+real speech/authentication/port checks (deploy-file-plan.txt;
+swarm-20260908-101646.log). Source dirty count was zero; model, speed and endpoint
+were gpt-realtime-2.1 / 1.25 / minimal / server-vad-450, with the unchanged selected
+deepseek-v4-flash#0 Agent. Actual paced speech traversed the public RPC/media
+transport, Native, Task admission, selected Code Agent, owned declaration tool,
+SDK file tools, D2 checkpoints and formal Git application:
+
+- task-972afa9f34de4099b77920ede0cb3baa created only 验收输出/plan_g.md, preserving
+  all 28 earlier Markdown files. It correctly retained 620+60+90+80=850, 650
+  remaining, and separate 1180 refund/620 prepaid hotel. SHA256:
+  aef8746e9ee206c28d6349bf0357c47cd5dbf773d6fb1464902cd099f68b720f.
+- task-29a8bf89d2224227b805e94379ca1bb0 explicitly edited only that G file;
+  its replace plan bound the exact original hash. The actual patch removed no
+  original lines and added one line. New SHA256:
+  828cd24463ca0c735044a3316df745b5d99ee9ae90f427d91c0ce634cf143512.
+  The requested phrase is present, but the written line is `计划校验完成，`:
+  a comma was added. Strict literal-line equality is therefore not credited.
+- task-75d5860ef8f9414b8e9a299d4640ebf6 created only 验收输出/plan_h.md, preserving
+  all 29 earlier files including edited G. It retained the budget and added
+  09:00/08:40 departure reasoning. SHA256:
+  3fe48ecccb69df9d3a23fed1c719bd97d02ae9ab2542216cddf4fa845d6335c7.
+
+All three actual Tasks completed with checkpoint state v2 and the corresponding
+create/replace/create plans. Full identities, source/plan digests and before/after
+hash sets remain in ignored file-plan-real-result.json. Received first PCM after
+actual acoustic speech end was 10,192.890 / 6,368.542 / 7,550.581 ms: all failed
+the 3-second acceptance target. The first turn also called context.get after
+creation. Exact same-provider-frame raw-PCM-to-send times were 139.811 / 38.227 /
+148.254 ms; only three samples, not a new supply percentile acceptance. No
+physical playout ACK was synthesized. This trial does not prove the forced
+original-D/model-proposal-C case, real same-Task partial-edit adjustment, arbitrary
+external-write atomicity, the original media or human microphone/speaker journey.
+
+### Remaining acceptance latency — bounded diagnostic checkpoint (Tier 1)
+
+The first real fb516c24 file-plan Task succeeded but took 10,192.890 ms to
+received PCM. Earlier task.create samples spent about 1.2–1.3 seconds between
+delegate admission and sealed receipt, in addition to argument generation,
+context lookups and Provider audio generation. Extend only the existing bounded
+profiling around Native context/authority/source wait, Task intent resolution,
+confirmation and formal invocation to locate that interval before optimizing it.
+Use existing identity-only diagnostics; no speech, file content, token, model,
+tool choice, authority reread, business operation or response semantics change.
+Own the Router/Registry diagnostic seams and affected profiling/Native/Source
+regressions. Actual timing comparison is required; instrumentation is not a
+latency repair and carries no acceptance credit by itself.
+
+The scoped profiling/Native Registry/Source regression command passed 83 tests
+(receipt-profile-tests.txt). Main's complete diff review confirms that the new
+spans only read the existing identity allowlist and retain exception/cancellation
+behavior; no request text, file bytes or secret is added to these spans.

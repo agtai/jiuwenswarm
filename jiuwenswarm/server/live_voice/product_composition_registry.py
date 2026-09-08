@@ -13004,6 +13004,7 @@ class AgentServerProductCompositionRegistry:
             pending=released_pending,
         )
 
+    @profiled("task_intent.formal_invoke", "clean", require_context=True)
     async def _invoke_production_resolution(
         self,
         *,
@@ -13110,6 +13111,7 @@ class AgentServerProductCompositionRegistry:
                 response_ref=response_ref,
             )
 
+    @profiled("task_intent.confirmation_issue", "clean", require_context=True)
     async def _issue_production_confirmation_continuation(
         self,
         *,
@@ -13236,6 +13238,7 @@ class AgentServerProductCompositionRegistry:
             raise
         return token
 
+    @profiled("task_intent.confirmation_consume", "clean", require_context=True)
     async def _confirm_production_intent(
         self,
         *,

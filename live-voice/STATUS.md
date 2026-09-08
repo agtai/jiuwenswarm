@@ -57,10 +57,13 @@ still failed; full original-source semantics are not proved by one run.
 [File-effect enforcement](decisions/DECISIONS.md#d-123-bind-native-task-file-effects-before-writes-and-across-recovery)
 now checks source-bearing Native Task writes, isolated deltas and D2 recovery
 against a frozen plan. Actual SDK/file operations and repeated Store recovery
-have scoped evidence; current-source real Native create/edit/derive verification
-is pending. Model interpretation of preservation, arbitrary concurrent external
-writes and physical acceptance remain open. No source-only or plan-only credit
-closes the original overwrite failure.
+have scoped evidence. A clean deployment's actual Native create/edit/derive
+journey changed only plan_g.md, then the explicitly editable plan_g.md, then new
+plan_h.md; every other file retained its hash, and all three Tasks saved v2 plans.
+The appended literal line gained a comma, and acceptance PCM still took 6.37–10.19
+seconds. Model interpretation, the forced original-D/proposal-C case, arbitrary
+concurrent external writes and physical acceptance remain open. Scoped file
+effects do not close the original overwrite or latency failure.
 
 ### Realtime acceptance repairs
 
