@@ -626,3 +626,22 @@ output path, retaining the failed original Task and artifact absence.
 Exact final prompt: 14 background-mode checks passed (66 deselected); independent
 read-only review found no blocking issue. Real positive convergence is still
 pending and is not credited from these checks.
+
+The final 300 ms trial exposed a separate preservation failure: the user spoke
+output vad300_d.md, but Native delegated vad300_c.md while still requiring all
+existing files be preserved. The Executor overwrote the existing C artifact.
+Tier 1 extension owns only the dedicated background prompt's handling of this
+existing preservation constraint: an existing exact output plus a preserve-files
+requirement is a conflict, not permission to replace or invent another path.
+No classifier, new authority or forced-success projection is added. Validate
+background mode composition, review, and a real conflict Task. Preserve the
+incorrect D version and restore C only from its sealed original bytes, recording
+that as corrective maintenance rather than Task or product acceptance.
+
+Final eight-line prompt passed 14 background-mode checks and independent review.
+It is a model instruction, not an atomic no-overwrite guarantee. Original C was
+restored from project Git blob 50d736d3d7a48ef69b8b1324f8e577e25b862611 with exact
+sealed SHA256 16ba045fd856abec5e759c1e416582d482d483b24ecbd6d2227c09937bbb1f1c.
+The incorrect D bytes were preserved in ignored evidence and the originally
+requested, previously absent vad300_d.md. This maintenance does not rewrite Task
+history or grant the incorrect D Task successful product acceptance.

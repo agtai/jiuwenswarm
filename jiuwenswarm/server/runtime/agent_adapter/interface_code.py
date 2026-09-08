@@ -139,6 +139,14 @@ BACKGROUND_PROJECT_RESULT_INSTRUCTIONS = (
     "and book-title marks normally delimit a path and are not filename characters; "
     "retain them only when the user explicitly requests them as literal characters "
     "in the filename. Check the actual filenames and contents before finishing. "
+    "Before writing an output, check whether that exact path already exists. "
+    "If the exact output already exists and the request requires preserving "
+    "that file or all existing files, without explicitly authorizing an edit "
+    "of that existing target, those requirements conflict: report it and leave "
+    "the existing file untouched. Do not replace it, silently choose a different "
+    "filename, or treat a newly created Task or a new report path alone as "
+    "permission to overwrite it. An explicit edit of an existing target may "
+    "still proceed while preserving the other files and unchanged requirements. "
     "This guidance grants no additional tool, file or external-action authority."
 )
 
