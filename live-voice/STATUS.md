@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-08 (human-session tearing/ordinary latency accepted; three requested fixes in verification; broader acceptance remains open).
+> Updated: 2026-09-08 (three requested fixes deployed and service-verified; refreshed-browser acceptance and broader acceptance remain open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -34,9 +34,15 @@ observed browser EOT-to-start criterion (P50 1.199 s), then authorized the
 voice Task-operation delay including observation-timeout disconnects, and truthful
 tool preambles. Implementation and independent review are complete: 586 Python
 checks pass; frontend has 705 pass / 11 known baseline failures / 1 skip,
-including passing new notification replay cases. Controlled deployment and
-real Provider measurements are the current remaining work. Item 4 (Task
-intent/result semantics) is explicitly excluded. The
+including passing new notification replay cases. Clean code `fff2fe15b7` is now
+locally deployed with gpt-realtime-2.1 / speed 1.25. Real Task create/status/adjust
+first feedback PCM was 1.270/0.876/1.165 s after Provider EOT; real receipts
+returned in 0.542/0.602/0.653 s after complete arguments. Actual notification
+cancel/re-prepare/claim succeeded against the real TTS Provider with no fake ACK.
+Refreshed-browser playback and complete audible-result timing remain for human
+acceptance. Actual adjustment application still waited 18.328 s for a checkpoint;
+the fast receipt is not application completion. Item 4 (Task intent/result
+semantics) is explicitly excluded. The
 measurement definition is preserved; no broader acoustic/device metric is claimed.
 
 ### Prior six-hour measured latency and continuity repair
