@@ -536,3 +536,29 @@ seals the expected target file. Full Executor/checkpoint regression: 161 passed,
 14 tests. Independent complete-diff review closed the placeholder/context identity/
 exception-mapping findings and approved the bounded implementation. Real Provider
 conflict/control runs remain required.
+
+## Requested restatement and grounded result answers — Tier 1
+
+The 1f499b8f 30-round batch had a content failure despite complete incoming
+transcription: case 15 returned only `负一` for a request to repeat dates, people,
+budget, meeting time and the final evening condition. Three identical-audio
+repeats on the unchanged runtime returned `4`, then two complete restatements.
+This is reproducible incorrect model output, not evidence of transport clipping.
+The broad default instruction to omit restatements conflicts with this explicit
+user request; that conflict is repaired without claiming it proves the cause of
+the numeric answers. Own only Native spoken-response instructions and affected
+Engine/closed-tool regression, retaining tool-only call frames and full answers.
+
+A result query also denied an available total even though its exact authoritative
+Task receipt contained 620+60+90+80=850 and the other option's 1260. Clarify that
+the requested facts in actual result_text must be used, with option labels when
+needed; absence of an identically named heading is not absence of the data.
+Ask for clarification using observed human task names when needed, without
+asking the user to supply internal IDs. No new matching classifier, fact filter,
+tool authority or pre-playback ASR/validation gate is introduced. Re-run identical
+speech, real result queries and the final ordinary sample batch on the change.
+
+Main reviewed the complete Tier 1 prompt diff. All 266 affected Engine, bound
+tool and receipt successor checks pass; whitespace check passes. This is prompt
+scope and regression evidence, not proof that the observed incorrect answers
+have been eliminated. New-runtime repetitions and content audit remain required.
