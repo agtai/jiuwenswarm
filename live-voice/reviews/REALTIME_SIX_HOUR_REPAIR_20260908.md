@@ -458,3 +458,36 @@ This removes redundant model-led reconnaissance, not authority checks.
 The affected Engine/bound-tool suite passes 223 tests; independent read-only
 trace review confirmed the query cycle and the existing schema's direct file
 operation. Actual rerun remains required before claiming the latency gain.
+
+## H nonterminal Work receipt continuation — Tier 2
+
+Four real fresh work.start traces show 175–204 ms of Engine context refresh
+after a true work receipt. Reuse the existing restricted receipt continuation only for an
+exact work.start accepted/running snapshot with unsettled execution and no result
+or rejection. This is factual analysis-start feedback, never durable Task
+acceptance or completion. Own receipt recognition, Engine restricted successor
+selection and focused integration tests. Preserve Router full-context receipts,
+including feature-off callers. Keep all
+admission, work persistence, unified journal completion, final authority checks,
+work state/notification owners, ACK and STOP semantics. No concurrent second
+voice response or pre-admission placeholder is introduced. Mixed operation groups,
+terminal/rejected/unknown Work receipts and feature-off use the existing full
+context route. Restricted successors allow only context.get before further
+business calls; verify duplicate/reordered receipts, stale/malformed states,
+zero forbidden Task/Tool/history effects, exact STOP and restored fresh context.
+Require independent review and real new work.start reruns; savings are measured
+separately and cannot alone establish the 1–1.5-second early-feedback target.
+
+Independent review found two P2 issues before deployment: an optimization of the
+Router receipt would break the feature-off contract; a terminal event arriving
+while the response waited for the send lock could make pending feedback stale.
+The Router optimization was removed. Receipt intake, queue selection and actual
+locked send now recheck exact work identity/revision against observed facts;
+terminal or newer work restores fresh full context outside the send lock and
+rechecks response ownership before publication. The 43 focused checks pass,
+including both arrival orderings, feature-off context, STOP late audio, durable
+work receipt replay and zero Task mutations. Seven affected Engine/business/work
+test files pass 316 tests. Independent re-review closed both P2 findings and ran
+eight race/fallback probes, including actual speech-start STOP while a downgraded
+request waits for refresh: no successor, extra facts, PCM or ACK survived.
+Router logic is unchanged; only the Engine refresh portion is optimized.

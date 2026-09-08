@@ -23,6 +23,25 @@ def is_task_acceptance_receipt(value: object) -> bool:
             and receipt.get("state") == "accepted")
 
 
+def is_nonterminal_work_start_receipt(value: object) -> bool:
+    """Recognize an actual started analysis, without implying Task acceptance."""
+    if (not isinstance(value, Mapping)
+            or value.get("contract_version") != "live-voice.native-business.v1"
+            or value.get("operation") != "work.start"
+            or "status" in value or "reason" in value):
+        return False
+    work = value.get("work")
+    if not isinstance(work, Mapping):
+        return False
+    work_id = work.get("work_id")
+    return (type(work_id) is str and bool(work_id) and len(work_id) <= 256
+            and type(work.get("revision")) is int and 1 <= work["revision"] <= 9_007_199_254_740_991
+            and type(work.get("sequence")) is int and 1 <= work["sequence"] <= 9_007_199_254_740_991
+            and type(work.get("state")) is str and work["state"] in {"accepted", "running"}
+            and work.get("execution_settled") is False
+            and work.get("reason") is None and "result_text" not in work)
+
+
 def observation_cursor(value):
     if value is None:
         return None
