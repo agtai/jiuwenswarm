@@ -41,6 +41,8 @@ param(
     [string]$NativeMaxOutputTokens = 'inf',
     [ValidateRange(0.25, 1.5)]
     [double]$NativeAudioSpeed = 1.0,
+    [ValidateSet('provider-default', 'minimal', 'low', IgnoreCase = $false)]
+    [string]$NativeReasoningEffort = 'provider-default',
     [switch]$L0Measurement,
     [switch]$L0OrdinaryChromeBatch,
     [switch]$L0ResumeBatch,
@@ -717,6 +719,13 @@ try {
         }
         $savedLocalBargeInProperty = $savedConfig.PSObject.Properties['local_barge_in_profile']
         $savedAudioSpeedProperty = $savedConfig.PSObject.Properties['native_audio_speed']
+        $savedReasoningEffortProperty = $savedConfig.PSObject.Properties['native_reasoning_effort']
+        if (-not $PSBoundParameters.ContainsKey('NativeReasoningEffort') -and $null -ne $savedReasoningEffortProperty -and $null -ne $savedReasoningEffortProperty.Value) {
+            $NativeReasoningEffort = [string]$savedReasoningEffortProperty.Value
+            if (@('provider-default', 'minimal', 'low') -cnotcontains $NativeReasoningEffort) {
+                Fail '已保存的 Realtime reasoning effort 必须为 provider-default、minimal 或 low。'
+            }
+        }
         if (-not $PSBoundParameters.ContainsKey('NativeAudioSpeed') -and $null -ne $savedAudioSpeedProperty -and $null -ne $savedAudioSpeedProperty.Value) {
             $NativeAudioSpeed = [double]$savedAudioSpeedProperty.Value
             if ([double]::IsNaN($NativeAudioSpeed) -or $NativeAudioSpeed -lt 0.25 -or $NativeAudioSpeed -gt 1.5) {
@@ -829,6 +838,7 @@ try {
             data_dir       = $DataDir
             local_barge_in_profile = $LocalBargeInProfile
             native_audio_speed = $NativeAudioSpeed
+            native_reasoning_effort = $NativeReasoningEffort
         } | ConvertTo-Json | Set-Content -LiteralPath $DemoConfigPath -Encoding UTF8
         Write-Pass "已保存无密钥的机器私有 Demo 选择：$DemoConfigPath"
     }
@@ -941,6 +951,7 @@ try {
         LIVE_VOICE_NATIVE_VAD_EAGERNESS                             = $NativeVadEagerness
         LIVE_VOICE_NATIVE_MAX_OUTPUT_TOKENS                        = $NativeMaxOutputTokens
         LIVE_VOICE_NATIVE_AUDIO_SPEED                              = $NativeAudioSpeed.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+        LIVE_VOICE_NATIVE_REASONING_EFFORT                          = $NativeReasoningEffort
         PYTHONUTF8                                                = '1'
         PYTHONIOENCODING                                          = 'utf-8'
     }
@@ -1235,6 +1246,7 @@ try {
         native_vad_eagerness       = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeVadEagerness } else { $null }
         native_max_output_tokens  = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeMaxOutputTokens } else { $null }
         native_audio_speed        = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeAudioSpeed } else { $null }
+        native_reasoning_effort   = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeReasoningEffort } else { $null }
         required_flags            = $validatedFlags
         frontend_flags            = [ordered]@{
             VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION = $generationInterruptionEnabled

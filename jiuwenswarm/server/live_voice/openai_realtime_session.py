@@ -13,6 +13,7 @@ import asyncio
 import inspect
 import json
 import math
+import re
 import time
 import unicodedata
 from collections import OrderedDict, deque
@@ -539,6 +540,38 @@ class OpenAIRealtimeSession:
         except Exception:
             pass
 
+    def _observe_negotiated_configuration(self, event: OpenAIRealtimeEvent) -> None:
+        """Record only bounded public settings actually returned by the Provider."""
+        if self._diagnostic_origin is None:
+            return
+        try:
+            session = event.to_dict().get("session", {})
+            def mapping(value):
+                return value if isinstance(value, Mapping) else {}
+            audio = mapping(session.get("audio"))
+            output = mapping(audio.get("output"))
+            detection = mapping(mapping(audio.get("input")).get("turn_detection"))
+            reasoning = mapping(session.get("reasoning"))
+            effort = reasoning.get("effort", "omitted")
+            eagerness = detection.get("eagerness", "omitted")
+            fields = {
+                "native_reasoning_effort": effort if effort in {"omitted", "minimal", "low", "medium", "high"} else "other",
+                "native_vad_eagerness": eagerness if eagerness in {"omitted", "auto", "low", "medium", "high"} else "other",
+            }
+            model = session.get("model")
+            if type(model) is str and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", model):
+                fields["native_model"] = model
+            speed = output.get("speed")
+            if type(speed) in (int, float) and 0.25 <= speed <= 1.5:
+                fields["native_audio_speed"] = speed
+            budget = session.get("max_output_tokens")
+            if budget == "inf" or (type(budget) is int and 1 <= budget <= 4096):
+                fields["native_output_budget"] = str(budget)
+            self._observe_transport("configuration_confirmed", event.event_type, event.event_id, **fields)
+        except Exception:
+            # Optional diagnostics must not change negotiation or echo payloads.
+            return
+
     async def open(self, *, session_update: Mapping[str, object]) -> None:
         async with self._state_lock:
             if self._state is not RealtimeSessionState.NEW:
@@ -619,6 +652,7 @@ class OpenAIRealtimeSession:
                 expected_type="session.updated",
                 expected_session_id=provider_session_id,
             )
+            self._observe_negotiated_configuration(updated)
         except asyncio.CancelledError:
             await self._close_after_open_failure()
             raise

@@ -334,6 +334,7 @@ def active_engine(
     session_config: OpenAIRealtimeSessionConfig | None = None,
     max_output_tokens: int | str = "inf",
     audio_speed: float = 1.0,
+    reasoning_effort: str | None = None,
     settle_silent_delivery: bool = True,
 ) -> tuple[OpenAIRealtimeNativeInteractionEngine, ScriptedSocket, CapturingFactory]:
     socket = ScriptedSocket((*negotiation(), *events))
@@ -346,6 +347,7 @@ def active_engine(
         pending_audio_capacity=pending_audio_capacity,
         max_output_tokens=max_output_tokens,
         audio_speed=audio_speed,
+        reasoning_effort=reasoning_effort,
     )
     if settle_silent_delivery:
         next_event = engine.next_event
@@ -365,6 +367,31 @@ def active_engine(
 def action_payload(event: NativeEngineEvent) -> dict[str, str]:
     assert event.action is not None
     return dict(event.action.payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effort", [None, "minimal", "low"])
+async def test_reasoning_effort_reaches_provider_without_inventing_default(effort):
+    engine, socket, _ = active_engine(reasoning_effort=effort)
+    try:
+        await engine.start()
+        session = socket.sent[0]["session"]
+        if effort is None:
+            assert "reasoning" not in session
+        else:
+            assert session["reasoning"] == {"effort": effort}
+    finally:
+        await engine.close()
+
+
+@pytest.mark.parametrize("effort", ["", "provider-default", "high", "LOW", " low", True, 1, [], {}])
+def test_invalid_reasoning_effort_rejects_before_any_provider_connection(effort):
+    from jiuwenswarm.server.live_voice.native_interaction_config import NativeInteractionConfigurationError
+    factory = CapturingFactory(ScriptedSocket())
+    with pytest.raises(NativeInteractionConfigurationError) as exc:
+        OpenAIRealtimeNativeInteractionEngine(config(), binding=binding(), socket_factory=factory, reasoning_effort=effort)
+    assert exc.value.reason == "NATIVE_REASONING_EFFORT_INVALID"
+    assert factory.calls == []
 
 
 @pytest.mark.asyncio

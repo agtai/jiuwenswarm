@@ -1681,6 +1681,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     vad_eagerness=interaction_selection.native_vad_eagerness,
                     max_output_tokens=interaction_selection.native_max_output_tokens,
                     audio_speed=interaction_selection.native_audio_speed,
+                    reasoning_effort=interaction_selection.native_reasoning_effort,
                 )
 
         except Exception:

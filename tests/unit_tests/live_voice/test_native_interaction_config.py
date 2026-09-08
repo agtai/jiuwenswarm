@@ -12,6 +12,7 @@ from jiuwenswarm.server.live_voice.native_interaction_config import (
     NATIVE_VAD_EAGERNESS_ENV,
     NATIVE_MAX_OUTPUT_TOKENS_ENV,
     NATIVE_AUDIO_SPEED_ENV,
+    NATIVE_REASONING_EFFORT_ENV,
     InteractionEngineKind,
     NativeInteractionConfigurationError,
     NativeInteractionSelection,
@@ -148,7 +149,7 @@ def test_native_endpoint_configuration_is_exact_and_fails_closed(value):
 def test_cascade_never_reads_native_endpoint_configuration(kind):
     class CascadeEnvironment(dict):
         def get(self, key, *default):
-            if key in {NATIVE_VAD_EAGERNESS_ENV, NATIVE_REALTIME_MODEL_ENV, NATIVE_MAX_OUTPUT_TOKENS_ENV, NATIVE_AUDIO_SPEED_ENV}:
+            if key in {NATIVE_VAD_EAGERNESS_ENV, NATIVE_REALTIME_MODEL_ENV, NATIVE_MAX_OUTPUT_TOKENS_ENV, NATIVE_AUDIO_SPEED_ENV, NATIVE_REASONING_EFFORT_ENV}:
                 raise AssertionError("Cascade accessed Native-only configuration")
             return super().get(key, *default)
 
@@ -156,6 +157,21 @@ def test_cascade_never_reads_native_endpoint_configuration(kind):
     selected = select_interaction_engine_environment(environment)
     assert selected.kind is InteractionEngineKind.CASCADE
     assert selected.native_vad_eagerness is None
+
+
+@pytest.mark.parametrize("raw,expected", [(None, None), ("provider-default", None), ("minimal", "minimal"), ("low", "low")])
+def test_reasoning_effort_preserves_omitted_provider_default(raw, expected):
+    env = {INTERACTION_ENGINE_ENV: "openai-realtime-native"}
+    if raw is not None:
+        env[NATIVE_REASONING_EFFORT_ENV] = raw
+    assert select_interaction_engine_environment(env).native_reasoning_effort == expected
+
+
+@pytest.mark.parametrize("raw", [None, "", "LOW", " low", "high", "low\n", True, 1, [], {}])
+def test_reasoning_effort_invalid_environment_fails_closed(raw):
+    with pytest.raises(NativeInteractionConfigurationError) as exc:
+        select_interaction_engine_environment({INTERACTION_ENGINE_ENV: "openai-realtime-native", NATIVE_REASONING_EFFORT_ENV: raw})
+    assert exc.value.reason == "NATIVE_REASONING_EFFORT_INVALID"
 
 
 def test_endpoint_selection_reads_only_explicit_environment_and_retains_old_constructor(monkeypatch):

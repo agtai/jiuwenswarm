@@ -18,6 +18,7 @@ NATIVE_REALTIME_MODEL_ENV = "LIVE_VOICE_NATIVE_REALTIME_MODEL"
 NATIVE_VAD_EAGERNESS_ENV = "LIVE_VOICE_NATIVE_VAD_EAGERNESS"
 NATIVE_MAX_OUTPUT_TOKENS_ENV = "LIVE_VOICE_NATIVE_MAX_OUTPUT_TOKENS"
 NATIVE_AUDIO_SPEED_ENV = "LIVE_VOICE_NATIVE_AUDIO_SPEED"
+NATIVE_REASONING_EFFORT_ENV = "LIVE_VOICE_NATIVE_REASONING_EFFORT"
 DEFAULT_NATIVE_AUDIO_SPEED = 1.0
 DEFAULT_NATIVE_REALTIME_MODEL = "gpt-realtime-2.1-mini"
 DEFAULT_NATIVE_VAD_EAGERNESS = "auto"
@@ -44,6 +45,28 @@ class NativeInteractionSelection:
     native_vad_eagerness: str | None = None
     native_max_output_tokens: int | Literal["inf"] = DEFAULT_NATIVE_MAX_OUTPUT_TOKENS
     native_audio_speed: float = DEFAULT_NATIVE_AUDIO_SPEED
+    native_reasoning_effort: str | None = None
+
+
+def validate_native_reasoning_effort(value: object) -> str | None:
+    """Keep Provider defaults absent; bound the explicitly authorized A/B modes."""
+    if value is None:
+        return None
+    if type(value) is str and value in {"minimal", "low"}:
+        return value
+    raise NativeInteractionConfigurationError(
+        "NATIVE_REASONING_EFFORT_INVALID", "Native reasoning effort must be minimal, low or omitted",
+    )
+
+
+def _reasoning_effort_environment(value: object) -> str | None:
+    if type(value) is str and value == "provider-default":
+        return None
+    if type(value) is not str:
+        raise NativeInteractionConfigurationError(
+            "NATIVE_REASONING_EFFORT_INVALID", "Native reasoning effort environment must be a canonical string",
+        )
+    return validate_native_reasoning_effort(value)
 
 
 def validate_native_audio_speed(value: object) -> float:
@@ -173,10 +196,15 @@ def select_interaction_engine_environment(
         native_audio_speed=_audio_speed_environment(
             environ.get(NATIVE_AUDIO_SPEED_ENV, str(DEFAULT_NATIVE_AUDIO_SPEED))
         ),
+        native_reasoning_effort=_reasoning_effort_environment(
+            environ.get(NATIVE_REASONING_EFFORT_ENV, "provider-default")
+        ),
     )
 
 
 __all__ = [
+    "NATIVE_REASONING_EFFORT_ENV",
+    "validate_native_reasoning_effort",
     "DEFAULT_NATIVE_AUDIO_SPEED",
     "NATIVE_AUDIO_SPEED_ENV",
     "validate_native_audio_speed",

@@ -55,6 +55,7 @@ from jiuwenswarm.server.live_voice.native_interaction_config import (
     DEFAULT_NATIVE_VAD_EAGERNESS, validate_native_vad_eagerness,
     DEFAULT_NATIVE_MAX_OUTPUT_TOKENS, validate_native_max_output_tokens,
     DEFAULT_NATIVE_AUDIO_SPEED, validate_native_audio_speed,
+    validate_native_reasoning_effort,
 )
 from jiuwenswarm.server.live_voice.native_business_observation import project_native_receipt, is_task_acceptance_receipt
 from jiuwenswarm.server.live_voice.native_continuation_preparation import (
@@ -495,8 +496,11 @@ def _session_update(
     vad_eagerness: str = DEFAULT_NATIVE_VAD_EAGERNESS,
     max_output_tokens: int | str = DEFAULT_NATIVE_MAX_OUTPUT_TOKENS,
     audio_speed: float = DEFAULT_NATIVE_AUDIO_SPEED,
+    reasoning_effort: str | None = None,
 ) -> dict[str, object]:
+    reasoning_effort = validate_native_reasoning_effort(reasoning_effort)
     return {
+        **({"reasoning": {"effort": reasoning_effort}} if reasoning_effort is not None else {}),
         "type": "realtime",
         "output_modalities": ["audio"],
         "max_output_tokens": validate_native_max_output_tokens(max_output_tokens),
@@ -809,6 +813,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         vad_eagerness: str = DEFAULT_NATIVE_VAD_EAGERNESS,
         max_output_tokens: int | str = DEFAULT_NATIVE_MAX_OUTPUT_TOKENS,
         audio_speed: float = DEFAULT_NATIVE_AUDIO_SPEED,
+        reasoning_effort: str | None = None,
     ) -> None:
         if not isinstance(binding, NativeInteractionBinding):
             raise TypeError("binding must use NativeInteractionBinding")
@@ -821,6 +826,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._vad_eagerness = validate_native_vad_eagerness(vad_eagerness)
         self._max_output_tokens = validate_native_max_output_tokens(max_output_tokens)
         self._audio_speed = validate_native_audio_speed(audio_speed)
+        self._reasoning_effort = validate_native_reasoning_effort(reasoning_effort)
         self._binding = binding
         self._session = OpenAIRealtimeSession(config, socket_factory=socket_factory,
                                              diagnostic_origin=identity_fields(binding))
@@ -1085,7 +1091,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             )
         self._state = NativeProviderState.STARTING
         try:
-            update = _session_update(self._vad_eagerness, self._max_output_tokens, self._audio_speed)
+            update = _session_update(self._vad_eagerness, self._max_output_tokens, self._audio_speed, self._reasoning_effort)
             self._profile_business("endpoint_strategy_requested", status=self._vad_eagerness)
             if self._business_context is not None:
                 update.update(instructions=_BUSINESS_INSTRUCTIONS, tools=native_business_tools())

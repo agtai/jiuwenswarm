@@ -176,6 +176,38 @@ and the six product requirements are those in the user-supplied execution prompt
 
 ## Physical acceptance preparation
 
+### E controlled configuration checkpoint
+
+Tier 1 configuration boundary: expose optional Provider reasoning effort for the
+authorized latency/quality A/B (`provider-default`, `minimal`, `low`). Omitted
+effort remains omitted; do not infer the Provider default or change models.
+Validate the closed setting before connection, pass it through the existing
+Gateway Engine factory and controlled launcher, and persist requested settings
+in the runtime contract. Observe only whitelisted negotiated model/speed/VAD/
+effort/output-budget facts from `session.updated`, never prompts, tools or keys.
+Tests cover default/explicit modes, invalid values before Provider effects,
+Cascade isolation and actual session.update payload. This change does not select
+the winning mode; real latency and semantic evidence must justify that decision.
+
+Configuration/Engine/Session checks: 295 pass; existing endpoint, output-budget
+and diagnostic privacy checks: 29 pass. PowerShell parser reports no errors.
+The source diff was reviewed at this Tier 1 boundary. The Provider's confirmed
+settings are observed once after exact session-ID negotiation and cannot change
+the negotiated result or record raw instructions/tools/credentials. Real
+configured-service A/B remains pending; no effort mode is selected by these tests.
+
+The first controlled candidate `eaf5382066` deployed cleanly at 01:19 UTC with
+real speech readiness, all four ports, `gpt-realtime-2.1`, speed 1.25, auto VAD,
+inf output budget and unchanged deepseek-v4-flash Agent configuration. No GUI
+was operated. Public RPC/media baseline recordings exercised real Provider audio,
+Task execution and file creation on the preceding d8ee9e6d deployment. One
+ordinary turn received first PCM 2759 ms after synthetic acoustic end; a Task
+receipt took 10098 ms. These are n=1 measurements per class, not physical playout.
+The real Task completed but its instruction changed the transcribed filename
+from 基线 to 记叙; the resulting file is therefore not a business-acceptance pass.
+All existing project files and hashes were retained. The first probe failed on
+Windows stdout encoding and is explicitly excluded from successful measurements.
+
 One consolidated operator script is provided in
 [the local acceptance script](../../logs/repair-20260908/PHYSICAL_ACCEPTANCE.md).
 Run after the exact candidate's controlled deployment has passed readiness.

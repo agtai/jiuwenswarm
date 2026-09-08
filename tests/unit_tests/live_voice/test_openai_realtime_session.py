@@ -129,6 +129,53 @@ def realtime_config(**changes: object) -> OpenAIRealtimeSessionConfig:
     return OpenAIRealtimeSessionConfig(**values)  # type: ignore[arg-type]
 
 
+@pytest.mark.asyncio
+async def test_negotiated_diagnostic_uses_only_confirmed_public_settings(monkeypatch):
+    import jiuwenswarm.server.live_voice.openai_realtime_session as module
+    captured = []
+    monkeypatch.setattr(module, "profile_snapshot_event", lambda event, origin, **fields: captured.append(fields))
+    created, updated = negotiated_events()
+    updated["session"].update({
+        "model": "gpt-realtime-2.1", "audio": {
+            "input": {"turn_detection": {"type": "semantic_vad", "eagerness": "high"}},
+            "output": {"speed": 1.25}}, "reasoning": {"effort": "low"},
+        "max_output_tokens": "inf", "instructions": "private-prompt-content",
+        "tools": [{"name": "private-tool"}], "api_key": "private-key-content",
+    })
+    socket = ScriptedRealtimeSocket((created, updated))
+    session = OpenAIRealtimeSession(realtime_config(), socket_factory=CapturingFactory(socket),
+        diagnostic_origin={"interaction_id": "interaction-1"})
+    try:
+        await session.open(session_update=session_update())
+        confirmed = [r for r in captured if r.get("milestone") == "configuration_confirmed"]
+        assert len(confirmed) == 1
+        assert confirmed[0] == {
+            "milestone": "configuration_confirmed", "status": "session.updated", "source_event_id": "evt-2",
+            "native_model": "gpt-realtime-2.1", "native_audio_speed": 1.25,
+            "native_reasoning_effort": "low", "native_vad_eagerness": "high", "native_output_budget": "inf",
+        }
+        assert "private" not in json.dumps(captured)
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_absent_negotiated_settings_are_not_invented(monkeypatch):
+    import jiuwenswarm.server.live_voice.openai_realtime_session as module
+    captured = []
+    monkeypatch.setattr(module, "profile_snapshot_event", lambda event, origin, **fields: captured.append(fields))
+    socket = ScriptedRealtimeSocket(negotiated_events())
+    session = OpenAIRealtimeSession(realtime_config(), socket_factory=CapturingFactory(socket),
+        diagnostic_origin={"interaction_id": "interaction-1"})
+    try:
+        await session.open(session_update=session_update())
+        confirmed = next(r for r in captured if r.get("milestone") == "configuration_confirmed")
+        assert confirmed["native_reasoning_effort"] == confirmed["native_vad_eagerness"] == "omitted"
+        assert not {"native_model", "native_audio_speed", "native_output_budget"} & confirmed.keys()
+    finally:
+        await session.close()
+
+
 def session_traceback_with_locals(exc: BaseException) -> str:
     provider_traceback = exc.__traceback__
     while (
