@@ -73,7 +73,8 @@ async def test_real_task_and_journal_receipt_return_before_blocked_optional_cont
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("continuation", ["forbidden_mutation", "fresh_context"])
-async def test_acceptance_speech_does_not_wait_and_dependent_steps_require_fresh_context(continuation):
+@pytest.mark.parametrize("bound", [False, True])
+async def test_acceptance_speech_does_not_wait_and_dependent_steps_require_fresh_context(continuation, bound):
     refresh_entered, release = asyncio.Event(), asyncio.Event()
     async def refresh():
         refresh_entered.set()
@@ -101,7 +102,7 @@ async def test_acceptance_speech_does_not_wait_and_dependent_steps_require_fresh
         assert result[1] is not None and not refresh_entered.is_set()
         requests = [event for event in socket.sent if event["type"] == "response.create"]
         assert len(requests) == 2 and requests[-1]["response"]["tool_choice"] == "auto"
-        assert [tool["name"] for tool in requests[-1]["response"]["tools"]] == ["jiuwen_context_get"]
+        assert [tool["name"] for tool in requests[-1]["response"]["tools"]] == ["jiuwen_bound_context_get"]
         assert "one brief natural sentence" in requests[-1]["response"]["instructions"]
         before = tuple(socket.sent)
         assert await engine.send_delegate_result("call1", f.response_ref(1), canonical) == result
@@ -112,16 +113,18 @@ async def test_acceptance_speech_does_not_wait_and_dependent_steps_require_fresh
         before = engine.snapshot().delegate_count
         followup = f.business_function("followup", "p2", "call2")
         if continuation == "forbidden_mutation":
-            followup["name"] = "jiuwen_task_create"
-            followup["arguments"] = function["arguments"]
+            followup["name"] = "jiuwen_bound_task_create" if bound else "jiuwen_task_create"
+            followup["arguments"] = (json.dumps({"request_text": "Read notes and write another report", "name": "Another report"})
+                                     if bound else function["arguments"])
             socket.push(followup)
             with pytest.raises(f.OpenAIRealtimeNativeInteractionError) as rejected:
                 await engine.next_event()
             assert rejected.value.reason == "NATIVE_RECEIPT_TOOL_FORBIDDEN"
             assert engine.snapshot().delegate_count == before
         else:
-            followup["name"] = "jiuwen_context_get"
-            followup["arguments"] = json.dumps({"request_text": "Continue the user's dependent steps", "context_id": None})
+            followup["name"] = "jiuwen_bound_context_get" if bound else "jiuwen_context_get"
+            followup["arguments"] = json.dumps({"request_text": "Continue the user's dependent steps",
+                                                **({} if bound else {"context_id": None})})
             socket.push(followup)
             assert (await engine.next_event()).delegate.business.operation == "context.get"
             socket.push(f.response_done("d2", "p2"))

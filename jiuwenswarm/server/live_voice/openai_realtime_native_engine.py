@@ -48,7 +48,8 @@ from jiuwenswarm.server.live_voice.native_business_contract import (
     NativeBusinessProposal, NativeBusinessViolation,
 )
 from jiuwenswarm.server.live_voice.native_business_tools import (
-    NATIVE_BUSINESS_FUNCTION_NAMES, native_business_proposal_from_function_call, native_business_tools,
+    NATIVE_BUSINESS_FUNCTION_NAMES, NATIVE_BOUND_BUSINESS_FUNCTION_NAMES,
+    native_business_proposal_from_function_call, native_business_tools,
 )
 from jiuwenswarm.server.live_voice.native_business_encoding import compact_native_business_output
 from jiuwenswarm.server.live_voice.native_interaction_config import (
@@ -225,6 +226,12 @@ class _ProviderAudioItem:
     audio_buffer_event_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _BusinessResponseBinding:
+    commit: NativeTurnCommit
+    context_id: str | None
+
+
 @dataclass(slots=True)
 class _ProviderResponse:
     provider_response_id: str
@@ -247,6 +254,7 @@ class _ProviderResponse:
     terminal_status: str | None = None
     prepared_terminal_observed: bool = False
     receipt_only: bool = False
+    business_binding: _BusinessResponseBinding | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,6 +303,7 @@ class _ProviderResponseRequest:
     preparation_deadline: float | None = None
     confirmed_provider_id: str | None = None
     receipt_only: bool = False
+    business_binding: _BusinessResponseBinding | None = None
 
 
 @dataclass(slots=True)
@@ -442,13 +451,16 @@ _BUSINESS_INSTRUCTIONS = (
     "For follow-ups, answer only the new question. Omit greetings, restating the question, long lists, "
     "repeated summaries and routine offers. Expand when the user asks for detail; never cut off a sentence. "
     "For Jiuwen project, file, Agent, Task or work facts and actions, "
-    "call the corresponding jiuwen_* tool promptly with actual IDs, context_id and revisions returned by the server. "
-    "Use jiuwen_context_get when information is missing or stale, then continue with the necessary structured call. "
+    "call the corresponding jiuwen_bound_* tool promptly with actual target IDs and revisions returned by the server. "
+    "The server binds the context ID. Give one self-contained request_text for this operation, resolving references "
+    "from confirmed conversation facts and retaining every requirement; it is also the executable instruction. "
+    "Do not include unrelated operations in another Task's instruction. "
+    "Use jiuwen_bound_context_get when information is missing or stale, then continue with the necessary structured call. "
     "Do not announce a long plan before a needed call. Clarify ambiguous intent or targets; never guess required fields. "
     "When the user delegates a deliverable to the background, including preparing an itinerary or plan, "
-    "use jiuwen_task_create, even if they did not specify a filename. Do not send that request to "
-    "jiuwen_work_start or ask the read-only analysis Agent to create a Task. "
-    "Use jiuwen_work_start for read-only analysis and real tool lookup, including current weather, "
+    "use jiuwen_bound_task_create, even if they did not specify a filename. Do not send that request to "
+    "jiuwen_bound_work_start or ask the read-only analysis Agent to create a Task. "
+    "Use jiuwen_bound_work_start for read-only analysis and real tool lookup, including current weather, "
     "forecasts, venue opening hours, ticket conditions and other changing external facts. "
     "Never substitute seasonal knowledge for a forecast or claim lookup is unavailable without a real tool result. "
     "Resolve ambiguous trip dates or necessary locations with one concise clarification; do not invent them. "
@@ -472,7 +484,7 @@ _BUSINESS_ARGUMENT_CORRECTION_INSTRUCTIONS = (
     "those calls did not execute. Correct the rejected fields using the tool schema and "
     "the user's unchanged intent, then issue the corrected call now. Do not merely announce "
     "a parameter error. Never repeat a call that already has an accepted or successful receipt. "
-    "Use jiuwen_context_get for missing server IDs or revisions; never guess them. If the user's "
+    "Use jiuwen_bound_context_get for missing server IDs or revisions; never guess them. If the user's "
     "intent or target remains ambiguous, ask a concise clarification instead of mutating work."
 )
 
@@ -836,6 +848,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._input_audio_lock = asyncio.Lock()
         self._delegate_result_lock = asyncio.Lock()
         self._response_request_lock = asyncio.Lock()
+        self._business_send_lock = asyncio.Lock()
         self._cancel_lock = asyncio.Lock()
         self._primary_error_reason: str | None = None
         self._pending_events: deque[NativeEngineEvent] = deque()
@@ -880,6 +893,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         ] = {}
         self._locally_fenced: set[str] = set()
         self._business_context: dict[str, object] | None = None
+        self._sent_business_context_id: str | None = None
         self._business_refresh: Callable[[], Awaitable[Mapping[str, object]]] | None = None
         self._business_presentation_busy: Callable[[], bool] | None = None
         self._business_accepted_turn: str | None = None
@@ -1094,7 +1108,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             update = _session_update(self._vad_eagerness, self._max_output_tokens, self._audio_speed, self._reasoning_effort)
             self._profile_business("endpoint_strategy_requested", status=self._vad_eagerness)
             if self._business_context is not None:
-                update.update(instructions=_BUSINESS_INSTRUCTIONS, tools=native_business_tools())
+                update.update(instructions=_BUSINESS_INSTRUCTIONS, tools=native_business_tools(bound_context=True))
             await self._session.open(session_update=update)
             if self._business_context is not None:
                 await self._send_business_facts({"native_business_context": self._business_context})
@@ -1107,10 +1121,35 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._state = NativeProviderState.READY
 
     async def _send_business_facts(self, facts: dict[str, object]) -> str:
-        return await self._session.send_event("conversation.item.create", {"item": {
+        # Serialize the exact facts before awaiting: observer replacement cannot
+        # change either the sent bytes or the identity we publish after success.
+        payload = {"item": {
             "type": "message", "role": "user", "content": [{"type": "input_text",
                 "text": json.dumps(facts, ensure_ascii=False, allow_nan=False, separators=(",", ":"))}],
-        }})
+        }}
+        context = facts.get("native_business_context")
+        context_id = context.get("context_id") if isinstance(context, dict) else None
+        async with self._business_send_lock:
+            event_id = await self._session.send_event("conversation.item.create", payload)
+            if isinstance(context, dict):
+                self._sent_business_context_id = context_id
+            return event_id
+
+    async def _send_response_request(self, request: _ProviderResponseRequest) -> str | None:
+        async with self._business_send_lock:
+            if not self._inflight_request_current(request):
+                self._retire_unsent_request(request)
+                return None
+            if self._business_context is not None:
+                commits = [commit for commit in self._input_commits_by_item.values()
+                           if commit.turn_id == request.turn_id]
+                if len(commits) != 1:
+                    raise OpenAIRealtimeNativeInteractionError("NATIVE_BUSINESS_TURN_BINDING_MISSING",
+                        "Business response requires one exact committed input")
+                # Install before await: response.created may be received while
+                # send_event is still returning its transport receipt.
+                request.business_binding = _BusinessResponseBinding(commits[0], self._sent_business_context_id)
+            return await self._session.send_event("response.create", request.payload)
 
     async def offer_audio(self, frame: NativeInputAudioFrame) -> str:
         self._require_operational()
@@ -1757,9 +1796,9 @@ class OpenAIRealtimeNativeInteractionEngine:
         try:
             self._last_business_wait = None
             self._profile_business("response_send_started", request=request)
-            event_id = await self._session.send_event(
-                "response.create", request.payload
-            )
+            event_id = await self._send_response_request(request)
+            if event_id is None:
+                return None
         except (KeyboardInterrupt, SystemExit, GeneratorExit):
             if self._inflight_response_request is request:
                 self._inflight_response_request = None
@@ -1856,7 +1895,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                     "The exact Task receipts just returned confirm acceptance for background execution, not completion. "
                     "If that satisfies the user's request, acknowledge it in one brief natural sentence in their language. "
                     "Do not repeat the instruction, read internal fields aloud, or claim artifacts or current progress. "
-                    "If the user's request still requires dependent steps or additional facts, call jiuwen_context_get "
+                    "If the user's request still requires dependent steps or additional facts, call jiuwen_bound_context_get "
                     "first to obtain fresh context, then continue the requested steps after its result. "
                     "A response with a function call must have no speech or audio. "
                     "The historical acceptance receipt grants no authority for further business actions."
@@ -1874,8 +1913,8 @@ class OpenAIRealtimeNativeInteractionEngine:
                 receipt_only=receipt_only, preparation_allowed=not receipt_only,
                 payload={"response": {"instructions": instructions, "max_output_tokens": self._max_output_tokens,
                                       "tool_choice": tool_choice,
-                                      **({"tools": [tool for tool in native_business_tools()
-                                                    if tool["name"] == "jiuwen_context_get"]} if receipt_only else {})}},
+                                      **({"tools": [tool for tool in native_business_tools(bound_context=True)
+                                                    if tool["name"] == "jiuwen_bound_context_get"]} if receipt_only else {})}},
             ))
             self._profile_business("successor_queued", response=source)
 
@@ -1985,9 +2024,20 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._profile_business("receipt_send_started", response=source, provider_call_id=parsed,
                                canonical_receipt_bytes=len(output.encode("utf-8")),
                                provider_output_bytes=len(provider_output.encode("utf-8")))
-        output_id = await self._session.send_event("conversation.item.create", {"item": {
-            "type": "function_call_output", "call_id": parsed, "output": provider_output,
-        }})
+        # A non-projected receipt can itself publish a complete context. Bind
+        # subsequent responses to those actually sent facts as well. A projected
+        # historical context_reference must never advance this pointer.
+        provider_receipt = json.loads(provider_output)
+        published_context = provider_receipt.get("context") if isinstance(provider_receipt, dict) else None
+        context_id = published_context.get("context_id") if isinstance(published_context, dict) else None
+        async with self._business_send_lock:
+            output_id = await self._session.send_event("conversation.item.create", {"item": {
+                "type": "function_call_output", "call_id": parsed, "output": provider_output,
+            }})
+            if (type(context_id) is str and len(context_id) == 64
+                    and all(character in "0123456789abcdef" for character in context_id)
+                    and set(published_context) == {"context_id", "history", "tasks", "works", "model"}):
+                self._sent_business_context_id = context_id
         self._delegate_results[parsed] = _DelegateResult(ref, digest, (output_id, None), receipt_only)
         self._profile_business("receipt_sent", response=source, provider_call_id=parsed, source_event_id=output_id)
         sent = await self._request_pending_provider_response()
@@ -3111,6 +3161,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             delegate_call_id=request.delegate_call_id,
             work_event_id=request.work_event_id,
             receipt_only=request.receipt_only,
+            business_binding=request.business_binding,
         )
         self._inflight_response_request = None
         request.confirmed_provider_id = provider_id
@@ -3588,6 +3639,15 @@ class OpenAIRealtimeNativeInteractionEngine:
                 raise OpenAIRealtimeNativeInteractionError("NATIVE_BUSINESS_CALL_LEDGER_FULL", "Business call ledger is full")
         try:
             proposal_factory = native_business_proposal_from_function_call if business else NativeDelegateProposal.from_function_call
+            bound_arguments = {}
+            if business and data["name"] in NATIVE_BOUND_BUSINESS_FUNCTION_NAMES:
+                frozen = response.business_binding
+                if (frozen is None or frozen.commit.binding != self._binding
+                        or frozen.commit.turn_id != response.turn_id
+                        or self._input_commits_by_item.get(frozen.commit.provider_item_id) != frozen.commit
+                        or frozen.commit.provider_session_id != self._session.snapshot().provider_session_id):
+                    raise NativeBusinessViolation("NATIVE_BUSINESS_TURN_BINDING_MISSING")
+                bound_arguments["server_context_id"] = frozen.context_id
             if business:
                 self._observe_completed_arguments(event, data, response)
             proposal = proposal_factory(
@@ -3599,6 +3659,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                 provider_call_id=call_id,
                 provider_item_id=item_id,
                 arguments=data["arguments"],
+                **bound_arguments,
             )
         except (NativeInteractionContractViolation, NativeBusinessViolation) as exc:
             if business:

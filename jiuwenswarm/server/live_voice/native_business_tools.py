@@ -34,7 +34,10 @@ _OPERATIONS = {
     "work.cancel": ("context_id", "target_id", "expected_revision"),
 }
 _FUNCTION_OPERATIONS = {"jiuwen_" + operation.replace(".", "_"): operation for operation in _OPERATIONS}
-NATIVE_BUSINESS_FUNCTION_NAMES = frozenset({NATIVE_BUSINESS_TOOL_NAME, *_FUNCTION_OPERATIONS})
+_BOUND_FUNCTION_OPERATIONS = {"jiuwen_bound_" + operation.replace(".", "_"): operation for operation in _OPERATIONS}
+NATIVE_BOUND_BUSINESS_FUNCTION_NAMES = frozenset(_BOUND_FUNCTION_OPERATIONS)
+NATIVE_BUSINESS_FUNCTION_NAMES = frozenset({NATIVE_BUSINESS_TOOL_NAME, *_FUNCTION_OPERATIONS, *_BOUND_FUNCTION_OPERATIONS})
+_SERVER_CONTEXT_ABSENT = object()
 _ACTION_FIELDS = ("context_id", "target_id", "expected_revision", "name", "instruction", "adjustment")
 _MAX_ARGUMENT_UTF8_BYTES = 16_384
 _DESCRIPTIONS = {
@@ -88,8 +91,30 @@ def _property(field: str, operation: str) -> dict[str, object]:
     }
 
 
-def native_business_tools() -> list[dict[str, object]]:
+def native_business_tools(*, bound_context: bool = False) -> list[dict[str, object]]:
     """Return fresh simple JSON Schemas; internal null-only fields stay internal."""
+    if bound_context:
+        result = []
+        for name, operation in _BOUND_FUNCTION_OPERATIONS.items():
+            fields = ["request_text", *(field for field in _OPERATIONS[operation]
+                                       if field not in {"context_id", "instruction", "adjustment"})]
+            properties = {field: _property(field, operation) for field in fields}
+            intent_field = next((field for field in ("instruction", "adjustment")
+                                 if field in _OPERATIONS[operation]), None)
+            if intent_field is not None:
+                properties["request_text"] = {
+                    **_property("request_text", operation), "maxLength": 4096,
+                    "description": "The ONE complete, self-contained executable request for this operation, preserving every user constraint and literal filename. "
+                    "Resolve references from confirmed conversation facts; do not copy unrelated operations into this request. "
+                    "Include required source, transformations, exact destination and preservation rules. "
+                    "This text is used unchanged as both the request and the executable " + intent_field +
+                    "; do not shorten it into a title or acknowledgement. Trimmed, control-free, at most 4096 UTF-8 bytes.",
+                }
+            result.append({"type": "function", "name": name,
+                "description": _DESCRIPTIONS[operation] + " The server binds the exact context; do not generate a context ID.",
+                "parameters": {"type": "object", "additionalProperties": False,
+                               "required": fields, "properties": properties}})
+        return result
     return [
         {
             "type": "function", "name": name, "description": _DESCRIPTIONS[operation],
@@ -117,7 +142,7 @@ def _invalid_constant(_value: str) -> None:
 
 
 def native_business_proposal_from_function_call(
-    *, name: object, arguments: object, **binding: object,
+    *, name: object, arguments: object, server_context_id: object = _SERVER_CONTEXT_ABSENT, **binding: object,
 ) -> NativeBusinessProposal:
     """Decode closed Provider fields, retaining the authoritative v1 validators."""
     if type(name) is not str or name not in NATIVE_BUSINESS_FUNCTION_NAMES:
@@ -135,7 +160,8 @@ def native_business_proposal_from_function_call(
             return NativeBusinessProposal.from_function_call(arguments=arguments, **binding)
         except RecursionError:
             raise NativeBusinessViolation("NATIVE_BUSINESS_JSON_INVALID") from None
-    operation = _FUNCTION_OPERATIONS[name]
+    bound = name in _BOUND_FUNCTION_OPERATIONS
+    operation = (_BOUND_FUNCTION_OPERATIONS if bound else _FUNCTION_OPERATIONS)[name]
     try:
         try:
             value = json.loads(arguments, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
@@ -144,6 +170,8 @@ def native_business_proposal_from_function_call(
         except (ValueError, TypeError, RecursionError):
             raise NativeBusinessViolation("NATIVE_BUSINESS_JSON_INVALID") from None
         expected_fields = {"request_text", *_OPERATIONS[operation]}
+        if bound:
+            expected_fields -= {"context_id", "instruction", "adjustment"}
         if type(value) is not dict or set(value) != expected_fields:
             missing = expected_fields - set(value) if type(value) is dict else set()
             raise NativeBusinessViolation(
@@ -151,6 +179,13 @@ def native_business_proposal_from_function_call(
                 field=sorted(missing)[0] if missing else "arguments",
                 expected="Exactly these fields: " + ", ".join(sorted(expected_fields)),
             )
+        if bound:
+            if server_context_id is _SERVER_CONTEXT_ABSENT:
+                raise NativeBusinessViolation("NATIVE_BUSINESS_CONTEXT_BINDING_MISSING")
+            value = {**value, "context_id": server_context_id}
+            for field in ("instruction", "adjustment"):
+                if field in _OPERATIONS[operation]:
+                    value[field] = value["request_text"]
         action = NativeBusinessAction.from_dict({
             "operation": operation,
             **{field: value[field] if field in _OPERATIONS[operation] else None for field in _ACTION_FIELDS},
@@ -162,4 +197,6 @@ def native_business_proposal_from_function_call(
         # internal action wrapper. No argument values enter error metadata.
         if exc.field.startswith("action."):
             exc.field = exc.field.removeprefix("action.")
+        if bound and exc.field in {"instruction", "adjustment"}:
+            exc.field = "request_text"
         raise

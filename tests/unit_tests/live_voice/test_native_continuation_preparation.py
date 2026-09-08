@@ -868,6 +868,9 @@ async def test_scheduler_fault_wakes_waiting_single_reader_and_never_publishes(m
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name,arguments,operation", [
+    ("jiuwen_bound_context_get", {"request_text": "Read current context"}, "context.get"),
+    ("jiuwen_bound_task_create", {"request_text": "Read source.md and save changed.md while preserving source.md",
+        "name": "Changed report"}, "task.create"),
     ("jiuwen_context_get", {"request_text": "Read current context", "context_id": None}, "context.get"),
     ("jiuwen_work_get", {"request_text": "Read completed analysis", "context_id": "a" * 64,
         "target_id": "work-1"}, "work.get"),
@@ -881,7 +884,7 @@ async def test_prepared_named_and_legacy_tools_preserve_receive_time_and_delegat
     observed = []
     monkeypatch.setattr(module, "profile_snapshot_event", lambda event, identities, **fields:
         observed.append((dict(identities), fields, asyncio.get_running_loop().time())))
-    engine, socket, _ = await preparing_engine()
+    engine, socket, fresh = await preparing_engine()
     try:
         call = business_function("f2", "p2", "call2")
         call["name"] = name
@@ -899,6 +902,10 @@ async def test_prepared_named_and_legacy_tools_preserve_receive_time_and_delegat
         assert all(identities.get("response_id") is None and identities.get("response_generation") is None
                    for identities, _, _ in before)
         assert engine.snapshot().delegate_count == 0 and not engine._delegates
+        if name.startswith("jiuwen_bound_"):
+            fresh["context"] = {**business_context(), "context_id": "b" * 64}
+            await engine._send_business_facts({"native_business_context": fresh["context"]})
+            assert engine._sent_business_context_id == "b" * 64
         await asyncio.sleep(.03)
         await engine.acknowledge_presentation(response_ref(1))
         assert action_payload(await next_output(engine))["provider_response_id"] == "p2"
@@ -906,6 +913,11 @@ async def test_prepared_named_and_legacy_tools_preserve_receive_time_and_delegat
         admission_time = asyncio.get_running_loop().time()
         delegate = (await next_output(engine)).delegate
         assert delegate.business.operation == operation and delegate.provider_call_id == "call2"
+        if name.startswith("jiuwen_bound_"):
+            assert delegate.business.context_id == "a" * 64
+            assert delegate.turn_id == engine._responses["p2"].business_binding.commit.turn_id
+            if operation == "task.create":
+                assert delegate.business.instruction == arguments["request_text"]
         assert engine.snapshot().delegate_count == 1
         after = [(identities, fields, when) for identities, fields, when in observed
                  if identities.get("provider_response_id") == "p2"

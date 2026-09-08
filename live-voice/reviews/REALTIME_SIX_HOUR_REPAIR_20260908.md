@@ -247,3 +247,48 @@ One consolidated operator script is provided in
 Run after the exact candidate's controlled deployment has passed readiness.
 Until then implementation continues independently. No automation operates the
 user's browser or devices.
+## G implementation checkpoint: one complete intent and frozen sent context
+
+Tier 3 Provider adapter boundary, Main sole writer. The accepted packet explicitly
+forbids adding an ASR wait to the interaction critical path. Therefore this change
+does not wait for transcription or create a transcript-dependent call queue.
+The new closed `jiuwen_bound_*` schemas carry one complete `request_text`; for
+create/successor/start/update it is also the exact executable `instruction`, and
+for adjustment it is the exact `adjustment`. The common text retains the existing
+4096 UTF-8 byte action limit. Names, exact targets and revisions remain explicit.
+No summarizer, classifier, guessed filename, inferred target or relaxed validator
+is added. Legacy full-field calls retain their existing strict parser.
+
+The Engine freezes the exact committed Native turn and the context ID most
+recently successfully sent to Provider. Context publication and response creation
+share one short send-sequence lock; the immutable binding is installed on the
+inflight request before the socket send await and copied on response.created.
+Only metadata publication/send is locked, never context refresh, Agent or Task I/O.
+Canonical v1, Router authorization/final checks, journal and durable Task/outbox
+remain owners of execution truth. Supplied extra context/instruction fields in
+bound calls reject closed. Existing STOP, prepared admission, duplicate identity
+and receipt-only context.get guards remain binding.
+
+Acceptance covers all 13 schemas, UTF-8/closed fields, exact original requirements,
+stale context, delayed response.created, concurrent context publication, same-turn
+successors, prepared continuation and unchanged legacy/Cascade. Real parameter
+duration and durable receipt latency will be measured after deployment. Physical
+audio acceptance remains separate; test passes cannot close it.
+
+G closure at 02:11 UTC: first coherent Engine/tools/Router/runtime/encoding
+boundary: 324 passed. Final bound Router, continuation/prepared and receipt-only
+boundary: 154 passed after correcting the negative oracle to inspect the actual
+canonical rejected business receipt (the transport correctly returned ok).
+The real SQLite Task carries the single complete instruction unchanged; exact
+replay adds no Task/outbox effects and stale context rejects without another Task.
+Independent review closed one P2: a new input could retire a response while it
+waited for the new send lock. The implementation now rechecks ownership inside
+the lock and retires unsent requests without fabricating a send receipt.
+Reviewed before-await response.created, failed facts send, context-bearing output,
+prepared promotion, STOP and bound receipt-only mutation rejection. Prepared
+context remains frozen even after another context is actually published.
+
+The one text is the complete self-contained specification of this operation,
+resolved by Provider from confirmed facts; it is not an unexpanded pronoun or a
+copy of unrelated operations from the same turn. No ASR wait was introduced.
+Real model requirement preservation and latency gains remain pending deployment.

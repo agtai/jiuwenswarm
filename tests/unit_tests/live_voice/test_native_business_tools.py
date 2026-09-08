@@ -12,6 +12,7 @@ from jiuwenswarm.server.live_voice.native_business_contract import (
 )
 from jiuwenswarm.server.live_voice.native_business_tools import (
     NATIVE_BUSINESS_FUNCTION_NAMES,
+    NATIVE_BOUND_BUSINESS_FUNCTION_NAMES,
     native_business_proposal_from_function_call,
     native_business_tools,
 )
@@ -98,7 +99,7 @@ def test_tool_catalog_covers_existing_operations_without_legacy_or_unused_argume
     tools = native_business_tools()
     assert set(SCENARIOS) == NATIVE_BUSINESS_OPERATIONS
     assert len(tools) == len(SCENARIOS) == 13
-    assert {tool["name"] for tool in tools} | {"jiuwen_business"} == NATIVE_BUSINESS_FUNCTION_NAMES
+    assert {tool["name"] for tool in tools} | {"jiuwen_business"} | NATIVE_BOUND_BUSINESS_FUNCTION_NAMES == NATIVE_BUSINESS_FUNCTION_NAMES
     for tool in tools:
         operation = tool["name"].removeprefix("jiuwen_").replace("_", ".", 1)
         # create_successor's remaining underscore is part of the operation.
