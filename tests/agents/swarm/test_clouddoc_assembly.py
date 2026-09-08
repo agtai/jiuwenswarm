@@ -66,7 +66,7 @@ def test_a_team_member_gets_the_co_scribe_tools(key):
         {"clouddoc_config": _cfg(key)},
         SwarmBuildContext(session_id="s1", channel_id="web"),
     )
-    from jiuwenswarm.agents.harness.common.tools.clouddoc.clouddoc_tools import (
+    from jiuwenswarm.extensions.co_scribe.backend.toolkit.clouddoc_tools import (
         ALL_TOOL_NAMES,
     )
 
@@ -144,7 +144,7 @@ def test_every_tool_reaches_a_team_member(key):
     Taken from the toolkit's own list rather than copied, which is what this checks:
     the design's as-built section said seven tools while the toolkit built nine, and a
     hand-copied whitelist would have carried exactly that gap into team mode."""
-    from jiuwenswarm.agents.harness.common.tools.clouddoc.clouddoc_tools import (
+    from jiuwenswarm.extensions.co_scribe.backend.toolkit.clouddoc_tools import (
         ALL_TOOL_NAMES,
     )
     from jiuwenswarm.agents.harness.team.team_runtime_inheritance import TOOL_WHITELIST
@@ -183,7 +183,7 @@ def test_the_configured_roster_reaches_the_providers(key, monkeypatch):
     """The chat host hands its providers the configured agent roster; the team host
     must hand over the same one, or a provider built here cannot tell another agent's
     mention from a person's."""
-    from jiuwenswarm.agents.harness.common.tools.clouddoc import routing
+    from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers import routing
 
     seen: dict = {}
     real = routing.build_routed_provider

@@ -60,7 +60,7 @@ def _ctx(tool_name: str, args: dict | None = None):
 
 @pytest.mark.asyncio
 async def test_the_rail_refuses_every_write_class_and_only_those():
-    from jiuwenswarm.agents.harness.common.tools.clouddoc.clouddoc_tools import (
+    from jiuwenswarm.extensions.co_scribe.backend.toolkit.clouddoc_tools import (
         EFFECT_CLASSES,
     )
 

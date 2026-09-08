@@ -1,0 +1,11 @@
+id: co-scribe
+name: Co-Scribe
+version: 1.0.0
+description: "Cloud-document co-editing: connections, managed documents, watches and receipts"
+author: JiuwenSwarm
+min_jiuwenswarm_version: "0.2.5"
+package_type: application
+dependencies: {}
+permissions:
+  - outbound_network
+  - agent_tools

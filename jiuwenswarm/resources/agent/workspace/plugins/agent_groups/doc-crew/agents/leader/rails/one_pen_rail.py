@@ -82,7 +82,7 @@ class OnePenRail(DeepAgentRail):
         if not tool_name.startswith("clouddoc_"):
             return
         try:
-            from jiuwenswarm.agents.harness.common.tools.clouddoc.clouddoc_tools import (
+            from jiuwenswarm.extensions.co_scribe.backend.toolkit.clouddoc_tools import (
                 EFFECT_CLASSES,
             )
         except ImportError:

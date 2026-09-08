@@ -6632,6 +6632,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         p = params or {}
         await _clouddoc_call(ws, req_id, "set_model", str(p.get("model_name") or ""))
 
+    async def _clouddoc_set_doc_model(ws, req_id, params, session_id):
+        """The per-document pin. The deployment-wide one above stays as the default."""
+        p = params or {}
+        await _clouddoc_call(
+            ws, req_id, "set_doc_model",
+            str(p.get("doc_id") or ""), str(p.get("model_name") or ""),
+        )
+
     async def _clouddoc_watch_set(ws, req_id, params, session_id):
         p = params or {}
         panel = _resolve(clouddoc_panel)
@@ -6679,7 +6687,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=True, payload={"enabled": False})
             return
         try:
-            from jiuwenswarm.agents.harness.common.tools.clouddoc.receipts import ReceiptStore
+            from jiuwenswarm.extensions.co_scribe.backend.toolkit.receipts import ReceiptStore
 
             items = ReceiptStore().list_for(str(p.get("doc_id") or ""), limit=int(p.get("limit") or 50))
             await channel.send_response(ws, req_id, ok=True, payload={"receipts": items})
@@ -6902,7 +6910,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     if clouddoc_panel is not None:
         # Receipts land from other processes; the gateway watches the shared ledger
         # file and pushes, so the workbench does not have to poll (see the module).
-        from jiuwenswarm.gateway.clouddoc.receipts_watch import watch_receipts_file
+        from jiuwenswarm.extensions.co_scribe.backend.host.panel.receipts_watch import watch_receipts_file
 
         asyncio.create_task(
             watch_receipts_file(channel.broadcast_event),
@@ -6910,6 +6918,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
     channel.register_method("clouddoc.set_mode", _clouddoc_set_mode)
     channel.register_method("clouddoc.set_model", _clouddoc_set_model)
+    channel.register_method("clouddoc.set_doc_model", _clouddoc_set_doc_model)
     channel.register_method("clouddoc.watch_set", _clouddoc_watch_set)
     channel.register_method("clouddoc.watch_revoke", _clouddoc_watch_revoke)
     channel.register_method("clouddoc.watch_revoke_all", _clouddoc_watch_revoke_all)

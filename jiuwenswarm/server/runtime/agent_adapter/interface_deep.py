@@ -9164,7 +9164,7 @@ class JiuWenSwarmDeepAdapter:
             return
 
         if self._clouddoc_toolkit is None:
-            from jiuwenswarm.agents.harness.common.tools.clouddoc.provider import (
+            from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.provider import (
                 read_connection_specs,
             )
 
@@ -9183,10 +9183,10 @@ class JiuWenSwarmDeepAdapter:
                         credentials_file = spec["credentials_file"]
                         break
             try:
-                from jiuwenswarm.agents.harness.common.tools.clouddoc.clouddoc_tools import (
+                from jiuwenswarm.extensions.co_scribe.backend.toolkit.clouddoc_tools import (
                     CloudDocToolkit,
                 )
-                from jiuwenswarm.agents.harness.common.tools.clouddoc.factory import (
+                from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.factory import (
                     build_provider,
                 )
             except ImportError:
@@ -9211,7 +9211,7 @@ class JiuWenSwarmDeepAdapter:
                     # A chat turn reaches every connection's documents, routed by
                     # which connection adopted each one -- built by the shared helper
                     # so every attended host gets the same reach.
-                    from jiuwenswarm.agents.harness.common.tools.clouddoc.routing import (
+                    from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.routing import (
                         build_routed_provider,
                     )
 
@@ -9236,7 +9236,7 @@ class JiuWenSwarmDeepAdapter:
             # earlier draft primed before construction and no-oped on every fresh
             # session -- exactly the turns that need it.
             try:
-                from jiuwenswarm.agents.harness.common.tools.clouddoc.kinds import (
+                from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.kinds import (
                     prime_provider_kinds,
                 )
 
@@ -9288,7 +9288,7 @@ class JiuWenSwarmDeepAdapter:
                 harness_mode = "mandate"
             if harness_mode != "direct":
                 try:
-                    from jiuwenswarm.agents.harness.common.tools.clouddoc.receipts import ReceiptStore
+                    from jiuwenswarm.extensions.co_scribe.backend.toolkit.receipts import ReceiptStore
 
                     provider.receipt_sink = ReceiptStore()
                 except Exception:  # noqa: BLE001
@@ -9331,11 +9331,11 @@ class JiuWenSwarmDeepAdapter:
             )
 
 
-        from jiuwenswarm.agents.harness.common.tools.clouddoc.clouddoc_tools import (
+        from jiuwenswarm.extensions.co_scribe.backend.toolkit.clouddoc_tools import (
             unattended_allowlist_for,
         )
 
-        from jiuwenswarm.agents.harness.common.tools.clouddoc_bridge import (
+        from jiuwenswarm.extensions.co_scribe.backend.clouddoc_bridge import (
             to_openjiuwen,
         )
 
@@ -9368,7 +9368,7 @@ class JiuWenSwarmDeepAdapter:
         and the watcher uses a separate session per document, so chat sessions are
         unaffected.
         """
-        from jiuwenswarm.agents.harness.common.tools.clouddoc.clouddoc_tools import (
+        from jiuwenswarm.extensions.co_scribe.backend.toolkit.clouddoc_tools import (
             unattended_allowlist_for,
         )
 
@@ -16016,7 +16016,7 @@ def _load_custom_subagents(
 # decides the value for a turn is each request's own request.channel_id.
 # It is defined once in the provider module, which both the gateway and the agentserver
 # depend on; this is a re-export that keeps the existing references working.
-from jiuwenswarm.agents.harness.common.tools.clouddoc.provider import (  # noqa: E402
+from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.provider import (  # noqa: E402
     CLOUDDOC_CHANNEL_ID,
 )
 

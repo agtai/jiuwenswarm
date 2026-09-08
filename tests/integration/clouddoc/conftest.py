@@ -22,7 +22,7 @@ import uuid
 
 import pytest
 
-from jiuwenswarm.agents.harness.common.tools.clouddoc.google_provider import (
+from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.google_provider import (
     GoogleDocsProvider,
 )
 

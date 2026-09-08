@@ -1,4 +1,4 @@
-export type SettingsModuleTarget = 'models' | 'agent' | 'clouddoc';
+export type SettingsModuleTarget = 'models' | 'agent';
 
 export const SETTINGS_MODULE_NAVIGATION_EVENT = 'jiuwen:settings-module';
 

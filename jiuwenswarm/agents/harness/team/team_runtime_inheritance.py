@@ -30,7 +30,7 @@ from openjiuwen.extensions.observability.demand import (
     get_trajectory_span_processor,
 )
 
-from jiuwenswarm.agents.harness.common.tools.clouddoc.clouddoc_tools import (
+from jiuwenswarm.extensions.co_scribe.backend.toolkit.clouddoc_tools import (
     ALL_TOOL_NAMES as ALL_CLOUDDOC_TOOL_NAMES,
 )
 from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskUserRail

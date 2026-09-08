@@ -72,11 +72,17 @@ async def test_shell_loads_without_page_errors(page):
     assert not errors, errors
 
 
+# Co-scribe contributes the Docs page as an application plugin, so the rail entry
+# carries the plugin's nav key rather than the "docs" key it had while the shell
+# hardcoded it. The plugin is listed only while ``clouddoc.enabled`` is true.
+DOCS_NAV_KEY = "app:co-scribe"
+
+
 @pytest.mark.asyncio
 async def test_docs_panel_renders_connections_and_documents(page):
-    docs_nav = nav_item(page, "docs")
+    docs_nav = nav_item(page, DOCS_NAV_KEY)
     if await docs_nav.count() == 0:
-        pytest.skip("no cloud-doc connection on this deployment; Docs nav hidden by design")
+        pytest.skip("co-scribe is disabled on this deployment; Docs nav hidden by design")
     await docs_nav.first.click()
     await page.wait_for_selector('[data-testid="docs-add-conn-select"]', timeout=30000)
     conns = await page.locator('[data-testid="docs-add-conn-select"] option').count()

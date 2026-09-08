@@ -16,10 +16,10 @@ import CronPanel from './components/CronPanel';
 import HeartbeatPanel from './components/HeartbeatPanel';
 import { ToolPanel } from './components/ToolPanel';
 import { UpdatePanel } from './components/UpdatePanel';
-import { DocsPanel } from './components/DocsPanel';
-import { DocWorkbench } from './components/DocWorkbench';
-import { useDocWorkbenchStore } from './stores/docWorkbenchStore';
-import { OPEN_DOC_EVENT, consumePendingOpenDoc } from './features/clouddoc/openDocSignal';
+import { DocWorkbench } from '../../../../extensions/co_scribe/frontend/DocWorkbench';
+import { CO_SCRIBE_PLUGIN_ID } from '../../../../extensions/co_scribe/frontend/pluginId';
+import { useDocWorkbenchStore } from '../../../../extensions/co_scribe/frontend/stores/docWorkbenchStore';
+import { OPEN_DOC_EVENT, consumePendingOpenDoc } from '../../../../extensions/co_scribe/frontend/features/clouddoc/openDocSignal';
 import { ExternalCliInstallDialog, type ExternalCliInstallStatuses } from './components/ExternalCliInstallDialog';
 import { SettingsPage } from './features/settings/SettingsPage';
 import type { SettingsPageDefinition } from './features/settings/registry/types';
@@ -340,15 +340,6 @@ function AppContent({
   const [externalCliDetectResults, setExternalCliDetectResults] =
     useState<Partial<Record<ExternalCliAgentKind, ExternalCliDetectResult>>>({});
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
-  const [hasVisitedDocs, setHasVisitedDocs] = useState(false);
-  // A2 (§25.3): the Docs nav item renders only when a cloud-doc connection exists —
-  // a deployment that never accessioned sees nothing. The Settings module announces
-  // changes so the item appears the moment a first key lands.
-  const [cloudDocReady, setCloudDocReady] = useState(false);
-  // The co-scribe plugin's install state (the 乙 plan): uninstalled hides both
-  // cloud-doc surfaces -- the Settings module and the Docs entry.
-  const [cloudDocInstalled, setCloudDocInstalled] = useState(false);
-
   const [requestedSettingsModuleId, setRequestedSettingsModuleId] =
     useState<SettingsModuleTarget | null>(null);
   const {
@@ -766,18 +757,7 @@ function AppContent({
     import.meta.env.MODE,
     typeof serverConfig?.runtime_platform === 'string' ? serverConfig.runtime_platform : undefined,
   );
-  const platformHiddenNavItems = getHiddenNavItemsForPlatform(frontendPlatform);
-  const effectiveSettingsDefinition = useMemo(() => {
-    if (cloudDocInstalled) return settingsPageDefinition;
-    return {
-      ...settingsPageDefinition,
-      modules: settingsPageDefinition.modules.filter((m) => m.id !== 'clouddoc'),
-    };
-  }, [cloudDocInstalled, settingsPageDefinition]);
-
-  const hiddenNavItems = cloudDocReady
-    ? platformHiddenNavItems
-    : [...platformHiddenNavItems, 'docs' as const];
+  const hiddenNavItems = getHiddenNavItemsForPlatform(frontendPlatform);
 
   useEffect(() => {
     if (!serverConfig) {
@@ -1544,18 +1524,6 @@ function AppContent({
     };
   }, [isConnected, request]);
 
-  // A chat reference chip asks for a document's receipts: land on Docs. The doc id
-  // itself travels through the openDocSignal latch, not this event.
-  useEffect(() => {
-    const onGoSettings = (e: Event) => {
-      const module = (e as CustomEvent<{ module?: string }>).detail?.module;
-      setActiveNav('settings');
-      if (module === 'clouddoc') requestSettingsModule('clouddoc');
-    };
-    window.addEventListener('jiuwen:navigate-settings', onGoSettings);
-    return () => window.removeEventListener('jiuwen:navigate-settings', onGoSettings);
-  }, []);
-
   useEffect(() => {
     const onOpenDoc = () => {
       // Opening a document lands in the workbench (release §14), which lives in
@@ -1594,32 +1562,6 @@ function AppContent({
     window.addEventListener(OPEN_DOC_EVENT, onOpenDoc);
     return () => window.removeEventListener(OPEN_DOC_EVENT, onOpenDoc);
   }, []);
-
-  useEffect(() => {
-    if (!isConnected) return;
-    let stale = false;
-    const check = async () => {
-      try {
-        const conf = await request<{ enabled?: boolean; installed?: boolean; connections?: unknown[] }>('clouddoc.get_conf');
-        if (!stale) {
-          setCloudDocReady(
-            Boolean(conf?.enabled) && conf?.installed !== false && (conf?.connections?.length ?? 0) > 0,
-          );
-          setCloudDocInstalled(Boolean(conf?.enabled) && conf?.installed !== false);
-        }
-      } catch {
-        if (!stale) setCloudDocReady(false);
-      }
-    };
-    void check();
-    const onChanged = () => void check();
-    window.addEventListener('jiuwen:clouddoc-connections-changed', onChanged);
-    return () => {
-      stale = true;
-      window.removeEventListener('jiuwen:clouddoc-connections-changed', onChanged);
-    };
-  }, [isConnected]);
-
 
   const clearRestartAutoCloseTimer = useCallback(() => {
     if (restartAutoCloseTimerRef.current != null) {
@@ -2972,7 +2914,6 @@ function AppContent({
       }
       if (nav === 'agents') setHasVisitedAgents(true);
       if (nav === 'skills') setHasVisitedSkills(true);
-      if (nav === 'docs') setHasVisitedDocs(true);
     },
     [activeNav, isMobile, modelSetupGuideStep, setSingleAgentPanelExpanded, setTeamAreaExpanded, setToolPanelHidden, t],
   );
@@ -3113,9 +3054,15 @@ function AppContent({
   // composer below the document is the session's own, and sending the first
   // message from there promotes the new conversation exactly as the chat view
   // does, so the workbench stays up across the promotion (verified live).
-  // Everything the workbench renders is co-scribe UI: uninstalling the plugin
-  // (cloudDocInstalled false) takes it away wholesale, tabs and all.
-  const docWorkbenchShown = cloudDocInstalled && docWorkbenchOpen && !showConversationNotFound && !!sessionId;
+  // Everything the workbench renders is co-scribe UI: turning the plugin off
+  // takes it away wholesale, tabs and all. The workbench is not a nav page, so
+  // it has no contribution point of its own yet -- but its enabled flag is read
+  // from the same manifest entry that decides whether the Docs page is listed,
+  // so the two can never disagree.
+  const coScribeEnabled = applicationPlugins.some(
+    (plugin) => plugin.plugin_id === CO_SCRIBE_PLUGIN_ID && plugin.enabled !== false,
+  );
+  const docWorkbenchShown = coScribeEnabled && docWorkbenchOpen && !showConversationNotFound && !!sessionId;
 const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFound && !shouldFullscreen;
   const isNewSessionPromotion = Boolean(sessionId && sessionIdsCreatedInThisPageRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
@@ -3420,7 +3367,7 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
         {activeNav === 'settings' && (
           <div className="app-section">
             <SettingsPage
-              definition={effectiveSettingsDefinition}
+              definition={settingsPageDefinition}
               isConnected={isConnected}
               connectionState={connectionState}
               request={settingsRequest}
@@ -3463,11 +3410,6 @@ const showWorkspaceDivider = effectiveTeamAreaExpanded && !showConversationNotFo
                 onSymphonyEnabledChange={saveSymphonyEnabled}
                 onNavigateToSettings={() => requestSettingsModule('agent')}
             />
-          </div>
-        )}
-        {hasVisitedDocs && (
-          <div className={`app-section ${activeNav === 'docs' ? '' : 'is-hidden'}`}>
-            <DocsPanel isConnected={isConnected} />
           </div>
         )}
         {activeNav === 'connectorMarket' && (

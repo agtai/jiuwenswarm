@@ -445,7 +445,7 @@ def build_permission_rail(
             # reads ``_clouddoc_turn`` rather than the contextvar; see
             # ``_update_clouddoc_tools``.
             try:
-                from jiuwenswarm.agents.harness.common.tools.clouddoc.clouddoc_tools import (
+                from jiuwenswarm.extensions.co_scribe.backend.toolkit.clouddoc_tools import (
                     unattended_allowlist_for,
                 )
 

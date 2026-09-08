@@ -1,5 +1,17 @@
 import type { ApplicationPluginContribution, ApplicationPluginManifest } from './types';
 
+/**
+ * Something changed what the server would answer with -- a package was
+ * installed or removed, a plugin was switched on or off. Anything holding the
+ * manifest re-reads it rather than patching its own copy, so the nav rail, the
+ * 应用插件 cards and every gate that reads a plugin's enabled flag stay one fact.
+ */
+export const APPLICATION_PLUGINS_CHANGED_EVENT = 'jiuwen:application-plugins-changed';
+
+export function announceApplicationPluginsChanged(): void {
+  window.dispatchEvent(new Event(APPLICATION_PLUGINS_CHANGED_EVENT));
+}
+
 function isContribution(value: unknown): value is ApplicationPluginContribution {
   if (!value || typeof value !== 'object') return false;
   const item = value as Partial<ApplicationPluginContribution>;

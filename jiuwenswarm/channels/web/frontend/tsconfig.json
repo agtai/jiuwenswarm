@@ -24,7 +24,13 @@
     /* Paths */
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      /* Bundled application plugins live outside this project root
+         (extensions/<name>/frontend) and are compiled into this build. Their
+         directories have no node_modules of their own, so a bare specifier
+         resolved from there finds nothing; map every one back to the app's
+         own dependencies, which is the single copy Vite bundles anyway. */
+      "*": ["node_modules/@types/*", "node_modules/*"]
     }
   },
   "include": ["src", "tests/fixtures/settings-extension"],

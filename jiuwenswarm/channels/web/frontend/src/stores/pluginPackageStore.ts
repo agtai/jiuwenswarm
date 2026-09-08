@@ -1,4 +1,6 @@
 import { create } from 'zustand';
+
+import { announceApplicationPluginsChanged } from '../applicationPlugins/manifest';
 import { PluginInstallPendingError, pluginPackagesApi } from '../services/pluginPackagesApi';
 import type { PluginConnectionState, PluginPackageDetail, PluginPackageSummary } from '../types/pluginPackage';
 
@@ -298,7 +300,10 @@ export const usePluginPackageStore = create<PluginPackageState>((set) => ({
     }));
     try {
       await pluginPackagesApi.install(id);
-      if (id === 'co-scribe') window.dispatchEvent(new Event('jiuwen:clouddoc-connections-changed'));
+      // A package may contribute an application plugin (co-scribe's Docs page
+      // does), and its manifest entry is what the nav rail and the 应用插件
+      // cards read. Re-read it rather than special-casing any one package id.
+      announceApplicationPluginsChanged();
       set((state) => {
         const nextInstalled = { ...state.installed, [id]: true };
         persistLocalState({ installed: nextInstalled });
@@ -341,7 +346,10 @@ export const usePluginPackageStore = create<PluginPackageState>((set) => ({
     set({ busyId: id, error: null, successMessage: null });
     try {
       const { notice } = await pluginPackagesApi.uninstall(id);
-      if (id === 'co-scribe') window.dispatchEvent(new Event('jiuwen:clouddoc-connections-changed'));
+      // A package may contribute an application plugin (co-scribe's Docs page
+      // does), and its manifest entry is what the nav rail and the 应用插件
+      // cards read. Re-read it rather than special-casing any one package id.
+      announceApplicationPluginsChanged();
       set((state) => {
         const nextInstalled = { ...state.installed, [id]: false };
         persistLocalState({ installed: nextInstalled });

@@ -2711,24 +2711,20 @@ def install_agent_group(params: dict) -> None:
 
 
 def _co_scribe_lifecycle(installed: bool) -> None:
-    """The co-scribe plugin's install state drives the deployment's cloud-doc
-    feature (the 乙 plan): install turns it on in mandate mode, uninstall turns
-    it off. Connections, watches and the receipt ledger stay on disk either
-    way -- reinstalling finds them where they were. The UI reads the same flag
-    and reveals or hides the Settings module and the Docs panel accordingly."""
-    from jiuwenswarm.common.config import update_config
+    """The co-scribe plugin package's install state drives the deployment's
+    cloud-doc feature (the 乙 plan): install turns it on in mandate mode,
+    uninstall turns it off. Connections, watches and the receipt ledger stay on
+    disk either way -- reinstalling finds them where they were.
 
-    def mutate(data: dict) -> dict:
-        section = data.setdefault("clouddoc", {})
-        section["enabled"] = installed
-        if installed and str(section.get("mode") or "").strip().lower() not in (
-            "mandate", "recorded", "direct"
-        ):
-            section["mode"] = "mandate"
-        return data
+    The write itself belongs to the co-scribe application plugin, which owns the
+    flag and offers the same switch on its 应用插件 card; this is the second
+    caller of that one writer, not a second implementation of it."""
+    from jiuwenswarm.extensions.co_scribe.backend.settings import (
+        set_clouddoc_enabled,
+    )
 
     try:
-        update_config(mutate)
+        set_clouddoc_enabled(installed)
     except Exception:
         logger.exception("[co-scribe] feature flag update failed")
 

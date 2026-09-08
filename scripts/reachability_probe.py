@@ -23,7 +23,7 @@ serialised for a person to read is legitimately callerless. The point is that ea
 should be a decision somebody made rather than something nobody noticed.
 
 Usage:
-    python scripts/reachability_probe.py jiuwenswarm/gateway/clouddoc
+    python scripts/reachability_probe.py jiuwenswarm/extensions/co_scribe/backend/host
     python scripts/reachability_probe.py <path> --i18n <locale.json> --ui <dir>
 """
 

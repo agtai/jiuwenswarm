@@ -19,6 +19,7 @@ import { usePendingConnectorFlow, PendingConnectorModals } from '../ConnectorMar
 import { Switch } from '../Switch';
 import { resolvePluginPickerIdentifiers } from '../../features/equipmentMarketplace';
 import { pruneEnabledExtensions } from '../../utils/enabledExtensions';
+import { fetchApplicationPlugins } from '../../applicationPlugins/manifest';
 import PlusIcon from '../../assets/agent-management/agent-plus.svg?react';
 import SearchIcon from '../../assets/agent-management/agent-search.svg?react';
 
@@ -71,6 +72,25 @@ export function ExtensionPickerPanel({ onClose, panelRef, direction }: Extension
   const busyMap = useConnectorStore((s) => s.busyMap);
   const loadConnectorList = useConnectorStore((s) => s.loadList);
   const connectMcp = useConnectorStore((s) => s.connect);
+
+  // 应用插件（application plugin）不属于这个二级面板：它们自带页面、在"应用插件"页
+  // 管理，而这里的开关只写 sessionStore.enabledPlugins → chat.send 的 plugin_names，
+  // 后端拿 plugin_names 只用来解析 MCP connector，应用插件声明的是技能不是 connector，
+  // 所以这个开关对它们从来就是空转（实测：开关关着，云文档工具照样跑）。按"是否被贡献
+  // 为应用插件"这条通则过滤，而不是写死某个 id——以后再有应用插件也自动不出现在这里。
+  const [applicationPluginIds, setApplicationPluginIds] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    let active = true;
+    void fetchApplicationPlugins()
+      .then((plugins) => {
+        if (active) setApplicationPluginIds(new Set(plugins.map((plugin) => plugin.plugin_id)));
+      })
+      .catch(() => {
+        // 清单拿不到就退回"不过滤"：宁可多显示一行空转的开关，也不要因为一次网络失败
+        // 把用户真正能用的插件也一起藏掉。
+      });
+    return () => { active = false; };
+  }, []);
 
   const [tokenTarget, setTokenTarget] = useState<{ name: string; response: ConnectorConnectResponse } | null>(null);
   const [authTarget, setAuthTarget] = useState<{ name: string; response: ConnectorConnectResponse } | null>(null);
@@ -155,11 +175,16 @@ export function ExtensionPickerPanel({ onClose, panelRef, direction }: Extension
     return () => document.removeEventListener('pointerdown', handlePointerDown);
   }, [onClose]);
 
+  const selectablePackages = useMemo(
+    () => packages.filter((p) => !applicationPluginIds.has(resolvePluginPickerIdentifiers(p).marketplaceId)),
+    [packages, applicationPluginIds],
+  );
+
   const filteredPlugins = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return packages;
-    return packages.filter((p) => localizedText(p.displayName, i18n.language).toLowerCase().includes(q));
-  }, [packages, searchQuery, i18n.language]);
+    if (!q) return selectablePackages;
+    return selectablePackages.filter((p) => localizedText(p.displayName, i18n.language).toLowerCase().includes(q));
+  }, [selectablePackages, searchQuery, i18n.language]);
 
   const filteredMcps = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();

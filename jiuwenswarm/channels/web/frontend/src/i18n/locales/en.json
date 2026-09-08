@@ -61,11 +61,10 @@
     "footCount": "{{count}} document(s)",
     "refresh": "Refresh",
     "refreshing": "Checking…",
-    "notEnabled": "Provide a service-account key in Settings → Cloud Docs to get started.",
+    "notEnabled": "Add a service-account key in the column on the left to get started.",
     "connDocs": "{{count}} docs",
     "noConn": "No connections yet",
     "refreshedAt": "refreshed at: {{time}}",
-    "addBtn": "Add",
     "adding": "Checking…",
     "sub": {
       "commentOnly": "Needs Editor access — proposals cannot apply",
@@ -74,19 +73,8 @@
       "backoffAt": "retrying after {{time}}",
       "checkedAt": "checked {{time}}"
     },
-    "connProvider": "Provider: ",
-    "addConn": "Add connection",
-    "connProviderLabel": "Provider",
     "providerFeishu": "Feishu Docs",
     "providerGoogle": "Google Docs",
-    "providerSoon": "Planned",
-    "connKeyLabel": "Service-account key",
-    "connMode": {
-      "path": "Server path",
-      "upload": "Upload JSON",
-      "saved": "Saved keys"
-    },
-    "connPathPlaceholder": "/path/to/service-account.json",
     "connChooseFile": "Choose key file…",
     "connUploadHint": "Saved under the config directory with 0600; the private key never enters config.yaml.",
     "connErr": {
@@ -95,8 +83,7 @@
       "unknown": "Could not add the connection; check the server log. {{detail}}"
     },
     "removeConn": "Remove connection",
-    "removeConnConfirm": "Remove connection {{address}}? Its {{count}} document(s) stop being watched; the documents and their sharing are untouched.",
-    "cancel": "Cancel",
+    "removeConnConfirm": "Disconnect {{address}}? Its {{count}} documents stop being watched and every watch granted under it lapses; receipts already on the ledger remain readable. The documents themselves and their sharing are untouched.",
     "adopted": "Adopted {{count}} newly shared document(s)",
     "needsEditor": "{{count}} document(s) are shared comment-only -- change them to Editor in Google Docs, then Refresh",
     "unsupported": "{{count}} shared file(s) can't be co-edited yet — only Google Docs are supported",
@@ -111,7 +98,6 @@
     "keyInUse": "In use",
     "keyDelete": "Delete",
     "keyDeleteConfirm": "Confirm?",
-    "savedEmpty": "No saved keys yet",
     "keyDeleteHint": "Deleting removes the local file only; revoke the credential in the GCP console to invalidate it.",
     "history": {
       "loading": "Loading…",
@@ -188,7 +174,32 @@
       "goDirect": "Turn off safeguards (direct)",
       "confirmDirect": "Click again to confirm: drop every safeguard"
     },
-    "manageConnInSettings": "Connections are managed in Settings → Cloud Docs",
+    "conn": {
+      "title": "Connected",
+      "none": "No cloud-doc platform connected yet",
+      "remove": "Disconnect",
+      "addTitle": "Add a connection (Google service account / Feishu app)",
+      "addHint": "Give the path to a key file on this machine, or paste the JSON directly: a Google service-account key, or a Feishu custom app's app_id / app_secret (optional brand). It is stored locally only (mode 600), never uploaded.",
+      "keyPlaceholder": "/path/to/service-account.json  or  {\"type\": \"service_account\", ...}",
+      "add": "Connect",
+      "added": "Connected.",
+      "savedKeys": "Or use a saved key:",
+      "guideTitle": "Before connecting",
+      "guideApis": "1. Enable the Docs / Drive / Sheets / Slides APIs on your GCP project.",
+      "guideShare": "2. Share the documents with the account address above (editor role); they arrive in the list on the right by themselves."
+    },
+    "model": {
+      "title": "Model for unattended turns",
+      "hint": "The deployment default: every turn dispatched from a document comment runs on it, unless a document picks its own in its record dialog. Leave unset to use the agentserver's default model.",
+      "default": "Using the agentserver's default model",
+      "useDefault": "Use default"
+    },
+    "docModel": {
+      "title": "Model for this document",
+      "useDefault": "Follow the deployment default",
+      "inherit": "Not set for this document — following the deployment default: {{model}}",
+      "inheritAgentDefault": "Not set for this document, and no deployment default — using the agentserver's default model"
+    },
     "table": {
       "allConns": "All connections",
       "allTiers": "All watch",
@@ -267,12 +278,19 @@
       "mdSaved": "Saved, receipt {{id}}",
       "mdStaleWhileEditing": "The file changed on the platform; it reloads once you save or discard your edits.",
       "editingDoc": "Editing: "
+    },
+    "plugin": {
+      "summary": "Cloud-document co-editing: the agent joins a shared document as a collaborator, a person @-mentions it, it proposes, a person approves, the watcher lands the change.",
+      "manageHint": "Connections, keys and managed documents are all handled on the Docs page.",
+      "enable": "Enable",
+      "disable": "Disable",
+      "loadFailed": "Could not read the co-scribe state",
+      "toggleFailed": "Could not update the plugin state"
     }
   },
   "common": {
     "noData": "No data",
     "confirm": "Confirm",
-    "cancel": "Cancel",
     "close": "Close",
     "refresh": "Refresh",
     "refreshing": "Refreshing...",
@@ -325,29 +343,8 @@
     "noSettings": "This plugin does not provide a settings page."
   },
   "settingsPanel": {
-    "clouddoc": {
-      "connectionsTitle": "Connected",
-      "noConnections": "No cloud-doc platform connected yet",
-      "docsCount": "{{n}} documents",
-      "copyAddress": "Copy account address",
-      "remove": "Disconnect",
-      "removeConfirm": "Disconnecting removes Co-Scribe from this line: every watch granted under it lapses, unattended handling stops, and its adopted documents are no longer served; receipts already on the ledger remain readable. Disconnect?",
-      "addTitle": "Add a connection (Google service account / Feishu app)",
-      "add": "Connect",
-      "addHint": "Paste a Google service account's JSON key, or a Feishu custom app's JSON (app_id, app_secret, optional brand). It is stored locally only (mode 600), never uploaded.",
-      "added": "Connected.",
-      "savedKeys": "Or use a saved key:",
-      "modelTitle": "Model for unattended turns",
-      "modelHint": "Applies to every turn dispatched from a document comment, across all connections. Leave unset to use the deployment's default model.",
-      "modelDefault": "Using the deployment default",
-      "modelUseDefault": "Use default",
-      "guideTitle": "Before connecting",
-      "guideApis": "1. Enable the Docs / Drive / Sheets / Slides APIs on your GCP project.",
-      "guideShare": "2. Share the documents with the SA email above (editor role), then adopt them in the Docs panel."
-    },
     "title": "Settings",
     "categories": {
-      "clouddoc": "Cloud Docs",
       "general": "General",
       "models": "Models",
       "agent": "Agent",
@@ -675,7 +672,6 @@
     "validation": {
       "required": "This field is required",
       "integerRange": "Enter an integer from {{min}} to {{max}}"
-
     }
   },
   "trajectory": {
@@ -3170,7 +3166,6 @@
     "title": "Please answer",
     "prev": "Previous",
     "next": "Next",
-    "cancel": "Cancel",
     "replyLater": "Reply Later",
     "skip": "Skip",
     "nextStep": "Next",

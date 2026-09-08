@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from jiuwenswarm.agents.harness.common.tools.clouddoc.provider import ProviderError
+from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.provider import ProviderError
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 

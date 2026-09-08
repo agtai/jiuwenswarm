@@ -328,7 +328,7 @@ def build_clouddoc_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list
     if not cfg.get("enabled"):
         return []
 
-    from jiuwenswarm.agents.harness.common.tools.clouddoc.provider import (
+    from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.provider import (
         CLOUDDOC_CHANNEL_ID,
     )
 
@@ -343,7 +343,7 @@ def build_clouddoc_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list
         )
         return []
 
-    from jiuwenswarm.agents.harness.common.tools.clouddoc.provider import (
+    from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.provider import (
         read_connection_specs,
     )
 
@@ -353,10 +353,10 @@ def build_clouddoc_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list
         return []
 
     try:
-        from jiuwenswarm.agents.harness.common.tools.clouddoc.clouddoc_tools import (
+        from jiuwenswarm.extensions.co_scribe.backend.toolkit.clouddoc_tools import (
             CloudDocToolkit,
         )
-        from jiuwenswarm.agents.harness.common.tools.clouddoc.factory import (
+        from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.factory import (
             build_provider,
         )
     except ImportError:
@@ -381,7 +381,7 @@ def build_clouddoc_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list
     # routed by adoption -- the same helper the chat path uses, so the two attended
     # hosts cannot drift apart again.
     try:
-        from jiuwenswarm.agents.harness.common.tools.clouddoc.routing import (
+        from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.routing import (
             all_adopted_documents,
             build_routed_provider,
         )
@@ -394,14 +394,14 @@ def build_clouddoc_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list
         logger.warning("[swarm.clouddoc] provider 初始化失败：%s", exc)
         return []
     try:
-        from jiuwenswarm.agents.harness.common.tools.clouddoc.kinds import prime_provider_kinds
+        from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.kinds import prime_provider_kinds
 
         prime_provider_kinds(provider, [d for sp in specs for d in (sp.get("documents") or [])])
     except Exception:  # noqa: BLE001 - priming must not stop member setup
         pass
 
     try:
-        from jiuwenswarm.agents.harness.common.tools.clouddoc.receipts import ReceiptStore
+        from jiuwenswarm.extensions.co_scribe.backend.toolkit.receipts import ReceiptStore
 
         # D21: direct mode carries no receipts by design; the other modes do.
         if str(cfg.get("mode") or "mandate").strip().lower() != "direct":
@@ -427,7 +427,7 @@ def build_clouddoc_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list
             connection_count=lambda: 1,
             workmode_file=str(cfg.get("workmode_file") or ""),
         )
-        from jiuwenswarm.agents.harness.common.tools.clouddoc_bridge import (
+        from jiuwenswarm.extensions.co_scribe.backend.clouddoc_bridge import (
             to_openjiuwen,
         )
 

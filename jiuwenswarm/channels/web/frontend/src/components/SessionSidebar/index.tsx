@@ -51,10 +51,10 @@ const connectorMarketNavIcon = (
 );
 
 // The rail is in two bands. Above the rule: what every deployment ships with.
-// Below it: what an installed plugin contributes -- co-scribe's Docs page and any
-// application plugin's own page. A plugin's icon appearing among the built-ins
-// said the deployment came with it, which is the one thing the rail should not
-// say: uninstall the plugin and the icon goes.
+// Below it: what an application plugin contributes, one entry per page in the
+// manifest. A plugin's icon appearing among the built-ins said the deployment
+// came with it, which is the one thing the rail should not say: disable the
+// plugin and the icon goes.
 const systemNavItems: NavItem[] = [
   { key: 'chat', labelKey: 'nav.work', icon: <WorkIcon aria-hidden /> },
   { key: 'skills', labelKey: 'nav.skills', icon: <SkillDesignIcon aria-hidden /> },
@@ -62,21 +62,6 @@ const systemNavItems: NavItem[] = [
   { key: 'connectorMarket', labelKey: 'nav.connectorMarket', icon: connectorMarketNavIcon },
   { key: 'settings', labelKey: 'nav.settings', icon: <SettingsIcon aria-hidden /> },
   { key: 'updatepanel', labelKey: 'nav.update', icon: <UpdateIcon aria-hidden /> },
-];
-
-// Contributed by the co-scribe plugin. It is hidden through ``hiddenNavItems``
-// until a cloud-document connection exists, the same gate as before the move.
-const pluginNavItems: NavItem[] = [
-  {
-    key: 'docs',
-    labelKey: 'nav.docs',
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-        <path strokeLinecap="round" strokeLinejoin="round" d="M14 2v6h6M9 13h6m-6 4h4" />
-      </svg>
-    ),
-  },
 ];
 
 export function SessionSidebar({
@@ -113,7 +98,7 @@ export function SessionSidebar({
     }));
   const visibleSystemNavItems = systemNavItems
     .filter((item) => !hiddenNavItems.includes(item.key));
-  const visiblePluginNavItems = [...pluginNavItems, ...applicationPluginItems]
+  const visiblePluginNavItems = applicationPluginItems
     .filter((item) => !hiddenNavItems.includes(item.key));
   // 定时任务（cron）是"任务"区内与会话同级的视图，没有独立的导航图标，
   // 因此进入定时任务时"任务"导航项也应保持选中态

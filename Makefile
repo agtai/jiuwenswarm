@@ -103,10 +103,10 @@ test-cov: ## Run tests and emit an HTML coverage report
 	@bash run_tests.sh -c
 
 mutants: ## Ask whether the tests would notice if the code were wrong (see scripts/mutation_probe.py)
-	$(PY) scripts/mutation_probe.py jiuwenswarm/gateway/clouddoc --jobs 6 --limit 200
+	$(PY) scripts/mutation_probe.py jiuwenswarm/extensions/co_scribe/backend/host --jobs 6 --limit 200
 
 mutants-full: ## The same, over every mutant rather than a sample (slow)
-	$(PY) scripts/mutation_probe.py jiuwenswarm/gateway/clouddoc --jobs 6
+	$(PY) scripts/mutation_probe.py jiuwenswarm/extensions/co_scribe/backend/host --jobs 6
 
 # ----------------------------------------------------------------------
 # Lint & format

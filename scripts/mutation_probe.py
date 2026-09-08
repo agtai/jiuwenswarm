@@ -25,7 +25,7 @@ codebase have actually taken, and each mutant runs only the tests mapped to its 
 The point is a number you will re-run, not a complete one you run once.
 
 Usage:
-    python scripts/mutation_probe.py jiuwenswarm/gateway/clouddoc
+    python scripts/mutation_probe.py jiuwenswarm/extensions/co_scribe/backend/host
     python scripts/mutation_probe.py <path> --jobs 8 --limit 50
 """
 
@@ -165,7 +165,11 @@ def _tests_for(path: Path, fallback: str) -> list[str]:
     fallback, so nothing is skipped for want of a naming convention.
     """
     stem = path.stem
-    roots = [Path("tests/unit_tests"), Path("tests/agents")]
+    roots = [
+        Path("tests/unit_tests"),
+        Path("tests/agents"),
+        Path("jiuwenswarm/extensions/co_scribe/tests/backend"),
+    ]
     hits: list[str] = []
 
     # A module and its tests do not always share a name, and guessing wrong costs the
@@ -191,15 +195,21 @@ def _tests_for(path: Path, fallback: str) -> list[str]:
     # tests cannot hide a survivor, but they turn a three-second mutant into a minute and
     # make a full run something nobody waits for.
     package = path.parent.name
+    # The directory check below leaned on the code's package and its test directory
+    # sharing a name ("clouddoc" under jiuwenswarm/gateway/clouddoc, tested from
+    # tests/unit_tests/... ). Co-scribe's tests live inside the plugin now, so that
+    # directory is itself the ownership fact and stands in for the name match.
+    plugin_tests = Path("jiuwenswarm/extensions/co_scribe/tests/backend").resolve()
     for root in roots:
         if not root.exists():
             continue
         for pat in patterns:
             for candidate in root.rglob(f"test_*{pat}*.py"):
                 name = candidate.name
+                owned = plugin_tests in candidate.resolve().parents
                 if package not in name and pat not in (stem, stem.replace("_", "")):
                     continue
-                if package not in name and package not in str(candidate.parent):
+                if package not in name and not owned and package not in str(candidate.parent):
                     continue
                 if str(candidate) not in hits:
                     hits.append(str(candidate))

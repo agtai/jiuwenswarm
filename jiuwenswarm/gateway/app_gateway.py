@@ -1672,7 +1672,7 @@ def _start_clouddoc_discovery(panel):
     if panel is None:
         return None
     from jiuwenswarm.common.config import get_config
-    from jiuwenswarm.gateway.clouddoc.panel import (
+    from jiuwenswarm.extensions.co_scribe.backend.host.panel.panel import (
         DISCOVERY_INTERVAL_SECONDS,
         discover_shared_periodically,
     )
@@ -1724,7 +1724,7 @@ async def _build_clouddoc_watcher(*, agent_client):
     # Whether to *poll* is still gated: see CloudDocConnections.start_all.
     enabled = bool(cfg.get("enabled"))
 
-    from jiuwenswarm.gateway.clouddoc.connections import (
+    from jiuwenswarm.extensions.co_scribe.backend.host.authority.connections import (
         CloudDocConnections,
         read_connection_specs,
     )
@@ -1732,19 +1732,19 @@ async def _build_clouddoc_watcher(*, agent_client):
     specs = read_connection_specs(cfg)
 
     try:
-        from jiuwenswarm.agents.harness.common.tools.clouddoc.factory import (
+        from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.factory import (
             build_provider,
         )
-        from jiuwenswarm.agents.harness.common.tools.clouddoc.google_provider import (
+        from jiuwenswarm.extensions.co_scribe.backend.toolkit.providers.google_provider import (
             GoogleDocsProvider,  # noqa: F401 - kept for the probe's error text
         )
-        from jiuwenswarm.gateway.clouddoc.comment_watcher import (
+        from jiuwenswarm.extensions.co_scribe.backend.host.watch.comment_watcher import (
             CloudDocCommentWatcher,
             WatcherConfig,
         )
-        from jiuwenswarm.gateway.clouddoc.cursor_store import CloudDocStore
-        from jiuwenswarm.gateway.clouddoc.dispatch import CloudDocDispatcher
-        from jiuwenswarm.gateway.clouddoc.triggers import (
+        from jiuwenswarm.extensions.co_scribe.backend.host.cursor_store import CloudDocStore
+        from jiuwenswarm.extensions.co_scribe.backend.host.watch.dispatch import CloudDocDispatcher
+        from jiuwenswarm.extensions.co_scribe.backend.host.watch.triggers import (
             TriggerConfig,
             validate_prefixes,
             word_list,
@@ -1774,14 +1774,14 @@ async def _build_clouddoc_watcher(*, agent_client):
         return None
 
     store = CloudDocStore()
-    from jiuwenswarm.gateway.clouddoc.dispatch import make_cancel_fn
+    from jiuwenswarm.extensions.co_scribe.backend.host.watch.dispatch import make_cancel_fn
 
     dispatcher = CloudDocDispatcher(
         agent_client, store, watcher_cfg, now_fn=time.time,
         session_max_turns=int(cfg.get("session_max_turns", 50)),
         cancel_fn=make_cancel_fn(agent_client, now_fn=time.time),
     )
-    from jiuwenswarm.gateway.clouddoc.watch_registry import (
+    from jiuwenswarm.extensions.co_scribe.backend.host.authority.watch_registry import (
         DEFAULT_DISPATCH_RATE_MAX,
         DEFAULT_DISPATCH_RATE_WINDOW_SECONDS,
         WatchRegistry,
@@ -1957,7 +1957,7 @@ async def _run(
     clouddoc_connections = await _build_clouddoc_watcher(agent_client=client)
     clouddoc_panel = None
     if clouddoc_connections is not None:
-        from jiuwenswarm.gateway.clouddoc.panel import CloudDocPanel
+        from jiuwenswarm.extensions.co_scribe.backend.host.panel.panel import CloudDocPanel
 
         clouddoc_panel = CloudDocPanel(clouddoc_connections)
 

@@ -14,8 +14,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores/chatStore';
 import { webRequest } from '../../services/webClient';
-import { requestOpenDoc } from '../../features/clouddoc/openDocSignal';
-import { useDocWorkbenchStore } from '../../stores/docWorkbenchStore';
+import { requestOpenDoc } from '../../../../../../extensions/co_scribe/frontend/features/clouddoc/openDocSignal';
+import { useDocWorkbenchStore } from '../../../../../../extensions/co_scribe/frontend/stores/docWorkbenchStore';
 
 export function DocReferencesStrip() {
   const { t } = useTranslation();

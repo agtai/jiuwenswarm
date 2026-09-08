@@ -6,7 +6,6 @@ export type SidebarNavKey =
   | 'agents'
   | 'sessions'
   | 'cron'
-  | 'docs'
   | 'settings'
   | 'updatepanel';
 

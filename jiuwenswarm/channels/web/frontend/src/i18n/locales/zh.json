@@ -61,11 +61,10 @@
     "footCount": "{{count}} 篇文档",
     "refresh": "刷新",
     "refreshing": "检查中…",
-    "notEnabled": "到 设置 → Cloud Docs 提供服务账号密钥即可开始。",
+    "notEnabled": "在左栏填入服务账号密钥即可开始。",
     "connDocs": "{{count}} 篇",
     "noConn": "尚未添加连接",
     "refreshedAt": "刷新时间: {{time}}",
-    "addBtn": "添加",
     "adding": "校验中…",
     "sub": {
       "commentOnly": "需「编辑者」权限，提议无法应用",
@@ -74,19 +73,8 @@
       "backoffAt": "{{time}} 后自动重试",
       "checkedAt": "上次检查 {{time}}"
     },
-    "connProvider": "厂商：",
-    "addConn": "添加连接",
-    "connProviderLabel": "厂商",
     "providerFeishu": "飞书文档",
     "providerGoogle": "Google 文档",
-    "providerSoon": "规划中",
-    "connKeyLabel": "服务账号密钥",
-    "connMode": {
-      "path": "服务器路径",
-      "upload": "上传 JSON",
-      "saved": "已存密钥"
-    },
-    "connPathPlaceholder": "/path/to/service-account.json",
     "connChooseFile": "选择密钥文件…",
     "connUploadHint": "以 600 权限落盘到配置目录，私钥不写入 config.yaml。",
     "connErr": {
@@ -95,8 +83,7 @@
       "unknown": "添加失败,请检查服务端日志。{{detail}}"
     },
     "removeConn": "删除连接",
-    "removeConnConfirm": "删除连接 {{address}}？其下 {{count}} 篇文档将停止监听；文档本身与共享关系不受影响。",
-    "cancel": "取消",
+    "removeConnConfirm": "断开连接 {{address}}？其名下 {{count}} 篇文档停止值守，全部 watch 授权随之失效；已留下的回执历史保留可查。文档本身与共享关系不受影响。",
     "adopted": "已自动纳管 {{count}} 篇新共享的文档",
     "needsEditor": "有 {{count}} 篇已共享，但只给了评论权——在 Google 文档里改成「编辑者」后点刷新",
     "unsupported": "有 {{count}} 个共享文件暂不支持——目前仅支持 Google 文档协同",
@@ -111,7 +98,6 @@
     "keyInUse": "启用中",
     "keyDelete": "删除",
     "keyDeleteConfirm": "确认删除？",
-    "savedEmpty": "没有已存的密钥",
     "keyDeleteHint": "删除只移除本机文件；凭证本身要在 GCP 控制台吊销才失效。",
     "history": {
       "loading": "读取中…",
@@ -188,7 +174,32 @@
       "goDirect": "关闭保障（切直连）",
       "confirmDirect": "再点一次确认：关闭全部保障"
     },
-    "manageConnInSettings": "连接管理已移至 设置 → Cloud Docs",
+    "conn": {
+      "title": "已连接",
+      "none": "尚未连接任何云文档平台",
+      "remove": "断开",
+      "addTitle": "添加连接（Google 服务账号 / 飞书应用）",
+      "addHint": "填写本机密钥文件路径，或直接粘贴 JSON：Google 服务账号密钥，或飞书自建应用的 app_id / app_secret（可选 brand）。密钥仅保存在本机（600 权限），不会上传。",
+      "keyPlaceholder": "/path/to/service-account.json  或  {\"type\": \"service_account\", ...}",
+      "add": "连接",
+      "added": "已连接。",
+      "savedKeys": "或使用已保存的密钥：",
+      "guideTitle": "接入前的准备",
+      "guideApis": "1. 在 GCP 项目中启用 Docs / Drive / Sheets / Slides API。",
+      "guideShare": "2. 把要协作的文档共享给上方的账号地址（编辑者权限），文档会自己进入右侧列表。"
+    },
+    "model": {
+      "title": "无人值守回合使用的模型",
+      "hint": "部署默认：所有连接下由文档评论触发的回合都用它，除非某篇文档在「文档记录」里另选。不设置则使用 agentserver 的默认模型。",
+      "default": "当前使用 agentserver 默认模型",
+      "useDefault": "恢复默认"
+    },
+    "docModel": {
+      "title": "这篇文档使用的模型",
+      "useDefault": "跟随部署默认",
+      "inherit": "未单独指定，跟随部署默认：{{model}}",
+      "inheritAgentDefault": "未单独指定，部署也未设置，使用 agentserver 默认模型"
+    },
     "table": {
       "allConns": "全部连接",
       "allTiers": "全部值守",
@@ -267,12 +278,19 @@
       "mdSaved": "已保存，回执 {{id}}",
       "mdStaleWhileEditing": "文件在平台上有了新改动；保存或放弃你的编辑后会重新载入。",
       "editingDoc": "正在编辑："
+    },
+    "plugin": {
+      "summary": "云文档协同：智能体作为协作者加入共享文档，人 @ 它、它提议、人批准、watcher 落地。",
+      "manageHint": "连接、密钥与纳管文档都在「文档」页管理。",
+      "enable": "启用",
+      "disable": "禁用",
+      "loadFailed": "无法读取云文档协同状态",
+      "toggleFailed": "无法更新插件状态"
     }
   },
   "common": {
     "noData": "暂无数据",
     "confirm": "确认",
-    "cancel": "取消",
     "close": "关闭",
     "refresh": "刷新",
     "refreshing": "刷新中...",
@@ -325,29 +343,8 @@
     "noSettings": "此插件未提供设置页面。"
   },
   "settingsPanel": {
-    "clouddoc": {
-      "connectionsTitle": "已连接",
-      "noConnections": "尚未连接任何云文档平台",
-      "docsCount": "{{n}} 篇文档",
-      "copyAddress": "复制账号地址",
-      "remove": "断开",
-      "removeConfirm": "断开连接即卸下这条线上的 Co-Scribe：其名下全部 watch 授权失效、无人值守停止、纳管文档不再被处理；已留下的回执历史保留可查。确定断开？",
-      "addTitle": "添加连接（Google 服务账号 / 飞书应用）",
-      "add": "连接",
-      "addHint": "粘贴 Google 服务账号的 JSON 密钥，或飞书自建应用的 JSON（app_id、app_secret，可选 brand）。密钥仅保存在本机（600 权限），不会上传。",
-      "added": "已连接。",
-      "savedKeys": "或使用已保存的密钥：",
-      "modelTitle": "无人值守回合使用的模型",
-      "modelHint": "对所有连接下由文档评论触发的回合生效；不设置则使用部署的默认模型。",
-      "modelDefault": "当前使用部署默认模型",
-      "modelUseDefault": "恢复默认",
-      "guideTitle": "接入前的准备",
-      "guideApis": "1. 在 GCP 项目中启用 Docs / Drive / Sheets / Slides API。",
-      "guideShare": "2. 把要协作的文档共享给上方的 SA 邮箱（编辑者权限），然后到 Docs 面板纳管。"
-    },
     "title": "设置",
     "categories": {
-      "clouddoc": "云文档连接",
       "general": "常规",
       "models": "模型",
       "agent": "智能体",
@@ -663,7 +660,6 @@
     "validation": {
       "required": "此字段为必填项",
       "integerRange": "请输入 {{min}}–{{max}} 之间的整数"
-
     }
   },
   "trajectory": {
@@ -3151,7 +3147,6 @@
     "title": "请回答问题",
     "prev": "上一题",
     "next": "下一题",
-    "cancel": "取消",
     "replyLater": "稍后回复",
     "skip": "跳过",
     "nextStep": "下一步",

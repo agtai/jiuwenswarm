@@ -1,1 +1,0 @@
-export { cloudDocModule } from './definition';
