@@ -73,9 +73,12 @@ seconds. Model interpretation, the forced original-D/proposal-C case, arbitrary
 concurrent external writes and physical acceptance remain open. Scoped file
 effects do not close the original overwrite or latency failure.
 
-The user's approximately 3.3-second ordinary first sound is the original video's
-measurement, not a current-deployment observation. Clean 0c89d8b9 repeats six
-ordinary inputs with received-PCM P50 1.915 s / P95 2.062 s; these are not speaker
+The user clarified that the approximately 3.3-second old-version first-sound
+baseline was confirmed through diagnostics. Do not relabel it as a subjective
+hearing estimate or a current-deployment observation. Its measurement endpoints
+and sample selection have not yet been aligned with the current CLI sample.
+Clean 0c89d8b9 repeats six ordinary inputs with received-PCM P50 1.915 s /
+P95 2.062 s; these are not speaker
 times. Removing routine Native RPC log flushes does not establish a meaningful
 end-to-end gain. A retained 525 ms local descriptor-delivery tail and missing
 current physical measurement leave ordinary first-sound acceptance open.

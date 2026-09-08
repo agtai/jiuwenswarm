@@ -915,10 +915,11 @@ receipt-latency repair (receipt-profile-real-result.json / receipt-stages.json).
 
 ### Ordinary audible latency — continuing transport repair (Tier 1)
 
-The user clarified that the reported approximately 3.3 seconds is ordinary chat
-in the original video, from acoustic speech end to hearing an answer. It is not
-a new measurement of the current deployment. The original audible acceptance
-targets remain open. On clean da09c452, three real ordinary rounds received PCM
+The user clarified that the reported approximately 3.3 seconds is an old-version
+ordinary-chat baseline confirmed through diagnostics. The earlier description
+as the user's actual hearing time was an assistant interpretation and is
+withdrawn. It is not a new measurement of the current deployment. The original
+audible acceptance targets remain open. On clean da09c452, three real ordinary rounds received PCM
 after 2017.081, 1657.457 and 1738.337 ms; these are recordings, not speaker
 measurements. Their exact Provider ingress-to-Gateway-send intervals were
 187.977, 142.977 and 117.467 ms. The browser still requires 250 ms of real queued
@@ -963,9 +964,10 @@ recordings in an existing Session; no physical played ACK was invented.
 
 The current received-PCM range is 1670.887–2061.808 ms. The 10.580 ms median
 difference does not establish an end-to-end improvement; the larger post-change
-tail is retained. No audible P50/P95 has been measured, and the original 3.3-second
-video cannot be compared directly with these received-PCM values. Ordinary first
-sound and the <=200 ms raw-to-send P95 acceptance remain open.
+tail is retained. No current audible P50/P95 has been measured. The old 3.3-second
+diagnostic baseline and these received-PCM values still need matching measurement
+endpoints and sample definitions before claiming a quantified reduction.
+Ordinary first sound and the <=200 ms raw-to-send P95 acceptance remain open.
 
 In the 525.053 ms sample (repair-int-b902673ba943), first-frame Gateway admission
 took 4.770 ms and the wake RPC took 12.1 ms. The exact Registry notification call
