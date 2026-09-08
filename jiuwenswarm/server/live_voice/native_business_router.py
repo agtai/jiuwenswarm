@@ -343,7 +343,7 @@ class NativeBusinessRouter:
         if current.context.file_path != route.native_p3_authority.context.file_path:
             raise NativeBusinessViolation("EXECUTION_CONTEXT_SCOPE_MISMATCH", code=ErrorCode.PERMISSION_DENIED)
 
-    async def _task(self, route, delegate, request_id):
+    async def _task(self, route, delegate, request_id, *, native_source=None):
         from .production_task_intent import (ProductionTaskIntentRequest, ProductionIntentOrigin,
             build_production_origin_binding, ProductionTaskPolicyOutcome)
         from .p3_production_intent_composition import CallLocalProductionOriginAuthority
@@ -355,7 +355,8 @@ class NativeBusinessRouter:
             native_authority=route.native_p3_authority)
         request = ProductionTaskIntentRequest(origin=ProductionIntentOrigin.STRUCTURED, scope=authority.scope,
             command_id="native-command." + hashlib.sha256(delegate.source_identity.encode()).hexdigest(),
-            proposal=action.task_proposal(), commit=None, source_id=delegate.source_identity)
+            proposal=action.task_proposal(), commit=None, source_id=delegate.source_identity,
+            native_source=native_source)
         origin = CallLocalProductionOriginAuthority(expected_binding=build_production_origin_binding(request), commit_ledger=None)
         resolution = await asyncio.to_thread(registry._task_intent_bridge.resolve_production,
             request, authority.reader, origin, _RejectingProductionConfirmationConsumer(), registry._production_clarification_owner)
@@ -471,7 +472,13 @@ class NativeBusinessRouter:
                     elif delegate.business.operation == "context.get":
                         facts = {"status": "observed"}
                     elif delegate.business.operation.startswith("task."):
-                        facts = await self._task(route, delegate, delegate.source_identity)
+                        from .native_task_source import SOURCE_OPERATIONS
+                        source = (await owner.task_source(admission)
+                                  if delegate.business.operation in SOURCE_OPERATIONS else None)
+                        # A source wait is not permission to dispatch after close
+                        # or project rebind. Recheck before any Task mutation.
+                        await self._require_context_authority(route)
+                        facts = await self._task(route, delegate, delegate.source_identity, native_source=source)
                     else:
                         facts = await self._work(route, delegate, admission, selection)
                     result = {"contract_version": NATIVE_BUSINESS_CONTRACT_VERSION, "operation": delegate.business.operation, **facts}

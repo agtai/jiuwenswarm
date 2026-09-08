@@ -477,6 +477,7 @@ class ProductionOriginBinding:
     structured_semantic_sha256: str | None = None
     clarification_answer_sha256: str | None = None
     semantic_context_binding: Mapping[str, str] | None = None
+    native_source: object | None = None
 
     def __post_init__(self) -> None:
         _require_opaque(self.principal_id, "origin_principal_id")
@@ -487,6 +488,13 @@ class ProductionOriginBinding:
         if not isinstance(self.origin, ProductionIntentOrigin):
             raise ValueError("INVALID_PRODUCTION_INTENT_ORIGIN")
         _require_opaque(self.source_id, "origin_source_id")
+        if self.native_source is not None:
+            from .native_task_source import NativeTaskSource
+            if (not isinstance(self.native_source, NativeTaskSource)
+                or self.origin is not ProductionIntentOrigin.STRUCTURED
+                or self.native_source.source_identity != self.source_id
+                or self.native_source.anchor.binding.scope != self.scope):
+                raise ValueError("NATIVE_TASK_SOURCE_ORIGIN_MISMATCH")
         natural = self.origin is not ProductionIntentOrigin.STRUCTURED
         if self.semantic_context_binding is not None:
             if not natural:
@@ -537,6 +545,7 @@ class ProductionOriginBinding:
                 "scope": self.scope.to_dict(),
                 "source_id": self.source_id,
                 "structured_semantic_sha256": self.structured_semantic_sha256,
+                **({} if self.native_source is None else {"native_source_sha256": self.native_source.digest}),
                 **(
                     {}
                     if self.semantic_context_binding is None
@@ -768,6 +777,7 @@ class ProductionTaskIntentRequest:
     clarification_answer_fingerprint: str | None = None
     confirmation_id: str | None = None
     semantic_context_binding: Mapping[str, str] | None = None
+    native_source: object | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.origin, ProductionIntentOrigin):
@@ -776,6 +786,16 @@ class ProductionTaskIntentRequest:
             raise ValueError("AUTHENTICATED_TASK_SCOPE_REQUIRED")
         _require_opaque(self.command_id, "task_intent_command_id")
         _require_opaque(self.source_id, "task_intent_source_id")
+        if self.native_source is not None:
+            from .native_task_source import NativeTaskSource
+            if (not isinstance(self.native_source, NativeTaskSource)
+                or self.origin is not ProductionIntentOrigin.STRUCTURED
+                or self.native_source.source_identity != self.source_id
+                or self.native_source.target_id != self.proposal.target
+                or self.native_source.expected_revision != self.proposal.observed_task_revision):
+                raise ValueError("NATIVE_TASK_SOURCE_ORIGIN_MISMATCH")
+            self.native_source.require_request(scope=self.scope, operation=self.proposal.operation,
+                instruction=self.proposal.arguments.get("adjustment" if self.proposal.operation == "task.adjust" else "instruction"))
         if self.origin is ProductionIntentOrigin.STRUCTURED:
             if self.commit is not None or self.proposal.extractions:
                 raise ValueError("INVALID_STRUCTURED_ORIGIN")
@@ -1147,6 +1167,7 @@ def _build_origin_binding(
             commit_sha256=None,
             extractions=(),
             structured_semantic_sha256=_structured_semantic_digest(request.proposal),
+            native_source=request.native_source,
             clarification_answer_sha256=clarification_answer_sha256,
         )
     commit = request.commit

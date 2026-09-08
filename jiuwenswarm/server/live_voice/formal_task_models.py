@@ -20,6 +20,8 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from .native_task_source import NativeTaskSource, source_extension, source_from_payload
+
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     CommandEnvelope,
@@ -850,6 +852,7 @@ class FormalTaskSpec:
     side_effect_class: str
     constraints: tuple[str, ...] = ()
     attributes: tuple[tuple[str, str], ...] = ()
+    native_source: NativeTaskSource | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.name, "task.name")
@@ -959,6 +962,11 @@ class FormalTaskSpec:
                 ErrorCode.INVALID_ARGUMENT,
             )
         object.__setattr__(self, "attributes", tuple(sorted(self.attributes)))
+        if self.native_source is not None:
+            if not isinstance(self.native_source, NativeTaskSource) or self.native_source.operation not in {"task.create", "task.create_successor"}:
+                raise ValueError("NATIVE_TASK_SOURCE_SPEC_INVALID")
+            if self.native_source.anchor.binding.scope != self.context.scope:
+                raise ValueError("NATIVE_TASK_SOURCE_SPEC_SCOPE_MISMATCH")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -971,6 +979,7 @@ class FormalTaskSpec:
             "side_effect_class": self.side_effect_class,
             "constraints": list(self.constraints),
             "attributes": dict(self.attributes),
+            **source_extension(self.native_source),
         }
 
     @classmethod
@@ -989,6 +998,8 @@ class FormalTaskSpec:
         if type(payload) is not dict or payload_fields not in (
             required_fields,
             required_fields | {"constraints"},
+            required_fields | {"native_source"},
+            required_fields | {"constraints", "native_source"},
         ):
             raise FormalTaskViolation(
                 "INVALID_FORMAL_TASK_SPEC",
@@ -1028,6 +1039,7 @@ class FormalTaskSpec:
             ),
             constraints=tuple(constraints),
             attributes=tuple(sorted(attributes.items())),
+            native_source=source_from_payload(payload),
         )
 
     def fingerprint_bytes(self) -> bytes:
@@ -2197,10 +2209,16 @@ class TaskAdjustmentRequest:
     adjustment_id: str
     adjustment: str
     requested_seq: int
+    native_source: NativeTaskSource | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.adjustment_id, "task_adjustment.adjustment_id")
         _require_text(self.adjustment, "task_adjustment.adjustment")
+        if self.native_source is not None:
+            if not isinstance(self.native_source, NativeTaskSource):
+                raise ValueError("NATIVE_TASK_SOURCE_ADJUSTMENT_INVALID")
+            self.native_source.require_request(scope=self.native_source.anchor.binding.scope,
+                operation="task.adjust", instruction=self.adjustment)
         if (
             "\x00" in self.adjustment
             or _utf8_size(self.adjustment, "task_adjustment.adjustment")
@@ -2223,11 +2241,12 @@ class TaskAdjustmentRequest:
             "adjustment_id": self.adjustment_id,
             "adjustment": self.adjustment,
             "requested_seq": self.requested_seq,
+            **source_extension(self.native_source),
         }
 
     @classmethod
     def from_dict(cls, payload: object) -> TaskAdjustmentRequest:
-        if type(payload) is not dict or set(payload) != {
+        if type(payload) is not dict or set(payload) - {"native_source"} != {
             "adjustment_id",
             "adjustment",
             "requested_seq",
@@ -2245,6 +2264,7 @@ class TaskAdjustmentRequest:
                 payload["adjustment"], "task_adjustment.adjustment"
             ),
             requested_seq=payload["requested_seq"],
+            native_source=source_from_payload(payload),
         )
 
 

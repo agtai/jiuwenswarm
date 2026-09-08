@@ -18,6 +18,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
 
+from .native_task_source import source_extension, source_from_payload, require_payload_source
+
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     CommandEnvelope,
@@ -4241,6 +4243,8 @@ class SqliteTaskStore:
                 "current background task requires the exact authorized Session",
                 ErrorCode.PERMISSION_DENIED,
             )
+        if require_payload_source(command) != spec.native_source:
+            raise ValueError("NATIVE_TASK_SOURCE_SPEC_MISMATCH")
         fingerprint = self._creation_fingerprint(command, spec, selection)
         scope_key = _scope_key(command.scope)
         with self._transaction() as connection:
@@ -4410,6 +4414,8 @@ class SqliteTaskStore:
         """Atomically create one immutable Task revision after a terminal Task."""
 
         self._validate_successor_command(command)
+        if require_payload_source(command) != spec.native_source:
+            raise ValueError("NATIVE_TASK_SOURCE_SPEC_MISMATCH")
         fingerprint = self._creation_fingerprint(command, spec, selection)
         scope_key = _scope_key(command.scope)
         predecessor_id = command.target_ref.id
@@ -5150,7 +5156,7 @@ class SqliteTaskStore:
         """Atomically admit one adjustment for an exact addressed attempt."""
 
         payload = command.payload
-        if type(payload) is not dict or set(payload) != {"adjustment"}:
+        if type(payload) is not dict or set(payload) - {"native_source"} != {"adjustment"}:
             raise FormalTaskViolation(
                 "TASK_ADJUSTMENT_INVALID",
                 "task.adjust payload must contain exactly one adjustment",
@@ -5158,7 +5164,8 @@ class SqliteTaskStore:
             )
         # Validate content before opening the write transaction; the final carrier
         # is reconstructed with the authoritative request-event sequence below.
-        TaskAdjustmentRequest(command.command_id, payload["adjustment"], 1)
+        source = require_payload_source(command)
+        TaskAdjustmentRequest(command.command_id, payload["adjustment"], 1, source)
         mutation_precondition = self._require_mutation_precondition(
             command, mutation_precondition
         )
@@ -5220,6 +5227,7 @@ class SqliteTaskStore:
                 command.command_id,
                 payload["adjustment"],
                 requested_event.seq,
+                source,
             )
             outbox_id = f"outbox-{uuid.uuid4().hex}"
             self._insert_outbox(
@@ -6525,6 +6533,7 @@ class SqliteTaskStore:
                 spec.side_effect_class,
                 spec.constraints,
                 spec.attributes,
+                spec.native_source,
             ) != (
                 prior_spec.name,
                 prior_spec.instruction,
@@ -6534,6 +6543,7 @@ class SqliteTaskStore:
                 prior_spec.side_effect_class,
                 prior_spec.constraints,
                 prior_spec.attributes,
+                prior_spec.native_source,
             ):
                 raise FormalTaskViolation(
                     "TASK_RETRY_SPEC_MISMATCH",
@@ -9283,7 +9293,7 @@ class SqliteTaskStore:
                 ),
             )
             if (
-                command.payload.keys() != {"adjustment"}
+                command.payload.keys() - {"native_source"} != {"adjustment"}
                 or result.observed_at
                 != (
                     request.occurred_at
@@ -9368,6 +9378,7 @@ class SqliteTaskStore:
                     or adjustment.adjustment_id != command_id
                     or adjustment.adjustment != command.payload["adjustment"]
                     or adjustment.requested_seq != request.seq
+                    or adjustment.native_source != require_payload_source(command)
                 ):
                     raise cls._corrupt(
                         "formal Task adjustment outbox does not bind its request"
@@ -10373,6 +10384,7 @@ class SqliteTaskStore:
                         or resolved_spec.origin != command.origin
                         or resolved_spec.required_capabilities
                         != command.required_capabilities
+                        or resolved_spec.native_source != require_payload_source(command)
                     )
                     if common_invalid:
                         raise cls._corrupt(
@@ -10452,6 +10464,7 @@ class SqliteTaskStore:
                             dispatch_spec.required_capabilities,
                             dispatch_spec.side_effect_class,
                             dispatch_spec.attributes,
+                            dispatch_spec.native_source,
                         )
                         != (
                             prior_spec.name,
@@ -10460,6 +10473,7 @@ class SqliteTaskStore:
                             prior_spec.required_capabilities,
                             prior_spec.side_effect_class,
                             prior_spec.attributes,
+                            prior_spec.native_source,
                         )
                         or verified_spec != dispatch_spec
                         or (
@@ -13265,11 +13279,13 @@ class SqliteTaskStore:
             raise self._corrupt("Task read snapshot lost its current Attempt")
         return row
 
-    def task_read_snapshot(self, task_id: str, scope: ScopeRef) -> _TaskReadSnapshot:
+    def task_read_snapshot(self, task_id: str, scope: ScopeRef, *, verify_lineage: bool = False) -> _TaskReadSnapshot:
         """Read Task, current Attempt, and admission from one SQLite snapshot."""
 
         with self._snapshot_reader() as connection:
             task = self._require_task_row(connection, task_id, scope)
+            if verify_lineage:
+                self._verify_durable_lineage(connection, task)
             self._hit("task_read_snapshot.after_task")
             attempt = self._task_read_attempt_row(connection, task)
             return self._task_read_snapshot_from_rows(task, attempt)
@@ -14767,6 +14783,7 @@ class SqliteTaskStore:
                         "executor_id": resolved_spec.executor_id,
                         "side_effect_class": resolved_spec.side_effect_class,
                         "attributes": dict(resolved_spec.attributes),
+                        **source_extension(resolved_spec.native_source),
                     }
                     if (
                         command.target_ref.id != f"create:{row['command_id']}"
@@ -14967,7 +14984,8 @@ class SqliteTaskStore:
                     assert adjustment is not None
                     if (
                         command.target_ref.id != row["task_id"]
-                        or command.payload != {"adjustment": adjustment.adjustment}
+                        or command.payload != {"adjustment": adjustment.adjustment,
+                            **source_extension(adjustment.native_source)}
                         or adjustment.adjustment_id != row["command_id"]
                         or type(command_result) is not dict
                         or set(command_result)

@@ -683,9 +683,10 @@ class PersistentTaskCore:
                     command, observed_at=observed_at
                 )
             if command.command_type == "task.create_successor":
+                from .native_task_source import source_payload_fields, require_payload_source
                 require_exact_payload(
                     command.payload,
-                    self._SUCCESSOR_PAYLOAD,
+                    source_payload_fields(command.payload, self._SUCCESSOR_PAYLOAD),
                     field_name="task.create_successor payload",
                 )
                 if context is None:
@@ -724,6 +725,7 @@ class PersistentTaskCore:
                     side_effect_class=command.payload["side_effect_class"],
                     constraints=tuple(command.payload["constraints"]),
                     attributes=tuple(sorted(attributes.items())),
+                    native_source=require_payload_source(command),
                 )
                 if spec.executor_id != self.executor.executor_id:
                     raise FormalTaskViolation(
@@ -759,11 +761,13 @@ class PersistentTaskCore:
                 )
                 return self.store.update(command, observed_at=observed_at)
             if command.command_type == "task.adjust":
+                from .native_task_source import source_payload_fields, require_payload_source
                 require_exact_payload(
                     command.payload,
-                    frozenset({"adjustment"}),
+                    source_payload_fields(command.payload, frozenset({"adjustment"})),
                     field_name="task.adjust payload",
                 )
+                require_payload_source(command)
                 return self.store.adjust(
                     command,
                     observed_at=observed_at,
@@ -819,8 +823,9 @@ class PersistentTaskCore:
                 now=observed_at,
             )
             payload = command.payload
+            from .native_task_source import source_payload_fields, require_payload_source
             require_exact_payload(
-                payload, self._CREATE_PAYLOAD, field_name="task.create payload"
+                payload, source_payload_fields(payload, self._CREATE_PAYLOAD), field_name="task.create payload"
             )
             attributes = payload["attributes"]
             if type(attributes) is not dict or any(
@@ -847,6 +852,7 @@ class PersistentTaskCore:
                 required_capabilities=tuple(command.required_capabilities),
                 side_effect_class=payload["side_effect_class"],
                 attributes=tuple(sorted(attributes.items())),
+                native_source=require_payload_source(command),
             )
             if spec.executor_id != self.executor.executor_id:
                 raise FormalTaskViolation(
@@ -938,6 +944,12 @@ class PersistentTaskCore:
     ) -> tuple[dict[str, object], dict[str, object] | None]:
         admission_payload = None if admission is None else admission.to_dict()
         task_payload = task.to_dict()
+        # Retained speech is execution evidence, not repeated query context.
+        # Keep the immutable Store spec complete while bounding list/status
+        # receipts independently of the number and size of prior transcripts.
+        if task.spec.native_source is not None:
+            task_payload["spec"].pop("native_source")
+            task_payload["native_source_sha256"] = task.spec.native_source.digest
         task_payload["queued"] = bool(admission is not None and admission.queued)
         task_payload["admission"] = admission_payload
         return task_payload, admission_payload

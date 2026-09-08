@@ -2518,6 +2518,7 @@ class P3AuthenticatedComposition:
             required_capabilities=tuple(spec.required_capabilities),
             side_effect_class=spec.side_effect_class,
             attributes=tuple(spec.attributes),
+            native_source_sha256=None if spec.native_source is None else spec.native_source.digest,
         )
 
     def _require_retry_executor(self, spec: FormalTaskSpec) -> None:
@@ -2557,6 +2558,7 @@ class P3AuthenticatedComposition:
                 "task attributes must be a string map",
                 ErrorCode.INVALID_ARGUMENT,
             )
+        from .native_task_source import source_from_payload
         return FormalTaskSpec(
             name=payload.get("name"),
             instruction=payload.get("instruction"),
@@ -2566,6 +2568,7 @@ class P3AuthenticatedComposition:
             required_capabilities=tuple(command.required_capabilities),
             side_effect_class=payload.get("side_effect_class"),
             attributes=tuple(sorted(attributes.items())),
+            native_source=source_from_payload(payload),
         )
 
     def _select_create_executor(
@@ -4135,6 +4138,18 @@ class P3AuthenticatedComposition:
                 )
 
             arguments = dict(resolution.arguments)
+            native_source = origin_binding.native_source
+            if native_source is not None:
+                if native_authority is None:
+                    raise FormalTaskViolation("NATIVE_TASK_SOURCE_AUTHORITY_REQUIRED",
+                        "Native speech source requires the retained Native authority", ErrorCode.PERMISSION_DENIED)
+                native_source.require_request(scope=authority.scope, operation=operation,
+                    instruction=arguments.get("adjustment" if operation == "task.adjust" else "instruction"))
+                if (native_source.target_id != resolution.target_task_id
+                    or native_source.expected_revision != (
+                        None if final_target is None else final_target.revision_number)):
+                    raise FormalTaskViolation("NATIVE_TASK_SOURCE_TARGET_MISMATCH",
+                        "Native speech source lost its exact target", ErrorCode.PERMISSION_DENIED)
             if operation == "task.list":
                 self._require_list_task_contexts(
                     authority=authority,
@@ -4411,6 +4426,8 @@ class P3AuthenticatedComposition:
                     }
                     command_context = authority.context
                 assert resolution.command_id is not None
+                if native_source is not None:
+                    command_payload["native_source"] = native_source.to_dict()
                 envelope = CommandEnvelope.from_dict(
                     {
                         "contract_version": CONTRACT_VERSION,

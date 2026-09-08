@@ -645,3 +645,86 @@ sealed SHA256 16ba045fd856abec5e759c1e416582d482d483b24ecbd6d2227c09937bbb1f1c.
 The incorrect D bytes were preserved in ignored evidence and the originally
 requested, previously absent vad300_d.md. This maintenance does not rewrite Task
 history or grant the incorrect D Task successful product acceptance.
+
+## Post-window source and file-effect repair — Tier 3 checkpoint
+
+The six-hour checkpoint is PARTIAL; execution continues under the same user
+request. The D-to-C overwrite demonstrates two separate defects: Native's
+rewritten proposal replaces the user's source at Task dispatch, and the Executor
+has no executable preservation policy. Main owns both seams. Required independent
+design review confirmed there is no existing file-effect contract to reuse.
+
+First implement original-input provenance through Runtime, production origin
+binding, P3, durable Task specification/adjustment and the actual Code Agent
+request. Freeze the exact admitted anchor commit and a bounded ordered window
+of preceding same-activation items as separately identified context. Do not
+invent a multi-item command span, concatenate history into authoritative speech,
+or infer reference ownership from recency. Retain canonical Provider transcript
+text and identities, including absent historical transcripts, separately from
+the model's executable proposal. Wait asynchronously and finitely for the
+anchor's final transcription at Task dispatch; no Provider-reader or ordinary
+first-audio wait. Missing/failed/closed source fails before Task mutation rather
+than falling back to rewritten text. Source bytes bind origin, command, immutable
+Task fingerprint and exact adjustment. Old persisted records remain explicitly
+source-absent with their existing canonical bytes; no retroactive source repair.
+
+Then implement a separately versioned FileEffectPlan proposed by the existing
+Code Agent and frozen by the server. Exact create/replace/delete paths, original
+existence/hash, required outputs and plan revision must be checked before durable
+effect preparation and every normal/recovery apply. Unlisted existing files stay
+unchanged. An actually adopted adjustment must bind the corresponding plan
+revision; successor Tasks receive their own plan. This is a scope expansion of
+the repair, recorded before code, not permission for a new keyword classifier,
+provider change, default create-only policy, or model self-issued overwrite grant.
+
+Source and effect enforcement have distinct acceptance. ASR and Agent semantic
+interpretation can still be wrong; typed plans do not prove natural-language
+correctness. The complete boundary requires the original D replay producing D
+while C is unchanged, explicit existing-file editing, preserved derivation,
+same-Task adjustment races, changed/appearing targets, retry/restart/D2 recovery,
+cancel/close/reconnect and forged/cross-scope source or plan with zero forbidden
+formal-file effects. Source-only tests cannot close preservation or physical
+acceptance. Applicable regressions and independent complete-diff review precede
+each coherent local commit; no deployment of an unfinished boundary.
+
+Source review also identified query amplification: full source evidence must not
+be copied into every Task list/status receipt. The read projection retains a
+bounded source digest; Store specs, commands, retry lineage and Executor requests
+retain the complete evidence. Verify legal large transcripts through actual
+serialized Native queries and replay, including UTF-8 and Provider JSON limits.
+
+### Source module implementation and checks after the requested pause
+
+The user resumed explicitly after changing Codex speed. Original transcription
+now reaches the existing Direct worker AgentRequest and adopted adjustment
+checkpoint. Runtime admission and bounded late-ASR waiting, immutable source
+binding, SQLite restart/retry/successor, verified Task.update and source-absent
+compatibility are implemented. The independent review found and closed receipt
+amplification; actual worker testing found and fixed an old adjustment outbox
+payload comparison that otherwise rejected the new source-bearing adjustment.
+
+On the source commit containing this record, commands use
+`.venv/Scripts/python.exe -m pytest ... -o addopts= -o log_cli=false -q -s --tb=short`:
+
+- Source scenarios: 24 passed, then 2 additional public-source/confirmation and
+  command-replay forgery cases passed, then 1 total-source-byte-bound case passed.
+  The Direct worker test captures the real dispatch and model-checkpoint request
+  carriers using a deterministic test Agent, produces a formal file and verifies
+  exact once-only adjustment application/replay. It is not real-model evidence.
+- Five legal 60 KB Chinese source records survive SQLite reopen while actual
+  serialized Native list/status and replay stay below both Unified 262,144-byte
+  and Native 524,288-byte receipt limits. Queries expose only source digests.
+- `test_persistent_task_core.py test_project_code_executor.py -k 'adjust or retry
+  or query or list or status or successor'`: 150 passed, 359 deselected.
+- Shared v2 contract, Native Runtime, Gateway Native client and Realtime Engine:
+  331 passed. The earlier affected-module run remains 535 passed, 2 Windows
+  symlink skips; only the subsequently affected Store/Executor checks were rerun.
+- Complete cold diff and independent source-module review passed. The two
+  discovery failures above and corrected test error-code assertions remain in
+  ignored logs; they were not converted to pass without affected reruns.
+
+Raw commands/results are retained under ignored `logs/repair-20260908/source-*`.
+No remote update occurred. Real Provider/selected Code Agent verification follows
+the clean controlled deployment. FileEffectPlan, natural-language fidelity,
+latency and physical A–F acceptance remain open; this closes neither the original
+overwrite failure nor the six-hour product acceptance.

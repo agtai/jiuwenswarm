@@ -16,6 +16,7 @@ from jiuwenswarm.server.live_voice.p3_product_confirmation import ProductP3Confi
 from tests.unit_tests.live_voice.test_native_agent_model import _model_harness, TOKEN
 from tests.unit_tests.live_voice.test_product_composition_registry import (
     _AgentManager, _native_turn_proposal, _native_speak_proposal, _native_propose_params, _native_delegate_proposal,
+    _native_input_transcript_proposal,
 )
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
@@ -26,7 +27,7 @@ from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import Gat
 from jiuwenswarm.server.live_voice.openai_realtime_native_engine import NativeEngineEvent
 
 
-async def make_registry(tmp_path, monkeypatch):
+async def make_registry(tmp_path, monkeypatch, *, input_text="Perform the requested project work."):
     h, catalog, builds, confirmed, authority = await _model_harness(tmp_path)
     now = datetime.now(UTC)
     expiry = (now + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
@@ -52,7 +53,13 @@ async def make_registry(tmp_path, monkeypatch):
     binding, capability = NativeInteractionBinding.from_dict(descriptor["binding"]), descriptor["capability"]
     assert descriptor["business_contract_version"] == NATIVE_BUSINESS_CONTRACT_VERSION
     assert active.payload["result"]["agent_model_selection"]["model_identity"] == confirmed.model_identity
-    for rid, proposal in (("turn", _native_turn_proposal(binding)), ("speak", _native_speak_proposal(binding))):
+    proposals = [("turn", _native_turn_proposal(binding))]
+    if input_text is not None:
+        transcript = _native_input_transcript_proposal(binding)
+        proposals.append(("input-transcript", replace(transcript,
+            input_transcript=replace(transcript.input_transcript, transcript=input_text))))
+    proposals.append(("speak", _native_speak_proposal(binding)))
+    for rid, proposal in proposals:
         output = await registry.handle_native_propose(params=_native_propose_params(binding, capability, proposal), request_id=rid, session_id="session-1")
         assert output.ok, output.payload
     source = ResponseRef(**output.payload["result"]["response"])

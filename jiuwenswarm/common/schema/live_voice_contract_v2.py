@@ -1401,6 +1401,7 @@ def _command_payload(command_type: str, value: object) -> _FrozenObject:
         _require_exact_keys(
             data,
             required={"adjustment"},
+            optional={"native_source"},
             field_name="command.payload",
         )
         adjustment = _required_text(data["adjustment"], "command.payload.adjustment")
@@ -1514,6 +1515,7 @@ def _command_payload(command_type: str, value: object) -> _FrozenObject:
                 "side_effect_class",
                 "attributes",
             },
+            optional={"native_source"},
             field_name="command.payload",
         )
         _uint(

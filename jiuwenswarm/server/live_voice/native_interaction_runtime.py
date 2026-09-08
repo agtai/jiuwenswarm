@@ -269,6 +269,9 @@ class NativeInteractionRuntimeOwner:
         self._delegate_results: dict[str, NativeDelegateResult] = {}
         self._delegate_holds: dict[str, ResponseRef] = {}
         self._interrupted_delegate_sources: set[ResponseRef] = set()
+        self._task_source_captures = {}
+        self._task_sources = {}
+        self._source_changed = asyncio.Event()
 
     def foreground_busy(self) -> bool:
         if self._closed:
@@ -489,6 +492,8 @@ class NativeInteractionRuntimeOwner:
             self._input_transcript_event_items[transcript.provider_event_id] = (
                 transcript.provider_item_id
             )
+            self._source_changed.set()
+            self._source_changed = asyncio.Event()
             return True, admission
 
     async def admit_delegate(
@@ -608,12 +613,66 @@ class NativeInteractionRuntimeOwner:
                 turn_commit=turn_commit,
                 source_response=retained_response.admission.response,
             )
+            from .native_task_source import MAX_SOURCE_CONTEXT_ITEMS, SOURCE_OPERATIONS
+            if isinstance(proposal, NativeBusinessProposal) and proposal.business.operation in SOURCE_OPERATIONS:
+                anchor = self._turns_by_id[proposal.turn_id]
+                ordered = tuple(self._turns_by_id.values())
+                preceding = ordered[:ordered.index(anchor)]
+                self._task_source_captures[proposal.provider_call_id] = (
+                    anchor, preceding[-MAX_SOURCE_CONTEXT_ITEMS:],
+                    max(0, len(preceding) - MAX_SOURCE_CONTEXT_ITEMS),
+                )
             self._delegates_by_call[proposal.provider_call_id] = admission
             self._delegate_holds[proposal.provider_call_id] = admission.source_response
             self._delegate_event_calls[proposal.provider_event_id] = (
                 proposal.provider_call_id
             )
             return True, admission
+
+    async def task_source(self, admission: NativeDelegateAdmission, *, timeout: float = 2.0):
+        """Wait off the Provider reader for the exact frozen anchor's final ASR.
+
+        An earlier missing transcription can also prevent ordered admission of
+        the anchor. That is an explicit source-unavailable failure, never a
+        fallback to the model's request_text or a new historical command span.
+        """
+        from .native_task_source import NativeTaskSource, NativeTaskSourceError
+        if type(timeout) not in (float, int) or not 0 < timeout <= 10:
+            raise ValueError("invalid Native Task source timeout")
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            async with self._lock:
+                self._require_open()
+                proposal = admission.proposal
+                if self._delegates_by_call.get(proposal.provider_call_id) != admission:
+                    raise NativeTaskSourceError("NATIVE_TASK_SOURCE_ADMISSION_MISMATCH")
+                captured = self._task_source_captures.get(proposal.provider_call_id)
+                if captured is None:
+                    raise NativeTaskSourceError("NATIVE_TASK_SOURCE_CAPTURE_MISSING")
+                prior = self._task_sources.get(proposal.provider_call_id)
+                if prior is not None:
+                    return prior
+                anchor, preceding, omitted = captured
+                current = self._input_transcripts_by_item.get(anchor.provider_item_id)
+                if current is not None:
+                    instruction = (proposal.business.adjustment if proposal.business.operation == "task.adjust"
+                                   else proposal.business.instruction)
+                    source = NativeTaskSource(proposal.source_identity, proposal.business.operation,
+                        hashlib.sha256(instruction.encode("utf-8")).hexdigest(), anchor, current[0],
+                        tuple((commit, (self._input_transcripts_by_item[commit.provider_item_id][0]
+                            if commit.provider_item_id in self._input_transcripts_by_item else None))
+                            for commit in preceding), omitted, proposal.business.target_id,
+                        proposal.business.expected_revision)
+                    self._task_sources[proposal.provider_call_id] = source
+                    return source
+                changed = self._source_changed
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise NativeTaskSourceError("NATIVE_TASK_SOURCE_TRANSCRIPT_UNAVAILABLE")
+            try:
+                await asyncio.wait_for(changed.wait(), timeout=remaining)
+            except TimeoutError:
+                raise NativeTaskSourceError("NATIVE_TASK_SOURCE_TRANSCRIPT_UNAVAILABLE") from None
 
     async def prepare_delegate_result(
         self,
@@ -1410,6 +1469,7 @@ class NativeInteractionRuntimeOwner:
             if self._owns_runtime:
                 await self._runtime.close()
             self._closed = True
+            self._source_changed.set()
 
     def has_current_admitted_audio(self, response: ResponseRef) -> bool:
         """Passive event-loop observation; it grants neither audio nor playout."""

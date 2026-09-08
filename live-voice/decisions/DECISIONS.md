@@ -2098,3 +2098,28 @@
   artifact completion cannot substitute for each other. No push, existing-
   history rewrite, GUI automation, user-data reset or unapproved authority
   expansion is granted. Subsequent C–H choices are recorded before implementation.
+
+## D-122 Retain original Native Task speech independently of model proposals
+
+- Date: 2026-09-08. The continuing six-hour repair exposed an actual D-to-C
+  filename rewrite followed by an overwrite. The accepted repair's
+  [Tier 3 checkpoint](../reviews/REALTIME_SIX_HOUR_REPAIR_20260908.md#post-window-source-and-file-effect-repair--tier-3-checkpoint)
+  separates source provenance from subsequent file-effect enforcement.
+- Runtime freezes the admitted anchor and at most 16 preceding items in Runtime
+  admission order. Provider clocks may reset on reconnect. Final anchor ASR is
+  required within a bounded asynchronous wait; missing history remains explicitly
+  unknown and later items cannot be silently attached to an earlier command.
+  This records retained transcription, not proof of what the speaker meant.
+- A closed versioned source object binds the proposal digest, exact activation,
+  target and revision through existing origin/confirmation authority, command,
+  Task specification, adjustment and retry lineage. Public callers cannot supply
+  this server-owned authority. Legacy source-absent records keep their bytes.
+  A verified later Task.update may change the current requirement while preserving
+  original evidence; a changed instruction hash alone does not authorize it.
+- The Code Agent receives original text separately from the model proposal and
+  receives exact adopted adjustment sources at its existing checkpoint. Full
+  evidence remains in Store and execution requests. List/status projections carry
+  only a source digest so repeated history cannot overflow receipt limits.
+- This contract does not authorize overwrites or close file preservation, ASR
+  semantics, latency or physical acceptance. Those require their own enforcement
+  and observed journeys under the unchanged selected models and project authority.

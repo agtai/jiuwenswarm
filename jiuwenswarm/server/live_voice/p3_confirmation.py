@@ -102,8 +102,13 @@ class PreparedP3RetryFacts:
     required_capabilities: tuple[str, ...]
     side_effect_class: str
     attributes: tuple[tuple[str, str], ...]
+    native_source_sha256: str | None = None
 
     def __post_init__(self) -> None:
+        if self.native_source_sha256 is not None and (
+            type(self.native_source_sha256) is not str or len(self.native_source_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in self.native_source_sha256)):
+            raise ValueError("NATIVE_TASK_SOURCE_DIGEST_INVALID")
         for field_name, value in (
             ("previous_attempt_id", self.previous_attempt_id),
             ("name", self.name),
@@ -161,6 +166,7 @@ class PreparedP3RetryFacts:
             "required_capabilities": list(self.required_capabilities),
             "side_effect_class": self.side_effect_class,
             "attributes": [list(item) for item in self.attributes],
+            **({} if self.native_source_sha256 is None else {"native_source_sha256": self.native_source_sha256}),
         }
 
 
