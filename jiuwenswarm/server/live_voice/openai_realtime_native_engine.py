@@ -56,7 +56,7 @@ from jiuwenswarm.server.live_voice.native_interaction_config import (
     DEFAULT_NATIVE_MAX_OUTPUT_TOKENS, validate_native_max_output_tokens,
     DEFAULT_NATIVE_AUDIO_SPEED, validate_native_audio_speed,
 )
-from jiuwenswarm.server.live_voice.native_business_observation import project_native_receipt
+from jiuwenswarm.server.live_voice.native_business_observation import project_native_receipt, is_task_acceptance_receipt
 from jiuwenswarm.server.live_voice.native_continuation_preparation import (
     PreparedOutputViolation, PreparedProviderOutput,
 )
@@ -245,6 +245,7 @@ class _ProviderResponse:
     first_audio_observed: bool = False
     terminal_status: str | None = None
     prepared_terminal_observed: bool = False
+    receipt_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +270,7 @@ class _DelegateResult:
     response: ResponseRef
     digest: str
     event_ids: tuple[str, str | None]
+    receipt_only: bool = False
 
 
 @dataclass(slots=True)
@@ -291,6 +293,7 @@ class _ProviderResponseRequest:
     preparation_allowed: bool = True
     preparation_deadline: float | None = None
     confirmed_provider_id: str | None = None
+    receipt_only: bool = False
 
 
 @dataclass(slots=True)
@@ -1727,7 +1730,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             if draining and request.predecessor is None:
                 request.predecessor = current.runtime_ref
                 request.preparation_deadline = asyncio.get_running_loop().time() + _PREPARED_RESPONSE_TIMEOUT_SECONDS
-            if (self._receipt_projection and not facts_sent and (request.delegate_call_id is not None
+            if (self._receipt_projection and not request.receipt_only and not facts_sent and (request.delegate_call_id is not None
                     or request.business_recovery or request.work_event_id is not None)):
                 if self._business_refresh is not None and not context_refreshed:
                     fresh = await self._business_refresh()
@@ -1839,6 +1842,19 @@ class OpenAIRealtimeNativeInteractionEngine:
             anchor = next((call for call in source.business_calls if call in self._delegates), None)
             instructions = _BUSINESS_INSTRUCTIONS
             tool_choice = "auto"
+            receipt_only = self._receipt_projection and all(
+                call in self._delegate_results and self._delegate_results[call].receipt_only
+                for call in source.business_calls)
+            if receipt_only:
+                instructions = (
+                    "The exact Task receipts just returned confirm acceptance for background execution, not completion. "
+                    "If that satisfies the user's request, acknowledge it in one brief natural sentence in their language. "
+                    "Do not repeat the instruction, read internal fields aloud, or claim artifacts or current progress. "
+                    "If the user's request still requires dependent steps or additional facts, call jiuwen_context_get "
+                    "first to obtain fresh context, then continue the requested steps after its result. "
+                    "A response with a function call must have no speech or audio. "
+                    "The historical acceptance receipt grants no authority for further business actions."
+                )
             if any(self._business_call_records[call].error_output is not None for call in source.business_calls):
                 corrections = self._business_argument_corrections.get(source.turn_id, 0)
                 if corrections < 2:
@@ -1849,8 +1865,11 @@ class OpenAIRealtimeNativeInteractionEngine:
                     tool_choice = "none"
             self._response_request_queue.append(_ProviderResponseRequest(
                 turn_id=source.turn_id, delegate_call_id=anchor, business_recovery=anchor is None,
+                receipt_only=receipt_only, preparation_allowed=not receipt_only,
                 payload={"response": {"instructions": instructions, "max_output_tokens": self._max_output_tokens,
-                                      "tool_choice": tool_choice}},
+                                      "tool_choice": tool_choice,
+                                      **({"tools": [tool for tool in native_business_tools()
+                                                    if tool["name"] == "jiuwen_context_get"]} if receipt_only else {})}},
             ))
             self._profile_business("successor_queued", response=source)
 
@@ -1948,24 +1967,26 @@ class OpenAIRealtimeNativeInteractionEngine:
         # The Runtime admitted a real effect/receipt. Speech retirement does not
         # turn it into a synthetic interruption or undo accepted work.
         try:
-            json.loads(output)
+            receipt = json.loads(output)
         except (ValueError, TypeError):
             raise OpenAIRealtimeNativeInteractionError("NATIVE_BUSINESS_OUTPUT_INVALID", "Business output must be JSON data") from None
         self._delegate_output_started.add(parsed)
         source = self._find_response(ref)
         self._profile_business("receipt_prepare_started", response=source, provider_call_id=parsed)
         provider_output = compact_native_business_output(project_native_receipt(output) if self._receipt_projection else output)
+        receipt_only = (self._receipt_projection and is_task_acceptance_receipt(receipt)
+                        and receipt["operation"] == wait.proposal.business.operation)
         self._profile_business("receipt_send_started", response=source, provider_call_id=parsed,
                                canonical_receipt_bytes=len(output.encode("utf-8")),
                                provider_output_bytes=len(provider_output.encode("utf-8")))
         output_id = await self._session.send_event("conversation.item.create", {"item": {
             "type": "function_call_output", "call_id": parsed, "output": provider_output,
         }})
-        self._delegate_results[parsed] = _DelegateResult(ref, digest, (output_id, None))
+        self._delegate_results[parsed] = _DelegateResult(ref, digest, (output_id, None), receipt_only)
         self._profile_business("receipt_sent", response=source, provider_call_id=parsed, source_event_id=output_id)
         sent = await self._request_pending_provider_response()
         if sent is not None and sent[0].delegate_call_id in self._find_response(ref).business_calls:
-            self._delegate_results[parsed] = _DelegateResult(ref, digest, (output_id, sent[1]))
+            self._delegate_results[parsed] = _DelegateResult(ref, digest, (output_id, sent[1]), receipt_only)
         # A successor may be sent later by response.done or presentation ACK.
         # None represents exactly that absence; it is never a fabricated receipt.
         return self._delegate_results[parsed].event_ids
@@ -3083,6 +3104,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             turn_id=response_turn_id,
             delegate_call_id=request.delegate_call_id,
             work_event_id=request.work_event_id,
+            receipt_only=request.receipt_only,
         )
         self._inflight_response_request = None
         request.confirmed_provider_id = provider_id
@@ -3594,6 +3616,10 @@ class OpenAIRealtimeNativeInteractionEngine:
                 self._pending_business_errors.append(call_id)
                 return []
             raise OpenAIRealtimeNativeInteractionError(exc.reason, str(exc)) from None
+        if response.receipt_only and (not isinstance(proposal, NativeBusinessProposal)
+                                     or proposal.business.operation != "context.get"):
+            raise OpenAIRealtimeNativeInteractionError("NATIVE_RECEIPT_TOOL_FORBIDDEN",
+                "Deferred context must be refreshed before another business effect")
         try:
             accepted, retained = self._contract_ledger.accept_delegate(proposal)
         except NativeInteractionContractViolation as exc:

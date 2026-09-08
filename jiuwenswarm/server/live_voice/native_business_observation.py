@@ -10,6 +10,19 @@ NATIVE_PROVIDER_RECEIPT_VERSION = "live-voice.native-provider-receipt.v1"
 MAX_OBSERVATION_WAIT_MS = 1000
 
 
+def is_task_acceptance_receipt(value: object) -> bool:
+    """Recognize only the real create receipt; this grants no business authority."""
+    if (not isinstance(value, Mapping)
+            or value.get("contract_version") != "live-voice.native-business.v1"
+            or value.get("operation") not in {"task.create", "task.create_successor"}
+            or value.get("status") != "dispatched"):
+        return False
+    task_id, receipt = value.get("task_id"), value.get("receipt")
+    return (type(task_id) is str and bool(task_id) and len(task_id) <= 256
+            and isinstance(receipt, Mapping) and receipt.get("task_id") == task_id
+            and receipt.get("state") == "accepted")
+
+
 def observation_cursor(value):
     if value is None:
         return None

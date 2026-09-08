@@ -22,7 +22,7 @@ from .native_business_contract import NATIVE_BUSINESS_CONTRACT_VERSION, NativeBu
 from .native_business_context import NativeBusinessContextStore, formal_context, select_conversation_history
 from .native_business_observation import (
     NATIVE_BUSINESS_OBSERVATION_VERSION, MAX_OBSERVATION_WAIT_MS,
-    observation_cursor, canonical_native_receipt,
+    observation_cursor, canonical_native_receipt, is_task_acceptance_receipt,
 )
 from .native_interaction_contract import NativeInteractionBinding
 from .native_interaction_runtime import NativeInteractionRuntimeError
@@ -459,10 +459,16 @@ class NativeBusinessRouter:
                     result["task_origin_reason"] = origin_reason
                 # A failed optional context refresh cannot rewrite a committed
                 # Task receipt as a rejected operation or invite a new mutation.
-                try:
-                    result["context"] = (await self.context(route)).payload()
-                except Exception as error:
-                    result["context_refresh_reason"] = getattr(error, "reason", "NATIVE_BUSINESS_CONTEXT_UNAVAILABLE")
+                if is_task_acceptance_receipt(result):
+                    # The durable Task has already accepted this exact command.
+                    # Observation refresh runs separately; it cannot delay or
+                    # redefine the acceptance receipt or its journal sealing.
+                    result["context_refresh_reason"] = "NATIVE_BUSINESS_CONTEXT_REQUIRES_REFRESH"
+                else:
+                    try:
+                        result["context"] = (await self.context(route)).payload()
+                    except Exception as error:
+                        result["context_refresh_reason"] = getattr(error, "reason", "NATIVE_BUSINESS_CONTEXT_UNAVAILABLE")
                 if (len(canonical_json_bytes(result)) > 262144
                     or len(json.dumps(result, ensure_ascii=True, separators=(",", ":")).encode()) > 524288):
                     result.pop("context", None)

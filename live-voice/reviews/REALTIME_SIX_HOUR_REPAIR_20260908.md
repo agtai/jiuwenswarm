@@ -126,6 +126,42 @@ Raw whitelisted observations: `logs/repair-20260908/provider-configuration.json`
 No credentials, Provider IDs or prompts are copied to that evidence. No latency
 or semantic-quality credit is assigned to these negotiation-only probes.
 
+### F implementation checkpoint
+
+Tier 3, bounded Task-create acceptance fast path only. For an exact server
+`task.create`/`task.create_successor` result with a matching real Task ID and
+an accepted receipt, seal and return the existing durable journal result before
+optional full context refresh. Do not remove admission/final authority reads or
+change Task execution/outbox ownership. Existing background observation owns
+the subsequent context refresh and Task discovery.
+
+Engine may create a concise acceptance response once every call
+in that response has such a durable acceptance receipt. It skips the redundant
+full-context read only for this response. It exposes only `context.get` with
+automatic tool choice: acknowledge a satisfied request briefly, or fetch fresh
+context before continuing remaining dependent steps. The Runtime checks the
+parsed operation before any delegate admission; it cannot mutate through this
+fast response. The next context result restores the normal full tool chain.
+Work results, argument correction,
+queries and multi-operation continuations retain fresh-context sequencing.
+The receipt's own fields are the sole speech facts. Later mutations retain the
+existing server context/revision/membership checks; interruption still retires
+speech without cancelling accepted Tasks. Prepared promotion keeps its existing
+fresh-authority fence. Owned surfaces: Native receipt representation, Router,
+Engine scheduler and acceptance/replay/negative tests. Check blocked optional
+refresh, durable Task/journal counts, duplicate/rejected/wrong-source receipts,
+future action freshness and unchanged work continuations.
+
+Independent review caught that an initial forced no-tools response would stop
+multi-step requests that depend on the newly accepted Task ID. That version was
+not committed or deployed. The context-only continuation above repairs the
+semantic regression and is covered by a dependent-followup test. The initial
+coherent boundary had 334 passing cases; the revised acceptance and existing
+Engine checks passed 187 cases (`f-followup-final-tests.txt`). The added case
+continues through fresh context; direct mutation is rejected based on its parsed
+operation. Independent review closed the P1 after this verification. No real
+acceptance-speech timing is claimed from this controlled test.
+
 The input's September 8 latency directory, 292-second clip, diarized audio,
 original project and data directory are absent on this host. Its 15 timestamps
 and baseline figures are supplied historical evidence, not independently
