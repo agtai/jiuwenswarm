@@ -28,6 +28,20 @@ history, not acceptance of this candidate.
 
 ## Current execution packet
 
+### Interruption and query-lock root-cause checkpoint
+
+The user requested root-cause confirmation and treatment analysis for the recheck's
+media interruption and query-held delay. The
+[causal probes and repair design](reviews/REALTIME_INTERRUPTION_QUERY_ROOT_CAUSE_20260908.md)
+are complete on `224c6753`: delegate interruption fences Conversation Runtime but
+leaves Native audio admission marked current; late batches reproduce two distinct
+errors depending on first-frame state. A parked P3 query independently blocks real
+Registry Native audio admission until released. Proposed work unifies exact
+response retirement and separates query lifetime ownership from short Registry
+critical sections. Production code and services are unchanged; implementation,
+boundary review, deployment and human regression remain pending. No error-code
+suppression, authority cache or unrelated repair has been introduced.
+
 ### Three requested repairs after human acceptance
 
 The user accepted audible tearing and ordinary first-sound latency using the
