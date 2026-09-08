@@ -31,8 +31,13 @@ later candidate do not rewrite that historical result.
 A pass here is not feature-complete, productized or RC/Production approval.
 
 The [September 8 measured acceptance record](../reviews/REALTIME_SIX_HOUR_ACCEPTANCE_20260908.md)
-records the current six-hour repair candidate as PARTIAL. Real latency, semantic
-and file-preservation failures remain alongside missing human playback evidence;
+records a six-hour repair checkpoint as PARTIAL. The subsequent
+[human-session diagnosis](../reviews/REALTIME_HUMAN_ACCEPTANCE_DIAGNOSIS_20260908.md)
+records user-confirmed audible-tearing PASS for Session
+`web_1a0805b849c_94530f3599ab` on clean `0c89d8b940`. That session failed Task
+spoken feedback, adjustment playback and completion notification, with three
+business-observation timeouts closing voice. Real latency, semantics,
+file-preservation guarantees and the complete physical matrix remain open;
 reviewed code, received PCM and maintenance recovery do not grant candidate PASS.
 
 Complete P1/P2/P3, multiple addressed Tasks, full Task operations, supported

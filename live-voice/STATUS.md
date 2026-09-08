@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-08 (six-hour measured repair; latency, semantic/file preservation and physical acceptance remain open).
+> Updated: 2026-09-08 (human-session tearing passed; latency, notification/recovery and broader acceptance remain open).
 > Read the judgement and current packet first; other sections and links are conditional.
 > Git and runtime evidence supply the actual source and deployment identity.
 
@@ -11,7 +11,9 @@ and “only human acceptance remains” are not justified.**
 
 Real Cascade analysis → explicit delegation → one Task → sealed file has scoped
 evidence. Complete A/B/A2 control, offline recovery, artifact correctness and a
-clean current-source microphone/speaker journey remain unproved. Result arithmetic,
+complete current-source microphone/speaker journey remain unproved. One actual
+September 8 session has user-confirmed no-tearing credit; its Task feedback and
+completion announcement failed. Result arithmetic,
 cost consistency, literal filenames, spoken feasibility and brevity remain open
 in the [artifact evidence](evidence/ARTIFACT_QUALITY_REHEARSAL_CHECK_20260903.md).
 
@@ -26,13 +28,22 @@ history, not acceptance of this candidate.
 
 ### Six-hour measured latency and continuity repair
 
-Execution is paused at the user's September 8 request after closing the current
+Repair execution is paused at the user's September 8 request after closing the current
 isolated lock investigation. The user explicitly withdrew the requirement to
 continue toward 100% completion now and requested a progress discussion before
 further work. The production deployment remains clean 0c89d8b940; the pause adds
 documentation and retained diagnostic evidence only. No lock implementation fix
 or further deployment was started. Outstanding acceptance remains PARTIAL and is
-not an active authorization to continue autonomously during this pause.
+not an active authorization to continue autonomously during this pause. The
+subsequent user-requested [human-session diagnosis](reviews/REALTIME_HUMAN_ACCEPTANCE_DIAGNOSIS_20260908.md)
+is complete as a read-only evidence/report scope: the user accepted audible
+tearing for that session, while three business-observation timeouts closed voice,
+Task creation lost its spoken confirmation, the status query took 15.547 s from
+browser EOT to playback start, and adjustment never started playback. An unplayed
+completion announcement fell back to text and consumed its event. Single-frame
+microphone energy during TTS preparation strongly matches the code's temporary
+yield path being treated as terminal failure; the original exception was not
+exported. Broad repair/deployment remains paused for discussion.
 
 The [September 8 execution boundary](reviews/REALTIME_SIX_HOUR_REPAIR_20260908.md)
 uses this checkout. Main implemented and reviewed prepared sample-credit supply,
@@ -52,7 +63,8 @@ but prompt compliance is not an atomic preservation guarantee. Actual states,
 files and maintenance recovery remain distinct from product success. The final
 controlled endpoint returns to 450 ms after the 300 ms comparison exposed more
 speech splits; this does not prove semantic failures disappear. The original
-15-point media and current microphone/speaker/browser acceptance are missing.
+15-point media and complete microphone/speaker/browser acceptance remain open;
+the human-session tearing credit above is narrower than that complete matrix.
 The earlier packets below retain context without activating historical workers.
 
 The continuing [source repair](decisions/DECISIONS.md#d-122-retain-original-native-task-speech-independently-of-model-proposals)
@@ -81,7 +93,10 @@ Clean 0c89d8b9 repeats six ordinary inputs with received-PCM P50 1.915 s /
 P95 2.062 s; these are not speaker
 times. Removing routine Native RPC log flushes does not establish a meaningful
 end-to-end gain. A retained 525 ms local descriptor-delivery tail and missing
-current physical measurement leave ordinary first-sound acceptance open.
+current aligned physical measurement leave ordinary first-sound acceptance open.
+The human session's eight no-tool browser EOT-to-AudioContext-start observations
+have P50 1.199 s, but exclude acoustic tail/VAD and device output delay. They
+cannot replace the CLI measurement or establish a strict 3.3-to-1.199 s comparison.
 
 ### Realtime acceptance repairs
 
@@ -320,14 +335,14 @@ whole-project audit for every bounded task.
 | Audio Device & browser I/O | Capture/playout, media wiring, exact-owner fencing; home-entry transcription; PCM-anchored lead and bounded starvation recovery with scoped evidence in the [three repairs](reviews/DEMO_THREE_REPAIRS_20260906.md) | Current-source headset continuity, listening/recovery/playback, permission/device coverage, AEC/NS/AGC, double-talk and loss/stop targets |
 | Speech Recognition | Streaming/batch finals, typed failure, bounded capture retry and lifetime repair | Long/paused speech, fallback/cancel, device/network and physical lifetime evidence |
 | Speech Synthesis | Streaming/batch TTS, response ownership, playback ACK; sample-credit prepared delivery and production diagnostic-cost repair with same-frame evidence | Physical long-answer continuity, first-audio, underrun, pronunciation and stale-output proof |
-| Realtime Media | Dedicated transport, registration/rotation, bounded P2 pull; lock-free external notification authorization and exact Native wake with reviewed race checks | Media-attachment tail, browser backpressure/load, loss/order/corruption/reconnect and truthful physical recovery |
+| Realtime Media | Dedicated transport, registration/rotation, bounded P2 pull; lock-free external notification authorization and exact Native wake with reviewed race checks | Actual business-observation timeouts close Native voice; media admission under load, loss/order/corruption/reconnect and truthful physical recovery |
 | Conversation Runtime | Commit/generation fencing, Stop/Exit, playout and Cascade generation interruption; Native analysis independent of speech, exact revision cancellation, response-group arbitration and ACK ownership | Combined physical listening/notification/Task races, no old-audio revival or detached-Task miscontrol |
 | Interaction Intelligence | Cascade semantic routing; Native typed business calls with bounded argument correction and Provider-confirmed interruption | Full Native business-audio journey, endpoint/false-interruption evaluation, language/device scope |
-| Agent Bridge and dialogue truth | Real Agent/file tools, independently owned read-only Native work, bound model/context, explicit reply continuations, restart-unknown checkpoints and canonical heard history | Actual receipt/feedback latency, transcription and literal-path drift, arithmetic/feasibility reliability and physical speech |
+| Agent Bridge and dialogue truth | Real Agent/file tools, independently owned read-only Native work, bound model/context, explicit reply continuations, restart-unknown checkpoints and canonical heard history | Actual receipt/feedback latency; observed workspace-query transcript delegated as park research; transcription/literal-path drift, arithmetic/feasibility and physical speech |
 | Task Control Core and Store | Canonical multi-Task state, durable commands/replay, exact targets/CAS, bounded adjustment delivery | Current concurrency/restart integration and full Task-operation coverage |
 | Executor & Durability | Direct D0/D2 v2 admission/reconciliation, sealed results/checkpoints; reviewed repeated-read failure and preservation-conflict prompts; real failure prevents partial apply in scoped cases | Reliable preservation despite model path drift, long-report convergence/length and full result/control acceptance; no D1/host-crash claim |
 | Voice–Task Bridge | Unified committed semantics, exact local create/successor/adjust/cancel consent, authorized target/revision checks, durable receipt continuation and exact as-of adjustment observations | Reliable literal target/intent and positive result queries, full modification/generalization; update/reprioritize retain confirmation; pause/resume/provide-input remain unsupported |
-| Integrated Web product experience | Right-panel Registry Tasks, operation-driven refresh, passive Native work state, confirmed model selection, text/notification ownership and processing state independent of capture | Current-source busy-to-idle terminal delivery, stable startup/interruption/playback, A/B/A2 and offline/unread/ACK/refresh; projectless backend authority |
+| Integrated Web product experience | Right-panel Registry Tasks, operation-driven refresh, passive Native work state, confirmed model selection, text/notification ownership and processing state independent of capture | Unplayed Task completion consumed as text after pre-playback failure; busy-to-idle audio retry, adjustment-result truth, stable recovery, A/B/A2 and offline/unread/ACK/refresh; projectless backend authority |
 | Observability, benchmark and latency | Exact event/call joins, real mixed ordinary/tool groups under running Tasks, production-log supply A/B and truthful receipt/file milestones | Actual audible P50 and Task/feedback targets, media tail and physical reproduction; received/generated audio is not heard history |
 | Automated verification and acceptance | Focused regressions and limited real-model/audio/file evidence | Unclassified Registry/Web failures, unique legacy-oracle migration, cumulative review/human acceptance |
 | Configuration, code and document cleanup | Controlled launcher, semantic cutover, bounded removals and prompt/config isolation | Complete reachability/retirement audit and remaining manifest rows; keep private artifacts/runtime data out of integration |
@@ -340,7 +355,7 @@ whole-project audit for every bounded task.
 | HARDCODE_RETIREMENT | PARTIAL: complete production reachability and unique-oracle migration remain open |
 | SEMANTIC_AND_EXECUTION | PARTIAL: real create/adjust/query/file evidence includes path drift, preservation violation, missing/short artifacts and correct rejection; recovery does not erase failed acceptance |
 | AUDIO_E2E_DIGITAL | PARTIAL: actual Native PCM/Agent/Task mixed groups and interruption/reopen evidence exist; complete A/B/A2 and physical consumption/ACK remain unproved |
-| HUMAN_PHYSICAL_ACCEPTANCE | FAIL / INCOMPLETE: later rehearsals exposed defects; current cumulative microphone/speaker journey has not passed |
+| HUMAN_PHYSICAL_ACCEPTANCE | PARTIAL: user accepted no audible tearing in the September 8 session; Task feedback/completion and recovery failed, and the complete physical matrix has not passed |
 | REGRESSION_AND_REVIEW | PARTIAL: inherited Registry/Web failures, affected migration and cumulative review remain open |
 
 ## Dependency route to feature complete
