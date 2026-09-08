@@ -12,7 +12,8 @@ feature complete or a newly accepted controlled candidate.**
 The user accepted audible tearing and the earlier browser first-sound metric
 for the scoped repair. The later human recheck confirms request-specific early
 feedback, a completed file Task and an acknowledged completion announcement.
-One interruption race and query-held audio delays remain. Full A/B/A2 control,
+The interruption/query-lock repairs are implemented and awaiting local deployment
+and real-path recheck. Full A/B/A2 control,
 offline recovery, artifact quality and the complete physical/device matrix are
 still unproved. Code-project authorization remains required; Work/projectless
 support has been discussed, not implemented.
@@ -25,8 +26,10 @@ The user paused the broad six-hour push and requested discussion rather than
 100% completion. The later three-fix implementation/recheck and interruption/
 query-lock diagnosis are completed scopes with the limits below. Their remaining
 items do not reactivate the whole backlog or historical parallel assignments.
-Continue the latest explicit user task; do not treat this document cleanup,
-model discussion or local URL convention as a production repair/deployment.
+The user has now explicitly resumed implementation of the two interruption/
+query-lock repairs below, including affected verification and controlled local
+deployment. The broad backlog, model changes and local URL implementation remain
+outside that scope.
 
 The last deployment identified by the
 [human recheck](reviews/REALTIME_HUMAN_RECHECK_20260908.md) used code
@@ -45,14 +48,16 @@ before runtime work; documentation HEAD is not the deployed product version.
   speech and played notification ACK; voice `task.status` and every failure/
   retry variant were not exercised. Receipt arrival is not adjustment application
   or completed work. Task intent/result semantics (item 4) remain excluded.
-- **Interruption and query-lock fixes pending:** the
+- **Interruption and query-lock code repaired:** the
   [root-cause probes and repair design](reviews/REALTIME_INTERRUPTION_QUERY_ROOT_CAUSE_20260908.md)
   reproduce delegate interruption fencing Conversation Runtime without cancelling
   the Native receiver, and P3 queries holding the Registry lock across external
   reads. One human interruption closed media; queries also delayed audio.
-  Production changes, affected tests/review, deployment and human regression for
-  these two causes have not run. Proposed fixes belong to response retirement
-  and query lifetime/short critical sections, not broad error suppression.
+  Commits `d1beb113` and `5cd46346` synchronize receive/output retirement and give
+  queries an owned lifetime outside the shared voice lock. Focused checks and
+  independent review passed; broad comparison retains the same 55 Registry and
+  7 Semantic baseline failures. Deployment, real-path recheck and new human
+  regression remain pending; no full-suite or physical acceptance claim.
 - **Local connection diagnosis and entry convention recorded:** use the
   [127.0.0.1 local entry](runbooks/E2E_RUNBOOK.md#local-entry-origin).
   Browser probes isolate roughly 300 ms of localhost IPv6-to-IPv4 fallback.
