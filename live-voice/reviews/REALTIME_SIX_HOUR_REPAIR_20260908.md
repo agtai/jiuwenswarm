@@ -982,3 +982,43 @@ deploy-native-rpc-logging.txt under logs/repair-20260908. Current browser device
 latency, continuous human turns and the original fifteen-point media remain
 missing. No additional shared protocol or Provider automatic-response behavior
 was introduced to conceal the remaining gap.
+
+### User-requested pause — current investigation closed, 09:10 UTC
+
+The user requested completion of only the work needed for the current checkpoint,
+then a progress discussion, explicitly removing the requirement to reach 100%
+of the original goal now. Production source was already clean and deployed; no
+lock repair had been started. The remaining bounded action was an isolated
+contention reproduction, followed by this record. Do not resume the broader
+queue automatically before that discussion and a new user direction.
+
+On source 999ae75871ff9fe47ef0fe31b1a19ae3bbd5f858 (documentation after deployed
+0c89d8b940), the actual ProjectStore `_file_lock` acquired an uncontended temporary
+sidecar in 0.163–0.345 ms. A separate process acquired the same sidecar and, after
+a handshake, released it in 30.176–30.520 ms. The production acquisition still
+took 1004.577, 1014.482 and 1006.543 ms in three repetitions. This reproduces the
+coarse Windows `LK_LOCK` contention wait. It uses a task-owned temporary directory,
+touches no deployed project registry, and changes no production code.
+
+Separately, eight actual authority snapshot reads without injected contention
+took about 48–51 ms after warm-up: project metadata under 1 ms, session metadata
+about 0.33 ms and Git revision lookup about 46–49 ms. Combined with the existing
+1057.623 ms notification preparation sample, this supports a next-step hypothesis;
+it does not prove that lock contention occurred in that live sample, establish
+an end-to-end improvement, or validate a replacement locking implementation.
+
+Evidence retained under logs/repair-20260908: reproduce_project_lock_wait.py,
+project-lock-wait-observation.json, project-lock-wait-observation-run.txt,
+profile_authority_read.py, authority-read-timings.json and authority-read-cprofile.txt.
+The reproduction completed successfully. This checkpoint changes documentation
+only; scoped diff/whitespace and link verification apply, without another product
+test run or deployment. The stable service remains on clean 0c89d8b940.
+
+Overall acceptance stays PARTIAL. Latest ordinary received-PCM P50 is 1.915 s
+(six rounds, range 1.671–2.062 s), not measured speaker latency. Latest two Task
+receipt recordings took 8.257 / 9.453 s. Source/file-plan repairs have scoped
+tests and real Task evidence, but forced source/proposal conflict, exact literal
+and length correctness, same-Task adjustment convergence, continuous physical
+audio, interruption and lifecycle acceptance remain open. The six-hour deadline
+was exceeded. These items are retained for discussion, not silently relabelled
+as completed or restarted work.

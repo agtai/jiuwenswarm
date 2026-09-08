@@ -26,6 +26,14 @@ history, not acceptance of this candidate.
 
 ### Six-hour measured latency and continuity repair
 
+Execution is paused at the user's September 8 request after closing the current
+isolated lock investigation. The user explicitly withdrew the requirement to
+continue toward 100% completion now and requested a progress discussion before
+further work. The production deployment remains clean 0c89d8b940; the pause adds
+documentation and retained diagnostic evidence only. No lock implementation fix
+or further deployment was started. Outstanding acceptance remains PARTIAL and is
+not an active authorization to continue autonomously during this pause.
+
 The [September 8 execution boundary](reviews/REALTIME_SIX_HOUR_REPAIR_20260908.md)
 uses this checkout. Main implemented and reviewed prepared sample-credit supply,
 production diagnostic cost, Registry lock release, exact notification wake,
