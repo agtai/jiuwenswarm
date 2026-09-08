@@ -427,3 +427,15 @@ opaque Task ID. Task task-591ba4a1710644dcb4eec692ed7f3a51 ended failed with
 NO_EFFECTIVE_TARGET_CHANGE; the isolated Agent could not resolve that Task ID to
 the source filename and attempted an unavailable bash tool. Original and prior
 variant hashes stayed unchanged. Neither acceptance nor audible completion passes.
+
+## G literal artifact instruction repair — Tier 1 prompt boundary
+
+The real failed successor exposed lossy model-generated arguments, not parser
+rewriting: own only Native business instructions. Require exact source filenames
+in executable request_text rather than an opaque Task ID; distinguish Task display
+names from paths; preserve latest explicit filename and dictated punctuation.
+No new classifier, text rewrite, capability, schema, executor access or mutation
+policy. Reuse bound-call contract tests for byte-preserving executable arguments;
+only a real spoken create/derive with correct files can close semantic fidelity.
+Bound tool and Native engine regression: 223 passed. Main reviewed the complete
+prompt diff; it adds no server-side text transformation or expanded authority.
