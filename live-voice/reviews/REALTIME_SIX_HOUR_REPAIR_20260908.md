@@ -915,9 +915,10 @@ receipt-latency repair (receipt-profile-real-result.json / receipt-stages.json).
 
 ### Ordinary audible latency — continuing transport repair (Tier 1)
 
-The user clarified that the reported approximately 3.3 seconds is ordinary chat,
-from acoustic speech end to hearing an answer. This remains a primary failed
-experience boundary. On clean da09c452, three real ordinary rounds received PCM
+The user clarified that the reported approximately 3.3 seconds is ordinary chat
+in the original video, from acoustic speech end to hearing an answer. It is not
+a new measurement of the current deployment. The original audible acceptance
+targets remain open. On clean da09c452, three real ordinary rounds received PCM
 after 2017.081, 1657.457 and 1738.337 ms; these are recordings, not speaker
 measurements. Their exact Provider ingress-to-Gateway-send intervals were
 187.977, 142.977 and 117.467 ms. The browser still requires 250 ms of real queued
@@ -944,3 +945,40 @@ for 100 batches of four records, repeated twice, had INFO medians 0.759 / 0.796 
 and maxima 14.784 / 7.110 ms; filtered DEBUG medians were 0.0011 / 0.0012 ms.
 This is a small synchronous overhead reduction, not evidence explaining the
 seconds-long delay. A same-speech before/after real transport trial follows.
+
+### Current ordinary timing — clean 0c89d8b9 deployment
+
+The controlled launcher rebuilt the frontend, passed its real speech round trip
+and negative-auth checks, and bound the clean 0c89d8b940 source to
+swarm-20260908-105503.log. Provider/model/speed/450 ms endpoint and the selected
+Agent stayed unchanged. Each side then used the same three cached real TTS inputs
+twice through actual Native RPC and dedicated audio. All twelve answers retained
+the requested arithmetic, times and final condition. These are fresh-activation
+recordings in an existing Session; no physical played ACK was invented.
+
+| Same-speech six-round sample | Received PCM P50 / nearest-rank P95 (ms) | Exact raw PCM to first send P50 / P95 (ms) |
+|---|---:|---:|
+| da09c452 before | 1925.849 / 1997.196 | 72.117 / 98.493 |
+| 0c89d8b9 after | 1915.269 / 2061.808 | 48.970 / 525.053 |
+
+The current received-PCM range is 1670.887–2061.808 ms. The 10.580 ms median
+difference does not establish an end-to-end improvement; the larger post-change
+tail is retained. No audible P50/P95 has been measured, and the original 3.3-second
+video cannot be compared directly with these received-PCM values. Ordinary first
+sound and the <=200 ms raw-to-send P95 acceptance remain open.
+
+In the 525.053 ms sample (repair-int-b902673ba943), first-frame Gateway admission
+took 4.770 ms and the wake RPC took 12.1 ms. The exact Registry notification call
+took 1057.623 ms, with only 0.378 ms in notification.wait: the delay was before
+its receive wait while the locally queued audio descriptor awaited that owned
+poll's return. Source-ready to sent was 0.894 ms on the Gateway clock. This is
+evidence to investigate notification preparation/authorization, not attribution
+to socket sending, Provider generation, a blocked audio admission lock, or the
+removed routine logs. Cross-process timestamps are not subtracted.
+
+Raw artifacts: ordinary-log-before/after rounds and server diagnostics,
+ordinary-log-comparison.json, native-rpc-logging-sink-cost.json and
+deploy-native-rpc-logging.txt under logs/repair-20260908. Current browser device
+latency, continuous human turns and the original fifteen-point media remain
+missing. No additional shared protocol or Provider automatic-response behavior
+was introduced to conceal the remaining gap.
