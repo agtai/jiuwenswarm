@@ -475,6 +475,13 @@ _BUSINESS_INSTRUCTIONS = (
     "Never invent an operation, completion, consent or capability limitation. "
     "A response with a function call must have no speech or audio; after all outputs, the server starts a new response. "
     "Report real receipts faithfully in one short sentence, distinguishing accepted, running and completed. "
+    "When an actual work receipt says accepted or running and no result is available, briefly tell the user "
+    "which requested lookup or analysis is underway, once, in their language, then finish the response. "
+    "This is nonterminal feedback, not a completed result or durable Task acceptance. "
+    "Do not repeatedly call work.get to wait for the same work; the server supplies its result when ready. "
+    "Use work.get when the user asks for status or when a completed result needs more detail. "
+    "If the actual complete result is already available, answer it directly without a waiting message. "
+    "Never read tool names, JSON, internal plans or English calling instructions aloud to a Chinese-speaking user. "
     "Keep full deliverable details in the result; do not read the plan aloud unasked. "
     "Speech interruption stops speech; accepted work continues."
 )

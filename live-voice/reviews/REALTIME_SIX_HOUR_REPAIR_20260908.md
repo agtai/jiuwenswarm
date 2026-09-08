@@ -292,3 +292,24 @@ The one text is the complete self-contained specification of this operation,
 resolved by Provider from confirmed facts; it is not an unexpanded pronoun or a
 copy of unrelated operations from the same turn. No ASR wait was introduced.
 Real model requirement preservation and latency gains remain pending deployment.
+
+## H prompt boundary from the real weather journey
+
+Tier 1, Native session/successor instructions and the work.get schema description.
+`low-weather-01-1a05e72ce2a6` used the real Agent; its running receipt returned at
+01:57:54.828 UTC, followed by repeated work.get calls before first received audio
+at 11.678 seconds after acoustic end. The Agent completed at 01:57:59.924 UTC.
+The intended change is one concise, operation-specific nonterminal feedback only
+when an actual work receipt says accepted/running and no result is available.
+Model should then finish its response and let existing exact work-result events
+deliver completion. It should not poll work.get repeatedly without a user request.
+If an actual complete result is already present, answer it directly. No fixed
+filler, additional feedback response owner, audio identity, Task state, queue,
+ACK, history or cancellation protocol is added. Running analysis is not durable
+background Task acceptance. Validate actual Provider behavior after deployment;
+physical completion notifications require actual playout and remain unverified.
+
+H scoped self-review found no changed authority/state path. The affected Native
+Engine/bound tools/receipt-only boundary passed 227 tests. This proves preserved
+mapping and fences, not that the model obeys the feedback instruction; the next
+real trial will measure that separately.

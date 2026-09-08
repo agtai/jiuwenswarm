@@ -51,7 +51,7 @@ _DESCRIPTIONS = {
     "task.cancel": "Cancel the exact background Task only on the user's explicit request. Speech interruption is not cancellation.",
     "work.start": "Use real Jiuwen Agent/tools for read-only questions, analysis or current external information lookup, including weather, forecasts and venue facts. Call promptly without announcing a plan. This read-only Agent cannot create a background Task or write a deliverable; explicit background deliverables use task.create.",
     "work.list": "Read the current independent analysis work overview.",
-    "work.get": "Read the actual state and complete result of an exact analysis work item.",
+    "work.get": "Read the actual state and complete result of an exact analysis work item when the user asks, or more completed-result detail is needed. Do not repeatedly poll accepted/running work; the server supplies its result when ready.",
     "work.update": "Apply explicit revised analysis requirements to the exact independent work item.",
     "work.cancel": "Cancel the exact independent analysis work only on an explicit request. Speech interruption is not cancellation.",
 }
