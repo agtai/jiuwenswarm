@@ -335,6 +335,7 @@ def active_engine(
     max_output_tokens: int | str = "inf",
     audio_speed: float = 1.0,
     reasoning_effort: str | None = None,
+    endpoint_mode: str = "semantic-vad",
     settle_silent_delivery: bool = True,
 ) -> tuple[OpenAIRealtimeNativeInteractionEngine, ScriptedSocket, CapturingFactory]:
     socket = ScriptedSocket((*negotiation(), *events))
@@ -348,6 +349,7 @@ def active_engine(
         max_output_tokens=max_output_tokens,
         audio_speed=audio_speed,
         reasoning_effort=reasoning_effort,
+        endpoint_mode=endpoint_mode,
     )
     if settle_silent_delivery:
         next_event = engine.next_event
@@ -4177,3 +4179,26 @@ async def test_retiring_admitted_delegate_successor_drains_already_buffered_outp
         assert tuple(socket.sent) == before
     finally:
         await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("silence", [300, 450, 600])
+async def test_fixed_endpoint_presets_leave_response_and_interrupt_with_engine(silence):
+    engine, socket, _ = active_engine(endpoint_mode=f"server-vad-{silence}")
+    try:
+        await engine.start()
+        assert socket.sent[0]["session"]["audio"]["input"]["turn_detection"] == {
+            "type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300,
+            "silence_duration_ms": silence, "create_response": False, "interrupt_response": False,
+        }
+        assert not any(event["type"] == "response.create" for event in socket.sent)
+    finally:
+        await engine.close()
+
+
+@pytest.mark.parametrize("mode", [None, True, 300, "server-vad-1", "server-vad-300 "])
+def test_invalid_endpoint_mode_has_zero_provider_effects(mode):
+    factory = CapturingFactory(ScriptedSocket())
+    with pytest.raises(ValueError):
+        OpenAIRealtimeNativeInteractionEngine(config(), binding=binding(), socket_factory=factory, endpoint_mode=mode)
+    assert factory.calls == []

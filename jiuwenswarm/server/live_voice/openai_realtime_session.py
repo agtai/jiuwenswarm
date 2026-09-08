@@ -558,6 +558,11 @@ class OpenAIRealtimeSession:
                 "native_reasoning_effort": effort if effort in {"omitted", "minimal", "low", "medium", "high"} else "other",
                 "native_vad_eagerness": eagerness if eagerness in {"omitted", "auto", "low", "medium", "high"} else "other",
             }
+            if detection.get("type") in {"semantic_vad", "server_vad"}:
+                fields["native_vad_type"] = detection["type"]
+            silence = detection.get("silence_duration_ms")
+            if detection.get("type") == "server_vad" and type(silence) is int and 0 < silence <= 10000:
+                fields["vad_silence_ms"] = silence
             model = session.get("model")
             if type(model) is str and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", model):
                 fields["native_model"] = model

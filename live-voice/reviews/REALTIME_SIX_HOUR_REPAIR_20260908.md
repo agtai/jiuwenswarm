@@ -397,3 +397,33 @@ physical microphone/speaker acceptance.
   Provider ingress; with a simulated 250 ms reserve its previously delivered
   audio covered that interval. It is not evidence of an audible gap or proof
   of audible continuity. Physical browser/device acceptance remains missing.
+
+## E endpoint experiment extension — Tier 2
+
+Controlled high/auto samples still leave endpoint and Provider latency material.
+The input packet explicitly permits server VAD at 300/450/600 ms. Add a closed
+Native-only endpoint preset selection, defaulting to unchanged semantic VAD;
+retain create_response=false, interrupt_response=false, the committed-turn owner,
+manual cancellation and all business admission. Own config, Engine/session
+configuration observation, Gateway constructor wiring, launcher persistence and
+focused configuration/negotiation tests. No browser reserve or DSP changes.
+Reject malformed presets before connection. Confirm actual Provider returned
+VAD type/silence separately from requested values. Actual fixed-input long
+conditions, dates/numbers and pauses must be checked before selecting a default;
+a faster first frame alone cannot justify early business mutation or lost words.
+Official reference: https://developers.openai.com/api/docs/guides/realtime-vad
+
+Endpoint extension verification: 323 focused tests passed; PowerShell parser
+reports zero errors. Independent complete-diff review passed, including exact
+unchanged default dictionaries and returned-600/requested-300 diagnostics.
+Actual Provider session.updated accepted all three presets on gpt-realtime-2.1,
+minimal, speed 1.25, unlimited output, with both automatic response and automatic
+interruption disabled. This establishes configuration support only.
+
+High/semantic six ordinary samples were 1520.477–1772.316 ms received first PCM
+(median 1611.144 ms). The long dictated filename trial still submitted parentheses
+instead of the explicitly spoken underscore and identified its source only by an
+opaque Task ID. Task task-591ba4a1710644dcb4eec692ed7f3a51 ended failed with
+NO_EFFECTIVE_TARGET_CHANGE; the isolated Agent could not resolve that Task ID to
+the source filename and attempted an unavailable bash tool. Original and prior
+variant hashes stayed unchanged. Neither acceptance nor audible completion passes.

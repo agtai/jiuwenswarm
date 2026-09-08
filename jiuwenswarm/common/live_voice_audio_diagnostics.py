@@ -118,6 +118,7 @@ FAILURE_CODES = frozenset({
 _LABELS = {
     "native_reasoning_effort": frozenset({"omitted", "minimal", "low", "medium", "high", "other"}),
     "native_vad_eagerness": frozenset({"omitted", "auto", "low", "medium", "high", "other"}),
+    "native_vad_type": frozenset({"semantic_vad", "server_vad"}),
     "argument_field": frozenset({"arguments", "request_text", "action", "action.operation",
         "action.context_id", "action.target_id", "action.expected_revision", "action.name",
         "action.instruction", "action.adjustment", "context_id", "target_id",

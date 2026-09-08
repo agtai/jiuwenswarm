@@ -153,6 +153,7 @@ async def test_negotiated_diagnostic_uses_only_confirmed_public_settings(monkeyp
             "milestone": "configuration_confirmed", "status": "session.updated", "source_event_id": "evt-2",
             "native_model": "gpt-realtime-2.1", "native_audio_speed": 1.25,
             "native_reasoning_effort": "low", "native_vad_eagerness": "high", "native_output_budget": "inf",
+            "native_vad_type": "semantic_vad",
         }
         assert "private" not in json.dumps(captured)
     finally:
@@ -658,3 +659,25 @@ def test_config_and_official_url_are_closed_and_secret_safe() -> None:
         official_realtime_url("https://example.com/v1", model="m")
     with pytest.raises(ValueError, match="model"):
         realtime_config(model="bad\nmodel")
+
+
+@pytest.mark.asyncio
+async def test_server_vad_diagnostic_reports_returned_silence_not_requested_value(monkeypatch):
+    import jiuwenswarm.server.live_voice.openai_realtime_session as module
+    captured = []
+    monkeypatch.setattr(module, "profile_snapshot_event", lambda event, origin, **fields: captured.append(fields))
+    created, updated = negotiated_events()
+    updated["session"]["audio"] = {"input": {"turn_detection": {"type": "server_vad", "silence_duration_ms": 600}}}
+    socket = ScriptedRealtimeSocket((created, updated))
+    session = OpenAIRealtimeSession(realtime_config(), socket_factory=CapturingFactory(socket),
+        diagnostic_origin={"interaction_id": "interaction-1"})
+    requested = session_update()
+    requested["audio"] = {"input": {"turn_detection": {"type": "server_vad", "silence_duration_ms": 300}}}
+    try:
+        await session.open(session_update=requested)
+        confirmed = next(r for r in captured if r.get("milestone") == "configuration_confirmed")
+        assert confirmed["native_vad_type"] == "server_vad"
+        assert confirmed["vad_silence_ms"] == 600
+        assert confirmed["native_vad_eagerness"] == "omitted"
+    finally:
+        await session.close()

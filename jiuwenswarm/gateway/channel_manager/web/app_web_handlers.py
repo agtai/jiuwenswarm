@@ -1682,6 +1682,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     max_output_tokens=interaction_selection.native_max_output_tokens,
                     audio_speed=interaction_selection.native_audio_speed,
                     reasoning_effort=interaction_selection.native_reasoning_effort,
+                    endpoint_mode=interaction_selection.native_endpoint_mode,
                 )
 
         except Exception:

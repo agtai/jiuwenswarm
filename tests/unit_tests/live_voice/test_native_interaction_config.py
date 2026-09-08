@@ -149,7 +149,7 @@ def test_native_endpoint_configuration_is_exact_and_fails_closed(value):
 def test_cascade_never_reads_native_endpoint_configuration(kind):
     class CascadeEnvironment(dict):
         def get(self, key, *default):
-            if key in {NATIVE_VAD_EAGERNESS_ENV, NATIVE_REALTIME_MODEL_ENV, NATIVE_MAX_OUTPUT_TOKENS_ENV, NATIVE_AUDIO_SPEED_ENV, NATIVE_REASONING_EFFORT_ENV}:
+            if key in {"LIVE_VOICE_NATIVE_ENDPOINT_MODE", NATIVE_VAD_EAGERNESS_ENV, NATIVE_REALTIME_MODEL_ENV, NATIVE_MAX_OUTPUT_TOKENS_ENV, NATIVE_AUDIO_SPEED_ENV, NATIVE_REASONING_EFFORT_ENV}:
                 raise AssertionError("Cascade accessed Native-only configuration")
             return super().get(key, *default)
 
@@ -216,3 +216,19 @@ def test_native_audio_speed_rejects_invalid_environment(raw):
             NATIVE_AUDIO_SPEED_ENV: raw,
         })
     assert raised.value.reason == "NATIVE_AUDIO_SPEED_INVALID"
+
+
+@pytest.mark.parametrize("mode", ["semantic-vad", "server-vad-300", "server-vad-450", "server-vad-600"])
+def test_native_fixed_endpoint_presets_are_explicit_and_do_not_read_process_state(mode, monkeypatch):
+    monkeypatch.setenv("LIVE_VOICE_NATIVE_ENDPOINT_MODE", "server-vad-300")
+    default = select_interaction_engine_environment({INTERACTION_ENGINE_ENV: "openai-realtime-native"})
+    assert default.native_endpoint_mode == "semantic-vad"
+    selected = select_interaction_engine_environment({INTERACTION_ENGINE_ENV: "openai-realtime-native", "LIVE_VOICE_NATIVE_ENDPOINT_MODE": mode})
+    assert selected.native_endpoint_mode == mode
+
+
+@pytest.mark.parametrize("mode", [None, "", "server_vad", "server-vad-0", "server-vad-299", "server-vad-0300", "server-vad-300\n", "SEMANTIC-VAD", True, 300, [], {}])
+def test_native_endpoint_preset_invalid_fails_before_connect(mode):
+    with pytest.raises(NativeInteractionConfigurationError) as exc:
+        select_interaction_engine_environment({INTERACTION_ENGINE_ENV: "openai-realtime-native", "LIVE_VOICE_NATIVE_ENDPOINT_MODE": mode})
+    assert exc.value.reason == "NATIVE_ENDPOINT_MODE_INVALID"

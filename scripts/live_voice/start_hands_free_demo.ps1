@@ -43,6 +43,8 @@ param(
     [double]$NativeAudioSpeed = 1.0,
     [ValidateSet('provider-default', 'minimal', 'low', IgnoreCase = $false)]
     [string]$NativeReasoningEffort = 'provider-default',
+    [ValidateSet('semantic-vad', 'server-vad-300', 'server-vad-450', 'server-vad-600', IgnoreCase = $false)]
+    [string]$NativeEndpointMode = 'semantic-vad',
     [switch]$L0Measurement,
     [switch]$L0OrdinaryChromeBatch,
     [switch]$L0ResumeBatch,
@@ -720,6 +722,13 @@ try {
         $savedLocalBargeInProperty = $savedConfig.PSObject.Properties['local_barge_in_profile']
         $savedAudioSpeedProperty = $savedConfig.PSObject.Properties['native_audio_speed']
         $savedReasoningEffortProperty = $savedConfig.PSObject.Properties['native_reasoning_effort']
+        $savedEndpointProperty = $savedConfig.PSObject.Properties['native_endpoint_mode']
+        if (-not $PSBoundParameters.ContainsKey('NativeEndpointMode') -and $null -ne $savedEndpointProperty -and $null -ne $savedEndpointProperty.Value) {
+            $NativeEndpointMode = [string]$savedEndpointProperty.Value
+            if (@('semantic-vad', 'server-vad-300', 'server-vad-450', 'server-vad-600') -cnotcontains $NativeEndpointMode) {
+                Fail 'Saved Native endpoint mode is invalid.'
+            }
+        }
         if (-not $PSBoundParameters.ContainsKey('NativeReasoningEffort') -and $null -ne $savedReasoningEffortProperty -and $null -ne $savedReasoningEffortProperty.Value) {
             $NativeReasoningEffort = [string]$savedReasoningEffortProperty.Value
             if (@('provider-default', 'minimal', 'low') -cnotcontains $NativeReasoningEffort) {
@@ -839,6 +848,7 @@ try {
             local_barge_in_profile = $LocalBargeInProfile
             native_audio_speed = $NativeAudioSpeed
             native_reasoning_effort = $NativeReasoningEffort
+            native_endpoint_mode = $NativeEndpointMode
         } | ConvertTo-Json | Set-Content -LiteralPath $DemoConfigPath -Encoding UTF8
         Write-Pass "已保存无密钥的机器私有 Demo 选择：$DemoConfigPath"
     }
@@ -952,6 +962,7 @@ try {
         LIVE_VOICE_NATIVE_MAX_OUTPUT_TOKENS                        = $NativeMaxOutputTokens
         LIVE_VOICE_NATIVE_AUDIO_SPEED                              = $NativeAudioSpeed.ToString([System.Globalization.CultureInfo]::InvariantCulture)
         LIVE_VOICE_NATIVE_REASONING_EFFORT                          = $NativeReasoningEffort
+        LIVE_VOICE_NATIVE_ENDPOINT_MODE                             = $NativeEndpointMode
         PYTHONUTF8                                                = '1'
         PYTHONIOENCODING                                          = 'utf-8'
     }
@@ -1247,6 +1258,7 @@ try {
         native_max_output_tokens  = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeMaxOutputTokens } else { $null }
         native_audio_speed        = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeAudioSpeed } else { $null }
         native_reasoning_effort   = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeReasoningEffort } else { $null }
+        native_endpoint_mode      = if ($InteractionEngine -eq 'openai-realtime-native') { $NativeEndpointMode } else { $null }
         required_flags            = $validatedFlags
         frontend_flags            = [ordered]@{
             VITE_FEATURE_LIVE_VOICE_GENERATION_INTERRUPTION = $generationInterruptionEnabled

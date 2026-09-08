@@ -57,6 +57,7 @@ from jiuwenswarm.server.live_voice.native_interaction_config import (
     DEFAULT_NATIVE_MAX_OUTPUT_TOKENS, validate_native_max_output_tokens,
     DEFAULT_NATIVE_AUDIO_SPEED, validate_native_audio_speed,
     validate_native_reasoning_effort,
+    DEFAULT_NATIVE_ENDPOINT_MODE, validate_native_endpoint_mode,
 )
 from jiuwenswarm.server.live_voice.native_business_observation import project_native_receipt, is_task_acceptance_receipt
 from jiuwenswarm.server.live_voice.native_continuation_preparation import (
@@ -516,8 +517,16 @@ def _session_update(
     max_output_tokens: int | str = DEFAULT_NATIVE_MAX_OUTPUT_TOKENS,
     audio_speed: float = DEFAULT_NATIVE_AUDIO_SPEED,
     reasoning_effort: str | None = None,
+    endpoint_mode: str = DEFAULT_NATIVE_ENDPOINT_MODE,
 ) -> dict[str, object]:
     reasoning_effort = validate_native_reasoning_effort(reasoning_effort)
+    endpoint_mode = validate_native_endpoint_mode(endpoint_mode)
+    turn_detection = (
+        {"type": "semantic_vad", "eagerness": validate_native_vad_eagerness(vad_eagerness)}
+        if endpoint_mode == "semantic-vad" else
+        {"type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300,
+         "silence_duration_ms": int(endpoint_mode.rsplit("-", 1)[1])}
+    )
     return {
         **({"reasoning": {"effort": reasoning_effort}} if reasoning_effort is not None else {}),
         "type": "realtime",
@@ -548,8 +557,7 @@ def _session_update(
                 "format": {"type": "audio/pcm", "rate": NATIVE_PCM_SAMPLE_RATE},
                 "transcription": {"model": "gpt-live-transcribe"},
                 "turn_detection": {
-                    "type": "semantic_vad",
-                    "eagerness": validate_native_vad_eagerness(vad_eagerness),
+                    **turn_detection,
                     "create_response": False,
                     "interrupt_response": False,
                 },
@@ -833,6 +841,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         max_output_tokens: int | str = DEFAULT_NATIVE_MAX_OUTPUT_TOKENS,
         audio_speed: float = DEFAULT_NATIVE_AUDIO_SPEED,
         reasoning_effort: str | None = None,
+        endpoint_mode: str = DEFAULT_NATIVE_ENDPOINT_MODE,
     ) -> None:
         if not isinstance(binding, NativeInteractionBinding):
             raise TypeError("binding must use NativeInteractionBinding")
@@ -846,6 +855,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._max_output_tokens = validate_native_max_output_tokens(max_output_tokens)
         self._audio_speed = validate_native_audio_speed(audio_speed)
         self._reasoning_effort = validate_native_reasoning_effort(reasoning_effort)
+        self._endpoint_mode = validate_native_endpoint_mode(endpoint_mode)
         self._binding = binding
         self._session = OpenAIRealtimeSession(config, socket_factory=socket_factory,
                                              diagnostic_origin=identity_fields(binding))
@@ -1112,7 +1122,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             )
         self._state = NativeProviderState.STARTING
         try:
-            update = _session_update(self._vad_eagerness, self._max_output_tokens, self._audio_speed, self._reasoning_effort)
+            update = _session_update(self._vad_eagerness, self._max_output_tokens, self._audio_speed, self._reasoning_effort, self._endpoint_mode)
             self._profile_business("endpoint_strategy_requested", status=self._vad_eagerness)
             if self._business_context is not None:
                 update.update(instructions=_BUSINESS_INSTRUCTIONS, tools=native_business_tools(bound_context=True))
