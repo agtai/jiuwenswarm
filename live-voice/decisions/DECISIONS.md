@@ -2093,6 +2093,72 @@
 - 顺序与门：S0 → S1 → 录放 harness（B2）→ B3 探针（`session/` + `authorization/`，约 4K 新代码替换约 40K 旧代码，
   在 `live_voice.v2.*` 方法名下以 feature flag 关闭状态上线，与旧实现做录放差分）→ 探针的行数比例与差分结果决定
   是否继续 B4–B9；旧实现保留到 B8 cutover 之后一个包周期。
-- 未决（仍需用户回答）：退休 OTel 产品观测链与 S7 探针工具（路线 B 不重写它们，默认随旧实现在 B8 退休）；
-  legacy 链与 `FEATURE_LIVE_VOICE_DEMO` 退休；错误码归并策略与 UI 文案表的维护者；Native 单独 commit 的时间点。
+- 未决：观测退休、legacy 与标准构建、验收证据绑定已由 D-122 记录，错误模型与文案已由 D-123 记录；Native 单独
+  commit 的时间点仍未定。
 - 不授予：远端更新、任何验收信用；26–29K 是规划值，B3 探针给出第一份实测。
+
+## D-122 路线 B 的退休范围、标准构建入口与验收证据绑定
+
+- 日期：2026-09-08
+- 状态：Accepted（用户对 D-121 的三项未决给出结论，并修正了"预留 principal 字段即可免迁移"与"干净工作树即可
+  保证证据可信"两处推论）。
+- 决定一，观测：退休旧 LiveVoice OTel 产品观测实现（`observability.py`、`product_observability_runtime.py`、
+  `product_observability_adapter.py`、`observability_correlation_contract.py`、`observability_exporter.py`、
+  `observability_otel_codec.py`、`observability_fault_harness.py`，共 6,874 行）与 S7 阶段专用入口
+  （`scripts/live_voice/s7_*.py` 3,475 行；支持模块 `alpha_privacy_conformance.py`、`alpha_benchmark.py`、
+  `channels/web/live_voice_deployment_observer.py` 2,703 行；前端观测与 L0 采集 2,243 行）。保留必要观测：闭合记录、
+  隐私投影、统一 sink（目标架构 §4.4）。路线 B 第一版不提供外部导出；发现真实消费者时按其需要决定适配方式，
+  不预设 OTLP，不为尚未成立的需求预留实现。
+  - 依据：唯一可选后端是进程内内存缓冲，仓库内没有产品读取入口，与 harness 的 OTel tracing
+    （`deploy/observability`、`agents/harness/agent_observability.py`）相互独立；开关变量在仓库内的部署配置、脚本、
+    runbook 中均未设置。环境变量被注入也不等于它已提供外部导出服务。
+  - 退休前检查（B7 执行前逐项记录结果；设计工作不等待这些结果）：
+    1. 现役部署与演示服务的进程环境和启动配置是否启用 `JIUWENSWARM_LIVE_VOICE_PRODUCT_OBSERVABILITY_ENABLED`；
+       `…_BACKEND` 与 `…_TOKEN_KEY_HEX` 只查是否配置，不读取值；不调查人为习惯。
+    2. 是否存在读取内存记录的真实消费者。有则记录其需要的数据与读取方式，适配方式另行决定；只是遗留变量则清理
+       配置并说明旧功能已退出。
+    3. 四类性质在新实现上各有指名测试：隐私（合成秘密与音频字节 canary 不出现在任何表面）、有界与溢出（丢弃计数、
+       不逐出）、关闭排空、观测失败不影响业务结果。
+    4. S7 五项检查逐项确认新位置（目标架构 §6.2 表）；录放 harness 不自动覆盖安全部署、隐私与故障验证。
+  - S7 是否闭合由证据判断：Alpha 证据归档于 STATUS，可以删除旧探针；仍适用的检查有后继才算闭合。
+- 决定二，legacy 与标准构建：第一版正式语音统一走 Gateway 路径，并进入标准构建；是否启用由产品配置与运行条件决定，
+  未配置时给出清楚的不可用状态或配置入口；入口迁移完成后删除 legacy 链（`useLiveVoiceDemo.ts`、`liveVoiceCore.ts`、
+  `liveVoiceStreamingSpeech.ts`、`liveVoiceTurnLifecycle.ts`、`liveVoiceMessageGate.ts`、`formal/integratedP1Route.ts`、
+  两个浏览器语音适配器、`LiveVoiceDemoBar.tsx` 的 legacy 段、写死的 `FEATURE_LIVE_VOICE_DEMO`）。删除意味着失去现有的
+  浏览器识别与朗读路径，这是明确的取舍。E2E runbook §7 的三种旧演示模式归档；其中仍需展示的能力迁移到新 journey，
+  不随脚本消失。
+  - 输入适配边界：通用交互核心不得把 Gateway 当成唯一合法身份来源。用户／服务身份（谁拥有执行权限）、提交来源
+    （经浏览器还是 Gateway）、输入证明（认证文本输入，还是绑定媒体资源的语音提交）是三个概念，schema 与授权 journal
+    分别表达；媒体 grant 只是语音提交的输入证明，认证文本入口是另一种输入证明。
+  - 不预先承诺浏览器授权方案或"免迁移"：不加入含义未定的 `principal` 占位字段。若当前审计已需要记录真实提交身份，
+    在 B1 明确定义其结构、认证依据与重放语义；否则不加。
+  - 隐私：无 Gateway 不等于本地处理。现有浏览器识别把音频送往浏览器厂商服务；任何浏览器路径按实际数据去向对照 C6
+    判断，C6 未写明的项不判定。
+- 决定三，验收证据绑定：保留轻量、自动的候选与运行证据绑定，不恢复完整 S7 框架。
+  - 信息分四类作用：确认测的是什么（源码提交、构建标识、实际运行的服务与前端资源版本）；确认哪种运行方式（关键配置、
+    feature flag、运行编号）；确认验证了什么（检查结果、失败原因、证据引用）；辅助复现（分支、领先落后数、工具版本）。
+    前三类是绑定项，第四类只记录，不作拒绝条件。
+  - 运行时标识必须从实际运行的制品取得：服务自报构建标识，前端 bundle 携带构建标识；不得由启动脚本把当前 HEAD
+    再写一遍。
+  - 干净树按场景：开发与诊断运行允许工作树有修改，但必须如实记录，不能冒充纯提交的验收结果；正式候选验收使用冻结
+    源码与可识别的构建产物，校验两者一致。
+  - 分工：轻量驱动负责身份与配置采集、关键一致性检查、运行编号与结果汇总；录放 harness 与 journey 负责业务验证；
+    安全部署、隐私、故障验证各有独立位置（目标架构 §6.2 表）。
+- 不授予：远端更新、验收信用；不改变 D-121 的范围与门。
+
+## D-123 错误模型：类别码、受控诊断字段与用户文案
+
+- 日期：2026-09-08
+- 状态：Accepted。
+- 决定：LiveVoice 的错误统一为三部分。`code` 稳定表达类别（timeout、unauthorized、conflict 等）；受控诊断字段是
+  白名单结构，至少含发生模块、阶段、闭合子原因、结果确定性（无副作用／已生效／未知）；用户文案按界面语言展示，
+  解释当前影响与可做的操作。`detail` 自由文本可进日志，不进观测记录；观测记录只含 `code` 与白名单字段。
+- 行为不由 `code` 单独决定，而由 `code`、结果确定性与阶段共同决定。超时且结果未知时按 `command_id` 或
+  `task_id + attempt_no` 对账，不当作新请求重建（与 C4 的 UNKNOWN 终态不变量、P1 的命令幂等一致）。
+- 类别码的数量是映射结果，不是预设指标。B0 的映射表对每个现有 reason 值列出：原触发条件、对应操作、结果确定性、
+  处理动作、目标 `code`、诊断字段、文案键。现有测试继续断言行为差异，不只是统一断言新码。
+- 示例：provider 失败但成功退回文字，`provider_failed` 记在 provider 事件，`degraded` 记在响应事件的交付状态，两者
+  同时成立；确认被新一代替换为 `stale`，同一命令身份携带不同内容才是 `conflict`；按实际触发条件映射。
+- 文案：工程维护中英文文案，产品审阅；界面中文为主，英文资源随界面语言切换，不同屏双语；同一 `code` 在不同阶段
+  可有不同提示。演示文字不逐字保留，但必须保留"已受理／执行中／已完成"、"取消请求／取消完成"等语义差异。
+- 不授予：不改变 SC-1 的授权性质（归并仍是语义变更）；不改变 D-098..D-115。

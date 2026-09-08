@@ -296,10 +296,12 @@ finalize、前端 Task 呈现与 home start；理由见当前分支重分析 §3
 2. 冻结 tag：建议取 A0 启动时的 w3 tip。
 3. tool hold 归属：建议 JIUWEN_KEEP（一个 rail element），不向 AgentCore 提 F4 扩展。
 4. 瘦身先于 `develop` 集成落地。
-5. 观测三通道收敛并适配已安装 tracer（会改变离线 profiling 报告的数据源，需同步运行手册）。
+5. 观测三通道收敛：已由 D-122 定，退休旧 OTel 实现、保留必要观测、第一版不提供外部导出，不适配 tracer（离线 profiling
+   报告的数据源改变，需同步运行手册）。
 6. L0 批量面板与离线 L0 工具（AR-010/050/145 约 1,260 行，另 AR-049 在 `l0Measurement.ts` 内未量测）：随 A1 re-home 到 `scripts/`
    还是保留为批量入口。
-7. 部署观测与 preflight（AR-086/087，1,494 行）：删除还是 re-home。
+7. 部署观测与 preflight（AR-086/087，1,494 行）：`live_voice_deployment_observer.py` 随 S7 支持模块退休（D-122，退休前检查
+   见其决定一）；preflight 已随零 caller 退休。
 8. 是否允许在 D1 前先关闭 AgentServer `schedule` 的 `project_code_pipeline` 分支。
 9. Native 单独 commit 的时间点与范围（本计划不含）。
 

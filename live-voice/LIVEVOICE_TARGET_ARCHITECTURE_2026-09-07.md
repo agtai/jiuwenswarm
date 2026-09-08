@@ -93,7 +93,7 @@ seam 1：AgentServer 的 E2A 方法（§4.4 的 16 个）；seam 2：浏览器�
 | `audio/edge.ts` | 采集（含 worklet 装载）、播放（含 playout receipt）、设备选择、跨页 ownership；事件 6 种；失败映射到 5 类 | 1,200 |
 | `audio/worklet.js` | 采集 worklet | 200 |
 | `audio/nearEnd.ts` | verified-headset 近端插话候选（RMS/峰值/回声相似度） | 300 |
-| `session/session.ts` | 事件流客户端：`open/resume(after_seq)/close`，把事件折叠成视图状态；命令 `submit/barge/interrupt/ack/task.*`；这就是全部"owner" | 900 |
+| `session/session.ts` | 事件流客户端：`open/resume(after_seq)/close`，把事件折叠成视图状态；命令 `submit/barge/interrupt/ack/task.*`；未配置或运行条件不满足时进入明确的不可用状态并给出配置入口（D-122）；这就是全部"owner" | 900 |
 | `session/media.ts` | LVM1 socket leaf：上行帧、下行帧、playout receipt；一个 lifecycle | 700 |
 | `session/speech.ts` | 流式不可用时的批处理 STT/TTS RPC | 300 |
 | `ui/Panel.tsx`、`ui/TaskPanel.tsx`、`ui/hooks.ts` | 视图；hook 只从 `Session` 状态派生 | 1,700 |
@@ -103,6 +103,10 @@ seam 1：AgentServer 的 E2A 方法（§4.4 的 16 个）；seam 2：浏览器�
 ControlLeaf/P3TaskExperience` 三个 owner（2.9K）、`integratedWebRouteShell`（0.6K）、Panel 里的 recovery/diagnostics
 （约 5K）、`liveVoiceContractV2.ts` 手写副本（2.8K）、legacy 链（3.1K）。它们的功能由"事件流 + resume"覆盖：重连后
 浏览器不需要证明自己在哪个阶段，只需要从最后收到的 seq 继续。
+
+D-122：正式语音入口进入标准构建，是否启用由产品配置与运行条件决定；`build:live-voice` 与普通构建的 profile 区分收敛为
+运行时配置，机制在 B6 定。legacy 链在入口迁移完成后删除；runbook §7 的三种旧演示模式归档，仍需展示的能力迁到新
+journey。第一版只交付 Gateway 路径的语音，浏览器识别与朗读路径随 legacy 退出，这是明确的取舍。
 
 ### 4.3 Gateway（Python，约 4K）
 
@@ -197,6 +201,11 @@ expires_at, consumed_seq NULL)`、`semantic_pending(session_id, seq, payload, ex
 AND consumed_seq IS NULL AND expires_at > now`，受影响行数为 1 即成功。四套 CAS 变成一条语句；D-099 的"确认绑定
 精确目标"由 `target_digest` 保证；D-108 的"语音证据不是授权"由 owner 只认 confirmation 行不认转写文本保证。
 
+输入适配边界（D-122）：交互核心不把 Gateway 当成唯一合法身份来源。用户／服务身份、提交来源、输入证明是三个概念，
+schema 与 journal 分别表达：身份回答谁有执行权限；来源回答请求经浏览器还是 Gateway；证明回答这是认证文本输入还是
+绑定媒体 grant 的语音提交。第一版只实现 Gateway 语音提交与认证文本输入两种证明；不为未来的浏览器模式加入含义未定的
+`principal` 占位字段，若审计已需要记录真实提交身份，则在 B1 定义其结构、认证依据与重放语义。
+
 ### 5.5 任务
 
 四张台账（设计简化计划 S2 的定义），加两条关系：任务事件投影进会话事件日志（`task.*` 事件带 `task_id`），进度策略
@@ -210,8 +219,12 @@ ABC + 两个实现；conformance 校验取消（provider 自报能力），错�
 
 ### 5.7 错误与校验
 
-wire 入口：生成的 parser 校验一次，失败 → `LiveVoiceError(invalid_input)`；授权失败 → `unauthorized/forbidden`；过期序号 →
-`stale`；资源 → `capacity/unavailable`；provider → `provider_failed/degraded`；不确定 → `result_unknown`。进程内不再抛
+错误是三部分（D-123）：`code` 表达类别；受控诊断字段是白名单结构，至少含模块、阶段、闭合子原因、结果确定性
+（none/applied/unknown）；用户文案按界面语言展示。`detail` 自由文本只进日志，观测记录只含 `code` 与白名单字段。
+行为由 `code`、结果确定性与阶段共同决定：超时且结果未知按 `command_id` 或 `task_id + attempt_no` 对账，不重建。
+wire 入口：生成的 parser 校验一次，失败 → `invalid_input`；授权失败 → `unauthorized/forbidden`；过期序号 → `stale`；
+同一命令身份携带不同内容 → `conflict`；资源 → `capacity/unavailable`；provider 失败记在 provider 事件，文字降级记在
+响应事件的交付状态 `degraded`；不确定 → `result_unknown`。类别码的数量是 B0 映射表的结果，不是指标。进程内不再抛
 类型化违规；不变量用 `assert`。守卫从 25.9K 行降到约 2K。
 
 ### 5.8 并发
@@ -247,10 +260,27 @@ wire 入口：生成的 parser 校验一次，失败 → `LiveVoiceError(invalid
 决定、呈现 unit 顺序、ACK 后的历史、任务台账终态。差异只允许出现在设计简化计划 §4 声明的 SC 项上。这套 harness
 在路线 A 与路线 B 都需要，是最先要建的东西。
 
+harness 常驻一条隐私断言：合成秘密与音频字节 canary 不得出现在任何记录、日志、事件与观测表面（沿用
+`alpha_privacy_conformance` 的 canary 技术）。harness 不自动覆盖安全部署、隐私与故障验证；S7 五项检查的后继位置：
+
+| S7 检查 | 后继 | 包 |
+|---|---|---|
+| speech-media | 媒体 seam 录放差分 + D-113 资源计数测试 + 帧 ACK 完整性断言 | B2、B5 |
+| agent-executor | 任务台账状态表测试 + 项目执行 journey（真实 worktree） | B4 |
+| benchmark-fault | 耗时测量脚本（出生产树的 `l0/latency_measurement.py`）+ provider 故障 journey | B7、B9 |
+| secure-deployment | B9 的部署检查（凭据不在树内、私有输入路径、TLS/来源限制），独立于 harness | B9 |
+| privacy | harness 常驻 canary 断言 + `observation.py` 隐私投影测试 | B2、B7 |
+
 ### 6.3 最终验收
 
 物理 demo journey（`start_hands_free_demo.ps1`）、formal web 验证、合成语音 journey 三者 PASS；`anatomy_modules.py`
-的预算（值类型 ≤150、异常 ≤12、守卫 ≤4K、owner ≤30、`throw` ≤150）全部达标。
+的预算（值类型 ≤150、异常类型 ≤12、守卫 ≤4K、owner ≤30、`throw` ≤150）全部达标；错误类别码的数量不设指标（D-123）。
+
+证据绑定（D-122）：保留轻量、自动的候选与运行证据绑定。绑定项三类：测的是什么（源码提交、构建标识、实际运行的服务
+与前端资源版本）、哪种运行方式（关键配置、feature flag、运行编号）、验证了什么（检查结果、失败原因、证据引用）；
+分支、领先落后数、工具版本只记录，不作拒绝条件。运行时标识从实际运行的制品取得（服务自报构建标识，前端 bundle
+携带构建标识），不由启动脚本重写 HEAD。开发与诊断运行允许脏树但必须记录；正式候选验收用冻结源码与可识别构建产物，
+校验一致。轻量驱动只做身份与配置采集、一致性检查、运行编号与结果汇总，业务验证由 harness 与 journey 承担。
 
 ## 7. 规模估算（自底向上）
 
@@ -293,6 +323,7 @@ wire 入口：生成的 parser 校验一次，失败 → `LiveVoiceError(invalid
 - Native：13.2K 不在本设计内；它依赖现在的 runtime/registry/media 内部接口，路线 B 落地后 Native 必须按新合同重做，
   否则要维持一套兼容层，那会把总量抬回 40K 以上。
 - 协议变更：16 个方法取代 37 个，浏览器与 AgentServer 必须同步切换；用 feature flag 双跑一个包周期。
+- 构建标识：D-122 的制品绑定要求服务与前端 bundle 自报构建标识；字段在 B1 定，B6/B7 落地，否则 B9 只能绑定声明。
 
 ## 10. 路线 B 的包序列（D-121）
 
@@ -301,14 +332,14 @@ wire 入口：生成的 parser 校验一次，失败 → `LiveVoiceError(invalid
 
 | 包 | 交付 | 验证 | 回滚 | 复用 |
 |---|---|---|---|---|
-| B0 授权与基线 | D-121 已记录；基线失败集、18 模块行数、错误码表、`semantic_audio_*` 回收 | S0 卡的完成判据 | revert | S0 卡 |
+| B0 授权与基线 | D-121/D-122/D-123 已记录；基线失败集、18 模块行数、D-123 七列映射表（原触发条件、操作、结果确定性、处理动作、目标 code、诊断字段、文案键）、`semantic_audio_*` 回收；开始记录 D-122 退休前检查 1–2 的结果 | S0 卡的完成判据；映射表覆盖 27 个 reason 枚举的 311 个值 | revert | S0 卡 |
 | B1 schema 与记录 | `common/schema/live_voice/`（refs、envelopes、task records、errors、codec）；新增 §5.2 的 15 种事件与 16 个命令的 envelope；TS 生成器 | S1 卡的完成判据 + 事件/命令 schema 生成幂等 | 不接入即无影响 | S1 卡 |
-| B2 录放 harness | E2A 方法录放器、媒体 WS 控制对象/帧摘要录放器、差分比对器；用合成语音 journey 录制旧实现的基线 traces | 旧实现两次录制自比对零差异；每条 journey 有一份基线 trace | 无 | 新（`scripts/live_voice/replay/`） |
+| B2 录放 harness | E2A 方法录放器、媒体 WS 控制对象/帧摘要录放器、差分比对器；常驻 canary 隐私断言；用合成语音 journey 录制旧实现的基线 traces。harness 不覆盖安全部署、隐私投影与故障验证，见 §6.2 表 | 旧实现两次录制自比对零差异；每条 journey 有一份基线 trace；canary 断言在旧实现上通过 | 无 | 新（`scripts/live_voice/replay/`） |
 | B3 会话核心探针 | `session/log.py`、`session/runtime.py`、`session/history.py`、`session/progress.py`、`authorization/*`、`rpc/handlers.py` 的会话与授权部分（`session.open/resume/close`、`input.commit`、`response.barge/interrupt`、`presentation.ack`、`events.read`、`confirmation.issue/consume`）、`composition/root.py`；flag 关闭 | §6.1 表中前 7 条不变量的测试全过；对旧实现的差分只含 SC 项；新代码 ≤ 估算 × 1.3（session ≤ 4.0K、authorization ≤ 3.3K） | 关 flag，删包 | 本文 §4.4、§5.2–5.4、§5.7–5.8；S3 卡的 symbol 处置表用于确认没有漏掉的责任 |
 | 门 | B3 的行数比例与差分结果由用户审阅后决定是否继续 | — | — | — |
 | B4 任务台账与执行器 | 四张台账、`core.py`、`admission.py`、`project_executor.py`、`worktree.py`、`importer.py`；任务事件投影进会话日志 | S2 卡的完成判据 + §6.1 表中 D-098/D-099/D-100/D-112/UNKNOWN 五条 | 旧 Store 只读 + importer 反向演练 | S2 卡（`task/events.py` 改为向会话日志投影） |
 | B5 Gateway 媒体与 provider | `media/session.py`、`route.py`、`codec.py`、`rpc.py`、`speech/*`；grant 绑定 `(session_id, turn_seq)`；Native 段以 mixin 挂载 | S5 卡的完成判据 + 媒体 seam 差分 + D-113 资源计数 | 关 flag | S5 卡 |
-| B6 浏览器 | `audio/*`、`session/session.ts`（事件流客户端）、`session/media.ts`、`session/speech.ts`、`ui/*`、`errors.ts`；legacy 链退休 | 前端 mounted 测试、三条 journey；`build` 与 `build:live-voice` 通过；`throw` ≤150 | 关 flag | S6 卡的 AudioEdge 与 legacy 退休部分 |
-| B7 观测 | `observability/observation.py`、`sink.py`、前端 `observability.ts`/`diagnosticsSink.ts`；退休 OTel 链与 S7 工具（待 §7.2 确认） | S7 卡的完成判据 | revert | S7 卡 |
+| B6 浏览器 | `audio/*`、`session/session.ts`（事件流客户端，含未配置的不可用状态）、`session/media.ts`、`session/speech.ts`、`ui/*`、`errors.ts`；正式入口进入标准构建，启用由配置与运行条件决定；旧演示模式归档、仍需展示的能力迁到新 journey；入口迁移完成后删除 legacy 链（D-122） | 前端 mounted 测试、三条 journey；标准 `build` 通过，未配置时显示不可用状态；`throw` ≤150 | 关 flag | S6 卡的 AudioEdge 与 legacy 退休部分 |
+| B7 观测 | `observability/observation.py`、`sink.py`、前端 `observability.ts`/`diagnosticsSink.ts`；退休旧 OTel 实现与 S7 工具，第一版不提供外部导出（D-122） | S7 卡的完成判据；D-122 退休前检查 1–4 全部有记录；四类性质各有指名测试 | revert | S7 卡 |
 | B8 cutover | flag 默认 v2；删除旧 `server/live_voice`、`gateway/live_voice`、前端 `features/live-voice/formal` 中被替代的文件与其测试；E2A 37 → 16 | 旧 symbol grep 为零；三条 journey PASS；旧套件只剩已迁移的用例 | 一个包周期内切回 flag | — |
-| B9 验收与计量 | 物理 journey、独立评审、`anatomy_modules.py` 预算、多仓口径报告、STATUS/README 更新 | S8 卡 | — | S8 卡 |
+| B9 验收与计量 | 轻量证据绑定驱动（身份与配置采集、实际制品标识一致性、运行编号、结果汇总）、部署检查、物理 journey、独立评审、`anatomy_modules.py` 预算、多仓口径报告、STATUS/README 更新 | S8 卡；正式验收证据绑定冻结源码与构建产物，开发运行如实记录脏树（D-122） | — | S8 卡 |

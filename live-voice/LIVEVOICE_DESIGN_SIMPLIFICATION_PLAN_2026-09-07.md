@@ -30,8 +30,8 @@
    （第二部分）都写明合并的 owner、删除的值类型与守卫、改变的语义、验收它的新测试。
 5. 旧测试是重写期间唯一的回归网：每个包先给新合同写新测试，切换后在同一个包里删除该模块的旧测试；
    旧套件失败列表就是"这次改了哪些语义"的清单，逐条对照 §4 确认是预期变化还是缺陷。
-6. 需要用户的五个决定见 §7：授权语义变更、退休从未启用的 OTel 产品观测链、退休 legacy 链与其 feature flag、
-   Task 家族在仓库内重写为小台账（不等 AgentCore F1–F6）、错误码归并策略。
+6. §7 的五个决定已记录：授权语义变更与 Task 家族在仓库内重写由 D-121，观测退休、legacy 与标准构建由 D-122，
+   错误模型与文案由 D-123；退休前检查见 D-122。
 7. 本计划原为路线 A（分包重构到 60–65K）。**2026-09-08 用户选择路线 B（D-121）**：按[目标架构](LIVEVOICE_TARGET_ARCHITECTURE_2026-09-07.md)
    重写到 26–29K。本文的 S0、S1、S2、S5、S7 卡在路线 B 中原样使用（目标架构 §10 的 B0/B1/B4/B5/B7），S3、S4、S6
    由目标架构 §4–§5 与 B3/B6 替代；§4 的 SC-1..10 仍是语义变更的授权范围。
@@ -296,7 +296,7 @@
   `liveVoiceContractV2.ts` 2,785（81 个导出，只有 `parseEventEnvelope` 与 `canonicalJson` 被别的生产文件用）、
   `speech_rpc.py` 142、`live_voice_operation_budgets.py` 13。
 - 目标合同：`Command/Query/Result/Event` 四个 envelope + `ScopeRef/ContextRef/IdentityRef/OriginRef`（≤1,000）；
-  `ErrorCode` 15 → ≤20 且全仓只此一处；canonical JSON codec ≤300；TS 类型由生成器产出。
+  `ErrorCode` 全仓只此一处，数量为 ERROR_CODES 映射的结果（D-123），并带白名单诊断字段；canonical JSON codec ≤300；TS 类型由生成器产出。
 - 删/合：schema 内的 registry/ledger/fence/tracker；`CapabilityDescriptor` → §3.3 `Capability`；`WorkProgressEventV2` →
   `TaskEvent`；TS 副本除 `parseEventEnvelope` 外删除。
 - 语义变化：事件序列校验由 `events` 台账保证，schema 不再校验状态机；envelope 字段减少。
@@ -336,12 +336,12 @@
 
 | 编号 | 变更 | 影响模块 | 谁能看到 | 落在哪个包 |
 |---|---|---|---|---|
-| SC-1 | 拒绝语义归并：约 200 个 reason 值 → ≤20 个 `ErrorCode`；内部一致性错误不再是类型化违规 | 全部 | 前端文案、日志、评审脚本 | S0 定表，S1 落地，其余包采用 |
+| SC-1 | 拒绝语义归并：27 个 reason 枚举 311 个值 → 类别 `code` + 白名单诊断字段（D-123，数量为映射结果）；内部一致性错误不再是类型化违规 | 全部 | 前端文案、日志、评审脚本 | S0 定表，S1 落地，其余包采用 |
 | SC-2 | 一个授权 owner：P2/P3 确认、critical-token 澄清、production intent 确认统一 TTL/scope/一次性消费 | 4、14 | 确认对话的时序与提示 | S3 |
 | SC-3 | 一个 response fence：播放期插话与生成期打断同一记录、同一取消入口 | 5、6、12 | 打断后的呈现与历史 | S4 |
 | SC-4 | Task 台账化：UNKNOWN 一等终态、不重放不确定投递、旧库一次性导入、无 authority replay 模式 | 7–11 | 崩溃/重启后的任务状态文案 | S2 |
 | SC-5 | checkpoint 成为 fact 的一种，不再单独发布 | 10 | 无用户可见影响 | S2 |
-| SC-6 | 观测：退休 OTel 产品链与 S7 探针工具，三通道 → 一个 sink；L0 测量出生产树 | 15 | 运行手册、profiling 报告数据源 | S7 |
+| SC-6 | 观测：退休旧 OTel 实现与 S7 探针工具，三通道 → 一个 sink，第一版不外部导出；L0 测量出生产树（D-122，含退休前检查） | 15 | 运行手册、profiling 报告数据源 | S7 |
 | SC-7 | schema 收缩：envelope 字段减少、状态机校验移出 schema、TS 由生成 | 16、2、13 | 协议版本号递增 | S1 |
 | SC-8 | provider 合同：能力自报替代 conformance 校验，降级理由粗粒度 | 3、2 | 降级提示文案 | S5 |
 | SC-9 | 前端：Panel 拆 owner hook，一个 Task UI，一本 journal，错误文案表 | 13、1 | UI 结构不变，错误提示变 | S6 |
@@ -391,11 +391,13 @@
 ## 7. 需要用户决定
 
 1. **授权语义变更**：已由 D-121（选择路线 B）记录，范围 SC-1..SC-10 与 §1.1 预算。
-2. **退休 OTel 产品观测链与 S7 探针工具**：开关 `JIUWENSWARM_LIVE_VOICE_PRODUCT_OBSERVABILITY_ENABLED` 从未在
-   部署、脚本、runbook 中设置；S7 探针（`scripts/live_voice/s7_*.py` 与 Alpha 支持模块）只服务已完成的 Alpha 验证。
-3. **退休 legacy 链与 `FEATURE_LIVE_VOICE_DEMO`**。
+2. **退休 OTel 产品观测链与 S7 探针工具**：已由 D-122 决定一记录。退休旧实现，保留必要观测，第一版不提供外部导出；
+   B7 前逐项记录 D-122 的四条退休前检查。
+3. **退休 legacy 链与 `FEATURE_LIVE_VOICE_DEMO`**：已由 D-122 决定二记录。正式入口进入标准构建、未配置时说明；
+   入口迁移完成后删除 legacy；旧演示模式归档，仍需展示的能力迁到新 journey。
 4. **Task 家族在仓库内重写为四张小台账**，不等 AgentCore F1–F6；AgentCore 落地后以 adapter 采用。
-5. **错误码归并策略**：约 200 个 reason 值归并为 ≤20 个 `ErrorCode`，UI 文案表由谁维护。
+5. **错误码归并策略**：已由 D-123 记录。类别 `code` + 白名单诊断字段 + 用户文案；码的数量是映射结果；文案由工程维护、
+   产品审阅，中文为主、英文随界面语言切换。
 
 ## 8. 计量与复现
 
@@ -486,14 +488,14 @@
 ## 11. S0 授权与基线
 
 - **目的**：把执行的前提固定下来：决定、基线失败集、错误码表、oracle 回收。
-- **前置**：用户对 §7 的五个决定给出结论。任何一个决定为"否"，相关卡片按 §7 的注记调整（例如不退休 OTel 链则
-  S7 只做三通道合一）。
+- **前置**：§7 的五个决定已由 D-121、D-122、D-123 记录。
 - **输入**：`live-voice/decisions/DECISIONS.md`；`scripts/live_voice/slimming/*`；`git show 7c7aad7b8:scripts/live_voice/`
   下的 `semantic_audio_runtime.py`、`semantic_audio_browser.py`、`semantic_audio_journey.py`、`semantic_audio_assertions.py`。
 - **目标结构**：
   - `live-voice/decisions/DECISIONS.md` 已有 D-121（路线 B 与语义变更授权）；补记 §7.2、§7.3、§7.5 的结论。
   - `live-voice/slimming/BASELINE_2026-09-07.md`：后端与前端失败清单（10.2 的两条命令的输出），18 模块行数，解剖表。
-  - `live-voice/slimming/ERROR_CODES.md`：目标 `ErrorCode`（≤20）与现有 reason 值的映射表。
+  - `live-voice/slimming/ERROR_CODES.md`：D-123 的七列映射表（原触发条件、对应操作、结果确定性、处理动作、目标 `code`、
+    诊断字段、文案键），覆盖 27 个 reason 枚举的 311 个值；码的数量是映射结果。
   - `scripts/live_voice/semantic_audio_*.py` 四个文件从 `7c7aad7b8` 回收。
 - **错误码表的写法**：目标码固定为 `invalid_input, unauthorized, forbidden, not_found, conflict, stale, expired, busy,
   unavailable, cancelled, interrupted, timeout, provider_failed, transport_failed, result_unknown, capacity, degraded,
@@ -951,8 +953,9 @@
 
 ## 18. S7 观测
 
-- **目的**：退休 OTel 产品链与 S7 探针工具，三通道合一个 sink，L0 测量出生产树。
-- **前置**：§7.2 决定为"是"（否则只做第 4–6 步）。
+- **目的**：退休旧 OTel 产品实现与 S7 探针工具，三通道合一个 sink，L0 测量出生产树；第一版不提供外部导出（D-122）。
+- **前置**：D-122 决定一；退休前检查 1–4 已逐项记录结果；四类性质（隐私 canary、有界与溢出、关闭排空、观测失败
+  隔离）在新实现上各有指名测试。
 - **输入**：`server/live_voice/product_observability_runtime.py`（1,425）、`product_observability_adapter.py`（847）、
   `observability_correlation_contract.py`（876）、`observability_otel_codec.py`（641）、`observability_exporter.py`（734）、
   `observability.py`（1,960）、`latency_measurement.py`（1,972）、`alpha_benchmark.py`（633）、`alpha_privacy_conformance.py`
