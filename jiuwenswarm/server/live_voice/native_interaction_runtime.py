@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import unicodedata
+from jiuwenswarm.common.live_voice_lock_diagnostics import ObservedAsyncLock
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -239,7 +240,7 @@ class NativeInteractionRuntimeOwner:
         self._binding = binding
         self._runtime = runtime
         self._owns_runtime = owns_runtime
-        self._lock = admission_lock if admission_lock is not None else asyncio.Lock()
+        self._lock = admission_lock if admission_lock is not None else ObservedAsyncLock("native_runtime")
         self._started = False
         self._closed = False
         self._turns_by_id: dict[str, NativeTurnCommit] = {}

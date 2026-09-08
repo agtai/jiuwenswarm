@@ -54,10 +54,10 @@ _IDS = frozenset({"session_id", "media_session_id", "capture_id", "lease_id", "i
 _IDS = _IDS | frozenset({"span_id", "model_call_id", "parent_span_id", "turn_id", "commit_id", "round_id", "task_id", "attempt_id", "command_id", "outbox_id", "tool_call_id", "unit_id", "activation_id", "project_id", "execution_session_id"})
 _IDS = _IDS | frozenset({"work_id", "input_id", "context_id", "provider_call_id", "turn_commit_id", "source_event_id", "task_event_id", "model_config_version"})
 _IDS = _IDS | frozenset({"provider_response_id", "provider_item_id"})
-_TOKENS = frozenset({"stage", "rpc_method", "error_type", "error_location", "error_code", "error_reason", "result_state", "milestone", "tool_name", "status", "reason", "reason_id"})
+_TOKENS = frozenset({"stage", "rpc_method", "error_type", "error_location", "error_code", "error_reason", "result_state", "milestone", "tool_name", "status", "reason", "reason_id", "lock_name", "lock_owner", "lock_waiter"})
 _VALUES = frozenset({"generation", "frame_count", "frames_sent", "frames_acked", "queue_frames", "received_samples", "sent_sample_end", "send_peak_ms", "vad_silence_ms", "provider_ms", "provider_start_ms", "provider_end_ms", "speech_started", "input_fenced", "elapsed_ms", "preopen_frames"})
 _VALUES = _VALUES | frozenset({
-    "frame_seq", "lock_wait_ms", "encode_ms", "socket_send_ms", "wire_seq", "remaining_ms",
+    "frame_seq", "lock_wait_ms", "lock_hold_ms", "encode_ms", "socket_send_ms", "wire_seq", "remaining_ms",
     "wire_bytes", "event_queue_frames", "event_seq", "committed", "closing",
     "terminal", "item_matches_speech", "item_matches_committed", "has_item",
     "speech_stopped", "timeout_ms", "status_code", "response_bytes", "phase_ms",

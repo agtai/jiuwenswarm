@@ -43,6 +43,42 @@ the current acceptance record; raw logs/audio stay under ignored local paths.
 
 ## Evidence inventory and measurement
 
+### C implementation checkpoint
+
+First retain per-batch Runtime admission and its exact audio authority. Add
+passive wait/holder spans to the existing Registry and default Native Runtime
+locks. For notification requests, move external authority preparation/lease
+cleanup outside the global Registry critical section, capturing the exact
+route or retained replay binding first and rechecking it under the lock before
+publishing any operation. Authorization is not cached for later mutations.
+Replays retain their original binding, sequence and fingerprint; a retired or
+replaced route cannot gain a new notification operation after the async read.
+Owner: Composition Registry/Native Runtime, Tier 3. Tests cover concurrent
+audio admission, cancellation during auth, close/replacement, replay conflict,
+sequence bounds and existing notification/Native regressions. A blocked
+authorization fixture is mechanism evidence, not attribution of the old spikes.
+Reply-level media authority and removing per-batch RPC remain contingent on
+real measurements; they are not silently introduced in this child repair.
+
+C checkpoint validation: `c-before-tests.txt` reproduces audio admission and
+route close blocked behind authorization (2 failures/1 pass). The fixed races,
+including same-binding owner replacement, real replay-ledger eviction, identical
+concurrent replay and conflicting fingerprint, plus passive-lock cancellation
+and sink failure checks pass: `c-race-tests.txt`, 9 passed. Snapshots include
+notification sequence/consumption, Native audio/heard history, operation ledgers,
+actual Agent facade calls and P3 semantic/query/retry admission calls.
+The full Registry comparison is **not green**: 68 existing failures are identical
+on `f2d3cdc7` and C; the baseline additionally fails the two new blocking cases.
+Retain these failures, specifically completed terminal notification heard-history,
+for integration attribution. Read-only independent review found no new code
+blocker; its interleaving/actual-Agent-call evidence requests were incorporated.
+
+At 02:30 Paris the existing remote-tracking ref acquired the three exact commits
+named by the user's packet (`f08cd261`, `fc02124e`, `d5e9083b`). They were absent
+at initial inspection. Integrate this task baseline locally after the C checkpoint,
+preserving A/B/C, then rebind tests and deployment to the resulting candidate.
+No remote update is authorized or performed.
+
 The input's September 8 latency directory, 292-second clip, diarized audio,
 original project and data directory are absent on this host. Its 15 timestamps
 and baseline figures are supplied historical evidence, not independently

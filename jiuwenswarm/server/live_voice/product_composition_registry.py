@@ -11,6 +11,7 @@ routes are not selected, replaced, or reclassified by this module.
 from __future__ import annotations
 
 from jiuwenswarm.common.live_voice_profiling import profiled, identity_fields
+from jiuwenswarm.common.live_voice_lock_diagnostics import ObservedAsyncLock
 from jiuwenswarm.server.live_voice.native_foreground import NATIVE_FOREGROUND, NativeForegroundControl
 
 import asyncio
@@ -1033,7 +1034,7 @@ class AgentServerProductCompositionRegistry:
             and p3_confirmation_forwarder is not None
             else None
         )
-        self._lock = asyncio.Lock()
+        self._lock = ObservedAsyncLock("product_composition")
         self._p3_operation_lock = asyncio.Lock()
         self._stopped = False
         self._p2_routes: dict[tuple[str, str], _P2Route] = {}
@@ -9752,21 +9753,33 @@ class AgentServerProductCompositionRegistry:
             fingerprint = canonical_json_bytes(
                 {key: value for key, value in params.items() if key != "auth_token"}
             )
+            # Resolve external authorization without holding up unrelated audio
+            # admission. Capture only an identity, never a reusable authority
+            # grant; the exact route/replay is checked again after the await.
             async with self._lock:
+                authenticated_entry = self._p2_notification_operations.get(request_id)
+                authenticated_route = self._p2_routes.get((parsed[0], parsed[2]))
+                if authenticated_entry is not None:
+                    authenticated_binding = authenticated_entry.p2_binding
+                    if authenticated_binding is None:
+                        raise RuntimeError("retained P2 notification lost its binding")
+                else:
+                    if authenticated_route is None:
+                        raise FormalTaskViolation("PRODUCT_P2_ROUTE_NOT_FOUND",
+                            "product P2 route is not active", ErrorCode.NOT_FOUND)
+                    authenticated_binding = authenticated_route.binding
+            await self._require_p2_binding_authority_locked(
+                params=params, routed_session=parsed[0], correlation_id=parsed[1],
+                interaction_id=parsed[2], activation_id=parsed[3], generation=parsed[4],
+                route=parsed[5], binding=authenticated_binding,
+            )
+            async with self._lock:
+                self._ensure_running()
                 entry = self._p2_notification_operations.get(request_id)
                 if entry is not None:
-                    if entry.p2_binding is None:
-                        raise RuntimeError("retained P2 notification lost its binding")
-                    await self._require_p2_binding_authority_locked(
-                        params=params,
-                        routed_session=parsed[0],
-                        correlation_id=parsed[1],
-                        interaction_id=parsed[2],
-                        activation_id=parsed[3],
-                        generation=parsed[4],
-                        route=parsed[5],
-                        binding=entry.p2_binding,
-                    )
+                    if entry.p2_binding != authenticated_binding:
+                        raise FormalTaskViolation("ACTIVATION_BINDING_MISMATCH",
+                            "notification replay changed during authorization", ErrorCode.PERMISSION_DENIED)
                     if entry.fingerprint != fingerprint:
                         raise FormalTaskViolation(
                             "PRODUCT_REQUEST_ID_CONFLICT",
@@ -9774,15 +9787,12 @@ class AgentServerProductCompositionRegistry:
                             ErrorCode.CONFLICT,
                         )
                 else:
-                    retained = await self._require_active_p2_route_locked(
-                        params=params,
-                        routed_session=parsed[0],
-                        correlation_id=parsed[1],
-                        interaction_id=parsed[2],
-                        activation_id=parsed[3],
-                        generation=parsed[4],
-                        route=parsed[5],
-                    )
+                    retained = self._p2_routes.get((parsed[0], parsed[2]))
+                    if (authenticated_entry is not None or retained is None
+                            or retained is not authenticated_route
+                            or retained.binding != authenticated_binding):
+                        raise FormalTaskViolation("PRODUCT_P2_ROUTE_NOT_FOUND",
+                            "notification owner retired during authorization", ErrorCode.NOT_FOUND)
                     if notification_sequence <= retained.notification_replay_floor:
                         raise FormalTaskViolation(
                             "PRODUCT_NOTIFICATION_REPLAY_EXPIRED",
