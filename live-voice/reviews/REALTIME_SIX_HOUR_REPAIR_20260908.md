@@ -562,3 +562,20 @@ Main reviewed the complete Tier 1 prompt diff. All 266 affected Engine, bound
 tool and receipt successor checks pass; whitespace check passes. This is prompt
 scope and regression evidence, not proof that the observed incorrect answers
 have been eliminated. New-runtime repetitions and content audit remain required.
+
+Independent cumulative review found one remaining Tier 1 prompt seam: Task
+acceptance, Work underway and Work completion use their own response instructions,
+which override session instructions. Extend the same explicit-content exception
+to these three entry points. Default short factual receipts remain; requested
+restatements may use only known requirements, and requested result detail only
+the actual completed result. Retain all receipt, freshness, tool and cancellation
+guards. Re-run affected Engine/receipt checks and actual composite requests.
+The same override also exists in retained legacy jiuwen_delegate continuation;
+include it in this instruction-only boundary, preserving its no-tool successor
+and exact-result grounding. Explicitly repeated requirements are not execution
+facts unless the real delegate result confirms them.
+All 223 affected Engine and bound-tool checks pass. Independent complete-diff
+review closed all four override conflicts and found no other unconditional
+content-compression override. The three identical cached-audio restatements on
+082b64a2 each retained every requested condition; this small generated-text and
+received-audio sample does not establish general correctness or physical delivery.
