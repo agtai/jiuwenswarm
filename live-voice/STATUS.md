@@ -50,8 +50,10 @@ The earlier packets below retain context without activating historical workers.
 The continuing [source repair](decisions/DECISIONS.md#d-122-retain-original-native-task-speech-independently-of-model-proposals)
 retains original Native transcription independently of the rewritten Task
 proposal through durable creation, retry, successor and adjustment. Source-aware
-execution and bounded query projections have scoped automated evidence; actual
-selected-Agent deployment validation is pending. File-effect enforcement remains
+execution and bounded query projections have scoped automated evidence. A clean
+deployment and real selected-Agent Task produced source_d.md with correct 850/650
+budget figures and preserved all 25 existing Markdown files. Confirmation latency
+still failed; full original-source semantics are not proved by one run. File-effect enforcement remains
 a separate open boundary. No source-only credit closes the overwrite failure.
 
 ### Realtime acceptance repairs

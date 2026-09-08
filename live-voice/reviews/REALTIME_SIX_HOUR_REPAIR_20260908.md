@@ -728,3 +728,24 @@ No remote update occurred. Real Provider/selected Code Agent verification follow
 the clean controlled deployment. FileEffectPlan, natural-language fidelity,
 latency and physical A–F acceptance remain open; this closes neither the original
 overwrite failure nor the six-hour product acceptance.
+
+Source commit `9dc31e63fcf637b1489dbb94b6587bbe9df3941b` was cleanly deployed at
+07:12 UTC through the authorized launcher with a fresh tsc/Vite build. Runtime
+contract retains gpt-realtime-2.1, speed 1.25, minimal and server-vad-450; actual
+TTS→STT and identity/forged-claim negatives passed. Log: swarm-20260908-091151.log.
+The real Provider → Native Task → selected deepseek-v4-flash#0 journey created
+`task-2f2b686b62944ae8ae855557239ad518` at 07:13:24.336678Z and completed it at
+07:13:51.993945Z. Its persisted source contains the exact final D-not-C/preserve
+utterance and three preceding source items. It wrote `验收输出/source_d.md`, SHA256
+`bf3123cdbc4131ea1cc8c030df35e884ea3386ea8a54b673a2fe84067b94f83f`, with 850 yuan
+new transport and 650 yuan remaining; all 25 pre-existing Markdown hashes stayed
+unchanged. This is one positive actual-model/source/file sample, not executable
+preservation enforcement or a forced model-C/original-D replay.
+
+The paired ordinary reply retained all requested people/date/1500/10:00/second-
+night-walk conditions. Received first PCM after measured acoustic end was
+1751.552 ms; Task acceptance PCM was 8391.832 ms and still fails 3 seconds. The
+Task path made an additional context.get call. Exact same-Gateway-clock raw
+Provider PCM→sent joins were 23.964 and 24.150 ms. N=2 is not a new percentile
+acceptance sample. No physical speaker, microphone or browser acceptance is
+claimed. Ignored source-real-* and native-source-real-* preserve raw evidence.
