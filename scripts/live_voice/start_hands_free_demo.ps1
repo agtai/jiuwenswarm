@@ -3,6 +3,7 @@ param(
     [ValidateSet('hands-free-demo', 'formal-web-validation')]
     [string]$RuntimeProfile = 'hands-free-demo',
     [ValidateSet(
+        'codex/demo-live-voice-20260909',
         'codex/live-voice-generation-interruption-realtime-adaptation',
         'codex/realtime-optimization-20260907',
         'hx/0812_live_voice_w3',
