@@ -26,9 +26,14 @@ all 37 original files, queried it, acknowledged its completion announcement and
 continued after interruption. It also reproduced playback timeout and Native
 input saturation; a follow-up creation/adjustment journey did not complete.
 The [deployed repair results](reviews/DEMO_ROOT_CAUSE_REPAIR_RESULTS_20260909.md)
-retain these mixed outcomes. A synchronized host/transport probe found CPU
-saturation, paging and TCP send waits together; external network versus local
-resource causation still requires a controlled low-load comparison. The
+retain these mixed outcomes. Low-load controls produced both congested and
+healthy connections. The requested [rollback control](reviews/REALTIME_COMMIT_CONTROL_20260909.md)
+reproduced input saturation twice on `a8afe0c`, before the interruption/query
+fixes; a separate baseline transport probe also reproduced long sends and TCP
+retransmission without either changed module. The two commits' scoped checks
+passed on their exact source. Local synchronous Code/SDK initialization also
+blocks Task receipt delivery and remains unrepaired. The originating cause of
+the separate transport degradation is still unresolved. The
 integrated Task/audio journey remains PARTIAL, not a stable Demo acceptance.
 User-end to headphone-first-sound still requires the agreed recording calibration.
 Full A/B/A2 control,
@@ -59,9 +64,10 @@ and the broad productization backlog remain excluded.
 Current deployed repair candidate: `9e9e5ebc5f`, gpt-realtime-2.1 / speed 1.25,
 minimal / server-vad-450, AgentCore package 0.1.16+jiuwenswarm.responses2.
 No change to a source installation, proxy, NIC or production endpoint is implied.
-The results record owns successful/failed journeys and timing boundaries; next
-resolve transmission under controlled host load, finish the voice adjustment
-journey, then complete the agreed human/physical calibration. No stable-latency
+The results and rollback records own successful/failed journeys and timing
+boundaries. Low-load and pre-fix controls are complete; next repair the isolated
+local event-loop blockers and locate the separate transport degradation, finish
+the voice adjustment journey, then complete the agreed human/physical calibration. No stable-latency
 claim can be made from the successful short response alone.
 
 Earlier controlled deployment evidence: `f85f0e33f2`, gpt-realtime-2.1, speed 1.25,
