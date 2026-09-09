@@ -221,11 +221,6 @@ async def test_g1a_scheduler_dispatches_one_valid_assigned_task(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="OJ-G1A-01: AsyncTool cancel has no public await-until-unwound settlement contract",
-)
 async def test_accepted_task_cancel_quiesces_related_execution(tmp_path: Path) -> None:
     """N/S/T/C/X: accepted Task cancel must settle its related execution."""
 
@@ -283,11 +278,6 @@ async def test_accepted_task_cancel_quiesces_related_execution(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="OJ-G1A-02: cancelled AsyncTool can revive, spill and inject after swallowed cancellation",
-)
 async def test_cancel_waits_for_hostile_tool_unwind_and_fences_runtime_spill(tmp_path: Path) -> None:
     """N/B/T/C/X: swallowed cancellation cannot trigger Runtime-owned spill."""
 
@@ -572,11 +562,6 @@ async def test_generation_race_characterizes_missing_atomic_admission(tmp_path: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="OJ-G1A-06: duplicate AsyncTool identity overwrites the active handle",
-)
 async def test_duplicate_async_tool_identity_fails_closed() -> None:
     """N/S/T/C/I: a running execution identity cannot be replaced in-place."""
 

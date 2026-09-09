@@ -572,6 +572,7 @@ async def test_plain_disconnect_does_not_emit_root_evict(monkeypatch: pytest.Mon
     server = agent_ws_server_module.AgentWebSocketServer()
     server._agent_manager = SimpleNamespace(
         cancel_all_inflight_work=AsyncMock(return_value=None),
+        executions=SimpleNamespace(disconnect_all=Mock(), retained_sessions=lambda: frozenset()),
     )
     server._stop_scheduler = AsyncMock(return_value=None)
     calls: list[dict] = []

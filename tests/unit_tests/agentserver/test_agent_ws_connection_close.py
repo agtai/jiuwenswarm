@@ -15,6 +15,7 @@ from jiuwenswarm.common.schema.agent import AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+from jiuwenswarm.server.runtime.session_execution import SessionExecutionService
 
 
 class FakeWebSocket:
@@ -82,6 +83,7 @@ class _FakeInterruptAgent:
 
 class _CleanupRecordingAgentManager:
     def __init__(self) -> None:
+        self.executions = SessionExecutionService(self)
         self.cleaned: list[tuple[str, str]] = []
         self.agent = _FakeInterruptAgent()
 
@@ -98,6 +100,7 @@ class _CleanupRecordingAgentManager:
 
 class _NoCreateCleanupAgentManager:
     def __init__(self) -> None:
+        self.executions = SessionExecutionService(self)
         self.cleaned: list[tuple[str, str]] = []
 
     def get_agent_nowait(self, *_args, **_kwargs):

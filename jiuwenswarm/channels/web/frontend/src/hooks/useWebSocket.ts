@@ -5,6 +5,7 @@
  */
 
 import { useEffect, useRef, useCallback, useState } from 'react';
+import { agentInputReply, captureAgentInput } from '../services/agentInputCommands';
 import { useTranslation } from 'react-i18next';
 import {
   ConnectionAckPayload,
@@ -29,6 +30,7 @@ import {
   ContextCompressionSummary,
   WsEvent,
   GoalRecord,
+  GoalControlTarget,
   GoalAction,
   Message,
 } from '../types';
@@ -44,9 +46,10 @@ import {
   useCronStore,
 } from '../stores';
 import { isPlanWireMode, resolvePlanWireMode } from '../features/planMode/wireMode';
-import { flushPendingGoalObjectiveBubble } from '../features/goalPendingObjectiveBubble';
+import { flushPendingGoalObjectiveBubble, queueOrAddGoalObjectiveMessage } from '../features/goalPendingObjectiveBubble';
 import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
+import { captureGoalTarget, goalCommandPayload } from '../services/goalCommands';
 import { createStreamDeltaBatcher } from '../services/streamDeltaBatcher';
 import {
   createSupplementOutputQuarantine,
@@ -231,6 +234,8 @@ function applyIncomingGoal(
   }
 
   goalStore.setLocalCreatedAt(goal.goal_id, new Date().toISOString());
+  // Only an authoritative Goal snapshot can credit the objective as accepted.
+  goalStore.recordGoalObjectiveText(sessionId, goal.objective);
 
   if (goal.status !== 'completed') {
     goalStore.markGoalSeenActive(goal.goal_id);
@@ -576,10 +581,10 @@ interface UseWebSocketReturn {
     action: 'accept' | 'reject',
     feedback?: string
   ) => Promise<void>;
-  setGoalObjective: (sessionId: string, objective: string) => Promise<void>;
-  pauseGoal: (sessionId: string) => Promise<void>;
-  resumeGoal: (sessionId: string) => Promise<void>;
-  clearGoal: (sessionId: string) => Promise<void>;
+  setGoalObjective: (sessionId: string, objective: string, target?: GoalControlTarget) => Promise<void>;
+  pauseGoal: (sessionId: string, target?: GoalControlTarget) => Promise<void>;
+  resumeGoal: (sessionId: string, target?: GoalControlTarget) => Promise<void>;
+  clearGoal: (sessionId: string, target?: GoalControlTarget) => Promise<void>;
   refreshGoal: (sessionId: string) => Promise<void>;
   drainTaskQueueIfIdle: (sessionId: string) => void;
   getInflightCount: () => number;
@@ -1250,7 +1255,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   // set/resume 走流式、正常路径上永远不会有 res（见 backend-requests.md #4），改用
   // sendGoalStreamCommand() 发出去就不等，真实状态全靠 goal.snapshot/goal.updated 事件驱动。
   const goalAction = useCallback(
-    async (sessionId: string, action: GoalAction | 'get', objective?: string) => {
+    async (sessionId: string, action: GoalAction | 'get', objective?: string, observedTarget?: GoalControlTarget) => {
       ensureSessionRuntimes(sessionId);
       useGoalStore.getState().setPendingAction(sessionId, action === 'get' ? null : action);
       const mode = useSessionStore.getState().getRuntime(sessionId)?.mode ?? 'agent';
@@ -1272,14 +1277,25 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         return;
       }
 
-      if (action === 'set' || action === 'resume') {
-        if (action === 'set' && objective) {
-          // "设为目标"徽章要靠这份历史记录复原（见 goalStore.ts objectiveMessageTexts 的
-          // 注释），发送这一刻就是唯一能拿到 objective 原文的地方，不能等回包再记。
-          useGoalStore.getState().recordGoalObjectiveText(sessionId, objective);
+      let target = observedTarget;
+      try {
+        const currentGoal = useGoalStore.getState().runtimes[sessionId]?.goal;
+        if (!target && (action !== 'set' || currentGoal?.status === 'completed')) {
+          // Starting the next Goal after completion replaces only that observed
+          // completed predecessor. CAS still rejects a concurrently new Goal.
+          target = captureGoalTarget(sessionId, currentGoal);
         }
+        // Active/paused/blocked Goals require an explicit observed edit target.
+        goalCommandPayload({ sessionId, action, objective, mode, target });
+      } catch (error) {
+        useGoalStore.getState().setPendingAction(sessionId, null);
+        reportFailure(error);
+        return;
+      }
+
+      if (action === 'set' || action === 'resume') {
         try {
-          await sendGoalStreamCommand({ sessionId, action, objective, mode });
+          await sendGoalStreamCommand({ sessionId, action, objective, mode, target });
         } catch (error) {
           // WS 层直接发送失败（未连接等）：这是能明确识别的失败，弹提示；set 不做进一步兜底
           // （"没有创建"本来就成立，不需要额外收敛），resume 按 b/c 步骤的约定补一次 get 兜底。
@@ -1316,10 +1332,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
       if (action === 'clear') {
         try {
-          const goal = await requestGoalAction({ sessionId, action, mode });
+          const goal = await requestGoalAction({ sessionId, action, mode, target });
           applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current);
-          // active 目标被删除时的会话结束由 App.tsx handleClearGoal 显式补发 cancel/pause 负责
-          // （真机联调确认只重置前端本地态不够，得发真信号），这里不用再管会话态。
         } catch (error) {
           // 一元 clear 失败时 webClient 目前不会把 payload.goal 透传进 WebError（见 webClient.ts
           // resolvePending），拿不到失败当时的目标快照，主动补一次 get 收敛。
@@ -1331,7 +1345,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
       // action === 'pause'：同样是一元 RPC，失败兜底同 clear。
       try {
-        const goal = await requestGoalAction({ sessionId, action, mode });
+        const goal = await requestGoalAction({ sessionId, action, mode, target });
         applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current);
       } catch (error) {
         const webError = error as WebError;
@@ -1349,12 +1363,21 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   );
 
   const setGoalObjective = useCallback(
-    (sessionId: string, objective: string) => goalAction(sessionId, 'set', objective),
+    (sessionId: string, objective: string, target?: GoalControlTarget) => goalAction(sessionId, 'set', objective, target),
     [goalAction]
   );
-  const pauseGoal = useCallback((sessionId: string) => goalAction(sessionId, 'pause'), [goalAction]);
-  const resumeGoal = useCallback((sessionId: string) => goalAction(sessionId, 'resume'), [goalAction]);
-  const clearGoal = useCallback((sessionId: string) => goalAction(sessionId, 'clear'), [goalAction]);
+  const pauseGoal = useCallback(
+    (sessionId: string, target?: GoalControlTarget) => goalAction(sessionId, 'pause', undefined, target),
+    [goalAction],
+  );
+  const resumeGoal = useCallback(
+    (sessionId: string, target?: GoalControlTarget) => goalAction(sessionId, 'resume', undefined, target),
+    [goalAction],
+  );
+  const clearGoal = useCallback(
+    (sessionId: string, target?: GoalControlTarget) => goalAction(sessionId, 'clear', undefined, target),
+    [goalAction],
+  );
   /**
    * 会话加载/切换时主动查一次当前 Goal 状态（协议文档 v2 §11 推荐流程第 3 步）——不这样做的话，
    * 刷新页面后 GoalBar 要等下一次 goal.updated 推送才会"自愈"重新出现，目标空闲/paused 时甚至
@@ -1805,6 +1828,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       try {
         const pendingQuestion = useChatStore.getState().getRuntime(sessionId)?.pendingQuestion;
         const pendingMatches = pendingQuestion?.request_id === requestId;
+        const managedTarget = pendingQuestion || requestId.startsWith('agent-input.')
+          ? captureAgentInput(pendingQuestion, requestId)
+          : null;
         const effectiveSource = source ?? (pendingMatches ? pendingQuestion?.source : undefined);
         const approvalSchema =
           pendingMatches
@@ -1839,7 +1865,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             : undefined;
         // 如果是需要走 interrupt/interact 的确认，发送 chat.send
         if (
-          effectiveSource === 'permission_interrupt' ||
+          managedTarget || effectiveSource === 'permission_interrupt' ||
           effectiveSource === 'confirm_interrupt' ||
           effectiveSource === 'ask_user_interrupt' ||
           effectiveSource === 'evolution_interrupt' ||
@@ -1861,7 +1887,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             usePlanStore.getState().setActive(sessionId, false);
             pendingPlanExecuteRef.current.add(sessionId);
           }
-          await request('chat.send', {
+          if (managedTarget) {
+            const command = await agentInputReply(sessionId, managedTarget, answers);
+            const receipt = await request<{ accepted?: boolean; status?: string; reason?: string }>(
+              'command.agent_input', command.params, command.options,
+            );
+            if (receipt.status === 'unknown') throw new Error('The answer receipt is unknown. Check the current Agent state.');
+            if (receipt.accepted !== true) throw new Error(receipt.reason || 'The answer was not accepted.');
+          } else await request('chat.send', {
             session_id: sessionId,
             query: '',
             mode: resolvedResumeMode,
@@ -1903,7 +1936,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             ...evolutionMetaPayload,
           });
         }
-        useChatStore.getState().setPendingQuestion(sessionId, null);
+        // A continuation can publish its next question before this receipt.
+        if (useChatStore.getState().getRuntime(sessionId)?.pendingQuestion?.request_id === requestId) {
+          useChatStore.getState().setPendingQuestion(sessionId, null);
+        }
       } catch (error) {
         if (planExecuteOptimistic) {
           // 请求没送出去，后端仍停在计划模式：撤回乐观更新，否则会留下一个标记，
@@ -2131,19 +2167,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
     /**
      * goal.snapshot / goal.updated / execution.error(带 goal 字段) 的统一落状态入口。
-     * goal 为 null 且 payload 没有顶层 session_id 时（文档 §4.4 第三种返回路径），
-     * 只能退化用当前 activeSessionId 兜底——这是文档示例本身没给出 session_id 时的已知限制。
+     * 无明确 session_id 的事件不能更新当前选中的会话。
      */
     const applyGoalSnapshot = (payload: Record<string, unknown>) => {
       const goal = (payload.goal ?? null) as GoalRecord | null;
-      const sessionId =
-        getPayloadSessionId(payload) ||
-        goal?.session_id ||
-        useChatStore.getState().activeSessionId ||
-        undefined;
-      if (!sessionId) return;
+      const sessionId = getPayloadSessionId(payload) || goal?.session_id || undefined;
+      if (!sessionId || (goal && goal.session_id !== sessionId)) return;
       ensureSessionRuntimes(sessionId);
       applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current);
+      return sessionId;
     };
 
     const unsubs = [
@@ -3055,11 +3087,29 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }),
       webClient.on('goal.snapshot', ({ payload }) => {
         if (shouldDropDuplicatedEvent('goal.snapshot', payload)) return;
-        applyGoalSnapshot(payload);
+        const sessionId = applyGoalSnapshot(payload);
+        if (!sessionId) return;
+        const accepted = payload.goal as GoalRecord | undefined;
+        if (payload.action === 'set' && accepted?.session_id && accepted.objective) {
+          queueOrAddGoalObjectiveMessage(sessionId, accepted.objective);
+        }
       }),
       webClient.on('goal.updated', ({ payload }) => {
         if (shouldDropDuplicatedEvent('goal.updated', payload)) return;
         applyGoalSnapshot(payload);
+      }),
+      webClient.on('goal.confirm_required', ({ payload }) => {
+        const existing = payload.existing_goal as GoalRecord | undefined;
+        const sessionId = getPayloadSessionId(payload) || existing?.session_id;
+        if (!sessionId || (existing && existing.session_id !== sessionId)) return;
+        if (existing) applyGoalSnapshot({ session_id: sessionId, goal: existing });
+        useGoalStore.getState().setPendingAction(sessionId, null);
+        useChatStore.getState().addMessage(sessionId, {
+          id: `error-${Date.now()}`,
+          role: 'system',
+          content: t('goal.replacementRequiresEdit'),
+          timestamp: new Date().toISOString(),
+        });
       }),
       webClient.on('runtime.accepted', () => {
         // Goal 的 loading 结束统一以 goal.snapshot 为准（文档 §4 中 set/resume 均先于
@@ -3067,9 +3117,21 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // 不当作错误、不重试、不新增消息（文档 §6.1）。
       }),
       webClient.on('execution.error', ({ payload }) => {
-        const goal = payload.goal;
-        if (goal !== undefined) {
+        const sessionId = getPayloadSessionId(payload) || (payload.goal as GoalRecord | undefined)?.session_id;
+        if (!sessionId || (payload.goal && (payload.goal as GoalRecord).session_id !== sessionId)) return;
+        if (payload.goal !== undefined) {
           applyGoalSnapshot(payload);
+        } else if (useGoalStore.getState().runtimes[sessionId]?.pendingAction) {
+          useGoalStore.getState().setQueryStatus(sessionId, 'unknown');
+          useGoalStore.getState().setPendingAction(sessionId, null);
+        }
+        if (typeof payload.message === 'string' && payload.message) {
+          useChatStore.getState().addMessage(sessionId, {
+            id: `error-${Date.now()}`,
+            role: 'system',
+            content: t('network.errorPrefix', { message: payload.message }),
+            timestamp: new Date().toISOString(),
+          });
         }
       }),
       webClient.on('context.usage', ({ payload }) => {
@@ -3517,6 +3579,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             : undefined;
         const normalizedPayload: AskUserQuestionPayload = {
           request_id: typeof questionPayload.request_id === 'string' ? questionPayload.request_id : '',
+          ...Object.fromEntries(
+            ['input_id', 'source_binding_id', 'source_task_id', 'pending_token']
+              .filter((field) => questionPayload[field] !== undefined)
+              .map((field) => [field, questionPayload[field]]),
+          ),
           source: typeof questionPayload.source === 'string' ? questionPayload.source : undefined,
           questions,
           ...(approvalSchema ? { approvalSchema } : {}),

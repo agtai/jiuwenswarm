@@ -1,0 +1,1298 @@
+diff --git a/docs/en/2.Development Guide/API Docs/openjiuwen.harness/deep_agent.md b/docs/en/2.Development Guide/API Docs/openjiuwen.harness/deep_agent.md
+index 51fd31c2..6f59698f 100644
+--- a/docs/en/2.Development Guide/API Docs/openjiuwen.harness/deep_agent.md	
++++ b/docs/en/2.Development Guide/API Docs/openjiuwen.harness/deep_agent.md	
+@@ -37,6 +37,29 @@ Initialize the agent with the given configuration. Sets up the inner `ReActAgent
+ 
+ **DeepAgent**: `self`, for method chaining.
+ 
++### async methods set_goal and resume_goal
++
++```python
++record, output = await agent.set_goal(objective, run_context=context, **controls)
++record, output = await agent.resume_goal(run_context=context, **controls)
++```
++
++These interaction entry points use the existing Goal manager, control CAS and
++single output lease. `run_context` is an optional bounded JSON dictionary saved
++with the Goal and copied into each actual task-loop attempt. It reaches rails
++through `RunContext`; the SDK's Goal/session/attempt identities take precedence.
++An omitted/null resume context preserves the binding. Only an idle paused or
++blocked Goal can install a changed context; a running attempt rejects changes
++with `GoalOperationError.code == "run_context_conflict"` before output admission.
++
++For public output correlation, explicitly supply `context["extra"]["source_metadata"]`.
++The SDK adds actual source request/task/session/Goal identities without copying
++the rest of the private context. The returned output can still belong to an
++earlier reader. `Session.with_source_metadata()` supplies immutable source views
++of the same state/writer at the real execution boundary; controller source labels
++remain in `payload.metadata` and preserve its typed payload. See the harness
++Goal README for bounds, persisted compatibility and the full source contract.
++
+ ### async method invoke
+ 
+ ```python
+diff --git a/openjiuwen/core/session/agent.py b/openjiuwen/core/session/agent.py
+index d765315b..779235a7 100644
+--- a/openjiuwen/core/session/agent.py
++++ b/openjiuwen/core/session/agent.py
+@@ -1,5 +1,8 @@
+ # coding: utf-8
+ # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
++import copy
++import json
++import math
+ import uuid
+ from typing import (
+     Any,
+@@ -28,7 +31,65 @@ if TYPE_CHECKING:
+     from openjiuwen.core.single_agent import AgentCard
+ 
+ 
++def _copy_json_mapping(value: Any, *, max_bytes: int = 65536) -> dict[str, Any]:
++    """Snapshot bounded JSON without coercing keys, objects, or nonfinite numbers."""
++    if type(value) is not dict:
++        raise ValueError("context must be a JSON object")
++    remaining = 4096
++
++    def check(item, depth=0):
++        nonlocal remaining
++        remaining -= 1
++        if remaining < 0 or depth > 32:
++            raise ValueError("context exceeds structural bounds")
++        if item is None or type(item) in (bool, int):
++            return
++        if type(item) is float and math.isfinite(item):
++            return
++        if type(item) is str and len(item) <= max_bytes:
++            return
++        if type(item) is dict:
++            for key, child in item.items():
++                if type(key) is not str or len(key) > max_bytes:
++                    raise ValueError("context keys must be bounded strings")
++                check(child, depth + 1)
++            return
++        if type(item) is list:
++            for child in item:
++                check(child, depth + 1)
++            return
++        raise ValueError("context contains a non-JSON or oversized value")
++
++    check(value)
++    encoded = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
++    if len(encoded.encode("utf-8")) > max_bytes:
++        raise ValueError("context exceeds serialized size bound")
++    return json.loads(encoded)
++
++
+ class Session:
++    def __getattr__(self, name):
++        # Resolve methods on the view normally; only its missing state comes
++        # from the owner, including runtime caches installed after view creation.
++        owner = object.__getattribute__(self, "__dict__").get("_source_owner")
++        if owner is not None:
++            return getattr(owner, name)
++        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
++
++    def __setattr__(self, name, value):
++        owner = object.__getattribute__(self, "__dict__").get("_source_owner")
++        if owner is not None and name not in ("_source_owner", "_source_metadata"):
++            setattr(owner, name, value)
++        else:
++            object.__setattr__(self, name, value)
++
++    def __delattr__(self, name):
++        owner = object.__getattribute__(self, "__dict__").get("_source_owner")
++        if owner is not None and name not in ("_source_owner", "_source_metadata"):
++            delattr(owner, name)
++        else:
++            object.__delattr__(self, name)
++
+     def __init__(self,
+                  session_id: str = None,
+                  envs: dict[str, Any] = None,
+@@ -56,6 +117,7 @@ class Session:
+         self._interaction = None
+         self._close_stream_on_post_run = close_stream_on_post_run
+         self._source_metadata = source_metadata or {}
++        self._source_owner = None
+         self._parent_session_id = (
+             parent_session_id.strip()
+             if isinstance(parent_session_id, str) and parent_session_id.strip()
+@@ -66,6 +128,20 @@ class Session:
+     def get_session_id(self) -> str:
+         return self._session_id
+ 
++    def with_source_metadata(self, metadata: dict[str, Any]) -> "Session":
++        """Return a provenance view sharing this Session's state and writer.
++
++        The JSON metadata is copied (4 KiB maximum). Views do not own pre/post
++        run or stream closure, and cannot change the provider cache identity.
++        Existing views and already-emitted chunks never share mutable metadata.
++        """
++        source = _copy_json_mapping(metadata, max_bytes=4096)
++        view = object.__new__(type(self))
++        view._source_metadata = _copy_json_mapping(
++            {**self._source_metadata, **source}, max_bytes=4096)
++        view._source_owner = self._source_owner or self
++        return view
++
+     def get_parent_session_id(self) -> str | None:
+         """Return the optional product Session that owns this child Session."""
+         return self._parent_session_id
+@@ -122,6 +198,8 @@ class Session:
+         Swarmflow workers, use their runtime session id as ``cache_id`` and may
+         point at an explicit product-session parent.
+         """
++        if self._source_owner is not None:
++            return self._source_owner.get_cache_identity()
+         if self._team_cache_scope is not None:
+             team_id, agent_id = self._team_cache_scope
+             return KVCacheIdentity(
+@@ -202,6 +280,9 @@ class Session:
+         ).stream_output()
+ 
+     async def pre_run(self, **kwargs):
++        if self._source_owner is not None:
++            await self._source_owner.pre_run(**kwargs)
++            return self
+         if self._pre_run_done:
+             return self
+         from openjiuwen.core.runner.callback import trigger
+@@ -222,11 +303,15 @@ class Session:
+         full session cleanup (checkpointer). Use this when
+         the caller (e.g. Runner) manages the session lifecycle.
+         """
++        if self._source_owner is not None:
++            return
+         await self._inner.stream_writer_manager().stream_emitter().close()
+         from openjiuwen.core.runner.runner import Runner
+         await Runner.callback_framework.unregister_event(event=self._session_id + "write_stream")
+ 
+     async def post_run(self):
++        if self._source_owner is not None:
++            return self
+         if self._post_run_done:
+             return self
+         if self._close_stream_on_post_run:
+@@ -250,16 +335,35 @@ class Session:
+     def _tag_stream_payload(self, data: Union[dict, OutputSchema]):
+         if not self._source_metadata:
+             return data
++        source = copy.deepcopy(self._source_metadata)
+         if isinstance(data, dict):
+-            return {**data, **self._source_metadata}
++            if {"type", "index", "payload"}.issubset(data):
++                return self._tag_stream_payload(OutputSchema.model_validate(data))
++            return {**data, **source}
+         if isinstance(data, OutputSchema):
+             payload = data.payload
+-            if isinstance(payload, dict):
+-                payload = {**payload, **self._source_metadata}
++            # Preserve controller protocol models instead of wrapping them in
++            # {value: ...}, which loses their type/data/metadata contract.
++            from openjiuwen.core.controller.schema.controller_output import ControllerOutputPayload
++
++            if isinstance(payload, ControllerOutputPayload):
++                # A controller writes executor-produced chunks through its
++                # original Session. Per-task labels beat those static defaults;
++                # an explicit source view remains authoritative for its writes.
++                metadata = (source | (payload.metadata or {}) if self._source_owner is None
++                            else (payload.metadata or {}) | source)
++                payload = payload.model_copy(update={"metadata": metadata})
++            elif isinstance(payload, dict):
++                if data.type == "controller_output":
++                    metadata = (source | (payload.get("metadata") or {}) if self._source_owner is None
++                                else (payload.get("metadata") or {}) | source)
++                    payload = {**payload, "metadata": metadata}
++                else:
++                    payload = {**payload, **source}
+             else:
+                 payload = {
+                     "value": payload,
+-                    **self._source_metadata,
++                    **source,
+                 }
+             return data.model_copy(update={"payload": payload})
+         return data
+diff --git a/openjiuwen/harness/deep_agent.py b/openjiuwen/harness/deep_agent.py
+index eed4162f..6490e89f 100644
+--- a/openjiuwen/harness/deep_agent.py
++++ b/openjiuwen/harness/deep_agent.py
+@@ -1397,8 +1397,11 @@ class DeepAgent(BaseAgent):
+                 run_kind = RunKind(kind)
+                 context_data = run.get("context")
+                 if context_data:
++                    if "source_metadata" in context_data or "_interaction_request_id" in context_data:
++                        raise ValueError("source metadata must explicitly use extra.source_metadata")
+                     _rc_fields = {f.name for f in dataclasses.fields(RunContext)}
+                     extra = dict(context_data.get("extra") or {})
++                    extra.pop("_interaction_request_id", None)
+                     for k, v in context_data.items():
+                         if k not in _rc_fields:
+                             extra[k] = v
+@@ -2807,6 +2810,9 @@ class DeepAgent(BaseAgent):
+         """Execute one interaction work item and optionally propose follow-up work."""
+         self._invoke_active = True
+         try:
++            source = work.output_source_metadata(task_id=task_id, session_id=session.get_session_id())
++            if source is not None:
++                session = session.with_source_metadata(source)
+             coordinator, controller = await self.prepare_interaction_task_loop(session)
+             if work.reset_loop:
+                 coordinator.reset()
+@@ -2821,6 +2827,10 @@ class DeepAgent(BaseAgent):
+                     "context": copy.deepcopy(work.context),
+                 }
+             invoke_inputs = self._normalize_inputs(inputs)
++            if invoke_inputs.run_context is not None:
++                # The scheduler task predates this request. Carry the SDK's
++                # actual request identity through its existing task metadata.
++                invoke_inputs.run_context.extra["_interaction_request_id"] = work.request_id
+             is_resume_input = self._is_resume_input(invoke_inputs)
+             ctx = AgentCallbackContext(
+                 agent=self, inputs=invoke_inputs, session=session
+@@ -3184,6 +3194,17 @@ class DeepAgent(BaseAgent):
+                 "or InteractiveInput"
+             )
+ 
++        # Validate opt-in and the final projection before enqueue/wakeup. The
++        # real round uses a fixed 32-character UUID task id generated by the SDK.
++        self._normalize_inputs(inputs)
++        source = RoundWorkItem.user(request_id=request.request_id, inputs=inputs).output_source_metadata(
++            task_id="0" * 32,
++            session_id=(self._interaction_session.get_session_id()
++                        if self._interaction_session is not None else inputs.get("conversation_id")),
++        )
++        if source is not None and self._interaction_session is not None:
++            self._interaction_session.with_source_metadata(source)
++
+         async with self._interaction_control_lock:
+             if is_resume_input:
+                 self._event_manager.push_user(
+@@ -3499,9 +3520,11 @@ class DeepAgent(BaseAgent):
+         self._active_interaction_round = ActiveInteractionRound(work=work, task_id=task_id)
+         self._event_manager.mark_started(work)
+         self._interaction_phase = InteractionPhase.RUNNING
++        source = None
+         try:
+             if session is None or not self._interaction_output.has_consumer():
+                 return
++            source = work.output_source_metadata(task_id=task_id, session_id=session.get_session_id())
+             if work.kind == "goal":
+                 if self.goal_manager is None:
+                     return
+@@ -3523,6 +3546,7 @@ class DeepAgent(BaseAgent):
+                     InteractionEvent.execution_error(
+                         code=outcome.error_code,
+                         message=outcome.error_message or "",
++                        source_metadata=source,
+                     )
+                 )
+         except asyncio.CancelledError:
+@@ -3533,6 +3557,7 @@ class DeepAgent(BaseAgent):
+                 InteractionEvent.execution_error(
+                     code="round_execution_error",
+                     message="round execution failed",
++                    source_metadata=source,
+                 )
+             )
+         finally:
+diff --git a/openjiuwen/harness/goal/README.md b/openjiuwen/harness/goal/README.md
+index 2aa59502..46bc3eeb 100644
+--- a/openjiuwen/harness/goal/README.md
++++ b/openjiuwen/harness/goal/README.md
+@@ -65,3 +65,73 @@ This does not make a successful admission a claim of business completion.
+ abort_active_round=False)` releases just that stream's lease. Existing close
+ defaults still discard pending work and cancel the active round. A stale handle
+ cannot release a newer reader.
++
++## Per-work host context and output provenance
++
++`GoalManager.set/resume` and `DeepAgent.set_goal/resume_goal` accept optional
++`run_context: dict | None`. The Goal record snapshots that context and copies it
++into every scheduled attempt through the existing `RunContext`/task metadata
++path. The SDK overwrites Goal identity, session identity and attempt revision;
++host context cannot replace those values. Existing calls without this argument
++retain their behavior. The context must be pure JSON (string keys, finite numbers,
++no Python objects), at most 64 KiB UTF-8, depth 32 and 4096 values. `extra`, when
++present, must be an object. Invalid context rejects before output preparation or
++Goal mutation with `GoalOperationError(code="invalid_run_context")`.
++Top-level `source_metadata` and `_interaction_request_id` are reserved and
++rejected; normalization never promotes them into the public map. Any supplied
++`extra._interaction_request_id` is discarded and the actual work request id is
++written by the SDK after normalization.
++
++Resume with `None` preserves the saved context. A different non-null context is
++accepted only for an idle PAUSED/BLOCKED Goal after the existing control CAS;
++`{}` explicitly replaces it with an empty context. ACTIVE or still-running
++attempts reject changes with `run_context_conflict`, before output preparation.
++Pause/resume of the same running attempt keeps its original context and revision.
++The existing Goal store encodes this field inside its record as a JSON string to
++avoid recursive state merging and preserve JSON null. Legacy dict/absent/null
++fields remain readable. Corrupt bindings fail both `peek()` and `load()` without
++clearing the record. `GoalRecord.to_dict()` returns an isolated dictionary field.
++
++Host rails read the actual scheduled invocation's context from
++`ctx.extra["run_context"]` (or the outer iteration's `inputs.run_context`).
++Request ContextVars do not establish context for an already-running supervisor
++or task scheduler. The SDK does not interpret host permissions or model choices.
++Hosts must validate missing, stale and restored bindings before their effects.
++
++Only `run_context["extra"]["source_metadata"]` is an explicit public output map.
++For example:
++
++```python
++run_context = {"extra": {
++    "host_execution": {"model_identity": "catalog-entry", "config_version": "v1"},
++    "source_metadata": {"source_binding_id": "binding-1",
++                        "source_origin_request_id": "request-1"},
++}}
++record, stream = await agent.set_goal("Prepare the report", run_context=run_context)
++```
++
++This map is copied with a 4 KiB bound; the final source map including SDK fields
++and static Session labels must also fit 4 KiB. Set and resume preflight the real
++session/Goal identity and next revision with the SDK's 32-character task-id size
++before output, persistence or queue effects. User input preflights its real
++request/session identity before enqueue. Restored invalid projections are
++rejected without repairing the stored record. Use the map only for public labels.
++The SDK adds authoritative
++`source_session_id`, `source_task_id`, `source_request_id`, `source_run_kind`,
++`source_goal_id` and `source_goal_revision`, overriding supplied values. Goal
++work has no input request id, so `source_request_id` is null; hosts can correlate
++it using their binding/origin ids. Private run context is never automatically
++copied into these labels. `goal.updated` and execution-error Goal snapshots omit
++`run_context`; hosts serializing a returned record must apply their own projection.
++
++`Session.with_source_metadata(metadata)` returns a source view sharing the same
++state, interaction and writer. It owns no new session lifecycle, stream closure
++or provider-cache identity. Existing views and queued chunks retain isolated
++metadata, including late output after another round begins. DeepAgent uses a
++round view, and the actual executor reconstructs its view from task metadata.
++Controller output preserves its typed payload and places source labels in
++`payload.metadata`; ordinary output places them in its payload (scalar payloads
++retain the existing `value` wrapper). Executor labels survive the scheduler's
++later write through the original Session. Context-free legacy rounds retain
++their existing output shape. EOF and controller settlement remain distinct
++from Goal completion and any host presentation acknowledgement.
+diff --git a/openjiuwen/harness/goal/manager.py b/openjiuwen/harness/goal/manager.py
+index a56ec912..106635bc 100644
+--- a/openjiuwen/harness/goal/manager.py
++++ b/openjiuwen/harness/goal/manager.py
+@@ -108,7 +108,9 @@ class GoalManager:
+         expected_control_revision: int | None = None,
+         before_effect: Callable[[], Awaitable[None] | None] | None = None,
+         prepare_output: Callable[[], Awaitable[None]] | None = None,
++        run_context: dict | None = None,
+     ) -> GoalRecord:
++        run_context = self._copy_run_context(run_context, operation="set")
+         normalized = objective.strip()
+         if not normalized:
+             raise GoalOperationError(
+@@ -141,6 +143,15 @@ class GoalManager:
+                     goal=existing,
+                 )
+ 
++            record = GoalRecord.create(
++                session_id=self._store.session_id,
++                objective=normalized,
++                token_budget=token_budget,
++                max_attempts=max_attempts,
++                run_context=run_context,
++            )
++            self._validate_source_projection(record, operation="set")
++
+             # The interaction owner may acquire output only after admission.
+             # Attaching output beforehand can schedule an unrelated active Goal.
+             if prepare_output is not None:
+@@ -152,12 +163,6 @@ class GoalManager:
+                     goal_id=existing.goal_id,
+                 )
+ 
+-            record = GoalRecord.create(
+-                session_id=self._store.session_id,
+-                objective=normalized,
+-                token_budget=token_budget,
+-                max_attempts=max_attempts,
+-            )
+             self._store.save(record)
+             await self._commit_store_locked()
+ 
+@@ -177,6 +182,36 @@ class GoalManager:
+ 
+             return record.copy_for_response()
+ 
++    @staticmethod
++    def _copy_run_context(context, *, operation):
++        if context is None:
++            return None
++        from openjiuwen.harness.goal.schema import _copy_goal_run_context
++
++        try:
++            return _copy_goal_run_context(context)
++        except (ValueError, TypeError, RecursionError) as exc:
++            raise GoalOperationError(operation=operation, code="invalid_run_context",
++                                     message="goal run context must be bounded JSON") from exc
++
++    def _validate_source_projection(self, record, *, operation, context=None, revision=None):
++        from openjiuwen.harness.schema.interaction import _source_metadata_for_run
++
++        selected_context = record.run_context if context is None else context
++        selected_revision = record.revision if revision is None else revision
++        try:
++            _source_metadata_for_run(selected_context, session_id=self._store.session_id,
++                                     task_id="0" * 32, run_kind="goal", goal_id=record.goal_id,
++                                     revision=selected_revision)
++            # A Session store can additionally account for its static labels;
++            # the public GoalStore protocol does not require this capability.
++            preflight = getattr(self._store, "_validate_run_context", None)
++            if callable(preflight):
++                preflight(selected_context, goal_id=record.goal_id, revision=selected_revision)
++        except (ValueError, TypeError, RecursionError) as exc:
++            raise GoalOperationError(operation=operation, code="invalid_run_context",
++                                     message="goal output source metadata exceeds its bounds") from exc
++
+     @staticmethod
+     async def _admit_control(before_effect):
+         if before_effect is not None:
+@@ -236,18 +271,31 @@ class GoalManager:
+     async def resume(self, *, expected_goal_id: str | None = None,
+                      expected_control_revision: int | None = None,
+                      before_effect: Callable[[], Awaitable[None] | None] | None = None,
+-                     prepare_output: Callable[[], Awaitable[None]] | None = None) -> Optional[GoalRecord]:
++                     prepare_output: Callable[[], Awaitable[None]] | None = None,
++                     run_context: dict | None = None) -> Optional[GoalRecord]:
++        run_context = self._copy_run_context(run_context, operation="resume")
+         async with self._control_lock:
+             await self._admit_control(before_effect)
+             record = self._read_control_target(
+                 "resume", expected_goal_id, expected_control_revision, strict=prepare_output is not None)
+             if record is None:
+                 return None
++            context_changed = run_context is not None and run_context != record.run_context
++            in_flight = self._has_in_flight_goal_attempt(record)
++            if context_changed and (record.status is GoalStatus.ACTIVE or in_flight):
++                raise GoalOperationError(operation="resume", code="run_context_conflict",
++                                         message="cannot replace an active goal run context", goal=record)
++            if record.status in (GoalStatus.ACTIVE, GoalStatus.PAUSED, GoalStatus.BLOCKED):
++                next_revision = record.revision + int(record.status is not GoalStatus.ACTIVE and not in_flight)
++                self._validate_source_projection(record, operation="resume", context=run_context,
++                                                 revision=next_revision)
+             if prepare_output is not None and record.status in (GoalStatus.ACTIVE, GoalStatus.PAUSED, GoalStatus.BLOCKED):
+                 await prepare_output()
+                 if record.status is GoalStatus.ACTIVE and self._has_output_stream():
+                     self._ensure_goal_work_locked(record)
+             if record.status in (GoalStatus.PAUSED, GoalStatus.BLOCKED):
++                if context_changed:
++                    record.run_context = run_context
+                 # While paused, hosts freeze on time_used_seconds. If an attempt
+                 # kept running, active_started_at still tracks that segment—
+                 # fold it into time_used here so becoming ACTIVE jumps the
+@@ -401,6 +449,7 @@ class GoalManager:
+             goal_id=record.goal_id,
+             revision=record.revision,
+             session_id=record.session_id,
++            run_context=record.run_context,
+         )
+         queued = self._event_manager.push_goal(work)
+         if queued:
+diff --git a/openjiuwen/harness/goal/schema.py b/openjiuwen/harness/goal/schema.py
+index c67e6fce..746d0bd6 100644
+--- a/openjiuwen/harness/goal/schema.py
++++ b/openjiuwen/harness/goal/schema.py
+@@ -10,6 +10,22 @@ from datetime import datetime, timezone
+ from enum import Enum
+ from typing import Any, Dict, Optional
+ 
++from openjiuwen.core.session.agent import _copy_json_mapping
++
++
++def _copy_goal_run_context(context):
++    if context is None:
++        return None
++    snapshot = _copy_json_mapping(context)
++    if "source_metadata" in snapshot or "_interaction_request_id" in snapshot:
++        raise ValueError("source metadata must explicitly use extra.source_metadata")
++    if "extra" in snapshot and type(snapshot["extra"]) is not dict:
++        raise ValueError("run context extra must be an object")
++    extra = snapshot.get("extra", {})
++    if "source_metadata" in extra:
++        _copy_json_mapping(extra["source_metadata"], max_bytes=4096)
++    return snapshot
++
+ 
+ class GoalStatus(str, Enum):
+     ACTIVE = "active"
+@@ -183,6 +199,10 @@ class GoalRecord:
+     # User controls have their own CAS identity. Pausing an in-flight attempt
+     # must not invalidate the attempt's execution revision.
+     control_revision: int = 1
++    run_context: Optional[Dict[str, Any]] = None
++
++    def __post_init__(self) -> None:
++        self.run_context = _copy_goal_run_context(self.run_context)
+ 
+     def touch(self, *, bump_revision: bool = False) -> None:
+         self.updated_at = _utc_now_iso()
+@@ -218,6 +238,7 @@ class GoalRecord:
+             "status": self.status.value,
+             "revision": self.revision,
+             "control_revision": self.control_revision,
++            "run_context": copy.deepcopy(self.run_context),
+             "attempt_count": self.attempt_count,
+             "token_usage": self.token_usage.to_dict(),
+             "max_attempts": self.max_attempts,
+@@ -270,6 +291,7 @@ class GoalRecord:
+             status=status,
+             revision=int(data.get("revision", 0)),
+             control_revision=control_revision,
++            run_context=data.get("run_context"),
+             attempt_count=int(data.get("attempt_count", 0)),
+             token_usage=TokenUsage.from_dict(usage_data) if isinstance(usage_data, dict) else TokenUsage(),
+             max_attempts=_optional_positive_int(data.get("max_attempts"), "max_attempts"),
+@@ -292,6 +314,7 @@ class GoalRecord:
+         objective: str,
+         max_attempts: Optional[int] = None,
+         token_budget: Optional[int] = None,
++        run_context: Optional[Dict[str, Any]] = None,
+     ) -> "GoalRecord":
+         now = _utc_now_iso()
+         return cls(
+@@ -300,6 +323,7 @@ class GoalRecord:
+             objective=objective,
+             max_attempts=max_attempts,
+             token_budget=token_budget,
++            run_context=run_context,
+             active_started_at=now,
+             created_at=now,
+             updated_at=now,
+diff --git a/openjiuwen/harness/goal/store.py b/openjiuwen/harness/goal/store.py
+index 2c0d215d..ebbe66b6 100644
+--- a/openjiuwen/harness/goal/store.py
++++ b/openjiuwen/harness/goal/store.py
+@@ -9,10 +9,12 @@ SQLite, or history as an alternative goal state source.
+ from __future__ import annotations
+ 
+ import inspect
++import json
+ import logging
+ from typing import TYPE_CHECKING, Optional
+ 
+-from openjiuwen.harness.goal.schema import GoalOperationError, GoalRecord
++from openjiuwen.harness.goal.schema import GoalOperationError, GoalRecord, _copy_goal_run_context
++from openjiuwen.core.session.agent import _copy_json_mapping
+ 
+ if TYPE_CHECKING:
+     from openjiuwen.core.session.agent import Session
+@@ -55,6 +57,22 @@ class SessionGoalStore:
+             )
+             self.clear()
+             return None
++        # Bindings cannot use the state's recursive dict merge: removed keys
++        # must disappear and JSON null must survive. Old dict records remain
++        # readable, but an invalid binding must never be repaired into execution.
++        data = dict(data)
++        try:
++            context = data.get("run_context")
++            if isinstance(context, str):
++                if len(context.encode("utf-8")) > 65536:
++                    raise ValueError("stored run context exceeds size bound")
++                context = _copy_json_mapping(json.loads(context))
++            data["run_context"] = _copy_goal_run_context(context)
++            self._validate_run_context(data["run_context"], goal_id=data.get("goal_id"),
++                                      revision=data.get("revision"))
++        except (ValueError, TypeError, RecursionError) as exc:
++            raise GoalOperationError(operation="get", code="invalid_state",
++                                     message="Stored Goal run context is invalid") from exc
+         try:
+             record = GoalRecord.from_dict(data)
+             if not repair and record.session_id != self.session_id:
+@@ -75,7 +93,24 @@ class SessionGoalStore:
+ 
+     def save(self, record: GoalRecord) -> None:
+         """Persist a GoalRecord to session state."""
+-        self._session.update_state({SESSION_GOAL_RECORD_KEY: record.to_dict()})
++        self._validate_run_context(record.run_context, goal_id=record.goal_id, revision=record.revision)
++        data = record.to_dict()
++        if record.run_context is not None:
++            data["run_context"] = json.dumps(_copy_goal_run_context(record.run_context),
++                                             ensure_ascii=False, allow_nan=False, separators=(",", ":"))
++        self._session.update_state({SESSION_GOAL_RECORD_KEY: data})
++
++    def _validate_run_context(self, context, *, goal_id, revision) -> None:
++        """Preflight the complete output projection without changing state."""
++        from openjiuwen.harness.schema.interaction import _source_metadata_for_run
++
++        # Actual round ids are UUID hex strings. Goal continuation keeps its
++        # revision; idle resume validates its next revision before admission.
++        source = _source_metadata_for_run(context, session_id=self.session_id, task_id="0" * 32,
++                                          run_kind="goal", goal_id=goal_id, revision=revision)
++        view = getattr(self._session, "with_source_metadata", None)
++        if source is not None and callable(view):
++            view(source)  # Also account for static labels on the actual Session.
+ 
+     def clear(self) -> None:
+         """Remove the GoalRecord from session state."""
+diff --git a/openjiuwen/harness/schema/interaction.py b/openjiuwen/harness/schema/interaction.py
+index b0830808..fb010592 100644
+--- a/openjiuwen/harness/schema/interaction.py
++++ b/openjiuwen/harness/schema/interaction.py
+@@ -25,6 +25,23 @@ if TYPE_CHECKING:
+ _OUTPUT_END = object()
+ 
+ 
++def _source_metadata_for_run(
++    run_context, *, session_id, task_id, run_kind, request_id=None, goal_id=None, revision=None,
++):
++    """Project only an explicitly public source map, then stamp SDK identities."""
++    extra = (run_context.get("extra", {}) if isinstance(run_context, dict)
++             else getattr(run_context, "extra", {}))
++    if not isinstance(extra, dict) or "source_metadata" not in extra:
++        return None
++    from openjiuwen.core.session.agent import _copy_json_mapping
++
++    source = _copy_json_mapping(extra["source_metadata"], max_bytes=4096)
++    source.update(source_session_id=session_id, source_task_id=task_id,
++                  source_request_id=request_id, source_run_kind=run_kind,
++                  source_goal_id=goal_id, source_goal_revision=revision)
++    return _copy_json_mapping(source, max_bytes=4096)
++
++
+ class InteractionPhase(str, Enum):
+     """Internal lifecycle phase of one session-scoped interaction loop."""
+ 
+@@ -92,18 +109,20 @@ class RoundWorkItem:
+         goal_id: str,
+         revision: int,
+         session_id: str,
++        run_context: Optional[Dict[str, object]] = None,
+     ) -> "RoundWorkItem":
+         """Build a goal work item wholly owned by openjiuwen."""
++        context = copy.deepcopy(run_context or {})
++        extra = context.get("extra")
++        if isinstance(extra, dict):
++            for reserved in ("goal_id", "revision", "session_id", "reset_loop"):
++                extra.pop(reserved, None)
++        context.update(goal_id=goal_id, revision=revision, session_id=session_id, reset_loop=True)
+         return cls(
+             kind="goal",
+             request_id=None,
+             inputs=copy.deepcopy(inputs),
+-            context={
+-                "goal_id": goal_id,
+-                "revision": revision,
+-                "session_id": session_id,
+-                "reset_loop": True,
+-            },
++            context=context,
+         )
+ 
+     @property
+@@ -115,6 +134,17 @@ class RoundWorkItem:
+     def reset_loop(self) -> bool:
+         return bool(self.context.get("reset_loop", True))
+ 
++    def output_source_metadata(self, *, task_id: str, session_id: str):
++        """Return this work's public provenance, independently of its reader."""
++        run = self.inputs.get("run") or {}
++        context = self.context if self.kind == "goal" else run.get("context", {})
++        return _source_metadata_for_run(
++            context, session_id=session_id, task_id=task_id, run_kind=self.kind,
++            request_id=self.request_id,
++            goal_id=self.context.get("goal_id") if self.kind == "goal" else None,
++            revision=self.context.get("revision") if self.kind == "goal" else None,
++        )
++
+ 
+ @dataclass
+ class ActiveInteractionRound:
+@@ -159,9 +189,12 @@ class InteractionEvent:
+ 
+     @classmethod
+     def goal_updated(cls, goal: Optional[Dict[str, object]]) -> InteractionEvent:
++        snapshot = copy.deepcopy(goal)
++        if snapshot is not None:
++            snapshot.pop("run_context", None)
+         return cls(
+             type=InteractionEventType.GOAL_UPDATED,
+-            payload={"goal": copy.deepcopy(goal)},
++            payload={"goal": snapshot},
+         )
+ 
+     @classmethod
+@@ -171,10 +204,15 @@ class InteractionEvent:
+         code: str,
+         message: str,
+         goal: Optional[Dict[str, object]] = None,
++        source_metadata: Optional[Dict[str, object]] = None,
+     ) -> InteractionEvent:
+         payload: Dict[str, object] = {"code": code, "message": message}
+         if goal is not None:
+             payload["goal"] = copy.deepcopy(goal)
++            payload["goal"].pop("run_context", None)
++        if source_metadata is not None:
++            # Source labels must not replace the actual error contract.
++            payload = {**copy.deepcopy(source_metadata), **payload}
+         return cls(type=InteractionEventType.EXECUTION_ERROR, payload=payload)
+ 
+ 
+diff --git a/openjiuwen/harness/task_loop/task_loop_event_executor.py b/openjiuwen/harness/task_loop/task_loop_event_executor.py
+index 96bacd86..442a6136 100644
+--- a/openjiuwen/harness/task_loop/task_loop_event_executor.py
++++ b/openjiuwen/harness/task_loop/task_loop_event_executor.py
+@@ -40,6 +40,7 @@ from openjiuwen.core.single_agent.rail.base import (
+     AgentCallbackEvent,
+     TaskIterationInputs,
+ )
++from openjiuwen.harness.schema.interaction import _source_metadata_for_run
+ 
+ if TYPE_CHECKING:
+     from openjiuwen.harness.deep_agent import (
+@@ -131,6 +132,21 @@ class TaskLoopEventExecutor(TaskExecutor):
+             task_run_kind = meta.get("run_kind")
+             task_run_context = meta.get("run_context")
+ 
++        extra = (task_run_context.get("extra", {}) if isinstance(task_run_context, dict)
++                 else getattr(task_run_context, "extra", {}))
++        context_fields = ({**extra, **task_run_context}
++                          if isinstance(extra, dict) and isinstance(task_run_context, dict) else extra)
++        is_goal = getattr(task_run_kind, "value", task_run_kind) == "goal"
++        source = _source_metadata_for_run(
++            task_run_context, session_id=cid, task_id=task_id,
++            run_kind="goal" if is_goal else "user",
++            request_id=extra.get("_interaction_request_id") if not is_goal and isinstance(extra, dict) else None,
++            goal_id=context_fields.get("goal_id") if is_goal and isinstance(context_fields, dict) else None,
++            revision=context_fields.get("revision") if is_goal and isinstance(context_fields, dict) else None,
++        )
++        if source is not None:
++            session = session.with_source_metadata(source)
++
+         coordinator = agent.loop_coordinator
+         iteration = (
+             (coordinator.current_iteration + 1)
+@@ -259,7 +275,7 @@ class TaskLoopEventExecutor(TaskExecutor):
+             payload = ControllerOutputPayload(
+                 type=EventType.TASK_COMPLETION,
+                 data=[JsonDataFrame(data=result)],
+-                metadata={"task_id": task_id},
++                metadata={**(source or {}), "task_id": task_id},
+             )
+             yield ControllerOutputChunk(
+                 index=0,
+@@ -304,7 +320,7 @@ class TaskLoopEventExecutor(TaskExecutor):
+             payload = ControllerOutputPayload(
+                 type=EventType.TASK_FAILED,
+                 data=[TextDataFrame(text=str(exc))],
+-                metadata={"task_id": task_id},
++                metadata={**(source or {}), "task_id": task_id},
+             )
+             yield ControllerOutputChunk(
+                 index=0,
+diff --git a/tests/unit_tests/core/session/test_source_metadata.py b/tests/unit_tests/core/session/test_source_metadata.py
+new file mode 100644
+index 00000000..a021a1d8
+--- /dev/null
++++ b/tests/unit_tests/core/session/test_source_metadata.py
+@@ -0,0 +1,70 @@
++"""Source views preserve execution provenance without owning a new session."""
++import asyncio
++
++import pytest
++
++from openjiuwen.core.controller.schema.controller_output import ControllerOutputChunk, ControllerOutputPayload
++from openjiuwen.core.session.agent import Session
++from openjiuwen.core.session.stream import OutputSchema
++
++
++def test_source_views_share_deepagent_runtime_cache_and_its_removal():
++    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
++    from openjiuwen.harness.deep_agent import DeepAgent
++
++    agent = DeepAgent(AgentCard(name="shared-state", description="test"))
++    session = Session(session_id="shared-runtime-cache")
++    outer = session.with_source_metadata({"source_binding_id": "outer"})
++    executor = session.with_source_metadata({"source_binding_id": "executor"})
++    state = agent.load_state(outer)
++    state.pending_follow_ups.append("still pending")
++    assert agent.load_state(session) is state
++    assert agent.load_state(executor) is state
++    agent.save_state(executor)
++    assert agent.load_state(outer).pending_follow_ups == ["still pending"]
++    agent.clear_state(outer)
++    assert not hasattr(session, "_deepagent_runtime_state")
++    assert not hasattr(executor, "_deepagent_runtime_state")
++    assert agent.load_state(executor).pending_follow_ups == ["still pending"]
++
++
++@pytest.mark.asyncio
++async def test_source_views_share_state_writer_and_keep_late_output_provenance():
++    session = Session(session_id="source-views")
++    source = {"source_binding_id": "old", "details": {"tag": "first"}}
++    old = session.with_source_metadata(source)
++    new = session.with_source_metadata({"source_binding_id": "new"})
++    source["details"]["tag"] = "changed"
++    old.update_state({"shared": "yes"})
++    assert new.get_state("shared") == session.get_state("shared") == "yes"
++    assert old._inner is new._inner is session._inner
++    await new.write_stream(OutputSchema(type="answer", index=0, payload={"content": "new"}))
++    await asyncio.create_task(old.write_stream(OutputSchema(type="answer", index=0, payload={"content": "late"})))
++    iterator = session.stream_iterator()
++    first, second = await anext(iterator), await anext(iterator)
++    assert first.payload["source_binding_id"] == "new"
++    assert second.payload["source_binding_id"] == "old"
++    assert second.payload["details"]["tag"] == "first"
++    second.payload["details"]["tag"] = "consumer changed"
++    await old.write_custom_stream({"event": "later"})
++    assert (await anext(iterator)).details["tag"] == "first"
++    await old.close_stream()
++    assert not session._inner.stream_writer_manager().stream_emitter().is_closed()
++    await iterator.aclose()
++
++
++@pytest.mark.asyncio
++async def test_source_view_preserves_typed_and_serialized_controller_payloads():
++    session = Session(session_id="controller-source")
++    view = session.with_source_metadata({"source_binding_id": "trusted"})
++    chunk = ControllerOutputChunk(index=0, payload=ControllerOutputPayload(
++        type="task_completion", data=[], metadata={"task_id": "task-1", "source_binding_id": "spoof"}))
++    await view.write_stream(chunk)
++    await view.write_stream(chunk.model_dump())
++    iterator = session.stream_iterator()
++    typed, serialized = await anext(iterator), await anext(iterator)
++    assert isinstance(typed.payload, ControllerOutputPayload)
++    assert typed.payload.metadata == {"task_id": "task-1", "source_binding_id": "trusted"}
++    assert serialized.payload["metadata"]["source_binding_id"] == "trusted"
++    assert chunk.payload.metadata["source_binding_id"] == "spoof"
++    await iterator.aclose()
+diff --git a/tests/unit_tests/harness/goal/test_goal_manager.py b/tests/unit_tests/harness/goal/test_goal_manager.py
+index 70a23ffa..ec2118df 100644
+--- a/tests/unit_tests/harness/goal/test_goal_manager.py
++++ b/tests/unit_tests/harness/goal/test_goal_manager.py
+@@ -92,6 +92,245 @@ class ManagerHarness:
+         self.notify_calls += 1
+ 
+ 
++@pytest.mark.asyncio
++@pytest.mark.parametrize("context,accepted", [
++    (None, True),
++    ({"extra": {"source_metadata": {"source_binding_id": "bound"}}}, True),
++    ({"extra": {"source_metadata": {"public_label": "x" * 4000}}}, False),
++])
++async def test_public_goal_store_protocol_needs_no_private_preflight(context, accepted):
++    class ProtocolOnlyStore:
++        session_id = "custom-store-session"
++
++        def __init__(self):
++            self.record = None
++            self.commits = self.writes = 0
++
++        def load(self):
++            return self.record.copy_for_response() if self.record is not None else None
++
++        peek = load
++
++        def save(self, record):
++            self.record = record.copy_for_response()
++            self.writes += 1
++
++        def clear(self):
++            self.record = None
++
++        async def commit(self):
++            self.commits += 1
++
++    h = ManagerHarness(output_attached=False)
++    store = ProtocolOnlyStore()
++    h.manager._store = store
++    if not accepted:
++        with pytest.raises(GoalOperationError) as rejected:
++            await h.manager.set("custom store", run_context=context)
++        assert rejected.value.code == "invalid_run_context"
++        assert store.writes == store.commits == 0 and store.peek() is None
++        return
++    record = await h.manager.set("custom store", run_context=context)
++    assert record.run_context == context
++    await h.manager.pause()
++    resumed = await h.manager.resume()
++    assert resumed.status is GoalStatus.ACTIVE
++    assert resumed.run_context == context
++    assert store.writes == store.commits == 3
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("context", [
++    {"source_metadata": {"private_marker": "PRIVATE"}, "_interaction_request_id": "HOST_SPOOF"},
++    {"source_metadata": {"private_marker": "PRIVATE"},
++     "extra": {"source_metadata": {"source_binding_id": "public"}}},
++    {"extra": {"source_metadata": {"public_label": "x" * 4000}}},
++])
++async def test_goal_source_rejects_before_output_store_or_queue(context):
++    h = ManagerHarness()
++    prepared = []
++
++    async def prepare_output():
++        prepared.append(True)
++
++    with pytest.raises(GoalOperationError) as rejected:
++        await h.manager.set("goal", run_context=context, prepare_output=prepare_output)
++    assert rejected.value.code == "invalid_run_context"
++    assert prepared == []
++    assert h.store.peek() is None
++    assert h.session.commit_count == h.notify_calls == 0
++    assert h.emitted == []
++    assert not h.events.has_pending_work()
++
++
++@pytest.mark.asyncio
++async def test_resume_source_size_rejects_before_output_and_preserves_binding():
++    h = ManagerHarness()
++    await h.manager.set("goal", run_context={"extra": {"source_metadata": {"source_binding_id": "old"}}})
++    record = await h.manager.pause()
++    before = (h.session.commit_count, h.notify_calls, list(h.emitted), record.to_dict())
++    prepared = []
++
++    async def prepare_output():
++        prepared.append(True)
++
++    with pytest.raises(GoalOperationError) as rejected:
++        await h.manager.resume(expected_goal_id=record.goal_id,
++                               expected_control_revision=record.control_revision,
++                               run_context={"extra": {"source_metadata": {"public_label": "x" * 4000}}},
++                               prepare_output=prepare_output)
++    assert rejected.value.code == "invalid_run_context"
++    assert prepared == []
++    assert before == (h.session.commit_count, h.notify_calls, h.emitted, h.store.peek().to_dict())
++    assert not h.events.has_pending_work()
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("session_id,static_labels", [
++    ("s" * 4100, {}), ("session", {"static_label": "x" * 4000}),
++], ids=["actual-session-too-long", "static-session-labels-too-large"])
++async def test_goal_source_budget_includes_actual_session_and_static_labels(session_id, static_labels):
++    from openjiuwen.core.session.agent import Session
++    from unittest.mock import AsyncMock
++
++    h = ManagerHarness()
++    session = Session(session_id=session_id, source_metadata=static_labels)
++    session.commit = AsyncMock()
++    h.manager._store = SessionGoalStore(session)
++    prepare = AsyncMock()
++    with pytest.raises(GoalOperationError) as rejected:
++        await h.manager.set("goal", run_context={"extra": {"source_metadata": {"source_binding_id": "bound"}}},
++                            prepare_output=prepare)
++    assert rejected.value.code == "invalid_run_context"
++    prepare.assert_not_called()
++    session.commit.assert_not_called()
++    assert session.get_state(SESSION_GOAL_RECORD_KEY) is None
++    assert h.notify_calls == 0 and not h.events.has_pending_work()
++
++
++@pytest.mark.asyncio
++async def test_complete_source_projection_at_bound_executes_and_survives_continuation():
++    import json
++    from openjiuwen.harness.schema.interaction import _source_metadata_for_run
++
++    h = ManagerHarness()
++    base = {"public_label": ""}
++    projected = _source_metadata_for_run({"extra": {"source_metadata": base}},
++                                        session_id=h.store.session_id, task_id="0" * 32,
++                                        run_kind="goal", goal_id="0" * 12, revision=1)
++    base["public_label"] = "x" * (4096 - len(json.dumps(projected, separators=(",", ":")).encode()))
++    record = await h.manager.set("goal", run_context={"extra": {"source_metadata": base}})
++    work = h.events.next_work()
++    source = work.output_source_metadata(task_id="1" * 32, session_id=h.store.session_id)
++    assert len(json.dumps(source, separators=(",", ":")).encode()) == 4096
++    h.events.mark_started(work)
++    await h.manager.begin_attempt(goal_id=record.goal_id, revision=record.revision)
++    h.events.mark_finished(work)
++    await h.manager.apply_assessment(goal_id=record.goal_id, revision=record.revision,
++                                    assessment=GoalAssessment(status=GoalAssessmentStatus.CONTINUE, evidence="more"))
++    continued = h.events.next_work()
++    assert continued is not None
++    assert continued.output_source_metadata(task_id="2" * 32, session_id=h.store.session_id)["public_label"] == base["public_label"]
++    h.events.mark_started(continued)
++    h.events.mark_finished(continued)
++    # Idle resume can increase the serialized revision width. Validate the
++    # proposed generation, not just the stored one that still fits exactly.
++    current = h.store.peek()
++    current.revision = 9
++    h.store.save(current)
++    paused = await h.manager.pause()
++    prepared = []
++
++    async def prepare_output():
++        prepared.append(True)
++
++    with pytest.raises(GoalOperationError) as rejected:
++        await h.manager.resume(expected_goal_id=paused.goal_id,
++                               expected_control_revision=paused.control_revision,
++                               prepare_output=prepare_output)
++    assert rejected.value.code == "invalid_run_context"
++    assert prepared == []
++    assert h.store.peek().to_dict() == paused.to_dict()
++
++
++@pytest.mark.asyncio
++async def test_goal_run_context_survives_store_and_continuation_without_aliases() -> None:
++    h = ManagerHarness()
++    context = {"extra": {"binding": {"model": "native", "optional": None}}}
++    record = await h.manager.set("bound goal", run_context=context)
++    context["extra"]["binding"]["model"] = "changed"
++    record.run_context["extra"]["binding"]["model"] = "response changed"
++    stored = h.store.peek()
++    assert stored.run_context == {"extra": {"binding": {"model": "native", "optional": None}}}
++    work = h.events.next_work()
++    assert work.context["extra"]["binding"] == {"model": "native", "optional": None}
++    h.events.mark_started(work)
++    h.events.mark_finished(work)
++    await h.manager.apply_assessment(
++        goal_id=stored.goal_id, revision=stored.revision,
++        assessment=GoalAssessment(status=GoalAssessmentStatus.CONTINUE, evidence="continue"),
++    )
++    assert h.events.next_work().context["extra"]["binding"]["model"] == "native"
++
++
++@pytest.mark.asyncio
++async def test_goal_updates_never_project_private_run_context():
++    h = ManagerHarness()
++    record = await h.manager.set("goal", run_context={"extra": {"permission_secret": "private"}})
++    assert record.to_dict()["run_context"]["extra"]["permission_secret"] == "private"
++    assert "run_context" not in h.emitted[-1].payload["goal"]
++    assert "permission_secret" not in repr(h.emitted)
++
++
++@pytest.mark.asyncio
++async def test_idle_resume_replaces_context_but_running_resume_rejects_before_output() -> None:
++    h = ManagerHarness()
++    original = await h.manager.set("goal", run_context={"extra": {"old_permission": "yes"}})
++    work = h.events.next_work()
++    h.events.mark_started(work)
++    paused = await h.manager.pause()
++    effects = (h.session.commit_count, h.notify_calls, len(h.emitted))
++    prepared = []
++
++    async def prepare_output():
++        prepared.append(True)
++
++    with pytest.raises(GoalOperationError, match="run context") as rejected:
++        await h.manager.resume(
++            expected_goal_id=paused.goal_id, expected_control_revision=paused.control_revision,
++            run_context={"extra": {"binding": "new"}}, prepare_output=prepare_output,
++        )
++    assert rejected.value.code == "run_context_conflict"
++    assert prepared == []
++    assert effects == (h.session.commit_count, h.notify_calls, len(h.emitted))
++    h.events.mark_finished(work)
++    resumed = await h.manager.resume(
++        expected_goal_id=paused.goal_id, expected_control_revision=paused.control_revision,
++        run_context={"extra": {"binding": "new", "optional": None}},
++    )
++    assert resumed.run_context == {"extra": {"binding": "new", "optional": None}}
++    assert h.store.peek().run_context == resumed.run_context
++    next_work = h.events.next_work()
++    assert "old_permission" not in next_work.context["extra"]
++    assert next_work.context["goal_id"] == original.goal_id
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("context", [{"x": object()}, {"x": float("nan")}, {1: "x"}, {"x": "x" * 65537}])
++async def test_invalid_goal_run_context_has_zero_admission_effects(context) -> None:
++    h = ManagerHarness()
++    prepared = []
++
++    async def prepare_output():
++        prepared.append(True)
++
++    with pytest.raises(GoalOperationError) as rejected:
++        await h.manager.set("goal", run_context=context, prepare_output=prepare_output)
++    assert rejected.value.code == "invalid_run_context"
++    assert h.store.peek() is None
++    assert (h.session.commit_count, h.notify_calls, h.emitted, prepared) == (0, 0, [], [])
++
++
+ def test_read_only_manager_peek_preserves_corrupt_state_with_zero_execution_effects() -> None:
+     harness = ManagerHarness(output_attached=False)
+     harness.session.update_state({SESSION_GOAL_RECORD_KEY: "corrupt"})
+diff --git a/tests/unit_tests/harness/goal/test_goal_store.py b/tests/unit_tests/harness/goal/test_goal_store.py
+index 10124446..222a85ba 100644
+--- a/tests/unit_tests/harness/goal/test_goal_store.py
++++ b/tests/unit_tests/harness/goal/test_goal_store.py
+@@ -46,6 +46,30 @@ class MergeSession:
+         self._state.update(value)
+ 
+ 
++@pytest.mark.parametrize("context", ["{broken", "null", "[]", '{"extra":{"x":NaN}}', {"x": object()},
++    {"source_metadata": {"private_marker": "PRIVATE"}},
++    {"extra": {"source_metadata": {"public_label": "x" * 4000}}}])
++@pytest.mark.parametrize("operation", ["peek", "load"])
++def test_corrupt_run_context_never_repairs_into_unbound_execution(context, operation):
++    session = FakeSession()
++    raw = GoalRecord.create(session_id=session.get_session_id(), objective="goal").to_dict()
++    raw["run_context"] = context
++    session.update_state({SESSION_GOAL_RECORD_KEY: raw})
++    session.update_state = Mock(side_effect=AssertionError("must preserve corrupt binding"))
++    with pytest.raises(GoalOperationError, match="run context"):
++        getattr(SessionGoalStore(session), operation)()
++    session.update_state.assert_not_called()
++
++
++@pytest.mark.parametrize("context", [None, {"extra": {"binding": "old", "optional": None}}])
++def test_legacy_context_is_readable_without_migration(context):
++    session = FakeSession()
++    raw = GoalRecord.create(session_id=session.get_session_id(), objective="goal").to_dict()
++    raw["run_context"] = context
++    session.update_state({SESSION_GOAL_RECORD_KEY: raw})
++    assert SessionGoalStore(session).peek().run_context == context
++
++
+ @pytest.mark.parametrize("raw", ["not-a-record", {"goal_id": "g"},
+     GoalRecord.create(session_id="other", objective="private").to_dict()])
+ def test_peek_rejects_invalid_or_wrong_session_state_without_repair(raw) -> None:
+diff --git a/tests/unit_tests/harness/test_deep_agent_event_executor.py b/tests/unit_tests/harness/test_deep_agent_event_executor.py
+index 4a094edc..f36552c5 100644
+--- a/tests/unit_tests/harness/test_deep_agent_event_executor.py
++++ b/tests/unit_tests/harness/test_deep_agent_event_executor.py
+@@ -83,6 +83,50 @@ class FakeSession:
+         self._state.update(data)
+ 
+ 
++@pytest.mark.asyncio
++async def test_executor_reconstructs_source_from_task_metadata_not_scheduler_session():
++    from openjiuwen.core.session.agent import Session
++    from openjiuwen.core.session.stream import OutputSchema
++    from openjiuwen.core.single_agent.rail.base import RunContext, RunKind
++
++    agent = _make_agent()
++    deps, manager = _make_deps()
++    session = Session(session_id="actual-session", source_metadata={"source_binding_id": "old-reader"})
++    context = RunContext(session_id="actual-session", extra={
++        "private_permission": "do-not-project", "goal_id": "goal-1", "revision": 2,
++        "_interaction_request_id": "HOST_SPOOF",
++        "source_metadata": {"source_binding_id": "new-work", "source_task_id": "forged"},
++    })
++    await manager.add_task(CoreTask(task_id="actual-task", session_id="actual-session",
++                                   task_type=DEEP_TASK_TYPE, description="query", status=CoreTaskStatus.SUBMITTED,
++                                   metadata={"run_kind": RunKind.GOAL, "run_context": context}))
++
++    async def invoke(inputs, selected_session, **kwargs):
++        assert inputs["run_context"].extra["private_permission"] == "do-not-project"
++        assert selected_session._inner is session._inner
++        await selected_session.write_stream(OutputSchema(type="llm_output", index=0, payload={"content": "answer"}))
++        return {"output": "answer"}
++
++    agent.react_agent.invoke = invoke
++    executor = TaskLoopEventExecutor(deps, agent)
++    results = [chunk async for chunk in executor.execute_ability("actual-task", session)]
++    iterator = session.stream_iterator()
++    output = await anext(iterator)
++    assert output.payload["source_binding_id"] == "new-work"
++    assert output.payload["source_task_id"] == "actual-task"
++    assert output.payload["source_session_id"] == "actual-session"
++    assert output.payload["source_request_id"] is None
++    assert "private_permission" not in repr(output)
++    assert results[0].payload.metadata["source_binding_id"] == "new-work"
++    assert results[0].payload.metadata["task_id"] == "actual-task"
++    assert results[0].payload.metadata["source_request_id"] is None
++    # TaskScheduler writes the returned controller chunk through its original
++    # Session after the executor generator yields.
++    await session.write_stream(results[0])
++    assert (await anext(iterator)).payload.metadata["source_binding_id"] == "new-work"
++    await iterator.aclose()
++
++
+ class FakeReactAgent:
+     """Tracks invoke calls."""
+ 
+diff --git a/tests/unit_tests/harness/test_deep_agent_interaction.py b/tests/unit_tests/harness/test_deep_agent_interaction.py
+index 8d6d4874..fb1f73f7 100644
+--- a/tests/unit_tests/harness/test_deep_agent_interaction.py
++++ b/tests/unit_tests/harness/test_deep_agent_interaction.py
+@@ -26,6 +26,86 @@ from openjiuwen.harness.tools.worktree.session import (
+ )
+ 
+ 
++@pytest.mark.asyncio
++@pytest.mark.parametrize("context,request_id", [
++    ({"source_metadata": {"private_marker": "PRIVATE"}}, "request"),
++    ({"extra": {"source_metadata": {"public_label": "x" * 4000}}}, "request"),
++    ({"extra": {"source_metadata": {"source_binding_id": "binding"}}}, "x" * 4100),
++], ids=["private-alias", "final-map-too-large", "request-id-too-large"])
++async def test_user_source_rejects_before_queue_or_wakeup(monkeypatch, context, request_id):
++    from openjiuwen.core.session.agent import Session
++
++    agent = DeepAgent(AgentCard(name="source-admission", description="test"))
++    agent._interaction_started = True
++    agent._interaction_session = Session(session_id="session")
++    notify = MagicMock()
++    monkeypatch.setattr(agent, "_notify_work", notify)
++    with pytest.raises(ValueError):
++        await agent.send_input(SendInputRequest(request_id=request_id,
++                               inputs={"query": "hello", "run": {"context": context}}))
++    assert not agent._event_manager.has_pending_work()
++    notify.assert_not_called()
++
++
++@pytest.mark.parametrize("field", ["source_metadata", "_interaction_request_id"])
++def test_normalize_rejects_reserved_top_level_source_aliases(field):
++    agent = DeepAgent(AgentCard(name="source-normalize", description="test"))
++    with pytest.raises(ValueError):
++        agent._normalize_inputs({"query": "hello", "run": {"context": {field: "private"}}})
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("kind", ["goal", "user"])
++async def test_bound_goal_round_keeps_private_context_and_tags_only_public_source(monkeypatch, kind):
++    from openjiuwen.core.session.agent import Session
++
++    agent = DeepAgent(AgentCard(name="bound-round", description="test"))
++    session = Session(session_id="actual-session")
++    work = RoundWorkItem.goal(
++        inputs={"query": "continue"}, goal_id="actual-goal", revision=7,
++        session_id="actual-session", run_context={
++            "session_id": "forged", "goal_id": "forged", "revision": 99,
++            "extra": {"goal_id": "forged", "revision": 99, "private_permission": "secret",
++                      "_interaction_request_id": "HOST_SPOOF",
++                      "source_metadata": {"source_binding_id": "binding-1", "source_request_id": "forged",
++                                          "source_task_id": "forged", "source_goal_id": "forged"}},
++        })
++    if kind == "user":
++        work = RoundWorkItem.user(request_id="actual-request", inputs={"query": "continue",
++                                  "run": {"context": work.context}})
++    controller = MagicMock()
++    controller.submit_round = AsyncMock()
++    controller.wait_round_completion = AsyncMock(return_value={"output": "answer"})
++    coordinator = MagicMock()
++    monkeypatch.setattr(agent, "prepare_interaction_task_loop", AsyncMock(return_value=(coordinator, controller)))
++    monkeypatch.setattr(agent, "load_state", MagicMock(return_value=MagicMock()))
++    monkeypatch.setattr(agent, "save_state", MagicMock())
++    monkeypatch.setattr(agent, "clear_state", MagicMock())
++    monkeypatch.setattr(agent, "_build_interaction_next_work", MagicMock(return_value=None))
++
++    async def write_result(result, selected_session):
++        from openjiuwen.core.session.stream import OutputSchema
++        await selected_session.write_stream(OutputSchema(type="answer", index=0, payload=result))
++
++    monkeypatch.setattr(agent, "_write_round_result_to_stream", write_result)
++    outcome = await agent.run_one_round(work, "actual-task", session)
++    assert outcome.error_code is None
++    context = controller.submit_round.await_args.kwargs["run_context"]
++    assert context.session_id == "actual-session"
++    assert context.extra["goal_id"] == "actual-goal"
++    assert context.extra["revision"] == 7
++    assert context.extra["private_permission"] == "secret"
++    assert context.extra["_interaction_request_id"] == ("actual-request" if kind == "user" else None)
++    iterator = session.stream_iterator()
++    output = await anext(iterator)
++    assert output.payload["source_binding_id"] == "binding-1"
++    assert output.payload["source_request_id"] == ("actual-request" if kind == "user" else None)
++    assert output.payload["source_task_id"] == "actual-task"
++    assert output.payload["source_goal_id"] == ("actual-goal" if kind == "goal" else None)
++    assert "private_permission" not in repr(output)
++    await iterator.aclose()
++
++
+ @pytest.mark.asyncio
+ async def test_start_initializes_context_before_scheduler_tasks(
+     monkeypatch: pytest.MonkeyPatch,

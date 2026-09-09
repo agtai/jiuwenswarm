@@ -153,6 +153,22 @@ def test_web_channel_preserves_goal_structured_payloads():
         assert WebChannel._build_event_payload(msg, event_name) == expected
 
 
+def test_goal_confirmation_survives_actual_chunk_and_web_payload_serializers():
+    from jiuwenswarm.common.schema.agent import AgentResponseChunk
+    from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+
+    existing = {"session_id": "session", "goal_id": "goal-1", "control_revision": 7,
+                "revision": 23, "objective": "Existing goal", "status": "active"}
+    chunk = AgentResponseChunk("set-request", "web", {
+        "event_type": "goal.confirm_required", "existing_goal": existing,
+        "requested_objective": "Unaccepted replacement"}, is_complete=True)
+    message = MessageHandler._chunk_to_message(chunk, "session")
+    assert message.event_type is EventType.GOAL_CONFIRM_REQUIRED
+    payload = WebChannel._build_event_payload(message, message.event_type.value)
+    assert payload == {**chunk.payload, "session_id": "session"}
+    assert payload["existing_goal"]["control_revision"] == 7
+
+
 @pytest.mark.asyncio
 async def test_web_channel_preserves_live_voice_task_progress_delivery_binding():
     channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())

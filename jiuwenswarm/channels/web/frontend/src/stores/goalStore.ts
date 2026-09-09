@@ -142,7 +142,7 @@ function saveCompletedGoalMessagesToStorage(map: Record<string, CompletedGoalMes
  *
  * "设为目标"徽章之前靠实时比对 `message.content === 当前 goal.objective`，目标被清除/替换后
  * 旧的设置消息就再也匹配不上了——这其实是设计错误："这条消息历史上设置过目标"是不可变事实，
- * 不该随当前 Goal 状态漂移。`command.goal set` 请求发出的那一刻就把 objective 原文记进这里
+ * 不该随当前 Goal 状态漂移。收到权威 Goal 快照后把 objective 原文记进这里
  * （不去重、不因为目标后来被清除/编辑/替换而移除），history.get 重新加载历史后按 content 命中
  * 这个列表给对应消息回填 `isGoalObjectiveMessage`（见 useWebSocket.ts
  * stampGoalObjectiveMessages）——不依赖消息 id：本地回显消息和 history.get 返回的同一条消息

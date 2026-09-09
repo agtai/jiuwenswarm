@@ -318,6 +318,360 @@ class NativeBusinessRouter:
             self._executors[scope] = (runtime, facade)
             return runtime
 
+    async def _agent(self, route, delegate):
+        from jiuwenswarm.server.runtime.agent_resolution import find_session_agent
+
+        await self._require_context_authority(route)
+        manager = self.registry._agent_manager
+        owner = await find_session_agent(manager, channel_id="web",
+            session_id=route.binding.scope.session_id,
+            project_dir=route.native_p3_authority.context.file_path)
+        await self._require_context_authority(route)
+        arguments = dict(session_id=route.binding.scope.session_id)
+        action = delegate.business
+        if action.operation in {"agent.pending", "agent.reply"}:
+            from jiuwenswarm.common.schema.agent import AgentRequest
+            from jiuwenswarm.server.runtime.agent_interrupt_execution import list_agent_interrupts, reply_agent_interrupt
+
+            if owner.project_id != route.binding.scope.project_id:
+                raise NativeBusinessViolation("EXECUTION_CONTEXT_SCOPE_MISMATCH", code=ErrorCode.PERMISSION_DENIED)
+            mutates = action.operation == "agent.reply"
+            current = await (self._require_work_authority(route) if mutates else self._require_context_authority(route))
+
+            def guard():
+                self._recheck_context_authority(route, current)
+                now = self.registry._p3_composition._clock()
+                route.native_p3_authority.principal.require_usable(
+                    operation="agent.chat" if mutates else "task.list", now=now)
+                current.context.require_usable(scope=route.binding.scope,
+                    required_permissions=frozenset({"task.execute", "project.write"}) if mutates else frozenset(),
+                    destructive=False, now=now)
+
+            if not mutates:
+                return list_agent_interrupts(manager.executions, owner.agent, **arguments, before_read=guard)
+            request = AgentRequest(request_id=delegate.source_identity, channel_id="web",
+                session_id=route.binding.scope.session_id, params={})
+            return await reply_agent_interrupt(manager.executions, owner.agent, request,
+                source_binding_id=action.target_id, source_task_id=action.source_task_id,
+                expected_pending_token=action.pending_token, input_id=action.input_id,
+                answers=action.answers, before_effect=guard)
+        if delegate.business.operation == "agent.list":
+            return manager.executions.list(owner.agent, **arguments)
+        return manager.executions.observe(owner.agent, **arguments,
+                                          execution_id=delegate.business.target_id)
+
+    async def _goal(self, route, delegate=None):
+        from jiuwenswarm.server.runtime.agent_resolution import find_session_agent
+        from openjiuwen.harness.goal.schema import GoalOperationError
+
+        await self._require_context_authority(route)
+        owner = await find_session_agent(self.registry._agent_manager, channel_id="web",
+            session_id=route.binding.scope.session_id,
+            project_dir=route.native_p3_authority.context.file_path)
+        await self._require_context_authority(route)
+        action = delegate.business if delegate is not None else None
+        if action is None or action.operation == "goal.get":
+            # No await between the final authority check and the snapshot.
+            return {"goal": owner.agent.peek_session_goal(route.binding.scope.session_id),
+                    "source": "session_agent"}
+        await self._require_work_authority(route)
+        if action.operation in {"goal.set", "goal.resume"}:
+            return await self._start_goal(route, delegate, owner)
+        effect_admitted = False
+
+        async def before_effect():
+            nonlocal effect_admitted
+            # SDK invokes this inside its control lock, including time spent
+            # waiting behind a text command. Reread registry/project authority;
+            # the preflight snapshot cannot authorize a later effect.
+            current = await self._require_work_authority(route)
+            self._recheck_context_authority(route, current)
+            now = self.registry._p3_composition._clock()
+            route.native_p3_authority.principal.require_usable(operation="agent.chat", now=now)
+            current.context.require_usable(scope=route.binding.scope,
+                required_permissions=frozenset({"task.execute", "project.write"}), destructive=False, now=now)
+            effect_admitted = True
+
+        operation = action.operation.split(".", 1)[1]
+        try:
+            goal = await owner.agent.control_session_goal(route.binding.scope.session_id,
+                action=operation, goal_id=action.target_id, control_revision=action.expected_revision,
+                before_effect=before_effect)
+        except GoalOperationError as error:
+            return {"status": "rejected", "reason": "GOAL_" + error.code.upper(), "error": str(error)}
+        except Exception:
+            if not effect_admitted:
+                raise
+            # SDK may have saved state before persistence or cancellation
+            # failed. The command journal must retain this as uncertain.
+            return {"status": "unknown", "reason": "GOAL_CONTROL_OUTCOME_UNKNOWN",
+                    "action": operation, "goal_id": action.target_id, "observation_required": True}
+        return {"action": operation, "goal": None if operation == "clear" else goal,
+                "cleared_goal": goal if operation == "clear" else None, "source": "session_agent"}
+
+    async def _start_goal(self, route, delegate, owner):
+        from jiuwenswarm.common.schema.agent import AgentRequest
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.server.runtime.execution_context import AgentExecutionPolicy
+
+        action = delegate.business
+        operation = action.operation.split(".", 1)[1]
+        native = route.native_p3_authority
+        admitted = False
+        entry = None
+
+        async def before_effect():
+            nonlocal admitted
+            current = await self._require_work_authority(route)
+            if not admitted:
+                # Initial admission requires the live authenticated carrier.
+                # Detached execution keeps its project/principal grant, rather
+                # than being cancelled when that speech carrier later closes.
+                self._recheck_context_authority(route, current)
+            resolver = self.registry._p3_composition._model_resolver
+            resolver.resolve(native.model_identity, expected_identity=native.model_identity,
+                expected_config_version=native.model_config_version, instantiate=False)
+            work = entry.prepared_work if entry is not None else None
+            if (work is not None and work.policy is entry.policy
+                    and entry.policy.before_effect is before_effect):
+                # The service coalesces repeated control requests. Keep the
+                # original guard's admission evidence on that exact entry so a
+                # replay cannot lose it or infer it from an arbitrary snapshot.
+                entry._native_goal_admission = (work, entry.policy)
+                admitted = True
+
+        params = {"action": operation, "mode": owner.canonical_mode,
+                  "work_mode": owner.work_mode, "project_dir": owner.project_dir,
+                  "model_name": native.model_identity}
+        if action.target_id is not None:
+            params.update(expected_goal_id=action.target_id,
+                          expected_control_revision=action.expected_revision)
+        if operation == "set":
+            params.update(objective=action.instruction,
+                          overwrite_confirmed=action.target_id is not None)
+        request = AgentRequest(
+            request_id="native-goal." + hashlib.sha256(delegate.source_identity.encode()).hexdigest(),
+            channel_id="web", session_id=route.binding.scope.session_id,
+            req_method=ReqMethod.COMMAND_GOAL, params=params, is_stream=True,
+            metadata={"enable_memory": False, "skip_a2ui": True})
+        service = self.registry._agent_manager.executions
+        entry = service.start_bound(owner.agent, request, policy=AgentExecutionPolicy(
+            origin="native", tool_policy="read_only", model_identity=native.model_identity,
+            model_config_version=native.model_config_version, before_effect=before_effect))
+        try:
+            result = await service.wait_control_result(entry)
+        except Exception:
+            # Scheduling/timeout/EOF does not prove whether SDK control saved.
+            return {"status": "unknown", "reason": "GOAL_CONTROL_OUTCOME_UNKNOWN",
+                    "action": operation, "execution_id": request.request_id,
+                    "observation_required": True}
+        if result.get("event_type") != "goal.snapshot":
+            return {"status": "rejected", "reason": result.get("code") or "GOAL_CONTROL_REJECTED",
+                    "action": operation, "goal": result.get("goal") or result.get("existing_goal")}
+        work = entry.prepared_work
+        evidence = getattr(entry, "_native_goal_admission", None)
+        if (work is None or type(evidence) is not tuple or len(evidence) != 2
+                or evidence[0] is not work or evidence[1] is not entry.policy
+                or work.policy is not entry.policy):
+            return {"status": "unknown", "reason": "GOAL_CONTROL_ADMISSION_UNOBSERVED",
+                    "action": operation, "observation_required": True}
+        goal = result.get("goal")
+        receipt = {"status": "accepted", "action": operation, "goal": goal,
+                   "execution_id": request.request_id, "source": "session_agent"}
+        if (operation == "resume" and isinstance(goal, dict)
+                and goal.get("goal_id") == action.target_id
+                and type(goal.get("control_revision")) is int
+                and goal["control_revision"] == action.expected_revision):
+            # An ACTIVE resume retains its actual Goal run context. This ID
+            # identifies the control request; shared observation follows the
+            # original output owner, with its original model and tool policy.
+            receipt["execution_binding"] = "preserved"
+        return receipt
+
+    async def _workflow(self, route, delegate):
+        from jiuwenswarm.common.schema.agent import AgentRequest
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.server.runtime.workflow_queries import query_workflows
+
+        await self._require_context_authority(route)
+        action = delegate.business
+        if action.operation == "workflow.start":
+            return await self._team(route, delegate)
+        if action.operation == "workflow.reply":
+            from jiuwenswarm.server.runtime.team_workflow_capabilities import reply_swarmflow
+
+            current = await self._require_work_authority(route)
+            admitted = False
+
+            def before_effect():
+                nonlocal admitted
+                self._recheck_context_authority(route, current)
+                now = self.registry._p3_composition._clock()
+                route.native_p3_authority.principal.require_usable(operation="agent.chat", now=now)
+                current.context.require_usable(scope=route.binding.scope,
+                    required_permissions=frozenset({"task.execute", "project.write"}),
+                    destructive=False, now=now)
+                admitted = True
+
+            try:
+                ok, reason = await reply_swarmflow(session_id=route.binding.scope.session_id,
+                    run_id=action.target_id, correlation_id=action.input_id,
+                    answer=action.instruction, channel_id="web", before_effect=before_effect)
+            except Exception:
+                if not admitted:
+                    raise
+                return {"status": "unknown", "reason": "WORKFLOW_REPLY_OUTCOME_UNKNOWN",
+                        "workflow_id": action.target_id, "input_id": action.input_id}
+            if ok and not admitted:
+                return {"status": "unknown", "reason": "WORKFLOW_REPLY_ADMISSION_UNOBSERVED",
+                        "workflow_id": action.target_id, "input_id": action.input_id}
+            return {"status": "input_accepted" if ok else "rejected", "reason": reason,
+                    "workflow_id": action.target_id, "input_id": action.input_id,
+                    "source": "session_team"}
+        response = await query_workflows(AgentRequest(
+            request_id=delegate.source_identity,
+            channel_id="web",
+            session_id=route.binding.scope.session_id,
+            req_method=ReqMethod.COMMAND_WORKFLOWS,
+            params={"action": action.operation.split(".", 1)[1], "workflow_id": action.target_id},
+        ))
+        # Checkpoint I/O may outlive the activation or its project grant.
+        await self._require_context_authority(route)
+        if not response.ok:
+            return {"status": "rejected", "reason": "WORKFLOW_QUERY_UNAVAILABLE", **response.payload}
+        return response.payload
+
+    async def _configured_execution_owner(self, route, *, mutates):
+        from jiuwenswarm.server.runtime.agent_resolution import find_session_agent
+
+        require = self._require_work_authority if mutates else self._require_context_authority
+        current = await require(route)
+        owner = await find_session_agent(self.registry._agent_manager, channel_id="web", session_id=route.binding.scope.session_id,
+                                         project_dir=current.context.file_path)
+        current = await require(route)
+        self._recheck_context_authority(route, current)
+        if owner.project_id != route.binding.scope.project_id:
+            raise NativeBusinessViolation("EXECUTION_CONTEXT_SCOPE_MISMATCH", code=ErrorCode.PERMISSION_DENIED)
+        return owner, current
+
+    def _configured_execution_guard(self, route, owner, current, *, mutates, capability_scope=None):
+        """Shared Native authority; capability owners retain execution semantics."""
+        admitted = False
+
+        def guard(capability=None):
+            nonlocal admitted
+            # Accepted Team/Workflow work outlives speech. Current service,
+            # principal and project permissions still fence every later effect.
+            if not admitted or not mutates:
+                self._recheck_context_authority(route, current)
+            composition = self.registry._p3_composition
+            if self.registry._stopped or not composition._accepting:
+                raise NativeBusinessViolation("NATIVE_WORK_AUTHORITY_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
+            now = composition._clock()
+            route.native_p3_authority.principal.require_usable(
+                operation="agent.chat" if mutates else "task.list", now=now)
+            required = frozenset(capability.required_permissions) if capability is not None and capability_scope is not None else frozenset()
+            if mutates:
+                required |= {"task.execute", "project.write"}
+            current.context.require_usable(scope=route.binding.scope,
+                required_permissions=required, destructive=False, now=now)
+            if (current.context.file_path != owner.project_dir
+                    or capability is not None and capability_scope is not None and capability.scope != capability_scope):
+                raise NativeBusinessViolation("EXECUTION_CONTEXT_SCOPE_MISMATCH", code=ErrorCode.PERMISSION_DENIED)
+            if capability_scope is None or capability is not None:
+                admitted = True
+
+        return guard
+
+    async def _team(self, route, delegate):
+        from jiuwenswarm.common.schema.agent import AgentRequest
+        from jiuwenswarm.server.runtime.team_execution_capabilities import TeamExecutionScope, inspect_configured_team
+        from jiuwenswarm.server.runtime.team_execution import (
+            SwarmflowStartIntent, start_configured_team, get_configured_team_execution,
+            list_configured_team_executions, cancel_configured_team_execution,
+        )
+
+        action = delegate.business
+        operation = action.operation.split(".", 1)[1]
+        mutates = operation in {"start", "cancel"}
+        owner, current = await self._configured_execution_owner(route, mutates=mutates)
+        scope = TeamExecutionScope("web", route.binding.scope.session_id, owner.project_dir,
+                                  owner.project_id, owner.canonical_mode, owner.work_mode)
+        manager = self.registry._agent_manager
+        service = manager.executions
+        if operation != "list" and action.epoch != service.execution_epoch:
+            raise NativeBusinessViolation("TEAM_EXECUTION_EPOCH_MISMATCH")
+        guard = self._configured_execution_guard(route, owner, current, mutates=mutates)
+        if operation == "list":
+            capability = await inspect_configured_team(manager, scope=scope, before_read=guard)
+            executions = list_configured_team_executions(service, owner.agent, scope=scope, before_effect=guard)
+            return {"epoch": service.execution_epoch, "configured_team": capability, "executions": executions}
+        if operation == "get":
+            return get_configured_team_execution(service, owner.agent, scope=scope,
+                execution_id=action.target_id, before_effect=guard)
+        request = AgentRequest(request_id=delegate.source_identity, channel_id="web", session_id=scope.session_id,
+            params={"query": action.instruction or delegate.request_text})
+        if operation == "cancel":
+            return await cancel_configured_team_execution(service, owner.agent, request, scope=scope,
+                execution_id=action.target_id, before_effect=guard)
+        intent = SwarmflowStartIntent(**action.inputs) if action.operation == "workflow.start" else None
+        return await start_configured_team(service, owner.agent, request, scope=scope,
+            expected_fingerprint=action.fingerprint, before_effect=guard, swarmflow=intent)
+
+    async def _core_workflow(self, route, delegate):
+        """Thin Native admission into the common registered Core Workflow owner."""
+        from jiuwenswarm.common.schema.agent import AgentRequest
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.server.runtime.core_workflow_capabilities import CoreWorkflowScope
+        from jiuwenswarm.server.runtime.core_workflow_execution import (
+            list_core_workflows, get_core_workflow, start_core_workflow, resume_core_workflow,
+        )
+
+        action = delegate.business
+        operation = action.operation.split(".", 1)[1]
+        mutates = operation in {"start", "resume"}
+        owner, current = await self._configured_execution_owner(route, mutates=mutates)
+        scope = CoreWorkflowScope("web", route.binding.scope.session_id,
+                                  route.binding.scope.project_id, owner.canonical_mode)
+        service = self.registry._agent_manager.executions
+        if operation != "list" and action.epoch != service.execution_epoch:
+            raise NativeBusinessViolation("CORE_WORKFLOW_EPOCH_MISMATCH")
+        native_guard = self._configured_execution_guard(route, owner, current, mutates=mutates, capability_scope=scope)
+        installed = getattr(self.registry._agent_manager, "core_workflow_host", None)
+
+        def before_effect(capability):
+            native_guard(capability)
+            if installed is not None:
+                installed.guard(scope, operation, capability)
+
+        if installed is not None and operation in {"list", "start"}:
+            installed.bind_scope(scope, operation=operation, before_read=lambda: before_effect(None))
+        if operation == "list":
+            return list_core_workflows(service, owner.agent, scope=scope, before_effect=before_effect)
+        if operation == "get":
+            return get_core_workflow(service, owner.agent, scope=scope,
+                                     run_id=action.target_id, before_effect=before_effect)
+        request = AgentRequest(request_id=delegate.source_identity, channel_id="web",
+            session_id=scope.session_id, req_method=ReqMethod.COMMAND_WORKFLOWS,
+            params={"kind": "core", "action": operation, "mode": owner.canonical_mode,
+                    "project_dir": owner.project_dir, "work_mode": owner.work_mode})
+        if operation == "start":
+            return await start_core_workflow(service, owner.agent, request=request, scope=scope,
+                epoch=action.epoch, capability_id=action.capability_id, inputs=action.inputs,
+                before_effect=before_effect)
+        return await resume_core_workflow(service, owner.agent, request=request, scope=scope,
+            epoch=action.epoch, run_id=action.target_id, expected_revision=action.expected_revision,
+            answers=action.answers, before_effect=before_effect)
+
+    async def _executor(self, route):
+        # This is the ordinary configured Agent capability. Code remains its
+        # separate configured capability; Work never rebinds a cached Code facade.
+        facade = await self.registry._agent_manager.get_agent(
+            "web", "agent", route.native_p3_authority.context.file_path, None)
+        if facade is None or not callable(getattr(facade, "process_formal_live_voice_stream", None)):
+            raise NativeBusinessViolation("FORMAL_AGENT_FACADE_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
+        return facade
+
     async def _work(self, route, delegate, admission, selection):
         from .native_work_runtime import context_identity
         action = delegate.business
@@ -365,10 +719,18 @@ class NativeBusinessRouter:
         current = await asyncio.to_thread(composition._resolve_native_activation_authority,
             route.native_p3_authority, operation="agent.chat", session_id=route.binding.session_id,
             now=now, require_clean=False)
+        # The resolver performs blocking I/O. Detached work keeps its carrier
+        # independence, but every effect still requires a live service and grant
+        # at the time that read finishes.
+        if self.registry._stopped or not composition._accepting:
+            raise NativeBusinessViolation("NATIVE_WORK_AUTHORITY_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
+        now = composition._clock()
+        route.native_p3_authority.principal.require_usable(operation="agent.chat", now=now)
         current.context.require_usable(scope=route.binding.scope,
             required_permissions=frozenset({"task.execute", "project.write"}), destructive=False, now=now)
         if current.context.file_path != route.native_p3_authority.context.file_path:
             raise NativeBusinessViolation("EXECUTION_CONTEXT_SCOPE_MISMATCH", code=ErrorCode.PERMISSION_DENIED)
+        return current
 
     @profiled("native.task_intent", "route.binding", "delegate", require_context=True)
     async def _task(self, route, delegate, request_id, *, native_source=None):
@@ -540,6 +902,16 @@ class NativeBusinessRouter:
                         # or project rebind. Recheck before any Task mutation.
                         await self._require_context_authority(route)
                         facts = await self._task(route, delegate, delegate.source_identity, native_source=source)
+                    elif delegate.business.operation.startswith("core_workflow."):
+                        facts = await self._core_workflow(route, delegate)
+                    elif delegate.business.operation.startswith("workflow."):
+                        facts = await self._workflow(route, delegate)
+                    elif delegate.business.operation.startswith("goal."):
+                        facts = await self._goal(route, delegate)
+                    elif delegate.business.operation.startswith("agent."):
+                        facts = await self._agent(route, delegate)
+                    elif delegate.business.operation.startswith("team."):
+                        facts = await self._team(route, delegate)
                     else:
                         facts = await self._work(route, delegate, admission, selection)
                     result = {"contract_version": NATIVE_BUSINESS_CONTRACT_VERSION, "operation": delegate.business.operation, **facts}

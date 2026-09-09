@@ -19,15 +19,16 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Pause, Pencil, Play, Target, Trash2 } from 'lucide-react';
 import { useChatStore, useGoalStore, useSessionStore } from '../../stores';
-import type { GoalRecord, GoalStatus } from '../../types';
+import type { GoalControlTarget, GoalRecord, GoalStatus } from '../../types';
+import { captureGoalTarget } from '../../services/goalCommands';
 import { EditGoalModal } from './EditGoalModal';
 import './GoalBar.css';
 
 interface GoalBarProps {
-  onSetGoal: (sessionId: string, objective: string) => void;
-  onPauseGoal: (sessionId: string) => void;
-  onResumeGoal: (sessionId: string) => void;
-  onClearGoal: (sessionId: string) => void;
+  onSetGoal: (sessionId: string, objective: string, target?: GoalControlTarget) => void;
+  onPauseGoal: (sessionId: string, target?: GoalControlTarget) => void;
+  onResumeGoal: (sessionId: string, target?: GoalControlTarget) => void;
+  onClearGoal: (sessionId: string, target?: GoalControlTarget) => void;
 }
 
 /** disconnected/unknown 是纯前端展示态，跟后端 goal.status 无关，见真实环境联调方案。 */
@@ -82,7 +83,7 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
   // goal 数据本身要一直保留（"设为目标"徽章等消费方依赖 goal.objective），见 useWebSocket.ts
   // 的 applyIncomingGoal 注释。
   const bannerHidden = useGoalStore((s) => (goal ? Boolean(s.bannerHiddenGoalIds[goal.goal_id]) : false));
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState<{ target: GoalControlTarget; objective: string } | null>(null);
   const [now, setNow] = useState(() => Date.now());
   // 暂停/恢复点击后的乐观图标翻转：只影响图标选哪个，不影响按钮是否可点（仍然沿用下面的
   // isDisabled 整组置灰）、也不影响状态文字颜色（那个继续等权威数据）。pendingAction 落地
@@ -106,16 +107,22 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
   // 与其等自动隐藏把弹窗连带 GoalBar 一起悄悄拽没（那样用户完全不知道发生了什么，编辑内容
   // 也白写了），不如一发现就主动关掉并提示，避免用户点保存把一个已经结束的目标悄悄"复活"。
   useEffect(() => {
-    if (editing && goal?.status === 'completed' && activeSessionId) {
-      setEditing(false);
-      useChatStore.getState().addMessage(activeSessionId, {
+    if (
+      editing &&
+      (activeSessionId !== editing.target.session_id ||
+        goal?.goal_id !== editing.target.goal_id ||
+        goal?.control_revision !== editing.target.control_revision ||
+        goal?.status === 'completed')
+    ) {
+      setEditing(null);
+      useChatStore.getState().addMessage(editing.target.session_id, {
         id: `error-${Date.now()}`,
         role: 'system',
         content: t('goal.editStaleWarning'),
         timestamp: new Date().toISOString(),
       });
     }
-  }, [editing, goal?.status, activeSessionId, t]);
+  }, [editing, goal?.status, goal?.goal_id, goal?.control_revision, activeSessionId, t]);
 
   // 没有目标（goal 为 null）时严格"不用管"——即使当前处于断联/查询失败，也不展示任何占位条；
   // 只有"这个会话之前已经查到过目标"（goal 非空，数据在断联/查询失败期间原样保留，不会被清空）
@@ -137,7 +144,13 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
   const isPausable = goal.status === 'active';
   const isResumable = goal.status === 'paused' || goal.status === 'blocked';
   const isBusy = pendingAction !== null;
-  const isDisabled = isBusy || degraded !== null;
+  let target: GoalControlTarget | undefined;
+  try {
+    target = captureGoalTarget(activeSessionId, goal);
+  } catch {
+    // Older/incomplete snapshots remain visible but cannot authorize controls.
+  }
+  const isDisabled = isBusy || degraded !== null || !target;
   // 图标显示用的"是否展示为可暂停"：乐观值优先，否则用真实状态。
   const displayAsPausable = optimisticPausable ?? isPausable;
 
@@ -166,7 +179,7 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
               title={t('goal.action.editTooltip')}
               className="goal-bar__action-btn"
               disabled={isDisabled}
-              onClick={() => setEditing(true)}
+              onClick={() => target && setEditing({ target, objective: goal.objective })}
             >
               <Pencil size={14} strokeWidth={2} />
             </button>
@@ -180,10 +193,10 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
               onClick={() => {
                 if (isPausable) {
                   setOptimisticPausable(false);
-                  onPauseGoal(activeSessionId);
+                  onPauseGoal(activeSessionId, target);
                 } else {
                   setOptimisticPausable(true);
-                  onResumeGoal(activeSessionId);
+                  onResumeGoal(activeSessionId, target);
                 }
               }}
             >
@@ -195,7 +208,7 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
             title={t('goal.action.deleteTooltip')}
             className="goal-bar__action-btn goal-bar__action-btn--danger"
             disabled={isDisabled}
-            onClick={() => onClearGoal(activeSessionId)}
+            onClick={() => onClearGoal(activeSessionId, target)}
           >
             <Trash2 size={14} strokeWidth={2} />
           </button>
@@ -204,16 +217,22 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
 
       {editing && (
         <EditGoalModal
-          initialObjective={goal.objective}
-          onCancel={() => setEditing(false)}
+          initialObjective={editing.objective}
+          onCancel={() => setEditing(null)}
           onSave={(objective) => {
             // 防御性兜底：正常情况下上面那个 useEffect 会在目标转 completed 的瞬间就关掉弹窗，
             // 这里理论上不会命中，但保存动作本身是不可逆的（会把已完成的目标复活），多一层检查
             // 成本很低。
-            const latestGoal = useGoalStore.getState().runtimes[activeSessionId]?.goal;
-            if (!latestGoal || latestGoal.goal_id !== goal.goal_id || latestGoal.status === 'completed') {
-              setEditing(false);
-              useChatStore.getState().addMessage(activeSessionId, {
+            const latestGoal = useGoalStore.getState().runtimes[editing.target.session_id]?.goal;
+            if (
+              useChatStore.getState().activeSessionId !== editing.target.session_id ||
+              !latestGoal ||
+              latestGoal.goal_id !== editing.target.goal_id ||
+              latestGoal.control_revision !== editing.target.control_revision ||
+              latestGoal.status === 'completed'
+            ) {
+              setEditing(null);
+              useChatStore.getState().addMessage(editing.target.session_id, {
                 id: `error-${Date.now()}`,
                 role: 'system',
                 content: t('goal.editStaleWarning'),
@@ -221,8 +240,8 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
               });
               return;
             }
-            onSetGoal(activeSessionId, objective);
-            setEditing(false);
+            onSetGoal(editing.target.session_id, objective, editing.target);
+            setEditing(null);
           }}
         />
       )}

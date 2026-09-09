@@ -1,0 +1,2223 @@
+From e833aa42f466a48b14ef2794d581ebd3206678d2 Mon Sep 17 00:00:00 2001
+From: hongxing <hongxing1227@gmail.com>
+Date: Wed, 9 Sep 2026 14:19:35 +0200
+Subject: [PATCH] feat(agent): bind human input to exact pending work
+
+---
+ README.md                                     |  84 ++++
+ .../session/interaction/interactive_input.py  | 107 +++-
+ .../core/single_agent/agents/react_agent.py   |  86 +++-
+ .../core/single_agent/interrupt/handler.py    | 121 ++++-
+ .../core/single_agent/interrupt/response.py   |   3 +
+ .../core/single_agent/interrupt/state.py      |  26 +-
+ openjiuwen/harness/deep_agent.py              | 206 +++++++-
+ openjiuwen/harness/schema/interaction.py      |  42 +-
+ openjiuwen/harness/task_loop/event_manager.py |  40 +-
+ .../task_loop/task_loop_event_executor.py     |  11 +-
+ .../interrupt/test_exact_agent_input.py       | 469 ++++++++++++++++++
+ .../harness/test_deep_agent_exact_input.py    | 415 ++++++++++++++++
+ 12 files changed, 1556 insertions(+), 54 deletions(-)
+ create mode 100644 tests/unit_tests/agent/react_agent/interrupt/test_exact_agent_input.py
+ create mode 100644 tests/unit_tests/harness/test_deep_agent_exact_input.py
+
+diff --git a/README.md b/README.md
+index 7584e9e7..72ea7f99 100644
+--- a/README.md
++++ b/README.md
+@@ -288,3 +288,87 @@ add a scheduler, concurrent-run lock or cross-process owner restoration. The
+ checksum detects checkpoint pairing errors; the trusted callback supplies
+ authorization. Normal start and legacy resume calls without a guard retain
+ their existing semantics.
++
++### Exact Agent human input and original Deep work
++
++An Agent tool interruption now publishes a fresh `pending_token` in the interrupt
++result and every canonical `ToolCallInterruptRequest`. Typed payloads and their
++serialized dictionaries carry the same field. Tokens are independent of provider
++tool-call IDs. Re-emitting a pending result preserves its token; any successful
++partial reply rotates the token for remaining interruptions.
++
++```python
++from openjiuwen.core.session import InteractiveInput
++from openjiuwen.core.single_agent.interrupt.response import AgentInputError
++from openjiuwen.harness.schema.interaction import SendInputRequest
++
++reply = InteractiveInput(
++    expected_pending_token=pending_token,
++    prepare_effect=prepare_original_work_authority,  # optional sync/async
++    before_effect=check_current_authority,          # optional synchronous
++)
++reply.update(pending_input_id, validated_answer)
++receipt = await deep_agent.send_input(SendInputRequest(
++    request_id="reply-control-request", inputs={"query": reply},
++))
++# {"accepted": True, "pending_token": pending_token}
++```
++
++Exact input requires a nonempty answer-ID subset of the actual pending IDs; raw
++input fallback, unrelated IDs, stale tokens and missing owners fail before
++consumption. Existing asynchronous preparation runs while pending state remains
++stored. `prepare_effect` runs last among asynchronous preparation steps. Then the
++original handler synchronously rechecks token/origin, invokes `before_effect`,
++rechecks and claims the pending state, with no intervening await. Both callbacks
++must return `None` or raise; only `prepare_effect` may await. Their original
++exceptions propagate. Rejection or preparation cancellation does not append an
++abort/answer history marker. Callbacks and the private receipt Future are never
++serialized; trusted in-process copies retain their shared control.
++
++`DeepAgent.peek_pending_input()` synchronously returns a deep copy of
++`{pending_token, execution_origin, pending_ids}` or `None`. It reads only the
++existing session, creates no owner and reveals no tool arguments. This is a
++trusted control-plane snapshot: `execution_origin` can contain private context
++and must not be forwarded as public output. Its SDK-built fields are `kind`
++(`user`/`goal`), original `request_id` (always `None` for Goal), actual `session_id`
++and the original bounded JSON `run_context`. The origin envelope has room for
++SDK fields around an existing legal 64 KiB context. Only the existing explicit
++`extra.source_metadata` map is projected into output.
++
++Deep exact continuation uses that original origin, never the reply request as a
++new work identity. A supplied reply context must match; omitting it uses the
++saved context. The original controller/coordinator and, for Goal, the original
++attempt/report sink remain in use. The existing interaction supervisor creates
++a new actual `ActiveInteractionRound.task_id` for the continuation and stamps it
++on output. This is the executed interaction-round identity; legacy and strict
++single-round resumes do not imply a new Core TaskStore record. Claim does not
++increment the Goal attempt count. Its success/error is assessed by the retained
++Goal rail, including the existing blocked outcome on execution failure.
++
++Pending managed User/Goal work with an explicit source binding keeps its current
++output reader. Its original queue accepts only exact continuation while pending;
++ordinary user inputs remain queued until claim or explicit invalidation. Goal
++automatic attempts cannot bypass this wait. Abort, stop, Goal clear/replacement
++and output cancellation invalidate the corresponding managed pending owner and
++settle unclaimed replies. Cancelling a `send_input` observer only stops that
++observer: an already queued owner still claims or rejects the same private
++receipt. A receipt is produced only after real claim, never merely after enqueue,
++and does not prove tool execution or business completion. A later execution
++failure does not restore the consumed token.
++
++Nested Agent replies use each child's canonical token saved in the parent's
++pending state. Missing/mixed child tokens reject before parent claim. The parent
++callback runs once; each original child owner rechecks its own saved token before
++its effects. A child independently replaced since publication may reject after
++the parent has already claimed. The parent receipt still proves only parent
++claim, and is not rolled back or presented as successful completion of the whole
++nested task. No cross-owner atomic claim or cross-process restoration is added.
++
++`AgentInputError.code` identifies rejections such as `pending_token_mismatch`,
++`pending_input_missing`, `pending_answer_ids_invalid`, `pending_origin_mismatch`,
++`pending_goal_changed`, `pending_owner_unavailable`, `pending_input_invalidated`,
++`pending_child_token_invalid` and `input_guard_result_invalid`. Calls without an
++exact token retain legacy behavior and `DeepAgent.send_input` returns `None`.
++Older states without token/origin are not repaired on read. Unbound legacy inputs
++keep their former reader lifetime and may retain non-JSON runtime context; when
++that context cannot be frozen, no strict origin is fabricated.
+diff --git a/openjiuwen/core/session/interaction/interactive_input.py b/openjiuwen/core/session/interaction/interactive_input.py
+index 9f06118f..47206860 100644
+--- a/openjiuwen/core/session/interaction/interactive_input.py
++++ b/openjiuwen/core/session/interaction/interactive_input.py
+@@ -3,9 +3,13 @@
+ 
+ from __future__ import annotations
+ 
+-from typing import Any, Dict
++import asyncio
++import copy
++import inspect
++from dataclasses import dataclass
++from typing import Any, Callable, Dict
+ 
+-from pydantic import BaseModel, Field
++from pydantic import BaseModel, Field, PrivateAttr
+ 
+ from openjiuwen.core.common.exception.codes import StatusCode
+ from openjiuwen.core.common.exception.errors import build_error
+@@ -13,15 +17,48 @@ from openjiuwen.core.common.exception.errors import build_error
+ _sentinel = object()
+ 
+ 
++class AgentInputError(ValueError):
++    """An exact Agent input was rejected before its pending state was claimed."""
++
++    def __init__(self, code):
++        super().__init__(code)
++        self.code = code
++
++
++@dataclass
++class _InputControl:
++    before_effect: Callable[[], None] | None = None
++    prepare_effect: Callable | None = None
++    sdk_before_effect: Callable[[], None] | None = None
++    receipt: asyncio.Future | None = None
++    claimed: bool = False
++
++
+ class InteractiveInput(BaseModel):
+     # key is id of interaction, value is input for the id
+     user_inputs: Dict[str, Any] = Field(default_factory=dict)
+ 
+     # input not bind to any id, used for the first interaction
+     raw_inputs: Any = Field(default=None)
++    expected_pending_token: str | None = Field(default=None, frozen=True)
++    _control: _InputControl = PrivateAttr(default_factory=_InputControl)
+ 
+-    def __init__(self, raw_inputs: Any = _sentinel):
+-        super().__init__(**{})
++    def __init__(self, raw_inputs: Any = _sentinel, *, expected_pending_token: str | None = None,
++                 before_effect: Callable[[], None] | None = None, prepare_effect: Callable | None = None):
++        if expected_pending_token is not None:
++            try:
++                valid = (isinstance(expected_pending_token, str) and bool(expected_pending_token.strip())
++                         and len(expected_pending_token.encode("utf-8")) <= 256 and "\x00" not in expected_pending_token)
++            except UnicodeError:
++                valid = False
++            if not valid:
++                raise AgentInputError("pending_token_invalid")
++        for callback in (before_effect, prepare_effect):
++            if callback is not None and (not callable(callback) or expected_pending_token is None):
++                raise AgentInputError("input_guard_invalid")
++        super().__init__(expected_pending_token=expected_pending_token)
++        self._control.before_effect = before_effect
++        self._control.prepare_effect = prepare_effect
+         if raw_inputs is None:
+             raise build_error(StatusCode.INTERACTION_INPUT_INVALID, reason="value of raw_inputs is none")
+         if raw_inputs is _sentinel:
+@@ -29,6 +66,68 @@ class InteractiveInput(BaseModel):
+             return
+         self.raw_inputs = raw_inputs
+ 
++    @property
++    def before_effect(self):
++        """Trusted process-local authorization; never part of a serialized input."""
++        return self._control.before_effect
++
++    @property
++    def prepare_effect(self):
++        return self._control.prepare_effect
++
++    async def _prepare_claim(self):
++        callback = self.prepare_effect
++        if callback is not None:
++            result = callback()
++            if inspect.isawaitable(result):
++                result = await result
++            if result is not None:
++                raise AgentInputError("input_guard_result_invalid")
++
++    @property
++    def claimed(self) -> bool:
++        return self._control.claimed
++
++    def __deepcopy__(self, memo=None):
++        memo = {} if memo is None else memo
++        clone = type(self).model_construct(
++            user_inputs=copy.deepcopy(self.user_inputs, memo),
++            raw_inputs=copy.deepcopy(self.raw_inputs, memo),
++            expected_pending_token=self.expected_pending_token,
++        )
++        clone._control = self._control
++        memo[id(self)] = clone
++        return clone
++
++    def __getstate__(self):
++        state = super().__getstate__()
++        state["__pydantic_private__"] = {}
++        return state
++
++    def __setstate__(self, state):
++        super().__setstate__(state)
++        self._control = _InputControl()
++
++    def _begin_claim_receipt(self):
++        if self._control.receipt is not None or self.claimed:
++            raise AgentInputError("input_already_dispatched")
++        future = asyncio.get_running_loop().create_future()
++        # A cancelled observer need not retrieve a later owner rejection.
++        future.add_done_callback(lambda item: None if item.cancelled() else item.exception())
++        self._control.receipt = future
++        return future
++
++    def _accept_claim(self):
++        self._control.claimed = True
++        receipt = self._control.receipt
++        if receipt is not None and not receipt.done():
++            receipt.set_result({"accepted": True, "pending_token": self.expected_pending_token})
++
++    def _reject_claim(self, error):
++        receipt = self._control.receipt
++        if receipt is not None and not receipt.done():
++            receipt.set_exception(error)
++
+     def update(self, node_id: str, value: Any):
+         if self.raw_inputs is not None:
+             raise build_error(StatusCode.INTERACTION_INPUT_INVALID, reason="raw_inputs existed, update is invalid")
+diff --git a/openjiuwen/core/single_agent/agents/react_agent.py b/openjiuwen/core/single_agent/agents/react_agent.py
+index 647212dd..c59ef07d 100644
+--- a/openjiuwen/core/single_agent/agents/react_agent.py
++++ b/openjiuwen/core/single_agent/agents/react_agent.py
+@@ -16,6 +16,7 @@ import inspect
+ import json
+ import time
+ from dataclasses import dataclass
++from contextlib import asynccontextmanager
+ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
+ 
+ from pydantic import Field, BaseModel
+@@ -54,6 +55,7 @@ from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
+ from openjiuwen.core.foundation.tool import ToolInfo
+ from openjiuwen.core.session import with_session
+ from openjiuwen.core.session.agent import Session, create_agent_session
++from openjiuwen.core.session.interaction.interactive_input import InteractiveInput, AgentInputError
+ from openjiuwen.core.session.stream import OutputSchema
+ from openjiuwen.core.session.stream.base import StreamMode
+ from openjiuwen.core.single_agent.base import BaseAgent
+@@ -64,6 +66,7 @@ from openjiuwen.core.single_agent.interrupt.state import (
+     ToolInterruptionState,
+     INTERRUPTION_KEY
+ )
++from openjiuwen.core.single_agent.interrupt.state import copy_execution_origin
+ from openjiuwen.core.single_agent.rail.base import (
+     AgentCallbackEvent,
+     AgentCallbackContext,
+@@ -1660,6 +1663,7 @@ class ReActAgent(BaseAgent):
+             session: Optional[Session],
+             invoke_inputs: InvokeInputs,
+             sub_agent_outputs: list = None,
++            *, execution_origin=None,
+     ) -> Dict[str, Any]:
+         """Persist interruption state and return the interrupt result dict.
+ 
+@@ -1667,7 +1671,7 @@ class ReActAgent(BaseAgent):
+         """
+         if isinstance(interrupt, ToolInterruptionState):
+             return await self._hitl_handler.commit_interrupt(
+-                interrupt, context, session, invoke_inputs, sub_agent_outputs
++                interrupt, context, session, invoke_inputs, sub_agent_outputs, execution_origin=execution_origin
+             )
+ 
+         pending_entry = interrupt.interrupted_workflows[interrupt.pending_workflow_id]
+@@ -1884,8 +1888,41 @@ class ReActAgent(BaseAgent):
+         return await self._inner_invoke(session=session, inputs=inputs, query=query, conversation_id=conversation_id,
+                                         need_cleanup=need_cleanup, **kwargs)
+ 
++    @asynccontextmanager
++    async def _input_lifecycle(self, ctx, exact_input, is_claimed):
++        if exact_input is None:
++            async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
++                yield
++            return
++        saved_inputs = ctx.inputs
++        await ctx.fire(AgentCallbackEvent.BEFORE_INVOKE)
++        error = None
++        try:
++            yield
++        except BaseException as caught:
++            error = caught
++            ctx.exception = caught
++            raise
++        finally:
++            ctx.inputs = saved_inputs
++            # Failed preparation is not a conversation turn. In particular,
++            # after-invoke memory rails must not append rejected reply history.
++            if is_claimed():
++                try:
++                    await ctx.fire(AgentCallbackEvent.AFTER_INVOKE)
++                except Exception:
++                    if error is None:
++                        raise
++                    logger.exception("AFTER_INVOKE failed after claimed input error")
++
+     @with_session()
+     async def _inner_invoke(self, session, inputs, query, need_cleanup, conversation_id, **kwargs):
++        exact_input = (copy.deepcopy(query) if isinstance(query, InteractiveInput)
++                       and query.expected_pending_token is not None else None)
++        if exact_input is not None:
++            query = exact_input
++        exact_claimed = False
++        execution_origin = copy_execution_origin(kwargs.get("_execution_origin"))
+         invoke_inputs = InvokeInputs(query=query, conversation_id=conversation_id)
+         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
+         abort_persisted = False
+@@ -1910,8 +1947,12 @@ class ReActAgent(BaseAgent):
+                 ctx.extra["_input_parts"] = list(inputs["_input_parts"])
+ 
+         try:
+-            async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
++            exact_state = (self._hitl_handler.preflight_exact(
++                exact_input, session, expected_origin=execution_origin) if exact_input is not None else None)
++            async with self._input_lifecycle(ctx, exact_input, lambda: exact_claimed):
+                 user_input = ctx.inputs.query
++                if exact_input is not None and user_input is not exact_input:
++                    raise AgentInputError("pending_input_replaced")
+                 # A continuation round carries no new query: it picks the
+                 # preserved context of a paused round back up in place.
+                 resume_continuation = bool(ctx.extra.get("_resume_continuation"))
+@@ -1923,12 +1964,12 @@ class ReActAgent(BaseAgent):
+                 # that window into something a slow-start report can name.
+                 prep_started_at = time.monotonic()
+ 
+-                hitl_state = self._hitl_handler.load(session)
++                hitl_state = exact_state if exact_input is not None else self._hitl_handler.load(session)
+                 interruption_state = hitl_state or self._load_interruption_state(session)
+                 if interruption_state is not None:
+-                    if hitl_state is not None:
++                    if hitl_state is not None and exact_input is None:
+                         self._hitl_handler.clear(session)
+-                    else:
++                    elif hitl_state is None:
+                         self._clear_interruption_state(session)
+                     # Restore original query so MemoryRail.after_invoke writes the right UserMessage
+                     ctx.extra["_original_query"] = interruption_state.original_query
+@@ -1975,6 +2016,10 @@ class ReActAgent(BaseAgent):
+                     is_tool_interruption = isinstance(interruption_state, ToolInterruptionState)
+                     
+                     if is_tool_interruption:
++                        if exact_input is not None:
++                            await exact_input._prepare_claim()
++                            interruption_state = self._hitl_handler.claim_exact(exact_input, session, exact_state)
++                            exact_claimed = True
+                         # Tool Interrupt: not write UserMessage, recovery input is passed to Rail via ctx.extra
+                         await self._handle_resume(
+                             interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
+@@ -2082,7 +2127,7 @@ class ReActAgent(BaseAgent):
+                         )
+                         if hitl_interrupt:
+                             await self._commit_interrupt(hitl_interrupt, context, session, invoke_inputs,
+-                                                         sub_agent_outputs)
++                                                         sub_agent_outputs, execution_origin=execution_origin)
+                             break
+ 
+                         workflow_interrupt = self._after_execute_tool_call(
+@@ -2112,7 +2157,10 @@ class ReActAgent(BaseAgent):
+ 
+             # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
+             return ctx.extra.get("invoke_result", invoke_inputs.result)
+-        except asyncio.CancelledError:
++        except asyncio.CancelledError as error:
++            if exact_input is not None and not exact_claimed:
++                exact_input._reject_claim(error)
++                raise
+             # 外部取消（非工具级 CancelledError）。工具级 CancelledError
+             # 在 AbilityManager.execute 中会被转成 ToolMessage，不会传播到这里。
+             if stream_lifecycle_owner:
+@@ -2123,7 +2171,10 @@ class ReActAgent(BaseAgent):
+                 commit_session=commit_on_abort,
+             )
+             raise  # Re-raise to propagate cancellation signal
+-        except Exception:
++        except Exception as error:
++            if exact_input is not None and not exact_claimed:
++                exact_input._reject_claim(error)
++                raise
+             # A model/rail/context failure may happen after the current turn has
+             # already been appended to the in-memory context. Preserve the same
+             # safe prefix used for cancellation instead of falling back to the
+@@ -2138,10 +2189,11 @@ class ReActAgent(BaseAgent):
+             raise  # Preserve the original ReAct failure for the caller
+         finally:
+             if need_cleanup and not stream_lifecycle_owner:
+-                if not abort_persisted:
++                unclaimed = exact_input is not None and not exact_claimed
++                if not abort_persisted and not unclaimed:
+                     await self.context_engine.save_contexts(session)
+                 await session.close_stream()
+-                if not abort_persisted:
++                if not abort_persisted and not unclaimed:
+                     await session.commit()
+ 
+     async def write_invoke_result_to_stream(
+@@ -2242,6 +2294,12 @@ class ReActAgent(BaseAgent):
+     @with_session()
+     async def _inner_stream(self, session, inputs, need_cleanup):
+         abort_persisted = False
++        query = inputs.get("query") if isinstance(inputs, dict) else inputs
++        exact_input = query if isinstance(query, InteractiveInput) and query.expected_pending_token is not None else None
++        was_claimed = exact_input.claimed if exact_input is not None else False
++
++        def rejected_exact():
++            return exact_input is not None and (was_claimed or not exact_input.claimed)
+ 
+         async def stream_process():
+             nonlocal abort_persisted
+@@ -2260,6 +2318,8 @@ class ReActAgent(BaseAgent):
+                         final_result, session
+                     )
+             except asyncio.CancelledError:
++                if rejected_exact():
++                    raise
+                 abort_persisted = await self._handle_context_abort(
+                     session,
+                     marker="[Request cancelled by user]",
+@@ -2267,6 +2327,8 @@ class ReActAgent(BaseAgent):
+                 )
+                 raise
+             except Exception as e:
++                if rejected_exact():
++                    raise
+                 logger.error("ReActAgent stream error: %s", e, exc_info=True)
+                 abort_persisted = await self._handle_context_abort(
+                     session,
+@@ -2278,11 +2340,11 @@ class ReActAgent(BaseAgent):
+                     error_result, session
+                 )
+             finally:
+-                if need_cleanup and not abort_persisted:
++                if need_cleanup and not abort_persisted and not rejected_exact():
+                     await self.context_engine.save_contexts(session)
+                 if self.is_agent_session:
+                     await session.close_stream()
+-                    if not abort_persisted:
++                    if not abort_persisted and not rejected_exact():
+                         await session.commit()
+ 
+         if self.is_agent_session:
+diff --git a/openjiuwen/core/single_agent/interrupt/handler.py b/openjiuwen/core/single_agent/interrupt/handler.py
+index 085342fe..57a2cee7 100644
+--- a/openjiuwen/core/single_agent/interrupt/handler.py
++++ b/openjiuwen/core/single_agent/interrupt/handler.py
+@@ -4,7 +4,10 @@
+ from __future__ import annotations
+ 
+ import copy
++import asyncio
++import inspect
+ import json
++import uuid
+ from dataclasses import dataclass
+ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+ 
+@@ -15,7 +18,7 @@ from openjiuwen.core.foundation.llm import AssistantMessage
+ from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+ from openjiuwen.core.session.agent import Session
+ from openjiuwen.core.session.interaction.interaction import InteractionOutput
+-from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
++from openjiuwen.core.session.interaction.interactive_input import InteractiveInput, AgentInputError
+ from openjiuwen.core.session.stream.base import OutputSchema
+ from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+ from openjiuwen.core.single_agent.interrupt.response import (
+@@ -27,6 +30,7 @@ from openjiuwen.core.single_agent.interrupt.state import (
+     ToolInterruptEntry,
+     ToolInterruptionState,
+     RESUME_START_ITERATION_KEY, INTERRUPT_AUTO_CONFIRM_KEY,
++    copy_execution_origin,
+ )
+ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
+ 
+@@ -55,6 +59,79 @@ class ToolInterruptHandler:
+     def __init__(self, agent: 'ReActAgent'):
+         self._agent = agent
+         self._key = INTERRUPTION_KEY
++        self._claim_reserved = False
++
++    def preflight_exact(self, user_input: InteractiveInput, session: Optional[Session], *, expected_origin=None):
++        """Read the real pending owner without clearing it or admitting answers."""
++        state = self.load(session)
++        if not isinstance(state, ToolInterruptionState) or not state.pending_token:
++            raise AgentInputError("pending_input_missing")
++        if state.pending_token != user_input.expected_pending_token:
++            raise AgentInputError("pending_token_mismatch")
++        if user_input.claimed:
++            raise AgentInputError("pending_input_already_claimed")
++        if state.execution_origin is not None:
++            if state.execution_origin["session_id"] != session.get_session_id():
++                raise AgentInputError("pending_scope_mismatch")
++        if expected_origin is not None and state.execution_origin != expected_origin:
++            raise AgentInputError("pending_origin_mismatch")
++        pending_ids = {key for entry in state.interrupted_tools.values() for key in entry.interrupt_requests}
++        if (user_input.raw_inputs is not None or not user_input.user_inputs
++                or not set(user_input.user_inputs).issubset(pending_ids)
++                or any(value is None for value in user_input.user_inputs.values())):
++            raise AgentInputError("pending_answer_ids_invalid")
++        for entry in state.interrupted_tools.values():
++            if entry.is_sub_agent:
++                self._child_pending_token(entry)
++        return state
++
++    @staticmethod
++    def _child_pending_token(entry):
++        tokens = {getattr(request, "pending_token", None) for request in entry.interrupt_requests.values()}
++        if len(tokens) != 1 or None in tokens:
++            raise AgentInputError("pending_child_token_invalid")
++        token = next(iter(tokens))
++        try:
++            InteractiveInput(expected_pending_token=token)
++        except AgentInputError as error:
++            raise AgentInputError("pending_child_token_invalid") from error
++        return token
++
++    def claim_exact(self, user_input, session, prepared_state):
++        """Final synchronous compare/authorize/clear on the existing handler."""
++        if self._claim_reserved:
++            raise AgentInputError("pending_claim_in_progress")
++        self._claim_reserved = True
++        try:
++            def validate():
++                if asyncio.current_task().cancelling():
++                    raise asyncio.CancelledError
++                live = self.preflight_exact(user_input, session, expected_origin=prepared_state.execution_origin)
++                if live != prepared_state:
++                    raise AgentInputError("pending_state_changed")
++                return live
++
++            validate()
++            for callback in (user_input._control.sdk_before_effect, user_input.before_effect):
++                if callback is None:
++                    continue
++                result = callback()
++                if inspect.isawaitable(result):
++                    close = getattr(result, "close", None)
++                    if callable(close):
++                        close()
++                    raise AgentInputError("input_guard_async_unsupported")
++                if result is not None:
++                    raise AgentInputError("input_guard_result_invalid")
++            claimed = validate()
++            if user_input._control.sdk_before_effect is not None:
++                user_input._control.sdk_before_effect()
++            self.clear(session)
++            claimed.pending_token = None
++            user_input._accept_claim()
++            return claimed
++        finally:
++            self._claim_reserved = False
+ 
+     def build_interrupt_state(
+             self,
+@@ -127,7 +204,7 @@ class ToolInterruptHandler:
+     def save(self, state: ToolInterruptionState, session: Optional[Session]) -> None:
+         """Save tool interruption state to session."""
+         if session:
+-            session.update_state({self._key: state})
++            session.update_state({self._key: state.model_copy(deep=True)})
+ 
+     def load(self, session: Optional[Session]) -> Optional[ToolInterruptionState]:
+         """Load tool interruption state from session."""
+@@ -239,6 +316,7 @@ class ToolInterruptHandler:
+     @staticmethod
+     def build_interrupt_result(
+             payloads: list = None,
++            *, pending_token: str | None = None,
+     ) -> Dict[str, object]:
+         """Build interrupt result from payloads.
+ 
+@@ -250,8 +328,12 @@ class ToolInterruptHandler:
+         state_outputs = []
+ 
+         if payloads:
+-            for idx, (inner_id, payload) in enumerate(payloads):
++            for idx, (inner_id, payload) in enumerate(copy.deepcopy(payloads)):
+                 interrupt_ids.append(inner_id)
++                value = payload.payload.value if isinstance(payload, OutputSchema) else payload
++                if isinstance(value, ToolCallInterruptRequest):
++                    value.pending_token = pending_token
++                    value.metadata.pop("pending_token", None)
+                 if isinstance(payload, OutputSchema):
+                     state_outputs.append(payload)
+                 else:
+@@ -270,6 +352,7 @@ class ToolInterruptHandler:
+             "result_type": "interrupt",
+             "state": state_outputs,
+             "interrupt_ids": interrupt_ids,
++            "pending_token": pending_token,
+         }
+ 
+     async def commit_interrupt(
+@@ -279,11 +362,16 @@ class ToolInterruptHandler:
+             session: Optional[Session],
+             invoke_inputs: InvokeInputs,
+             sub_agent_outputs: list = None,
++            *, execution_origin=None,
+     ) -> Dict[str, object]:
+         """Persist tool interruption state and return interrupt dict."""
+         await self._agent.context_engine.save_contexts(session)
++        if execution_origin is not None:
++            state.execution_origin = copy_execution_origin(execution_origin)
++        if state.pending_token is None:
++            state.pending_token = uuid.uuid4().hex
+         self.save(state, session)
+-        result = self.build_interrupt_result(sub_agent_outputs)
++        result = self.build_interrupt_result(sub_agent_outputs, pending_token=state.pending_token)
+         invoke_inputs.result = result
+         return result
+ 
+@@ -313,6 +401,9 @@ class ToolInterruptHandler:
+         Returns interrupt dict if still waiting, or None to continue ReAct loop.
+         """
+         state = resume_ctx.state
++        # Executing any answer consumes this generation, even when some tools
++        # interrupt again. Pure result re-emission does not enter this method.
++        state.pending_token = None
+         user_input = resume_ctx.user_input
+         ctx = resume_ctx.ctx
+         context = resume_ctx.context
+@@ -328,10 +419,24 @@ class ToolInterruptHandler:
+         ctx.extra.update({key: user_input for key in resume_user_input_keys})
+ 
+         tools_to_execute = []
++        unaddressed_children = {}
++        child_payloads = []
+         for outer_id, entry in state.interrupted_tools.items():
+             tc = copy.deepcopy(entry.tool_call)
+             if entry.is_sub_agent:
+-                tc = self._build_sub_agent_resume_tool_call(tc, user_input)
++                child_input = user_input
++                if isinstance(user_input, InteractiveInput) and user_input.expected_pending_token is not None:
++                    answers = {key: copy.deepcopy(value) for key, value in user_input.user_inputs.items()
++                               if key in entry.interrupt_requests}
++                    if not answers:
++                        # A partial parent answer leaves this child untouched.
++                        unaddressed_children[outer_id] = entry
++                        child_payloads.extend((key, request) for key, request in entry.interrupt_requests.items())
++                        continue
++                    child_input = InteractiveInput(expected_pending_token=self._child_pending_token(entry))
++                    for key, value in answers.items():
++                        child_input.update(key, value)
++                tc = self._build_sub_agent_resume_tool_call(tc, child_input)
+             tools_to_execute.append(tc)
+ 
+         try:
+@@ -348,6 +453,12 @@ class ToolInterruptHandler:
+             results, tools_to_execute
+         )
+ 
++        new_interrupted_tools.update(unaddressed_children)
++        sub_agent_outputs.extend(child_payloads)
++        for entry in unaddressed_children.values():
++            for key, request in entry.interrupt_requests.items():
++                if request.auto_confirm_key:
++                    auto_confirm_mapping[key] = request.auto_confirm_key
+         state.interrupted_tools = new_interrupted_tools
+         state.auto_confirm_mapping = auto_confirm_mapping
+ 
+diff --git a/openjiuwen/core/single_agent/interrupt/response.py b/openjiuwen/core/single_agent/interrupt/response.py
+index a73c1fb6..59b64882 100644
+--- a/openjiuwen/core/single_agent/interrupt/response.py
++++ b/openjiuwen/core/single_agent/interrupt/response.py
+@@ -5,6 +5,8 @@ from __future__ import annotations
+ from typing import Any, Optional
+ from pydantic import BaseModel, Field
+ 
++from openjiuwen.core.session.interaction.interactive_input import AgentInputError as AgentInputError
++
+ 
+ class InterruptRequest(BaseModel):
+     """Request for user interruption/confirmation."""
+@@ -32,6 +34,7 @@ class ToolCallInterruptRequest(InterruptRequest):
+     tool_call_id: str = ""
+     tool_args: Any = None
+     index: Optional[int] = None
++    pending_token: str | None = None
+ 
+     @classmethod
+     def from_tool_call(
+diff --git a/openjiuwen/core/single_agent/interrupt/state.py b/openjiuwen/core/single_agent/interrupt/state.py
+index 568f2c1d..e91d2f49 100644
+--- a/openjiuwen/core/single_agent/interrupt/state.py
++++ b/openjiuwen/core/single_agent/interrupt/state.py
+@@ -4,7 +4,7 @@
+ from __future__ import annotations
+ from dataclasses import field
+ from typing import Dict
+-from pydantic import BaseModel
++from pydantic import BaseModel, field_validator
+ 
+ from openjiuwen.core.foundation.llm import AssistantMessage
+ from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+@@ -34,3 +34,27 @@ class ToolInterruptionState(BaseInterruptionState):
+     """
+     interrupted_tools: Dict[str, ToolInterruptEntry] = field(default_factory=dict)
+     auto_confirm_mapping: Dict[str, str] = field(default_factory=dict)
++    pending_token: str | None = None
++    execution_origin: dict | None = None
++
++    @field_validator("execution_origin", mode="before")
++    @classmethod
++    def copy_execution_origin(cls, value):
++        return copy_execution_origin(value)
++
++
++def copy_execution_origin(value):
++    if value is None:
++        return None
++    from openjiuwen.core.session.agent import _copy_json_mapping
++
++    # Leave room for SDK identities around an existing legal 64 KiB context.
++    snapshot = _copy_json_mapping(value, max_bytes=131072)
++    if (set(snapshot) != {"kind", "request_id", "session_id", "run_context"}
++            or snapshot["kind"] not in ("user", "goal")
++            or not isinstance(snapshot["session_id"], str) or not snapshot["session_id"]
++            or (snapshot["request_id"] is not None and not isinstance(snapshot["request_id"], str))
++            or (snapshot["run_context"] is not None and not isinstance(snapshot["run_context"], dict))
++            or (snapshot["kind"] == "goal" and snapshot["request_id"] is not None)):
++        raise ValueError("invalid SDK execution origin")
++    return snapshot
+diff --git a/openjiuwen/harness/deep_agent.py b/openjiuwen/harness/deep_agent.py
+index 6490e89f..16596cc1 100644
+--- a/openjiuwen/harness/deep_agent.py
++++ b/openjiuwen/harness/deep_agent.py
+@@ -44,7 +44,8 @@ from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
+ from openjiuwen.core.foundation.tool import Tool, ToolCard
+ from openjiuwen.core.runner import Runner
+ from openjiuwen.core.session.agent import Session
+-from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
++from openjiuwen.core.session.interaction.interactive_input import InteractiveInput, AgentInputError
++from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY, ToolInterruptionState
+ from openjiuwen.core.session.stream.base import StreamMode
+ from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
+ from openjiuwen.core.single_agent.base import BaseAgent
+@@ -105,6 +106,7 @@ from openjiuwen.harness.schema.interaction import (
+     RoundOutcome,
+     RoundWorkItem,
+     SendInputRequest,
++    _execution_origin_for_run,
+ )
+ from openjiuwen.harness.task_loop.event_manager import EventManager
+ 
+@@ -1909,7 +1911,7 @@ class DeepAgent(BaseAgent):
+         self._registered_rails.append(rail)
+ 
+     async def _run_single_round_invoke(
+-        self, ctx: AgentCallbackContext, session: Optional[Session]
++        self, ctx: AgentCallbackContext, session: Optional[Session], *, execution_origin=None
+     ) -> Dict[str, Any]:
+         """Invoke inner ReActAgent exactly once."""
+         modified = ctx.inputs
+@@ -1928,6 +1930,7 @@ class DeepAgent(BaseAgent):
+         return await self._react_agent.invoke(
+             self._to_effective_inputs(modified),
+             session,
++            **({"_execution_origin": execution_origin} if execution_origin is not None else {}),
+         )
+ 
+     async def _setup_task_loop(
+@@ -2774,6 +2777,13 @@ class DeepAgent(BaseAgent):
+             session: Current session (unused).
+         """
+         _ = session
++        if self._invalidate_pending_input():
++            active = self._active_interaction_round
++            if active is not None and active.work.is_input_continuation and not active.work.query.claimed:
++                active.work.query._reject_claim(AgentInputError("pending_input_invalidated"))
++                task = self._interaction_round_task
++                if task is not None and task is not asyncio.current_task() and not task.done():
++                    task.cancel()
+         coordinator = self._loop_coordinator
+         controller = self._loop_controller
+         if coordinator is not None and controller is not None:
+@@ -2813,7 +2823,13 @@ class DeepAgent(BaseAgent):
+             source = work.output_source_metadata(task_id=task_id, session_id=session.get_session_id())
+             if source is not None:
+                 session = session.with_source_metadata(source)
+-            coordinator, controller = await self.prepare_interaction_task_loop(session)
++            if work.is_input_continuation:
++                self._validate_input_continuation(_execution_origin_for_run(
++                    work.inputs["run"]["context"], session_id=session.get_session_id(),
++                    kind=work.kind, request_id=work.request_id))
++                coordinator, controller = self._loop_coordinator, self._loop_controller
++            else:
++                coordinator, controller = await self.prepare_interaction_task_loop(session)
+             if work.reset_loop:
+                 coordinator.reset()
+                 state = self.load_state(session)
+@@ -2821,26 +2837,49 @@ class DeepAgent(BaseAgent):
+                 self.save_state(session, state)
+ 
+             inputs = copy.deepcopy(work.inputs)
+-            if work.kind == "goal":
++            if work.kind == "goal" and not work.is_input_continuation:
+                 inputs["run"] = {
+                     "kind": "goal",
+                     "context": copy.deepcopy(work.context),
+                 }
+             invoke_inputs = self._normalize_inputs(inputs)
++            is_resume_input = self._is_resume_input(invoke_inputs)
+             if invoke_inputs.run_context is not None:
+                 # The scheduler task predates this request. Carry the SDK's
+                 # actual request identity through its existing task metadata.
+                 invoke_inputs.run_context.extra["_interaction_request_id"] = work.request_id
+-            is_resume_input = self._is_resume_input(invoke_inputs)
++            origin = (_execution_origin_for_run(invoke_inputs.run_context, session_id=session.get_session_id(),
++                                                kind=work.kind, request_id=work.request_id)
++                      if work.is_input_continuation else None)
+             ctx = AgentCallbackContext(
+                 agent=self, inputs=invoke_inputs, session=session
+             )
+-            async with ctx.lifecycle(
+-                AgentCallbackEvent.BEFORE_INVOKE,
+-                AgentCallbackEvent.AFTER_INVOKE,
+-            ):
++            lifecycle = (self._react_agent._input_lifecycle(ctx, work.query, lambda: work.query.claimed)
++                         if work.is_input_continuation else ctx.lifecycle(
++                             AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE))
++            async with lifecycle:
+                 if is_resume_input:
+-                    result = await self._run_single_round_invoke(ctx, session)
++                    if work.is_input_continuation:
++                        effective = ctx.inputs
++                        if (not isinstance(effective, InvokeInputs) or not isinstance(effective.query, InteractiveInput)
++                                or effective.query._control is not work.query._control):
++                            raise AgentInputError("pending_input_replaced")
++                    try:
++                        result = await self._run_single_round_invoke(ctx, session, execution_origin=origin)
++                    except Exception as error:
++                        if (work.is_input_continuation and work.query.claimed and work.kind == "goal"
++                                and self._task_completion_rail is not None):
++                            invoke_inputs.result = {"result_type": "error", "error": str(error)}
++                            ctx.inputs, ctx.exception = invoke_inputs, error
++                            with suppress(Exception):
++                                await self._task_completion_rail.after_task_iteration(ctx)
++                        raise
++                    if work.is_input_continuation and work.kind == "goal" and self._task_completion_rail is not None:
++                        # Finish the retained attempt/report sink. BEFORE_TASK_ITERATION
++                        # would begin/reset it and must not run a second time.
++                        invoke_inputs.result = result
++                        ctx.inputs = invoke_inputs
++                        await self._task_completion_rail.after_task_iteration(ctx)
+                 else:
+                     await controller.submit_round(
+                         session,
+@@ -2874,6 +2913,8 @@ class DeepAgent(BaseAgent):
+             self.clear_state(session)
+             return RoundOutcome(next_work=next_work)
+         except Exception:
++            if work.is_input_continuation and not work.query.claimed:
++                raise
+             logger.exception("[DeepAgent] interaction round execution failed")
+             return RoundOutcome(
+                 error_code="round_execution_error",
+@@ -3163,7 +3204,62 @@ class DeepAgent(BaseAgent):
+                         self._notify_work()
+                 return stream
+ 
+-    async def send_input(self, request: SendInputRequest) -> None:
++    def peek_pending_input(self) -> Optional[Dict[str, object]]:
++        """Return an isolated snapshot of the existing pending owner, without restoration."""
++        session = self._interaction_session
++        state = session.get_state(INTERRUPTION_KEY) if session is not None else None
++        if not isinstance(state, ToolInterruptionState) or not state.pending_token:
++            return None
++        return copy.deepcopy({"pending_token": state.pending_token, "execution_origin": state.execution_origin,
++                              "pending_ids": list(dict.fromkeys(key for entry in state.interrupted_tools.values()
++                                                                 for key in entry.interrupt_requests))})
++
++    def _managed_pending_input(self):
++        pending = self.peek_pending_input()
++        origin = pending and pending["execution_origin"]
++        context = origin and origin["run_context"]
++        source = (context or {}).get("extra", {}).get("source_metadata", {})
++        if origin and isinstance(source, dict) and source.get("source_binding_id"):
++            return pending
++        return None
++
++    def _validate_input_continuation(self, origin, *, output_token=None):
++        if (not self._interaction_started or self._interaction_phase is InteractionPhase.TERMINATED
++                or self._interaction_session is None or self._react_agent is None
++                or self._loop_controller is None or self._loop_coordinator is None
++                or self._bound_session_id != origin["session_id"]
++                or self._interaction_session.get_session_id() != origin["session_id"]):
++            raise AgentInputError("pending_owner_unavailable")
++        if not self.has_output_stream() or (output_token is not None
++                and self._interaction_output.current_token() != output_token):
++            raise AgentInputError("pending_output_unavailable")
++        if origin["kind"] == "goal":
++            context = origin["run_context"] or {}
++            fields = {**(context.get("extra") or {}), **context}
++            goal = self.goal_manager.peek() if self.goal_manager is not None else None
++            if (goal is None or goal.status is not GoalStatus.ACTIVE or goal.goal_id != fields.get("goal_id")
++                    or goal.revision != fields.get("revision")):
++                raise AgentInputError("pending_goal_changed")
++
++    def _invalidate_pending_input(self, *, expected_run_kind=None, expected_goal_id=None, expected_revision=None):
++        pending = self._managed_pending_input()
++        if pending is None:
++            return False
++        origin = pending["execution_origin"]
++        context = origin["run_context"] or {}
++        fields = {**(context.get("extra") or {}), **context}
++        if ((expected_run_kind is not None and origin["kind"] != expected_run_kind)
++                or (expected_goal_id is not None and fields.get("goal_id") != expected_goal_id)
++                or (expected_revision is not None and fields.get("revision") != expected_revision)):
++            return False
++        self._interaction_session.update_state({INTERRUPTION_KEY: None})
++        self._event_manager.discard_input_work()
++        if self._active_interaction_round is None and self._event_manager.active_work is not None:
++            self._event_manager.mark_finished(self._event_manager.active_work)
++        self._notify_work()
++        return True
++
++    async def send_input(self, request: SendInputRequest) -> Optional[Dict[str, object]]:
+         """Dispatch user text or interrupt-resume input.
+ 
+         Hosts that need to read output must call ``attach_output`` first (or
+@@ -3175,9 +3271,12 @@ class DeepAgent(BaseAgent):
+             raise RuntimeError("interaction_terminated")
+ 
+         async with self._interaction_send_lock:
+-            await self._send_user(request)
++            receipt = await self._send_user(request)
++        # Cancellation abandons only this observer. The original queued owner
++        # still claims or rejects the same private carrier exactly once.
++        return await asyncio.shield(receipt) if receipt is not None else None
+ 
+-    async def _send_user(self, request: SendInputRequest) -> None:
++    async def _send_user(self, request: SendInputRequest) -> Optional[asyncio.Future]:
+         inputs = request.inputs
+         if not isinstance(inputs, dict):
+             raise ValueError(
+@@ -3194,9 +3293,49 @@ class DeepAgent(BaseAgent):
+                 "or InteractiveInput"
+             )
+ 
++        if is_resume_input and query.expected_pending_token is not None:
++            async with self._interaction_control_lock:
++                if self._react_agent is None or self._interaction_session is None:
++                    raise AgentInputError("pending_owner_unavailable")
++                state = self._react_agent._hitl_handler.preflight_exact(query, self._interaction_session)
++                origin = state.execution_origin
++                if origin is None:
++                    raise AgentInputError("pending_origin_missing")
++                self._validate_input_continuation(origin)
++                if inputs.get("conversation_id") not in (None, origin["session_id"]):
++                    raise AgentInputError("pending_scope_mismatch")
++                if "run" in inputs:
++                    supplied = self._normalize_inputs(inputs)
++                    candidate = _execution_origin_for_run(supplied.run_context, session_id=origin["session_id"],
++                        kind="goal" if supplied.run_kind is RunKind.GOAL else "user", request_id=origin["request_id"])
++                    if candidate != origin:
++                        raise AgentInputError("pending_origin_mismatch")
++                output_token = self._interaction_output.current_token()
++                work = RoundWorkItem.continuation(query=query, origin=origin)
++                source = work.output_source_metadata(task_id="0" * 32, session_id=origin["session_id"])
++                if source is not None:
++                    self._interaction_session.with_source_metadata(source)
++                receipt = query._begin_claim_receipt()
++
++                def guard_owner():
++                    if self._interaction_control_lock.locked():
++                        raise AgentInputError("pending_control_busy")
++                    self._validate_input_continuation(origin, output_token=output_token)
++                    active = self._active_interaction_round
++                    if active is None or active.work is not work:
++                        raise AgentInputError("pending_owner_changed")
++
++                query._control.sdk_before_effect = guard_owner
++                self._event_manager.push_resume(work)
++                self._notify_work()
++                return receipt
++
+         # Validate opt-in and the final projection before enqueue/wakeup. The
+         # real round uses a fixed 32-character UUID task id generated by the SDK.
+-        self._normalize_inputs(inputs)
++        normalized = self._normalize_inputs(inputs)
++        if not is_resume_input and self._interaction_session is not None:
++            _execution_origin_for_run(normalized.run_context,
++                session_id=self._interaction_session.get_session_id(), kind="user", request_id=request.request_id)
+         source = RoundWorkItem.user(request_id=request.request_id, inputs=inputs).output_source_metadata(
+             task_id="0" * 32,
+             session_id=(self._interaction_session.get_session_id()
+@@ -3227,7 +3366,8 @@ class DeepAgent(BaseAgent):
+             except ValueError as exc:
+                 raise ValueError(f"unsupported input dispatch mode: {request.mode}") from exc
+ 
+-            if mode is InputDispatchMode.STEER and self._active_interaction_round is not None:
++            if (mode is InputDispatchMode.STEER and self._active_interaction_round is not None
++                    and self._managed_pending_input() is None):
+                 if loop is None:
+                     raise RuntimeError("active interaction round cannot accept steer without loop_controller")
+                 loop.enqueue_steer(str(inputs["query"]))
+@@ -3308,7 +3448,7 @@ class DeepAgent(BaseAgent):
+         (or close the output stream with ``abort_active_round=True``).
+         """
+         active = self._active_interaction_round
+-        if active is None:
++        if active is None and self._managed_pending_input() is None:
+             return False
+         await self._cancel_active_round(reason=reason)
+         return True
+@@ -3335,6 +3475,8 @@ class DeepAgent(BaseAgent):
+            still draining LLM I/O, continue without waiting and let cancel
+            finish in the background.
+         """
++        self._invalidate_pending_input(expected_run_kind=expected_run_kind, expected_goal_id=expected_goal_id,
++                                       expected_revision=expected_revision)
+         active = self._active_interaction_round
+         if active is None:
+             return
+@@ -3410,15 +3552,16 @@ class DeepAgent(BaseAgent):
+                     await self._interaction_wakeup.wait()
+                     continue
+ 
+-                work = self._event_manager.next_work()
++                parked = self._managed_pending_input() is not None
++                work = self._event_manager.next_work(input_only=parked)
+                 if work is None:
+                     await self._promote_loop_follow_ups()
+-                    work = self._event_manager.next_work()
++                    work = self._event_manager.next_work(input_only=parked)
+                 if work is None:
+                     await self._close_idle_output_if_finished()
+                     self._interaction_phase = InteractionPhase.IDLE
+                     self._interaction_wakeup.clear()
+-                    if self._event_manager.has_pending_work():
++                    if self._event_manager.has_pending_work(input_only=parked):
+                         continue
+                     await self._interaction_wakeup.wait()
+                     continue
+@@ -3430,9 +3573,11 @@ class DeepAgent(BaseAgent):
+                         await asyncio.wait_for(self._interaction_round_forwarded.wait(), timeout=2.0)
+                 self._interaction_round_task = None
+                 self._interaction_round_forwarded = None
+-        except asyncio.CancelledError:
++        except asyncio.CancelledError as error:
++            self._event_manager.discard_input_work(error)
+             logger.debug("[DeepAgent] supervisor cancelled")
+-        except Exception:
++        except Exception as error:
++            self._event_manager.discard_input_work(error)
+             logger.exception("[DeepAgent] supervisor failed")
+             self._interaction_phase = InteractionPhase.IDLE
+ 
+@@ -3468,6 +3613,8 @@ class DeepAgent(BaseAgent):
+         queued before the host can observe an idle completion.  Callers must
+         treat a True result as both "keep open" and "goal work ensured".
+         """
++        if self._managed_pending_input() is not None:
++            return True
+         if self._event_manager.has_pending_work() or self._active_interaction_round is not None:
+             return True
+         record = self._load_goal_record_locked()
+@@ -3523,9 +3670,11 @@ class DeepAgent(BaseAgent):
+         source = None
+         try:
+             if session is None or not self._interaction_output.has_consumer():
++                if work.is_input_continuation:
++                    raise AgentInputError("pending_output_unavailable")
+                 return
+             source = work.output_source_metadata(task_id=task_id, session_id=session.get_session_id())
+-            if work.kind == "goal":
++            if work.kind == "goal" and not work.is_input_continuation:
+                 if self.goal_manager is None:
+                     return
+                 started = await self.goal_manager.begin_attempt(
+@@ -3549,9 +3698,14 @@ class DeepAgent(BaseAgent):
+                         source_metadata=source,
+                     )
+                 )
+-        except asyncio.CancelledError:
++        except asyncio.CancelledError as error:
++            if work.is_input_continuation:
++                work.query._reject_claim(error)
+             logger.info("[DeepAgent] round cancelled")
+-        except Exception:
++        except Exception as error:
++            if work.is_input_continuation and not work.query.claimed:
++                work.query._reject_claim(error)
++                return
+             logger.exception("[DeepAgent] round execution failed")
+             self._emit_interaction_event(
+                 InteractionEvent.execution_error(
+@@ -3561,7 +3715,9 @@ class DeepAgent(BaseAgent):
+                 )
+             )
+         finally:
+-            self._event_manager.mark_finished(work)
++            if work.is_input_continuation and not work.query.claimed:
++                work.query._reject_claim(AgentInputError("pending_owner_finished_without_claim"))
++            self._event_manager.mark_finished(work, keep_pending=self._managed_pending_input() is not None)
+             if session is not None:
+                 emitted = await self._emit_round_boundary(session)
+                 if not emitted:
+diff --git a/openjiuwen/harness/schema/interaction.py b/openjiuwen/harness/schema/interaction.py
+index fb010592..2b196fa8 100644
+--- a/openjiuwen/harness/schema/interaction.py
++++ b/openjiuwen/harness/schema/interaction.py
+@@ -11,6 +11,7 @@ from __future__ import annotations
+ 
+ import asyncio
+ import copy
++import dataclasses
+ import uuid
+ from dataclasses import dataclass, field
+ from enum import Enum
+@@ -42,6 +43,31 @@ def _source_metadata_for_run(
+     return _copy_json_mapping(source, max_bytes=4096)
+ 
+ 
++def _execution_origin_for_run(run_context, *, session_id, kind, request_id=None):
++    """Freeze identities from the actual SDK work/task, before mutable rails."""
++    from openjiuwen.core.single_agent.interrupt.state import copy_execution_origin
++
++    extra = run_context.get("extra", {}) if isinstance(run_context, dict) else getattr(run_context, "extra", {})
++    source = extra.get("source_metadata", {}) if isinstance(extra, dict) else {}
++    managed = isinstance(source, dict) and bool(source.get("source_binding_id"))
++    try:
++        context = dataclasses.asdict(run_context) if dataclasses.is_dataclass(run_context) else copy.deepcopy(run_context)
++        if context is not None:
++            reason = context.get("reason")
++            if isinstance(reason, Enum):
++                context["reason"] = reason.value
++            if isinstance(context.get("extra"), dict):
++                context["extra"].pop("_interaction_request_id", None)
++        return copy_execution_origin(dict(kind=kind, request_id=request_id if kind == "user" else None,
++                                          session_id=session_id, run_context=context))
++    except (ValueError, TypeError, RecursionError):
++        if managed:
++            raise
++        # Legacy callers may carry process-local objects in RunContext.extra.
++        # They keep their original path, without manufacturing a strict origin.
++        return None
++
++
+ class InteractionPhase(str, Enum):
+     """Internal lifecycle phase of one session-scoped interaction loop."""
+ 
+@@ -82,6 +108,7 @@ class RoundWorkItem:
+     inputs: Dict[str, object]
+     context: Dict[str, object] = field(default_factory=dict)
+     is_follow_up: bool = False
++    is_input_continuation: bool = False
+ 
+     @classmethod
+     def user(
+@@ -125,6 +152,18 @@ class RoundWorkItem:
+             context=context,
+         )
+ 
++    @classmethod
++    def continuation(cls, *, query, origin):
++        """Continue the original work; the reply request supplies no new identity."""
++        context = copy.deepcopy(origin["run_context"])
++        inputs = {"query": query, "conversation_id": origin["session_id"],
++                  "run": {"kind": "goal" if origin["kind"] == "goal" else "normal", "context": context}}
++        work_context = {"reset_loop": False}
++        if origin["kind"] == "goal":
++            work_context = {**(context.get("extra") or {}), **context, "reset_loop": False}
++        return cls(kind=origin["kind"], request_id=origin["request_id"], inputs=copy.deepcopy(inputs),
++                   context=work_context, is_input_continuation=True)
++
+     @property
+     def query(self) -> object:
+         """The task-loop query; intentionally derived from ``inputs`` only."""
+@@ -137,7 +176,8 @@ class RoundWorkItem:
+     def output_source_metadata(self, *, task_id: str, session_id: str):
+         """Return this work's public provenance, independently of its reader."""
+         run = self.inputs.get("run") or {}
+-        context = self.context if self.kind == "goal" else run.get("context", {})
++        context = (self.context if self.kind == "goal" and not self.is_input_continuation
++                   else run.get("context", {}))
+         return _source_metadata_for_run(
+             context, session_id=session_id, task_id=task_id, run_kind=self.kind,
+             request_id=self.request_id,
+diff --git a/openjiuwen/harness/task_loop/event_manager.py b/openjiuwen/harness/task_loop/event_manager.py
+index 4d10138f..e05dda95 100644
+--- a/openjiuwen/harness/task_loop/event_manager.py
++++ b/openjiuwen/harness/task_loop/event_manager.py
+@@ -47,7 +47,21 @@ class EventManager:
+         logger.debug("[EventManager] goal work queued: goal_id=%s revision=%s", goal_id, revision)
+         return True
+ 
+-    def next_work(self) -> Optional[RoundWorkItem]:
++    def push_resume(self, work: RoundWorkItem) -> None:
++        if not work.is_input_continuation:
++            raise ValueError("push_resume requires an input continuation")
++        queue = self._goal_queue if work.kind == "goal" else self._user_queue
++        queue.appendleft(work)
++
++    def next_work(self, *, input_only: bool = False) -> Optional[RoundWorkItem]:
++        if input_only:
++            for queue in (self._user_queue, self._goal_queue):
++                for work in queue:
++                    if work.is_input_continuation:
++                        queue.remove(work)
++                        self._dequeued = work
++                        return work
++            return None
+         if self._user_queue:
+             self._dequeued = self._user_queue.popleft()
+             return self._dequeued
+@@ -61,11 +75,13 @@ class EventManager:
+             self._dequeued = None
+         self._active = work
+ 
+-    def mark_finished(self, work: RoundWorkItem) -> None:
+-        if self._active == work:
++    def mark_finished(self, work: RoundWorkItem, *, keep_pending: bool = False) -> None:
++        if self._active == work and not keep_pending:
+             self._active = None
+ 
+-    def has_pending_work(self) -> bool:
++    def has_pending_work(self, *, input_only: bool = False) -> bool:
++        if input_only:
++            return any(work.is_input_continuation for work in (*self._user_queue, *self._goal_queue))
+         return bool(self._user_queue or self._goal_queue)
+ 
+     def has_pending_user_work(self) -> bool:
+@@ -116,6 +132,7 @@ class EventManager:
+             same_session = work.context.get("session_id") == session_id
+             same_goal = goal_id is None or work.context.get("goal_id") == goal_id
+             if same_session and same_goal:
++                self._reject_discarded(work)
+                 continue
+             kept.append(work)
+         self._goal_queue = kept
+@@ -135,9 +152,24 @@ class EventManager:
+         The durable GoalRecord deliberately survives.  A later GOAL send
+         recreates its next work item after a frontend has attached again.
+         """
++        for work in (*self._user_queue, *self._goal_queue):
++            self._reject_discarded(work)
+         self._user_queue.clear()
+         self._goal_queue.clear()
+ 
++    @staticmethod
++    def _reject_discarded(work, error=None):
++        if work.is_input_continuation:
++            from openjiuwen.core.session.interaction.interactive_input import AgentInputError
++            work.query._reject_claim(error if error is not None else AgentInputError("pending_input_invalidated"))
++
++    def discard_input_work(self, error=None) -> None:
++        for queue in (self._user_queue, self._goal_queue):
++            for work in list(queue):
++                if work.is_input_continuation:
++                    queue.remove(work)
++                    self._reject_discarded(work, error)
++
+     @property
+     def active_work(self) -> Optional[RoundWorkItem]:
+         return self._active
+diff --git a/openjiuwen/harness/task_loop/task_loop_event_executor.py b/openjiuwen/harness/task_loop/task_loop_event_executor.py
+index 442a6136..e9a1945d 100644
+--- a/openjiuwen/harness/task_loop/task_loop_event_executor.py
++++ b/openjiuwen/harness/task_loop/task_loop_event_executor.py
+@@ -40,7 +40,7 @@ from openjiuwen.core.single_agent.rail.base import (
+     AgentCallbackEvent,
+     TaskIterationInputs,
+ )
+-from openjiuwen.harness.schema.interaction import _source_metadata_for_run
++from openjiuwen.harness.schema.interaction import _source_metadata_for_run, _execution_origin_for_run
+ 
+ if TYPE_CHECKING:
+     from openjiuwen.harness.deep_agent import (
+@@ -144,6 +144,13 @@ class TaskLoopEventExecutor(TaskExecutor):
+             goal_id=context_fields.get("goal_id") if is_goal and isinstance(context_fields, dict) else None,
+             revision=context_fields.get("revision") if is_goal and isinstance(context_fields, dict) else None,
+         )
++        request_id = extra.get("_interaction_request_id") if isinstance(extra, dict) else None
++        active = agent.active_round
++        if active is not None and active.task_id == task_id and not is_goal:
++            request_id = active.work.request_id
++        origin = _execution_origin_for_run(
++            task_run_context, session_id=cid, kind="goal" if is_goal else "user", request_id=request_id,
++        )
+         if source is not None:
+             session = session.with_source_metadata(source)
+ 
+@@ -236,7 +243,7 @@ class TaskLoopEventExecutor(TaskExecutor):
+         after_fired = False
+         try:
+             result = await agent.react_agent.invoke(
+-                effective, session, _streaming=True
++                effective, session, _streaming=True, _execution_origin=origin
+             )
+ 
+             # Mark completed in TaskPlan (skip for interrupt)
+diff --git a/tests/unit_tests/agent/react_agent/interrupt/test_exact_agent_input.py b/tests/unit_tests/agent/react_agent/interrupt/test_exact_agent_input.py
+new file mode 100644
+index 00000000..ec0ef086
+--- /dev/null
++++ b/tests/unit_tests/agent/react_agent/interrupt/test_exact_agent_input.py
+@@ -0,0 +1,469 @@
++# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
++"""Real ReAct/model/tool/state ownership for exact human input admission."""
++
++import asyncio
++import copy
++import pickle
++from types import SimpleNamespace
++from uuid import uuid4
++
++import pytest
++import pytest_asyncio
++
++from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
++from openjiuwen.core.foundation.llm import AssistantMessage, AssistantMessageChunk, Model, ModelClientConfig, ModelRequestConfig, ToolCall
++from openjiuwen.core.foundation.tool import Tool, ToolCard
++from openjiuwen.core.runner import Runner
++from openjiuwen.core.runner.callback import AsyncCallbackFramework
++from openjiuwen.core.session import InteractiveInput
++from openjiuwen.core.session.agent import create_agent_session
++from openjiuwen.core.session.checkpointer import CheckpointerFactory
++from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
++from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
++from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
++from openjiuwen.core.single_agent.schema.agent_card import AgentCard
++from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
++
++
++@pytest_asyncio.fixture
++async def real_agent(monkeypatch, tmp_path):
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.setattr(Runner, "callback_framework", AsyncCallbackFramework())
++    monkeypatch.setattr(CheckpointerFactory, "_default_checkpointer", InMemoryCheckpointer())
++    effects, responses, provider_calls = [], [], []
++    tool_name = "exact_input_effect_" + uuid4().hex
++    call_id = "provider-reused-call-id"
++
++    class RecordingTool(Tool):
++        def __init__(self):
++            super().__init__(ToolCard(id=tool_name, name=tool_name, description="Controlled external effect",
++                input_params={"type": "object", "properties": {"target": {"type": "string"}},
++                              "required": ["target"]}))
++
++        async def invoke(self, inputs, **kwargs):
++            effects.append(inputs["target"])
++            return {"applied": inputs["target"]}
++
++        async def stream(self, inputs, **kwargs):
++            yield await self.invoke(inputs, **kwargs)
++
++    class RecordingClient:
++        async def invoke(self, messages=None, **kwargs):
++            provider_calls.append(len(messages or []))
++            assert responses, "Unexpected provider call"
++            return responses.pop(0)
++
++        async def stream(self, messages=None, **kwargs):
++            message = await self.invoke(messages=messages, **kwargs)
++            yield AssistantMessageChunk(**message.model_dump())
++
++    monkeypatch.setattr("openjiuwen.core.foundation.llm.model.create_model_client", lambda **kwargs: RecordingClient())
++    model = Model(model_config=ModelRequestConfig(model="exact-input-model"),
++        model_client_config=ModelClientConfig(client_provider="OpenAI", api_key="test-only",
++                                               api_base="http://127.0.0.1:1"))
++    card = AgentCard(id="exact-input-" + uuid4().hex)
++    agent = ReActAgent(card=card)
++    agent.configure(ReActAgentConfig(model_name="exact-input-model", max_iterations=3,
++        kv_cache_affinity_config=KVCacheAffinityConfig(enable_kv_cache_release=False, enable_kv_cache_affinity=False)))
++    agent.set_llm(model)
++    tool = RecordingTool()
++    Runner.resource_mgr.add_tool(tool)
++    agent.ability_manager.add(tool.card)
++    await agent.register_rail(ConfirmInterruptRail(tool_names=[tool_name]))
++    session = create_agent_session(session_id=card.id, card=card)
++    await session.pre_run(inputs={})
++
++    async def interrupt(target="A", **kwargs):
++        responses.append(AssistantMessage(content="", tool_calls=[ToolCall(
++            id=call_id, type="function", name=tool_name, arguments='{"target":"' + target + '"}')]))
++        return await agent.invoke({"query": "Execute " + target}, session, **kwargs)
++
++    yield SimpleNamespace(agent=agent, session=session, effects=effects, responses=responses,
++                          provider_calls=provider_calls, model=model, interrupt=interrupt, call_id=call_id, tool_name=tool_name)
++    await session.post_run()
++    Runner.resource_mgr.remove_tool(tool_name)
++
++
++def answer(token, call_id, *, before_effect=None, prepare_effect=None):
++    value = InteractiveInput(expected_pending_token=token, before_effect=before_effect, prepare_effect=prepare_effect)
++    value.update(call_id, {"approved": True, "auto_confirm": False, "feedback": ""})
++    return value
++
++
++@pytest.mark.asyncio
++async def test_reused_provider_id_cannot_replay_previous_pending_generation(real_agent):
++    fixture = real_agent
++    first = await fixture.interrupt("A")
++    token_a = first["pending_token"]
++    old_answer = answer(token_a, fixture.call_id)
++    fixture.responses.append(AssistantMessage(content="A done"))
++    assert (await fixture.agent.invoke({"query": old_answer}, fixture.session))["output"] == "A done"
++    assert fixture.effects == ["A"]
++    assert fixture.session.get_state(INTERRUPTION_KEY) is None
++
++    second = await fixture.interrupt("B")
++    token_b = second["pending_token"]
++    assert token_a and token_b and token_a != token_b
++    state = fixture.session.get_state(INTERRUPTION_KEY)
++    assert state.pending_token == token_b
++    assert second["state"][0].payload.value.pending_token == token_b
++    before = state.model_dump()
++    history_before = messages(fixture)
++    provider_count = len(fixture.provider_calls)
++    from openjiuwen.core.single_agent.interrupt.response import AgentInputError
++
++    with pytest.raises(AgentInputError, match="pending_token_mismatch"):
++        await fixture.agent.invoke({"query": old_answer}, fixture.session)
++    assert fixture.session.get_state(INTERRUPTION_KEY).model_dump() == before
++    assert messages(fixture) == history_before
++    assert fixture.effects == ["A"] and len(fixture.provider_calls) == provider_count
++    fixture.responses.append(AssistantMessage(content="B done"))
++    assert (await fixture.agent.invoke({"query": answer(token_b, fixture.call_id)}, fixture.session))["output"] == "B done"
++    assert fixture.effects == ["A", "B"]
++
++
++def messages(fixture):
++    context = fixture.agent.context_engine.get_context(session_id=fixture.session.get_session_id())
++    return [item.model_dump() for item in context.get_messages()]
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("mode", ["raise", "false", "true", "awaitable"])
++async def test_guard_rejects_without_pending_history_or_effect_mutation(real_agent, mode):
++    from openjiuwen.core.single_agent.interrupt.response import AgentInputError
++
++    fixture = real_agent
++    pending = await fixture.interrupt()
++    state_before, history_before = fixture.session.get_state(INTERRUPTION_KEY).model_dump(), messages(fixture)
++    error = PermissionError("revoked")
++
++    async def asynchronous():
++        raise AssertionError("Must not await the final guard")
++
++    def guard():
++        if mode == "raise":
++            raise error
++        return {"false": False, "true": True}.get(mode) if mode != "awaitable" else asynchronous()
++
++    with pytest.raises(PermissionError if mode == "raise" else AgentInputError) as caught:
++        await fixture.agent.invoke({"query": answer(pending["pending_token"], fixture.call_id,
++                                                    before_effect=guard)}, fixture.session)
++    if mode == "raise":
++        assert caught.value is error
++    assert fixture.session.get_state(INTERRUPTION_KEY).model_dump() == state_before
++    assert messages(fixture) == history_before
++    assert fixture.effects == [] and len(fixture.provider_calls) == 1
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("cancel", [False, True])
++async def test_async_prepare_revocation_or_cancel_preserves_retry(real_agent, cancel):
++    fixture = real_agent
++    pending = await fixture.interrupt()
++    state_before, history_before = fixture.session.get_state(INTERRUPTION_KEY).model_dump(), messages(fixture)
++    entered, release = asyncio.Event(), asyncio.Event()
++
++    async def prepare():
++        entered.set()
++        await release.wait()
++        raise PermissionError("revoked after preparation")
++
++    task = asyncio.create_task(fixture.agent.invoke({"query": answer(
++        pending["pending_token"], fixture.call_id, prepare_effect=prepare)}, fixture.session))
++    await asyncio.wait_for(entered.wait(), 5)
++    if cancel:
++        task.cancel()
++    else:
++        release.set()
++    with pytest.raises(asyncio.CancelledError if cancel else PermissionError):
++        await task
++    assert fixture.session.get_state(INTERRUPTION_KEY).model_dump() == state_before
++    assert messages(fixture) == history_before
++    assert fixture.effects == [] and len(fixture.provider_calls) == 1
++    fixture.responses.append(AssistantMessage(content="retry done"))
++    await fixture.agent.invoke({"query": answer(pending["pending_token"], fixture.call_id)}, fixture.session)
++    assert fixture.effects == ["A"]
++
++
++@pytest.mark.asyncio
++async def test_concurrent_exact_claims_execute_tool_once(real_agent):
++    from openjiuwen.core.single_agent.interrupt.response import AgentInputError
++
++    fixture = real_agent
++    pending = await fixture.interrupt()
++    reached, release = 0, asyncio.Event()
++
++    async def prepare():
++        nonlocal reached
++        reached += 1
++        if reached == 2:
++            release.set()
++        await release.wait()
++
++    fixture.responses.append(AssistantMessage(content="done once"))
++    results = await asyncio.gather(*(fixture.agent.invoke({"query": answer(
++        pending["pending_token"], fixture.call_id, prepare_effect=prepare)}, fixture.session)
++        for _ in range(2)), return_exceptions=True)
++    assert sum(isinstance(item, AgentInputError) for item in results) == 1
++    assert fixture.effects == ["A"] and len(fixture.provider_calls) == 2
++    assert fixture.session.get_state(INTERRUPTION_KEY) is None
++
++
++@pytest.mark.asyncio
++async def test_reentrant_guard_cannot_claim_same_pending(real_agent):
++    from openjiuwen.core.single_agent.interrupt.response import AgentInputError
++
++    fixture = real_agent
++    pending = await fixture.interrupt()
++    snapshot = fixture.session.get_state(INTERRUPTION_KEY)
++    seen = []
++
++    def guard():
++        with pytest.raises(AgentInputError, match="pending_claim_in_progress"):
++            fixture.agent._hitl_handler.claim_exact(answer(pending["pending_token"], fixture.call_id),
++                                                    fixture.session, snapshot)
++        seen.append("blocked")
++
++    fixture.responses.append(AssistantMessage(content="done"))
++    await fixture.agent.invoke({"query": answer(pending["pending_token"], fixture.call_id, before_effect=guard)},
++                                fixture.session)
++    assert fixture.effects == ["A"] and seen == ["blocked"]
++
++
++@pytest.mark.asyncio
++async def test_partial_reply_rotates_pending_token(real_agent):
++    from openjiuwen.core.single_agent.interrupt.response import AgentInputError
++
++    fixture = real_agent
++    fixture.responses.append(AssistantMessage(content="", tool_calls=[ToolCall(
++        id=target, type="function", name=fixture.tool_name, arguments='{"target":"' + target + '"}')
++        for target in ("A", "B")]))
++    first = await fixture.agent.invoke({"query": "Execute both"}, fixture.session)
++    partial = await fixture.agent.invoke({"query": answer(first["pending_token"], "A")}, fixture.session)
++    assert partial["result_type"] == "interrupt" and partial["interrupt_ids"] == ["B"]
++    assert partial["pending_token"] != first["pending_token"]
++    assert fixture.effects == ["A"] and len(fixture.provider_calls) == 1
++    with pytest.raises(AgentInputError, match="pending_token_mismatch"):
++        await fixture.agent.invoke({"query": answer(first["pending_token"], "B")}, fixture.session)
++    fixture.responses.append(AssistantMessage(content="both done"))
++    await fixture.agent.invoke({"query": answer(partial["pending_token"], "B")}, fixture.session)
++    assert fixture.effects == ["A", "B"]
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("legacy", [False, True])
++async def test_old_pending_without_token_is_legacy_only(real_agent, legacy):
++    from openjiuwen.core.single_agent.interrupt.response import AgentInputError
++
++    fixture = real_agent
++    original = await fixture.interrupt()
++    old_state = fixture.session.get_state(INTERRUPTION_KEY)
++    old_state.pending_token = None
++    fixture.agent._hitl_handler.save(old_state, fixture.session)
++    user_input = answer(None if legacy else original["pending_token"], fixture.call_id)
++    if legacy:
++        fixture.responses.append(AssistantMessage(content="legacy done"))
++        await fixture.agent.invoke({"query": user_input}, fixture.session)
++        assert fixture.effects == ["A"]
++    else:
++        with pytest.raises(AgentInputError, match="pending_input_missing"):
++            await fixture.agent.invoke({"query": user_input}, fixture.session)
++        assert fixture.effects == [] and len(fixture.provider_calls) == 1
++
++
++def test_trusted_callbacks_are_copied_but_never_serialized():
++    def before():
++        return None
++
++    def prepare():
++        return None
++    value = answer("token", "tool", before_effect=before, prepare_effect=prepare)
++    clone = copy.deepcopy(value)
++    assert clone.before_effect is before and clone.prepare_effect is prepare
++    assert clone.user_inputs == value.user_inputs and clone.user_inputs is not value.user_inputs
++    for serialized in (value.model_dump(), value.model_dump_json(), repr(value)):
++        assert "before_effect" not in str(serialized) and "prepare_effect" not in str(serialized)
++    restored = pickle.loads(pickle.dumps(value))
++    assert restored.expected_pending_token == "token"
++    assert restored.before_effect is None and restored.prepare_effect is None and not restored.claimed
++
++
++@pytest.mark.asyncio
++async def test_exact_stream_preclaim_rejection_preserves_history_and_original_error(real_agent):
++    f = real_agent
++    pending = await f.interrupt()
++    before = messages(f)
++    error = RuntimeError('stream permission revoked')
++    def guard():
++        raise error
++    value = answer(pending['pending_token'], f.call_id, before_effect=guard)
++    with pytest.raises(RuntimeError) as caught:
++        async for _ in f.agent.stream({'query': value}, f.session):
++            pass
++    assert caught.value is error
++    assert messages(f) == before and not f.effects
++    assert f.session.get_state(INTERRUPTION_KEY).pending_token == pending['pending_token']
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize('bad', ['foreign-id', 'empty', 'raw', 'scope'])
++async def test_exact_preflight_rejects_unrelated_input_before_callback(real_agent, bad):
++    from openjiuwen.core.session.interaction.interactive_input import AgentInputError
++    f = real_agent
++    origin = {'kind': 'user', 'request_id': 'original', 'session_id': f.session.get_session_id(),
++              'run_context': None}
++    pending = await f.interrupt(_execution_origin=origin)
++    calls = []
++    value = answer(pending['pending_token'], f.call_id, before_effect=lambda: calls.append(True))
++    if bad == 'foreign-id':
++        value.user_inputs = {'foreign': {'approved': True}}
++    elif bad == 'empty':
++        value.user_inputs.clear()
++    elif bad == 'raw':
++        value.raw_inputs = 'yes'
++    else:
++        state = f.session.get_state(INTERRUPTION_KEY)
++        state.execution_origin['session_id'] = 'other-session'
++        f.session.update_state({INTERRUPTION_KEY: state})
++    before = f.session.get_state(INTERRUPTION_KEY)
++    with pytest.raises(AgentInputError):
++        await f.agent.invoke({'query': value}, f.session)
++    assert f.session.get_state(INTERRUPTION_KEY) == before and not f.effects and not calls
++
++
++@pytest.mark.asyncio
++async def test_sync_guard_invalidation_is_rechecked_before_claim(real_agent):
++    from openjiuwen.core.session.interaction.interactive_input import AgentInputError
++    f = real_agent
++    pending = await f.interrupt()
++    def invalidate():
++        f.agent._hitl_handler.clear(f.session)
++    value = answer(pending['pending_token'], f.call_id, before_effect=invalidate)
++    with pytest.raises(AgentInputError, match='pending_input_missing'):
++        await f.agent.invoke({'query': value}, f.session)
++    assert not value.claimed and not f.effects
++
++
++@pytest.mark.asyncio
++async def test_context_preparation_failure_does_not_clear_exact_state(real_agent, monkeypatch):
++    f = real_agent
++    pending = await f.interrupt()
++    before = messages(f)
++    error = RuntimeError('context preparation failed')
++    async def fail(*args, **kwargs):
++        raise error
++    monkeypatch.setattr(f.agent.context_engine, 'create_context', fail)
++    with pytest.raises(RuntimeError) as caught:
++        await f.agent.invoke({'query': answer(pending['pending_token'], f.call_id)}, f.session)
++    assert caught.value is error
++    assert f.session.get_state(INTERRUPTION_KEY).pending_token == pending['pending_token']
++    assert messages(f) == before and not f.effects
++
++
++@pytest_asyncio.fixture
++async def nested(real_agent):
++    f = real_agent
++    child = f.agent
++    delegate_name = 'delegate_' + uuid4().hex
++    class Delegate(Tool):
++        def __init__(self):
++            super().__init__(ToolCard(id=delegate_name, name=delegate_name, description='Original child',
++                input_params={'type': 'object', 'properties': {'query': {'type': 'string'}}}))
++        async def invoke(self, inputs, **kwargs):
++            return await child.invoke(inputs, f.session)
++        async def stream(self, inputs, **kwargs):
++            yield await self.invoke(inputs, **kwargs)
++    tool = Delegate()
++    Runner.resource_mgr.add_tool(tool)
++    f.parent = ReActAgent(card=AgentCard(id='parent-' + uuid4().hex))
++    f.parent.configure(ReActAgentConfig(model_name='exact-input-model', max_iterations=3,
++        kv_cache_affinity_config=KVCacheAffinityConfig(enable_kv_cache_release=False, enable_kv_cache_affinity=False)))
++    f.parent.set_llm(f.model)
++    f.parent.ability_manager.add(tool.card)
++    f.parent_session = create_agent_session(session_id=f.parent.card.id, card=f.parent.card)
++    await f.parent_session.pre_run(inputs={})
++    f.responses.extend([
++        AssistantMessage(content='', tool_calls=[ToolCall(id='delegate-call', type='function',
++            name=delegate_name, arguments='{"query":"Execute A"}')]),
++        AssistantMessage(content='', tool_calls=[ToolCall(id=f.call_id, type='function',
++            name=f.tool_name, arguments='{"target":"A"}')]),
++    ])
++    f.parent_pending = await f.parent.invoke({'query': 'Execute through child'}, f.parent_session)
++    yield f
++    await f.parent_session.post_run()
++    Runner.resource_mgr.remove_tool(delegate_name)
++
++
++@pytest.mark.asyncio
++async def test_nested_exact_uses_saved_child_token_and_parent_guard_once(nested):
++    f = nested
++    parent_token = f.parent_pending['pending_token']
++    child_token = f.session.get_state(INTERRUPTION_KEY).pending_token
++    assert child_token != parent_token
++    calls = []
++    f.responses.extend([AssistantMessage(content='Child done'), AssistantMessage(content='Parent done')])
++    result = await f.parent.invoke({'query': answer(parent_token, f.call_id,
++        before_effect=lambda: calls.append(True))}, f.parent_session)
++    assert result['output'] == 'Parent done'
++    assert f.effects == ['A'] and calls == [True]
++    assert f.session.get_state(INTERRUPTION_KEY) is None
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize('bad', ['missing', 'mixed'])
++async def test_nested_missing_or_mixed_saved_child_tokens_preserve_parent(nested, bad):
++    from openjiuwen.core.session.interaction.interactive_input import AgentInputError
++    f = nested
++    state = f.parent_session.get_state(INTERRUPTION_KEY)
++    entry = next(iter(state.interrupted_tools.values()))
++    request = entry.interrupt_requests[f.call_id]
++    if bad == 'missing':
++        request.pending_token = None
++    else:
++        other = request.model_copy(deep=True)
++        other.pending_token = 'other-child-token'
++        entry.interrupt_requests['second-child-id'] = other
++    f.parent_session.update_state({INTERRUPTION_KEY: state})
++    count = len(f.provider_calls)
++    with pytest.raises(AgentInputError, match='pending_child_token_invalid'):
++        await f.parent.invoke({'query': answer(state.pending_token, f.call_id)}, f.parent_session)
++    assert f.parent_session.get_state(INTERRUPTION_KEY) == state and not f.effects
++    assert len(f.provider_calls) == count
++
++
++@pytest.mark.asyncio
++async def test_nested_stale_child_token_does_not_consume_new_child(nested):
++    f = nested
++    child_a = f.session.get_state(INTERRUPTION_KEY).pending_token
++    f.responses.append(AssistantMessage(content='Child A done separately'))
++    await f.agent.invoke({'query': answer(child_a, f.call_id)}, f.session)
++    child_b = await f.interrupt('B')
++    before = f.session.get_state(INTERRUPTION_KEY)
++    history = messages(f)
++    calls = len(f.provider_calls)
++    f.responses.append(AssistantMessage(content='The child reply was rejected; task incomplete'))
++    carrier = answer(f.parent_pending['pending_token'], f.call_id)
++    result = await f.parent.invoke({'query': carrier}, f.parent_session)
++    assert carrier.claimed and f.parent_session.get_state(INTERRUPTION_KEY) is None
++    assert 'incomplete' in result['output']
++    assert f.session.get_state(INTERRUPTION_KEY) == before and before.pending_token == child_b['pending_token']
++    assert messages(f) == history and f.effects == ['A']
++    assert len(f.provider_calls) == calls + 1  # only the parent summarizes its execution error
++
++
++@pytest.mark.asyncio
++async def test_canonical_token_overrides_metadata_and_reemission_preserves_generation(real_agent):
++    from openjiuwen.core.single_agent.rail.base import InvokeInputs
++    f = real_agent
++    first = await f.interrupt()
++    state = f.session.get_state(INTERRUPTION_KEY)
++    request = first['state'][0].payload.value.model_copy(deep=True)
++    request.metadata['pending_token'] = 'self-reported'
++    result = await f.agent._hitl_handler.commit_interrupt(state,
++        f.agent.context_engine.get_context(session_id=f.session.get_session_id()), f.session,
++        InvokeInputs(query='ignored'), [(f.call_id, request)])
++    assert result['pending_token'] == first['pending_token']
++    typed = result['state'][0].payload.value
++    assert typed.pending_token == first['pending_token'] and 'pending_token' not in typed.metadata
++    assert result['state'][0].model_dump()['payload']['value']['pending_token'] == first['pending_token']
++    assert f.session.get_state(INTERRUPTION_KEY).pending_token == first['pending_token']
+diff --git a/tests/unit_tests/harness/test_deep_agent_exact_input.py b/tests/unit_tests/harness/test_deep_agent_exact_input.py
+new file mode 100644
+index 00000000..33f86c03
+--- /dev/null
++++ b/tests/unit_tests/harness/test_deep_agent_exact_input.py
+@@ -0,0 +1,415 @@
++# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
++"""Original Deep supervisor, scheduler, ReAct and real input claim integration."""
++import asyncio
++import copy
++
++import pytest
++import pytest_asyncio
++
++from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall
++from openjiuwen.harness.deep_agent import DeepAgent, DeepAgentConfig
++from openjiuwen.harness.schema.interaction import SendInputRequest
++from tests.unit_tests.agent.react_agent.interrupt.test_exact_agent_input import real_agent, answer  # noqa: F401
++
++
++@pytest_asyncio.fixture
++async def deep(real_agent):  # noqa: F811 - imported pytest fixture
++    f = real_agent
++    f.deep = DeepAgent(f.agent.card).configure(DeepAgentConfig(
++        model=f.model, enable_task_loop=True, auto_create_workspace=False, enable_read_image_multimodal=False))
++    f.deep.set_react_agent(f.agent, initialized=True)
++    f.deep.ability_manager = f.agent.ability_manager
++    await f.deep.start(session=f.session)
++    f.chunks = []
++
++    async def collect():
++        async for chunk in f.stream:
++            f.chunks.append(chunk)
++    f.collect = collect
++    f.reader = None
++    yield f
++    await f.deep.stop()
++    if f.reader is not None:
++        await asyncio.wait_for(f.reader, 3)
++
++
++async def until(predicate):
++    async with asyncio.timeout(5):
++        while not predicate():
++            await asyncio.sleep(0.005)
++
++
++def context(binding='original-binding'):
++    return {'extra': {'source_metadata': {'source_binding_id': binding}, 'private': 'keep-original'}}
++
++
++async def start_pending(f, *, managed=True, kind='user'):
++    f.responses.append(AssistantMessage(content='', tool_calls=[ToolCall(
++        id=f.call_id, type='function', name=f.tool_name, arguments='{"target":"A"}')]))
++    if kind == 'user':
++        inputs = {'query': 'Execute A'}
++        if managed:
++            inputs['run'] = {'kind': 'normal', 'context': context()}
++        await f.deep.send_input(SendInputRequest(request_id='original-request', inputs=inputs))
++    else:
++        await f.deep.goal_manager.set('Execute A', run_context=context() if managed else None)
++    f.stream = await f.deep.attach_output()
++    f.reader = asyncio.create_task(f.collect())
++    await until(lambda: f.session.get_state('__react_agent_interruption__') is not None or f.reader.done())
++    await until(lambda: f.deep._active_interaction_round is None)
++    return f.deep.peek_pending_input()
++
++
++@pytest.mark.asyncio
++async def test_managed_user_same_reader_and_original_work_receipt(deep):
++    f = deep
++    pending = await start_pending(f)
++    assert pending and pending['execution_origin']['request_id'] == 'original-request'
++    assert pending['execution_origin']['kind'] == 'user'
++    assert not f.reader.done()
++    original = copy.deepcopy(pending)
++    pending['execution_origin']['run_context']['extra']['private'] = 'tampered'
++    assert f.deep.peek_pending_input() == original
++    f.responses.append(AssistantMessage(content='A done'))
++    reply = answer(original['pending_token'], f.call_id)
++    receipt = await asyncio.wait_for(f.deep.send_input(SendInputRequest(
++        request_id='reply-not-source', inputs={'query': reply})), 5)
++    assert receipt == {'accepted': True, 'pending_token': original['pending_token']}
++    await asyncio.wait_for(f.reader, 5)
++    assert f.effects == ['A']
++    assert f.deep.peek_pending_input() is None
++
++
++def source_chunks(f):
++    result = []
++    for chunk in f.chunks:
++        payload = getattr(chunk, 'payload', None)
++        if isinstance(payload, dict) and payload.get('source_task_id'):
++            result.append(payload)
++        elif getattr(payload, 'metadata', None):
++            result.append(payload.metadata)
++    return result
++
++
++@pytest.mark.asyncio
++async def test_ordinary_queued_user_waits_for_managed_claim_and_keeps_own_source(deep):
++    f = deep
++    pending = await start_pending(f)
++    count = len(f.provider_calls)
++    await f.deep.send_input(SendInputRequest(request_id='next-user', inputs={
++        'query': 'Next user task', 'run': {'context': context('next-binding')}}))
++    await asyncio.sleep(.04)
++    assert f.deep.peek_pending_input() == pending and len(f.provider_calls) == count and not f.effects
++    f.responses.extend([AssistantMessage(content='A done'), AssistantMessage(content='Next done')])
++    assert (await f.deep.send_input(SendInputRequest(request_id='reply', inputs={
++        'query': answer(pending['pending_token'], f.call_id)})))['accepted']
++    await asyncio.wait_for(f.reader, 5)
++    originals = [p for p in source_chunks(f) if p.get('source_binding_id') == 'original-binding']
++    assert len({p['source_task_id'] for p in originals}) == 2
++    assert {p.get('source_request_id') for p in originals} == {'original-request'}
++    assert any(p.get('source_binding_id') == 'next-binding' and p.get('source_request_id') == 'next-user'
++               for p in source_chunks(f))
++    assert f.effects == ['A']
++
++
++@pytest.mark.asyncio
++async def test_managed_goal_claim_completes_original_attempt_on_same_reader(deep):
++    f = deep
++    pending = await start_pending(f, kind='goal')
++    record = f.deep.goal_manager.peek()
++    assert record.attempt_count == 1 and record.last_assessment is None and not f.reader.done()
++    assert pending['execution_origin']['kind'] == 'goal' and pending['execution_origin']['request_id'] is None
++    await asyncio.sleep(.04)
++    assert f.deep.goal_manager.peek().attempt_count == 1 and len(f.provider_calls) == 1
++    f.responses.extend([
++        AssistantMessage(content='', tool_calls=[ToolCall(id='report', type='function',
++            name='submit_goal_report', arguments='{"status":"complete","evidence":"A applied"}')]),
++        AssistantMessage(content='Goal A done'),
++        AssistantMessage(content='{"status":"complete","evidence":"A actually applied"}'),
++    ])
++    receipt = await f.deep.send_input(SendInputRequest(request_id='reply', inputs={
++        'query': answer(pending['pending_token'], f.call_id)}))
++    assert receipt['accepted']
++    await asyncio.wait_for(f.reader, 5)
++    result = f.deep.goal_manager.peek()
++    assert result.status.value == 'completed' and result.attempt_count == 1
++    assert result.goal_id == record.goal_id and result.revision == record.revision
++    assert f.effects == ['A'] and not f.responses
++    sources = [p for p in source_chunks(f) if p.get('source_binding_id') == 'original-binding']
++    assert {p.get('source_run_kind') for p in sources} == {'goal'}
++    assert {p.get('source_request_id') for p in sources} == {None}
++    assert len({p['source_task_id'] for p in sources}) == 2
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize('operation', ['abort', 'clear', 'replace'])
++async def test_goal_invalidation_settles_preclaim_waiter_without_tool_effect(deep, operation):
++    from openjiuwen.core.session.interaction.interactive_input import AgentInputError
++    f = deep
++    pending = await start_pending(f, kind='goal')
++    entered, release = asyncio.Event(), asyncio.Event()
++    async def prepare():
++        entered.set()
++        await release.wait()
++    reply = answer(pending['pending_token'], f.call_id, prepare_effect=prepare)
++    observer = asyncio.create_task(f.deep.send_input(SendInputRequest(request_id='reply', inputs={'query': reply})))
++    await asyncio.wait_for(entered.wait(), 5)
++    if operation == 'abort':
++        await f.deep.goal_manager.pause()
++        await f.deep.cancel_round(reason='host-abort')
++    elif operation == 'clear':
++        await f.deep.goal_manager.clear()
++    else:
++        # Keep replacement work queued while checking invalidation effects.
++        await f.deep.goal_manager.set('Replacement', overwrite_confirmed=True, run_context=context('replacement'))
++        await f.deep.goal_manager.pause()
++    release.set()
++    with pytest.raises((AgentInputError, asyncio.CancelledError)):
++        await asyncio.wait_for(observer, 5)
++    assert not f.effects and not reply.claimed and f.deep.peek_pending_input() is None
++
++
++@pytest.mark.asyncio
++async def test_observer_cancel_does_not_cancel_original_queued_owner(deep):
++    f = deep
++    pending = await start_pending(f)
++    entered, release = asyncio.Event(), asyncio.Event()
++    async def prepare():
++        entered.set()
++        await release.wait()
++    reply = answer(pending['pending_token'], f.call_id, prepare_effect=prepare)
++    observer = asyncio.create_task(f.deep.send_input(SendInputRequest(request_id='reply', inputs={'query': reply})))
++    await asyncio.wait_for(entered.wait(), 5)
++    observer.cancel()
++    with pytest.raises(asyncio.CancelledError):
++        await observer
++    assert not reply.claimed and f.deep.peek_pending_input() == pending
++    f.responses.append(AssistantMessage(content='A done'))
++    release.set()
++    await asyncio.wait_for(f.reader, 5)
++    assert reply.claimed and f.effects == ['A']
++
++
++@pytest.mark.asyncio
++async def test_deep_guard_rejection_preserves_reader_history_and_retry(deep):
++    from tests.unit_tests.agent.react_agent.interrupt.test_exact_agent_input import messages
++    f = deep
++    pending = await start_pending(f)
++    before = messages(f)
++    error = TimeoutError('revoked after asynchronous preparation')
++    async def prepare():
++        await asyncio.sleep(0)
++        raise error
++    with pytest.raises(TimeoutError) as caught:
++        await f.deep.send_input(SendInputRequest(request_id='reply', inputs={
++            'query': answer(pending['pending_token'], f.call_id, prepare_effect=prepare)}))
++    assert caught.value is error
++    assert messages(f) == before and f.deep.peek_pending_input() == pending and not f.reader.done()
++    f.responses.append(AssistantMessage(content='A done'))
++    assert (await f.deep.send_input(SendInputRequest(request_id='retry', inputs={
++        'query': answer(pending['pending_token'], f.call_id)})))['accepted']
++    await asyncio.wait_for(f.reader, 5)
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize('extra', [{'conversation_id': 'wrong'}, {'run': {'context': context('wrong')}}])
++async def test_deep_wrong_scope_context_rejects_before_queue_and_callback(deep, extra):
++    from openjiuwen.core.session.interaction.interactive_input import AgentInputError
++    f = deep
++    pending = await start_pending(f)
++    calls = []
++    reply = answer(pending['pending_token'], f.call_id, before_effect=lambda: calls.append(True))
++    with pytest.raises(AgentInputError):
++        await f.deep.send_input(SendInputRequest(request_id='reply', inputs={'query': reply, **extra}))
++    assert not calls and not f.effects and f.deep.peek_pending_input() == pending
++    assert not f.deep.event_manager.has_pending_work()
++
++
++@pytest.mark.asyncio
++async def test_unbound_legacy_user_still_finishes_reader(deep):
++    f = deep
++    pending = await start_pending(f, managed=False)
++    await asyncio.wait_for(f.reader, 5)
++    assert pending and pending['execution_origin']['run_context'] is None
++    assert not f.effects
++
++
++@pytest.mark.asyncio
++async def test_goal_pause_resume_keeps_parked_attempt_and_pending(deep):
++    f = deep
++    pending = await start_pending(f, kind='goal')
++    original = f.deep.goal_manager.peek()
++    await f.deep.goal_manager.pause()
++    paused = f.deep.goal_manager.peek()
++    assert paused.attempt_count == 1 and paused.status.value == 'paused'
++    assert f.deep.peek_pending_input() == pending
++    resumed = await f.deep.goal_manager.resume()
++    assert resumed.revision == original.revision and resumed.attempt_count == 1
++    assert f.deep.peek_pending_input() == pending
++    await f.deep.goal_manager.clear()
++    await asyncio.wait_for(f.reader, 5)
++
++
++@pytest.mark.asyncio
++async def test_deep_duplicate_queued_strict_input_receives_one_claim(deep):
++    from openjiuwen.core.session.interaction.interactive_input import AgentInputError
++    f = deep
++    pending = await start_pending(f)
++    entered, release = asyncio.Event(), asyncio.Event()
++    async def prepare():
++        entered.set()
++        await release.wait()
++    first = asyncio.create_task(f.deep.send_input(SendInputRequest(request_id='one', inputs={
++        'query': answer(pending['pending_token'], f.call_id, prepare_effect=prepare)})))
++    await asyncio.wait_for(entered.wait(), 5)
++    second = asyncio.create_task(f.deep.send_input(SendInputRequest(request_id='two', inputs={
++        'query': answer(pending['pending_token'], f.call_id)})))
++    await until(lambda: f.deep.event_manager.has_pending_work())
++    f.responses.append(AssistantMessage(content='A done'))
++    release.set()
++    results = await asyncio.gather(first, second, return_exceptions=True)
++    assert sum(isinstance(result, dict) and result.get('accepted') is True for result in results) == 1
++    assert sum(isinstance(result, AgentInputError) for result in results) == 1
++    await asyncio.wait_for(f.reader, 5)
++    assert f.effects == ['A']
++
++
++@pytest.mark.asyncio
++async def test_deep_original_pending_aba_rejects_old_answer(deep):
++    from openjiuwen.core.session.interaction.interactive_input import AgentInputError
++    f = deep
++    first = await start_pending(f)
++    f.responses.append(AssistantMessage(content='A done'))
++    await f.deep.send_input(SendInputRequest(request_id='reply-A', inputs={
++        'query': answer(first['pending_token'], f.call_id)}))
++    await asyncio.wait_for(f.reader, 5)
++    second = await start_pending(f)
++    assert first['pending_token'] != second['pending_token']
++    calls = len(f.provider_calls)
++    with pytest.raises(AgentInputError, match='pending_token_mismatch'):
++        await f.deep.send_input(SendInputRequest(request_id='replay-A', inputs={
++            'query': answer(first['pending_token'], f.call_id)}))
++    assert f.deep.peek_pending_input() == second and len(f.provider_calls) == calls and f.effects == ['A']
++    f.responses.append(AssistantMessage(content='Second A done'))
++    await f.deep.send_input(SendInputRequest(request_id='reply-B', inputs={
++        'query': answer(second['pending_token'], f.call_id)}))
++    await asyncio.wait_for(f.reader, 5)
++    assert f.effects == ['A', 'A']
++
++
++@pytest.mark.asyncio
++async def test_public_abort_invalidates_pending_and_settles_prepare_owner(deep):
++    from openjiuwen.core.session.interaction.interactive_input import AgentInputError
++    f = deep
++    pending = await start_pending(f)
++    entered = asyncio.Event()
++    async def prepare():
++        entered.set()
++        await asyncio.Event().wait()
++    observer = asyncio.create_task(f.deep.send_input(SendInputRequest(request_id='reply', inputs={
++        'query': answer(pending['pending_token'], f.call_id, prepare_effect=prepare)})))
++    await asyncio.wait_for(entered.wait(), 5)
++    await f.deep.abort()
++    with pytest.raises((AgentInputError, asyncio.CancelledError)):
++        await asyncio.wait_for(observer, 5)
++    assert f.deep.peek_pending_input() is None and not f.effects
++
++
++@pytest.mark.asyncio
++async def test_managed_invalid_origin_rejects_before_enqueue_legacy_rich_context_still_runs(deep):
++    f = deep
++    before = context()
++    before['extra']['non_json'] = object()
++    with pytest.raises(ValueError):
++        await f.deep.send_input(SendInputRequest(request_id='managed-bad', inputs={
++            'query': 'bad', 'run': {'context': before}}))
++    assert not f.deep.event_manager.has_pending_work() and not f.provider_calls
++    f.responses.append(AssistantMessage(content='Legacy context accepted'))
++    await f.deep.send_input(SendInputRequest(request_id='legacy', inputs={
++        'query': 'Legacy', 'run': {'context': {'extra': {'non_json': object()}}}}))
++    f.stream = await f.deep.attach_output()
++    f.reader = asyncio.create_task(f.collect())
++    await asyncio.wait_for(f.reader, 5)
++    assert len(f.provider_calls) == 1 and f.deep.peek_pending_input() is None
++
++
++@pytest.mark.asyncio
++async def test_goal_largest_legal_context_has_origin_envelope_room(deep):
++    f = deep
++    import json
++    run_context = context()
++    run_context['extra']['private'] = ''
++    budget = 65536 - len(json.dumps(run_context, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
++    run_context['extra']['private'] = 'x' * budget
++    f.responses.append(AssistantMessage(content='', tool_calls=[ToolCall(
++        id=f.call_id, type='function', name=f.tool_name, arguments='{"target":"A"}')]))
++    await f.deep.goal_manager.set('Goal with full context', run_context=run_context)
++    f.stream = await f.deep.attach_output()
++    f.reader = asyncio.create_task(f.collect())
++    await until(lambda: f.deep.peek_pending_input() is not None)
++    assert f.deep.peek_pending_input()['execution_origin']['run_context']['extra']['private'] == 'x' * budget
++    await f.deep.goal_manager.clear()
++
++
++@pytest.mark.asyncio
++async def test_reply_queued_while_idle_close_waits_is_not_lost(deep, monkeypatch):
++    f = deep
++    pending = await start_pending(f)
++    entered, release = asyncio.Event(), asyncio.Event()
++    original = f.deep._close_idle_output_if_finished
++    async def close_wait():
++        entered.set()
++        await release.wait()
++        await original()
++    monkeypatch.setattr(f.deep, '_close_idle_output_if_finished', close_wait)
++    f.deep._notify_work()
++    await asyncio.wait_for(entered.wait(), 5)
++    observer = asyncio.create_task(f.deep.send_input(SendInputRequest(request_id='reply', inputs={
++        'query': answer(pending['pending_token'], f.call_id)})))
++    await until(lambda: f.deep.event_manager.has_pending_work(input_only=True))
++    f.responses.append(AssistantMessage(content='A done'))
++    release.set()
++    assert (await asyncio.wait_for(observer, 5))['accepted']
++    await asyncio.wait_for(f.reader, 5)
++
++
++@pytest.mark.asyncio
++async def test_goal_execution_failure_after_claim_blocks_original_attempt(deep):
++    f = deep
++    pending = await start_pending(f, kind='goal')
++    receipt = await f.deep.send_input(SendInputRequest(request_id='reply', inputs={
++        'query': answer(pending['pending_token'], f.call_id)}))
++    assert receipt['accepted']
++    await asyncio.wait_for(f.reader, 5)
++    result = f.deep.goal_manager.peek()
++    assert result.status.value == 'blocked' and result.attempt_count == 1
++    assert f.effects == ['A'] and f.deep.peek_pending_input() is None
++
++
++@pytest.mark.asyncio
++async def test_outer_rail_cannot_downgrade_strict_input_to_legacy(deep):
++    from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
++    from openjiuwen.core.session.interaction.interactive_input import AgentInputError
++    f = deep
++    pending = await start_pending(f)
++    async def replace(ctx):
++        ctx.inputs.query = 'approve everything'
++    await f.deep.register_callback(AgentCallbackEvent.BEFORE_INVOKE, replace)
++    with pytest.raises(AgentInputError, match='pending_input_replaced'):
++        await f.deep.send_input(SendInputRequest(request_id='reply', inputs={
++            'query': answer(pending['pending_token'], f.call_id)}))
++    assert f.deep.peek_pending_input() == pending and not f.effects and len(f.provider_calls) == 1
++
++
++@pytest.mark.asyncio
++async def test_supervisor_failure_settles_queued_receipt_and_preserves_pending(deep, monkeypatch):
++    f = deep
++    pending = await start_pending(f)
++    error = RuntimeError('original supervisor failed before dequeue')
++    def fail(**kwargs):
++        raise error
++    monkeypatch.setattr(f.deep.event_manager, 'next_work', fail)
++    with pytest.raises(RuntimeError) as caught:
++        await asyncio.wait_for(f.deep.send_input(SendInputRequest(request_id='reply', inputs={
++            'query': answer(pending['pending_token'], f.call_id)})), 5)
++    assert caught.value is error and f.deep.peek_pending_input() == pending and not f.effects
+-- 
+2.55.0.windows.2
+

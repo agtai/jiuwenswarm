@@ -71,6 +71,7 @@ class ReqMethod(Enum):
 
     PROACTIVE_TICK = "proactive.tick"  # Trigger proactive recommendation tick (from Cron)
     COMMAND_GOAL = "command.goal"
+    COMMAND_AGENT_INPUT = "command.agent_input"
 
     FILES_LIST = "files.list"
     FILES_GET = "files.get"
@@ -298,6 +299,7 @@ class EventType(Enum):
     CHAT_SESSION_RESULT = "chat.session_result"
     GOAL_SNAPSHOT = "goal.snapshot"
     GOAL_UPDATED = "goal.updated"
+    GOAL_CONFIRM_REQUIRED = "goal.confirm_required"
     RUNTIME_ACCEPTED = "runtime.accepted"
     EXECUTION_ERROR = "execution.error"
     TEAM_MEMBER = "team.member"

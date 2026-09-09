@@ -807,6 +807,11 @@ async def test_business_session_seeds_json_facts_and_only_explicit_tool():
             "jiuwen_bound_context_get", "jiuwen_bound_task_list", "jiuwen_bound_task_status", "jiuwen_bound_task_result",
             "jiuwen_bound_task_create", "jiuwen_bound_task_create_successor", "jiuwen_bound_task_adjust", "jiuwen_bound_task_cancel",
             "jiuwen_bound_work_start", "jiuwen_bound_work_list", "jiuwen_bound_work_get", "jiuwen_bound_work_update", "jiuwen_bound_work_cancel",
+            "jiuwen_bound_agent_list", "jiuwen_bound_agent_get", "jiuwen_bound_agent_pending", "jiuwen_bound_agent_reply",
+            "jiuwen_bound_goal_get", "jiuwen_bound_goal_set", "jiuwen_bound_goal_resume", "jiuwen_bound_goal_pause", "jiuwen_bound_goal_clear",
+            "jiuwen_bound_team_list", "jiuwen_bound_team_get", "jiuwen_bound_team_start", "jiuwen_bound_team_cancel",
+            "jiuwen_bound_workflow_list", "jiuwen_bound_workflow_get", "jiuwen_bound_workflow_reply", "jiuwen_bound_workflow_start",
+            "jiuwen_bound_core_workflow_list", "jiuwen_bound_core_workflow_get", "jiuwen_bound_core_workflow_start", "jiuwen_bound_core_workflow_resume",
         }
         assert update["tool_choice"] == "auto"
         assert '"Okay" or "好的" is sufficient' in update["instructions"]

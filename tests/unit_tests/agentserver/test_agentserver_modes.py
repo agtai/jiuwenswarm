@@ -24,6 +24,17 @@ class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
         await self._handle_stream(ws, request, send_lock)
 
 
+async def complete_stream(server, ws, request):
+    task = asyncio.create_task(server.handle_stream_for_test(ws, request, asyncio.Lock()))
+    done, _ = await asyncio.wait([task], timeout=3)
+    if not done:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    # wait_for would credit a timeout swallowed by heartbeat cleanup as success.
+    assert task in done, "stream failed to finish without an extra cancellation"
+    return task.result()
+
+
 def fake_encode_agent_chunk_for_wire(chunk, response_id, sequence):
     return {
         "response_id": response_id,
@@ -2668,7 +2679,7 @@ def test_handle_stream_accepts_team_mode_without_sub_mode(monkeypatch):
             is_stream=True,
         )
 
-        await server.handle_stream_for_test(fake_ws, request, asyncio.Lock())
+        await complete_stream(server, fake_ws, request)
         return fake_manager, fake_ws, request
 
     fake_manager, fake_ws, request = asyncio.run(run_case())
@@ -2681,7 +2692,8 @@ def test_handle_stream_accepts_team_mode_without_sub_mode(monkeypatch):
             "sub_mode": None,
         }
     ]
-    assert fake_manager.agent.seen_request is request
+    assert fake_manager.agent.seen_request == request
+    assert fake_manager.agent.seen_request is not request
     assert request.params["mode"] == "team"
     assert fake_ws.sent == [
         {
@@ -2744,7 +2756,7 @@ def test_handle_stream_accepts_code_team_sub_mode(monkeypatch):
             is_stream=True,
         )
 
-        await server.handle_stream_for_test(fake_ws, request, asyncio.Lock())
+        await complete_stream(server, fake_ws, request)
         return fake_manager, fake_ws, request
 
     fake_manager, fake_ws, request = asyncio.run(run_case())
@@ -2757,7 +2769,8 @@ def test_handle_stream_accepts_code_team_sub_mode(monkeypatch):
             "sub_mode": "team",
         }
     ]
-    assert fake_manager.agent.seen_request is request
+    assert fake_manager.agent.seen_request == request
+    assert fake_manager.agent.seen_request is not request
     assert request.params["mode"] == "code.team"
     assert fake_ws.sent == [
         {

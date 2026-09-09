@@ -501,7 +501,8 @@
     },
     "completedCardTitle": "目标已完成",
     "completedMessageFallback": "目标已完成。",
-    "editStaleWarning": "目标在编辑期间已经完成，这次修改未保存。如需设置新目标，请重新通过「+」创建。",
+    "editStaleWarning": "编辑期间目标或会话发生了变化，这次修改未保存。请查看当前目标后重新编辑。",
+    "replacementRequiresEdit": "当前已有目标。请查看该目标，并通过「编辑目标」确认替换。",
     "detail": {
       "attempts": "已执行次数",
       "tokens": "累计 Token",

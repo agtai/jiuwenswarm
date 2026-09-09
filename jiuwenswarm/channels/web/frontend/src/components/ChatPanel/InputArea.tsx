@@ -27,7 +27,6 @@ import {
   resolveEffectiveModel,
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
-import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
 import { AgentMode, MediaItem, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
@@ -1338,8 +1337,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         pushAttachmentAlert(t('chat.goalAttachmentsBlocked'));
         return;
       }
-      // command.goal 立刻发出（GoalBar「已设置」）；忙碌时用户气泡暂存，答完再入列。
-      queueOrAddGoalObjectiveMessage(sid, trimmedBase);
+      // 等待权威 Goal 接受事件后再显示“已设为目标”，拒绝不产生成功标记。
       useGoalStore.getState().setArmed(sid, false);
       onSetGoal(sid, trimmedBase);
     } else if (goalArmed && trimmedBase && sid === NEW_CONVERSATION_ID) {

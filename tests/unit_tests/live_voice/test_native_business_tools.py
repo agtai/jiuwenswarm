@@ -1,5 +1,6 @@
 """Provider-specific shapes retain the real v1 carrier and operation validators."""
 
+import hashlib
 import json
 
 import pytest
@@ -24,6 +25,21 @@ from jiuwenswarm.server.live_voice.native_interaction_contract import (
 from jiuwenswarm.server.live_voice.production_task_intent import _validate_arguments
 
 
+@pytest.mark.parametrize("bound,expected", [
+    (False, "ee5cafc1cf72dd081bdf25104a30754ac8ca5e6575135c41f1fe2d46ab899f62"),
+    (True, "cf3b7fbed599308dbd6bce6746b63241cd09fd3eee02dd4f3093f0eb5c8af7bf"),
+    (None, "a76483c0d296951464a10f028941fd07f9ae3cd6a7e3423ffc9465dbe34c5f54"),
+])
+def test_provider_catalog_matches_pre_projection_contract_snapshot(bound, expected):
+    from jiuwenswarm.server.live_voice.native_business_contract import native_business_tool
+
+    # Captured before retiring the duplicate field tables. Array order covers
+    # operation order and required-field order; descriptions/nullability stay exact.
+    catalog = native_business_tool() if bound is None else native_business_tools(bound_context=bound)
+    encoded = json.dumps(catalog, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    assert hashlib.sha256(encoded).hexdigest() == expected
+
+
 # Expected business inputs are written independently of the adapter's table.
 SCENARIOS = {
     "context.get": {"context_id": None},
@@ -39,6 +55,30 @@ SCENARIOS = {
     "work.get": {"target_id": "work-a"},
     "work.update": {"target_id": "work-a", "expected_revision": 4, "instruction": "Include the latest stated constraint."},
     "work.cancel": {"target_id": "work-a", "expected_revision": 4},
+    "workflow.list": {},
+    "workflow.get": {"target_id": "workflow-a"},
+    "workflow.reply": {"target_id": "workflow-a", "input_id": "review:host:0", "instruction": "Use the first source."},
+    "agent.list": {},
+    "agent.get": {"target_id": "execution-a"},
+    "agent.pending": {},
+    "agent.reply": {"target_id": "original-binding", "source_task_id": "actual-task",
+                    "pending_token": "pending-generation", "input_id": "question-id",
+                    "answers": [{"id": "approval", "value": "approve"}]},
+    "team.list": {},
+    "team.get": {"target_id": "team-execution", "epoch": "epoch"},
+    "team.start": {"epoch": "epoch", "fingerprint": None, "instruction": "Carry out the configured Team task."},
+    "team.cancel": {"target_id": "team-execution", "epoch": "epoch"},
+    "workflow.start": {"epoch": "epoch", "fingerprint": "b" * 64, "inputs": {"script_path": "flow.swarmflow", "args": "{}"}},
+    "goal.get": {},
+    "goal.set": {"target_id": None, "expected_revision": None, "instruction": "Investigate the explicitly requested objective."},
+    "goal.resume": {"target_id": "goal-a", "expected_revision": 4},
+    "goal.pause": {"target_id": "goal-a", "expected_revision": 4},
+    "goal.clear": {"target_id": "goal-a", "expected_revision": 4},
+    "core_workflow.list": {},
+    "core_workflow.get": {"target_id": "core-run", "epoch": "current-epoch"},
+    "core_workflow.start": {"epoch": "current-epoch", "capability_id": "registered-flow", "inputs": {"text": "用户输入"}},
+    "core_workflow.resume": {"target_id": "core-run", "epoch": "current-epoch", "expected_revision": 2,
+                             "answers": {"ask": {"choice": "first"}}},
 }
 INTERNAL_FIELDS = {"context_id", "target_id", "expected_revision", "name", "instruction", "adjustment"}
 
@@ -70,12 +110,27 @@ def decode(operation, *, values=None, **changes):
     )
 
 
+def test_workflow_reply_provider_tool_keeps_run_and_pending_input_identity():
+    data = {"request_text": "Use the first source.", "context_id": "a" * 64,
+            "target_id": "run-1", "input_id": "review:host:0", "instruction": "Use the first source."}
+    proposal = native_business_proposal_from_function_call(name="jiuwen_workflow_reply",
+        arguments=json.dumps(data), **binding())
+    assert proposal.business.operation == "workflow.reply"
+    assert proposal.business.target_id == "run-1"
+    assert proposal.business.input_id == "review:host:0"
+    assert proposal.business.instruction == "Use the first source."
+    with pytest.raises(NativeBusinessViolation):
+        native_business_proposal_from_function_call(name="jiuwen_workflow_reply",
+            arguments=json.dumps({key: value for key, value in data.items() if key != "input_id"}), **binding())
+
+
 @pytest.mark.parametrize("operation", SCENARIOS)
 def test_every_operation_retains_authoritative_proposal_carrier_and_source(operation):
     flat = inputs(operation)
     legacy = {
         "request_text": flat["request_text"],
-        "action": {"operation": operation, **{field: flat.get(field) for field in INTERNAL_FIELDS}},
+        "action": {"operation": operation, **{field: flat.get(field) for field in INTERNAL_FIELDS},
+                   **{field: flat[field] for field in ("input_id", "epoch", "capability_id", "inputs", "answers", "source_task_id", "pending_token", "fingerprint") if field in flat}},
     }
     expected = NativeBusinessProposal.from_function_call(arguments=json.dumps(legacy), **binding())
     actual = decode(operation)
@@ -98,10 +153,10 @@ def test_every_operation_retains_authoritative_proposal_carrier_and_source(opera
 def test_tool_catalog_covers_existing_operations_without_legacy_or_unused_arguments():
     tools = native_business_tools()
     assert set(SCENARIOS) == NATIVE_BUSINESS_OPERATIONS
-    assert len(tools) == len(SCENARIOS) == 13
+    assert len(tools) == len(SCENARIOS) == 34
     assert {tool["name"] for tool in tools} | {"jiuwen_business"} | NATIVE_BOUND_BUSINESS_FUNCTION_NAMES == NATIVE_BUSINESS_FUNCTION_NAMES
     for tool in tools:
-        operation = tool["name"].removeprefix("jiuwen_").replace("_", ".", 1)
+        operation = next(value for value in SCENARIOS if tool["name"] == "jiuwen_" + value.replace(".", "_"))
         # create_successor's remaining underscore is part of the operation.
         expected_fields = set(inputs(operation))
         schema = tool["parameters"]
@@ -112,9 +167,41 @@ def test_tool_catalog_covers_existing_operations_without_legacy_or_unused_argume
             ["string", "null"] if operation == "context.get" else "string"
         )
         for field in expected_fields - {"context_id"}:
-            assert schema["properties"][field]["type"] == ("integer" if field == "expected_revision" else "string")
+            if field == "fingerprint":
+                assert schema["properties"][field]["type"] == ["string", "null"]
+                continue
+            if operation == "goal.set" and field in {"target_id", "expected_revision"}:
+                variants = schema["properties"][field]["anyOf"]
+                assert [item["type"] for item in variants] == [
+                    "integer" if field == "expected_revision" else "string", "null"]
+                continue
+            assert schema["properties"][field]["type"] == (
+                "integer" if field == "expected_revision" else "array" if operation == "agent.reply" and field == "answers"
+                else "object" if field in {"inputs", "answers"} else "string")
     tools[0]["parameters"]["properties"].clear()
     assert native_business_tools()[0]["parameters"]["properties"]
+
+
+@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize("target,revision", [(None, None), ("goal-a", 4)])
+def test_goal_set_tool_schema_and_decoder_support_exact_null_or_replacement_pair(bound, target, revision):
+    from jsonschema import validate
+
+    name = "jiuwen_bound_goal_set" if bound else "jiuwen_goal_set"
+    data = {"request_text": "Inspect all requested source facts.", "target_id": target, "expected_revision": revision}
+    if not bound:
+        data.update(context_id="a" * 64, instruction="Inspect all requested source facts.")
+    tool = next(item for item in native_business_tools(bound_context=bound) if item["name"] == name)
+    validate(data, tool["parameters"])
+    parsed = native_business_proposal_from_function_call(name=name, arguments=json.dumps(data),
+        **({"server_context_id": "a" * 64} if bound else {}), **binding())
+    assert parsed.business.target_id == target and parsed.business.expected_revision == revision
+    assert parsed.business.instruction == data["request_text"]
+    for extra in ("model_name", "mode", "authorized", "input_id"):
+        with pytest.raises(NativeBusinessViolation):
+            native_business_proposal_from_function_call(name=name,
+                arguments=json.dumps({**data, extra: "forged"}),
+                **({"server_context_id": "a" * 64} if bound else {}), **binding())
 
 
 @pytest.mark.parametrize("operation", SCENARIOS)

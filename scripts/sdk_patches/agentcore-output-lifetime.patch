@@ -1,0 +1,192 @@
+diff --git a/openjiuwen/harness/deep_agent.py b/openjiuwen/harness/deep_agent.py
+index 9d41a50b3fd7c209f764dabddc06bb717d690514..eed4162f7f120abf92997527d7ff4391ca12a6a3 100644
+--- a/openjiuwen/harness/deep_agent.py
++++ b/openjiuwen/harness/deep_agent.py
+@@ -3066,6 +3066,7 @@ class DeepAgent(BaseAgent):
+             raise RuntimeError("goal_manager_not_started")
+         if "prepare_output" in controls:
+             raise ValueError("DeepAgent owns Goal output preparation")
++        on_output_ready = controls.pop("on_output_ready", None)
+         stream = None
+         finishing_lease = None
+ 
+@@ -3084,6 +3085,8 @@ class DeepAgent(BaseAgent):
+             if stream is None and lease is not None and lease.finishing:
+                 finishing_lease = lease
+                 raise OutputFinishing()
++            if on_output_ready is not None:
++                on_output_ready(lease.token, stream is not None)
+ 
+         async with self._interaction_send_lock:
+             while True:
+@@ -3111,7 +3114,7 @@ class DeepAgent(BaseAgent):
+                         cleanup.result()
+                     raise
+ 
+-    async def attach_output(self) -> Optional[InteractionOutputStream]:
++    async def attach_output(self, *, on_output_ready=None) -> Optional[InteractionOutputStream]:
+         """Claim the sole output reader for this interaction.
+ 
+         Returns ``None`` when another consumer already holds the lease.
+@@ -3119,6 +3122,11 @@ class DeepAgent(BaseAgent):
+         If an ACTIVE goal exists, missing goal work is ensured even when this
+         call does not obtain the lease, so an already-attached reader continues
+         to receive goal progress (session switch / concurrent attach_goal).
++
++        The optional synchronous host callback receives the opaque lease token
++        and whether this call acquired it, under the control lock and before
++        scheduling. It can reject a disconnected owner by raising. A finishing
++        existing lease is not announced as available for new work.
+         """
+         if not self._interaction_started or self._interaction_phase is InteractionPhase.TERMINATED:
+             raise RuntimeError("interaction_terminated")
+@@ -3126,6 +3134,18 @@ class DeepAgent(BaseAgent):
+         async with self._interaction_send_lock:
+             async with self._interaction_control_lock:
+                 stream = await self._attach_output_locked()
++                lease = self._interaction_output.current_lease()
++                try:
++                    if on_output_ready is not None:
++                        if lease is None or lease.finishing:
++                            raise RuntimeError("interaction_output_unavailable")
++                        on_output_ready(lease.token, stream is not None)
++                except BaseException:
++                    if stream is not None:
++                        # No work has been admitted by this attachment. Preserve
++                        # the old queue and active round on host rejection.
++                        await self._interaction_output.detach(lease.token)
++                    raise
+                 if self.goal_manager is not None:
+                     record = self._load_goal_record_locked()
+                     if record is not None and record.status is GoalStatus.ACTIVE:
+diff --git a/openjiuwen/harness/goal/README.md b/openjiuwen/harness/goal/README.md
+index 1a213929fbfaaeebc3caa7c06ca47834a29fef02..2aa59502817583a39ec6922ffb671fd9a628f6b9 100644
+--- a/openjiuwen/harness/goal/README.md
++++ b/openjiuwen/harness/goal/README.md
+@@ -43,6 +43,16 @@ already finishing, the call waits for its buffered output to drain and then
+ revalidates admission before acquiring a new lease. No Goal control lock is held
+ during that wait. Cancelling the waiting command does not cancel the old reader.
+ 
++`attach_output`, `set_goal` and `resume_goal` accept an optional synchronous
++`on_output_ready(token, acquired)` host callback. The opaque token identifies
++the actual existing or newly acquired output lease; `acquired` is false when an
++older reader will consume the new work. It runs under the interaction control
++lock before scheduling, after Goal admission checks for Goal commands. A host
++can retain its actual reader here or raise if that reader is already closing.
++A rejected/stale Goal or a finishing old lease never invokes the callback. A
++new lease is released if the callback fails, preserving unrelated queued work.
++The callback must not await, block, reacquire SDK locks or mutate Goal state.
++
+ Do not attach output before validating a Goal command: ordinary `attach_output`
+ may ensure active Goal work, and ordinary stream close discards queued work.
+ On failure after acquisition, the new APIs wait for their own lease to be
+diff --git a/tests/unit_tests/harness/goal/test_goal_output_admission.py b/tests/unit_tests/harness/goal/test_goal_output_admission.py
+index a44af539e2ef623113e2a4b14af71e3541e2ff7b..57b592af01843b43ee35f50f2e9e84b0675b22b0 100644
+--- a/tests/unit_tests/harness/goal/test_goal_output_admission.py
++++ b/tests/unit_tests/harness/goal/test_goal_output_admission.py
+@@ -47,6 +47,84 @@ def effects(owner):
+             agent._emit_interaction_event.call_count, agent._interaction_output.current_token())
+ 
+ 
++@pytest.mark.asyncio
++async def test_output_ready_observes_exact_borrowed_lease_before_goal_effects(owner):
++    agent, _, _ = owner
++    notices = []
++    def ready(token, acquired):
++        assert agent._interaction_control_lock.locked()
++        assert agent.goal_manager.peek() is None
++        assert not agent._event_manager.has_pending_work()
++        notices.append((token, acquired))
++    stream = await agent.attach_output(on_output_ready=ready)
++    record, borrowed = await agent.set_goal("Retained objective", on_output_ready=ready)
++    assert borrowed is None and record.objective == "Retained objective"
++    assert notices == [(agent._interaction_output.current_token(), True),
++                       (agent._interaction_output.current_token(), False)]
++    await stream.close(abort_active_round=False)
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("attached", [False, True])
++async def test_output_ready_rejection_preserves_goal_queue_and_old_reader(owner, attached):
++    agent, _, _ = owner
++    stream = await agent.attach_output() if attached else None
++    user = RoundWorkItem.user(request_id="user", inputs={"query": "Keep this work"})
++    agent._event_manager.push_user(user)
++    before = effects(owner)
++    with pytest.raises(PermissionError, match="owner disconnected"):
++        await agent.set_goal("Must not start", on_output_ready=Mock(side_effect=PermissionError("owner disconnected")))
++    assert effects(owner) == before
++    assert agent._event_manager.next_work() is user
++    if stream is not None:
++        await agent._interaction_output.emit("preserved")
++        assert await anext(stream) == "preserved"
++        await stream.close(abort_active_round=False)
++
++
++@pytest.mark.asyncio
++async def test_stale_goal_never_notifies_output_owner(owner):
++    agent, _, _ = owner
++    record, stream = await agent.set_goal("Original")
++    ready = Mock()
++    before = effects(owner)
++    with pytest.raises(GoalOperationError):
++        await agent.resume_goal(expected_goal_id=record.goal_id,
++            expected_control_revision=record.control_revision + 1, on_output_ready=ready)
++    ready.assert_not_called()
++    assert effects(owner) == before
++    await stream.close(abort_active_round=False)
++
++
++@pytest.mark.asyncio
++async def test_attach_output_ready_failure_does_not_discard_work_or_keep_new_lease(owner):
++    agent, _, _ = owner
++    user = RoundWorkItem.user(request_id="user", inputs={"query": "Keep this work"})
++    agent._event_manager.push_user(user)
++    before = effects(owner)
++    with pytest.raises(PermissionError):
++        await agent.attach_output(on_output_ready=Mock(side_effect=PermissionError("closed")))
++    assert effects(owner) == before
++    assert agent._event_manager.next_work() is user
++
++
++@pytest.mark.asyncio
++async def test_finishing_attach_cannot_ensure_goal_work_without_host_admission(owner):
++    agent, _, _ = owner
++    record, stream = await agent.set_goal("Active goal")
++    assert agent._event_manager.next_work().context["goal_id"] == record.goal_id
++    await agent._interaction_output.finish_current()
++    before = effects(owner)
++    ready = Mock(side_effect=PermissionError("owner closing"))
++    with pytest.raises(RuntimeError, match="output_unavailable"):
++        await agent.attach_output(on_output_ready=ready)
++    assert effects(owner) == before
++    assert not agent._event_manager.has_pending_work()
++    ready.assert_not_called()
++    with pytest.raises(StopAsyncIteration):
++        await anext(stream)
++
++
+ @pytest.mark.asyncio
+ async def test_set_consumes_real_output_and_replacement_keeps_original_consumer(owner):
+     agent, _, _ = owner
+@@ -200,16 +278,19 @@ async def test_new_goal_waits_for_finishing_reader_without_losing_either_stream(
+     await agent._interaction_output.emit({"text": "last ordinary response"})
+     await agent._interaction_output.finish_current()
+     before = effects(owner)
+-    pending = asyncio.create_task(agent.set_goal("New goal"))
++    ready = Mock()
++    pending = asyncio.create_task(agent.set_goal("New goal", on_output_ready=ready))
+     await asyncio.sleep(0)
+     assert not pending.done()
+     assert effects(owner) == before
++    ready.assert_not_called()
+     assert not agent._event_manager.has_pending_work()
+     assert await anext(old) == {"text": "last ordinary response"}
+     with pytest.raises(StopAsyncIteration):
+         await anext(old)
+     created, stream = await asyncio.wait_for(pending, 1)
+     assert stream is not None
++    ready.assert_called_once_with(agent._interaction_output.current_token(), True)
+     assert agent._event_manager.next_work().context["goal_id"] == created.goal_id
+     await agent._interaction_output.emit({"text": "new goal response"})
+     assert await anext(stream) == {"text": "new goal response"}

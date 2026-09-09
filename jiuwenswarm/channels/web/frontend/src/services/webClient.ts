@@ -12,6 +12,7 @@ import { getWsBase } from '../utils/env';
 import { resolveUserId } from '../utils/userId';
 import i18n from '../i18n';
 import { GoalRecord } from '../types/goal';
+import { goalCommandPayload, type GoalCommandParams } from './goalCommands';
 import { diagnosticIdentity, markAudioRpcRejection, profileAudioOperation } from '../features/live-voice/formal/audioDiagnostics';
 
 type EventHandler = (event: WsEvent) => void;
@@ -620,18 +621,13 @@ interface GoalCommandResponsePayload {
  * 是真的有问题，不是误判。见 cjh/goal/Goal持续目标Web前端对接.md §4。
  * clear 成功后 goal 应视为已清空，不用 cleared_goal 兜底出一个"已清除的目标"。
  */
-export async function requestGoalAction(params: {
-  sessionId: string;
+export async function requestGoalAction(params: GoalCommandParams & {
   action: 'get' | 'pause' | 'clear';
   /** 当前会话模式（如 'agent'），协议文档 v2 §2.1 要求带上，不要写死 'code.normal' */
   mode?: string;
 }): Promise<GoalRecord | null> {
-  const { sessionId, action, mode } = params;
-  const payload = await webRequest<GoalCommandResponsePayload>('command.goal', {
-    session_id: sessionId,
-    action,
-    mode: mode ?? 'agent',
-  });
+  const { action } = params;
+  const payload = await webRequest<GoalCommandResponsePayload>('command.goal', goalCommandPayload(params));
   if (action === 'clear') {
     return null;
   }
@@ -646,21 +642,14 @@ export async function requestGoalAction(params: {
  * 所以这两个动作干脆不等 res：发出去就返回，真实状态全靠 goal.snapshot/goal.updated 事件驱动
  * （`useWebSocket.ts` 的 `applyGoalSnapshot`），不再需要一个"等不到就超时"的 Promise。
  */
-export async function sendGoalStreamCommand(params: {
-  sessionId: string;
+export async function sendGoalStreamCommand(params: GoalCommandParams & {
   action: 'set' | 'resume';
   objective?: string;
   mode?: string;
 }): Promise<void> {
-  const { sessionId, action, objective, mode } = params;
   await webClient.sendFireAndForget(
     'command.goal',
-    {
-      session_id: sessionId,
-      action,
-      mode: mode ?? 'agent',
-      ...(action === 'set' ? { objective, overwrite_confirmed: true } : {}),
-    },
+    goalCommandPayload(params),
     { isStream: true }
   );
 }

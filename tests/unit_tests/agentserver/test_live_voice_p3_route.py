@@ -400,6 +400,8 @@ class _ConnectionCleanupRegistry:
 
 class _ConnectionAgentManager:
     def __init__(self) -> None:
+        from jiuwenswarm.server.runtime.session_execution import SessionExecutionService
+        self.executions = SessionExecutionService(self)
         self.cancel_calls = 0
 
     async def cancel_all_inflight_work(self, **_kwargs: object) -> None:

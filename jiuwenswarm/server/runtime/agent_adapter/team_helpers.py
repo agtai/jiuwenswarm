@@ -503,11 +503,13 @@ def persist_workflow_runs(runs: dict[str, WorkflowRunState], session_id: str) ->
     _enqueue_write(session_id, metadata)
 
 
-def restore_workflow_runs(session_id: str) -> dict[str, WorkflowRunState] | None:
+def restore_workflow_runs(session_id: str, *, strict: bool = False) -> dict[str, WorkflowRunState] | None:
     """Restore WorkflowRunState dict from session metadata."""
     from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata
-    metadata = _read_metadata(session_id, cache_bust=True)
+    metadata = _read_metadata(session_id, cache_bust=True, **({"strict": True} if strict else {}))
     runs_data = metadata.get(_WORKFLOW_RUNS_STATE_KEY)
+    if strict and _WORKFLOW_RUNS_STATE_KEY in metadata and not isinstance(runs_data, dict):
+        raise ValueError("workflow checkpoint inventory is not an object")
     if not runs_data:
         return None
     return {
@@ -1652,6 +1654,7 @@ async def _start_team_stream_round(
     hide_dm: bool = False,
     debug: bool = False,
     source: str = "first",
+    execution: Any = None,
 ) -> asyncio.Queue:
     """Start a team stream round and register its waiter queue."""
     # Sync team observability with current config before streaming.
@@ -1660,8 +1663,12 @@ async def _start_team_stream_round(
     # matches the latest config toggle.
     from jiuwenswarm.agents.harness.team.team_manager import sync_team_observability
 
+    if execution is not None:
+        execution.check()
     sync_team_observability()
     await team_manager.prepare_runtime_activation(session_id, team_name)
+    if execution is not None:
+        execution.check()
     request_queue = _new_team_event_queue()
     team_manager.add_waiter(session_id, request_id, request_queue)
     logger.info(
@@ -1685,10 +1692,73 @@ async def _start_team_stream_round(
             query,
             round_id=round_id,
             envs=stream_envs or None,
+            **({'execution': execution} if execution is not None else {}),
         )
     )
     team_manager.register_stream_task(session_id, stream_task)
+    if execution is not None:
+        execution.producer = stream_task
+        stream_task._jiuwenswarm_team_execution = execution
     return request_queue
+
+
+async def process_configured_team_stream(request: Any, *, execution: Any) -> AsyncIterator[AgentResponseChunk]:
+    """Observe the original Team producer for a trusted configured capability.
+
+    Scope/configuration was prepared by its Host owner. This entry does not
+    interpret Text slash commands or accept model/member metadata overrides.
+    Existing Text waiters remain attached to the same physical producer.
+    """
+    from jiuwenswarm.server.runtime.team_execution import _TeamRun
+
+    if type(execution) is not _TeamRun:
+        raise ValueError('configured_team_authority_unavailable')
+    tm = execution.manager
+    session_id, rid = request.session_id, request.request_id
+    execution.check()
+    task = tm.get_stream_task(session_id)
+    queue = None
+    try:
+        if task is not None and not task.done():
+            execution.producer = task
+            task._jiuwenswarm_team_execution = execution
+            queue = _new_team_event_queue()
+            tm.add_waiter(session_id, rid, queue)
+            await execution.runtime_ready()
+            from jiuwenswarm.server.runtime.team_execution import _guard
+
+            def admit():
+                execution.check()
+                _guard(execution.before_effect, execution.capability)
+            success, reason = await tm.interact(session_id, request.params['query'],
+                expected_task=task, before_effect=admit)
+            if not success:
+                raise ValueError(reason or 'configured_team_input_rejected')
+            execution.input_accepted = True
+            if execution.intent is not None:
+                execution.intent.admitted.set()
+            execution.receipt_changed.set()
+        else:
+            execution.cold_start = True
+            queue = await _start_team_stream_round(channel_id=request.channel_id,
+                session_id=session_id, request_id=rid, team_manager=tm,
+                team_name=execution.spec.team_name, team_spec=execution.spec,
+                query=request.params['query'], source='configured capability', execution=execution)
+            task = execution.producer
+        while not task.done() or not queue.empty():
+            try:
+                async with asyncio.timeout(0.1):
+                    event = await queue.get()
+            except TimeoutError:
+                continue
+            agent_ref, metadata = _build_team_event_chunk_meta(event)
+            yield AgentResponseChunk(request_id=rid, channel_id=request.channel_id,
+                payload=event, agent_ref=agent_ref, metadata=metadata, is_complete=False)
+        # Observe actual Task exit; queue EOF and team.completed are insufficient.
+        await asyncio.shield(task)
+    finally:
+        if queue is not None:
+            tm.remove_waiter(session_id, rid)
 
 
 async def process_team_message_stream(
@@ -2220,6 +2290,7 @@ async def _consume_stream_with_query(
     *,
     round_id: int,
     envs: dict[str, Any] | None = None,
+    execution: Any = None,
 ) -> None:
     """Consume the team stream in the background and broadcast parsed events."""
     _envs = envs or {}
@@ -2238,6 +2309,7 @@ async def _consume_stream_with_query(
     tm_.reset_workflow_completed(session_id)
     lg: TeamStreamLogger | None = None
     stream_cancelled = False
+    runner_stream = None
     try:
         logger.info(
             "[TeamHelpers] stream started: channel_id=%s session_id=%s round_id=%s",
@@ -2276,13 +2348,16 @@ async def _consume_stream_with_query(
             _safe_query_preview(initial_query),
         )
         runner_entered_at = time.monotonic()
-        async for chunk in Runner.run_agent_team_streaming(
+        if execution is not None:
+            execution.check()
+        runner_stream = Runner.run_agent_team_streaming(
             agent_team=team_spec,
             inputs={"query": initial_query},
             session=session_id,
             envs=envs,
             stream_logger=lg,
-        ):
+        )
+        async for chunk in runner_stream:
             received_chunks += 1
             # First event of any kind from the runner — usually a framework
             # control event (team.runtime_ready and friends), not model output.
@@ -2363,12 +2438,14 @@ async def _consume_stream_with_query(
                     sync_team_identity_metadata(
                         channel_id=channel_id,
                         session_id=session_id,
-                        mode="team",
+                        mode=execution.scope.agent_mode if execution is not None else "team",
                         ready_team_name=ready_team_name,
                         activation_kind=activation_kind,
                     )
                     tm = get_team_manager(channel_id)
                     tm.commit_runtime_ready(session_id, ready_team_name)
+                    if execution is not None:
+                        await execution.runtime_ready()
                     await tm.attach_distributed_hooks_for_runner_runtime(
                         team_name=ready_team_name,
                         session_id=session_id,
@@ -2594,6 +2671,8 @@ async def _consume_stream_with_query(
         except asyncio.CancelledError:
             stream_cancelled = True
             raise
+        if execution is not None:
+            raise
     finally:
         # Flush & close the stream trace logger if one was opened.
         if lg is not None:
@@ -2602,7 +2681,11 @@ async def _consume_stream_with_query(
             except Exception as e:
                 logger.warning(f"TeamStreamLogger flush failed, error is {e}")
         try:
-            if not stream_cancelled:
+            if execution is not None and runner_stream is not None:
+                # Managed settlement includes the original Runner generator's
+                # finalization in this same physical producer Task.
+                await runner_stream.aclose()
+            if not stream_cancelled and execution is None:
                 # Broadcast team.completed so cron round watchers (both the
                 # agent adapter's _wait_for_cron_team_round_events and the cron
                 # scheduler's own round_state) can finalise when the stream

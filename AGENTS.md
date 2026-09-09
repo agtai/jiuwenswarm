@@ -51,17 +51,36 @@ the required action and recommendation while continuing unblocked work.
 
 ### Parallel ownership
 
-For an active D-060/D-062 parallel packet, Main assigns coherent non-overlapping
-work within tool capacity and remains the Integration Owner and shared semantic
-owner. Historical lane assignments are dormant without a current packet.
+When the current task authorizes parallel work, Main records coherent scopes,
+file owners and shared dependencies before dispatch, within tool capacity.
+Main remains the Integration Owner and shared semantic owner. Historical lane
+assignments are dormant without a current assignment.
 
 Separate-worktree workers may commit only their task branch when their packet
 grants that authority; they cannot change the integration branch, rewrite shared
-history or integrate their own return. A shared-worktree subagent may edit only
-its assigned files while holding the sole active filesystem-writer lease, and
-cannot switch branches, stage, commit or integrate. Main reviews and performs
-shared-worktree Git operations; semantic conflicts stay with Main and the owning
-module. Generic worker templates do not override these limits.
+history or integrate their own return.
+
+Shared-worktree agents may write concurrently to explicitly assigned,
+non-overlapping files. Each file has one active writer, including Main; ownership
+also covers tests, fixtures, exports and generated files. Agree shared interfaces
+before dependent implementation. An owner must finish or stop its writes before
+Main transfers that file to another owner. Without an explicit ownership map,
+use one writer. This replaces the former workspace-wide single-writer rule;
+it does not permit concurrent edits to the same file.
+
+Shared-worktree workers cannot switch branches, stage, commit or integrate.
+Main reviews and performs Git operations against a stable scoped snapshot with
+the affected owners quiescent; branch/history changes require all writers to be
+quiescent. Dependency installation/sync, shared lockfiles, source-patch manifests,
+runtime configuration and service restarts have one designated operator. Tests
+running in parallel must have isolated mutable data, outputs and ports. Do not
+validate consumers against an SDK source tree another worker is still changing;
+use a stable source snapshot or an isolated checkout/environment.
+
+Use separate worktrees when file ownership or runtime/test resources cannot be
+isolated within the shared checkout. Main coordinates final candidate validation
+and real-scenario acceptance. Semantic conflicts stay with Main and the owning
+module; generic worker templates do not override these limits.
 
 ## Live Voice routing and facts
 

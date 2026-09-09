@@ -19,6 +19,10 @@ import logging
 import logging.handlers
 import os
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from jiuwenswarm.server.runtime.core_workflow_bootstrap import CoreWorkflowBootstrap
 
 from openjiuwen.core.common.logging import LogManager
 
@@ -171,7 +175,7 @@ install_subagent_observability_hook()
 
 
 
-async def _run(host: str, port: int) -> None:
+async def _run(host: str, port: int, *, core_workflow_bootstrap: CoreWorkflowBootstrap | None = None) -> None:
     from openjiuwen.core.runner import Runner
     from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
     from jiuwenswarm.agents.harness.team.remote_member_bootstrap import run_teammate_bootstrap_daemon
@@ -206,7 +210,8 @@ async def _run(host: str, port: int) -> None:
 
     server = AgentWebSocketServer.get_instance(
         host=host,
-        port=port
+        port=port,
+        core_workflow_bootstrap=core_workflow_bootstrap,
     )
     await server.start()
 

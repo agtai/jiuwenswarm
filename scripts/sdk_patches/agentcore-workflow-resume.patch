@@ -1,0 +1,1224 @@
+From e3a1f875c49898157ddfdea07ee863709b888909 Mon Sep 17 00:00:00 2001
+From: hongxing <hongxing1227@gmail.com>
+Date: Wed, 9 Sep 2026 13:06:49 +0200
+Subject: [PATCH] feat(workflow): require proven checkpoints for guarded
+ continuation
+
+---
+ README.md                                     |  52 ++
+ openjiuwen/core/graph/graph.py                |  15 +-
+ openjiuwen/core/graph/pregel/engine.py        |   6 +-
+ openjiuwen/core/runner/runner.py              |  16 +-
+ openjiuwen/core/session/checkpointer/base.py  |   5 +
+ .../core/session/checkpointer/inmemory.py     |  57 ++-
+ .../core/session/checkpointer/persistence.py  |  80 ++-
+ .../session/checkpointer/workflow_resume.py   | 227 +++++++++
+ openjiuwen/core/workflow/__init__.py          |   6 +
+ openjiuwen/core/workflow/workflow.py          |  12 +
+ .../workflow/test_workflow_strict_resume.py   | 470 ++++++++++++++++++
+ 11 files changed, 933 insertions(+), 13 deletions(-)
+ create mode 100644 openjiuwen/core/session/checkpointer/workflow_resume.py
+ create mode 100644 tests/unit_tests/core/workflow/test_workflow_strict_resume.py
+
+diff --git a/README.md b/README.md
+index 89f4ee94..7584e9e7 100644
+--- a/README.md
++++ b/README.md
+@@ -236,3 +236,55 @@ when pause/stop/finalize starts. Warm resume of the same owner reopens admission
+ replacement or removal of that owner never revives its old inputs.
+ Legacy `interact_agent_team` still reports publication rather than this stronger
+ receipt. Tool permission approval remains on its existing separate API.
++
++### Strict workflow continuation
++
++`Runner.run_workflow` accepts an optional guard for continuation of an existing
++interrupted workflow:
++
++```python
++from openjiuwen.core.workflow import WorkflowResumeGuard, WorkflowResumeError
++
++result = await Runner.run_workflow(
++    workflow,
++    interactive_input,
++    session=session_id,
++    resume_guard=WorkflowResumeGuard(before_effect=check_current_authority),
++)
++```
++
++Strict mode requires `InteractiveInput` containing answers for every interrupted
++root node. It checks the exact session and workflow scope, the selected live
++workflow/checkpointer owner, and a pairing checksum over the stored workflow
++state, updates and graph snapshot. The existing checkpointer saves that checksum
++alongside its workflow checkpoint. Mere session existence is insufficient.
++Missing, changed, damaged or unproven parts fail before restoring state, injecting
++answers or executing nodes; they never fall back to the start node. The prepared
++graph snapshot is passed directly to the original Pregel loop without a second
++storage read.
++
++Supported providers are `InMemoryCheckpointer` and `PersistenceCheckpointer`
++using the built-in SQLite `DbBasedKVStore`; SQLite reads all proof parts in one
++query. Other stores/providers, raw inputs, partial answers and nested
++loop/subworkflow interruptions are unsupported in strict mode. Answering a
++parent node does not authorize its interrupted child graph. Checkpoints saved
++by older SDK versions have no pairing proof and remain usable through the
++unchanged legacy path without `resume_guard`.
++
++The synchronous callback runs after checkpoint I/O and validation, immediately
++before session restoration and answer injection, with no intervening await. It
++must return `None` or raise; its original exception propagates. Other return
++values, including `False` and `True`, fail with
++`strict_resume_guard_result_invalid`; awaitables are also rejected. Cancellation
++while proof is pending leaves the checkpoint available. `WorkflowResumeError`
++is a `ValueError` with a machine-readable `code` such as
++`strict_resume_checkpoint_missing`, `strict_resume_checkpoint_unproven`,
++`strict_resume_owner_mismatch`, `strict_resume_inputs_unsupported` or
++`strict_resume_unsupported`.
++
++The caller continues to own run/revision/replay checks, current authorization,
++and serialization of calls against each workflow/session. This API does not
++add a scheduler, concurrent-run lock or cross-process owner restoration. The
++checksum detects checkpoint pairing errors; the trusted callback supplies
++authorization. Normal start and legacy resume calls without a guard retain
++their existing semantics.
+diff --git a/openjiuwen/core/graph/graph.py b/openjiuwen/core/graph/graph.py
+index 129e3c95..443e1f29 100644
+--- a/openjiuwen/core/graph/graph.py
++++ b/openjiuwen/core/graph/graph.py
+@@ -316,6 +316,7 @@ class CompiledGraph(ExecutableGraph):
+         is_main = False
+         session_id = session.session_id()
+         workflow_id = session.workflow_id()
++        strict_preparing = False
+ 
+         if config is None:
+             is_main = True
+@@ -323,7 +324,17 @@ class CompiledGraph(ExecutableGraph):
+ 
+         try:
+             if is_main:
+-                await self._checkpointer.pre_workflow_execute(session, inputs)
++                target = getattr(session, "_strict_resume_target", None)
++                if target is None:
++                    await self._checkpointer.pre_workflow_execute(session, inputs)
++                else:
++                    from openjiuwen.core.session.checkpointer.workflow_resume import PREPARED_WORKFLOW_RESUME
++                    strict_preparing = True
++                    target.validate(session, self._checkpointer)
++                    prepared = await self._checkpointer.prepare_workflow_resume(
++                        session, inputs, before_effect=lambda: target.admit(session, self._checkpointer))
++                    config[PREPARED_WORKFLOW_RESUME] = prepared
++                    strict_preparing = False
+             if not isinstance(inputs, InteractiveInput):
+                 session.state().commit_user_inputs(inputs)
+ 
+@@ -347,7 +358,7 @@ class CompiledGraph(ExecutableGraph):
+             elif exception is not None:
+                 raise exception
+         except asyncio.CancelledError:
+-            if is_main:
++            if is_main and not strict_preparing:
+                 await self._checkpointer.post_workflow_execute(session, {}, None)
+             raise
+ 
+diff --git a/openjiuwen/core/graph/pregel/engine.py b/openjiuwen/core/graph/pregel/engine.py
+index 50ea31b3..0251e41f 100644
+--- a/openjiuwen/core/graph/pregel/engine.py
++++ b/openjiuwen/core/graph/pregel/engine.py
+@@ -38,7 +38,11 @@ class PregelLoop:
+         self.executor = TaskExecutorPool(self.config)
+         self.max_step = self.config[RECURSION_LIMIT]
+         state = None
+-        if self.config.get(SESSION_ID) and self.config.get(NS) and self.saver:
++        from openjiuwen.core.session.checkpointer.workflow_resume import PREPARED_WORKFLOW_RESUME
++        prepared = self.config.pop(PREPARED_WORKFLOW_RESUME, None)
++        if prepared is not None:
++            state = prepared.consume_graph(self.config[SESSION_ID], self.config[NS])
++        elif self.config.get(SESSION_ID) and self.config.get(NS) and self.saver:
+             state = await self.saver.get(self.config[SESSION_ID], self.config[NS])
+         if self._is_resume(state):
+             # Restore barrier channel
+diff --git a/openjiuwen/core/runner/runner.py b/openjiuwen/core/runner/runner.py
+index 465a7238..594f15fc 100644
+--- a/openjiuwen/core/runner/runner.py
++++ b/openjiuwen/core/runner/runner.py
+@@ -57,6 +57,7 @@ from openjiuwen.core.workflow import (
+ 
+ if TYPE_CHECKING:
+     from openjiuwen.agent_teams.runtime import TeamRuntimeManager
++    from openjiuwen.core.session.checkpointer.workflow_resume import WorkflowResumeGuard
+ 
+ 
+ class _RunnerImpl(_TeamRunnerMixin):
+@@ -362,7 +363,8 @@ class _RunnerImpl(_TeamRunnerMixin):
+                            *,
+                            session: Optional[str | WorkflowSession | AgentSession] = None,
+                            context: ModelContext = None,
+-                           envs: Optional[dict[str, Any]] = None):
++                           envs: Optional[dict[str, Any]] = None,
++                           resume_guard: Optional["WorkflowResumeGuard"] = None):
+         """
+         Execute a workflow with given inputs.
+ 
+@@ -372,10 +374,13 @@ class _RunnerImpl(_TeamRunnerMixin):
+             session: Existing session ID or Session instance for context persistence
+             context: model context
+             envs: Environment variables or configuration overrides,
++            resume_guard: Require a proven interrupted checkpoint and synchronous admission before restoration.
+         """
+         with self._root_task_group_scope():
+             workflow_instance, workflow_session = await self._prepare_workflow(workflow, session)
+-            return await workflow_instance.invoke(inputs, session=workflow_session, context=context)
++            from openjiuwen.core.session.checkpointer.workflow_resume import workflow_resume_scope
++            with workflow_resume_scope(workflow_instance, workflow_session, inputs, resume_guard):
++                return await workflow_instance.invoke(inputs, session=workflow_session, context=context)
+ 
+     async def run_workflow_streaming(self,
+                                      workflow: str | Workflow,
+@@ -765,7 +770,8 @@ class Runner(_TeamRunnerClassMixin):
+         *,
+             session: Optional[str | WorkflowSession | AgentSession] = None,
+         context: Optional[ModelContext] = None,
+-        envs: Optional[dict[str, Any]] = None
++        envs: Optional[dict[str, Any]] = None,
++        resume_guard: Optional["WorkflowResumeGuard"] = None,
+     ) -> Any:
+         """
+         Execute a workflow with given inputs.
+@@ -776,13 +782,15 @@ class Runner(_TeamRunnerClassMixin):
+             session: Existing session ID or Session instance for context persistence
+             context: model context
+             envs: Environment variables or configuration overrides
++            resume_guard: Require a proven interrupted checkpoint and synchronous admission before restoration.
+         """
+         return await GLOBAL_RUNNER.run_workflow(
+             workflow=workflow,
+             inputs=inputs,
+             session=session,
+             context=context,
+-            envs=envs
++            envs=envs,
++            resume_guard=resume_guard,
+         )
+     
+     @classmethod
+diff --git a/openjiuwen/core/session/checkpointer/base.py b/openjiuwen/core/session/checkpointer/base.py
+index 63b0dafa..af271fbe 100644
+--- a/openjiuwen/core/session/checkpointer/base.py
++++ b/openjiuwen/core/session/checkpointer/base.py
+@@ -12,6 +12,11 @@ from openjiuwen.core.session.session import BaseSession
+ 
+ 
+ class Checkpointer(ABC):
++    async def prepare_workflow_resume(self, session: BaseSession, inputs: InteractiveInput, *, before_effect):
++        """Opt-in exact recovery; custom providers must prove all checkpoint parts."""
++        from openjiuwen.core.session.checkpointer.workflow_resume import WorkflowResumeError
++        raise WorkflowResumeError("strict_resume_unsupported")
++
+     @staticmethod
+     def get_thread_id(session: BaseSession) -> str:
+         return ":".join([session.session_id(), session.workflow_id()])
+diff --git a/openjiuwen/core/session/checkpointer/inmemory.py b/openjiuwen/core/session/checkpointer/inmemory.py
+index bfcfa36d..921e7576 100644
+--- a/openjiuwen/core/session/checkpointer/inmemory.py
++++ b/openjiuwen/core/session/checkpointer/inmemory.py
+@@ -29,6 +29,43 @@ class InMemoryCheckpointer(Checkpointer):
+         self._graph_store = InMemoryStore()
+         self._session_to_workflow_ids = {}
+ 
++    async def prepare_workflow_resume(self, session, inputs, *, before_effect):
++        from openjiuwen.core.session.checkpointer.workflow_resume import (
++            WorkflowResumeError, checkpoint_proof, prepare_snapshot, _sync_admit,
++        )
++        sid, wid = session.session_id(), session.workflow_id()
++        storage, graph_store = self._workflow_stores.get(sid), self._graph_store
++        if storage is None:
++            raise WorkflowResumeError("strict_resume_checkpoint_missing")
++        state_blob, updates_blob = storage.state_blobs.get(wid), storage.state_updates_blobs.get(wid)
++        proof = storage.resume_proofs.get(wid)
++        original_graph = graph_store.store_ck.get(sid, {}).get(wid)
++        graph = await graph_store.get(sid, wid)
++
++        def require_unchanged():
++            if (self._workflow_stores.get(sid) is not storage or self._graph_store is not graph_store
++                    or storage.state_blobs.get(wid) is not state_blob
++                    or storage.state_updates_blobs.get(wid) is not updates_blob
++                    or storage.resume_proofs.get(wid) != proof
++                    or graph_store.store_ck.get(sid, {}).get(wid) is not original_graph):
++                raise WorkflowResumeError("strict_resume_checkpoint_changed")
++
++        require_unchanged()
++        try:
++            actual_proof = checkpoint_proof(sid, wid, state_blob, updates_blob, storage.serde.dumps_typed(graph))
++            if proof is None or proof != actual_proof:
++                raise WorkflowResumeError("strict_resume_checkpoint_unproven")
++            prepared = prepare_snapshot(session, inputs, storage.serde.loads_typed(state_blob),
++                                        storage.serde.loads_typed(updates_blob), graph)
++        except WorkflowResumeError:
++            raise
++        except Exception as error:
++            raise WorkflowResumeError("strict_resume_checkpoint_invalid") from error
++        _sync_admit(before_effect)
++        require_unchanged()
++        prepared.apply(session)
++        return prepared
++
+     async def pre_workflow_execute(self, session: BaseSession, inputs: InteractiveInput):
+         session_id = session.session_id()
+         workflow_id = session.workflow_id()
+@@ -120,7 +157,16 @@ class InMemoryCheckpointer(Checkpointer):
+             workflow_id=workflow_id,
+             metadata={"storage_type": "inmemory"}
+         )
+-        await workflow_store.save(session)
++        graph = self._graph_store.store_ck.get(session_id, {}).get(workflow_id)
++        graph_blob = None
++        if graph is not None:
++            try:
++                graph_blob = workflow_store.serde.dumps_typed(graph)
++            except Exception:
++                # Legacy in-memory graphs can contain non-serializable values.
++                # Preserve their existing recovery without asserting a proof.
++                pass
++        await workflow_store.save(session, graph_blob=graph_blob)
+         workflow_ids.add(workflow_id)
+         session_logger.info(
+             f"Succeed to save workflow checkpoint on {reason}",
+@@ -452,8 +498,9 @@ class WorkflowStorage(Storage):
+             str,
+             tuple[str, bytes]
+         ] = {}
++        self.resume_proofs = {}
+ 
+-    async def save(self, session: BaseSession):
++    async def save(self, session: BaseSession, *, graph_blob=None):
+         workflow_id = session.workflow_id()
+         state = session.state().get_state(copied=False)
+         state_blob = self.serde.dumps_typed(state)
+@@ -464,6 +511,11 @@ class WorkflowStorage(Storage):
+         updates_blob = self.serde.dumps_typed(updates)
+         if updates_blob:
+             self.state_updates_blobs[workflow_id] = updates_blob
++        self.resume_proofs.pop(workflow_id, None)
++        if graph_blob is not None and state_blob and updates_blob:
++            from openjiuwen.core.session.checkpointer.workflow_resume import checkpoint_proof
++            self.resume_proofs[workflow_id] = checkpoint_proof(
++                session.session_id(), workflow_id, state_blob, updates_blob, graph_blob)
+ 
+     async def recover(self, session: BaseSession, inputs: InteractiveInput = None):
+         workflow_id = session.workflow_id()
+@@ -495,6 +547,7 @@ class WorkflowStorage(Storage):
+     async def clear(self, workflow_id: str):
+         self.state_blobs.pop(workflow_id, None)
+         self.state_updates_blobs.pop(workflow_id, None)
++        self.resume_proofs.pop(workflow_id, None)
+ 
+     async def exists(self, session: BaseSession) -> bool:
+         state_blob = self.state_blobs.get(session.workflow_id())
+diff --git a/openjiuwen/core/session/checkpointer/persistence.py b/openjiuwen/core/session/checkpointer/persistence.py
+index 4f37fa75..56ba0e92 100644
+--- a/openjiuwen/core/session/checkpointer/persistence.py
++++ b/openjiuwen/core/session/checkpointer/persistence.py
+@@ -329,6 +329,7 @@ class WorkflowStorage(BaseStorage):
+     _UPDATE_BLOBS = "workflow_update_blobs"
+     _UPDATE_BLOBS_DUMP_TYPE = "workflow_update_blobs_dump_type"
+     _KEY_NUMS = 4
++    _RESUME_PROOF = "workflow_resume_proof"
+ 
+     def _process_interactive_inputs(self, session: BaseSession, inputs: InteractiveInput) -> None:
+         """Process interactive inputs and update workflow state."""
+@@ -349,7 +350,7 @@ class WorkflowStorage(BaseStorage):
+                 node_session.state().update({INTERACTIVE_INPUT: [value]})
+         session.state().commit()
+ 
+-    async def save(self, session: BaseSession):
++    async def save(self, session: BaseSession, *, graph_blob=None):
+         """Save workflow state to KV store."""
+         state = session.state().get_state(copied=False)
+         workflow_id = session.workflow_id()
+@@ -394,6 +395,16 @@ class WorkflowStorage(BaseStorage):
+             has_operations = True
+ 
+         if has_operations:
++            proof = ""
++            if graph_blob is not None and state_blob and updates_blob:
++                from openjiuwen.core.session.checkpointer.workflow_resume import checkpoint_proof
++                try:
++                    proof = checkpoint_proof(session_id, workflow_id, state_blob, updates_blob, graph_blob)
++                except (ValueError, TypeError):
++                    # Invalid graph bytes must not break legacy state saving.
++                    pass
++            await pipeline.set(build_key_with_namespace(
++                session_id, SESSION_NAMESPACE_WORKFLOW, workflow_id, self._RESUME_PROOF), proof)
+             try:
+                 await pipeline.execute()
+                 session_logger.debug(
+@@ -507,7 +518,8 @@ class WorkflowStorage(BaseStorage):
+         # Use batch_delete for multiple keys
+         deleted = await self._kv_store.batch_delete([
+             state_dump_type_key, state_blob_key,
+-            state_updates_dump_type_key, state_updates_blob_key
++            state_updates_dump_type_key, state_updates_blob_key,
++            build_key_with_namespace(session_id, SESSION_NAMESPACE_WORKFLOW, workflow_id, self._RESUME_PROOF),
+         ])
+         session_logger.debug(
+             "Workflow checkpoint cleared",
+@@ -743,6 +755,66 @@ class PersistenceCheckpointer(Checkpointer):
+         self._workflow_storage = WorkflowStorage(kv_store)
+         self._graph_state = GraphStore(kv_store)
+ 
++    async def prepare_workflow_resume(self, session, inputs, *, before_effect):
++        from openjiuwen.core.session.checkpointer.workflow_resume import (
++            WorkflowResumeError, checkpoint_proof, normalized_blob, prepare_snapshot, _sync_admit,
++        )
++        # This built-in store performs a single SELECT for all requested keys.
++        # An arbitrary BaseKVStore pipeline does not promise a consistent read.
++        if type(self._kv_store) is not DbBasedKVStore or self._kv_store.engine.dialect.name != "sqlite":
++            raise WorkflowResumeError("strict_resume_unsupported")
++        sid, wid = session.session_id(), session.workflow_id()
++        kv, storage, graph_store = self._kv_store, self._workflow_storage, self._graph_state
++        pipeline = kv.pipeline()
++        for suffix in (storage._STATE_BLOBS_DUMP_TYPE, storage._STATE_BLOBS,
++                       storage._UPDATE_BLOBS_DUMP_TYPE, storage._UPDATE_BLOBS, storage._RESUME_PROOF):
++            await pipeline.get(build_key_with_namespace(sid, SESSION_NAMESPACE_WORKFLOW, wid, suffix))
++        for suffix in (graph_store._DATA_TYPE, graph_store._DATA_VALUE):
++            await pipeline.get(build_key_with_namespace(sid, WORKFLOW_NAMESPACE_GRAPH, wid, suffix))
++        values = await pipeline.execute()
++
++        def require_owner():
++            if self._kv_store is not kv or self._workflow_storage is not storage or self._graph_state is not graph_store:
++                raise WorkflowResumeError("strict_resume_owner_mismatch")
++
++        require_owner()
++        try:
++            if len(values) != 7:
++                raise WorkflowResumeError("strict_resume_checkpoint_missing")
++            state_blob, updates_blob, graph_blob = values[:2], values[2:4], values[5:7]
++            proof = values[4].decode("utf-8") if isinstance(values[4], bytes) else values[4]
++            if not proof or proof != checkpoint_proof(sid, wid, state_blob, updates_blob, graph_blob):
++                raise WorkflowResumeError("strict_resume_checkpoint_unproven")
++            prepared = prepare_snapshot(session, inputs,
++                storage._serde.loads_typed(normalized_blob(state_blob)),
++                storage._serde.loads_typed(normalized_blob(updates_blob)),
++                graph_store._serde.loads_typed(normalized_blob(graph_blob)))
++        except WorkflowResumeError:
++            raise
++        except Exception as error:
++            raise WorkflowResumeError("strict_resume_checkpoint_invalid") from error
++        _sync_admit(before_effect)
++        require_owner()
++        prepared.apply(session)
++        return prepared
++
++    async def _save_workflow_checkpoint(self, session):
++        # Pair the workflow parts with the already-saved graph. A later change
++        # to either part invalidates strict recovery, while legacy recovery is
++        # unchanged when no graph proof can be obtained.
++        sid, wid = session.session_id(), session.workflow_id()
++        graph_blob = None
++        try:
++            pipeline = self._kv_store.pipeline()
++            for suffix in (self._graph_state._DATA_TYPE, self._graph_state._DATA_VALUE):
++                await pipeline.get(build_key_with_namespace(sid, WORKFLOW_NAMESPACE_GRAPH, wid, suffix))
++            values = await pipeline.execute()
++            if len(values) == 2 and all(value is not None for value in values):
++                graph_blob = values
++        except Exception:
++            pass
++        await self._workflow_storage.save(session, graph_blob=graph_blob)
++
+     async def pre_agent_execute(self, session: BaseSession, inputs):
+         """Prepare agent execution by recovering agent state."""
+         session_logger.info(
+@@ -870,7 +942,7 @@ class PersistenceCheckpointer(Checkpointer):
+                 workflow_id=workflow_id,
+                 metadata={"reason": "exception", "storage_type": "persistence"}
+             )
+-            await self._workflow_storage.save(session)
++            await self._save_workflow_checkpoint(session)
+             raise exception
+ 
+         if result.get(TASK_STATUS_INTERRUPT) is None:
+@@ -891,7 +963,7 @@ class PersistenceCheckpointer(Checkpointer):
+                 workflow_id=workflow_id,
+                 metadata={"reason": "interaction_required", "storage_type": "persistence"}
+             )
+-            await self._workflow_storage.save(session)
++            await self._save_workflow_checkpoint(session)
+ 
+     async def session_exists(self, session_id: str) -> bool:
+         """
+diff --git a/openjiuwen/core/session/checkpointer/workflow_resume.py b/openjiuwen/core/session/checkpointer/workflow_resume.py
+new file mode 100644
+index 00000000..885c23a5
+--- /dev/null
++++ b/openjiuwen/core/session/checkpointer/workflow_resume.py
+@@ -0,0 +1,227 @@
++# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
++"""Opt-in, single-call checkpoint admission for exact workflow continuation."""
++
++from __future__ import annotations
++
++import base64
++import asyncio
++import hashlib
++import inspect
++from contextlib import contextmanager
++from contextvars import ContextVar
++from copy import deepcopy
++from dataclasses import dataclass
++from typing import Callable
++
++
++class WorkflowResumeError(ValueError):
++    def __init__(self, code: str):
++        super().__init__(code)
++        self.code = code
++
++
++class _GuardFailure(Exception):
++    """Keep authorization errors out of legacy timeout/recursion translation."""
++
++    def __init__(self, error):
++        super().__init__(str(error))
++        self.error = error
++
++
++@dataclass(frozen=True, kw_only=True)
++class WorkflowResumeGuard:
++    """Require a proven checkpoint and synchronous authorization before restoration.
++
++    Use with ``Runner.run_workflow(..., resume_guard=...)``. This mode supports
++    complete answers to interrupted root nodes; raw inputs, nested interruptions,
++    old checkpoints without a pairing proof, and unknown providers fail closed.
++    The callback must synchronously return None or raise; its exceptions
++    propagate unchanged. Other return values are rejected.
++    """
++
++    before_effect: Callable[[], None]
++
++    def __post_init__(self):
++        if not callable(self.before_effect):
++            raise TypeError("before_effect must be callable")
++
++
++def _sync_admit(callback):
++    result = callback()
++    if inspect.isawaitable(result):
++        close = getattr(result, "close", None)
++        if callable(close):
++            close()
++        raise WorkflowResumeError("strict_resume_async_guard_unsupported")
++    if result is not None:
++        raise WorkflowResumeError("strict_resume_guard_result_invalid")
++
++
++@dataclass
++class _ResumeTarget:
++    workflow: object
++    public_session: object
++    session_id: str
++    workflow_id: str
++    inputs: object
++    guard: WorkflowResumeGuard
++    caller_task: object
++    checkpointer: object = None
++
++    def validate(self, session, checkpointer):
++        if self.caller_task.cancelling() or self.caller_task.done() or asyncio.current_task().cancelling():
++            raise asyncio.CancelledError
++        if (session.session_id() != self.session_id or session.workflow_id() != self.workflow_id
++                or self.workflow._card.id != self.workflow_id
++                or checkpointer is not self.checkpointer or session.checkpointer() is not self.checkpointer):
++            raise WorkflowResumeError("strict_resume_owner_mismatch")
++
++    def admit(self, session, checkpointer):
++        self.validate(session, checkpointer)
++        try:
++            _sync_admit(self.guard.before_effect)
++        except Exception as error:
++            raise _GuardFailure(error) from error
++        self.validate(session, checkpointer)
++
++
++_resume_target: ContextVar[_ResumeTarget | None] = ContextVar("_workflow_resume_target", default=None)
++PREPARED_WORKFLOW_RESUME = "_prepared_workflow_resume"
++
++
++@contextmanager
++def workflow_resume_scope(workflow, session, inputs, guard):
++    if guard is None:
++        yield
++        return
++    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
++
++    if not isinstance(guard, WorkflowResumeGuard) or not isinstance(inputs, InteractiveInput):
++        raise WorkflowResumeError("strict_resume_input_required")
++    sid, wid = session.get_session_id(), workflow._card.id
++    if any(not isinstance(value, str) or not value or value != value.strip() for value in (sid, wid)):
++        raise WorkflowResumeError("strict_resume_scope_invalid")
++    target = _ResumeTarget(workflow, session, sid, wid, deepcopy(inputs), guard, asyncio.current_task())
++    token = _resume_target.set(target)
++    try:
++        yield
++    except _GuardFailure as failure:
++        raise failure.error from None
++    finally:
++        _resume_target.reset(token)
++
++
++def get_workflow_resume_target(workflow, session, inputs):
++    target = _resume_target.get()
++    if target is None or target.workflow is not workflow:
++        return None
++    if (target.public_session is not session or session.get_session_id() != target.session_id
++            or workflow._card.id != target.workflow_id or inputs != target.inputs):
++        raise WorkflowResumeError("strict_resume_owner_mismatch")
++    return target
++
++
++def normalized_blob(pair):
++    if pair is None or len(pair) != 2 or pair[0] is None or pair[1] is None:
++        raise WorkflowResumeError("strict_resume_checkpoint_missing")
++    kind, value = pair
++    if isinstance(kind, bytes):
++        kind = kind.decode("utf-8")
++    if isinstance(value, str):
++        value = base64.b64decode(value, validate=True)
++    if not isinstance(kind, str) or not kind or kind == "empty" or not isinstance(value, bytes) or not value:
++        raise WorkflowResumeError("strict_resume_checkpoint_missing")
++    return kind, value
++
++
++def checkpoint_proof(session_id, workflow_id, state_blob, updates_blob, graph_blob):
++    """Bind all saved parts and their exact scope; no inference from mere existence."""
++    parts = tuple(normalized_blob(part) for part in (state_blob, updates_blob, graph_blob))
++    digest = hashlib.sha256(b"workflow-resume-v1")
++    # Length framing is independent of Python object aliasing and KV decoding.
++    for value in (session_id.encode(), workflow_id.encode(),
++                  *(value for kind, blob in parts for value in (kind.encode(), blob))):
++        digest.update(len(value).to_bytes(8, "big"))
++        digest.update(value)
++    return digest.hexdigest()
++
++
++@dataclass
++class PreparedWorkflowResume:
++    session_id: str
++    workflow_id: str
++    state: dict
++    updates: dict
++    graph_state: object
++    inputs: object
++    consumed: bool = False
++
++    def apply(self, session):
++        from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT
++        from openjiuwen.core.session.internal.workflow import NodeSession
++
++        session.state().set_state(self.state)
++        for node_id, value in self.inputs.user_inputs.items():
++            node = NodeSession(session, node_id)
++            previous = node.state().get(INTERACTIVE_INPUT)
++            answers = [*previous, value] if isinstance(previous, list) else [value]
++            node.state().update({INTERACTIVE_INPUT: answers})
++        session.state().commit()
++        session.state().set_updates(self.updates)
++
++    def consume_graph(self, session_id, workflow_id):
++        if self.consumed or session_id != self.session_id or workflow_id != self.workflow_id:
++            raise WorkflowResumeError("strict_resume_snapshot_mismatch")
++        self.consumed = True
++        return self.graph_state
++
++
++def prepare_snapshot(session, inputs, state, updates, graph_state):
++    from openjiuwen.core.common.constants.constant import INTERACTION
++    from openjiuwen.core.graph.pregel.base import GraphInterrupt, Interrupt
++    from openjiuwen.core.graph.pregel.constants import TASK_STATUS_INTERRUPT
++    from openjiuwen.core.graph.store import GraphState, PendingNode
++    from openjiuwen.core.session.interaction.interaction import InteractionOutput
++    from openjiuwen.core.session.stream.base import OutputSchema
++    from openjiuwen.core.session.state.base import (
++        IO_STATE_KEY, GLOBAL_STATE_KEY, COMP_STATE_KEY, WORKFLOW_STATE_KEY,
++        IO_STATE_UPDATES_KEY, GLOBAL_STATE_UPDATES_KEY, COMP_STATE_UPDATES_KEY, WORKFLOW_STATE_UPDATES_KEY,
++    )
++
++    for value, keys in ((state, (IO_STATE_KEY, GLOBAL_STATE_KEY, COMP_STATE_KEY, WORKFLOW_STATE_KEY)),
++                        (updates, (IO_STATE_UPDATES_KEY, GLOBAL_STATE_UPDATES_KEY,
++                                   COMP_STATE_UPDATES_KEY, WORKFLOW_STATE_UPDATES_KEY))):
++        if (not isinstance(value, dict) or set(value) != set(keys)
++                or any(not isinstance(value[key], dict) and not (index == 1 and value[key] is None)
++                       for index, key in enumerate(keys))):
++            raise WorkflowResumeError("strict_resume_checkpoint_invalid")
++    if (not isinstance(graph_state, GraphState) or graph_state.ns != session.workflow_id()
++            or type(graph_state.step) is not int or graph_state.step < 0
++            or not isinstance(graph_state.channel_values, dict) or not isinstance(graph_state.pending_buffer, list)
++            or not isinstance(graph_state.node_version, dict) or not isinstance(graph_state.pending_node, dict)
++            or not graph_state.pending_node):
++        raise WorkflowResumeError("strict_resume_graph_invalid")
++    for name, node in graph_state.pending_node.items():
++        if (not isinstance(name, str) or not isinstance(node, PendingNode)
++                or node.node_name != name or node.status != TASK_STATUS_INTERRUPT):
++            raise WorkflowResumeError("strict_resume_graph_invalid")
++        if not isinstance(node.exception, list) or not node.exception:
++            raise WorkflowResumeError("strict_resume_inputs_unsupported")
++        for exception in node.exception:
++            if (not isinstance(exception, GraphInterrupt) or not isinstance(exception.value, tuple)
++                    or not exception.value):
++                raise WorkflowResumeError("strict_resume_inputs_unsupported")
++            for interruption in exception.value:
++                if (not isinstance(interruption, Interrupt) or not isinstance(interruption.value, OutputSchema)
++                        or interruption.value.type != INTERACTION
++                        or not isinstance(interruption.value.payload, InteractionOutput)
++                        or interruption.value.payload.id != name):
++                    # A parent graph's interrupted node is not proof of its
++                    # child graph; answering the parent must not restart it.
++                    raise WorkflowResumeError("strict_resume_inputs_unsupported")
++    if (inputs.raw_inputs is not None or not inputs.user_inputs
++            or set(inputs.user_inputs) != set(graph_state.pending_node)
++            or any(value is None for value in inputs.user_inputs.values())):
++        raise WorkflowResumeError("strict_resume_inputs_unsupported")
++    return PreparedWorkflowResume(session.session_id(), session.workflow_id(), state, updates,
++                                  graph_state, deepcopy(inputs))
+diff --git a/openjiuwen/core/workflow/__init__.py b/openjiuwen/core/workflow/__init__.py
+index 2ce18856..c7cc3df7 100644
+--- a/openjiuwen/core/workflow/__init__.py
++++ b/openjiuwen/core/workflow/__init__.py
+@@ -10,6 +10,10 @@ from openjiuwen.core.workflow.base import (
+ 
+ )
+ from openjiuwen.core.workflow.workflow import Workflow
++from openjiuwen.core.session.checkpointer.workflow_resume import (
++    WorkflowResumeGuard as WorkflowResumeGuard,
++    WorkflowResumeError as WorkflowResumeError,
++)
+ 
+ from openjiuwen.core.workflow.workflow_config import (
+     WorkflowConfig,
+@@ -83,6 +87,8 @@ _WORKFLOW_CLASSES = [
+     "WorkflowOutput",
+     "WorkflowChunk",
+     "WorkflowExecutionState",
++    "WorkflowResumeGuard",
++    "WorkflowResumeError",
+     "execute_single_component"
+ ]
+ 
+diff --git a/openjiuwen/core/workflow/workflow.py b/openjiuwen/core/workflow/workflow.py
+index 21b53391..4fde51a7 100644
+--- a/openjiuwen/core/workflow/workflow.py
++++ b/openjiuwen/core/workflow/workflow.py
+@@ -1,6 +1,7 @@
+ # coding: utf-8
+ # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+ import asyncio
++from copy import deepcopy
+ import uuid
+ from abc import ABCMeta
+ from contextlib import asynccontextmanager
+@@ -337,8 +338,16 @@ class Workflow(metaclass=_WorkflowMeta):
+         Returns:
+             WorkflowOutput containing results and metadata
+         """
++        from openjiuwen.core.session.checkpointer.workflow_resume import (
++            get_workflow_resume_target, WorkflowResumeError,
++        )
++        resume_target = get_workflow_resume_target(self, session, inputs)
+         if kwargs.get("is_sub"):
++            if resume_target is not None:
++                raise WorkflowResumeError("strict_resume_owner_mismatch")
+             return await self._sub_invoke(inputs, session, context, **kwargs)
++        if resume_target is not None:
++            inputs = deepcopy(resume_target.inputs)
+         self._validate_session(session)
+         self._validate_inputs(inputs, **kwargs)
+         self._install_asyncio_exception_handler()
+@@ -350,6 +359,9 @@ class Workflow(metaclass=_WorkflowMeta):
+             inputs=inputs,
+         )
+         workflow_session = self._create_workflow_session(session, stream_modes=[BaseStreamMode.OUTPUT], is_sub=False)
++        if resume_target is not None:
++            resume_target.checkpointer = workflow_session.checkpointer()
++            workflow_session._strict_resume_target = resume_target
+ 
+         async def _invoke_task():
+             chunks = []
+diff --git a/tests/unit_tests/core/workflow/test_workflow_strict_resume.py b/tests/unit_tests/core/workflow/test_workflow_strict_resume.py
+new file mode 100644
+index 00000000..2383e517
+--- /dev/null
++++ b/tests/unit_tests/core/workflow/test_workflow_strict_resume.py
+@@ -0,0 +1,470 @@
++# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
++"""Strict continuation through the real Runner, workflow, graph and checkpoint owners."""
++
++import asyncio
++from types import SimpleNamespace
++from uuid import uuid4
++
++import pytest
++import pytest_asyncio
++
++from openjiuwen.core.runner import Runner
++from openjiuwen.core.runner.callback import AsyncCallbackFramework
++from openjiuwen.core.session import InteractiveInput
++from openjiuwen.core.session.checkpointer import CheckpointerFactory
++from openjiuwen.core.session.checkpointer.base import (
++    Checkpointer, build_key_with_namespace, SESSION_NAMESPACE_WORKFLOW,
++)
++from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
++from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointerProvider
++from openjiuwen.core.workflow import (
++    Workflow, WorkflowCard, WorkflowComponent, Start, End, WorkflowExecutionState,
++    WorkflowResumeGuard, WorkflowResumeError,
++)
++
++
++class CountStart(Start):
++    def __init__(self, counts):
++        super().__init__()
++        self.counts = counts
++
++    async def invoke(self, inputs, session, context):
++        self.counts["start"] += 1
++        return inputs
++
++
++class Ask(WorkflowComponent):
++    def __init__(self, counts, rounds=1):
++        super().__init__()
++        self.counts = counts
++        self.rounds = rounds
++
++    async def invoke(self, inputs, session, context):
++        self.counts["ask"] += 1
++        answers = [await session.interact(f"Answer question {index}") for index in range(self.rounds)]
++        self.counts["answered"] += 1
++        return {"answer": answers[-1]}
++
++
++@pytest_asyncio.fixture(params=["memory", "sqlite"])
++async def pending(request, monkeypatch, tmp_path):
++    monkeypatch.setattr(Runner, "callback_framework", AsyncCallbackFramework())
++    provider = InMemoryCheckpointer() if request.param == "memory" else await PersistenceCheckpointerProvider().create(
++        {"db_type": "sqlite", "db_path": str(tmp_path / "checkpoint.db")})
++    monkeypatch.setattr(CheckpointerFactory, "_default_checkpointer", provider)
++    counts = {"start": 0, "ask": 0, "answered": 0}
++    workflow = Workflow(WorkflowCard(id="review-workflow", name="Strict resume fixture"))
++    workflow.set_start_comp("start", CountStart(counts))
++    ask = Ask(counts)
++    workflow.add_workflow_comp("ask", ask)
++    workflow.set_end_comp("end", End(), inputs_schema={"answer": "${ask.answer}"})
++    workflow.add_connection("start", "ask")
++    workflow.add_connection("ask", "end")
++    sid = uuid4().hex
++    output = await Runner.run_workflow(workflow, {"query": "test"}, session=sid)
++    assert output.state is WorkflowExecutionState.INPUT_REQUIRED
++    assert output.result[0].payload.id == "ask"
++    assert counts == {"start": 1, "ask": 1, "answered": 0}
++    value = SimpleNamespace(workflow=workflow, provider=provider, sid=sid, counts=counts,
++                            kind=request.param, ask=ask)
++    yield value
++    await provider.release(sid)
++    if request.param == "sqlite":
++        await provider._kv_store.engine.dispose()
++
++
++async def resume(pending, guard=lambda: None, *, sid=None, inputs=None):
++    if inputs is None:
++        inputs = InteractiveInput()
++        inputs.update("ask", "accepted answer")
++    return await Runner.run_workflow(pending.workflow, inputs, session=sid or pending.sid,
++                                     resume_guard=WorkflowResumeGuard(before_effect=guard))
++
++
++@pytest.mark.asyncio
++async def test_strict_resume_continues_actual_pending_node_once(pending):
++    seen = []
++    result = await resume(pending, lambda: seen.append("admitted"))
++    assert result.state is WorkflowExecutionState.COMPLETED
++    assert pending.counts == {"start": 1, "ask": 2, "answered": 1}
++    assert seen == ["admitted"]
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("missing", ["state", "graph", "wrong_session", "wrong_workflow"])
++async def test_missing_proof_never_restarts_or_injects_input(pending, monkeypatch, missing):
++    b = pending
++    if missing == "graph":
++        await b.provider.graph_store().delete(b.sid, "review-workflow")
++    if missing == "state":
++        if b.kind == "memory":
++            await b.provider._workflow_stores[b.sid].clear("review-workflow")
++        else:
++            await b.provider._workflow_storage.clear("review-workflow", b.sid)
++    if missing == "wrong_workflow":
++        monkeypatch.setattr(b.workflow.card, "id", "wrong-workflow")
++    writes = watch_restoration(monkeypatch)
++    admitted = []
++    before = dict(b.counts)
++    error = None
++    try:
++        await resume(b, lambda: admitted.append(True),
++                     sid="wrong-session" if missing == "wrong_session" else None)
++    except Exception as caught:
++        error = caught
++    assert b.counts == before
++    assert writes == [] and admitted == []
++    assert error is not None
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("error_type", [PermissionError, TimeoutError, RecursionError])
++async def test_guard_rejection_has_zero_node_effect(pending, monkeypatch, error_type):
++    error = error_type("revoked while loading checkpoint")
++    writes = watch_restoration(monkeypatch)
++
++    def reject():
++        raise error
++
++    before = dict(pending.counts)
++    caught = None
++    try:
++        await resume(pending, reject)
++    except Exception as exception:
++        caught = exception
++    assert pending.counts == before
++    assert writes == []
++    assert caught is error
++
++
++def watch_restoration(monkeypatch):
++    from openjiuwen.core.session.state.workflow_state import InMemoryState
++
++    writes = []
++    for name in ("set_state", "set_updates"):
++        original = getattr(InMemoryState, name)
++
++        def record(self, value, _name=name, _original=original):
++            writes.append(_name)
++            return _original(self, value)
++
++        monkeypatch.setattr(InMemoryState, name, record)
++    return writes
++
++
++def delay_snapshot(pending, monkeypatch):
++    entered, release = asyncio.Event(), asyncio.Event()
++    if pending.kind == "memory":
++        graph = pending.provider.graph_store()
++        original = graph.get
++
++        async def get(*args):
++            result = await original(*args)
++            entered.set()
++            await release.wait()
++            return result
++
++        monkeypatch.setattr(graph, "get", get)
++    else:
++        kv = pending.provider._kv_store
++        original = kv.pipeline
++
++        def pipeline():
++            value = original()
++            execute = value.execute
++
++            async def wait_execute():
++                result = await execute()
++                entered.set()
++                await release.wait()
++                return result
++
++            value.execute = wait_execute
++            return value
++
++        monkeypatch.setattr(kv, "pipeline", pipeline)
++    return entered, release
++
++
++@pytest.mark.asyncio
++async def test_permission_revoked_during_actual_snapshot_read(pending, monkeypatch):
++    writes = watch_restoration(monkeypatch)
++    entered, release = delay_snapshot(pending, monkeypatch)
++    admitted = []
++    revoked = False
++
++    def guard():
++        admitted.append("checked")
++        if revoked:
++            raise PermissionError("revoked")
++
++    before = dict(pending.counts)
++    task = asyncio.create_task(resume(pending, guard))
++    await asyncio.wait_for(entered.wait(), 5)
++    assert admitted == [] and writes == []
++    revoked = True
++    release.set()
++    with pytest.raises(PermissionError, match="revoked"):
++        await task
++    assert admitted == ["checked"] and writes == [] and pending.counts == before
++
++
++@pytest.mark.asyncio
++async def test_cancel_during_proof_preserves_pending_checkpoint(pending, monkeypatch):
++    writes = watch_restoration(monkeypatch)
++    with monkeypatch.context() as gate_patch:
++        entered, release = delay_snapshot(pending, gate_patch)
++        task = asyncio.create_task(resume(pending))
++        await asyncio.wait_for(entered.wait(), 5)
++        task.cancel()
++        # Cleanup must not need another checkpoint operation while proof is pending.
++        release.set()
++        with pytest.raises(asyncio.CancelledError):
++            await task
++    assert writes == []
++    assert pending.counts == {"start": 1, "ask": 1, "answered": 0}
++    assert (await resume(pending)).state is WorkflowExecutionState.COMPLETED
++
++
++async def remove_pairing_proof(pending):
++    if pending.kind == "memory":
++        pending.provider._workflow_stores[pending.sid].resume_proofs.clear()
++    else:
++        storage = pending.provider._workflow_storage
++        key = build_key_with_namespace(pending.sid, SESSION_NAMESPACE_WORKFLOW,
++                                       "review-workflow", storage._RESUME_PROOF)
++        await pending.provider._kv_store.delete(key)
++
++
++@pytest.mark.asyncio
++async def test_old_checkpoint_is_legacy_only(pending, monkeypatch):
++    await remove_pairing_proof(pending)
++    writes = watch_restoration(monkeypatch)
++    with pytest.raises(WorkflowResumeError, match="checkpoint_unproven"):
++        await resume(pending)
++    assert writes == []
++    inputs = InteractiveInput()
++    inputs.update("ask", "legacy answer")
++    result = await Runner.run_workflow(pending.workflow, inputs, session=pending.sid)
++    assert result.state is WorkflowExecutionState.COMPLETED
++    assert pending.counts == {"start": 1, "ask": 2, "answered": 1}
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("part", ["state", "updates", "graph", "mixed_graph"])
++async def test_damaged_or_mixed_parts_never_restore(pending, monkeypatch, part):
++    from openjiuwen.core.graph.store import create_serializer
++
++    b = pending
++    if part in ("graph", "mixed_graph"):
++        graph = await b.provider.graph_store().get(b.sid, "review-workflow")
++        graph.step += 1
++        if part == "graph":
++            graph.pending_node.clear()
++        await b.provider.graph_store().save(b.sid, "review-workflow", graph)
++    elif b.kind == "memory":
++        storage = b.provider._workflow_stores[b.sid]
++        blobs = storage.state_blobs if part == "state" else storage.state_updates_blobs
++        blobs["review-workflow"] = create_serializer("pickle").dumps_typed({"unexpected": "damaged"})
++    else:
++        storage = b.provider._workflow_storage
++        suffix = storage._STATE_BLOBS if part == "state" else storage._UPDATE_BLOBS
++        await b.provider._kv_store.set(build_key_with_namespace(
++            b.sid, SESSION_NAMESPACE_WORKFLOW, "review-workflow", suffix), b"corrupt checkpoint")
++    writes = watch_restoration(monkeypatch)
++    before = dict(b.counts)
++    admitted = []
++    with pytest.raises(WorkflowResumeError):
++        await resume(b, lambda: admitted.append(True))
++    assert writes == [] and admitted == [] and b.counts == before
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("mode", ["raw", "empty", "wrong_node", "nested", "extra_node"])
++async def test_unsupported_input_scope_has_no_effect(pending, monkeypatch, mode):
++    inputs = InteractiveInput("unbound answer") if mode == "raw" else InteractiveInput()
++    if mode in ("wrong_node", "nested"):
++        inputs.update("other" if mode == "wrong_node" else "ask.inner", "answer")
++    if mode == "extra_node":
++        inputs.update("ask", "answer")
++        inputs.update("other", "answer")
++    writes = watch_restoration(monkeypatch)
++    with pytest.raises(WorkflowResumeError, match="inputs_unsupported"):
++        await resume(pending, inputs=inputs)
++    assert writes == [] and pending.counts == {"start": 1, "ask": 1, "answered": 0}
++
++
++@pytest.mark.asyncio
++async def test_prepared_graph_is_consumed_without_second_storage_read(pending, monkeypatch):
++    from openjiuwen.core.graph.store import GraphStore
++
++    async def second_read(*args, **kwargs):
++        raise AssertionError("Pregel must consume the prepared snapshot")
++
++    monkeypatch.setattr(GraphStore, "get", second_read)
++    assert (await resume(pending)).state is WorkflowExecutionState.COMPLETED
++    assert pending.counts == {"start": 1, "ask": 2, "answered": 1}
++
++
++@pytest.mark.asyncio
++async def test_unknown_provider_default_is_unsupported(pending, monkeypatch):
++    monkeypatch.setattr(pending.provider, "prepare_workflow_resume",
++                        Checkpointer.prepare_workflow_resume.__get__(pending.provider))
++    writes = watch_restoration(monkeypatch)
++    with pytest.raises(WorkflowResumeError, match="strict_resume_unsupported"):
++        await resume(pending)
++    assert writes == [] and pending.counts == {"start": 1, "ask": 1, "answered": 0}
++
++
++@pytest.mark.asyncio
++async def test_replaced_provider_cannot_restore_cached_graph(pending, monkeypatch):
++    monkeypatch.setattr(CheckpointerFactory, "_default_checkpointer", InMemoryCheckpointer())
++    writes = watch_restoration(monkeypatch)
++    with pytest.raises(WorkflowResumeError, match="owner_mismatch"):
++        await resume(pending)
++    assert writes == [] and pending.counts == {"start": 1, "ask": 1, "answered": 0}
++
++
++@pytest.mark.asyncio
++async def test_async_guard_is_rejected_before_restoration(pending, monkeypatch):
++    writes = watch_restoration(monkeypatch)
++
++    async def unsupported():
++        raise AssertionError("must not await this guard")
++
++    with pytest.raises(WorkflowResumeError, match="async_guard_unsupported"):
++        await resume(pending, unsupported)
++    assert writes == [] and pending.counts == {"start": 1, "ask": 1, "answered": 0}
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("guard_result", [False, True, object()], ids=["false", "true", "object"])
++async def test_non_none_guard_result_is_rejected_before_restoration(pending, monkeypatch, guard_result):
++    from openjiuwen.core.session.checkpointer.workflow_resume import PreparedWorkflowResume
++
++    applied = []
++    original_apply = PreparedWorkflowResume.apply
++
++    def apply(self, session):
++        applied.append(session)
++        return original_apply(self, session)
++
++    monkeypatch.setattr(PreparedWorkflowResume, "apply", apply)
++    writes = watch_restoration(monkeypatch)
++    with pytest.raises(WorkflowResumeError) as caught:
++        await resume(pending, lambda: guard_result)
++    assert caught.value.code == "strict_resume_guard_result_invalid"
++    assert applied == [] and writes == []
++    assert pending.counts == {"start": 1, "ask": 1, "answered": 0}
++
++
++@pytest.mark.asyncio
++async def test_strict_requires_interactive_input_before_any_start(pending, monkeypatch):
++    writes = watch_restoration(monkeypatch)
++    with pytest.raises(WorkflowResumeError, match="input_required"):
++        await Runner.run_workflow(pending.workflow, {"query": "new work"}, session="fresh",
++                                  resume_guard=WorkflowResumeGuard(before_effect=lambda: None))
++    assert writes == [] and pending.counts == {"start": 1, "ask": 1, "answered": 0}
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("answer_id", ["outer.ask", "outer"])
++async def test_real_nested_interruption_is_unsupported(pending, monkeypatch, answer_id):
++    from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
++
++    counts = {"start": 0, "ask": 0, "answered": 0}
++    inner = Workflow(WorkflowCard(id="inner"))
++    inner.set_start_comp("start", CountStart(counts))
++    inner.add_workflow_comp("ask", Ask(counts))
++    inner.set_end_comp("end", End())
++    inner.add_connection("start", "ask")
++    inner.add_connection("ask", "end")
++    outer = Workflow(WorkflowCard(id="nested-root"))
++    outer.set_start_comp("start", Start())
++    outer.add_workflow_comp("outer", SubWorkflowComponent(inner))
++    outer.set_end_comp("end", End())
++    outer.add_connection("start", "outer")
++    outer.add_connection("outer", "end")
++    sid = uuid4().hex
++    try:
++        result = await Runner.run_workflow(outer, {"query": "nested"}, session=sid)
++        assert result.state is WorkflowExecutionState.INPUT_REQUIRED
++        assert result.result[0].payload.id == "outer.ask"
++        writes = watch_restoration(monkeypatch)
++        inputs = InteractiveInput()
++        inputs.update(answer_id, "answer")
++        with pytest.raises(WorkflowResumeError, match="inputs_unsupported"):
++            await Runner.run_workflow(outer, inputs, session=sid,
++                                      resume_guard=WorkflowResumeGuard(before_effect=lambda: None))
++        assert counts == {"start": 1, "ask": 1, "answered": 0} and writes == []
++    finally:
++        await pending.provider.release(sid)
++
++
++@pytest.mark.asyncio
++async def test_same_node_second_interruption_uses_new_paired_snapshot(pending):
++    pending.ask.rounds = 2
++    first = await resume(pending)
++    assert first.state is WorkflowExecutionState.INPUT_REQUIRED
++    assert first.result[0].payload.id == "ask"
++    assert pending.counts == {"start": 1, "ask": 2, "answered": 0}
++    second = await resume(pending)
++    assert second.state is WorkflowExecutionState.COMPLETED
++    assert pending.counts == {"start": 1, "ask": 3, "answered": 1}
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("change", ["inputs", "session", "subgraph"])
++async def test_workflow_input_callback_cannot_change_strict_target(pending, monkeypatch, change):
++    from openjiuwen.core.runner.callback.events import WorkflowEvents
++    from openjiuwen.core.workflow import create_workflow_session
++
++    async def transform(*args, **kwargs):
++        if change == "inputs":
++            inputs = InteractiveInput()
++            inputs.update("ask", "replacement answer")
++            return (inputs, *args[1:]), kwargs
++        if change == "session":
++            return args, {**kwargs, "session": create_workflow_session(session_id=pending.sid)}
++        return args, {**kwargs, "is_sub": True}
++
++    await Runner.callback_framework.register(WorkflowEvents.WORKFLOW_INVOKE_INPUT,
++                                              transform, callback_type="transform")
++    writes = watch_restoration(monkeypatch)
++    with pytest.raises(WorkflowResumeError, match="owner_mismatch"):
++        await resume(pending)
++    assert writes == [] and pending.counts == {"start": 1, "ask": 1, "answered": 0}
++
++
++@pytest.mark.asyncio
++async def test_caller_answer_mutation_during_proof_cannot_rebind(pending, monkeypatch):
++    inputs = InteractiveInput()
++    inputs.update("ask", "original answer")
++    entered, release = delay_snapshot(pending, monkeypatch)
++    task = asyncio.create_task(resume(pending, inputs=inputs))
++    await asyncio.wait_for(entered.wait(), 5)
++    inputs.update("ask", "changed answer")
++    release.set()
++    result = await task
++    assert result.result == {"output": {"answer": "original answer"}}
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("pending", ["memory"], indirect=True)
++async def test_legacy_inmemory_graph_without_serializable_proof_still_recovers(pending):
++    from openjiuwen.core.graph.pregel.constants import TASK_STATUS_INTERRUPT
++    from openjiuwen.core.session.internal.workflow import WorkflowSession
++
++    graph = pending.provider._graph_store.store_ck[pending.sid]["review-workflow"]
++    graph.pending_node["ask"].exception[0].value[0].value.payload.value = lambda: "question"
++    storage = pending.provider._workflow_stores[pending.sid]
++    session = WorkflowSession(workflow_id="review-workflow", session_id=pending.sid)
++    session.state().set_state(storage.serde.loads_typed(storage.state_blobs["review-workflow"]))
++    session.state().set_updates(storage.serde.loads_typed(storage.state_updates_blobs["review-workflow"]))
++    await pending.provider.post_workflow_execute(session, {TASK_STATUS_INTERRUPT: True}, None)
++    assert "review-workflow" not in storage.resume_proofs
++    inputs = InteractiveInput()
++    inputs.update("ask", "legacy answer")
++    result = await Runner.run_workflow(pending.workflow, inputs, session=pending.sid)
++    assert result.state is WorkflowExecutionState.COMPLETED
++    assert pending.counts == {"start": 1, "ask": 2, "answered": 1}
+-- 
+2.55.0.windows.2
+

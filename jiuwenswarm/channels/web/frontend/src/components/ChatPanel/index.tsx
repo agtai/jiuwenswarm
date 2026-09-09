@@ -10,7 +10,7 @@ import { ArrowRight, CheckCircle2, ClipboardList, Copy, Info, LoaderCircle, Shar
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useHarnessStore, useSessionStore, useTodoStore } from '../../stores';
-import { AgentMode, MediaItem, Message, UserAnswer, type ProjectInfo } from '../../types';
+import { AgentMode, MediaItem, Message, UserAnswer, type ProjectInfo, type GoalControlTarget } from '../../types';
 import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
@@ -127,10 +127,10 @@ interface ChatPanelProps {
   permissionsEnabled: boolean;
   onSavePermission: (updates: Record<string, string>) => Promise<void>;
   /** Goal（持续目标）控制，见 GoalBar 组件 */
-  onSetGoal?: (sessionId: string, objective: string) => void;
-  onPauseGoal?: (sessionId: string) => void;
-  onResumeGoal?: (sessionId: string) => void;
-  onClearGoal?: (sessionId: string) => void;
+  onSetGoal?: (sessionId: string, objective: string, target?: GoalControlTarget) => void;
+  onPauseGoal?: (sessionId: string, target?: GoalControlTarget) => void;
+  onResumeGoal?: (sessionId: string, target?: GoalControlTarget) => void;
+  onClearGoal?: (sessionId: string, target?: GoalControlTarget) => void;
   /** 目标 active 但当前无处理中任务时，消息入队后主动排空一次，见 InputArea.tsx 对应调用点 */
   onDrainTaskQueueIfIdle?: (sessionId: string) => void;
 }

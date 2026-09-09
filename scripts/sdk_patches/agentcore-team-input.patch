@@ -1,0 +1,523 @@
+From a88224703284912511abaca7d972c1ec107da899 Mon Sep 17 00:00:00 2001
+From: hongxing <hongxing1227@gmail.com>
+Date: Wed, 9 Sep 2026 14:16:27 +0200
+Subject: [PATCH] feat(team): guard input at original supervisor admission
+
+---
+ openjiuwen/agent_teams/agent/team_agent.py    |   7 +-
+ openjiuwen/agent_teams/harness/control.py     |   3 +-
+ .../agent_teams/harness/native_harness.py     |  28 ++-
+ .../agent_teams/harness/team_harness.py       |   5 +-
+ openjiuwen/agent_teams/runtime/manager.py     |  49 ++++
+ openjiuwen/core/runner/team_runner.py         |  18 +-
+ .../harness/test_guarded_team_input.py        | 233 ++++++++++++++++++
+ 7 files changed, 335 insertions(+), 8 deletions(-)
+ create mode 100644 tests/unit_tests/agent_teams/harness/test_guarded_team_input.py
+
+diff --git a/openjiuwen/agent_teams/agent/team_agent.py b/openjiuwen/agent_teams/agent/team_agent.py
+index b0fb44be..b9786e49 100644
+--- a/openjiuwen/agent_teams/agent/team_agent.py
++++ b/openjiuwen/agent_teams/agent/team_agent.py
+@@ -420,14 +420,17 @@ class TeamAgent(BaseAgent):
+     def has_in_flight_round(self) -> bool:
+         return self._has_in_flight_round()
+ 
+-    async def deliver_input(self, content: Any, *, use_steer: bool = True) -> None:
++    async def deliver_input(self, content: Any, *, use_steer: bool = True, before_effect=None) -> None:
+         # The runtime's single supervisor serialises inputs: send() starts a
+         # round when idle, steers (use_steer) or queues a follow-up when running.
+         # No transition-window race, so no manual branch / pending queue here.
+         harness = self.harness
+         if harness is None:
++            if before_effect is not None:
++                raise ValueError("guarded_input_owner_unavailable")
+             return
+-        await harness.send(content, immediate=use_steer)
++        await harness.send(content, immediate=use_steer,
++                           **({"before_effect": before_effect} if before_effect is not None else {}))
+ 
+     def set_background_task_controller(self, controller: Any) -> None:
+         """Attach the embedder's background task controller to this member's brain.
+diff --git a/openjiuwen/agent_teams/harness/control.py b/openjiuwen/agent_teams/harness/control.py
+index 90e7ba50..ead3072d 100644
+--- a/openjiuwen/agent_teams/harness/control.py
++++ b/openjiuwen/agent_teams/harness/control.py
+@@ -10,7 +10,7 @@ from __future__ import annotations
+ 
+ import asyncio
+ from dataclasses import dataclass
+-from typing import Union
++from typing import Callable, Union
+ 
+ from openjiuwen.agent_teams.harness.state import InboxMessage
+ 
+@@ -26,6 +26,7 @@ class _CmdSend:
+ 
+     msg: InboxMessage
+     ack: asyncio.Future
++    before_effect: Callable[[], None] | None = None
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+diff --git a/openjiuwen/agent_teams/harness/native_harness.py b/openjiuwen/agent_teams/harness/native_harness.py
+index c6862967..ee240182 100644
+--- a/openjiuwen/agent_teams/harness/native_harness.py
++++ b/openjiuwen/agent_teams/harness/native_harness.py
+@@ -510,7 +510,7 @@ class NativeHarness(DeepAgent):
+     # External API: send / abort / pause
+     # ------------------------------------------------------------------
+ 
+-    async def send(self, content: "str | InteractiveInput", *, immediate: bool = False) -> str:
++    async def send(self, content: "str | InteractiveInput", *, immediate: bool = False, before_effect=None) -> str:
+         """Push an inbound message to the supervisor.
+ 
+         ``content`` may be an ``InteractiveInput`` carrying an interrupt resume.
+@@ -532,6 +532,10 @@ class NativeHarness(DeepAgent):
+         Args:
+             content: Raw user content.
+             immediate: See above; ignored when PAUSED.
++            before_effect: Optional trusted synchronous None-or-raises check,
++                consumed by the supervisor immediately before input mutation.
++                Cancelling before that check prevents delivery; cancelling an
++                observer afterward does not roll back already admitted work.
+ 
+         Returns:
+             The monotonic sequence id of this message.
+@@ -539,7 +543,7 @@ class NativeHarness(DeepAgent):
+         self._require_alive()
+         ack: asyncio.Future = asyncio.get_running_loop().create_future()
+         msg = InboxMessage(seq=0, content=content, immediate=immediate)
+-        await self._control.put(_CmdSend(msg=msg, ack=ack))
++        await self._control.put(_CmdSend(msg=msg, ack=ack, before_effect=before_effect))
+         return await ack
+ 
+     async def abort(self, *, immediate: bool = False) -> None:
+@@ -806,6 +810,26 @@ class NativeHarness(DeepAgent):
+ 
+     async def _on_send(self, cmd: _CmdSend) -> None:
+         """Route a send according to current phase."""
++        if cmd.before_effect is not None:
++            import inspect
++
++            # A cancelled waiter before consumption has no input effects. A
++            # failed guard rejects only this input; original work keeps running.
++            if cmd.ack.done():
++                return
++            try:
++                if self._st.phase not in (HarnessState.IDLE, HarnessState.RUNNING, HarnessState.PAUSED):
++                    raise ValueError('guarded_input_phase_unavailable')
++                result = cmd.before_effect()
++                if inspect.iscoroutine(result):
++                    result.close()
++                if result is not None:
++                    raise ValueError('guarded_input_guard_must_return_none')
++                if self._st.phase not in (HarnessState.IDLE, HarnessState.RUNNING, HarnessState.PAUSED):
++                    raise ValueError('guarded_input_phase_unavailable')
++            except (Exception, asyncio.CancelledError) as exc:
++                cmd.ack.set_exception(exc)
++                return
+         seq = self._st.next_seq()
+         msg = InboxMessage(seq=seq, content=cmd.msg.content, immediate=cmd.msg.immediate)
+ 
+diff --git a/openjiuwen/agent_teams/harness/team_harness.py b/openjiuwen/agent_teams/harness/team_harness.py
+index 74305960..75c13cf0 100644
+--- a/openjiuwen/agent_teams/harness/team_harness.py
++++ b/openjiuwen/agent_teams/harness/team_harness.py
+@@ -288,14 +288,15 @@ class TeamHarness:
+             )
+         return self._native.outputs()
+ 
+-    async def send(self, content: Any, *, immediate: bool = False) -> Any:
++    async def send(self, content: Any, *, immediate: bool = False, before_effect=None) -> Any:
+         """Submit input to the native; ``immediate`` steers the active round."""
+         if self._native is None:
+             raise_error(
+                 StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                 error_msg="TeamHarness.send() before start().",
+             )
+-        return await self._native.send(content, immediate=immediate)
++        return await self._native.send(content, immediate=immediate,
++                                       **({"before_effect": before_effect} if before_effect is not None else {}))
+ 
+     async def abort(self, *, immediate: bool = False) -> None:
+         """Abort the active round: graceful (False) or hard+rollback (True).
+diff --git a/openjiuwen/agent_teams/runtime/manager.py b/openjiuwen/agent_teams/runtime/manager.py
+index 06db2703..762b1ca7 100644
+--- a/openjiuwen/agent_teams/runtime/manager.py
++++ b/openjiuwen/agent_teams/runtime/manager.py
+@@ -406,6 +406,7 @@ class TeamRuntimeManager:
+         *,
+         team_name: str,
+         session_id: str,
++        before_effect=None,
+     ) -> DeliverResult:
+         """Route an interact payload through the active team's gate.
+ 
+@@ -446,10 +447,18 @@ class TeamRuntimeManager:
+             when the runtime is shutting down. Other failure reasons
+             propagate from the underlying inbox.
+         """
++        if before_effect is not None and (type(payload) is not GodViewMessage
++                                          or type(payload.body) is not str or not callable(before_effect)):
++            return DeliverResult.failure('guarded_input_unsupported')
+         entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
+         if entry is None:
+             return DeliverResult.failure("not_active")
+ 
++        if before_effect is not None:
++            # The guarded contract is one explicit local leader. Never parse
++            # strings, resolve recipients, restore a runtime, or fan out.
++            return await self._deliver_guarded_leader(entry, payload, before_effect)
++
+         if isinstance(payload, InteractiveInput):
+             if entry.agent.has_pending_interrupt():
+                 await entry.agent.resume_interrupt(payload)
+@@ -494,6 +503,46 @@ class TeamRuntimeManager:
+         finally:
+             await entry.interact_gate.consume_done(ticket)
+ 
++    async def _deliver_guarded_leader(self, entry, payload, before_effect):
++        import inspect
++        from openjiuwen.agent_teams.harness.native_harness import NativeHarness
++
++        agent, gate = entry.agent, entry.interact_gate
++        harness = agent.harness
++        native = getattr(harness, '_native', None)
++        if not isinstance(native, NativeHarness):
++            return DeliverResult.failure('guarded_input_unsupported')
++        session_id, team_name = entry.current_session_id, entry.team_name
++
++        def require_owner():
++            if (self.pool._teams.get(team_name) is not entry or entry.agent is not agent
++                    or entry.current_session_id != session_id or entry.closing
++                    or entry.state is not RuntimeState.RUNNING or entry.interact_gate is not gate
++                    or gate.closed or agent.harness is not harness or harness._native is not native):
++                raise ValueError('guarded_input_owner_changed')
++
++        def admit():
++            require_owner()
++            result = before_effect()
++            if inspect.iscoroutine(result):
++                result.close()
++            if result is not None:
++                raise ValueError('guarded_input_guard_must_return_none')
++            require_owner()
++
++        if entry.closing or entry.state is not RuntimeState.RUNNING:
++            return DeliverResult.failure('not_active')
++        ticket = await gate.admit()
++        if ticket is None:
++            return DeliverResult.failure('gate_closed')
++        try:
++            await agent.deliver_input(payload.body, before_effect=admit)
++            return DeliverResult.success(None)
++        except Exception as exc:
++            return DeliverResult.failure(f'deliver_to_leader_failed:{exc}')
++        finally:
++            await gate.consume_done(ticket)
++
+     @staticmethod
+     def _as_swarmflow_human_reply(
+         payloads: list[InteractPayload],
+diff --git a/openjiuwen/core/runner/team_runner.py b/openjiuwen/core/runner/team_runner.py
+index 35385772..a59c2bf1 100644
+--- a/openjiuwen/core/runner/team_runner.py
++++ b/openjiuwen/core/runner/team_runner.py
+@@ -424,6 +424,7 @@ class _TeamRunnerMixin:
+         *,
+         team_name: Optional[str] = None,
+         session_id: Optional[str] = None,
++        before_effect=None,
+     ):
+         """Deliver an interact payload to an active TeamAgent runtime.
+ 
+@@ -433,6 +434,12 @@ class _TeamRunnerMixin:
+         channel (``GodViewMessage(body=...)``); the conversion happens
+         inside ``TeamRuntimeManager.interact``.
+ 
++        With ``before_effect``, only an explicit string-bodied GodViewMessage
++        to an already resident local leader is supported. The synchronous
++        callback must return None or raise. The original supervisor rechecks
++        the exact owner and callback before applying the input. Rejection has
++        no input effect; acceptance is delivery, not business completion.
++
+         Returns a ``DeliverResult``. Missing ``team_name`` or
+         ``session_id`` returns ``DeliverResult.failure("missing_target")``.
+         """
+@@ -440,11 +447,18 @@ class _TeamRunnerMixin:
+ 
+         if team_name is None or session_id is None:
+             return DeliverResult.failure("missing_target")
++        if before_effect is not None:
++            manager = vars(self).get('_team_runtime_manager')
++            if manager is None:
++                return DeliverResult.failure('not_active')
++        else:
++            manager = self._get_team_runtime_manager()
+         with self._bind_interact_team_session(session_id):
+-            return await self._get_team_runtime_manager().interact(
++            return await manager.interact(
+                 payload,
+                 team_name=team_name,
+                 session_id=session_id,
++                **({"before_effect": before_effect} if before_effect is not None else {}),
+             )
+ 
+     async def register_human_agent_inbound(
+@@ -1017,12 +1031,14 @@ class _TeamRunnerClassMixin:
+         *,
+         team_name: Optional[str] = None,
+         session_id: Optional[str] = None,
++        before_effect=None,
+     ):
+         """Deliver an interact payload to an active TeamAgent runtime."""
+         return await _global_runner().interact_agent_team(
+             payload,
+             team_name=team_name,
+             session_id=session_id,
++            **({"before_effect": before_effect} if before_effect is not None else {}),
+         )
+ 
+     @classmethod
+diff --git a/tests/unit_tests/agent_teams/harness/test_guarded_team_input.py b/tests/unit_tests/agent_teams/harness/test_guarded_team_input.py
+new file mode 100644
+index 00000000..6b1abfb1
+--- /dev/null
++++ b/tests/unit_tests/agent_teams/harness/test_guarded_team_input.py
+@@ -0,0 +1,233 @@
++"""Exact leader input guard is consumed by the existing native supervisor."""
++import asyncio
++from types import SimpleNamespace
++from unittest.mock import Mock
++
++import pytest
++import pytest_asyncio
++
++from openjiuwen.agent_teams.agent.team_agent import TeamAgent
++from openjiuwen.agent_teams.harness import NativeHarness, HarnessState
++from openjiuwen.agent_teams.harness.team_harness import TeamHarness
++from openjiuwen.agent_teams.interaction import GodViewMessage, OperatorMessage
++from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
++from openjiuwen.agent_teams.runtime.pool import ActiveTeam
++from openjiuwen.agent_teams.schema.team import TeamRole
++from openjiuwen.core.runner import Runner
++from openjiuwen.core.runner.runner import GLOBAL_RUNNER
++from tests.unit_tests.agent_teams.harness.fixtures import (
++    make_spec, make_card, start_harness, drain_outputs, wait_for_state,
++)
++
++pytestmark = pytest.mark.asyncio
++
++
++@pytest_asyncio.fixture
++async def runtime(monkeypatch):
++    await Runner.start()
++    native = NativeHarness(make_spec())
++    fake = await start_harness(native)
++    outputs = []
++    reader = asyncio.create_task(drain_outputs(native, outputs))
++    harness = TeamHarness(make_spec(), None, native, role=TeamRole.LEADER, member_name='leader')
++    team = TeamAgent(make_card('guarded-team'))
++    team._configurator.harness = harness
++    manager = TeamRuntimeManager()
++    entry = ActiveTeam('guarded-team', team, 'public-session')
++    manager.pool._teams[entry.team_name] = entry
++    monkeypatch.setattr(GLOBAL_RUNNER, '_team_runtime_manager', manager)
++    yield SimpleNamespace(native=native, fake=fake, entry=entry, manager=manager, team=team, outputs=outputs)
++    await native.stop()
++    await reader
++    # Do not make Runner.stop drive an unrelated TeamAgent lifecycle in fixture.
++    manager.pool._teams.clear()
++    await Runner.stop()
++
++
++async def send(runtime, guard, payload=None):
++    return await Runner.interact_agent_team(
++        payload if payload is not None else GodViewMessage(body='guarded input'),
++        team_name=runtime.entry.team_name, session_id='public-session', before_effect=guard)
++
++
++async def test_real_runner_to_supervisor_guard_and_legacy(runtime):
++    guard = Mock(return_value=None)
++    assert await send(runtime, guard)
++    assert await wait_for_state(runtime.native, HarnessState.IDLE)
++    assert [call['query'] for call in runtime.fake.invocations] == ['guarded input']
++    guard.assert_called_once_with()
++    assert runtime.entry.interact_gate.inflight == 0
++    assert await runtime.manager.interact('legacy', team_name='guarded-team', session_id='public-session')
++    assert await wait_for_state(runtime.native, HarnessState.IDLE)
++    assert [call['query'] for call in runtime.fake.invocations] == ['guarded input', 'legacy']
++
++
++@pytest.mark.parametrize('mutation', ['revoke', 'replace', 'closing', 'session', 'native'])
++async def test_queued_rejection_has_zero_round_or_input_effect(runtime, monkeypatch, mutation):
++    entered, release = asyncio.Event(), asyncio.Event()
++    original_dispatch = runtime.native._dispatch
++    async def delay(cmd):
++        entered.set()
++        await release.wait()
++        await original_dispatch(cmd)
++    monkeypatch.setattr(runtime.native, '_dispatch', delay)
++    allowed = True
++    def guard():
++        if not allowed:
++            raise PermissionError('revoked')
++    task = asyncio.create_task(send(runtime, guard))
++    await asyncio.wait_for(entered.wait(), 2)
++    if mutation == 'revoke':
++        allowed = False
++    elif mutation == 'replace':
++        runtime.manager.pool._teams['guarded-team'] = ActiveTeam('guarded-team', runtime.team, 'public-session')
++    elif mutation == 'closing':
++        runtime.entry.closing = True
++    elif mutation == 'session':
++        runtime.entry.current_session_id = 'different'
++    else:
++        runtime.team.harness._native = object()
++    release.set()
++    try:
++        result = await asyncio.wait_for(task, 2)
++        assert not result
++        assert runtime.fake.invocations == []
++        assert runtime.native.state is HarnessState.IDLE
++        assert runtime.entry.interact_gate.inflight == 0
++        assert not runtime.native._st.supervisor_task.done()
++    finally:
++        runtime.team.harness._native = runtime.native
++
++
++@pytest.mark.parametrize('payload', ['plain', OperatorMessage(body='broadcast'), GodViewMessage(body={})])
++async def test_guarded_nonexact_payload_rejected_before_gate(runtime, payload):
++    guard = Mock(return_value=None)
++    assert not await send(runtime, guard, payload)
++    guard.assert_not_called()
++    assert runtime.fake.invocations == []
++    assert runtime.entry.interact_gate.inflight == 0
++
++
++@pytest.mark.parametrize('value', [False, True, 'allow'])
++async def test_non_none_guard_return_does_not_kill_original_supervisor(runtime, value):
++    assert not await send(runtime, lambda: value)
++    assert runtime.fake.invocations == []
++    assert not runtime.native._st.supervisor_task.done()
++    assert await send(runtime, lambda: None)
++
++
++async def test_callback_cannot_replace_original_owner_then_return_allow(runtime):
++    def replace():
++        runtime.manager.pool._teams['guarded-team'] = ActiveTeam('guarded-team', runtime.team, 'public-session')
++    assert not await send(runtime, replace)
++    assert runtime.fake.invocations == []
++    assert not runtime.native._st.supervisor_task.done()
++
++
++async def test_async_guard_is_not_awaited_or_applied(runtime):
++    effects = []
++    async def guard():
++        effects.append('forbidden')
++    assert not await send(runtime, guard)
++    assert effects == [] and runtime.fake.invocations == []
++
++
++@pytest.mark.parametrize('cancel', [True, False])
++async def test_cancel_or_gate_close_while_queued_does_not_deliver(runtime, monkeypatch, cancel):
++    entered, release = asyncio.Event(), asyncio.Event()
++    dispatch = runtime.native._dispatch
++    async def delay(cmd):
++        entered.set()
++        await release.wait()
++        await dispatch(cmd)
++    monkeypatch.setattr(runtime.native, '_dispatch', delay)
++    guard = Mock(return_value=None)
++    task = asyncio.create_task(send(runtime, guard))
++    await asyncio.wait_for(entered.wait(), 2)
++    close = None
++    if cancel:
++        task.cancel()
++        with pytest.raises(asyncio.CancelledError):
++            await task
++    else:
++        close = asyncio.create_task(runtime.entry.interact_gate.close_and_drain())
++        await asyncio.sleep(0)
++    release.set()
++    if not cancel:
++        assert not await task
++        await close
++    # A legacy send after the rejected command is a FIFO supervisor barrier.
++    await runtime.native.send('old Text remains allowed')
++    assert await wait_for_state(runtime.native, HarnessState.IDLE)
++    assert [call['query'] for call in runtime.fake.invocations] == ['old Text remains allowed']
++    guard.assert_not_called()
++    assert runtime.entry.interact_gate.inflight == 0
++
++
++async def test_guarded_missing_manager_never_creates_runtime(monkeypatch):
++    monkeypatch.setattr(GLOBAL_RUNNER, '_team_runtime_manager', None)
++    creator = Mock(side_effect=AssertionError('must not create runtime'))
++    monkeypatch.setattr(GLOBAL_RUNNER, '_get_team_runtime_manager', creator)
++    result = await Runner.interact_agent_team(GodViewMessage(body='hi'), team_name='missing',
++        session_id='missing', before_effect=lambda: None)
++    assert not result and result.reason == 'not_active'
++    creator.assert_not_called()
++
++
++async def test_guarded_steer_uses_original_running_round(runtime):
++    from tests.unit_tests.agent_teams.harness.fixtures import wait_invoke_running
++    runtime.fake.sleep_seconds = 10
++    await runtime.native.send('original work')
++    await wait_invoke_running(runtime.fake)
++    original = runtime.native._st.active
++    guard = Mock(return_value=None)
++    assert await send(runtime, guard)
++    assert runtime.native._st.active is original
++    assert runtime.native.event_handler.interaction_queues.steering.get_nowait() == 'guarded input'
++    guard.assert_called_once_with()
++    assert len(runtime.fake.invocations) == 1
++
++
++async def test_wrong_session_rejects_before_input_or_guard(runtime):
++    guard = Mock(return_value=None)
++    result = await Runner.interact_agent_team(GodViewMessage(body='foreign input'),
++        team_name=runtime.entry.team_name, session_id='foreign-session', before_effect=guard)
++    assert not result and result.reason == 'not_active'
++    assert runtime.fake.invocations == []
++    assert runtime.entry.interact_gate.inflight == 0
++    guard.assert_not_called()
++
++
++async def test_observer_cancel_after_admission_keeps_original_round(runtime, monkeypatch):
++    from tests.unit_tests.agent_teams.harness.fixtures import wait_invoke_running
++
++    entered, release = asyncio.Event(), asyncio.Event()
++    emit = runtime.native._emit_round
++    async def delay(kind, *args, **kwargs):
++        if kind == 'started':
++            entered.set()
++            await release.wait()
++        return await emit(kind, *args, **kwargs)
++    monkeypatch.setattr(runtime.native, '_emit_round', delay)
++    runtime.fake.sleep_seconds = 10
++    guard = Mock(return_value=None)
++    task = asyncio.create_task(send(runtime, guard))
++    try:
++        await asyncio.wait_for(entered.wait(), 2)
++        await wait_invoke_running(runtime.fake)
++        original = runtime.native._st.active
++        task.cancel()
++        with pytest.raises(asyncio.CancelledError):
++            await task
++        release.set()
++        # FIFO barrier behind the already admitted command; its old ACK is gone,
++        # but neither the original work nor its supervisor may be cancelled.
++        await runtime.native.send('next input')
++        assert runtime.native._st.active is original
++        assert len(runtime.fake.invocations) == 1
++        assert runtime.entry.interact_gate.inflight == 0
++        assert not runtime.native._st.supervisor_task.done()
++        guard.assert_called_once_with()
++    finally:
++        release.set()
++        await runtime.native.abort(immediate=True)
+-- 
+2.55.0.windows.2
+

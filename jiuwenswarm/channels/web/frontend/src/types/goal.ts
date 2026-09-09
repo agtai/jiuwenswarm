@@ -28,6 +28,8 @@ export interface GoalRecord {
   objective: string;
   status: GoalStatus;
   revision: number;
+  /** Goal 控制版本，与执行轮次 revision 独立；旧服务缺失时只能查询。 */
+  control_revision?: number;
   attempt_count: number;
   created_at?: string;
   updated_at?: string;
@@ -43,3 +45,9 @@ export interface GoalRecord {
 }
 
 export type GoalAction = 'set' | 'pause' | 'resume' | 'clear';
+
+export interface GoalControlTarget {
+  session_id: string;
+  goal_id: string;
+  control_revision: number;
+}

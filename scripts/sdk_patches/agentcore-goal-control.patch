@@ -1,0 +1,443 @@
+diff --git a/openjiuwen/harness/goal/README.md b/openjiuwen/harness/goal/README.md
+new file mode 100644
+index 00000000..5da9db5e
+--- /dev/null
++++ b/openjiuwen/harness/goal/README.md
+@@ -0,0 +1,32 @@
++# Shared Goal observation and control
++
++`GoalManager` remains the session's only Goal state owner. Use `peek()` for a
++copied observation without acquiring the interaction control lock. Stores must
++provide `peek()` without repairs or writes. `SessionGoalStore.peek()` raises
++`GoalOperationError(code="invalid_state")` for corrupt or wrong-session data;
++its existing `load()` recovery behavior is unchanged.
++
++For a command derived from an observed Goal, pass both preconditions:
++
++```python
++observed = manager.peek()
++paused = await manager.pause(
++    expected_goal_id=observed.goal_id,
++    expected_control_revision=observed.control_revision,
++)
++```
++
++`set`, `pause`, `resume`, and `clear` check these optional preconditions under
++the existing interaction control lock. A stale target raises `stale_goal` before
++any persistence, notification, queued work or cancellation. Unconditional calls
++remain supported. `before_effect`, when supplied, is an application admission
++check called inside that same lock; it may await fresh authority I/O and must
++raise to reject. It must not block the event loop or reacquire the Goal lock.
++
++`control_revision` starts at 1, including for legacy persisted records, and
++changes on Goal status transitions. It is separate from `revision`, which binds
++execution attempts. Pause stops subsequent attempts while allowing the current
++attempt to finish and record its assessment. In-flight pause/resume must not
++invalidate that attempt generation. Set/resume execution still requires the
++existing output attachment and stream consumer; a state update alone is not
++evidence of execution. A read or rejected control never starts a consumer.
+diff --git a/openjiuwen/harness/goal/manager.py b/openjiuwen/harness/goal/manager.py
+index 810e20c2..57f016df 100644
+--- a/openjiuwen/harness/goal/manager.py
++++ b/openjiuwen/harness/goal/manager.py
+@@ -4,6 +4,7 @@
+ from __future__ import annotations
+ 
+ import asyncio
++import inspect
+ import logging
+ from typing import Awaitable, Callable, Optional, Protocol
+ 
+@@ -33,6 +34,10 @@ class GoalStore(Protocol):
+     def load(self) -> Optional[GoalRecord]:
+         ...
+ 
++    def peek(self) -> Optional[GoalRecord]:
++        """Read without writes or automatic corrupt-state repair."""
++        ...
++
+     def save(self, record: GoalRecord) -> None:
+         ...
+ 
+@@ -84,7 +89,7 @@ class GoalManager:
+         whether an attempt-boundary ``chat.final`` is intermediate). Prefer
+         ``await get()`` when a lock-consistent snapshot is required.
+         """
+-        record = self._store.load()
++        record = self._store.peek()
+         return record.copy_for_response() if record is not None else None
+ 
+     async def get(self) -> Optional[GoalRecord]:
+@@ -99,6 +104,9 @@ class GoalManager:
+         overwrite_confirmed: bool = False,
+         token_budget: Optional[int] = None,
+         max_attempts: Optional[int] = None,
++        expected_goal_id: str | None = None,
++        expected_control_revision: int | None = None,
++        before_effect: Callable[[], Awaitable[None] | None] | None = None,
+     ) -> GoalRecord:
+         normalized = objective.strip()
+         if not normalized:
+@@ -121,7 +129,8 @@ class GoalManager:
+             )
+ 
+         async with self._control_lock:
+-            existing = self._store.load()
++            await self._admit_control(before_effect)
++            existing = self._read_control_target("set", expected_goal_id, expected_control_revision)
+             if existing is not None and not overwrite_confirmed:
+                 raise GoalOperationError(
+                     operation="set",
+@@ -161,9 +170,34 @@ class GoalManager:
+ 
+             return record.copy_for_response()
+ 
+-    async def pause(self) -> Optional[GoalRecord]:
++    @staticmethod
++    async def _admit_control(before_effect):
++        if before_effect is not None:
++            result = before_effect()
++            if inspect.isawaitable(result):
++                await result
++
++    def _read_control_target(self, operation, expected_goal_id, expected_control_revision):
++        """Read/check under the interaction lock before any write or effect."""
++        if expected_goal_id is None and expected_control_revision is None:
++            return self._store.load()
++        if (not isinstance(expected_goal_id, str) or not expected_goal_id
++                or type(expected_control_revision) is not int or expected_control_revision < 1):
++            raise GoalOperationError(operation=operation, code="invalid_target",
++                                     message="Goal ID and positive control revision are required together")
++        record = self._store.peek()
++        if (record is None or record.goal_id != expected_goal_id
++                or record.control_revision != expected_control_revision):
++            raise GoalOperationError(operation=operation, code="stale_goal",
++                                     message="Goal control target has changed")
++        return record
++
++    async def pause(self, *, expected_goal_id: str | None = None,
++                    expected_control_revision: int | None = None,
++                    before_effect: Callable[[], Awaitable[None] | None] | None = None) -> Optional[GoalRecord]:
+         async with self._control_lock:
+-            record = self._store.load()
++            await self._admit_control(before_effect)
++            record = self._read_control_target("pause", expected_goal_id, expected_control_revision)
+             if record is None:
+                 return None
+             if record.status is GoalStatus.ACTIVE:
+@@ -184,6 +218,7 @@ class GoalManager:
+                 if self._has_in_flight_goal_attempt(record):
+                     record.start_timing()
+                 record.status = GoalStatus.PAUSED
++                record.control_revision += 1
+                 record.touch(bump_revision=False)
+                 self._store.save(record)
+                 await self._commit_store_locked()
+@@ -191,9 +226,12 @@ class GoalManager:
+                     self._emit_goal_updated_locked(record)
+             return record.copy_for_response()
+ 
+-    async def resume(self) -> Optional[GoalRecord]:
++    async def resume(self, *, expected_goal_id: str | None = None,
++                     expected_control_revision: int | None = None,
++                     before_effect: Callable[[], Awaitable[None] | None] | None = None) -> Optional[GoalRecord]:
+         async with self._control_lock:
+-            record = self._store.load()
++            await self._admit_control(before_effect)
++            record = self._read_control_target("resume", expected_goal_id, expected_control_revision)
+             if record is None:
+                 return None
+             if record.status in (GoalStatus.PAUSED, GoalStatus.BLOCKED):
+@@ -204,6 +242,7 @@ class GoalManager:
+                 in_flight = self._has_in_flight_goal_attempt(record)
+                 record.settle_active_time(keep_active=False)
+                 record.status = GoalStatus.ACTIVE
++                record.control_revision += 1
+                 record.start_timing()
+                 # Idle / BLOCKED resume bumps revision and may ensure a new
+                 # attempt (generation token). If the same attempt is still
+@@ -218,9 +257,12 @@ class GoalManager:
+                     self._emit_goal_updated_locked(record)
+             return record.copy_for_response()
+ 
+-    async def clear(self) -> Optional[GoalRecord]:
++    async def clear(self, *, expected_goal_id: str | None = None,
++                    expected_control_revision: int | None = None,
++                    before_effect: Callable[[], Awaitable[None] | None] | None = None) -> Optional[GoalRecord]:
+         async with self._control_lock:
+-            record = self._store.load()
++            await self._admit_control(before_effect)
++            record = self._read_control_target("clear", expected_goal_id, expected_control_revision)
+             if record is None:
+                 return None
+             record.settle_active_time(keep_active=False)
+@@ -309,6 +351,7 @@ class GoalManager:
+             if record is None or not self._matches_in_flight(record, goal_id, revision):
+                 return None
+             record.last_assessment = assessment
++            previous_status = record.status
+             if assessment.status is GoalAssessmentStatus.COMPLETE:
+                 record.settle_active_time(keep_active=False)
+                 record.status = GoalStatus.COMPLETED
+@@ -323,6 +366,8 @@ class GoalManager:
+                 # Attempt finished under pause: stop the clock; resume opens a
+                 # fresh segment so idle pause time is not counted.
+                 record.settle_active_time(keep_active=False)
++            if record.status is not previous_status:
++                record.control_revision += 1
+             record.touch()
+             self._store.save(record)
+             await self._commit_store_locked()
+diff --git a/openjiuwen/harness/goal/schema.py b/openjiuwen/harness/goal/schema.py
+index 9f2988dc..c67e6fce 100644
+--- a/openjiuwen/harness/goal/schema.py
++++ b/openjiuwen/harness/goal/schema.py
+@@ -180,6 +180,9 @@ class GoalRecord:
+     active_started_at: Optional[str] = None
+     created_at: str = field(default_factory=_utc_now_iso)
+     updated_at: str = field(default_factory=_utc_now_iso)
++    # User controls have their own CAS identity. Pausing an in-flight attempt
++    # must not invalidate the attempt's execution revision.
++    control_revision: int = 1
+ 
+     def touch(self, *, bump_revision: bool = False) -> None:
+         self.updated_at = _utc_now_iso()
+@@ -214,6 +217,7 @@ class GoalRecord:
+             "objective": self.objective,
+             "status": self.status.value,
+             "revision": self.revision,
++            "control_revision": self.control_revision,
+             "attempt_count": self.attempt_count,
+             "token_usage": self.token_usage.to_dict(),
+             "max_attempts": self.max_attempts,
+@@ -238,6 +242,9 @@ class GoalRecord:
+         except ValueError as exc:
+             raise ValueError("invalid persisted GoalRecord status") from exc
+         usage_data = data.get("token_usage")
++        control_revision = data.get("control_revision", 1)
++        if type(control_revision) is not int or control_revision < 1:
++            raise ValueError("invalid persisted Goal control revision")
+         assessment_data = data.get("last_assessment")
+         # Session ``update_dict`` treats nested ``None`` as key deletion. After
+         # pause/complete, ``active_started_at`` may be absent rather than null.
+@@ -262,6 +269,7 @@ class GoalRecord:
+             objective=objective,
+             status=status,
+             revision=int(data.get("revision", 0)),
++            control_revision=control_revision,
+             attempt_count=int(data.get("attempt_count", 0)),
+             token_usage=TokenUsage.from_dict(usage_data) if isinstance(usage_data, dict) else TokenUsage(),
+             max_attempts=_optional_positive_int(data.get("max_attempts"), "max_attempts"),
+diff --git a/openjiuwen/harness/goal/store.py b/openjiuwen/harness/goal/store.py
+index 017ca980..2c0d215d 100644
+--- a/openjiuwen/harness/goal/store.py
++++ b/openjiuwen/harness/goal/store.py
+@@ -12,7 +12,7 @@ import inspect
+ import logging
+ from typing import TYPE_CHECKING, Optional
+ 
+-from openjiuwen.harness.goal.schema import GoalRecord
++from openjiuwen.harness.goal.schema import GoalOperationError, GoalRecord
+ 
+ if TYPE_CHECKING:
+     from openjiuwen.core.session.agent import Session
+@@ -34,10 +34,20 @@ class SessionGoalStore:
+ 
+     def load(self) -> Optional[GoalRecord]:
+         """Load the current GoalRecord from session state."""
++        return self._read(repair=True)
++
++    def peek(self) -> Optional[GoalRecord]:
++        """Read without repairing or clearing state; corrupt data is unavailable."""
++        return self._read(repair=False)
++
++    def _read(self, *, repair: bool) -> Optional[GoalRecord]:
+         data = self._session.get_state(SESSION_GOAL_RECORD_KEY)
+         if data is None:
+             return None
+         if not isinstance(data, dict):
++            if not repair:
++                raise GoalOperationError(operation="get", code="invalid_state",
++                                         message="Stored Goal state is invalid")
+             logger.warning(
+                 "[GoalStore] Invalid goal state type %s in session %s, clearing",
+                 type(data).__name__,
+@@ -46,8 +56,15 @@ class SessionGoalStore:
+             self.clear()
+             return None
+         try:
+-            return GoalRecord.from_dict(data)
++            record = GoalRecord.from_dict(data)
++            if not repair and record.session_id != self.session_id:
++                raise GoalOperationError(operation="get", code="invalid_state",
++                                         message="Stored Goal belongs to another session")
++            return record
+         except (KeyError, ValueError, TypeError) as exc:
++            if not repair:
++                raise GoalOperationError(operation="get", code="invalid_state",
++                                         message="Stored Goal state is invalid") from exc
+             logger.warning(
+                 "[GoalStore] Failed to deserialize goal state in session %s: %s, clearing",
+                 self.session_id,
+diff --git a/tests/unit_tests/harness/goal/test_goal_manager.py b/tests/unit_tests/harness/goal/test_goal_manager.py
+index 4e5fada5..70a23ffa 100644
+--- a/tests/unit_tests/harness/goal/test_goal_manager.py
++++ b/tests/unit_tests/harness/goal/test_goal_manager.py
+@@ -18,7 +18,7 @@ from openjiuwen.harness.goal.schema import (
+     GoalOperationError,
+     GoalStatus,
+ )
+-from openjiuwen.harness.goal.store import SessionGoalStore
++from openjiuwen.harness.goal.store import SESSION_GOAL_RECORD_KEY, SessionGoalStore
+ from openjiuwen.harness.task_loop.event_manager import EventManager
+ from openjiuwen.harness.schema.interaction import InteractionEvent, InteractionEventType
+ 
+@@ -92,6 +92,82 @@ class ManagerHarness:
+         self.notify_calls += 1
+ 
+ 
++def test_read_only_manager_peek_preserves_corrupt_state_with_zero_execution_effects() -> None:
++    harness = ManagerHarness(output_attached=False)
++    harness.session.update_state({SESSION_GOAL_RECORD_KEY: "corrupt"})
++    with pytest.raises(GoalOperationError, match="Stored Goal"):
++        harness.manager.peek()
++    assert harness.session.get_state(SESSION_GOAL_RECORD_KEY) == "corrupt"
++    assert harness.session.commit_count == harness.notify_calls == 0
++    assert harness.cancel_calls == harness.emitted == []
++
++
++@pytest.mark.asyncio
++async def test_conditional_control_fences_aba_without_invalidating_finishing_attempt() -> None:
++    harness = ManagerHarness()
++    created = await harness.manager.set("Finish report")
++    # A live attempt keeps its generation when paused/resumed.
++    event = harness.events.next_work()
++    assert event is not None
++    started = await harness.manager.begin_attempt(goal_id=created.goal_id, revision=created.revision)
++    assert started is not None
++    paused = await harness.manager.pause(expected_goal_id=created.goal_id,
++        expected_control_revision=created.control_revision)
++    assert paused.revision == created.revision
++    resumed = await harness.manager.resume(expected_goal_id=paused.goal_id,
++        expected_control_revision=paused.control_revision)
++    assert resumed.revision == created.revision
++    assert resumed.control_revision > paused.control_revision > created.control_revision
++    before = harness.store.peek().to_dict()
++    effects = (harness.session.commit_count, len(harness.emitted), harness.notify_calls)
++    with pytest.raises(GoalOperationError, match="target has changed"):
++        await harness.manager.pause(expected_goal_id=created.goal_id,
++            expected_control_revision=created.control_revision)
++    assert harness.store.peek().to_dict() == before
++    assert (harness.session.commit_count, len(harness.emitted), harness.notify_calls) == effects
++    completed = await harness.manager.apply_assessment(goal_id=created.goal_id, revision=created.revision,
++        assessment=GoalAssessment(status=GoalAssessmentStatus.COMPLETE, evidence="Report exists"))
++    assert completed.status is GoalStatus.COMPLETED
++    assert completed.control_revision > resumed.control_revision
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("operation", ["pause", "resume", "clear", "set"])
++async def test_wrong_control_target_has_zero_state_and_execution_effects(operation) -> None:
++    harness = ManagerHarness()
++    await harness.manager.set("Original")
++    before = harness.store.peek().to_dict()
++    effects = (harness.session.commit_count, len(harness.emitted), harness.notify_calls)
++    args = {"objective": "Replacement", "overwrite_confirmed": True} if operation == "set" else {}
++    with pytest.raises(GoalOperationError) as error:
++        await getattr(harness.manager, operation)(**args, expected_goal_id="other",
++            expected_control_revision=1)
++    assert error.value.code == "stale_goal"
++    assert harness.store.peek().to_dict() == before
++    assert (harness.session.commit_count, len(harness.emitted), harness.notify_calls) == effects
++    assert harness.cancel_calls == []
++
++
++@pytest.mark.asyncio
++async def test_condition_is_checked_after_waiting_for_existing_owner_lock() -> None:
++    harness = ManagerHarness(output_attached=False)
++    current = await harness.manager.set("Original")
++    await harness.manager._control_lock.acquire()
++    pending = asyncio.create_task(harness.manager.clear(expected_goal_id=current.goal_id,
++        expected_control_revision=current.control_revision))
++    await asyncio.sleep(0)
++    replacement = goal_schema.GoalRecord.create(session_id="session-1", objective="Replacement")
++    harness.store.save(replacement)
++    harness.manager._control_lock.release()
++    before_commits = harness.session.commit_count
++    with pytest.raises(GoalOperationError) as error:
++        await pending
++    assert error.value.code == "stale_goal"
++    assert harness.store.peek().goal_id == replacement.goal_id
++    assert harness.session.commit_count == before_commits
++    assert harness.cancel_calls == harness.emitted == []
++
++
+ @pytest.mark.asyncio
+ async def test_set_requires_a_non_empty_objective() -> None:
+     harness = ManagerHarness()
+diff --git a/tests/unit_tests/harness/goal/test_goal_schema.py b/tests/unit_tests/harness/goal/test_goal_schema.py
+index 154b456d..7dd5d3db 100644
+--- a/tests/unit_tests/harness/goal/test_goal_schema.py
++++ b/tests/unit_tests/harness/goal/test_goal_schema.py
+@@ -42,6 +42,24 @@ def _freeze_goal_clock(monkeypatch: pytest.MonkeyPatch, clock: dict[str, int]) -
+     monkeypatch.setattr(goal_schema, "datetime", FrozenDateTime)
+ 
+ 
++def test_legacy_goal_defaults_control_revision_without_changing_attempt_generation() -> None:
++    raw = GoalRecord.create(session_id="session-1", objective="Report").to_dict()
++    raw.pop("control_revision")
++    restored = GoalRecord.from_dict(raw)
++    assert restored.control_revision == 1
++    assert restored.revision == raw["revision"]
++    restored.control_revision = 7
++    assert GoalRecord.from_dict(restored.to_dict()).control_revision == 7
++
++
++@pytest.mark.parametrize("revision", [0, -1, True, "1", None])
++def test_invalid_control_revision_is_not_a_usable_target(revision) -> None:
++    raw = GoalRecord.create(session_id="session-1", objective="Report").to_dict()
++    raw["control_revision"] = revision
++    with pytest.raises(ValueError, match="control revision"):
++        GoalRecord.from_dict(raw)
++
++
+ def test_token_usage_accumulates_and_round_trips() -> None:
+     usage = TokenUsage()
+     usage.accumulate(input_tokens=100, output_tokens=50, cached_input_tokens=20)
+diff --git a/tests/unit_tests/harness/goal/test_goal_store.py b/tests/unit_tests/harness/goal/test_goal_store.py
+index 5c98d1a1..10124446 100644
+--- a/tests/unit_tests/harness/goal/test_goal_store.py
++++ b/tests/unit_tests/harness/goal/test_goal_store.py
+@@ -3,9 +3,12 @@
+ from __future__ import annotations
+ 
+ from typing import Any
++from unittest.mock import Mock
++
++import pytest
+ 
+ from openjiuwen.core.session.state.base import InMemoryStateLike
+-from openjiuwen.harness.goal.schema import GoalRecord, GoalStatus
++from openjiuwen.harness.goal.schema import GoalOperationError, GoalRecord, GoalStatus
+ from openjiuwen.harness.goal.store import SESSION_GOAL_RECORD_KEY, SessionGoalStore
+ 
+ 
+@@ -43,6 +46,18 @@ class MergeSession:
+         self._state.update(value)
+ 
+ 
++@pytest.mark.parametrize("raw", ["not-a-record", {"goal_id": "g"},
++    GoalRecord.create(session_id="other", objective="private").to_dict()])
++def test_peek_rejects_invalid_or_wrong_session_state_without_repair(raw) -> None:
++    session = FakeSession()
++    session.update_state({SESSION_GOAL_RECORD_KEY: raw})
++    session.update_state = Mock(side_effect=AssertionError("read must not write"))
++    with pytest.raises(GoalOperationError, match="Stored Goal"):
++        SessionGoalStore(session).peek()
++    assert session.get_state(SESSION_GOAL_RECORD_KEY) == raw
++    session.update_state.assert_not_called()
++
++
+ def test_session_store_save_load_and_clear() -> None:
+     session = FakeSession()
+     store = SessionGoalStore(session)

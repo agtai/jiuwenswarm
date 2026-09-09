@@ -280,7 +280,7 @@ def _metadata_file(session_id: str) -> Path:
     return session_dir / "metadata.json"
 
 
-def _read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
+def _read_metadata(session_id: str, cache_bust: bool = False, *, strict: bool = False) -> dict[str, Any]:
     """读取会话元数据(优先从内存缓存读取,避免异步写入未落盘时读到陈旧数据)
 
     读路径不应产生副作用：即便 session 目录不存在，也不触发 mkdir，
@@ -290,6 +290,7 @@ def _read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
     Args:
         session_id: 会话 ID
         cache_bust: 强制跳过缓存，直接从磁盘读取（用于跨进程同步场景，如 session.list）
+        strict: 读取/解码失败时抛出异常；供不能把失败当作空事实的观测接口使用。
     """
     if not cache_bust:
         with _CACHE_LOCK:
@@ -297,8 +298,13 @@ def _read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
             if cached is not None:
                 return cached.copy()
     # cache_bust=True 或缓存没有数据时，强制读磁盘
-    fpath = get_agent_sessions_dir() / session_id / "metadata.json"
+    sessions_dir = get_agent_sessions_dir()
+    fpath = sessions_dir / session_id / "metadata.json"
     if not fpath.exists():
+        if strict:
+            for directory in (sessions_dir, fpath.parent):
+                if directory.exists() and not directory.is_dir():
+                    raise ValueError("session metadata parent is not a directory")
         return {}
     # Reading must be mutually exclusive with _write_metadata_sync: the writer
     # replaces the whole file, so an unlocked read can land inside the
@@ -310,6 +316,8 @@ def _read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
         logger.warning(
             "failed to read metadata.json: %s (session_id=%s)", exc, session_id,
         )
+        if strict:
+            raise
         return {}
     if not raw.strip():
         # An empty file is a FAILURE, not "empty metadata". It must never be
@@ -320,6 +328,8 @@ def _read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
             "metadata.json is empty, treating as read failure (session_id=%s)",
             session_id,
         )
+        if strict:
+            raise ValueError("session metadata is empty")
         return {}
     try:
         data = json.loads(raw)
@@ -328,12 +338,16 @@ def _read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
             "failed to parse metadata.json: %s (session_id=%s, size=%d)",
             exc, session_id, len(raw),
         )
+        if strict:
+            raise
         return {}
     if not isinstance(data, dict):
         logger.warning(
             "metadata.json content is not a dict: %s (session_id=%s)",
             type(data).__name__, session_id,
         )
+        if strict:
+            raise ValueError("session metadata is not an object")
         return {}
     return data
 

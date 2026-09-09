@@ -171,15 +171,22 @@ async def test_agentserver_send_push_reports_missing_gateway_as_not_delivered():
 
 @pytest.mark.asyncio
 async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
+    from jiuwenswarm.server.runtime.session_execution import SessionExecutionService
+    from unittest.mock import Mock
+    closed = asyncio.Event()
+
     class FakeAgent:
         async def process_message_stream(self, request):
-            for index in range(2):
+            try:
                 yield AgentResponseChunk(
                     request_id=request.request_id,
                     channel_id=request.channel_id,
-                    payload={"content": str(index)},
+                    payload={"content": "oversized"},
                     is_complete=False,
                 )
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
 
     server = agent_ws_server.AgentWebSocketServer.__new__(
         agent_ws_server.AgentWebSocketServer
@@ -190,6 +197,8 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
     class ForegroundManager:
         def __init__(self):
             self.events = []
+            self.pin_agent, self.unpin_agent = Mock(), Mock()
+            self.executions = SessionExecutionService(self)
 
         async def begin_foreground_chat(self):
             self.events.append("begin")
@@ -233,6 +242,9 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
 
     assert send_count == 1
     assert foreground_manager.events == ["begin", "end"]
+    assert closed.is_set()
+    foreground_manager.pin_agent.assert_called_once()
+    foreground_manager.unpin_agent.assert_called_once()
 
 
 def test_agent_ws_server_has_no_direct_websocket_send_calls():

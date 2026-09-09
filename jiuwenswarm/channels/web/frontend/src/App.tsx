@@ -35,7 +35,6 @@ import {
   type FetchHistoryPageResult,
 } from './features/historyRestore';
 import { prefetchHistoryPages } from './features/historyPagination';
-import { queueOrAddGoalObjectiveMessage } from './features/goalPendingObjectiveBubble';
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
@@ -1839,8 +1838,7 @@ function AppContent() {
         useGoalStore.getState().setArmed(NEW_CONVERSATION_ID, false);
         if (goalArmedOnNew) {
           // 欢迎页 "+" 选了「目标」：这条内容不走普通 chat.send，
-          // 本地落一条 user 消息（供徽章匹配）后改调 command.goal（见 InputArea.tsx 的同款分流逻辑）
-          queueOrAddGoalObjectiveMessage(newSid, content);
+          // 通过 command.goal 提交；权威接受事件负责落地用户目标气泡。
           setGoalObjective(newSid, content);
         } else {
           const sent = await sendMessage(content, newSid, mediaItems);
@@ -1931,26 +1929,6 @@ function AppContent() {
     void cancel(currentSessionId);
     if (isGoalActive) void pauseGoal(currentSessionId);
   }, [cancel, mode, pause, pauseGoal]);
-
-  /**
-   * 删除目标：active 时除了清目标，还要顺带结束当前会话输出——复用停止按钮同一套中断调用
-   * （team 走 pause、其余走 cancel）。先清目标再补发中断，避免目标还没清掉那个空档被
-   * "ACTIVE 目标保持交互打开"的后端逻辑又续上一轮。非 active 状态下只清目标，不打断当前
-   * 会话（如果还有一轮在自然跑完，让它继续）。
-   */
-  const handleClearGoal = useCallback(
-    (sessionId: string) => {
-      const isGoalActive = useGoalStore.getState().runtimes[sessionId]?.goal?.status === 'active';
-      void clearGoal(sessionId);
-      if (!isGoalActive) return;
-      if (mode === 'team') {
-        void pause(sessionId);
-      } else {
-        void cancel(sessionId);
-      }
-    },
-    [cancel, clearGoal, mode, pause]
-  );
 
   const handleUserAnswer = useCallback((requestId: string, answers: UserAnswer[], source?: string) => {
     const currentSessionId = sessionIdRef.current;
@@ -2443,7 +2421,7 @@ function AppContent() {
                       onSetGoal={setGoalObjective}
                       onPauseGoal={pauseGoal}
                       onResumeGoal={resumeGoal}
-                      onClearGoal={handleClearGoal}
+                      onClearGoal={clearGoal}
                       onDrainTaskQueueIfIdle={drainTaskQueueIfIdle}
                     />
                   </div>

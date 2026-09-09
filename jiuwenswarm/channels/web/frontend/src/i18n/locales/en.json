@@ -500,7 +500,8 @@
     },
     "completedCardTitle": "Goal completed",
     "completedMessageFallback": "Goal completed.",
-    "editStaleWarning": "The goal was completed while you were editing it, so this change wasn't saved. Use \"+\" to set a new goal if needed.",
+    "editStaleWarning": "The goal or session changed while you were editing. This change wasn't saved. Check the current goal before editing again.",
+    "replacementRequiresEdit": "A goal already exists. Review it and use Edit goal to replace it.",
     "detail": {
       "attempts": "Attempts",
       "tokens": "Total tokens",

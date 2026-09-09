@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
+from jiuwenswarm.common.schema.agent import AgentResponseChunk
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ContextRef,
@@ -88,6 +91,82 @@ class FormalLiveVoiceViolation(ValueError):
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
         self.reason = reason
+
+
+NO_TOOL_OUTPUT_BUFFER_MAX_BYTES = 32_768
+_NO_TOOL_DSML_MARKUP = re.compile(r"<\s*/?\s*\|{2}\s*dsml\s*\|{2}", flags=re.IGNORECASE)
+_CONTROL_MARKUP_TRANSLATION = str.maketrans(
+    {"｜": "|", "\u200b": None, "\u200c": None, "\u200d": None, "\ufeff": None}
+)
+
+
+def contains_no_tool_control_markup(value: str) -> bool:
+    return _NO_TOOL_DSML_MARKUP.search(value.translate(_CONTROL_MARKUP_TRANSLATION)) is not None
+
+
+class FormalAgentOutput:
+    """Validate a committed execution's final without granting speech/history.
+
+    A final is provisional until the actual producer and its cleanup finish.
+    Tool-less deltas remain private until their complete control-markup check.
+    """
+
+    def __init__(self, execution, *, max_result_bytes=131072):
+        self.execution = execution
+        # Legacy streaming consumers have no retained-result byte limit. The
+        # shared service keeps its bounded result policy by default.
+        self.max_result_bytes = max_result_bytes
+        self.final = None
+        self.failed = False
+        self.pending = []
+        self.pending_bytes = 0
+
+    def accept(self, chunk):
+        if (not isinstance(chunk, AgentResponseChunk)
+                or chunk.request_id != self.execution.request_id
+                or chunk.channel_id != self.execution.channel_id
+                or not isinstance(chunk.payload, dict)):
+            raise FormalLiveVoiceViolation("INVALID_FORMAL_AGENT_OUTPUT", "output identity or payload mismatch")
+        chunk = deepcopy(chunk)
+        kind, content = chunk.payload.get("event_type"), chunk.payload.get("content")
+        if not self.execution.allow_tools and kind == "chat.delta":
+            if not isinstance(content, str):
+                raise FormalLiveVoiceViolation("INVALID_FORMAL_AGENT_OUTPUT", "delta must be text")
+            try:
+                self.pending_bytes += len(content.encode("utf-8"))
+            except UnicodeEncodeError as error:
+                raise FormalLiveVoiceViolation("INVALID_FORMAL_AGENT_OUTPUT", "output is not valid UTF-8") from error
+            if self.pending_bytes > NO_TOOL_OUTPUT_BUFFER_MAX_BYTES:
+                raise FormalLiveVoiceViolation("FORMAL_NO_TOOL_OUTPUT_TOO_LARGE", "tool-less output exceeds bound")
+            self.pending.append(chunk)
+            return ()
+        output = []
+        if kind == "chat.final":
+            if not self.execution.allow_tools:
+                candidate = "".join(item.payload["content"] for item in self.pending)
+                if isinstance(content, str):
+                    candidate += content
+                if contains_no_tool_control_markup(candidate):
+                    raise FormalLiveVoiceViolation("FORMAL_NO_TOOL_CONTROL_MARKUP_REJECTED", "control markup in tool-less output")
+                output.extend(self.pending)
+                self.pending.clear()
+                self.pending_bytes = 0
+            if isinstance(content, str) and content.strip():
+                if self.final is not None:
+                    raise FormalLiveVoiceViolation("DUPLICATE_AGENT_FINAL", "more than one usable final")
+                if self.max_result_bytes is not None and len(content.encode("utf-8")) > self.max_result_bytes:
+                    raise FormalLiveVoiceViolation("FORMAL_AGENT_RESULT_TOO_LARGE", "result exceeds bound")
+                self.final = content
+        elif kind == "chat.error":
+            self.failed = True
+            self.pending.clear()
+            self.pending_bytes = 0
+        return (*output, chunk)
+
+    def result(self):
+        if self.failed or self.final is None:
+            raise FormalLiveVoiceViolation("FORMAL_AGENT_RESULT_UNAVAILABLE", "no authoritative final result")
+        return self.final
 
 
 def _require_text(value: object, field_name: str) -> str:

@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "test:goal-controls": "esbuild tests/goalControlsEntry.ts --bundle --packages=external --platform=node --format=esm --loader:.css=empty --loader:.svg=file --loader:.png=file --outfile=node_modules/.cache/goal-controls/entry.mjs --define:import.meta.env={} --define:import.meta.glob=globalThis.__goalTestAssetGlob && node --test tests/goalControls.test.mjs",
     "test:task-notification-identity": "tsc src/features/live-voice/formal/taskNotificationIdentity.ts --target ES2020 --module ES2020 --moduleResolution Bundler --outDir node_modules/.cache/task-notification-identity --skipLibCheck --noEmitOnError --strict && node --test tests/taskNotificationIdentity.test.mjs",
     "test:live-voice-audio-diagnostics": "esbuild src/features/live-voice/formal/audioDiagnostics.ts src/features/live-voice/formal/audioTimingDiagnostics.ts --bundle --platform=node --format=esm --outdir=node_modules/.cache/live-voice-audio-diagnostics --out-extension:.js=.mjs && node --test tests/liveVoiceAudioDiagnostics.test.mjs tests/liveVoiceAudioTimingDiagnostics.test.mjs",
     "test:task-notification-timeline": "esbuild src/features/chatTimeline/buildTurnTimeline.ts --bundle --platform=node --format=esm --packages=external --loader:.css=empty --loader:.svg=file --loader:.png=file --outfile=node_modules/.cache/task-notification-timeline/buildTurnTimeline.mjs --define:import.meta.env={} && node --test tests/taskNotificationTimeline.test.mjs",

@@ -1101,8 +1101,10 @@ async def test_finalize_runtime_cleanup_releases_session_markers(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("preserve_first", [False, True])
 async def test_cancel_all_stream_tasks_uses_per_session_lifecycle_locks(
     monkeypatch: pytest.MonkeyPatch,
+    preserve_first: bool,
 ) -> None:
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_manager.get_config",
@@ -1127,17 +1129,21 @@ async def test_cancel_all_stream_tasks_uses_per_session_lifecycle_locks(
 
     first_session_lock = manager.get_lifecycle_lock_for_test("sess-1")
     async with first_session_lock:
-        cancel_all = asyncio.create_task(manager.cancel_all_stream_tasks())
+        cancel_all = asyncio.create_task(manager.cancel_all_stream_tasks(
+            preserve_sessions=frozenset({"sess-1"}) if preserve_first else frozenset()))
         await asyncio.wait_for(second_cancelled.wait(), timeout=1.0)
         await asyncio.sleep(0)
         assert first_cancelled.is_set() is False
-        assert cancel_all.done() is False
+        assert cancel_all.done() is preserve_first
 
     await asyncio.wait_for(cancel_all, timeout=1.0)
 
-    assert first_cancelled.is_set() is True
-    assert manager.has_stream_task("sess-1") is False
+    assert first_cancelled.is_set() is not preserve_first
+    assert manager.has_stream_task("sess-1") is preserve_first
     assert manager.has_stream_task("sess-2") is False
+    if preserve_first:
+        await manager.cancel_all_stream_tasks()
+        assert first_cancelled.is_set()
 
 
 @pytest.mark.asyncio

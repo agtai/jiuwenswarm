@@ -28,6 +28,128 @@ def test_read_cannot_carry_write_arguments():
     assert read.mutates is False
 
 
+@pytest.mark.parametrize("operation,extra,mutates", [
+    ("core_workflow.list", {"target_id": None}, False),
+    ("core_workflow.get", {"epoch": "epoch", "target_id": "run"}, False),
+    ("core_workflow.start", {"target_id": None, "epoch": "epoch", "capability_id": "flow", "inputs": {}}, True),
+    ("core_workflow.resume", {"target_id": "run", "epoch": "epoch", "expected_revision": 2, "answers": {"ask": "yes"}}, True),
+])
+def test_core_operations_keep_exact_new_fields_separate_from_existing_wire(operation, extra, mutates):
+    body = action(operation, **extra)
+    parsed = NativeBusinessAction.from_dict(body)
+    assert parsed.to_dict() == body
+    assert parsed.mutates is mutates
+    for field in {"epoch", "capability_id", "inputs", "answers"} & set(body):
+        with pytest.raises(NativeBusinessViolation):
+            NativeBusinessAction.from_dict({key: value for key, value in body.items() if key != field})
+    for field in {"epoch", "capability_id", "inputs", "answers"} - set(body):
+        with pytest.raises(NativeBusinessViolation):
+            NativeBusinessAction.from_dict({**body, field: None})
+    old = action("workflow.get")
+    for key in ("epoch", "capability_id", "inputs", "answers"):
+        with pytest.raises(NativeBusinessViolation):
+            NativeBusinessAction.from_dict({**old, key: None})
+
+
+@pytest.mark.parametrize("value", [None, [], {1: "bad"}, {"x": float("nan")}, {"x": object()}, {"x": "a" * 8192}])
+def test_core_json_rejects_nonobject_nonfinite_and_oversized_inputs(value):
+    with pytest.raises(NativeBusinessViolation):
+        NativeBusinessAction.from_dict(action("core_workflow.start", target_id=None,
+            epoch="epoch", capability_id="flow", inputs=value))
+
+
+def test_core_json_snapshots_do_not_mutate_original_or_exported_arguments():
+    value = {"nested": ["first"]}
+    parsed = NativeBusinessAction.from_dict(action("core_workflow.start", target_id=None,
+        epoch="epoch", capability_id="flow", inputs=value))
+    value["nested"].append("second")
+    exported = parsed.to_dict()
+    exported["inputs"]["nested"].append("third")
+    assert parsed.to_dict()["inputs"] == {"nested": ["first"]}
+
+
+def test_agent_reply_requires_exact_source_question_generation_and_snapshots_answer():
+    answer = [{"question": "Proceed?", "selected_options": ["Approve"]}]
+    body = action("agent.reply", target_id="binding", source_task_id="task",
+                  pending_token="generation", input_id="question", answers=answer)
+    parsed = NativeBusinessAction.from_dict(body)
+    assert parsed.mutates and parsed.to_dict() == body
+    for field in ("target_id", "source_task_id", "pending_token", "input_id", "answers"):
+        with pytest.raises(NativeBusinessViolation):
+            NativeBusinessAction.from_dict({key: value for key, value in body.items() if key != field})
+    answer[0]["selected_options"].append("Deny")
+    exported = parsed.to_dict()
+    exported["answers"].clear()
+    assert parsed.to_dict()["answers"][0]["selected_options"] == ["Approve"]
+    assert NativeBusinessAction.from_dict(action("agent.pending", target_id=None)).mutates is False
+
+
+@pytest.mark.parametrize("change", [
+    {"answers": {}}, {"answers": []}, {"answers": [float("nan")]}, {"answers": ["x" * 8192]},
+    {"pending_token": None}, {"pending_token": " old "}, {"source_task_id": None},
+    {"input_id": " wrong "}, {"expected_revision": 1}, {"epoch": "foreign"},
+])
+def test_agent_reply_rejects_wrong_shapes_and_foreign_family_fields(change):
+    body = action("agent.reply", target_id="binding", source_task_id="task",
+                  pending_token="generation", input_id="question", answers=[{"selected_options": ["Deny"]}])
+    with pytest.raises(NativeBusinessViolation):
+        NativeBusinessAction.from_dict({**body, **change})
+
+
+def test_workflow_reply_requires_exact_pending_input_and_preserves_old_canonical_shapes():
+    body = action("workflow.reply", target_id="run-1", instruction="Use the first source.",
+                  input_id="review:host:0")
+    parsed = NativeBusinessAction.from_dict(body)
+    assert parsed.mutates and parsed.input_id == "review:host:0"
+    assert parsed.to_dict() == body
+    for change in ({"input_id": None}, {"input_id": " foreign "}, {"input_id": "\x00"},
+                   {"expected_revision": 1}, {"name": "guessed phase"}):
+        with pytest.raises(NativeBusinessViolation):
+            NativeBusinessAction.from_dict({**body, **change})
+    old = action("workflow.get", target_id="run-1")
+    assert NativeBusinessAction.from_dict(old).to_dict() == old
+    with pytest.raises(NativeBusinessViolation):
+        NativeBusinessAction.from_dict({**old, "input_id": "review:host:0"})
+
+
+@pytest.mark.parametrize("target,revision", [(None, None), ("goal-a", 7)])
+def test_goal_set_requires_explicit_create_or_exact_replacement_pair(target, revision):
+    body = action("goal.set", target_id=target, expected_revision=revision, instruction="Read the full source.")
+    parsed = NativeBusinessAction.from_dict(body)
+    assert parsed.to_dict() == body and parsed.mutates
+    for changes in ({"target_id": None, "expected_revision": 7},
+                    {"target_id": "goal-a", "expected_revision": None},
+                    {"expected_revision": True}, {"instruction": None},
+                    {"name": "invented name"}, {"input_id": "wrong-protocol"}):
+        with pytest.raises(NativeBusinessViolation):
+            NativeBusinessAction.from_dict({**body, **changes})
+
+
+def test_goal_resume_requires_control_cas_and_does_not_expand_old_canonical_operations():
+    body = action("goal.resume", target_id="goal-a", expected_revision=3)
+    assert NativeBusinessAction.from_dict(body).mutates
+    for changes in ({"target_id": None}, {"expected_revision": None}, {"expected_revision": 0},
+                    {"expected_revision": True}, {"instruction": "not a new objective"}):
+        with pytest.raises(NativeBusinessViolation):
+            NativeBusinessAction.from_dict({**body, **changes})
+    for operation in ("goal.pause", "goal.clear", "task.cancel", "work.cancel"):
+        old = action(operation, expected_revision=3)
+        parsed = NativeBusinessAction.from_dict(old)
+        assert json.dumps(parsed.to_dict(), sort_keys=True, separators=(",", ":")) == json.dumps(
+            old, sort_keys=True, separators=(",", ":"))
+        assert "input_id" not in parsed.to_dict()
+
+
+@pytest.mark.parametrize("operation,target", [("workflow.list", None), ("workflow.get", "workflow-a")])
+def test_workflow_observation_is_read_only_and_has_closed_arguments(operation, target):
+    body = action(operation, target_id=target)
+    assert NativeBusinessAction.from_dict(body).mutates is False
+    for name, value in {"instruction": "start a run", "name": "new workflow", "adjustment": "change it",
+                        "expected_revision": 1}.items():
+        with pytest.raises(NativeBusinessViolation):
+            NativeBusinessAction.from_dict({**body, name: value})
+
+
 def test_exact_adjustment_requires_observed_context_target_and_revision():
     command = action("task.adjust", adjustment="arrive before the meeting", expected_revision=4)
     parsed = NativeBusinessAction.from_dict(command)

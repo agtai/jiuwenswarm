@@ -150,6 +150,10 @@ export interface Question {
  */
 export interface AskUserQuestionPayload {
   request_id: string;
+  input_id?: string;
+  source_binding_id?: string;
+  source_task_id?: string;
+  pending_token?: string;
   questions: Question[];
   source?: string; // 来源标识，用于区分自进化确认和工具权限确认
   approvalSchema?: string;

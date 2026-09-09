@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 import datetime as _dt
 import inspect
 import json
@@ -15,8 +16,11 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Optional
+from typing import Any, Callable, ClassVar, Optional, TYPE_CHECKING
 from weakref import WeakValueDictionary
+
+if TYPE_CHECKING:
+    from jiuwenswarm.server.runtime.core_workflow_bootstrap import CoreWorkflowBootstrap
 
 from openjiuwen.core.common.logging import server_logger
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
@@ -27,6 +31,7 @@ from jiuwenswarm.agents.harness.common.auto_harness.project_execution import (
 )
 from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
 from jiuwenswarm.server.ws_send import send_wire_payload
+from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
 from jiuwenswarm.common.utils import get_agent_sessions_dir, get_config_file, mask_sensitive
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
@@ -63,6 +68,10 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
+from jiuwenswarm.server.runtime.agent_resolution import (
+    prepare_agent_request, resolve_request_project_dir, resolve_agent_request_mode,
+    resolve_request_runtime_mode, _apply_resolved_mode_to_request, _SESSION_PREVIOUS_MODE_KEY,
+)
 from jiuwenswarm.server.runtime.agent_warm_pool import WarmClaim
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenswarm.server.runtime.session.session_history import (
@@ -84,13 +93,8 @@ from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
 )
 from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.common.mode_matrix import (
-    ResolvedMode,
-    TEAM_PLAN_CODE_MODE,
-    TEAM_PLAN_NORMAL_MODE,
-    canonicalize_mode_text,
     is_plan_mode,
     is_team_mode,
-    resolve_request_mode,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc import (
     get_permissions_config_req_methods,
@@ -233,7 +237,6 @@ _plan_active_sessions: set[str] = set()
 
 # 上一轮写盘前的会话 canonical mode，由 ``_prepare_code_mode_chat_turn`` 在覆盖
 # metadata 之前捎带到 params 里，给 ``_ensure_code_mode_state`` 当跨重启判据。
-_SESSION_PREVIOUS_MODE_KEY = "_session_previous_mode"
 
 # ``plan_entry_source`` 的合法取值，表示"用户这一条消息明确要求进入 plan"。
 # 一次性字段：TUI 的 ``/plan`` 命令、Web 用户手动打开 Plan 开关后的第一条消息。
@@ -469,32 +472,6 @@ def _is_restorable_history_record(record: Any) -> bool:
     return event_type in _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES
 
 
-def resolve_request_project_dir(request: AgentRequest) -> str | None:
-    """Resolve the stable project identity for agent construction.
-
-    New clients send ``project_dir`` separately from dynamic ``cwd``. Keep
-    legacy fallbacks for older clients that only send cwd/trusted_dirs.
-    """
-    params = request.params or {}
-    project_dir = params.get("project_dir")
-    if isinstance(project_dir, str) and project_dir.strip():
-        return project_dir.strip()
-    metadata = request.metadata or {}
-    metadata_project_dir = metadata.get("project_dir") if isinstance(metadata, dict) else None
-    if isinstance(metadata_project_dir, str) and metadata_project_dir.strip():
-        return metadata_project_dir.strip()
-    cwd = params.get("cwd")
-    if isinstance(cwd, str) and cwd.strip():
-        return cwd.strip()
-    metadata_cwd = metadata.get("cwd") if isinstance(metadata, dict) else None
-    if isinstance(metadata_cwd, str) and metadata_cwd.strip():
-        return metadata_cwd.strip()
-    trusted_dirs = params.get("trusted_dirs")
-    if isinstance(trusted_dirs, list) and trusted_dirs:
-        first = trusted_dirs[0]
-        if isinstance(first, str) and first.strip():
-            return first.strip()
-    return None
 
 
 def _build_schedule_execution_target(
@@ -650,85 +627,10 @@ def _harness_error_code(exc: BaseException) -> str:
     return "BAD_REQUEST"
 
 
-def resolve_agent_request_mode(
-    raw_mode: Any,
-    *,
-    work_mode: Any = None,
-) -> tuple[str, str | None, str]:
-    """Resolve request params.mode into manager mode, sub_mode, and canonical value.
-
-    plan / fast 已合并为单一 ``agent`` 模式：任何 ``agent`` / ``agent.plan`` /
-    ``agent.fast`` 请求都归一到 ``agent``（sub_mode=None）。历史裸 ``plan`` /
-    ``fast``（无 ``agent.`` 前缀，如旧 cron job 存量数据）同样归一到 ``agent``，
-    与 CLI ``MODE_ALIASES``、记忆配置 ``_resolve_mode_memory`` 的裸 token 处理保持一致。
-    """
-    mode_text = canonicalize_mode_text(raw_mode)
-    normalized_work_mode = (
-        work_mode.strip().lower() if isinstance(work_mode, str) else ""
-    )
-
-    if mode_text in ("plan", "fast"):
-        if normalized_work_mode == "code":
-            return "code", "normal", "code.normal"
-        return "agent", None, "agent"
-
-    if mode_text == TEAM_PLAN_NORMAL_MODE:
-        return "team", "plan", TEAM_PLAN_NORMAL_MODE
-    if mode_text == TEAM_PLAN_CODE_MODE:
-        return "code", "team", TEAM_PLAN_CODE_MODE
-
-    parts = mode_text.split(".")
-    mode = parts[0] or "agent"
-    if mode == "agent":
-        # 合并模式：忽略历史子模式（plan / fast），统一 canonical "agent"。
-        if normalized_work_mode == "code":
-            return "code", "normal", "code.normal"
-        return "agent", None, "agent"
-    if mode == "team":
-        sub_mode = parts[1] if len(parts) > 1 and parts[1] else None
-        if sub_mode not in {None}:
-            sub_mode = None
-        canonical_mode = f"team.{sub_mode}" if sub_mode else "team"
-        return "team", sub_mode, canonical_mode
-
-    default_sub_modes = {
-        "code": "normal",
-    }
-    sub_mode = parts[1] if len(parts) > 1 and parts[1] else default_sub_modes.get(mode)
-    if mode == "code" and sub_mode not in {"plan", "normal", "team"}:
-        sub_mode = default_sub_modes.get(mode, "normal")
-    canonical_mode = f"{mode}.{sub_mode}" if sub_mode else mode
-    if canonical_mode in {"agent", "code", "code.normal"}:
-        if normalized_work_mode == "code":
-            return "code", "normal", "code.normal"
-        if normalized_work_mode == "work":
-            return "agent", None, "agent"
-    return mode, sub_mode, canonical_mode
 
 
-def resolve_request_runtime_mode(
-    request: AgentRequest,
-    *,
-    work_mode: Any = None,
-) -> ResolvedMode:
-    """解析请求的运行模式（Web 组合 mode + work_mode；其余走历史解析）。"""
-    params = request.params if isinstance(request.params, dict) else {}
-    return resolve_request_mode(
-        params,
-        resolve_agent_request_mode,
-        work_mode=work_mode,
-    )
 
 
-def _apply_resolved_mode_to_request(
-    request: AgentRequest,
-    *,
-    work_mode: Any = None,
-) -> tuple[str, str | None]:
-    resolved = resolve_request_runtime_mode(request, work_mode=work_mode)
-    if isinstance(request.params, dict):
-        request.params["mode"] = resolved.canonical_mode
-    return resolved.manager_mode, resolved.sub_mode
 
 
 def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
@@ -935,6 +837,7 @@ class AgentWebSocketServer:
             *,
             ping_interval: float | None = 30.0,
             ping_timeout: float | None = 300.0,
+            core_workflow_bootstrap: CoreWorkflowBootstrap | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -949,7 +852,8 @@ class AgentWebSocketServer:
         self._current_ws_done: asyncio.Event | None = None
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
-        self._agent_manager = AgentManager()
+        self._agent_manager = (AgentManager() if core_workflow_bootstrap is None else
+                               AgentManager(core_workflow_bootstrap=core_workflow_bootstrap))
         # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
         # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。
         self._stateless_fallback_agents: dict[str, Any] = {}
@@ -1020,18 +924,24 @@ class AgentWebSocketServer:
             port: int = 18000,
             ping_interval: float | None = 30.0,
             ping_timeout: float | None = 300.0,
+            core_workflow_bootstrap: CoreWorkflowBootstrap | None = None,
     ) -> "AgentWebSocketServer":
         """返回单例实例。
 
         首次调用时创建实例，后续调用返回已存在的实例。
         """
         if cls._instance is not None:
+            if core_workflow_bootstrap is not None:
+                installed = getattr(cls._instance._agent_manager, "core_workflow_host", None)
+                if installed is None or installed.bootstrap is not core_workflow_bootstrap:
+                    raise ValueError("CORE_WORKFLOW_BOOTSTRAP_ALREADY_CREATED")
             return cls._instance
         cls._instance = cls(
             host=host,
             port=port,
             ping_interval=ping_interval,
             ping_timeout=ping_timeout,
+            core_workflow_bootstrap=core_workflow_bootstrap,
         )
         return cls._instance
 
@@ -1731,6 +1641,10 @@ class AgentWebSocketServer:
                     await asyncio.gather(*connection_tasks, return_exceptions=True)
                 connection_done.set()
                 return
+            # Fence transport-owned producers before route cleanup can yield.
+            # A queued retained command must not acquire an old text lease in
+            # the gap between observer cancellation and its finally block.
+            self._agent_manager.executions.disconnect_all()
             registry = getattr(self, "_live_voice_product_composition", None)
             if registry is not None:
                 try:
@@ -1757,6 +1671,7 @@ class AgentWebSocketServer:
 
                 await cancel_all_team_stream_tasks_across_managers(
                     reason=f"[gateway ws closed {remote}] ",
+                    preserve_sessions=self._agent_manager.executions.retained_sessions(),
                 )
             except Exception:
                 logger.exception("[AgentWebSocketServer] team stream cancel failed")
@@ -1916,6 +1831,9 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.COMMAND_WORKFLOWS:
                 await self._handle_command_workflows(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.COMMAND_AGENT_INPUT:
+                await self._handle_command_agent_input(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.TEAM_HISTORY_GET:
                 await self._handle_team_history_get(ws, request, send_lock)
@@ -2263,6 +2181,12 @@ class AgentWebSocketServer:
             return False
         channel_id = request.channel_id or "default"
         try:
+            executions = self._agent_manager.executions
+            if executions.retains_session(channel_id=channel_id, session_id=session_id):
+                # Presentation has disconnected; admitted shared work still
+                # owns the runtime. After exit it follows the existing idle
+                # session cache policy, allowing subsequent Goal observation.
+                return True
             cleaned = await self._agent_manager.cleanup_session_runtime(
                 channel_id=channel_id,
                 session_id=session_id,
@@ -2338,6 +2262,19 @@ class AgentWebSocketServer:
         不影响后续任务。
         """
         channel_id = request.channel_id or "default"
+
+        if self._is_client_disconnect_cancel_request(request):
+            owned = self._agent_manager.executions.disconnect(
+                channel_id=channel_id, session_id=SessionManager.get_session_id(request.session_id))
+            if owned:
+                resp = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                    payload={"event_type": "chat.interrupt_result", "success": True,
+                             "message": "Presentation disconnected; execution lifetime handled by its owner"})
+                if send_response:
+                    wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                    async with send_lock:
+                        await send_wire_payload(ws, wire)
+                return resp
 
         # 1. 尝试按 params 中的 mode 查找已有 agent
         project_dir = resolve_request_project_dir(request)
@@ -2606,129 +2543,12 @@ class AgentWebSocketServer:
         return agent
 
     async def _prepare_code_mode_chat_turn(
-        self,
-        request: AgentRequest,
-        channel_id: str,
-        *,
-        sync_metadata: bool = True,
+        self, request: AgentRequest, channel_id: str, *, sync_metadata: bool = True,
     ) -> tuple[str, str | None, Any]:
-        """Mode resolution and correct agent instance selection."""
-        # [新增] 在 _apply_resolved_mode_to_request 把 canonical mode 写回 params 之前，
-        # 先记录请求是否「显式」携带了 mode。下游 sync 用它做守卫：未显式携带则不覆盖
-        # 磁盘已锁定的会话 mode（避免只读 RPC 用默认推断值腐蚀 team 等已锁定 mode）。
-        # model 的显式与否由 _sync_chat_request_request_metadata 内部从 params 判断
-        # （model_name 不会被规范化改写），故此处只捕获 mode 标志。
-        # 注意：用与下游一致的严格判断——纯空白串 "   " 不算显式携带（bool("   ") 为 True
-        # 会误判，导致空白 mode 走默认推断 agent.plan 并写盘腐蚀已锁定 mode）。
-        params = request.params if isinstance(request.params, dict) else {}
-        _raw_mode = params.get("mode")
-        explicit_mode_provided = isinstance(_raw_mode, str) and bool(_raw_mode.strip())
-        runtime_work_mode = None
-        sid = str(request.session_id or "").strip()
-        if sid:
-            from jiuwenswarm.server.runtime.session.session_metadata import (
-                get_session_metadata,
-            )
-
-            session_metadata = get_session_metadata(
-                sid,
-                cache_bust=True,
-                enable_writeback=False,
-            )
-            stored_work_mode = (
-                session_metadata.get("work_mode")
-                if isinstance(session_metadata, dict)
-                else None
-            )
-            # 下面的 sync 会把本轮 canonical mode 覆盖进 metadata，所以在覆盖前
-            # 先把上一轮的值捎带给 _ensure_code_mode_state：它据此判断这个会话是
-            # 不是可能还停在 plan 里（跨进程重启依然有效）。
-            stored_session_mode = (
-                session_metadata.get("mode")
-                if isinstance(session_metadata, dict)
-                else None
-            )
-            if isinstance(stored_session_mode, str) and stored_session_mode.strip():
-                params[_SESSION_PREVIOUS_MODE_KEY] = stored_session_mode.strip()
-            if isinstance(stored_work_mode, str) and stored_work_mode.strip().lower() in {
-                "code",
-                "work",
-            }:
-                runtime_work_mode = stored_work_mode.strip().lower()
-        if runtime_work_mode is None:
-            request_work_mode = params.get("work_mode")
-            if isinstance(request_work_mode, str) and request_work_mode.strip().lower() in {
-                "code",
-                "work",
-            }:
-                runtime_work_mode = request_work_mode.strip().lower()
-            else:
-                from jiuwenswarm.server.runtime.session.work_mode import (
-                    default_work_mode_for_channel,
-                )
-                channel_id_for_default = request.channel_id or "web"
-                runtime_work_mode = default_work_mode_for_channel(channel_id_for_default)
-                logger.warning(
-                    "[_prepare_code_mode_chat_turn] work_mode missing in both session "
-                    "metadata and request params; defaulting to %r for channel=%s session=%s",
-                    runtime_work_mode,
-                    channel_id_for_default,
-                    request.session_id,
-                )
-        params["work_mode"] = runtime_work_mode
-        mode, sub_mode = _apply_resolved_mode_to_request(
-            request,
-            work_mode=runtime_work_mode,
+        return await prepare_agent_request(
+            self._agent_manager, request, channel_id,
+            sync_metadata=sync_metadata, metadata_sync=_sync_chat_request_metadata,
         )
-        agent_mode = "agent" if mode == "auto_harness" else mode
-        requested_project_dir = resolve_request_project_dir(request)
-        # [改动] 写盘用 canonical mode（request.params["mode"]，已被规范化为
-        # "agent.plan"/"team" 等），而非一级 mode（"agent"），使磁盘出现你期望的两类值。
-        canonical_mode = (
-            request.params.get("mode") if isinstance(request.params, dict) else None
-        )
-        if sync_metadata:
-            project_dir = _sync_chat_request_metadata(
-                request,
-                requested_project_dir,
-                canonical_mode if canonical_mode else mode,
-                explicit_mode_provided=explicit_mode_provided,
-                user_id=str(getattr(request, "user_id", "") or "").strip(),
-            )
-        else:
-            # Read-only path (e.g. command.goal get): never create/update
-            # metadata.json. Prefer request project_dir, else locked disk value.
-            project_dir = requested_project_dir
-            if not (isinstance(project_dir, str) and project_dir.strip()):
-                sid = str(request.session_id or "").strip()
-                if sid:
-                    from jiuwenswarm.server.runtime.session.session_metadata import (
-                        get_session_metadata,
-                    )
-
-                    meta = get_session_metadata(
-                        sid, cache_bust=True, enable_writeback=False
-                    )
-                    locked = meta.get("project_dir") if isinstance(meta, dict) else None
-                    if isinstance(locked, str) and locked.strip():
-                        project_dir = locked.strip()
-        if isinstance(project_dir, str) and project_dir.strip():
-            project_dir = project_dir.strip()
-            request.params["project_dir"] = project_dir
-            request.metadata = dict(request.metadata or {})
-            request.metadata["project_dir"] = project_dir
-
-        await self._agent_manager.wait_for_session_prewarm(request.session_id)
-        agent = await self._agent_manager.get_agent(
-            channel_id=channel_id,
-            mode=agent_mode,
-            project_dir=project_dir,
-            sub_mode=sub_mode,
-        )
-        if agent is None:
-            raise ValueError("Failed to get agent")
-
-        return mode, sub_mode, agent
 
     @staticmethod
     def _session_may_hold_plan_state(request: AgentRequest, session_id: str) -> bool:
@@ -3096,10 +2916,11 @@ class AgentWebSocketServer:
                 while True:
                     # 等待心跳间隔，如果期间有真实 chunk 发送则 heartbeat_event 被设置，重置等待
                     try:
-                        await asyncio.wait_for(
-                            heartbeat_event.wait(),
-                            timeout=_STREAM_HEARTBEAT_INTERVAL_SECONDS,
-                        )
+                        # A child wait_for task can finish with the last chunk
+                        # while this heartbeat is cancelled. Keep the timeout
+                        # in this task so cleanup cancellation cannot be lost.
+                        async with asyncio.timeout(_STREAM_HEARTBEAT_INTERVAL_SECONDS):
+                            await heartbeat_event.wait()
                         # 有真实 chunk 发送，重置 event 继续等待
                         heartbeat_event.clear()
                     except asyncio.TimeoutError:
@@ -3137,49 +2958,50 @@ class AgentWebSocketServer:
         heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
         try:
-            async for chunk in agent.process_message_stream(request):
-                chunk_count += 1
-                # 通知心跳任务有真实 chunk 发送，重置心跳计时
-                heartbeat_event.set()
-                # V2: chunk 回带请求侧 agent_ref，供 gateway 3 元组精确路由
-                # （设计 §6.3）。is None 守卫：保留 team 模式由事件派生的 agent_ref
-                # （_build_team_event_chunk_meta 已设值），不覆盖。
-                if chunk.agent_ref is None:
-                    chunk.agent_ref = request.agent_ref
-                wire = encode_agent_chunk_for_wire(
-                    chunk,
-                    response_id=request.request_id,
-                    sequence=chunk_count - 1,
-                )
-                # 诊断：打印前 3 个和每 50 个 chunk 的发送情况
-                if chunk_count <= 3 or chunk_count % 50 == 0:
-                    _pl = getattr(chunk, "payload", None) or {}
-                    _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
-                    logger.info(
-                        "[AgentWebSocketServer] chunk sent: request_id=%s seq=%s"
-                        " event_type=%s wire_keys=%s",
-                        request.request_id, chunk_count - 1, _et,
-                        list(wire.keys())[:10] if isinstance(wire, dict) else "non-dict",
+            async with aclosing(self._agent_manager.executions.stream(agent, request)) as output:
+                async for chunk in output:
+                    chunk_count += 1
+                    # 通知心跳任务有真实 chunk 发送，重置心跳计时
+                    heartbeat_event.set()
+                    # V2: chunk 回带请求侧 agent_ref，供 gateway 3 元组精确路由
+                    # （设计 §6.3）。is None 守卫：保留 team 模式由事件派生的 agent_ref
+                    # （_build_team_event_chunk_meta 已设值），不覆盖。
+                    if chunk.agent_ref is None:
+                        chunk.agent_ref = request.agent_ref
+                    wire = encode_agent_chunk_for_wire(
+                        chunk,
+                        response_id=request.request_id,
+                        sequence=chunk_count - 1,
                     )
-                try:
-                    async with send_lock:
-                        sent_original = await send_wire_payload(ws, wire)
-                    if not sent_original:
-                        logger.warning(
-                            "[AgentWebSocketServer] 流式响应因单个 chunk 超限而停止: "
-                            "request_id=%s seq=%s",
+                    # 诊断：打印前 3 个和每 50 个 chunk 的发送情况
+                    if chunk_count <= 3 or chunk_count % 50 == 0:
+                        _pl = getattr(chunk, "payload", None) or {}
+                        _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                        logger.info(
+                            "[AgentWebSocketServer] chunk sent: request_id=%s seq=%s"
+                            " event_type=%s wire_keys=%s",
+                            request.request_id, chunk_count - 1, _et,
+                            list(wire.keys())[:10] if isinstance(wire, dict) else "non-dict",
+                        )
+                    try:
+                        async with send_lock:
+                            sent_original = await send_wire_payload(ws, wire)
+                        if not sent_original:
+                            logger.warning(
+                                "[AgentWebSocketServer] 流式响应因单个 chunk 超限而停止: "
+                                "request_id=%s seq=%s",
+                                request.request_id,
+                                chunk_count - 1,
+                            )
+                            return
+                    except WebSocketConnectionClosed:
+                        logger.info(
+                            "[AgentWebSocketServer] 流式响应停止，WebSocket 已关闭: request_id=%s",
                             request.request_id,
-                            chunk_count - 1,
                         )
                         return
-                except WebSocketConnectionClosed:
-                    logger.info(
-                        "[AgentWebSocketServer] 流式响应停止，WebSocket 已关闭: request_id=%s",
-                        request.request_id,
-                    )
-                    return
-                # 清除 event，让心跳任务重新开始计时
-                heartbeat_event.clear()
+                    # 清除 event，让心跳任务重新开始计时
+                    heartbeat_event.clear()
         finally:
             # 停止心跳任务
             if heartbeat_task is not None:
@@ -4921,197 +4743,36 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
+    async def _handle_command_agent_input(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        from jiuwenswarm.server.runtime.agent_interrupt_requests import dispatch_agent_input_request
+
+        def guard():
+            if self._current_ws is not ws or self._current_ws_done is None or self._current_ws_done.is_set():
+                raise PermissionError("AGENT_INPUT_CONNECTION_CLOSED")
+
+        response = await dispatch_agent_input_request(self._agent_manager, request, before_effect=guard)
+        wire = encode_agent_response_for_wire(response, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
     async def _handle_command_workflows(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        """Handle command.workflows RPC — list summaries or get one workflow detail."""
-        from jiuwenswarm.agents.harness.team import get_team_manager
+        """Project the shared authenticated Workflow query onto the WebSocket."""
+        from jiuwenswarm.server.runtime.workflow_queries import query_workflows
 
-        session_id = request.session_id or ""
-        channel_id = request.channel_id or "web"
-        params = request.params if isinstance(request.params, dict) else {}
-        action = str(params.get("action") or "list").strip().lower()
-        workflow_id = params.get("workflow_id") or params.get("workflow_run_id")
-        wf_id_log = workflow_id.strip() if isinstance(workflow_id, str) else workflow_id
+        if isinstance(request.params, dict) and request.params.get("kind") == "core":
+            from jiuwenswarm.server.runtime.core_workflow_requests import dispatch_core_workflow_request
 
-        logger.info(
-            "[WF_DBG] command.workflows req channel_id=%s session_id=%s request_id=%s action=%s workflow_id=%s",
-            channel_id,
-            session_id,
-            request.request_id,
-            action,
-            wf_id_log,
-        )
+            def guard():
+                if self._current_ws is not ws or self._current_ws_done is None or self._current_ws_done.is_set():
+                    raise PermissionError("CORE_WORKFLOW_CONNECTION_CLOSED")
 
-        team_manager = get_team_manager(channel_id)
-        workflow_handler = team_manager.get_workflow_handler(session_id)
-        source = "live" if workflow_handler is not None else "checkpoint"
-        detail_raw_bytes: int | None = None
-
-        if workflow_handler is None:
-            # No live handler (runtime not active / torn down by cancel-stop).
-            # The snapshot is a read-only pull and must not depend on runtime
-            # liveness — fall back to the persisted checkpoint so historical /
-            # terminal workflow runs remain queryable after the team session
-            # is cancelled or stopped.
-            try:
-                from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
-                    restore_workflow_runs,
-                )
-
-                restored = restore_workflow_runs(session_id)
-                workflows = (
-                    [run.to_workflow_run_dict() for run in restored.values()]
-                    if restored
-                    else []
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "[WF_DBG] command.workflows checkpoint_restore_failed session_id=%s error=%s",
-                    session_id,
-                    exc,
-                )
-                workflows = []
+            resp = await dispatch_core_workflow_request(self._agent_manager, request,
+                                                       connection=ws, before_read=guard)
+        elif isinstance(request.params, dict) and "kind" in request.params and request.params["kind"] != "swarmflow":
+            resp = AgentResponse(request_id=request.request_id, channel_id=request.channel_id,
+                ok=False, payload={"status": "rejected", "reason": "WORKFLOW_KIND_INVALID"})
         else:
-            try:
-                workflows = workflow_handler.get_workflow_snapshot()
-            except Exception as e:
-                logger.warning(
-                    "[WF_DBG] command.workflows snapshot_failed session_id=%s error=%s",
-                    session_id,
-                    e,
-                )
-                workflows = []
-
-        source_count = len(workflows)
-        source_bytes = sum(_json_wire_size(item) for item in workflows if isinstance(item, dict))
-
-        if action == "get":
-            if not isinstance(workflow_id, str) or not workflow_id.strip():
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=channel_id,
-                    ok=False,
-                    payload={"error": "workflow_id is required for action=get"},
-                )
-            else:
-                target_id = workflow_id.strip()
-                match = next(
-                    (item for item in workflows if isinstance(item, dict) and item.get("id") == target_id),
-                    None,
-                )
-                if match is None:
-                    resp = AgentResponse(
-                        request_id=request.request_id,
-                        channel_id=channel_id,
-                        ok=False,
-                        payload={"error": f"workflow not found: {target_id}"},
-                    )
-                else:
-                    detail_raw_bytes = _json_wire_size(match)
-                    resp = AgentResponse(
-                        request_id=request.request_id,
-                        channel_id=channel_id,
-                        ok=True,
-                        payload=_build_workflow_detail_payload(match, session_id=session_id),
-                    )
-        elif action == "get_human_prompt":
-            agent_id = params.get("agent_id")
-            correlation_id = params.get("correlation_id")
-            agent_id_str = agent_id.strip() if isinstance(agent_id, str) and agent_id.strip() else None
-            corr_id_str = (
-                correlation_id.strip()
-                if isinstance(correlation_id, str) and correlation_id.strip()
-                else None
-            )
-            if not isinstance(workflow_id, str) or not workflow_id.strip():
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=channel_id,
-                    ok=False,
-                    payload={"error": "workflow_id is required for action=get_human_prompt"},
-                )
-            elif not agent_id_str and not corr_id_str:
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=channel_id,
-                    ok=False,
-                    payload={"error": "agent_id or correlation_id is required for action=get_human_prompt"},
-                )
-            else:
-                target_id = workflow_id.strip()
-                match = next(
-                    (item for item in workflows if isinstance(item, dict) and item.get("id") == target_id),
-                    None,
-                )
-                if match is None:
-                    resp = AgentResponse(
-                        request_id=request.request_id,
-                        channel_id=channel_id,
-                        ok=False,
-                        payload={"error": f"workflow not found: {target_id}"},
-                    )
-                else:
-                    prompt_payload = _build_workflow_human_prompt_payload(
-                        match,
-                        session_id=session_id,
-                        agent_id=agent_id_str,
-                        correlation_id=corr_id_str,
-                    )
-                    resp = AgentResponse(
-                        request_id=request.request_id,
-                        channel_id=channel_id,
-                        ok="error" not in prompt_payload,
-                        payload=prompt_payload,
-                    )
-        else:
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=channel_id,
-                ok=True,
-                payload=_build_workflow_list_payload(workflows, session_id=session_id),
-            )
-
-        payload = resp.payload if isinstance(resp.payload, dict) else {}
-        payload_bytes = _json_wire_size(payload)
-        truncated = bool(payload.get("truncated")) if isinstance(payload, dict) else False
-        included = len(payload.get("workflows", [])) if payload.get("action") == "list" else None
-        error = payload.get("error") if isinstance(payload, dict) and not resp.ok else None
-        log_level = logging.WARNING if (not resp.ok or truncated) else logging.INFO
-        if action == "list":
-            logger.log(
-                log_level,
-                "[WF_DBG] command.workflows res ok=%s action=list source=%s count=%d source_bytes=%d "
-                "payload_bytes=%d included=%d/%d truncated=%s error=%s",
-                resp.ok,
-                source,
-                source_count,
-                source_bytes,
-                payload_bytes,
-                included or 0,
-                source_count,
-                truncated,
-                error,
-            )
-        else:
-            prompt_len = None
-            if action == "get_human_prompt" and isinstance(payload, dict):
-                human_prompt = payload.get("human_prompt")
-                if isinstance(human_prompt, str):
-                    prompt_len = len(human_prompt.encode("utf-8"))
-            logger.log(
-                log_level,
-                "[WF_DBG] command.workflows res ok=%s action=%s source=%s workflow_id=%s "
-                "raw_bytes=%s payload_bytes=%d truncated=%s prompt_len=%s error=%s",
-                resp.ok,
-                action,
-                source,
-                wf_id_log,
-                detail_raw_bytes,
-                payload_bytes,
-                truncated,
-                prompt_len,
-                error,
-            )
-
+            resp = await query_workflows(request)
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)

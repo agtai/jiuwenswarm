@@ -1,17 +1,9 @@
 """Tests for the Goal capability adapter used by JiuwenSwarm."""
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-# Goal capability tests exercise the checked-out OpenJiuwen implementation,
-# not whichever released package happens to be installed in the test venv.
-_AGENT_CORE_ROOT = Path(__file__).resolve().parents[3].parent / "agent-core"
-if str(_AGENT_CORE_ROOT) not in sys.path:
-    sys.path.insert(0, str(_AGENT_CORE_ROOT))
 
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.harness.goal.schema import GoalOperationError, GoalRecord, GoalStatus
@@ -35,6 +27,9 @@ class _FakeGoals:
         self.calls.append(("get", None))
         return self.record
 
+    def peek(self):
+        return self.record
+
     def get_store(self):
         return SimpleNamespace(load=lambda: self.record)
 
@@ -45,6 +40,7 @@ class _FakeGoals:
         overwrite_confirmed: bool = False,
         token_budget: int | None = None,
         max_attempts: int | None = None,
+        **controls,
     ) -> GoalRecord:
         self.calls.append(("set", objective))
         if not objective.strip():
@@ -63,7 +59,7 @@ class _FakeGoals:
         self.record = GoalRecord.create(session_id="session-1", objective=objective)
         return self.record
 
-    async def pause(self) -> GoalRecord | None:
+    async def pause(self, **controls) -> GoalRecord | None:
         self.calls.append(("pause", None))
         if self.record is None:
             return None
@@ -71,7 +67,7 @@ class _FakeGoals:
             self.record.status = GoalStatus.PAUSED
         return self.record
 
-    async def resume(self) -> GoalRecord | None:
+    async def resume(self, **controls) -> GoalRecord | None:
         self.calls.append(("resume", None))
         if self.record is None:
             return None
@@ -79,7 +75,7 @@ class _FakeGoals:
             self.record.status = GoalStatus.ACTIVE
         return self.record
 
-    async def clear(self) -> GoalRecord | None:
+    async def clear(self, **controls) -> GoalRecord | None:
         self.calls.append(("clear", None))
         removed = self.record
         self.record = None
@@ -103,6 +99,26 @@ def _delta_chunk(text: str) -> OutputSchema:
 
 def _answer_chunk(text: str) -> OutputSchema:
     return _chunk("answer", {"output": text, "result_type": "success"})
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_public_goal_snapshots_do_not_expose_or_mutate_private_context(wrapped):
+    stored = {
+        "goal_id": "goal-1", "objective": "inspect",
+        "run_context": {"principal": "private", "permissions": {"write": False}},
+        "last_assessment": {"evidence": "observed"},
+    }
+    record = SimpleNamespace(to_dict=lambda: stored)
+    snapshot = JiuWenSwarmDeepAdapter._goal_record_payload(record)
+    wire = JiuWenSwarmDeepAdapter._interaction_goal_updated_payload(
+        {"goal": stored} if wrapped else stored
+    )["goal"]
+    for public in (snapshot, wire):
+        assert "run_context" not in public
+        assert public["goal_id"] == "goal-1"
+        public["last_assessment"]["evidence"] = "changed externally"
+    assert stored["last_assessment"]["evidence"] == "observed"
+    assert stored["run_context"]["permissions"] == {"write": False}
 
 
 class _FakeGoalAdapter:
@@ -254,7 +270,7 @@ def test_runtime_events_are_adapted_without_leaking_runtime_objects() -> None:
         )
     )
 
-    assert updated == {"event_type": "goal.updated", "goal": goal}
+    assert updated == {"event_type": "goal.updated", "goal": {k: v for k, v in goal.items() if k != "run_context"}}
     assert failed == {
         "event_type": "execution.error",
         "code": "round_execution_error",
@@ -301,7 +317,7 @@ def test_runtime_goal_update_payload_is_always_nested_under_goal() -> None:
         }
     )
 
-    assert updated == {"event_type": "goal.updated", "goal": goal}
+    assert updated == {"event_type": "goal.updated", "goal": {k: v for k, v in goal.items() if k != "run_context"}}
     assert cleared == {"event_type": "goal.updated", "goal": None}
 
 

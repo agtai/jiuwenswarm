@@ -103,7 +103,10 @@ class NativeBusinessContextStore:
         if selection is None:
             raise NativeBusinessViolation("NATIVE_BUSINESS_CONTEXT_STALE")
         facts = selection.payload()
-        if action.target_id is not None:
+        # Other capability owners resolve their targets inside the authorized
+        # session. Goal controls compare their own control revision under the
+        # SDK lock; they cannot use a Work/Task snapshot as control authority.
+        if action.target_id is not None and not action.operation.startswith(("workflow.", "goal.", "agent.", "team.", "core_workflow.")):
             collection = facts["tasks"] if action.operation.startswith("task.") else facts["works"]
             key = "task_id" if action.operation.startswith("task.") else "work_id"
             revision_key = "revision_number" if key == "task_id" else "revision"

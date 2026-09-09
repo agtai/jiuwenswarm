@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ from jiuwenswarm.common.config import get_config, get_default_models
 
 if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+    from jiuwenswarm.server.runtime.core_workflow_bootstrap import CoreWorkflowBootstrap
 
 
 logger = logging.getLogger(__name__)
@@ -120,7 +122,7 @@ class AgentManager:
     - "default": 默认通道
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, core_workflow_bootstrap: CoreWorkflowBootstrap | None = None) -> None:
         self.agents: dict[str, dict[str, "JiuWenSwarm"]] = {}
         # 记录每个 (channel_id, mode) 的创建参数, 便于 recreate_agent 立刻重建
         self._agent_create_params: dict[str, dict[str, dict[str, Any]]] = {}
@@ -148,6 +150,14 @@ class AgentManager:
         from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
 
         self.warm_pool = AgentWarmPool(self)
+        from jiuwenswarm.server.runtime.session_execution import SessionExecutionService
+        self.executions = SessionExecutionService(self)
+        from jiuwenswarm.server.runtime.core_workflow_capabilities import CoreWorkflowCapabilities
+        self.core_workflow_capabilities = CoreWorkflowCapabilities()
+        self.core_workflow_host = None
+        if core_workflow_bootstrap is not None:
+            from jiuwenswarm.server.runtime.core_workflow_bootstrap import install_core_workflow_bootstrap
+            install_core_workflow_bootstrap(self, core_workflow_bootstrap)
 
     def _get_agent_create_lock(
         self,
@@ -497,6 +507,7 @@ class AgentManager:
 
     async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
         """Cancel transport-owned work when the Gateway WebSocket disconnects."""
+        self.executions.disconnect_all()
         for channel_id, modes in list(self.agents.items()):
             # These exact channels belong to service owners. Registry shutdown
             # settles Native work; media disconnect grants no work/task cancel.
@@ -504,7 +515,11 @@ class AgentManager:
                 continue
             for agent in list(modes.values()):
                 try:
-                    await agent.cancel_inflight_work(reason)
+                    retained = self.executions.retained_sessions(agent)
+                    if retained:
+                        await agent.cancel_inflight_work(reason, preserve_sessions=retained)
+                    else:
+                        await agent.cancel_inflight_work(reason)
                 except Exception:
                     logger.exception("[AgentManager] cancel_inflight_work failed")
 
@@ -980,6 +995,16 @@ class AgentManager:
                 f"{len(failures)} Agent owner(s) remain"
             ) from failures[0]
 
+    def find_agent_exact(
+        self, *, channel_id: str, mode: str, project_dir: str | None, sub_mode: str | None,
+    ) -> "JiuWenSwarm | None":
+        """Find one configured owner without creation or fallback to another key."""
+        channel_agents = self.agents.get(_normalize_channel_id(channel_id), {})
+        key = _make_agent_cache_key(mode, collapse_plan_sub_mode(mode, sub_mode),
+                                   _normalize_project_dir(project_dir))
+        agent = channel_agents.get(key)
+        return self._borrow_agent(agent) if agent is not None else None
+
     def get_agent_nowait(
         self,
         channel_id: str = "",
@@ -1423,15 +1448,19 @@ class AgentManager:
             if agent is None:
                 raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
 
-            # 流式处理
-            async for chunk in agent.process_message_stream(request):
-                yield chunk
+            async with aclosing(self.executions.stream(agent, request)) as output:
+                async for chunk in output:
+                    yield chunk
         except Exception as e:
             logger.error(f"[AgentManager] Error in process_message_stream: {e}", exc_info=True)
             raise
 
     async def cleanup(self) -> None:
         """清理所有 agent 实例."""
+        if self.core_workflow_host is not None:
+            self.core_workflow_host.revoke()
+        if not await self.executions.close():
+            raise RuntimeError("shared Agent output consumers have not settled")
         await self.warm_pool.close()
         retirement_tasks = [
             task

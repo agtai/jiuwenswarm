@@ -43,8 +43,9 @@ def test_all_bound_operations_retain_exact_canonical_business_proposal(operation
 
 
 def test_bound_catalog_advertises_only_one_intent_and_exact_targets():
-    for tool in native_business_tools(bound_context=True):
-        operation = tool['name'].removeprefix('jiuwen_bound_').replace('_', '.', 1)
+    tools = {tool['name']: tool for tool in native_business_tools(bound_context=True)}
+    for operation in tools_fixture.SCENARIOS:
+        tool = tools['jiuwen_bound_' + operation.replace('.', '_')]
         schema = tool['parameters']
         assert set(schema['required']) == set(schema['properties']) == set(values(operation))
         assert schema['additionalProperties'] is False

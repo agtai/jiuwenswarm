@@ -151,6 +151,7 @@ async def _execute_auto_memory_extraction(
     session_id: str,
     messages: list | None = None,
     parent_agent: "AgentAdapter | None" = None,
+    *, model: Any = None,
 ) -> None:
     """Execute auto memory extraction in background.
 
@@ -249,6 +250,7 @@ async def _execute_auto_memory_extraction(
             history=history,
             existing_memories=existing_memories,
             parent_agent=parent_agent,
+            model=model,
         )
 
         logger.debug("[auto_memory] Extraction task completed")
@@ -263,6 +265,7 @@ async def _run_memory_extraction_with_cache_sharing(
     history: list[dict[str, Any]],
     existing_memories: list[dict[str, Any]],
     parent_agent: "AgentAdapter",
+    *, model: Any = None,
 ) -> None:
     """Run memory extraction with API cache sharing.
 
@@ -306,9 +309,10 @@ async def _run_memory_extraction_with_cache_sharing(
             return
 
         # 1. Get parent agent's model
-        parent_model = getattr(parent_instance, "deep_config", None)
-        if parent_model is not None:
-            parent_model = getattr(parent_model, "model", None)
+        parent_model = model
+        if parent_model is None:
+            parent_config = getattr(parent_instance, "deep_config", None)
+            parent_model = getattr(parent_config, "model", None)
 
         if parent_model is None:
             logger.error("[auto_memory] Parent agent has no model, cannot proceed")

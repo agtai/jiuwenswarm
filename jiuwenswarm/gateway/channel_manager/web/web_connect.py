@@ -135,6 +135,7 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "security.alert",
         "goal.snapshot",
         "goal.updated",
+        "goal.confirm_required",
         # Web 的 Plan 开关靠该事件在计划执行后自动复位，需要完整 payload
         # 才能拿到退出后应回到的 mode。
         "plan.mode_exited",

@@ -133,6 +133,9 @@ class LowerFormalAdapter:
         self.calls = 0
         self.legacy_calls = 0
         self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.settled = asyncio.Event()
+        self.cancel_calls = 0
         self.requests = []
         self.inputs = []
 
@@ -158,9 +161,13 @@ class LowerFormalAdapter:
             if self.terminal_release is not None:
                 await self.terminal_release.wait()
         except asyncio.CancelledError:
+            self.cancel_calls += 1
+            self.cancelled.set()
             if self.cancel_cleanup_release is not None:
                 await self.cancel_cleanup_release.wait()
             raise
+        finally:
+            self.settled.set()
 
     async def process_message_stream_impl(self, *_args, **_kwargs):
         self.legacy_calls += 1

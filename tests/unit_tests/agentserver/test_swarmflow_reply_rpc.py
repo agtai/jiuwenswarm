@@ -10,12 +10,14 @@ covers the missing-params short-circuit that stays inside jiuwenswarm.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+from jiuwenswarm.common.schema.message import ReqMethod
 
 
 def _make_handler() -> JiuWenSwarmDeepAdapter:
@@ -66,3 +68,31 @@ async def test_handle_swarmflow_reply_rejects_missing_fields():
     assert resp.ok is False
     assert resp.payload == {"ok": False, "error": "missing session_id/correlation_id/answer"}
     assert tm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_public_reply_uses_shared_exact_owner_without_initializing_agent(monkeypatch):
+    reply = AsyncMock(return_value=(True, None))
+    monkeypatch.setattr("jiuwenswarm.server.runtime.team_workflow_capabilities.reply_swarmflow", reply)
+    agent = JiuWenSwarm()
+    agent._ensure_adapter = Mock(side_effect=AssertionError("reply cannot initialize an Agent"))
+    request = _req(session_id="sess-1", run_id="run-1", correlation_id="review:host:0", answer=" raw answer ")
+    request.req_method = ReqMethod.CHAT_SWARMFLOW_REPLY
+    response = await agent.process_message(request)
+    assert response.ok and response.payload["ok"]
+    assert response.payload["status"] == "input_accepted"
+    reply.assert_awaited_once_with(session_id="sess-1", run_id="run-1",
+        correlation_id="review:host:0", answer=" raw answer ", channel_id="tui")
+    agent._ensure_adapter.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reply_payload_cannot_override_authenticated_session(monkeypatch):
+    reply = AsyncMock()
+    monkeypatch.setattr("jiuwenswarm.server.runtime.team_workflow_capabilities.reply_swarmflow", reply)
+    handler = _make_handler()
+    request = _req(session_id="foreign", run_id="run-1", correlation_id="review:host:0", answer="answer")
+    request.session_id = "authenticated-session"
+    response = await handler.handle_swarmflow_reply(request)
+    assert not response.ok and response.payload["error"] == "swarmflow_reply_session_mismatch"
+    reply.assert_not_called()
