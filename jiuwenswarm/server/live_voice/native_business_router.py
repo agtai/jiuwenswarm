@@ -39,8 +39,6 @@ class NativeBusinessRouter:
         self.contexts = NativeBusinessContextStore()
         self._work_owner = None
         self._work_journal = None
-        self._executors = {}
-        self._executor_lock = asyncio.Lock()
         self._work_presentations = {}
         self._selected_work_events = {}
         self._task_events = {}
@@ -287,36 +285,6 @@ class NativeBusinessRouter:
         except Exception as error:
             return _error_result(request_id, reason=getattr(error, "reason", "NATIVE_BUSINESS_CONTEXT_UNAVAILABLE"),
                 code=getattr(error, "code", ErrorCode.UNAVAILABLE))
-
-    async def _executor(self, route):
-        from .agent_conversation_runtime import AgentConversationRuntime
-        scope = route.binding.scope
-        async with self._executor_lock:
-            retained = self._executors.get(scope)
-            if retained is not None:
-                return retained[0]
-            if len(self._executors) >= 32:
-                raise NativeBusinessViolation("NATIVE_WORK_SCOPE_CAPACITY", code=ErrorCode.UNAVAILABLE)
-            facade = await self.registry._agent_manager.get_agent(
-                "live_voice_native_work", "agent", route.native_p3_authority.context.file_path, None)
-            if facade is None or not callable(getattr(facade, "process_formal_live_voice_stream", None)):
-                raise NativeBusinessViolation("FORMAL_AGENT_FACADE_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
-            pin = getattr(self.registry._agent_manager, "pin_agent", None)
-            if callable(pin):
-                pin(facade)
-            identity = hashlib.sha256(canonical_json_bytes(scope.to_dict())).hexdigest()
-            runtime = AgentConversationRuntime(scope=scope, instance_id="native-work-service:" + identity,
-                facade=facade, enabled=True, max_concurrency=4, max_requests=128)
-            try:
-                if not await runtime.start():
-                    raise NativeBusinessViolation("NATIVE_WORK_EXECUTOR_UNAVAILABLE", code=ErrorCode.UNAVAILABLE)
-            except BaseException:
-                unpin = getattr(self.registry._agent_manager, "unpin_agent", None)
-                if callable(unpin):
-                    unpin(facade)
-                raise
-            self._executors[scope] = (runtime, facade)
-            return runtime
 
     async def _agent(self, route, delegate):
         from jiuwenswarm.server.runtime.agent_resolution import find_session_agent
@@ -673,7 +641,7 @@ class NativeBusinessRouter:
         return facade
 
     async def _work(self, route, delegate, admission, selection):
-        from .native_work_runtime import context_identity
+        from .native_work_runtime import context_identity, execute_native_work
         action = delegate.business
         # Admission/journal I/O can yield after context selection. Query and
         # cancellation, as well as execution, need authority at their effect.
@@ -697,8 +665,8 @@ class NativeBusinessRouter:
             control.check()
             await self._require_work_authority(route)
             control.check()
-            return await executor.execute_native_work(control=control, commit=commit, context=context,
-                correlation_id=route.binding.correlation_id, channel_id="web", allow_tools=True)
+            return await execute_native_work(service=self.registry._agent_manager.executions,
+                agent=executor, control=control, commit=commit, context=context)
         arguments = dict(scope=scope, request_id=delegate.source_identity, input_id=commit.commit_id,
             instruction=action.instruction, model_identity=route.native_p3_authority.model_identity,
             model_config_version=route.native_p3_authority.model_config_version,
@@ -1088,10 +1056,3 @@ class NativeBusinessRouter:
             await asyncio.gather(*reads, return_exceptions=True)
         if self._work_owner is not None:
             await self._work_owner.close()
-        for scope, (runtime, facade) in tuple(self._executors.items()):
-            result = await runtime.close(timeout_seconds=1.0)
-            if getattr(result, "closed", False) or runtime.snapshot().closed:
-                unpin = getattr(self.registry._agent_manager, "unpin_agent", None)
-                if callable(unpin):
-                    unpin(facade)
-                del self._executors[scope]

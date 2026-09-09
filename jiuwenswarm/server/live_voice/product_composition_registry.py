@@ -1856,6 +1856,7 @@ class AgentServerProductCompositionRegistry:
             context.scope,
             instance_id=f"product-p2:{instance_fingerprint}",
             facade=facade,
+            execution_service=getattr(self._agent_manager, "executions", None),
             enabled=True,
             response_generation_owner=next_response_generation,
         )
@@ -4707,10 +4708,9 @@ class AgentServerProductCompositionRegistry:
                 # This route owns no Chat history and always runs an
                 # Agent-profile turn, so the session work mode is not its input.
                 agent = await self._agent_manager.get_agent(
-                    # Formal P2 owns an independent Agent facade.  Reusing the
-                    # ordinary Web channel serializes a voice turn behind a
-                    # long-running text/Tool turn in the Agent facade cache.
-                    _FORMAL_LIVE_VOICE_AGENT_CHANNEL,
+                    # Native uses the configured public Agent. Its formal child
+                    # session isolates the committed turn from concurrent text.
+                    "web" if native_p3_authority is not None else _FORMAL_LIVE_VOICE_AGENT_CHANNEL,
                     _FORMAL_LIVE_VOICE_AGENT_MODE,
                     project_dir,
                     None,

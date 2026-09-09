@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import math
 import secrets
 from collections.abc import Awaitable, Callable
@@ -19,16 +20,19 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TypeVar
 
+from openjiuwen.core.common.background_tasks import wait_for_task_settlement
+
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ErrorCode,
     ScopeRef,
+    TurnCommit,
     canonical_json_bytes,
 )
 from jiuwenswarm.server.live_voice.native_foreground import NATIVE_FOREGROUND
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextSnapshot,
+    FormalAgentExecution,
 )
-from jiuwenswarm.common.live_voice_profiling import profile_event
 
 T = TypeVar("T")
 
@@ -85,6 +89,59 @@ def context_identity(context: FormalContextSnapshot) -> str:
             }
         )
     ).hexdigest()
+
+
+async def execute_native_work(*, service, agent, control: NativeWorkControl,
+                              commit: TurnCommit, context: FormalContextSnapshot,
+                              channel_id: str = "web", allow_tools: bool = True) -> str:
+    """Project admitted Native work into the common configured Agent service.
+
+    The journal owns durable admission and results; the service owns the actual
+    producer. No conversation runtime, synthetic speech response or bridge is
+    needed to execute work which has no speech lifetime.
+    """
+    from jiuwenswarm.server.runtime.session_execution import SessionExecutionUnavailable
+
+    if (not isinstance(control, NativeWorkControl) or not isinstance(commit, TurnCommit)
+            or not isinstance(context, FormalContextSnapshot)
+            or control.snapshot.scope != commit.scope or context.scope != commit.scope
+            or control.snapshot.input_id != commit.commit_id
+            or control.snapshot.context_id != context_identity(context)):
+        raise NativeWorkViolation("NATIVE_WORK_BINDING_MISMATCH",
+            "work requires its exact admitted input and context", ErrorCode.PERMISSION_DENIED)
+    specifications = [entry for entry in context.entries
+                      if entry.ref.source == "live_voice.native_work_specification"]
+    try:
+        specification = json.loads(specifications[0].content) if len(specifications) == 1 else None
+    except (ValueError, TypeError):
+        specification = None
+    if not isinstance(specification, dict) or specification.get("instruction") != control.snapshot.instruction:
+        raise NativeWorkViolation("NATIVE_WORK_SPECIFICATION_MISMATCH",
+            "work requires its exact selected specification", ErrorCode.PERMISSION_DENIED)
+    if type(allow_tools) is not bool:
+        raise NativeWorkViolation("INVALID_AGENT_TOOL_POLICY", "tool policy must be boolean")
+    context.validate_for(commit)
+    control.check()
+    identity = control.snapshot
+    request_id = f"{identity.work_id}:r{identity.revision}"
+    private_id = hashlib.sha256(canonical_json_bytes({
+        "scope": identity.scope.to_dict(), "request_id": request_id,
+    })).hexdigest()
+    execution = FormalAgentExecution(request_id=request_id, channel_id=channel_id,
+        internal_session_id="lv-formal-work-" + private_id, commit=commit, context=context,
+        allow_tools=allow_tools and not any(entry.ref.source == "live_voice.task_result" for entry in context.entries),
+        read_only_tools=True, model_identity=identity.model_identity,
+        model_config_version=identity.model_config_version)
+    binding = NATIVE_FOREGROUND.set(None)
+    try:
+        entry = service.start_formal(agent, execution)
+        control.settlement = entry.task
+        return await control.read_only(service.wait_formal(entry))
+    except SessionExecutionUnavailable as error:
+        raise NativeWorkViolation(error.reason, "configured Agent result is unavailable",
+                                  ErrorCode.RESULT_UNKNOWN) from error
+    finally:
+        NATIVE_FOREGROUND.reset(binding)
 
 
 def _text(value: str, name: str, maximum: int = 256) -> str:
@@ -217,15 +274,6 @@ class NativeWorkControl:
     snapshot: NativeWorkSnapshot
     cancelled: asyncio.Event
     settlement: asyncio.Future | None = None
-
-    def observe(self, stage: str, **fields: object) -> None:
-        profile_event(
-            "native_work",
-            work_id=self.snapshot.work_id,
-            request_id=self.snapshot.request_id,
-            milestone=stage,
-            **fields,
-        )
 
     def check(self) -> None:
         if self.cancelled.is_set():
@@ -812,78 +860,65 @@ class NativeWorkRuntime:
                 )
                 return
             record.runner = asyncio.create_task(runner(record.control))
-            stop = asyncio.create_task(record.control.cancelled.wait())
-            try:
-                done, _ = await asyncio.wait(
-                    {record.runner, stop},
-                    timeout=self._timeout,
-                    return_when=asyncio.FIRST_COMPLETED,
+            settlement = await wait_for_task_settlement(
+                record.runner, cancelled=record.control.cancelled,
+                timeout=self._timeout, settlement_timeout=self._cancel_timeout,
+            )
+            timed_out = settlement.timed_out
+            if not settlement.settled:
+                self._transition(
+                    record, NativeWorkState.UNKNOWN,
+                    reason="CANCELLATION_OUTCOME_UNKNOWN", execution_settled=False,
                 )
-                timed_out = not done
-                if record.runner not in done:
-                    record.control.cancelled.set()
-                    settled, _ = await asyncio.wait(
-                        {record.runner}, timeout=self._cancel_timeout
-                    )
-                    if not settled:
-                        self._transition(
-                            record,
-                            NativeWorkState.UNKNOWN,
-                            reason="CANCELLATION_OUTCOME_UNKNOWN",
-                            execution_settled=False,
-                        )
-                        # Keep the physical slot occupied until the real runner
-                        # settles. A timeout is never permission for more work.
-                        await asyncio.gather(record.runner, return_exceptions=True)
-                        self._transition(
-                            record, NativeWorkState.UNKNOWN, execution_settled=True
-                        )
-                        return
-                if record.snapshot.state is NativeWorkState.UNKNOWN:
-                    await asyncio.gather(record.runner, return_exceptions=True)
-                    self._transition(
-                        record,
-                        NativeWorkState.UNKNOWN,
-                        execution_settled=record.control.settlement is None
-                        or record.control.settlement.done(),
-                    )
-                    return
-                if record.control.cancelled.is_set():
-                    error = (
-                        record.runner.exception()
-                        if not record.runner.cancelled()
-                        else None
-                    )
-                    unknown = getattr(error, "code", None) is ErrorCode.RESULT_UNKNOWN
-                    state = (
-                        NativeWorkState.UNKNOWN
-                        if unknown
-                        else (
-                            NativeWorkState.SUPERSEDED
-                            if record.snapshot.state is NativeWorkState.SUPERSEDED
-                            else NativeWorkState.CANCELLED
-                        )
-                    )
-                    self._transition(
-                        record,
-                        state,
-                        reason="WORK_DEADLINE_EXCEEDED"
-                        if timed_out
-                        else (getattr(error, "reason", None) or record.snapshot.reason),
-                        execution_settled=not unknown,
-                    )
-                    return
-                result = record.runner.result()
-                _text(result, "result_text", 131072)
+                # The SDK wait leaves ownership here until the actual runner exits.
+                await asyncio.gather(record.runner, return_exceptions=True)
+                self._transition(record, NativeWorkState.UNKNOWN, execution_settled=True)
+                return
+            if record.snapshot.state is NativeWorkState.UNKNOWN:
+                await asyncio.gather(record.runner, return_exceptions=True)
                 self._transition(
                     record,
-                    NativeWorkState.COMPLETED,
-                    result_text=result,
-                    execution_settled=True,
+                    NativeWorkState.UNKNOWN,
+                    execution_settled=record.control.settlement is None
+                    or record.control.settlement.done(),
                 )
-            finally:
-                stop.cancel()
-                await asyncio.gather(stop, return_exceptions=True)
+                return
+            if record.control.cancelled.is_set():
+                error = (
+                    record.runner.exception()
+                    if not record.runner.cancelled()
+                    else None
+                )
+                unknown = getattr(error, "code", None) is ErrorCode.RESULT_UNKNOWN
+                physical = record.control.settlement
+                if physical is not None and physical.done():
+                    unknown = unknown or physical.cancelled() or physical.exception() is not None
+                state = (
+                    NativeWorkState.UNKNOWN
+                    if unknown
+                    else (
+                        NativeWorkState.SUPERSEDED
+                        if record.snapshot.state is NativeWorkState.SUPERSEDED
+                        else NativeWorkState.CANCELLED
+                    )
+                )
+                self._transition(
+                    record,
+                    state,
+                    reason="WORK_DEADLINE_EXCEEDED"
+                    if timed_out
+                    else (getattr(error, "reason", None) or record.snapshot.reason),
+                    execution_settled=not unknown,
+                )
+                return
+            result = record.runner.result()
+            _text(result, "result_text", 131072)
+            self._transition(
+                record,
+                NativeWorkState.COMPLETED,
+                result_text=result,
+                execution_settled=True,
+            )
         except asyncio.CancelledError:
             record.control.cancelled.set()
             self._transition(
@@ -906,8 +941,8 @@ class NativeWorkRuntime:
             )
         finally:
             if record.control.settlement is not None:
-                # Agent bridge receipt can time out while actual Harness cleanup
-                # remains live. Keep this reservation until that owner settles.
+                # A common producer can outlive the request cancellation budget.
+                # Keep this reservation until its actual cleanup settles.
                 settled = await asyncio.gather(
                     asyncio.shield(record.control.settlement), return_exceptions=True
                 )

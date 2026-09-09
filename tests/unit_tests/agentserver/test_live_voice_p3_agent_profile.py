@@ -157,7 +157,9 @@ async def test_gateway_disconnect_preserves_exact_service_owned_live_voice_agent
     assert interactive.cancel_calls == 1
     assert other_channel.cancel_calls == 1
     assert formal.cancel_calls == 0
-    assert native_work.cancel_calls == 0
+    # The retired private channel has no current owner; names alone grant no
+    # shared-work retention. Exact retained sessions are covered separately.
+    assert native_work.cancel_calls == 1
     assert manager._agent_pins == original_pins
     assert all(agent.cleanup_calls == 0 for agent in (interactive, formal, native_work, other_channel))
 

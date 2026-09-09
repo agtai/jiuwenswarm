@@ -509,9 +509,9 @@ class AgentManager:
         """Cancel transport-owned work when the Gateway WebSocket disconnects."""
         self.executions.disconnect_all()
         for channel_id, modes in list(self.agents.items()):
-            # These exact channels belong to service owners. Registry shutdown
-            # settles Native work; media disconnect grants no work/task cancel.
-            if channel_id in {"live_voice_formal_task", "live_voice_native_work"}:
+            # Formal Tasks retain their own service lifetime. Shared Native work
+            # is retained by its exact execution sessions below.
+            if channel_id == "live_voice_formal_task":
                 continue
             for agent in list(modes.values()):
                 try:

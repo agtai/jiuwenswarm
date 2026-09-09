@@ -26,15 +26,15 @@ from jiuwenswarm.server.live_voice.production_task_intent import _validate_argum
 
 
 @pytest.mark.parametrize("bound,expected", [
-    (False, "ee5cafc1cf72dd081bdf25104a30754ac8ca5e6575135c41f1fe2d46ab899f62"),
-    (True, "cf3b7fbed599308dbd6bce6746b63241cd09fd3eee02dd4f3093f0eb5c8af7bf"),
+    (False, "56062f53e0997493d74f5cae2c19cd93f42b504386db0f5711f6bb05b905cc82"),
+    (True, "2bb0c473bf4beede941064cfd46edd825f55ffbe31f43130fac18ec737cb89d5"),
     (None, "a76483c0d296951464a10f028941fd07f9ae3cd6a7e3423ffc9465dbe34c5f54"),
 ])
-def test_provider_catalog_matches_pre_projection_contract_snapshot(bound, expected):
+def test_provider_catalog_matches_reviewed_contract_snapshot(bound, expected):
     from jiuwenswarm.server.live_voice.native_business_contract import native_business_tool
 
-    # Captured before retiring the duplicate field tables. Array order covers
-    # operation order and required-field order; descriptions/nullability stay exact.
+    # The shared capability schemas retain the W3 Task/Work prompt and state
+    # rules. Array order, required fields, descriptions and nullability stay exact.
     catalog = native_business_tool() if bound is None else native_business_tools(bound_context=bound)
     encoded = json.dumps(catalog, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     assert hashlib.sha256(encoded).hexdigest() == expected

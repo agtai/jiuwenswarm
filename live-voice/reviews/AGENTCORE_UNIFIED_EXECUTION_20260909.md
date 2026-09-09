@@ -149,8 +149,8 @@ it adds no source authority. Its 13 scoped SDK checks and the previously failing
 actual Host/public Team paths passed. The complete scoped leases for Agent input,
 Team execution, Native retirement and schema maintenance have returned to Main.
 Their evidence is linked in STATUS. Main owns the index, paired source and
-numbered commits. Task 2's independently executable snapshot is next; final
-candidate verification has not started.
+numbered commits. Task 2 `546ca7e7` passed its independent snapshot. The Task 3 cutover is now
+committed with its scoped evidence; final candidate verification is next.
 
 - `parallel_team_workflow_analysis`: Host Team and actual Native public execution
   handoffs complete; all consumers stopped and write leases returned.
@@ -413,30 +413,30 @@ Owned seams: `server/runtime/agent_adapter/interface.py`, `interface_deep.py`,
 `native_business_router.py`, `agent_conversation_runtime.py` and the associated
 frontend projection/interaction surfaces only where required.
 
-- [ ] Resolve one configured capability service for text and Native consumers;
+- [x] Resolve one configured capability service for text and Native consumers;
   route Agent/Tools, Team, Goal and Workflow to their existing owners.
-- [ ] Resolve the canonical Agent owner rather than creating a voice channel's
+- [x] Resolve the canonical Agent owner rather than creating a voice channel's
   separate AgentManager pool. One service holds DeepAgent's single output lease;
   text and voice observe projected events from that owner. TeamManager is already
   a cross-channel singleton keyed by session and must remain the Team owner.
-- [ ] Carry principal, session, project, selected model, stable execution target
+- [x] Carry principal, session, project, selected model, stable execution target
   and operation revision through admission, commands and observation.
-- [ ] Deliver actual input/approval requests and replies through the existing
+- [x] Deliver actual input/approval requests and replies through the existing
   permission/interaction owner; advertise only operations that owner supports.
-- [ ] Preserve Goal pause as stopping subsequent rounds while the current attempt
+- [x] Preserve Goal pause as stopping subsequent rounds while the current attempt
   settles. Start/resume through the existing attach/control/consume chain. Bind
   Goal and round commands to the expected identity inside the existing SDK lock,
   including commands originating from text. For permission/ask-user, preserve
   `CHAT_SEND + answers + source=*interrupt` to `InteractiveInput`; an unrelated
   `CHAT_ANSWER` receipt is not proof that input was resolved.
-- [ ] Extract SwarmFlow observation from the WebSocket handler into the shared
+- [x] Extract SwarmFlow observation from the WebSocket handler into the shared
   service; preserve exact run/correlation for replies and start via the configured
   SwarmflowTool. Its `name/resume_id` variants remain unsupported. Ordinary Core
   Workflow needs explicit registered, schema-bound authorized entries and its
   own session/input-required continuation; never infer them from a tool name.
-- [ ] Replace voice-only execution orchestration where the shared adapter takes
+- [x] Replace voice-only execution orchestration where the shared adapter takes
   ownership; retain media/confirmation/history and project-effect policy.
-- [ ] Test positive cross-channel invocation/control and wrong-scope, stale,
+- [x] Test positive cross-channel invocation/control and wrong-scope, stale,
   duplicate, cancellation and feature-off paths; independently review and commit.
 
 This is Tier 3 at the authority/protocol seam. P/N/B/S/T/C/R/I/F/K/X apply.
@@ -446,8 +446,7 @@ publish late audio or cancel a different execution target.
 The [shared Goal prerequisite evidence](../evidence/AGENTCORE_SHARED_GOAL_20260909.md)
 records the paired SDK commit, exact source reconstruction, shared get/pause/
 clear adapter, scoped tests and three repaired review findings. These adapters
-remain part of the uncommitted Task 2 batch; the complete capability/stream
-boundary is still pending.
+are included in Task 2 `546ca7e7`; final real-candidate acceptance remains pending.
 
 The first implementation boundary extracts existing SwarmFlow observation from
 `server/agent_ws_server.py` into `server/runtime/workflow_queries.py` and adds
@@ -548,8 +547,9 @@ not completion of the shared Agent output service or the durable Task downshift.
 
 The [settlement prerequisite evidence](../evidence/AGENTCORE_TASK_SETTLEMENT_20260909.md)
 records the paired SDK commit, real source reconstruction, both consumers,
-focused tests and three closed review findings. The complete Task 3 cutover
-and its JiuwenSwarm commit remain pending.
+focused tests and three closed review findings. The Task 3 cutover is now recorded in
+[its commit evidence](../evidence/AGENTCORE_TASK3_COMMIT_20260909.md); final candidate
+verification remains pending.
 
 Task 2 prerequisite discovered in source: `GoalManager.peek()` calls
 `SessionGoalStore.load()`, whose corrupt-record recovery clears session state.
@@ -576,14 +576,14 @@ JiuwenSwarm `native_work_runtime.py`, `native_work_journal.py`,
 `persistent_task_core.py`, `task_store.py`, `project_code_executor.py` and their
 durability collaborators only for the responsibility being replaced.
 
-- [ ] Implement only gaps demonstrated by Tasks 1–2 in AgentCore's existing
+- [x] Implement only gaps demonstrated by Tasks 1–2 in AgentCore's existing
   execution/task owners; export and document the actual reusable API.
-- [ ] Wire both configured execution and Live Voice consumers to that authority.
+- [x] Wire both configured execution and Live Voice consumers to that authority.
   Preserve compatibility with existing persisted Task/Work records and exact
   cancellation/recovery/effect facts.
-- [ ] Remove replaced JiuwenSwarm lifecycle/storage/execution logic and migrate
+- [x] Remove replaced JiuwenSwarm lifecycle/storage/execution logic and migrate
   unique oracles to the owning runtime tests. Record net production-code changes.
-- [ ] Run focused lifecycle/durability and consumer integration tests, independent
+- [x] Run focused lifecycle/durability and consumer integration tests, independent
   review, paired source identity checks and the task's commit.
 
 This is Tier 3; all scenario dimensions apply to the replaced authority. Fault
@@ -604,3 +604,71 @@ effects and truthful unknown outcomes after lost process ownership.
 - [ ] Record commands, source commits, results, code reduction and remaining
   limitations in scoped evidence; update STATUS and close Goal only when its
   actual accepted boundary is complete.
+
+
+## W3 cherry-pick integration — 2026-09-10
+
+The user requested `66833d5c`, `20915742`, then `1108e8ec` on
+`hx/0812_live_voice_w3`, starting at `57d3b29f`. This is source integration,
+not another deployment or the historical parallel/real-acceptance packet above.
+Source/dependency and shared-authority seams retain Tier 3; existing Native
+presentation/context/retirement seams retain Tier 2. Preserve D-125 prompt
+behavior, D-126 result ownership, D-127 late adjustments and Mini/VAD300 defaults.
+
+Conflict resolution preserves the W3 runtime and acceptance history in STATUS
+and maps the imported source decision to D-128, avoiding the existing Mini
+D-124. Shared Agent/Team/Goal/Workflow tool descriptions are added alongside
+W3's complete-request, receipt-truth and Task/Work result rules. Automatic merges
+retain Task adjustment result projection and the query/notification heard ledger
+while replacing the private executor with the shared service. The only additional
+code edits are two test-oracle updates: the expanded 34-operation catalog and
+the deliberately combined descriptions. No new product policy is introduced.
+
+Final byte comparison (excluding documents and the two intentional oracle
+updates) shows 127 source-only imported files identical to `1108e8ec` and 45
+W3-only files identical to `57d3b29f`. The three overlapping production modules
+were reviewed together with their caller/test seams. AgentCore remains exact
+`ffeb1abc`, tree `6f3826983ea8c15eb182ec7761705fd5058c1235`. Tests use a separate
+editable environment under `.codex_tmp/agentcore-w3-integration`; source cleanliness,
+metadata and actual import origin passed. Existing deployment dependencies and
+services were not replaced, restarted or exercised through a new voice session.
+
+Verification on the combined source:
+
+- Focused Native/tools/result/adjustment/shared execution selection: 413 passed,
+  6 failed initially. Four failures were the superseded catalog oracles; their
+  affected replay passed all 5 cases. The other two semantic-VAD-default
+  expectations reproduce unchanged on an export of `57d3b29f`; the real default
+  remains server VAD 300 as requested.
+- Remaining affected Host/SDK/public-entry/Native regressions: 1778 passed,
+  61 failed, 5 skipped, 10 xfailed. Exact failed-node replay on exported W3
+  baseline reproduced 60 failures (55 Registry and 5 context-refresh fixtures).
+  These are retained failures, not passing acceptance.
+- One additional combined-run observation,
+  `test_terminal_after_voice_playout_failure_replays_on_successor_p2[after_owner_close_capacity_progress_close_retry]`,
+  saw a closed progress lease where the fixture expected active. It passed on
+  baseline and on an isolated combined-source rerun. The original failure is
+  retained as an unresolved timing/interference observation; the rerun does not
+  prove that observation fixed or establish an environment root cause.
+- Frontend Goal/Agent controls: 15 passed; TypeScript and a separate-output
+  Live Voice Vite build passed. Existing duplicate locale-key/chunk warnings
+  remain. No deployment bundle was replaced.
+- Python parsing, scoped overlap/oracle Ruff F, relative Markdown targets,
+  unique decision IDs and non-patch whitespace checks passed. Wider changed-file
+  Ruff retains 13 findings in files identical to the source branch. Embedded SDK
+  patch whitespace is preserved byte-for-byte for reconstruction.
+
+Raw selections, XML, logs, source SHA256s and baseline comparison remain in
+`.codex_tmp/agentcore-w3-integration/`. The initial isolated-environment collection
+failure was missing inherited PyWin32 bootstrap; environment setup was corrected
+before executable checks. The first baseline export hit Windows path length in
+unrelated generated documentation; the executed baseline used a shorter temporary
+path with exact tracked Host/tests/runtime assets. Neither setup attempt receives
+execution credit. New independent review tooling was unavailable: cold integration
+diff review, exact preservation checks and failure baselines supplement the source
+branch's original reviews, without claiming an independent review of this merge.
+
+The requested source integration is complete. Combined product acceptance stays
+PARTIAL with the baseline failures, one transient observation and the user's
+pending real sessions. No remote refs, user project files, running dependency
+environment, service processes or private configuration were changed.

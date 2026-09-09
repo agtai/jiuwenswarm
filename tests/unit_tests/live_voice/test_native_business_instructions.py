@@ -6,6 +6,7 @@ import re
 import pytest
 
 from jiuwenswarm.server.live_voice import native_business_instructions as prompts
+from jiuwenswarm.server.live_voice.native_business_contract import NATIVE_BUSINESS_OPERATIONS
 from jiuwenswarm.server.live_voice.native_business_tools import native_business_tools
 from tests.unit_tests.live_voice import test_openai_realtime_native_engine as f
 from tests.unit_tests.live_voice.test_native_acceptance_fast_path import (
@@ -42,14 +43,19 @@ def test_effective_variants_preserve_shared_truth_language_and_requested_detail(
 def test_tool_descriptions_reference_only_the_actual_catalog(bound):
     tools = native_business_tools(bound_context=bound)
     names = {tool["name"] for tool in tools}
-    assert len(names) == 13
+    prefix = "jiuwen_bound_" if bound else "jiuwen_"
+    assert names == {prefix + operation.replace(".", "_") for operation in NATIVE_BUSINESS_OPERATIONS}
     for tool in tools:
         mentioned = set(re.findall(r"jiuwen_[a-z_]+", tool["description"]))
         assert mentioned <= names
         assert "{" not in tool["description"]
     if bound:
         mentioned = set(re.findall(r"jiuwen_bound_[a-z]+[a-z_]*", prompts.BUSINESS_SESSION_INSTRUCTIONS))
-        assert mentioned == names
+        # Session prose owns the Task/Work guidance; new shared capabilities
+        # carry their exact selection/authority rules in their tool descriptions.
+        task_work_names = {name for name in names if name.startswith((
+            "jiuwen_bound_task_", "jiuwen_bound_work_")) or name == "jiuwen_bound_context_get"}
+        assert mentioned == task_work_names
         assert "jiuwen_delegate" not in prompts.BUSINESS_SESSION_INSTRUCTIONS
 
 

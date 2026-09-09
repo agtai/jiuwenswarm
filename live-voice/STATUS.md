@@ -90,6 +90,20 @@ of this integration. Original branch evidence remains historical; it does not
 establish acceptance of this combined source. No historical worker packet is
 reactivated. The imported AgentCore policy is D-128 in this branch.
 
+Source integration and scoped verification are complete; the
+[W3 integration record](reviews/AGENTCORE_UNIFIED_EXECUTION_20260909.md#w3-cherry-pick-integration--2026-09-10)
+records the conflicts, preserved repairs, baseline failures and one combined-run
+progress-lease observation that passed its isolated recheck. This is not an
+all-green suite or combined product acceptance. The existing deployment remains
+unchanged; its Python dependency binding has not been switched to this manifest.
+
+The imported shared Agent/Team/Goal/Workflow execution and Native cutover are
+implemented. Their original source, SDK, automated checks and bounded real
+acceptance belong to the [source-branch verification](evidence/AGENTCORE_FINAL_VERIFICATION_20260909.md)
+and [Task 3 boundary](evidence/AGENTCORE_TASK3_COMMIT_20260909.md). They are not
+this W3 deployment's runtime facts. The source manifest requires AgentCore
+`ffeb1abc` / tree `6f3826983ea8c15eb182ec7761705fd5058c1235` and its twelve patches.
+
 The following source repair and deployment paragraphs retain the W3 baseline
 and its acceptance limits; they are not additional execution orders.
 

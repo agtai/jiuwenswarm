@@ -1,5 +1,10 @@
 # Native Work common execution cutover — 2026-09-09
 
+Current closure: the prepared cutover is activated by the Task 3 commit above
+Task 2 `546ca7e7`. Installed SDK is now `ffeb1abc`. Earlier checkpoint source IDs
+and uncommitted labels below describe the historical scoped checks. Final
+candidate acceptance remains pending; see [Task 3 evidence](AGENTCORE_TASK3_COMMIT_20260909.md).
+
 This records the prepared Task 3 working-tree cutover. Task 2 carries its common
 service prerequisites and this checkpoint; the runtime replacement itself is
 activated by the separate Task 3 commit.

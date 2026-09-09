@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
+from unittest.mock import Mock
 import pytest
 
 from jiuwenswarm.server.live_voice.native_foreground import (
@@ -26,10 +27,18 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
 from tests.unit_tests.live_voice.test_agent_conversation_runtime import (
     scope,
     commit,
-    runtime,
+    facade,
     LowerFormalAdapter,
-    RecordingHistoryWriter,
 )
+from tests.unit_tests.live_voice.test_shared_session_execution import service
+
+
+@pytest.fixture
+def no_generated_history(monkeypatch):
+    writes = Mock(side_effect=AssertionError("Work must not write generated conversation history"))
+    for name in ("append_history_record", "append_compact_history_records"):
+        monkeypatch.setattr("jiuwenswarm.server.runtime.agent_adapter.interface." + name, writes)
+    return writes
 
 
 def admission(
@@ -313,21 +322,22 @@ async def test_restart_restores_terminal_or_unknown_never_replays_and_close_canc
 
 
 @pytest.mark.asyncio
-async def test_agent_work_uses_actual_harness_independent_of_speech_and_without_history():
+async def test_agent_work_uses_common_service_independent_of_speech_and_without_history(no_generated_history):
+    from jiuwenswarm.server.live_voice.native_work_runtime import execute_native_work
     release = asyncio.Event()
-    lower = LowerFormalAdapter(final="real formal bridge final", release=release)
-    history = RecordingHistoryWriter()
-    agent = runtime(lower, history, native_delegate_timeout_seconds=0.01)
-    await agent.start()
+    terminal_release = asyncio.Event()
+    lower = LowerFormalAdapter(final="real configured Agent final", release=release,
+                               terminal_release=terminal_release)
+    agent, hub = facade(lower), service()
     current, selected = agent_input()
     owner = NativeWorkRuntime()
 
     async def runner(control):
-        return await agent.execute_native_work(
+        return await execute_native_work(
+            service=hub, agent=agent,
             control=control,
             commit=current,
             context=selected,
-            correlation_id="work-correlation",
         )
 
     speech = NativeForegroundControl(
@@ -339,48 +349,49 @@ async def test_agent_work_uses_actual_harness_independent_of_speech_and_without_
     await asyncio.wait_for(lower.started.wait(), 1)
     speech.interrupt()
     await asyncio.sleep(0.025)
-    assert agent._harness.snapshot().cancel_effects == 0
+    entry = next(iter(hub._records.values()))
+    assert not entry.cancellation_requested and entry.retained
+    assert hub.retains_session(channel_id="web", session_id=scope().session_id)
     metadata = lower.requests[0].metadata
     assert metadata["formal_live_voice_read_only_tools"] is True
     assert metadata["formal_live_voice_model_identity"] == "model#0"
     assert metadata["formal_live_voice_model_config_version"] == "config-version"
     release.set()
+    await asyncio.sleep(0.01)
+    assert owner.query(scope=work.scope, work_id=work.work_id).state is NativeWorkState.RUNNING
+    hub.manager.unpin_agent.assert_not_called()
+    terminal_release.set()
     result = await terminal(owner, work)
     assert (
         result.state is NativeWorkState.COMPLETED
-        and result.result_text == "real formal bridge final"
+        and result.result_text == "real configured Agent final"
     )
     assert lower.calls == 1 and lower.legacy_calls == 0
-    assert (
-        history.users
-        == history.assistant_intents
-        == history.native_assistant_intents
-        == []
-    )
-    snapshot = agent.snapshot()
-    assert (
-        snapshot.queued_notifications == 0
-        and snapshot.conversation.presentation.records == ()
-    )
+    no_generated_history.assert_not_called()
+    assert lower.inputs[0]["enable_memory"] is False
+    observed = hub.observe(agent, session_id=scope().session_id, execution_id=f"{work.work_id}:r1")
+    assert observed["stream_closed"] and observed["events"][-1]["payload"]["content"] == result.result_text
+    hub.manager.pin_agent.assert_called_once_with(agent)
+    hub.manager.unpin_agent.assert_called_once_with(agent)
     await owner.close()
-    await agent.close(timeout_seconds=1.0)
+    await hub.close()
 
 
 @pytest.mark.asyncio
-async def test_agent_work_exact_cancel_waits_harness_terminal_and_bad_binding_has_zero_effects():
-    lower = LowerFormalAdapter(release=asyncio.Event())
-    history = RecordingHistoryWriter()
-    agent = runtime(lower, history)
-    await agent.start()
+async def test_agent_work_exact_cancel_waits_actual_cleanup_and_bad_binding_has_zero_effects(no_generated_history):
+    from jiuwenswarm.server.live_voice.native_work_runtime import execute_native_work
+    cleanup = asyncio.Event()
+    lower = LowerFormalAdapter(release=asyncio.Event(), cancel_cleanup_release=cleanup)
+    agent, hub = facade(lower), service()
     current, selected = agent_input()
-    owner = NativeWorkRuntime()
+    owner = NativeWorkRuntime(cancel_settlement_seconds=0.01)
 
     async def runner(control):
-        return await agent.execute_native_work(
+        return await execute_native_work(
+            service=hub, agent=agent,
             control=control,
             commit=current,
             context=selected,
-            correlation_id="work-correlation",
         )
 
     args = admission(runner)
@@ -389,9 +400,15 @@ async def test_agent_work_exact_cancel_waits_harness_terminal_and_bad_binding_ha
     await asyncio.wait_for(lower.started.wait(), 1)
     cancelling = await owner.cancel(scope=scope(), work_id=work.work_id, revision=1)
     assert cancelling.state is NativeWorkState.CANCELLING
-    assert (await terminal(owner, work)).state is NativeWorkState.CANCELLED
-    assert agent._harness.snapshot().cancel_effects == 1
-    assert agent._harness.snapshot().active_rounds == ()
+    unknown = await terminal(owner, work, state=NativeWorkState.UNKNOWN)
+    assert not unknown.execution_settled
+    entry = next(iter(hub._records.values()))
+    assert entry.cancellation_requested and not entry.task.done()
+    hub.manager.unpin_agent.assert_not_called()
+    cleanup.set()
+    assert (await terminal(owner, work)).execution_settled
+    assert entry.task.done()
+    hub.manager.unpin_agent.assert_called_once_with(agent)
     invalid = await owner.start(
         **admission(runner, request="bad-binding", input_id="foreign-commit")
     )
@@ -400,10 +417,83 @@ async def test_agent_work_exact_cancel_waits_harness_terminal_and_bad_binding_ha
         failed.state is NativeWorkState.FAILED
         and failed.reason == "NATIVE_WORK_BINDING_MISMATCH"
     )
-    assert lower.calls == 1 and agent._harness.snapshot().cancel_effects == 1
-    assert history.users == history.assistant_intents == []
+    assert lower.calls == 1 and len(hub._records) == 1
+    no_generated_history.assert_not_called()
     await owner.close()
-    await agent.close(timeout_seconds=1.0)
+    await hub.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("supersede", [False, True])
+async def test_actual_agent_fast_cancel_or_replacement_keeps_confirmed_terminal_state(supersede):
+    from jiuwenswarm.server.live_voice.native_work_runtime import execute_native_work
+    lower = LowerFormalAdapter(release=asyncio.Event())
+    agent, hub = facade(lower), service()
+    current, selected = agent_input()
+    owner = NativeWorkRuntime()
+
+    async def runner(control):
+        return await execute_native_work(service=hub, agent=agent, control=control,
+                                         commit=current, context=selected)
+
+    arguments = admission(runner)
+    arguments["context_id"] = context_identity(selected)
+    work = await owner.start(**arguments)
+    await asyncio.wait_for(lower.started.wait(), 1)
+    if supersede:
+        async def replacement(control):
+            return "replacement final"
+        arguments.update(request_id="replacement", runner=replacement)
+        arguments.pop("foreground")
+        next_work = await owner.update(work_id=work.work_id, revision=1, **arguments)
+        assert (await terminal(owner, next_work)).state is NativeWorkState.COMPLETED
+    else:
+        await owner.cancel(scope=work.scope, work_id=work.work_id, revision=1)
+    await terminal(owner, work)
+    # Observe the final cleanup classification, not the earlier terminal transition.
+    await asyncio.wait_for(owner._records[(work.scope, work.work_id, 1)].operation, 1)
+    actual = owner.query(scope=work.scope, work_id=work.work_id, revision=1)
+    assert actual.state is (NativeWorkState.SUPERSEDED if supersede else NativeWorkState.CANCELLED)
+    assert actual.execution_settled and actual.reason != "EXECUTION_SETTLEMENT_UNCONFIRMED"
+    assert lower.calls == 1
+    hub.manager.unpin_agent.assert_called_once_with(agent)
+    await owner.close()
+    await hub.close()
+
+
+@pytest.mark.asyncio
+async def test_actual_agent_cancel_cleanup_failure_remains_unknown():
+    from jiuwenswarm.server.live_voice.native_work_runtime import execute_native_work
+
+    class BrokenCleanup(LowerFormalAdapter):
+        async def process_formal_live_voice_stream_impl(self, request, inputs):
+            try:
+                async for chunk in super().process_formal_live_voice_stream_impl(request, inputs):
+                    yield chunk
+            finally:
+                raise OSError("cleanup failed")
+
+    lower = BrokenCleanup(release=asyncio.Event())
+    agent, hub = facade(lower), service()
+    current, selected = agent_input()
+    owner = NativeWorkRuntime()
+
+    async def runner(control):
+        return await execute_native_work(service=hub, agent=agent, control=control,
+                                         commit=current, context=selected)
+
+    arguments = admission(runner)
+    arguments["context_id"] = context_identity(selected)
+    work = await owner.start(**arguments)
+    await asyncio.wait_for(lower.started.wait(), 1)
+    await owner.cancel(scope=work.scope, work_id=work.work_id, revision=1)
+    await asyncio.wait_for(owner._records[(work.scope, work.work_id, 1)].operation, 1)
+    result = owner.query(scope=work.scope, work_id=work.work_id, revision=1)
+    assert result.state is NativeWorkState.UNKNOWN and result.execution_settled
+    assert result.result_text is None
+    hub.manager.unpin_agent.assert_called_once_with(agent)
+    await owner.close()
+    await hub.close()
 
 
 @pytest.mark.asyncio

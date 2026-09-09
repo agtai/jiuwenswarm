@@ -476,6 +476,9 @@ class _AgentManager:
         self.get_calls: list[tuple[object, ...]] = []
         self.pins = 0
         self.unpins = 0
+        from jiuwenswarm.server.runtime.session_execution import SessionExecutionService
+
+        self.executions = SessionExecutionService(self)
 
     async def get_agent(self, *args):
         self.get_calls.append(args)
@@ -2630,7 +2633,7 @@ async def test_native_activation_action_ledger_crosses_generic_256_default(
 
 
 @pytest.mark.asyncio
-async def test_native_dialogue_delegate_uses_agent_bridge_and_returns_result(
+async def test_native_dialogue_delegate_uses_shared_agent_and_returns_result(
     tmp_path: Path,
 ) -> None:
     from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_unary
@@ -2650,6 +2653,7 @@ async def test_native_dialogue_delegate_uses_agent_bridge_and_returns_result(
         channel_id="web",
     )
     assert activated.ok is True
+    assert manager.get_calls[-1][:2] == ("web", "agent")
     descriptor = cast(
         dict[str, object],
         cast(dict[str, object], activated.payload["result"])["_native_gateway"],
@@ -2751,6 +2755,12 @@ async def test_native_dialogue_delegate_uses_agent_bridge_and_returns_result(
     assert manager.agent.calls == 1
     assert composition.handle_calls == []
     route = registry._p2_routes[(SCOPE.session_id, binding.interaction_id)]
+    assert route.activation_lease._runtime._execution_service is manager.executions
+    entry, = manager.executions._records.values()
+    assert entry.agent is manager.agent and entry.task.done()
+    assert entry.formal.internal_session_id.startswith("lv-formal-native-")
+    assert entry.formal.internal_session_id != SCOPE.session_id
+    assert entry.stream_outcome == "ended"
     assert route.activation_lease.task_notification_foreground_safe(route.binding) is False
     runtime_snapshot = route.activation_lease._runtime.snapshot()
     assert runtime_snapshot.queued_notifications == 0
@@ -2993,6 +3003,10 @@ async def test_native_dialogue_delegate_is_drained_before_registry_close(
     assert resolve_calls == 1
     assert manager.agent.calls == 1
     snapshot = route.activation_lease._runtime.snapshot()
+    entry, = manager.executions._records.values()
+    assert entry.task.done() and entry.stream_closed
+    assert manager.pins == manager.unpins
+    assert route.activation_lease._runtime._native_delegate_settlements == set()
     assert snapshot.queued_notifications == 0
     assert snapshot.conversation.presentation.records == ()
 

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -14,6 +16,7 @@ from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     CommandEnvelope,
+    ContextRef,
     ProducerRef,
     ResponseRef,
     ScopeRef,
@@ -82,9 +85,11 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
     project_task_progress_event,
 )
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+    FormalContextEntry,
     FormalContextSnapshot,
 )
 from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+from jiuwenswarm.server.runtime.session_execution import SessionExecutionService
 
 
 def scope(*, session_id: str = "session-formal") -> ScopeRef:
@@ -361,6 +366,7 @@ def runtime(
     notification_capacity: int = 64,
     bridge: AgentBridgeRuntime | None = None,
     native_delegate_timeout_seconds: float | None = None,
+    execution_service: SessionExecutionService | None = None,
 ) -> AgentConversationRuntime:
     harness = JiuWenSwarmRoundHarness(
         instance_id="real-harness-1",
@@ -372,6 +378,8 @@ def runtime(
         scope(),
         instance_id="composition-1",
         facade=facade(lower),
+        execution_service=execution_service or SessionExecutionService(
+            SimpleNamespace(pin_agent=Mock(), unpin_agent=Mock())),
         enabled=enabled,
         max_requests=max_requests,
         notification_capacity=notification_capacity,
@@ -724,7 +732,7 @@ async def _prepare_native_delegate_execution(
 
 
 @pytest.mark.asyncio
-async def test_native_delegate_uses_existing_bridge_without_text_presentation() -> None:
+async def test_native_delegate_uses_shared_execution_without_text_presentation() -> None:
     lower = LowerFormalAdapter(final="Canonical Jiuwen result.")
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
@@ -775,6 +783,16 @@ async def test_native_delegate_uses_existing_bridge_without_text_presentation() 
 
     assert result == "Canonical Jiuwen result."
     assert lower.calls == 1
+    service = current._execution_service
+    entry, = service._records.values()
+    assert entry.agent is current._facade
+    assert entry.task.done() and entry.stream_outcome == "ended"
+    assert entry.formal.internal_session_id.startswith("lv-formal-native-")
+    assert entry.formal.internal_session_id != delegated.scope.session_id
+    assert lower.requests[0].session_id == entry.formal.internal_session_id
+    assert current._harness.snapshot().retained_rounds == 0
+    service.manager.pin_agent.assert_called_once_with(current._facade)
+    service.manager.unpin_agent.assert_called_once_with(current._facade)
     assert history.users == []
     assert history.assistant_intents == []
     snapshot = current.snapshot()
@@ -848,10 +866,16 @@ async def test_native_delegate_caller_cancel_replays_one_retained_agent_executio
     with pytest.raises(asyncio.CancelledError):
         await caller
 
+    entry, = current._execution_service._records.values()
+    assert not entry.cancellation_requested and not entry.task.done()
+    assert lower.cancel_calls == 0
+
     replay = asyncio.create_task(current.execute_native_delegate(**invocation))
     release.set()
     assert await replay == "Canonical retained result."
     assert lower.calls == 1
+    assert len(current._execution_service._records) == 1
+    assert entry.task.done() and lower.cancel_calls == 0
     await owner.close()
     closed = await current.close(timeout_seconds=0.2)
     assert closed.status is AgentConversationShutdownStatus.CLOSED
@@ -944,7 +968,11 @@ async def test_native_delegate_server_deadline_cancels_once_and_closes_bounded()
         )
     assert replayed.value.reason == raised.value.reason
     assert lower.calls == 1
-    assert current._harness.snapshot().cancel_effects == 1
+    entry, = current._execution_service._records.values()
+    assert entry.cancellation_requested and entry.task.done()
+    assert entry.stream_outcome == "cancelled" and lower.cancel_calls == 1
+    assert lower.settled.is_set()
+    current._execution_service.manager.unpin_agent.assert_called_once_with(current._facade)
     before = current.snapshot()
     await asyncio.sleep(0.02)
     after = current.snapshot()
@@ -978,11 +1006,102 @@ async def test_native_foreground_interrupt_cancels_exact_round_without_replay(be
     with pytest.raises(ValueError):
         await current.execute_native_delegate(**invocation)
     assert lower.calls == (0 if before_start else 1)
-    assert current._harness.snapshot().cancel_effects == (0 if before_start else 1)
+    entries = tuple(current._execution_service._records.values())
+    assert len(entries) == (0 if before_start else 1)
+    assert lower.cancel_calls == (0 if before_start else 1)
+    if entries:
+        assert entries[0].cancellation_requested and entries[0].task.done()
+        assert entries[0].stream_outcome == "cancelled"
     assert current.snapshot().queued_notifications == 0
     assert current.snapshot().conversation.presentation.records == ()
     await owner.close()
     assert (await current.close(timeout_seconds=0.2)).status is AgentConversationShutdownStatus.CLOSED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_answer_contract", [False, True])
+async def test_native_selected_result_uses_shared_toolless_execution(explicit_answer_contract):
+    lower = LowerFormalAdapter(final="The first recorded event is at 08:30.")
+    current, owner, binding, source, delegated, _context = await _prepare_native_delegate_execution(
+        lower, suffix="selected-result")
+    reference = ContextRef.from_dict({
+        "source": "live_voice.task_result", "stable_id": "result-1",
+        "uri": "urn:live-voice:task-result:result-1", "scope": delegated.scope.to_dict(),
+        "revision": {"kind": "version", "value": "1"}, "permissions": ["context.read"],
+        "expires_at": None,
+        "redaction": {"policy_id": "test", "redacted": False, "fields": []}, "extensions": {},
+    })
+    selected = FormalContextEntry(reference, json.dumps({"result_text": "08:30 Museum visit."}))
+    delegated = replace(delegated, context_refs=(reference,), text="What is the first recorded event?")
+    context = FormalContextSnapshot(delegated.scope, (selected,))
+    try:
+        result = await current.execute_native_delegate(
+            request_id="native-selected-result", source_response=source,
+            correlation_id=binding.correlation_id, commit=delegated, context=context,
+            channel_id="web", allow_tools=True,
+            answer_from_selected_task_result=explicit_answer_contract)
+        assert result == lower.final and lower.calls == 1 and lower.legacy_calls == 0
+        entry, = current._execution_service._records.values()
+        assert entry.task.done() and entry.stream_outcome == "ended"
+        assert entry.formal.allow_tools is False
+        assert entry.formal.answer_from_selected_task_result is explicit_answer_contract
+        assert lower.requests[0].metadata["formal_live_voice_tools_allowed"] is False
+        prompt = json.loads(entry.formal.prompt_content())
+        assert prompt["answer_contract"]["mode"] == "direct_answer_from_selected_task_result"
+        assert prompt["selected_context"][0]["content"] == selected.content
+        assert current._harness.snapshot().retained_rounds == 0
+        assert current.snapshot().conversation.presentation.records == ()
+        history = current._history_writer
+        assert history.users == history.assistant_intents == history.native_assistant_intents == []
+    finally:
+        await owner.close()
+        await current.close(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_native_timeout_retains_shared_producer_until_late_cleanup_finishes():
+    cleanup_release = asyncio.Event()
+    lower = LowerFormalAdapter(final="forbidden late result", release=asyncio.Event(),
+                               cancel_cleanup_release=cleanup_release)
+    current, owner, binding, source, delegated, context = await _prepare_native_delegate_execution(
+        lower, suffix="late-cleanup", native_delegate_timeout_seconds=0.01)
+    invocation = dict(request_id="native-late-cleanup", source_response=source,
+        correlation_id=binding.correlation_id, commit=delegated, context=context,
+        channel_id="web", allow_tools=True)
+    service = current._execution_service
+    try:
+        with pytest.raises(AgentConversationRuntimeViolation) as raised:
+            await asyncio.wait_for(current.execute_native_delegate(**invocation), 2)
+        assert raised.value.reason == "NATIVE_DELEGATE_AGENT_TIMEOUT"
+        entry, = service._records.values()
+        assert lower.cancel_calls == 1 and lower.cancelled.is_set()
+        assert not lower.settled.is_set() and not entry.task.done()
+        assert entry.task in current._native_delegate_settlements
+        service.manager.unpin_agent.assert_not_called()
+        with pytest.raises(AgentConversationRuntimeViolation) as replay:
+            await current.execute_native_delegate(**invocation)
+        assert replay.value.reason == raised.value.reason and lower.calls == 1
+
+        await owner.close()
+        pending = await current.close(timeout_seconds=0.01)
+        assert pending.status is AgentConversationShutdownStatus.PENDING
+        assert not entry.task.done() and entry.task in current._native_delegate_settlements
+        cleanup_release.set()
+        closed = await current.close(timeout_seconds=1)
+        assert closed.status is AgentConversationShutdownStatus.CLOSED
+        assert entry.task.done() and lower.settled.is_set() and lower.cancel_calls == 1
+        assert current._native_delegate_settlements == set()
+        assert entry.stream_outcome == "cancelled" and entry.result_text is None
+        assert entry.sequence == 0
+        assert current.snapshot().queued_notifications == 0
+        assert current.snapshot().conversation.presentation.records == ()
+        history = current._history_writer
+        assert history.users == history.assistant_intents == history.native_assistant_intents == []
+        service.manager.unpin_agent.assert_called_once_with(current._facade)
+    finally:
+        cleanup_release.set()
+        await owner.close()
+        await current.close(timeout_seconds=1)
 
 
 async def prepare(
@@ -991,25 +1110,7 @@ async def prepare(
     selected = turn or commit()
     await current.start()
     await current.open_interaction(selected.interaction_id)
-    await current.start_turn(selected.interaction_id, selected.turn_id)
-    await current.commit_turn(selected)
     return selected
-
-
-async def dispatch(
-    current: AgentConversationRuntime,
-    selected: TurnCommit,
-    *,
-    request_id: str = "request-1",
-    response_id: str = "response-1",
-):
-    return await current.dispatch_committed_turn(
-        request_id=request_id,
-        response_id=response_id,
-        correlation_id=f"correlation-{request_id}",
-        commit=selected,
-        context=FormalContextSnapshot(selected.scope),
-    )
 
 
 async def run_scripted_harness(
@@ -1053,7 +1154,7 @@ async def acknowledge_formal_round(
     request_id: str,
     response_id: str,
 ) -> None:
-    handle = await dispatch(
+    handle = await submit(
         current,
         selected,
         request_id=request_id,
@@ -2120,7 +2221,7 @@ async def test_real_facade_round_truth_reaches_cr_and_text_ack_history() -> None
     current = runtime(lower, history)
     selected = await prepare(current)
 
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     notifications = [
         await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(3)
     ]
@@ -2227,7 +2328,7 @@ async def test_formal_context_content_mismatch_fails_closed() -> None:
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     notifications = [
         await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(4)
     ]
@@ -2317,8 +2418,6 @@ async def test_formal_context_identity_separates_same_content_across_interaction
         text="same question",
     )
     await current.open_interaction(second.interaction_id)
-    await current.start_turn(second.interaction_id, second.turn_id)
-    await current.commit_turn(second)
     await acknowledge_formal_round(
         current,
         second,
@@ -2358,7 +2457,7 @@ async def test_source_terminal_retains_exact_enqueued_final_for_ack_history_retr
     history = RecordingHistoryWriter(fail_assistant_once=True)
     current = runtime(lower, history)
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     notifications = [
         await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(4)
     ]
@@ -2431,7 +2530,7 @@ async def test_exact_cancel_rejects_wrong_bindings_and_ack_is_not_terminal() -> 
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     for _ in range(2):
         await asyncio.wait_for(current.next_notification(), timeout=1)
 
@@ -2522,7 +2621,7 @@ async def test_effect_hook_preserves_four_cancel_scopes_and_interrupted_prefix()
         history,
     )
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     notifications = [
         await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(3)
     ]
@@ -2612,7 +2711,7 @@ async def test_immediate_exact_cancel_cannot_lose_harness_terminal() -> None:
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
 
     accepted = await current.close_interaction(
         cancel_command(handle, selected, command_id="cancel-immediate")
@@ -2703,7 +2802,7 @@ async def test_capacity_one_unsubscribed_composition_reaches_terminal_and_closes
         notification_capacity=1,
     )
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
 
     await asyncio.wait_for(handle.completion, timeout=1)
     closed = await current.close(timeout_seconds=1)
@@ -2788,7 +2887,7 @@ async def test_observer_overflow_is_lossy_but_ordered_critical_notifications_sur
         notification_capacity=1,
     )
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
 
     await asyncio.wait_for(handle.completion, timeout=1)
     assert (await current.close(timeout_seconds=1)).status is (
@@ -2989,7 +3088,7 @@ async def test_composition_enforces_its_request_bound_with_larger_injected_runti
         bridge=bridge,
     )
     first = await prepare(current)
-    first_handle = await dispatch(current, first)
+    first_handle = await submit(current, first)
     await asyncio.wait_for(first_handle.completion, timeout=1)
 
     second = commit(
@@ -2999,18 +3098,16 @@ async def test_composition_enforces_its_request_bound_with_larger_injected_runti
         text="second",
     )
     await current.open_interaction(second.interaction_id)
-    await current.start_turn(second.interaction_id, second.turn_id)
-    await current.commit_turn(second)
     responses_before = current.snapshot().conversation.conversation.responses
 
     with pytest.raises(AgentConversationRuntimeViolation) as full:
-        await dispatch(
+        await submit(
             current,
             second,
             request_id="request-capacity-2",
             response_id="response-capacity-2",
         )
-    assert full.value.reason == "COMPOSITION_REQUEST_LEDGER_FULL"
+    assert full.value.reason == "COMMITTED_TURN_LEDGER_FULL"
     assert current.snapshot().conversation.conversation.responses == responses_before
     assert current.snapshot().retained_admissions == 1
     assert lower.calls == 1
@@ -3051,7 +3148,7 @@ async def test_cancelled_waiter_consumes_nothing_and_concurrent_waiters_are_uniq
 
     waiters = [asyncio.create_task(current.next_notification()) for _ in range(3)]
     await asyncio.sleep(0)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     first = await asyncio.wait_for(asyncio.gather(*waiters), timeout=1)
     await asyncio.wait_for(handle.completion, timeout=1)
     assert (await current.close(timeout_seconds=1)).status is (
@@ -3102,7 +3199,7 @@ async def test_reconnect_supersedes_exact_notification_lease_without_business_ca
         )
     assert stale_epoch.value.reason == "STALE_NOTIFICATION_CONSUMER"
 
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     observed = [
         await asyncio.wait_for(current.next_notification_for(second), timeout=1)
         for _ in range(2)
@@ -3175,7 +3272,7 @@ async def test_no_consumer_lease_retains_critical_tail_without_blocking_close() 
     lease = current.attach_notification_consumer(
         consumer_id="web-no-consumer", connection_epoch=0
     )
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     await asyncio.wait_for(handle.completion, timeout=1)
     # Bridge completion means the source terminal was observed, not that the
     # separate Conversation consumer has already prepared presentation. Wait
@@ -3253,7 +3350,7 @@ async def test_effect_claim_cancellation_replays_and_superseded_owner_loses_noth
     first_lease = current.attach_notification_consumer(
         consumer_id="effect-connection", connection_epoch=0
     )
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
 
     async def wait_for_enqueued_presentation() -> None:
         while not current.snapshot().conversation.presentation.records:
@@ -3393,7 +3490,7 @@ async def test_reconnect_preserves_unacknowledged_effect_order_before_existing_b
     first_lease = current.attach_notification_consumer(
         consumer_id="ordered-effect-connection", connection_epoch=0
     )
-    first_handle = await dispatch(current, first_turn)
+    first_handle = await submit(current, first_turn)
 
     async def first_presentation_is_enqueued() -> None:
         while not any(
@@ -3426,7 +3523,7 @@ async def test_reconnect_preserves_unacknowledged_effect_order_before_existing_b
         text="retain a newer effect in the backlog",
     )
     await prepare(current, second_turn)
-    second_handle = await dispatch(
+    second_handle = await submit(
         current,
         second_turn,
         request_id="request-ordered-backlog",
@@ -3492,7 +3589,7 @@ async def test_final_drain_delivers_pending_stop_and_accepts_exact_effect_ack() 
     lease = current.attach_notification_consumer(
         consumer_id="final-effect-drain", connection_epoch=0
     )
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     stop = await current.barge_in(
         "barge-before-close", handle.response_ref, cancel_response=False
     )
@@ -3543,7 +3640,7 @@ async def test_disconnected_transport_uses_distinct_exact_final_drain_capability
     transport_lease = current.attach_notification_consumer(
         consumer_id="disconnected-final-drain", connection_epoch=0
     )
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
 
     async def presentation_is_enqueued() -> None:
         while not current.snapshot().conversation.presentation.records:
@@ -3633,7 +3730,7 @@ async def test_effect_delivery_inputs_are_canonical_bounded_and_zero_effect() ->
     lease = current.attach_notification_consumer(
         consumer_id="bounded-effect-delivery", connection_epoch=0
     )
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
 
     async def presentation_is_enqueued() -> None:
         while not any(
@@ -3770,7 +3867,7 @@ async def test_exact_notification_lease_drains_only_currently_queued_items_with_
     lease = current.attach_notification_consumer(
         consumer_id="bounded-pull-owner", connection_epoch=0
     )
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     await asyncio.wait_for(handle.completion, timeout=1)
 
     async def wait_for_four() -> None:
@@ -3861,7 +3958,7 @@ async def test_cancel_ack_does_not_precede_authoritative_cleanup_terminal() -> N
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     for _ in range(2):
         await asyncio.wait_for(current.next_notification(), timeout=1)
     await asyncio.wait_for(lower.started.wait(), timeout=1)
@@ -3916,7 +4013,7 @@ async def test_harness_rejection_closes_formal_stream_in_its_driving_context(can
     current = runtime(lower, history)
     try:
         selected = await prepare(current)
-        handle = await dispatch(current, selected)
+        handle = await submit(current, selected)
         await asyncio.wait_for(cleanup_started.wait(), timeout=1)
         if cancel_during_cleanup:
             await current.close_interaction(cancel_command(handle, selected, command_id="cancel-during-cleanup"))
@@ -3941,14 +4038,12 @@ async def test_interaction_close_rejects_replaced_round_without_cancel_effect() 
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
     first = await prepare(current)
-    first_handle = await dispatch(current, first)
+    first_handle = await submit(current, first)
     for _ in range(2):
         await asyncio.wait_for(current.next_notification(), timeout=1)
 
     second = commit(turn_id="turn-2", commit_id="commit-2", text="second")
-    await current.start_turn(second.interaction_id, second.turn_id)
-    await current.commit_turn(second)
-    await dispatch(
+    await submit(
         current,
         second,
         request_id="request-2",
@@ -3978,7 +4073,7 @@ async def test_completion_cancel_race_converges_on_harness_terminal_truth() -> N
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     for _ in range(2):
         await asyncio.wait_for(current.next_notification(), timeout=1)
 
@@ -4018,22 +4113,22 @@ async def test_concurrent_replay_dispatches_once_and_conflict_does_not_mutate_cr
     current = runtime(lower, history)
     selected = await prepare(current)
     one, replay = await asyncio.gather(
-        dispatch(current, selected),
-        dispatch(current, selected),
+        submit(current, selected),
+        submit(current, selected),
     )
     assert one is replay
     await asyncio.wait_for(call_wait(lower, 1), timeout=1)
     assert lower.calls == 1
     responses_before = current.snapshot().conversation.conversation.responses
     with pytest.raises(AgentConversationRuntimeViolation) as conflict:
-        await current.dispatch_committed_turn(
+        await current.submit_committed_turn(
             request_id="request-1",
             response_id="changed-response",
             correlation_id="correlation-request-1",
             commit=selected,
             context=FormalContextSnapshot(selected.scope),
         )
-    assert conflict.value.reason == "COMPOSITION_REQUEST_ID_CONFLICT"
+    assert conflict.value.reason == "COMMITTED_TURN_REQUEST_CONFLICT"
     assert current.snapshot().conversation.conversation.responses == responses_before
     for _ in range(4):
         await asyncio.wait_for(current.next_notification(), timeout=1)
@@ -4080,7 +4175,7 @@ async def test_product_submit_commits_and_dispatches_once_with_exact_replay() ->
 
 
 @pytest.mark.asyncio
-async def test_product_bound_turn_rejects_cross_request_legacy_dispatch() -> None:
+async def test_product_bound_turn_rejects_cross_request_submit() -> None:
     lower = LowerFormalAdapter()
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
@@ -4100,7 +4195,7 @@ async def test_product_bound_turn_rejects_cross_request_legacy_dispatch() -> Non
     product = asyncio.create_task(submit(current, selected))
     await asyncio.wait_for(entered.wait(), timeout=1)
     assert selected.turn_id in current._commits
-    same_request = asyncio.create_task(dispatch(current, selected))
+    same_request = asyncio.create_task(submit(current, selected))
     await asyncio.sleep(0)
     assert not same_request.done()
     before = current.snapshot()
@@ -4111,7 +4206,7 @@ async def test_product_bound_turn_rejects_cross_request_legacy_dispatch() -> Non
     )
 
     with pytest.raises(AgentConversationRuntimeViolation) as conflict:
-        await dispatch(
+        await submit(
             current,
             selected,
             request_id="request-cross-path-conflict",
@@ -4142,62 +4237,6 @@ async def test_product_bound_turn_rejects_cross_request_legacy_dispatch() -> Non
     await asyncio.wait_for(history_wait(history), timeout=1)
     snapshot = current.snapshot()
     assert len(snapshot.conversation.conversation.responses) == 1
-    assert lower.calls == 1
-    assert len(history.users) == 1
-    assert (await current.close(timeout_seconds=1)).status is (
-        AgentConversationShutdownStatus.CLOSED
-    )
-
-
-@pytest.mark.asyncio
-async def test_product_submit_attaches_to_exact_inflight_legacy_dispatch() -> None:
-    lower = LowerFormalAdapter()
-    history = RecordingHistoryWriter()
-    current = runtime(lower, history)
-    selected = await prepare(current)
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    original_completion = current._complete_admission
-
-    async def gated_completion(*args, **kwargs) -> None:
-        entered.set()
-        await release.wait()
-        await original_completion(*args, **kwargs)
-
-    current._complete_admission = gated_completion  # type: ignore[method-assign]
-    legacy = asyncio.create_task(dispatch(current, selected))
-    await asyncio.wait_for(entered.wait(), timeout=1)
-    product = asyncio.create_task(submit(current, selected))
-
-    async def product_is_attached() -> None:
-        while "request-1" not in current._committed_turn_submissions:
-            await asyncio.sleep(0)
-
-    await asyncio.wait_for(product_is_attached(), timeout=1)
-    assert not legacy.done()
-    assert not product.done()
-    snapshot = current.snapshot()
-    assert tuple(current._admissions) == ("request-1",)
-    assert tuple(current._committed_turn_submissions) == ("request-1",)
-    assert current._submitted_turn_bindings == {
-        (selected.interaction_id, selected.turn_id): "request-1"
-    }
-    assert not snapshot.conversation.conversation.responses
-    assert snapshot.harness.reservations == (
-        ("request-1", HarnessReservationState.COMMITTING),
-    )
-    assert snapshot.bridge.reserved_requests == 1
-    assert snapshot.harness.retained_rounds == 0
-    assert lower.calls == 0
-    assert not history.users and not history.assistant_intents
-
-    release.set()
-    legacy_handle = await asyncio.wait_for(legacy, timeout=1)
-    product_handle = await asyncio.wait_for(product, timeout=1)
-    assert product_handle is legacy_handle
-    await asyncio.wait_for(legacy_handle.completion, timeout=1)
-    await asyncio.wait_for(history_wait(history), timeout=1)
-    assert len(current.snapshot().conversation.conversation.responses) == 1
     assert lower.calls == 1
     assert len(history.users) == 1
     assert (await current.close(timeout_seconds=1)).status is (
@@ -4525,250 +4564,6 @@ async def test_concurrent_product_submits_claim_commit_id_before_capacity() -> N
 
 
 @pytest.mark.asyncio
-async def test_legacy_start_claim_blocks_product_before_reservation() -> None:
-    lower = LowerFormalAdapter()
-    history = RecordingHistoryWriter()
-    current = runtime(lower, history, max_requests=1)
-    selected = commit(
-        turn_id="turn-cross-start",
-        commit_id="commit-cross-start",
-        interaction_id="interaction-cross-start",
-    )
-    legal = commit(
-        turn_id="turn-cross-start-legal",
-        commit_id="commit-cross-start-legal",
-        interaction_id="interaction-cross-start-legal",
-    )
-    await current.start()
-    await current.open_interaction(selected.interaction_id)
-    await current.open_interaction(legal.interaction_id)
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    original_start_turn = current._cr.start_turn
-
-    async def blocked_start_turn(interaction_id: str, turn_id: str):
-        if turn_id == selected.turn_id:
-            entered.set()
-            await release.wait()
-        return await original_start_turn(interaction_id, turn_id)
-
-    current._cr.start_turn = blocked_start_turn  # type: ignore[method-assign]
-    legacy_start = asyncio.create_task(
-        current.start_turn(selected.interaction_id, selected.turn_id)
-    )
-    await asyncio.wait_for(entered.wait(), timeout=1)
-    product = asyncio.create_task(submit(current, selected))
-    await asyncio.sleep(0)
-    assert not product.done()
-    assert tuple(current._turn_identity_claims) == (selected.turn_id,)
-    assert not current._commit_identity_claims
-    assert not current._admissions
-    assert not current._committed_turn_submissions
-    assert not current._submitted_turn_bindings
-    blocked = current.snapshot()
-    assert not blocked.conversation.conversation.turns
-    assert blocked.harness.reservations == ()
-    assert blocked.harness.retained_rounds == 0
-    assert blocked.bridge.reserved_requests == 0
-    assert blocked.bridge.retained_requests == 0
-
-    release.set()
-    await asyncio.wait_for(legacy_start, timeout=1)
-    with pytest.raises(AgentConversationRuntimeViolation) as conflict:
-        await product
-    assert conflict.value.reason == "TURN_COMMIT_CONFLICT"
-    after = current.snapshot()
-    assert tuple(
-        (turn.turn_id, turn.state.value)
-        for turn in after.conversation.conversation.turns
-    ) == ((selected.turn_id, "capturing"),)
-    assert after.harness.reservations == ()
-    assert after.bridge.reserved_requests == 0
-    assert not current._admissions
-    assert not current._committed_turn_submissions
-
-    legal_handle = await submit(
-        current,
-        legal,
-        request_id="request-cross-start-legal",
-        response_id="response-cross-start-legal",
-    )
-    await asyncio.wait_for(legal_handle.completion, timeout=1)
-    assert lower.calls == 1
-    assert (await current.close(timeout_seconds=1)).status is (
-        AgentConversationShutdownStatus.CLOSED
-    )
-
-
-@pytest.mark.asyncio
-async def test_legacy_commit_claim_blocks_product_before_reservation() -> None:
-    lower = LowerFormalAdapter()
-    history = RecordingHistoryWriter()
-    current = runtime(lower, history, max_requests=1)
-    legacy = commit(
-        turn_id="turn-cross-legacy-wins",
-        commit_id="commit-cross-shared",
-        interaction_id="interaction-cross-legacy-wins",
-    )
-    product_commit = commit(
-        turn_id="turn-cross-product-loses",
-        commit_id=legacy.commit_id,
-        interaction_id="interaction-cross-product-loses",
-    )
-    legal = commit(
-        turn_id="turn-cross-legacy-legal",
-        commit_id="commit-cross-legacy-legal",
-        interaction_id="interaction-cross-legacy-legal",
-    )
-    await current.start()
-    for selected in (legacy, product_commit, legal):
-        await current.open_interaction(selected.interaction_id)
-    await current.start_turn(legacy.interaction_id, legacy.turn_id)
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    original_commit_turn = current._cr.commit_turn
-
-    async def blocked_commit_turn(selected: TurnCommit):
-        if selected.turn_id == legacy.turn_id:
-            entered.set()
-            await release.wait()
-        return await original_commit_turn(selected)
-
-    current._cr.commit_turn = blocked_commit_turn  # type: ignore[method-assign]
-    legacy_commit = asyncio.create_task(current.commit_turn(legacy))
-    await asyncio.wait_for(entered.wait(), timeout=1)
-    product = asyncio.create_task(
-        submit(
-            current,
-            product_commit,
-            request_id="request-cross-product-loses",
-            response_id="response-cross-product-loses",
-        )
-    )
-    await asyncio.sleep(0)
-    assert not product.done()
-    assert current._commit_identity_claims[legacy.commit_id].turn_id == legacy.turn_id
-    assert not current._admissions
-    assert not current._committed_turn_submissions
-    blocked = current.snapshot()
-    assert tuple(
-        (turn.turn_id, turn.state.value)
-        for turn in blocked.conversation.conversation.turns
-    ) == ((legacy.turn_id, "capturing"),)
-    assert blocked.harness.reservations == ()
-    assert blocked.bridge.reserved_requests == 0
-
-    release.set()
-    assert await asyncio.wait_for(legacy_commit, timeout=1) is True
-    with pytest.raises(AgentConversationRuntimeViolation) as conflict:
-        await product
-    assert conflict.value.reason == "TURN_COMMIT_CONFLICT"
-    after = current.snapshot()
-    assert tuple(
-        (turn.turn_id, turn.state.value, turn.commit_id)
-        for turn in after.conversation.conversation.turns
-    ) == ((legacy.turn_id, "committed", legacy.commit_id),)
-    assert after.harness.reservations == ()
-    assert after.bridge.reserved_requests == 0
-    assert not current._admissions
-    assert not current._committed_turn_submissions
-
-    legal_handle = await submit(
-        current,
-        legal,
-        request_id="request-cross-legacy-legal",
-        response_id="response-cross-legacy-legal",
-    )
-    await asyncio.wait_for(legal_handle.completion, timeout=1)
-    assert lower.calls == 1
-    assert (await current.close(timeout_seconds=1)).status is (
-        AgentConversationShutdownStatus.CLOSED
-    )
-
-
-@pytest.mark.asyncio
-async def test_product_claim_blocks_legacy_commit_before_cr_mutation() -> None:
-    lower = LowerFormalAdapter()
-    history = RecordingHistoryWriter()
-    current = runtime(lower, history, max_requests=2)
-    legacy = commit(
-        turn_id="turn-cross-legacy-loses",
-        commit_id="commit-cross-product-shared",
-        interaction_id="interaction-cross-legacy-loses",
-    )
-    product_commit = commit(
-        turn_id="turn-cross-product-wins",
-        commit_id=legacy.commit_id,
-        interaction_id="interaction-cross-product-wins",
-    )
-    legal = commit(
-        turn_id="turn-cross-product-legal",
-        commit_id="commit-cross-product-legal",
-        interaction_id="interaction-cross-product-legal",
-    )
-    await current.start()
-    for selected in (legacy, product_commit, legal):
-        await current.open_interaction(selected.interaction_id)
-    await current.start_turn(legacy.interaction_id, legacy.turn_id)
-    admitted = asyncio.Event()
-    release = asyncio.Event()
-    original_completion = current._complete_committed_turn_submission
-
-    async def gated_completion(*args, **kwargs) -> None:
-        admitted.set()
-        await release.wait()
-        await original_completion(*args, **kwargs)
-
-    current._complete_committed_turn_submission = gated_completion  # type: ignore[method-assign]
-    product = asyncio.create_task(
-        submit(
-            current,
-            product_commit,
-            request_id="request-cross-product-wins",
-            response_id="response-cross-product-wins",
-        )
-    )
-    await asyncio.wait_for(admitted.wait(), timeout=1)
-    before_conflict = current.snapshot()
-
-    with pytest.raises(AgentConversationRuntimeViolation) as conflict:
-        await current.commit_turn(legacy)
-    assert conflict.value.reason == "TURN_COMMIT_CONFLICT"
-    after_conflict = current.snapshot()
-    assert after_conflict.conversation == before_conflict.conversation
-    assert after_conflict.harness == before_conflict.harness
-    assert after_conflict.bridge == before_conflict.bridge
-    assert tuple(
-        (turn.turn_id, turn.state.value, turn.commit_id)
-        for turn in after_conflict.conversation.conversation.turns
-    ) == ((legacy.turn_id, "capturing", None),)
-    assert len(current._admissions) == 1
-    assert len(current._committed_turn_submissions) == 1
-    assert len(current._submitted_turn_bindings) == 1
-    assert not current._commits
-    assert lower.calls == 0
-    assert not history.users and not history.assistant_intents
-
-    release.set()
-    product_handle = await asyncio.wait_for(product, timeout=1)
-    await asyncio.wait_for(product_handle.completion, timeout=1)
-    legal_handle = await submit(
-        current,
-        legal,
-        request_id="request-cross-product-legal",
-        response_id="response-cross-product-legal",
-    )
-    await asyncio.wait_for(legal_handle.completion, timeout=1)
-    while len(history.users) < 2:
-        await asyncio.sleep(0)
-    assert lower.calls == 2
-    assert len(history.users) == 2
-    assert (await current.close(timeout_seconds=1)).status is (
-        AgentConversationShutdownStatus.CLOSED
-    )
-
-
-@pytest.mark.asyncio
 async def test_product_submit_conflict_and_capacity_fail_before_new_cr_effects() -> (
     None
 ):
@@ -4878,16 +4673,16 @@ async def test_product_submit_reserves_harness_capacity_before_turn_mutation() -
 
 
 @pytest.mark.asyncio
-async def test_uncommitted_and_feature_off_have_zero_authority_effects() -> None:
+async def test_invalid_commit_and_feature_off_have_zero_authority_effects() -> None:
     lower = LowerFormalAdapter()
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
     await current.start()
     selected = commit()
     before = current.snapshot()
-    with pytest.raises(AgentConversationRuntimeViolation) as uncommitted:
-        await dispatch(current, selected)
-    assert uncommitted.value.reason == "UNCOMMITTED_TURN"
+    with pytest.raises(AgentConversationRuntimeViolation) as invalid:
+        await submit(current, replace(selected, scope=scope(session_id="wrong-session")))
+    assert invalid.value.reason == "INVALID_COMMITTED_TURN"
     after = current.snapshot()
     assert after.conversation == before.conversation
     assert after.harness.retained_rounds == 0
@@ -4965,7 +4760,7 @@ async def test_history_failure_is_observable_retryable_and_fenced_ack_writes_zer
     history = RecordingHistoryWriter(fail_assistant_once=True)
     current = runtime(lower, history)
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     notifications = [
         await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(3)
     ]
@@ -4999,7 +4794,7 @@ async def test_history_failure_is_observable_retryable_and_fenced_ack_writes_zer
     history_two = RecordingHistoryWriter()
     second = runtime(lower_two, history_two)
     selected_two = await prepare(second)
-    handle_two = await dispatch(second, selected_two)
+    handle_two = await submit(second, selected_two)
     notifications_two = [
         await asyncio.wait_for(second.next_notification(), timeout=1) for _ in range(3)
     ]
@@ -5032,7 +4827,7 @@ async def test_history_failure_is_observable_retryable_and_fenced_ack_writes_zer
     late_history = RecordingHistoryWriter()
     late = runtime(late_lower, late_history)
     late_commit = await prepare(late)
-    late_handle = await dispatch(late, late_commit)
+    late_handle = await submit(late, late_commit)
     for _ in range(2):
         await asyncio.wait_for(late.next_notification(), timeout=1)
     await late.request_response_cancel("response-cancel-late", late_handle.response_ref)
@@ -5056,7 +4851,7 @@ async def test_concurrent_exact_ack_writes_history_once_and_replays() -> None:
     history = BlockingHistoryWriter()
     current = runtime(lower, history)
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     notifications = [
         await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(3)
     ]
@@ -5096,7 +4891,7 @@ async def test_cancelled_ack_waiter_retains_history_through_close_and_replay(
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     notifications = [
         await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(4)
     ]
@@ -5180,7 +4975,7 @@ async def test_shutdown_waits_for_inflight_ack_history_before_closed() -> None:
     history = BlockingHistoryWriter()
     current = runtime(lower, history)
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     notifications = [
         await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(3)
     ]
@@ -5214,7 +5009,7 @@ async def test_shutdown_history_failure_never_claims_closed() -> None:
     history = AlwaysFailAssistantHistoryWriter()
     current = runtime(lower, history)
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     notifications = [
         await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(3)
     ]
@@ -5250,7 +5045,7 @@ async def test_cancelled_close_waiter_retains_pending_shutdown_without_implicit_
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     for _ in range(2):
         await asyncio.wait_for(current.next_notification(), timeout=1)
 
@@ -5283,7 +5078,7 @@ async def test_empty_final_preserves_round_unknown_and_produces_no_presentation(
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     notifications = [
         await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(4)
     ]
@@ -5317,7 +5112,7 @@ async def test_adapter_exception_emits_only_harness_failed_terminal() -> None:
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
     selected = await prepare(current)
-    handle = await dispatch(current, selected)
+    handle = await submit(current, selected)
     notifications = [
         await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(3)
     ]
@@ -5386,6 +5181,24 @@ async def test_no_tool_round_bounds_prevalidation_output_without_partial_leak() 
         allow_tools=False,
     )
 
+    assert not any(isinstance(event, AgentResponseChunk) for event in events)
+    assert events[-1].payload == {"state": "terminal", "outcome": "failed"}
+
+
+@pytest.mark.asyncio
+async def test_legacy_streaming_round_preserves_its_unbounded_final_policy():
+    text = "x" * 131073
+    events = await run_scripted_harness(({"event_type": "chat.final", "content": text},), allow_tools=True)
+    assert [event.payload["content"] for event in events if isinstance(event, AgentResponseChunk)] == [text]
+    assert events[-1].payload == {"state": "terminal", "outcome": "completed"}
+
+
+@pytest.mark.asyncio
+async def test_no_tool_round_rejects_invalid_unicode_before_projection():
+    events = await run_scripted_harness((
+        {"event_type": "chat.delta", "content": "\ud800"},
+        {"event_type": "chat.final", "content": "must not complete"},
+    ), allow_tools=False)
     assert not any(isinstance(event, AgentResponseChunk) for event in events)
     assert events[-1].payload == {"state": "terminal", "outcome": "failed"}
 
@@ -5472,29 +5285,25 @@ async def test_bridge_queue_full_and_cr_accept_failure_leave_no_partial_response
     )
     current = runtime(lower, history, bridge=bridge)
     first = await prepare(current)
-    first_handle = await dispatch(current, first)
+    first_handle = await submit(current, first)
     for _ in range(2):
         await asyncio.wait_for(current.next_notification(), timeout=1)
 
     second = commit(turn_id="turn-2", commit_id="commit-2", text="second")
-    await current.start_turn(second.interaction_id, second.turn_id)
-    await current.commit_turn(second)
-    second_handle = await dispatch(
+    second_handle = await submit(
         current,
         second,
         request_id="request-2",
         response_id="response-2",
     )
     third = commit(turn_id="turn-3", commit_id="commit-3", text="third")
-    await current.start_turn(third.interaction_id, third.turn_id)
-    await current.commit_turn(third)
     # Harness execution is admitted independently of the Bridge consumer's
     # concurrency lane.  Stabilize the two accepted Agent effects so this
     # assertion measures only the rejected third dispatch.
     await asyncio.wait_for(call_wait(lower, 2), timeout=1)
     responses_before = current.snapshot().conversation.conversation.responses
     with pytest.raises(AgentBridgeRuntimeViolation) as full:
-        await dispatch(
+        await submit(
             current,
             third,
             request_id="request-3",
@@ -5511,10 +5320,8 @@ async def test_bridge_queue_full_and_cr_accept_failure_leave_no_partial_response
     assert (await second_handle.completion).terminal_outcome.value == "unknown"
 
     fourth = commit(turn_id="turn-4", commit_id="commit-4", text="fourth")
-    await current.start_turn(fourth.interaction_id, fourth.turn_id)
-    await current.commit_turn(fourth)
     with pytest.raises(ConversationRuntimeViolation) as reused:
-        await dispatch(
+        await submit(
             current,
             fourth,
             request_id="request-4",
@@ -5538,17 +5345,15 @@ async def test_harness_capacity_failure_precedes_cr_mutation_and_agent_effect() 
     history = RecordingHistoryWriter()
     current = runtime(lower, history, max_active_rounds=1)
     first = await prepare(current)
-    await dispatch(current, first)
+    await submit(current, first)
     for _ in range(2):
         await asyncio.wait_for(current.next_notification(), timeout=1)
     await asyncio.wait_for(call_wait(lower, 1), timeout=1)
 
     second = commit(turn_id="turn-2", commit_id="commit-2", text="second")
-    await current.start_turn(second.interaction_id, second.turn_id)
-    await current.commit_turn(second)
     responses_before = current.snapshot().conversation.conversation.responses
     with pytest.raises(AgentConversationRuntimeViolation) as invalid_channel:
-        await current.dispatch_committed_turn(
+        await current.submit_committed_turn(
             request_id="request-invalid-channel",
             response_id="response-invalid-channel",
             correlation_id="correlation-invalid-channel",
@@ -5560,7 +5365,7 @@ async def test_harness_capacity_failure_precedes_cr_mutation_and_agent_effect() 
     assert current.snapshot().conversation.conversation.responses == responses_before
     assert current.snapshot().harness.retained_rounds == 1
     with pytest.raises(HarnessRoundViolation) as full:
-        await dispatch(
+        await submit(
             current,
             second,
             request_id="request-2",
@@ -5594,7 +5399,8 @@ async def test_native_default_budget_allows_work_past_old_25_second_deadline():
         assert not pending.done()
         release.set()
         assert await asyncio.wait_for(pending, 2) == "Long project read completed"
-        assert lower.calls == 1 and current._harness.snapshot().cancel_effects == 0
+        entry, = current._execution_service._records.values()
+        assert lower.calls == 1 and lower.cancel_calls == 0 and not entry.cancellation_requested
     finally:
         release.set()
         await owner.close()
