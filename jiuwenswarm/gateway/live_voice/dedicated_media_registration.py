@@ -1023,7 +1023,7 @@ class _NativeMediaSession:
     end_of_turn_queue: asyncio.Queue[tuple[int, int]] = field(repr=False)
     delivery_queue: asyncio.Queue[NativeEngineEvent] = field(repr=False)
     start_record: _MediaAuthority | None = field(default=None, repr=False)
-    input_enqueued_at: dict[int, float] = field(default_factory=dict, repr=False)
+    input_enqueued_at: dict[int, tuple[float, float]] = field(default_factory=dict, repr=False)
     start_task: asyncio.Task[None] | None = field(default=None, repr=False)
     startup_retired: bool = False
     input_task: asyncio.Task[None] | None = field(default=None, repr=False)
@@ -1604,7 +1604,7 @@ class DedicatedMediaProductRegistry:
         self, record: _MediaAuthority, frame: MediaAudioFrame
     ) -> None:
         """Queue one already media-validated frame for the exact Native Engine."""
-
+        accept_started = time.perf_counter()
         key = self._native_session_keys_by_record.get(record.record_id)
         session = self._native_sessions.get(key) if key is not None else None
         fence_detail: str | None = None
@@ -1666,7 +1666,7 @@ class DedicatedMediaProductRegistry:
                 MediaDetachReason.NATIVE_PROVIDER_TRANSPORT_FAILED.value,
                 "Native input queue is saturated",
             ) from None
-        session.input_enqueued_at[native_frame.seq] = self._monotonic()
+        session.input_enqueued_at[native_frame.seq] = (accept_started, time.perf_counter())
         session.next_media_sequence += 1
         session.next_media_sample_cursor += len(frame.samples)
         session.next_input_sequence += 1
@@ -2311,17 +2311,23 @@ class DedicatedMediaProductRegistry:
             try:
                 if frame is None or session.closed:
                     return
-                started = self._monotonic()
-                enqueued = session.input_enqueued_at.pop(frame.seq, started)
+                started = time.perf_counter()
+                accepted, enqueued = session.input_enqueued_at.pop(frame.seq, (started, started))
                 source_event_id = await session.engine.offer_audio(frame)
-                finished = self._monotonic()
-                if frame.seq % 50 == 0 or finished - started >= .1:
-                    profile_event("native_input_delivery", **identity_fields(session.activation.binding),
-                        frame_seq=frame.seq, source_event_id=source_event_id, queue_frames=session.input_queue.qsize(),
-                        frame_queue_wait_ms=(started - enqueued) * 1000,
-                        duration_ms=(finished - started) * 1000,
-                        pending_audio_ms=session.input_queue.qsize() * 20,
-                        elapsed_ms=(finished - enqueued) * 1000, outcome="sent")
+                finished = time.perf_counter()
+                profile_event("native_input_delivery", **identity_fields(session.activation.binding),
+                    frame_seq=frame.seq, source_event_id=source_event_id, queue_frames=session.input_queue.qsize(),
+                    input_sample_cursor=frame.sample_cursor,
+                    sent_sample_end=frame.sample_cursor + len(frame.pcm16) // 2,
+                    sample_rate_hz=NATIVE_PCM_SAMPLE_RATE,
+                    gateway_accept_started_ms=accepted * 1000,
+                    gateway_enqueue_monotonic_ms=enqueued * 1000,
+                    gateway_offer_started_ms=started * 1000,
+                    gateway_offer_completed_ms=finished * 1000,
+                    frame_queue_wait_ms=(started - enqueued) * 1000,
+                    duration_ms=(finished - started) * 1000,
+                    pending_audio_ms=session.input_queue.qsize() * 20,
+                    elapsed_ms=(finished - enqueued) * 1000, outcome="sent")
             finally:
                 session.input_queue.task_done()
 

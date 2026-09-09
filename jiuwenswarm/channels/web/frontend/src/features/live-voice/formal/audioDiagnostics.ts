@@ -7,9 +7,10 @@ import {
 } from './audioDiagnosticJournal.js';
 const LIMIT = 2048;
 const MILESTONE_LIMIT = 512;
-// Explicit low-frequency observations only. Frame, polling and ordinary profile
-// traffic cannot evict these causal records; the second lane remains bounded.
+// Causal observations and bounded endpoint frame windows only. Ordinary frame,
+// polling and profile traffic cannot evict them; the second lane remains bounded.
 const MILESTONE_EVENTS = new Set([
+  'endpoint_input_frame',
   'browser_milestone', 'p1_milestone', 'p1_end_of_turn', 'media_end_of_turn', 'eot_handler_delivered',
   'native_request_state', 'native_work_state', 'native_task_association', 'native_model_confirmed',
   'native_context_selected', 'native_text_first_visible', 'native_text_read_failed',
@@ -32,6 +33,8 @@ for (const key of ['request_id', 'operation_id', 'span_id', 'task_id', 'attempt_
 for (const key of ['stage', 'rpc_method', 'error_type', 'error_code', 'error_reason', 'milestone', 'detector_profile']) LABEL_KEYS.add(key);
 for (const key of ['input_time_method', 'output_time_method']) LABEL_KEYS.add(key);
 const VALUE_KEYS = new Set([
+  'browser_enqueue_ms', 'browser_socket_sent_ms', 'endpoint_received_ms',
+  'capture_first_window_dbfs', 'capture_last_window_dbfs',
   'output_chars',
   'input_tail_estimate_ms', 'input_tail_low_estimate_ms', 'input_tail_context_ms',
   'input_tail_sample_end', 'input_tail_frame_seq', 'input_threshold_dbfs',
@@ -159,6 +162,45 @@ function rejectionFields(value: unknown): Record<string, unknown> {
 let dropped = 0;
 let milestoneDropped = 0;
 let installed = false;
+// Merge numeric observations by exact capture generation/frame. Never retain PCM.
+const endpointFrames = new Map<string, Map<number, ReturnType<typeof safeFields>>>();
+let endpointEpoch = 0;
+
+export function retainAudioEndpointFrame(fields: Readonly<Record<string, unknown>>): void {
+  try {
+    const safe = safeFields(fields);
+    if (typeof safe.capture_id !== 'string' || !Number.isSafeInteger(safe.capture_generation)
+      || !Number.isSafeInteger(safe.frame_seq) || Number(safe.frame_seq) < 0) return;
+    const key = `${safe.capture_id}:${safe.capture_generation}`;
+    let frames = endpointFrames.get(key);
+    if (!frames) {
+      if (endpointFrames.size >= 4) endpointFrames.delete(endpointFrames.keys().next().value!);
+      frames = new Map();
+      endpointFrames.set(key, frames);
+    }
+    const seq = Number(safe.frame_seq);
+    frames.set(seq, { ...frames.get(seq), ...safe });
+    while (frames.size > 100) frames.delete(Math.min(...frames.keys()));
+  } catch { /* Optional observations cannot reject a frame. */ }
+}
+
+function retainEndpointWindow(fields: ReturnType<typeof safeFields>, receivedMs: number): void {
+  const key = `${fields.capture_id}:${fields.generation}`;
+  const frames = endpointFrames.get(key);
+  if (!frames) return;
+  const epoch = endpointEpoch;
+  const batch = [...frames.values()].sort((a, b) => Number(a.frame_seq) - Number(b.frame_seq)).map(frame => ({
+    session_id: fields.session_id, interaction_id: fields.interaction_id,
+    media_session_id: fields.media_session_id, lease_id: fields.lease_id,
+    provider_end_ms: fields.provider_end_ms, endpoint_received_ms: receivedMs, ...frame,
+  }));
+  // Snapshot now, journal after the EOT handler returns. Original timestamps are
+  // explicit fields; the record timestamp belongs to this deferred publication.
+  setTimeout(() => {
+    if (epoch !== endpointEpoch) return;
+    for (const frame of batch) recordAudioDiagnostic('endpoint_input_frame', frame);
+  }, 0);
+}
 
 export function audioDiagnosticSnapshot(): readonly Readonly<AudioDiagnostic>[] {
   const unique = new Map<number, Readonly<AudioDiagnostic>>();
@@ -167,6 +209,8 @@ export function audioDiagnosticSnapshot(): readonly Readonly<AudioDiagnostic>[] 
 }
 
 export function clearAudioDiagnostics(): void {
+  endpointFrames.clear();
+  endpointEpoch += 1;
   records.length = 0;
   milestones.length = 0;
   dropped = 0;
@@ -351,6 +395,7 @@ export function recordAudioDiagnostic(event: string, fields: Readonly<Record<str
       milestones.push(record);
     }
     appendAudioDiagnosticJournal(record, milestone);
+    if (event === 'p1_end_of_turn') retainEndpointWindow(safe, record.monotonic_ms);
     if (typeof window !== 'undefined' && !installed) {
       installed = true;
       window.addEventListener('pagehide', flushAudioDiagnosticJournal);

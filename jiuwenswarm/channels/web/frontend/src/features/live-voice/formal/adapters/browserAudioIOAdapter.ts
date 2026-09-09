@@ -1,4 +1,4 @@
-import { recordAudioDiagnostic, profileAudioOperation } from '../audioDiagnostics.js';
+import { recordAudioDiagnostic, profileAudioOperation, retainAudioEndpointFrame } from '../audioDiagnostics.js';
 import { CaptureTimingDiagnostics, firstSignalOffset, outputTimingFacts } from '../audioTimingDiagnostics.js';
 import {
   AudioPort,
@@ -2406,6 +2406,7 @@ export class BrowserAudioIOAdapter {
       session.expectedSeq += 1;
       try {
         this.#captureTiming.observe(frame, session.context, performance.now());
+        retainAudioEndpointFrame({ ...frame.capture, ...this.captureTimingSnapshot() });
         if (frame.seq % 50 === 0) recordAudioDiagnostic('capture_clock_sample', {
           capture_id: frame.capture.capture_id, capture_generation: frame.capture.capture_generation,
           ...this.captureTimingSnapshot(),

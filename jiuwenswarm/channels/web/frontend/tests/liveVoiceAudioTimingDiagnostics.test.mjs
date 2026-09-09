@@ -14,6 +14,8 @@ test('input timing retains numeric energy tail through silence, separates captur
     samples,
   };
   timing.observe(frame, { currentTime: 2.03, sampleRate: 1000, state: 'running' }, 5000);
+  assert.ok(Math.abs(timing.snapshot('c1').capture_first_window_dbfs + 20) < 0.001);
+  assert.equal(timing.snapshot('c1').capture_last_window_dbfs, null);
   samples.fill(0);
   timing.observe({ ...frame, seq: 4, sample_cursor: 80, context_time_s: 2.02 }, { currentTime: 2.05, sampleRate: 1000, state: 'running' }, 5020);
   const facts = timing.snapshot('c1');

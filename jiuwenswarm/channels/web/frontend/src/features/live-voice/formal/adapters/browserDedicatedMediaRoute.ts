@@ -1,7 +1,7 @@
 /** Real WebSocket leaf for the closed Browser <-> Gateway Media contract. */
 
 import { createCapturedAudioFrame, type CapturedAudioFrame } from '../audioPort.js';
-import { recordAudioDiagnostic } from '../audioDiagnostics.js';
+import { recordAudioDiagnostic, retainAudioEndpointFrame } from '../audioDiagnostics.js';
 import type { BrowserAudioLocalStopReceipt } from './browserAudioIOAdapter.js';
 import {
   boundedMediaConsumerFailureReason,
@@ -823,6 +823,8 @@ export class BrowserDedicatedMediaSocketLeaf {
       this.#terminate('MEDIA_INVALID_FRAME');
       return { accepted: false, reason_id: 'MEDIA_INVALID_FRAME' };
     }
+    retainAudioEndpointFrame({ ...normalized.capture, frame_seq: normalized.seq,
+      browser_enqueue_ms: monotonicNowMs() });
     const result = this.#activation.owner.enqueue({
       seq: normalized.seq,
       sample_cursor: normalized.sample_cursor,
@@ -1199,6 +1201,11 @@ export class BrowserDedicatedMediaSocketLeaf {
 
   #observeUplinkFrameSent(seq: number): void {
     this.#diagnosticLastSentSeq = seq;
+    try {
+      retainAudioEndpointFrame({ capture_id: this.binding.generation.id,
+        capture_generation: this.binding.generation.value, frame_seq: seq,
+        browser_socket_sent_ms: monotonicNowMs(), socket_buffered_bytes: this.#socket.bufferedAmount });
+    } catch { /* Diagnostic reads cannot alter sender ownership. */ }
     try {
       this.#onUplinkFrameSent?.(seq);
     } catch {

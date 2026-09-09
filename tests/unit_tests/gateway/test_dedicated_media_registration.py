@@ -834,6 +834,37 @@ async def test_silent_terminal_ack_waits_for_runtime_while_provider_control_rema
 
 
 @pytest.mark.asyncio
+async def test_native_input_diagnostics_cover_unsampled_frames_and_queue_wait(monkeypatch):
+    from jiuwenswarm.gateway.live_voice import dedicated_media_registration as module
+    records = []
+    monkeypatch.setattr(module, 'profile_event', lambda name, **fields: records.append((name, fields)))
+    ticks = [10.0]
+    monkeypatch.setattr(module, 'time', SimpleNamespace(perf_counter=lambda: ticks[0]))
+    queue = asyncio.Queue()
+    frames = [NativeInputAudioFrame(seq=i, sample_cursor=i * 480, pcm16=b'\0' * 960) for i in range(3)]
+    for frame in frames:
+        queue.put_nowait(frame)
+    queue.put_nowait(None)
+    offered = []
+    async def offer(frame):
+        offered.append(frame)
+        ticks[0] += .002
+        return f'client-event-{frame.seq}'
+    session = SimpleNamespace(closed=False, engine=SimpleNamespace(offer_audio=offer), input_queue=queue,
+        input_enqueued_at={i: (9.8, 9.9) for i in range(3)}, activation=SimpleNamespace(binding={'capture_id': 'capture-a'}))
+    registry = DedicatedMediaProductRegistry(enabled=True)
+    await registry._run_native_input(session)
+    assert offered == frames and session.input_enqueued_at == {}
+    await queue.join()
+    assert [r['frame_seq'] for _, r in records] == [0, 1, 2]
+    for _, row in records:
+        assert row['frame_queue_wait_ms'] >= 99.9
+        assert row['gateway_accept_started_ms'] <= row['gateway_enqueue_monotonic_ms'] <= row['gateway_offer_started_ms'] <= row['gateway_offer_completed_ms']
+        assert row['sent_sample_end'] - row['input_sample_cursor'] == 480
+        assert row['sample_rate_hz'] == 24000 and row['capture_id'] == 'capture-a'
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('lane', ['input', 'events', 'delivery'])
 async def test_native_consumer_rechecks_owner_after_already_awakened_wait(lane, monkeypatch):
     registry = DedicatedMediaProductRegistry(enabled=True)

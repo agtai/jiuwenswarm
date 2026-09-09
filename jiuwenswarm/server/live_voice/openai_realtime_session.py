@@ -827,6 +827,7 @@ class OpenAIRealtimeSession:
                     encode_ms=(send_started - encode_started) * 1000,
                     wire_bytes=len(wire.encode("utf-8")))
             socket_started = time.perf_counter()
+            observations = {}
             observer = self._socket_diagnostics
             if observer is not None:
                 observer.begin(None, next_count, budget_seconds=self._config.operation_timeout_seconds)
@@ -860,6 +861,7 @@ class OpenAIRealtimeSession:
                 await self._record_primary(error.reason)
                 raise error from None
             finally:
+                socket_finished = time.perf_counter()
                 if observer is not None:
                     observations = observer.finish()
                     duration = (time.perf_counter() - socket_started) * 1000
@@ -869,6 +871,14 @@ class OpenAIRealtimeSession:
                             encode_ms=(send_started - encode_started) * 1000,
                             socket_send_ms=duration, **observations)
             self._client_event_count = next_count
+            if parsed_type == "input_audio_buffer.append":
+                self._observe_transport("audio_append_sent", parsed_type, event_id,
+                    input_append_seq=self._input_append_count - 1,
+                    send_lock_started_ms=lock_started * 1000,
+                    send_lock_acquired_ms=encode_started * 1000,
+                    socket_send_started_ms=socket_started * 1000,
+                    socket_send_completed_ms=socket_finished * 1000,
+                    **observations)
             if timed:
                 self._observe_transport("socket_send_completed", parsed_type, event_id,
                                         socket_send_ms=(time.perf_counter() - socket_started) * 1000)

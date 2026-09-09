@@ -51,11 +51,15 @@ export class CaptureTimingDiagnostics {
       if (!finite(nowMs) || !finite(context.currentTime) || context.state !== 'running' || rate <= 0) return;
       const mapping = nowMs - context.currentTime * 1000;
       const step = Math.max(1, Math.round((rate * INPUT_WINDOW_MS) / 1000));
+      let firstWindowDbfs: number | null = null;
+      let lastWindowDbfs: number | null = null;
       for (let start = 0; start < frame.samples.length; start += step) {
         const end = Math.min(start + step, frame.samples.length);
         let energy = 0;
         for (let i = start; i < end; i += 1) energy += frame.samples[i] ** 2;
         const power = energy / (end - start);
+        lastWindowDbfs = power > 0 && finite(power) ? 10 * Math.log10(power) : null;
+        if (start === 0) firstWindowDbfs = lastWindowDbfs;
         const contextEnd = (frame.context_time_s + end / rate) * 1000;
         if (power >= 10 ** (LOW_INPUT_DBFS / 10)) this.#lowTail = mapping + contextEnd;
         if (power >= 10 ** (INPUT_DBFS / 10))
@@ -67,6 +71,8 @@ export class CaptureTimingDiagnostics {
           };
       }
       this.#last = {
+        capture_first_window_dbfs: firstWindowDbfs,
+        capture_last_window_dbfs: lastWindowDbfs,
         capture_callback_ms: nowMs,
         capture_context_ms: context.currentTime * 1000,
         capture_frame_end_context_ms: (frame.context_time_s + frame.samples.length / rate) * 1000,

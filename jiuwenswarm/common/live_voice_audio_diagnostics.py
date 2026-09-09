@@ -60,6 +60,9 @@ _TOKENS = _TOKENS | frozenset({"native_model", "native_output_budget"})
 _TOKENS = _TOKENS | frozenset({"provider_event_type", "output_item_type", "output_phase", "output_content_type", "transport_cause_type", "close_kind"})
 _VALUES = frozenset({"generation", "frame_count", "frames_sent", "frames_acked", "queue_frames", "received_samples", "sent_sample_end", "send_peak_ms", "vad_silence_ms", "provider_ms", "provider_start_ms", "provider_end_ms", "speech_started", "input_fenced", "elapsed_ms", "preopen_frames"})
 _VALUES = _VALUES | frozenset({
+    "gateway_accept_started_ms", "gateway_enqueue_monotonic_ms", "gateway_offer_started_ms", "gateway_offer_completed_ms",
+    "socket_send_started_ms", "socket_send_completed_ms", "send_lock_started_ms", "send_lock_acquired_ms",
+    "input_append_seq", "input_sample_cursor", "socket_rtt_ms", "socket_rtt_observed_ms", "socket_rtt_age_ms",
     "native_audio_speed",
     "frame_seq", "lock_wait_ms", "lock_hold_ms", "encode_ms", "socket_send_ms", "wire_seq", "remaining_ms",
     "wire_bytes", "event_queue_frames", "event_seq", "committed", "closing",

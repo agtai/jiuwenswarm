@@ -7,7 +7,81 @@ import {
   audioDiagnosticBundle,
   profileAudioOperation,
   markAudioRpcRejection,
+  retainAudioEndpointFrame,
 } from '../node_modules/.cache/live-voice-audio-diagnostics/audioDiagnostics.mjs';
+
+test('endpoint retains the last 100 complete frame timings for the exact capture, beyond ordinary log eviction', async () => {
+  const previous = console.info;
+  console.info = () => undefined;
+  clearAudioDiagnostics();
+  try {
+    for (let frame_seq = 0; frame_seq < 180; frame_seq++) {
+      const identity = { capture_id: 'capture-a', capture_generation: 2, frame_seq };
+      retainAudioEndpointFrame({
+        ...identity,
+        capture_callback_ms: frame_seq * 20,
+        capture_frame_sample_end: (frame_seq + 1) * 960,
+        pcm: new Float32Array(960),
+        transcript: 'PRIVATE',
+      });
+      retainAudioEndpointFrame({ ...identity, browser_enqueue_ms: frame_seq * 20 + 1 });
+      retainAudioEndpointFrame({ ...identity, browser_socket_sent_ms: frame_seq * 20 + 2 });
+    }
+    retainAudioEndpointFrame({ capture_id: 'capture-a', capture_generation: 3, frame_seq: 0, capture_callback_ms: 9999 });
+    retainAudioEndpointFrame({ capture_id: 'capture-a', capture_generation: 2, frame_seq: 1, browser_socket_sent_ms: 9999 });
+    recordAudioDiagnostic('p1_end_of_turn', { capture_id: 'capture-a', generation: 2, session_id: 'session-a', provider_end_ms: 3500 });
+    assert.equal(audioDiagnosticSnapshot().filter(r => r.event === 'endpoint_input_frame').length, 0);
+    // The snapshot is fixed at EOT; later capture cannot mutate it.
+    retainAudioEndpointFrame({ capture_id: 'capture-a', capture_generation: 2, frame_seq: 180 });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    for (let seq = 0; seq < 2200; seq++) recordAudioDiagnostic('capture_progress', { seq });
+    const frames = audioDiagnosticSnapshot().filter(r => r.event === 'endpoint_input_frame');
+    assert.equal(frames.length, 100);
+    assert.equal(frames[0].fields.frame_seq, 80);
+    assert.equal(frames.at(-1).fields.frame_seq, 179);
+    assert.ok(
+      frames.every(
+        r =>
+          r.fields.capture_generation === 2 &&
+          r.fields.provider_end_ms === 3500 &&
+          r.fields.session_id === 'session-a' &&
+          r.fields.browser_socket_sent_ms - r.fields.capture_callback_ms === 2,
+      ),
+    );
+    assert.equal(JSON.stringify(frames).includes('PRIVATE'), false);
+    assert.ok(frames.every(r => r.fields.endpoint_received_ms <= r.monotonic_ms));
+  } finally {
+    clearAudioDiagnostics();
+    console.info = previous;
+  }
+});
+
+test('endpoint bounds capture history and clear cancels deferred publication without resurrecting records', async () => {
+  const previous = console.info;
+  console.info = () => undefined;
+  clearAudioDiagnostics();
+  try {
+    for (let i = 0; i < 5; i++) retainAudioEndpointFrame({ capture_id: `capture-${i}`, capture_generation: 1, frame_seq: 0 });
+    recordAudioDiagnostic('p1_end_of_turn', { capture_id: 'capture-0', generation: 1 });
+    recordAudioDiagnostic('p1_end_of_turn', { capture_id: 'capture-4', generation: 2 });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(audioDiagnosticSnapshot().filter(r => r.event === 'endpoint_input_frame').length, 0);
+    recordAudioDiagnostic('p1_end_of_turn', { capture_id: 'capture-4', generation: 1 });
+    clearAudioDiagnostics();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(audioDiagnosticSnapshot().length, 0);
+    assert.doesNotThrow(() =>
+      retainAudioEndpointFrame({
+        get capture_id() {
+          throw new Error('PRIVATE');
+        },
+      }),
+    );
+  } finally {
+    clearAudioDiagnostics();
+    console.info = previous;
+  }
+});
 
 test('diagnostics contain only allowlisted scalars, freeze records and remain bounded', () => {
   const previous = console.info;

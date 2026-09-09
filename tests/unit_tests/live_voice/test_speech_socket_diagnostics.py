@@ -208,6 +208,19 @@ async def test_real_loopback_factory_wire_and_observer(monkeypatch):
             assert attached["write_buffer_high_bytes"] > 0
             assert "PRIVATE" not in repr(records)
             assert observer.timer is None
+            assert observer.snapshot()["socket_rtt_ms"] is None
+            # The product observer adds no ping. This test explicitly requests
+            # one to exercise the same hook as websockets' existing keepalive.
+            pong = await socket.ping(b"PRIVATE_PING")
+            await asyncio.wait_for(pong, 1)
+            rtt = next(f for e, f in records if e == "socket_keepalive_rtt")
+            assert rtt["capture_id"] == "real-loopback" and rtt["generation"] == 9
+            assert rtt["socket_rtt_ms"] >= 0 and rtt["socket_rtt_observed_ms"] > 0
+            assert observer.snapshot()["socket_rtt_age_ms"] >= 0
+            assert "frame_seq" not in rtt and "wire_seq" not in rtt
+            assert "PRIVATE" not in repr(records) and len(received) == 1
+            socket.acknowledge_pings(b"unsolicited")
+            assert len([1 for e, _ in records if e == "socket_keepalive_rtt"]) == 1
             # Fault injection on the real websockets flow-control implementation;
             # not a claim that this loopback network is congested.
             observer.begin(1, 2)

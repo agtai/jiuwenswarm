@@ -48,7 +48,7 @@ async def test_transport_timing_distinguishes_lock_send_and_receive_without_payl
         sent_id = await blocked
         socket.push(event("input_audio_buffer.speech_stopped", "endpoint", item_id="i1", audio_end_ms=900))
         assert (await session.receive_event()).event_id == "endpoint"
-        # High-frequency data is not logged, regardless of payload contents.
+        # Every append retains scalar timing, never its audio payload.
         await session.send_event("input_audio_buffer.append", {"audio": "PRIVATE_AUDIO"})
         if sink_fails:
             assert not records
@@ -61,7 +61,8 @@ async def test_transport_timing_distinguishes_lock_send_and_receive_without_payl
             assert sent[0]["encode_ms"] >= 0 and sent[1]["socket_send_ms"] == 0
             received = next(r for r in records if r["source_event_id"] == "endpoint")
             assert received["received_monotonic_ms"] > 0 and received["decode_ms"] >= 0
-            assert not any(r["status"] == "input_audio_buffer.append" for r in records)
+            appended = [r for r in records if r["milestone"] == "audio_append_sent"]
+            assert len(appended) == 1 and appended[0]["input_append_seq"] == 0
     finally:
         _CURRENT.reset(token)
         await session.close()
@@ -111,6 +112,31 @@ async def test_failed_audio_send_retains_close_codes_without_error_text(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_every_append_has_original_send_boundaries_and_exact_wire_identity(monkeypatch):
+    records = []
+    monkeypatch.setattr(transport, "profile_snapshot_event", lambda e, origin, **f: records.append({**origin, **f}))
+    socket = ScriptedRealtimeSocket(negotiated_events())
+    session = transport.OpenAIRealtimeSession(realtime_config(), socket_factory=CapturingFactory(socket),
+        diagnostic_origin={"session_id": "frame-origin", "activation_id": "a1"})
+    await session.open(session_update=session_update())
+    try:
+        ids = [await session.send_event("input_audio_buffer.append", {"audio": "PRIVATE_PCM"}) for _ in range(55)]
+        frames = [r for r in records if r["milestone"] == "audio_append_sent"]
+        assert [r["source_event_id"] for r in frames] == ids
+        assert [r["input_append_seq"] for r in frames] == list(range(55))
+        assert all(r["send_lock_started_ms"] <= r["send_lock_acquired_ms"]
+            <= r["socket_send_started_ms"] <= r["socket_send_completed_ms"] for r in frames)
+        socket.send_failure_type = "input_audio_buffer.append"
+        with pytest.raises(transport.OpenAIRealtimeSessionError):
+            await session.send_event("input_audio_buffer.append", {"audio": "PRIVATE_PCM"})
+        assert len([r for r in records if r["milestone"] == "audio_append_sent"]) == 55
+        assert len([r for r in socket.sent if r["type"] == "input_audio_buffer.append"]) == 55
+        assert "PRIVATE" not in repr(records)
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_real_diagnostic_sink_keeps_closed_transport_facts_and_no_socket_text(monkeypatch):
     records = []
     await asyncio.to_thread(diagnostics._QUEUE.join)
@@ -128,6 +154,25 @@ async def test_real_diagnostic_sink_keeps_closed_transport_facts_and_no_socket_t
     assert payload["received_close_code"] == 1001 and payload["sent_close_code"] == 1011
     assert payload["socket_errno"] == 10054 and payload["session_id"] == "sink-origin"
     assert "PRIVATE" not in repr(records)
+
+
+@pytest.mark.asyncio
+async def test_real_sink_keeps_frame_clock_and_heartbeat_scalars(monkeypatch):
+    records = []
+    await asyncio.to_thread(diagnostics._QUEUE.join)
+    monkeypatch.setattr(diagnostics._LOGGER, "info", lambda template, *args: records.append(template % args))
+    fields = {
+        "gateway_accept_started_ms": 100.0, "gateway_enqueue_monotonic_ms": 100.2,
+        "gateway_offer_started_ms": 100.3, "gateway_offer_completed_ms": 101.1,
+        "send_lock_started_ms": 100.4, "send_lock_acquired_ms": 100.5,
+        "socket_send_started_ms": 100.6, "socket_send_completed_ms": 101.0,
+        "input_sample_cursor": 480, "sent_sample_end": 960, "input_append_seq": 1,
+        "socket_rtt_ms": 130.2, "socket_rtt_observed_ms": 90.0, "socket_rtt_age_ms": 11.0,
+    }
+    diagnostics.record_audio_diagnostic("endpoint_test", **fields, audio="PRIVATE_PCM")
+    await asyncio.to_thread(diagnostics._QUEUE.join)
+    payload = json.loads(records[-1].split(" ", 1)[1])["fields"]
+    assert payload == fields and "PRIVATE" not in repr(records)
 
 
 @pytest.mark.asyncio

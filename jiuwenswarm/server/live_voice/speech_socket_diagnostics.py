@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import math
 import socket as socket_module
 import time
 from contextlib import suppress
@@ -31,6 +32,8 @@ class SocketDiagnostics:
         self.next_tick = 0.0
         self.next_report = 0.0
         self.send_started = 0.0
+        self.rtt_ms = None
+        self.rtt_observed_ms = None
 
     def emit(self, event, **fields):
         with suppress(Exception):
@@ -38,7 +41,9 @@ class SocketDiagnostics:
                 frame_seq=self.frame_seq, wire_seq=self.wire_seq, **fields)
 
     def snapshot(self):
-        result = {}
+        result = {"socket_rtt_ms": self.rtt_ms, "socket_rtt_observed_ms": self.rtt_observed_ms,
+                  "socket_rtt_age_ms": None if self.rtt_observed_ms is None else
+                  max(0.0, time.perf_counter() * 1000 - self.rtt_observed_ms)}
         with suppress(Exception):
             transport = self.socket.transport
             size = transport.get_write_buffer_size()
@@ -50,6 +55,17 @@ class SocketDiagnostics:
             tcp = self.socket.transport.get_extra_info("socket")
             result["tcp_nodelay"] = tcp.getsockopt(socket_module.IPPROTO_TCP, socket_module.TCP_NODELAY) == 1
         return result
+
+    def pong_received(self):
+        with suppress(Exception):
+            latency = self.socket.latency
+            if type(latency) not in (int, float) or not math.isfinite(latency) or latency < 0:
+                return
+            self.rtt_ms = latency * 1000
+            self.rtt_observed_ms = time.perf_counter() * 1000
+            # A heartbeat observation has no audio-frame ownership.
+            record_audio_diagnostic("socket_keepalive_rtt", **self.identity,
+                socket_rtt_ms=self.rtt_ms, socket_rtt_observed_ms=self.rtt_observed_ms)
 
     def begin(self, frame_seq, wire_seq, *, budget_seconds=30.0):
         with suppress(Exception):
@@ -132,6 +148,15 @@ class SocketDiagnostics:
 class _ObservedFlowControl:
     """Only observe; superclass remains the sole flow-control owner."""
     voice_diagnostics = None
+
+    def acknowledge_pings(self, data):
+        matched = False
+        with suppress(Exception):
+            matched = data in self.pong_waiters
+        super().acknowledge_pings(data)
+        with suppress(Exception):
+            if matched and self.voice_diagnostics is not None:
+                self.voice_diagnostics.pong_received()
 
     def pause_writing(self):
         super().pause_writing()

@@ -57,13 +57,16 @@ publication/binding, prepared-response compatibility, and the real conversation/
 Task journey, followed by Demo preparation. The
 [repair execution record](reviews/DEMO_ROOT_CAUSE_REPAIRS_20260909.md) owns module
 boundaries, risk and verification order. Completed passive diagnostics remain in
-the [diagnostic extension record](reviews/DIAGNOSTIC_TIMING_EXTENSION_20260909.md);
-the [calibration runbook](runbooks/TIMING_CALIBRATION.md) owns physical measurement.
+the [diagnostic extension record](reviews/DIAGNOSTIC_TIMING_EXTENSION_20260909.md).
+The user-requested [endpoint frame follow-up](reviews/ENDPOINT_FRAME_DIAGNOSTICS_20260909.md)
+adds per-frame input timings and passive heartbeat RTT for a new recording;
+the 450 ms VAD setting remains fixed and Provider-internal timing remains unobserved.
+The [calibration runbook](runbooks/TIMING_CALIBRATION.md) owns physical measurement.
 The pinned AgentCore installation package is the user's explicit choice for this
 workspace. Work/projectless, Task intent/result semantics item 4, model changes
 and the broad productization backlog remain excluded.
 
-Current deployed repair candidate: `b4aa449017`, gpt-realtime-2.1 / speed 1.25,
+Accepted repair behavior baseline: `b4aa449017`, gpt-realtime-2.1 / speed 1.25,
 minimal / server-vad-450, AgentCore package 0.1.16+jiuwenswarm.responses2.
 The user's six-scenario interruption/query acceptance passed on this deployment;
 the [acceptance record](evidence/INTERRUPTION_QUERY_HUMAN_ACCEPTANCE_20260909.md)
