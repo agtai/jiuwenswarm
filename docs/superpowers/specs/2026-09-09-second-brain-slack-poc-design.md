@@ -110,7 +110,7 @@ Dois caminhos de leitura coexistem, com papéis distintos:
 ```python
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
 ...
-for wtool in [wiki_ingest, wiki_query, wiki_lint, read_pdf]:
+for wtool in [wiki_ingest, wiki_query, read_pdf]:   # wiki_lint fica de fora — ver abaixo
 ```
 
 **O registro é global — e isto é uma escolha, não uma impossibilidade.**
@@ -127,8 +127,31 @@ do Slack é `slack_{team}_{channel}_{thread}`, o canal é derivável dentro de
 *Escolhemos global* por custo/benefício: o condicional mexe no caminho quente de
 construção do agente e exige um terceiro parse de id de sessão — que o próprio código já
 desaconselha (`parse_slack_cron_session` está documentado como uma segunda cópia
-indesejada desse parse). O custo do global é 3 tool cards a mais no prompt de cada agente;
-não é risco de segurança, porque um agente não chama `wiki_ingest` sem ser instruído.
+indesejada desse parse).
+
+**Mas o global tem um custo de segurança, e a v2 o subestimava.** A afirmação anterior
+("não é risco, porque um agente não chama `wiki_ingest` sem ser instruído") está errada.
+
+`wiki_ingest` valida extensão **apenas no ramo de diretório**; para um arquivo único não
+valida nada (`wiki_tools.py:498-508`), e a cópia é `shutil.copy2` direto
+(`wiki_tools.py:331`), **fora do `SysOperation`** — logo fora do rail de permissão que
+guarda `read_file`. Um agente em qualquer canal pode então chamar
+`wiki_ingest(source="~/.jiuwenswarm/config/.env")`: o arquivo é copiado para `sources/`,
+o subagente o lê, e o conteúdo vira página de wiki — que a §5.4 publica no índice.
+
+A precisão importa: isto **não cria** a capacidade de ler arquivos onde o agente já tem
+`bash`/`read_file`. O que cria é um **caminho de leitura que não passa pelo rail de
+permissão** — num canal onde `bash` foi negado por scope, `wiki_ingest` continuaria
+aberto. É uma inconsistência de guarda.
+
+**Mitigações, e a PoC adota as três:**
+
+1. **Validar extensão no ramo de arquivo único** — três linhas em `wiki_tools.py`, e é
+   simplesmente o bug: o filtro `.pdf/.md/.txt` já existe no outro ramo.
+2. **Registrar só `wiki_ingest` e `wiki_query`.** `wiki_lint` fica de fora: a demo não
+   precisa dele e ele é deliberadamente mutativo (`wiki_tools.py:356`).
+3. **Negar por scope onde não se quer** — `permissions: {tools: {wiki_ingest: deny}}`.
+   Isto `scopes` faz bem, porque estreitar é a direção permitida.
 
 O que escopa o *comportamento* é o `delivery.prompt` (§5.3): a ferramenta existe em todo
 lugar, mas só o canal de papers instrui a usá-la. Registro condicional é a evolução
@@ -179,14 +202,21 @@ Justificativa das mudanças em relação à v1:
   único de qualquer tipo (`wiki_tools.py:507`): sem esta regra o subagente tenta "ler" um
   PNG colado no canal.
 
-A regra 8 é deliberadamente **agnóstica de formato** — fala em "a unidade que a
+A regra 8 tem uma **parte agnóstica e uma parte concreta**, e a distinção importa: o
+princípio é "a unidade que o leitor reportou", mas o formato efetivamente exigido é
+`p.N`, que só existe para PDF. Para outros tipos a regra 10 cobre (âncora no arquivo).
+Uma generalização real — linha para `.md`, célula para planilha — fica para quando houver
+um segundo tipo de fonte em uso.
+
+O princípio permanece: fala em "a unidade que a
 ferramenta reportou", não em PDF. A especificidade vem do leitor (página para PDF, linha
 para `.md`, célula para planilha), e degrada para ancoragem em nível de arquivo quando
 não há localizador. As regras 8 e 11 também corrigem um defeito real: o prompt padrão manda usar `read_pdf`,
 ferramenta que o subagente **não recebe** (`final_tools=[]`, `wiki_tools.py:213`); ele já
-usa `read_file` com `pages`, e as regras passam a dizer a verdade. Enquanto a linha 54 do
-`wiki_tools.py` não for corrigida, espera-se **uma chamada falhada a `read_pdf` por
-ingest** — inofensiva, mas visível no log.
+usa `read_file` com `pages`, e as regras passam a dizer a verdade. A linha 54 do `wiki_tools.py` continua mandando usar `read_pdf`, mas
+**isso não produz chamada falhada**: no smoke test o subagente simplesmente ignorou a
+instrução e foi direto ao `read_file` (zero ocorrências de `read_pdf` no log). O prompt
+está errado e é inofensivo; as regras 8 e 11 é que passam a dizer a verdade.
 
 ### 5.3 O canal de papers  *(configuração)*
 
@@ -210,12 +240,18 @@ scopes:
       prompt_append: |
         Este canal é uma biblioteca de papers com uma LLM Wiki em
         <WIKI_ROOT>.
-        - Anexo novo: chame wiki_ingest(source=<caminho do anexo>,
-          workspace="<WIKI_ROOT>") e responda com a página criada.
+        - Anexo novo, e só se for .pdf/.md/.txt:
+          1. chame wiki_ingest(source=<caminho do anexo>, workspace="<WIKI_ROOT>");
+          2. PUBLIQUE: copie cada <WIKI_ROOT>/.llm_wiki/wiki/*.md para
+             <AGENT_WORKSPACE>/memory/ com o prefixo wiki__ , um arquivo por vez,
+             com cópia (nunca mv nem symlink);
+          3. relate quais páginas foram criadas ou atualizadas, listando o
+             diretório da wiki — o retorno de wiki_ingest diz apenas [Success].
         - Pergunta: use memory_search para achar as páginas relevantes e
           responda citando as âncoras [[fonte: … p.N]]. Para perguntas que
           exigem varrer o acervo inteiro, use wiki_query.
         - Nunca afirme sem âncora.
+        - Anexo que não seja .pdf/.md/.txt: não ingira; diga por quê.
 ```
 
 `mode: [mention, has_file]` é o par mínimo: `has_file` acorda no upload do PDF,
@@ -248,7 +284,11 @@ arquivo-a-arquivo:
 - arquivo a arquivo, **não** o diretório: o scan é `os.listdir` (`lite/internal.py:80`);
 - prefixo `wiki__` para que as páginas não colidam com a memória de conversa e sejam
   fáceis de limpar;
-- symlink serve se o leitor seguir links; cópia é o caminho seguro. Decidir no ensaio.
+- **cópia, nunca `mv` nem symlink**: o watcher não tem handler `on_moved`
+  (`lite/manager.py:778`), então um arquivo movido não dispara reindexação;
+- eventos no **primeiro segundo** após a inicialização são ignorados, e **não há sync
+  periódico** de fallback se o watcher falhar (`lite/config.py:52`). Se a publicação
+  acontecer logo após um restart, force uma nova escrita ou reinicie a sessão.
 
 Quem executa: o próprio agente, instruído pelo `prompt_append` a espelhar após o ingest;
 alternativamente um passo manual no ensaio de quinta. **Não** automatizar em código na PoC.
@@ -284,7 +324,7 @@ Exigiria fork ou upgrade da dependência, fora de alcance em 2 dias. Ver §10.3.
 | # | Critério | Como verificar |
 |---|---|---|
 | S1 | PDF no canal vira páginas de wiki sem intervenção manual | postar e observar |
-| S2 | ≥ 90% das afirmações substantivas têm âncora | `grep -c "\[\[fonte:"` por página |
+| S2 | ≥ 90% das afirmações substantivas têm âncora | amostrar **3 páginas**, contar à mão as afirmações substantivas (denominador) e as ancoradas (numerador). `grep -c` sozinho não mede: não há denominador automático |
 | S3 | Âncoras corretas | conferir 5 amostras contra o PDF |
 | S4 | `memory_search` retorna páginas da wiki **após a publicação (§5.4)** | consulta direta ao índice |
 | S5 | Resposta no canal cita âncoras | inspeção |
@@ -314,7 +354,10 @@ tem de ser medido, não presumido.
 | `wiki_query` escreve na wiki sem ler o `AGENT.md` (`wiki_tools.py:352`) | média | não usar `wiki_query` para escrever na demo; se usar, revisar depois |
 | 4º paper "ao vivo" já ingerido → `[Skipped]: Deduplicated` | média | separar um paper inédito para o ensaio |
 | App Slack sem `files:read` ou sem subscrição `message.channels`/`file_share` | média | conferir escopos ao reautorizar |
-| `has_file` acorda para qualquer anexo (imagem, screenshot) | média | regra 12 do `AGENT.md` |
+| `has_file` acorda para qualquer anexo (imagem, screenshot) | média | regra 12 do `AGENT.md` + a guarda de extensão no `prompt_append` |
+| `wiki_ingest` lê qualquer arquivo fora do rail de permissão | **alta** | as 3 mitigações da §5.1 |
+| Publicação após restart cai na janela morta do watcher | baixa | forçar nova escrita; ver §5.4 |
+| `config.yaml` e backups em modo 0644 com segredos hardcoded | alta (ambiental) | `chmod 600`; ver §9 |
 
 ## 9. Questões em aberto
 
@@ -331,7 +374,14 @@ Notas sobre o config vivo (`~/.jiuwenswarm/config/config.yaml`):
   lá sem tocar em `allowed_channel_ids`. Comportamento desejado — registrado para não
   surpreender;
 - o ingest síncrono de ~5 min cabe folgado: o bound de um turno é 3600 s
-  (`_TURN_INITIATOR_TIMEOUT_SECONDS`).
+  (`_TURN_INITIATOR_TIMEOUT_SECONDS`);
+- **`models.defaults` tem 11 entradas, e as 11 estão com `is_default: true`.** O código
+  pega a primeira (`wiki_tools.py:368`); trocar de modelo exige reordenar ou limpar as
+  flags, não só repor uma chave;
+- **higiene, fora do escopo da PoC mas do mesmo ambiente:** `config.yaml` e os `.bak-*`
+  estão em modo `0644` contendo chaves de API em texto puro. Recomendado `chmod 600`. Ao
+  repor os tokens do Slack, **não restaure o backup inteiro** — ele carrega outras
+  diferenças de `models.defaults`; copie só as duas linhas.
 
 ## 10. Evoluções
 
