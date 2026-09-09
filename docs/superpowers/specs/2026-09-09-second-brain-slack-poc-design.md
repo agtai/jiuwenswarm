@@ -110,7 +110,7 @@ Dois caminhos de leitura coexistem, com papéis distintos:
 ```python
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
 ...
-for wtool in [wiki_ingest, wiki_query, read_pdf]:   # wiki_lint fica de fora — ver abaixo
+for wtool in [wiki_ingest, wiki_query, read_pdf]:   # wiki_lint não é preciso na demo
 ```
 
 **O registro é global — e isto é uma escolha, não uma impossibilidade.**
@@ -144,14 +144,28 @@ A precisão importa: isto **não cria** a capacidade de ler arquivos onde o agen
 permissão** — num canal onde `bash` foi negado por scope, `wiki_ingest` continuaria
 aberto. É uma inconsistência de guarda.
 
-**Mitigações, e a PoC adota as três:**
+**Mitigações.** Uma revisão posterior mostrou que a lista anterior era fraca; esta é a
+corrigida:
 
-1. **Validar extensão no ramo de arquivo único** — três linhas em `wiki_tools.py`, e é
-   simplesmente o bug: o filtro `.pdf/.md/.txt` já existe no outro ramo.
-2. **Registrar só `wiki_ingest` e `wiki_query`.** `wiki_lint` fica de fora: a demo não
-   precisa dele e ele é deliberadamente mutativo (`wiki_tools.py:356`).
-3. **Negar por scope onde não se quer** — `permissions: {tools: {wiki_ingest: deny}}`.
-   Isto `scopes` faz bem, porque estreitar é a direção permitida.
+1. **Restringir `source`** ao diretório de uploads da sessão
+   (`get_agent_sessions_dir()/<sid>/uploads`, que é onde o conector deposita os anexos —
+   `slack_connect.py:11358`) ou ao workspace do agente. **Este é o fecho real.** Validar
+   extensão sozinho não basta: o ramo de diretório faz `glob("**/*")` a partir de
+   qualquer raiz (`wiki_tools.py:500-506`), logo `wiki_ingest(source="~")` ingeriria todo
+   `.md` do usuário.
+2. **Validar extensão também no ramo de arquivo único** — o filtro `.pdf/.md/.txt` já
+   existe no outro ramo; é o bug óbvio, mas é complemento, não substituto de (1).
+3. **Usar `sys_operation.fs()` para a cópia**, em vez de `shutil.copy2`. O parâmetro
+   `sys_operation` **já chega** na função (`wiki_tools.py:475`) e é ignorado. Isto põe a
+   leitura de volta atrás do rail de permissão, que é a inconsistência de origem.
+4. **Negar por scope onde não se quer** — `permissions: {tools: {wiki_ingest: deny}}`.
+   Funciona (estreitar é permitido), mas é opt-out por canal: o default global segue
+   aberto, então não substitui (1).
+
+> **O que NÃO é mitigação.** Deixar `wiki_lint` de fora do registro não protege nada: ele
+> apenas lê a wiki. Quem escreve nela é o `wiki_query` — *"write it back into the wiki"*,
+> `wiki_tools.py:352` — e esse **fica** registrado. Uma versão anterior deste spec listava
+> isso como mitigação; era teatro.
 
 O que escopa o *comportamento* é o `delivery.prompt` (§5.3): a ferramenta existe em todo
 lugar, mas só o canal de papers instrui a usá-la. Registro condicional é a evolução
@@ -194,7 +208,10 @@ Justificativa das mudanças em relação à v1:
   da afirmação cai noutro chunk e o S5 falha mesmo com o S3 perfeito.
 - **`## Page N`** (regra 8) — `harness/tools/filesystem.py:750` escreve
   `f"## Page {page_no}\n{page_text}"`. O número é dado, não inferido; isto é o que
-  sustenta o S3.
+  sustenta o S3. **Atenção ao conferir:** é o índice *físico* do pdfplumber (a 1ª página
+  do arquivo é 1), não o número impresso na página. Num paper com capa ou numeração
+  romana no início, os dois divergem — confira pelo contador do visualizador de PDF, não
+  pelo número impresso.
 - **faixa ≤ 5** (regra 11) — o teto declarado é 20 páginas (`PDF_MAX_PAGES_PER_READ`),
   mas `MAX_TOKENS = 25_000` estoura antes e **trunca**; uma faixa truncada produz âncora
   deslocada sem o modelo perceber.
@@ -237,16 +254,15 @@ scopes:
       chat:    <ID_DO_CANAL_DE_PAPERS>
     delivery:
       mode: [mention, has_file]
+      mid_turn: queue          # ver nota abaixo — o default `cancel` mata o ingest
       prompt_append: |
         Este canal é uma biblioteca de papers com uma LLM Wiki em
         <WIKI_ROOT>.
         - Anexo novo, e só se for .pdf/.md/.txt:
           1. chame wiki_ingest(source=<caminho do anexo>, workspace="<WIKI_ROOT>");
-          2. PUBLIQUE: copie cada <WIKI_ROOT>/.llm_wiki/wiki/*.md para
-             <AGENT_WORKSPACE>/memory/ com o prefixo wiki__ , um arquivo por vez,
-             com cópia (nunca mv nem symlink);
-          3. relate quais páginas foram criadas ou atualizadas, listando o
+          2. relate quais páginas foram criadas ou atualizadas, listando o
              diretório da wiki — o retorno de wiki_ingest diz apenas [Success].
+             A publicação no índice é automática (§5.4); não a faça você.
         - Pergunta: use memory_search para achar as páginas relevantes e
           responda citando as âncoras [[fonte: … p.N]]. Para perguntas que
           exigem varrer o acervo inteiro, use wiki_query.
@@ -256,6 +272,13 @@ scopes:
 
 `mode: [mention, has_file]` é o par mínimo: `has_file` acorda no upload do PDF,
 `mention` permite perguntar.
+
+**`mid_turn: queue` não é opcional.** O default é `cancel`
+(`scopes/schema.py:123` — *"cancel is first because it is the default"*). Durante os ~5
+minutos de um ingest, **qualquer mensagem de outra pessoa na thread cancela o turno**; e
+como o manifesto só grava após sucesso (`wiki_tools.py:340`), a tentativa seguinte
+recomeça do zero. Num canal com gente comentando, isso é quase garantido. `queue` segura
+a mensagem até a sessão ficar ociosa; o Slack implementa os três mecanismos.
 
 **O `delivery.prompt` é costurado no texto da mensagem do usuário**, não no system
 prompt: `slack_connect.py:10498` faz `text = "\n\n".join([text, *appended])`. A
@@ -276,8 +299,21 @@ O índice que o agente consulta é o do kernel `lite`, e ele varre
 `<agent workspace>/memory/*.md` — plano, sem recursão. Logo a wiki precisa ser
 **publicada** lá.
 
-**Passo de publicação (zero código no kernel):** depois de cada ingest, espelhar
-arquivo-a-arquivo:
+**Passo de publicação — em código, não por prompt.** A v3 deste spec mandava o agente
+espelhar via `prompt_append`. **Isso não funciona no Slack**, por duas razões verificadas:
+
+- o modelo **não sabe onde fica o workspace**: a seção de diretórios só é injetada para
+  os canais `tui`/`web`/`ws_client` (`runtime_prompt_rail.py:325`);
+- copiar exigiria `bash cp` de um diretório **fora** do workspace, o que passa pelo
+  `file_guard` e no Slack vira **botão de aprovação no meio do turno**. A demo dependeria
+  de um clique.
+
+Como `wiki_tools.py` já será editado para as mitigações da §5.1, a publicação vira ~5
+linhas ali: após `[Success]`, copiar `wiki/*.md` para
+`get_agent_workspace_dir()/memory/wiki__*.md`. Isso elimina o risco que a §8 marcava como
+"alta" e torna o S1 ("sem intervenção manual") verdadeiro.
+
+O espelhamento é arquivo-a-arquivo:
 
     <WIKI_ROOT>/.llm_wiki/wiki/*.md   →   <agent workspace>/memory/wiki__*.md
 
@@ -290,8 +326,7 @@ arquivo-a-arquivo:
   periódico** de fallback se o watcher falhar (`lite/config.py:52`). Se a publicação
   acontecer logo após um restart, force uma nova escrita ou reinicie a sessão.
 
-Quem executa: o próprio agente, instruído pelo `prompt_append` a espelhar após o ingest;
-alternativamente um passo manual no ensaio de quinta. **Não** automatizar em código na PoC.
+Quem executa: o próprio `wiki_ingest`, ao final de uma ingestão bem-sucedida.
 
 **Credencial.** As três variáveis em `~/.jiuwenswarm/config/.env`:
 `EMBED_API_KEY`, `EMBED_API_BASE`, `EMBED_MODEL`. Elas chegam ao kernel via
@@ -315,18 +350,25 @@ Exigiria fork ou upgrade da dependência, fora de alcance em 2 dias. Ver §10.3.
 2. Abrir uma página e mostrar as âncoras `[[fonte: … p.N]]` com as citações.
 3. Perguntar algo pontual no canal → resposta por `memory_search` com âncora.
 4. **Conferir**: abrir o PDF na página apontada e comparar com a citação.
-5. Perguntar algo transversal ("o que estes papers discordam entre si?") →
-   `wiki_query`.
-6. *(Se o tempo permitir)* ingerir um 4º paper ao vivo e mostrar o `index.md` mudando.
+   Este é o clímax da demo — é o que "ponteiro" significa.
+5. *(Opcional, só se o ensaio aprovar)* pergunta transversal → `wiki_query`.
+
+**Cortes deliberados, e as razões:**
+
+| Cortado | Por quê |
+|---|---|
+| Ingest ao vivo de um 4º paper | ~5 min de silêncio na frente da plateia. Além disso o dedup por SHA-256 exigiria um paper inédito, e um `mid_turn` mal configurado cancelaria o turno |
+| Embeddings / "híbrida" no discurso | as `EMBED_*` estão vazias; BM25 sozinho funciona. Só prometer híbrida se a chave existir na quinta — senão dizer "busca sobre a wiki" |
+| `wiki_query` ao vivo (passo 5) | ele **escreve** na wiki (`wiki_tools.py:352`) sem ler o `AGENT.md`, então pode criar páginas sem âncora. Manter só se o ensaio mostrar que não estraga; e sempre por último |
 
 ## 7. Critérios de sucesso
 
 | # | Critério | Como verificar |
 |---|---|---|
-| S1 | PDF no canal vira páginas de wiki sem intervenção manual | postar e observar |
+| S1 | PDF no canal vira páginas de wiki **e é publicado no índice** sem intervenção manual | postar e observar. Só é verdade com a publicação em código (§5.4) |
 | S2 | ≥ 90% das afirmações substantivas têm âncora | amostrar **3 páginas**, contar à mão as afirmações substantivas (denominador) e as ancoradas (numerador). `grep -c` sozinho não mede: não há denominador automático |
 | S3 | Âncoras corretas | conferir 5 amostras contra o PDF |
-| S4 | `memory_search` retorna páginas da wiki **após a publicação (§5.4)** | consulta direta ao índice |
+| S4 | `memory_search` retorna páginas da wiki **após a publicação (§5.4)** | não há CLI para o índice do `lite`; verificar com `sqlite3 ~/.jiuwenswarm/agent/workspace/memory/memory.db "select path from files where path like '%wiki__%'"` |
 | S5 | Resposta no canal cita âncoras | inspeção |
 | S6 | Ingest de 1 paper < 8 min | cronometrar |
 
@@ -355,13 +397,39 @@ tem de ser medido, não presumido.
 | 4º paper "ao vivo" já ingerido → `[Skipped]: Deduplicated` | média | separar um paper inédito para o ensaio |
 | App Slack sem `files:read` ou sem subscrição `message.channels`/`file_share` | média | conferir escopos ao reautorizar |
 | `has_file` acorda para qualquer anexo (imagem, screenshot) | média | regra 12 do `AGENT.md` + a guarda de extensão no `prompt_append` |
-| `wiki_ingest` lê qualquer arquivo fora do rail de permissão | **alta** | as 3 mitigações da §5.1 |
+| `wiki_ingest` lê qualquer arquivo fora do rail de permissão | **alta** | as 4 mitigações da §5.1, sendo (1) o fecho real |
+| **`mid_turn` default `cancel` cancela o ingest de 5 min** | **alta** | `mid_turn: queue` no scope (§5.3) — não é opcional |
+| **46 erros `NoneType … 'id'` no smoke test** (ver §8.1) | **desconhecida** | reproduzir pelo Slack na quinta antes de confiar em qualquer medição |
 | Publicação após restart cai na janela morta do watcher | baixa | forçar nova escrita; ver §5.4 |
-| `config.yaml` e backups em modo 0644 com segredos hardcoded | alta (ambiental) | `chmod 600`; ver §9 |
+| ~~`config.yaml` em 0644~~ | — | **resolvido**: todos os arquivos com segredo em 0600 |
+
+### 8.1 O smoke test não foi limpo — e todas as medições vêm dele
+
+O ingest que produziu a wiki de referência terminou em `[Success]`, mas o log tem
+**46 ocorrências de `'NoneType' object has no attribute 'id'`** — em cada `write_file`,
+`edit_file` e `bash`. Os arquivos **foram** escritos (a wiki existe e é boa), mas o modelo
+viu falha e gastou iterações relendo para conferir.
+
+Consequências que precisam ser ditas em voz alta:
+
+- os **294 s** medidos e o comportamento observado ("ignorou `read_pdf`", "leu em 4
+  faixas") vêm dessa execução degradada. Não são baseline confiável;
+- a causa provável é diferença de harness entre o runner standalone (que usei) e o
+  caminho real do Slack — **mas ninguém verificou isso**;
+- o subagente **improvisa quando não consegue cumprir uma regra**: sem `bash` funcional,
+  inventou a data do `log.md` (usou a do arXiv) em vez de parar; e leu faixas de 10
+  páginas descrevendo-as como 3 blocos. Isto é o prognóstico direto para as regras 8-12:
+  esperar **conformidade parcial**, não obediência.
+
+**Ação:** o primeiro item do ensaio de quinta é reproduzir o ingest **pelo Slack**, não
+por CLI, e verificar se os 46 erros somem. Se persistirem, medir S2/S3 contra essa
+realidade e não contra a esperança.
 
 ## 9. Questões em aberto
 
-1. Qual `<WIKI_ROOT>` — sugestão: `~/.jiuwenswarm/wikis/papers`.
+1. Qual `<WIKI_ROOT>` — sugestão: `~/.jiuwenswarm/wikis/papers`. **Precisa ser caminho
+   literal e absoluto no YAML**: no Slack o modelo não recebe a seção de diretórios
+   (`runtime_prompt_rail.py:325`) e não descobriria o caminho sozinho.
 2. Qual o ID do canal de papers (o `C0BKNLQ1FR7` atual é o canal de testes geral).
 3. Quais 3 papers.
 4. Há endpoint de embeddings disponível?
@@ -378,10 +446,9 @@ Notas sobre o config vivo (`~/.jiuwenswarm/config/config.yaml`):
 - **`models.defaults` tem 11 entradas, e as 11 estão com `is_default: true`.** O código
   pega a primeira (`wiki_tools.py:368`); trocar de modelo exige reordenar ou limpar as
   flags, não só repor uma chave;
-- **higiene, fora do escopo da PoC mas do mesmo ambiente:** `config.yaml` e os `.bak-*`
-  estão em modo `0644` contendo chaves de API em texto puro. Recomendado `chmod 600`. Ao
-  repor os tokens do Slack, **não restaure o backup inteiro** — ele carrega outras
-  diferenças de `models.defaults`; copie só as duas linhas.
+- **higiene:** `config.yaml`, `.env` e todos os `.bak*`/`.pre-align` estão agora em
+  `0600` (feito). Ao repor os tokens do Slack, **não restaure o backup inteiro** — ele
+  carrega outras diferenças de `models.defaults`; copie só as duas linhas.
 
 ## 10. Evoluções
 
