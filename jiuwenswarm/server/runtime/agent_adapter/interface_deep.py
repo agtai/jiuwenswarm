@@ -332,6 +332,14 @@ from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import 
 )
 from jiuwenswarm.symphony.config import load_symphony_config
 from jiuwenswarm.agents.harness.common.tools.pdf_tools import read_pdf
+from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query
+
+#: Tools every agent shares. wiki_ingest and wiki_query were unregistered upstream in
+#: e4fae3061 as part of trimming prompt surface, not because of any defect; the papers
+#: channel needs them, and a scope cannot grant a tool (it can only narrow), so they come
+#: back globally and the channel's prompt is what puts them to use. wiki_lint stays out:
+#: the PoC never lints.
+SHARED_AGENT_TOOLS = (wiki_ingest, wiki_query, read_pdf)
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
@@ -7717,7 +7725,7 @@ class JiuWenSwarmDeepAdapter:
         """Get tool cards."""
         tool_cards = []
 
-        for wtool in [read_pdf]:
+        for wtool in SHARED_AGENT_TOOLS:
             self._register_shared_tool(wtool)
             tool_cards.append(wtool.card)
 
