@@ -67,6 +67,38 @@ def source_is_allowed(path: Path) -> bool:
     roots = (get_agent_sessions_dir().resolve(), get_agent_workspace_dir().resolve())
     return any(resolved == root or root in resolved.parents for root in roots)
 
+
+#: Prefix for a wiki page copied into the agent's memory directory. It keeps the pages
+#: apart from conversation memory, makes them greppable, and cannot collide with the
+#: dated session files the memory index also stores.
+WIKI_PUBLISH_PREFIX = "wiki__"
+
+
+def publish_wiki_pages(wiki_dir: Path, memory_dir: Path) -> List[Path]:
+    """Copy each wiki page into the agent's memory directory, and say which.
+
+    The memory index the agent searches is the kernel's ``lite`` manager, and it scans
+    ``<workspace>/memory`` with ``os.listdir`` -- flat, no recursion, any ``.md``. So the
+    pages have to be published there file by file rather than by pointing a config key at
+    the wiki: the key that would have done that (``memory.extraPaths``) feeds a different
+    manager, which the agent never consults.
+
+    ``copyfile`` rather than ``copy2`` so the copy gets a fresh mtime, and never a move or
+    a symlink: the index's watcher has no ``on_moved`` handler, so a moved file is not
+    reindexed.
+    """
+    if not wiki_dir.is_dir():
+        return []
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    published: List[Path] = []
+    for page in sorted(wiki_dir.glob("*.md")):
+        if not page.is_file():
+            continue
+        target = memory_dir / f"{WIKI_PUBLISH_PREFIX}{page.name}"
+        shutil.copyfile(page, target)
+        published.append(target)
+    return published
+
 DEFAULT_WIKI_AGENT_SYSTEM_PROMPT_EN = (
     "You are an LLM Wiki Maintainer. You manage a workspace consisting of three primary directories:\n"
     "1. `sources/`: where immutable raw text and PDF files are placed.\n"
@@ -369,6 +401,17 @@ class LLMWiki:
             return result
 
         await self._manifest.record(sha256=sha256, name=source_path.name, destination=destination)
+
+        # Publish before returning, so the pages are searchable by the time the agent
+        # answers in the channel. Failure here must not fail the ingest: the wiki is
+        # written and correct either way, and a missing publication is recoverable by
+        # ingesting again or copying by hand.
+        try:
+            published = publish_wiki_pages(self.wiki_dir, get_agent_workspace_dir() / "memory")
+            logger.info("[LLMWiki] published %d wiki page(s) to the memory index", len(published))
+        except Exception as exc:
+            logger.warning("[LLMWiki] publishing wiki pages failed: %s", exc)
+
         return result
 
     async def query(self, question: str) -> Dict[str, Any]:
