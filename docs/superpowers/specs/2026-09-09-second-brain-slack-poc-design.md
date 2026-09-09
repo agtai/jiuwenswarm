@@ -88,12 +88,26 @@ from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki
 for wtool in [wiki_ingest, wiki_query, wiki_lint, read_pdf]:
 ```
 
-**Registro é global, e isso é forçado pelo mecanismo, não uma escolha.** `scopes`
-só estreita permissões (D4: `allow` nunca amplia, pois a fusão é `strictest`), e `not`
-existe apenas em eixos de identidade — não há `not: {chat: ...}`. Portanto é impossível
-conceder uma ferramenta a um único canal via scopes. O que escopa o *comportamento* é o
-`delivery.prompt` (§5.3): a ferramenta existe em todo lugar, mas só o canal de papers
-instrui a usá-la.
+**O registro é global — e isto é uma escolha, não uma impossibilidade.**
+
+*Via `scopes` seria impossível*: eles só estreitam permissões (D4: `allow` nunca amplia,
+pois a fusão é `strictest`) e `not` existe apenas em eixos de identidade, então nenhum
+scope pode **conceder** uma ferramenta a um canal.
+
+*Via código seria possível*: o adapter tem `_is_session_scoped_adapter`, e o
+`_tool_owner_id()` já se escopa por sessão (`<card id>_s_<session>`). Como o id de sessão
+do Slack é `slack_{team}_{channel}_{thread}`, o canal é derivável dentro de
+`_get_tool_cards`.
+
+*Escolhemos global* por custo/benefício: o condicional mexe no caminho quente de
+construção do agente e exige um terceiro parse de id de sessão — que o próprio código já
+desaconselha (`parse_slack_cron_session` está documentado como uma segunda cópia
+indesejada desse parse). O custo do global é 3 tool cards a mais no prompt de cada agente;
+não é risco de segurança, porque um agente não chama `wiki_ingest` sem ser instruído.
+
+O que escopa o *comportamento* é o `delivery.prompt` (§5.3): a ferramenta existe em todo
+lugar, mas só o canal de papers instrui a usá-la. Registro condicional é a evolução
+natural se a PoC virar produto.
 
 Se depois quisermos proibi-la em algum canal, aí sim `scopes` serve —
 `permissions: {tools: {wiki_ingest: deny}}` estreita e funciona.
@@ -134,14 +148,24 @@ não há localizador. A regra 11 corrige um defeito real: o prompt padrão manda
 
 ### 5.3 O canal de papers  *(configuração)*
 
+Escrito em **duas camadas**, usando a composição que `compose.py` já implementa: prosa
+com `<key>_append` acrescenta ao que a camada acima assentou, em vez de substituir.
+
 ```yaml
 scopes:
+  # camada 1 — comportamento base, todo canal Slack
+  - match: {channel: slack}
+    delivery:
+      prompt: |
+        <comportamento base do bot>
+
+  # camada 2 — este canal é de papers
   - match:
       channel: slack
       chat:    <ID_DO_CANAL_DE_PAPERS>
     delivery:
       mode: [mention, has_file]
-      prompt: |
+      prompt_append: |
         Este canal é uma biblioteca de papers com uma LLM Wiki em
         <WIKI_ROOT>.
         - Anexo novo: chame wiki_ingest(source=<caminho do anexo>,
@@ -154,6 +178,10 @@ scopes:
 
 `mode: [mention, has_file]` é o par mínimo: `has_file` acorda no upload do PDF,
 `mention` permite perguntar.
+
+`chat` é **escalar** (`schema.py:899` recusa qualquer valor que não seja string), logo
+cada canal de papers exige seu próprio scope com o mesmo `prompt_append` copiado. Com um
+canal isso não incomoda; com vários, é a repetição que a §10.2 resolve.
 
 ### 5.4 Busca híbrida  *(configuração + credencial)*
 
@@ -218,9 +246,49 @@ tem de ser medido, não presumido.
 3. Quais 3 papers.
 4. Há endpoint de embeddings disponível?
 
-## 10. Evolução: híbrida por dentro do `wiki_query`
+## 10. Evoluções
+
+### 10.1 Híbrida por dentro do `wiki_query`
 
 A PoC coloca a híbrida **ao lado** do `wiki_query`. O passo seguinte é colocá-la
 **dentro**: o `wiki_query` recuperaria as páginas relevantes antes de abri-las, em vez
 de listar o diretório e ler tudo. Hoje ele lê a wiki inteira — com 17 páginas funciona,
 com 200 não. Isso exige modificar uma ferramenta upstream e por isso fica fora da PoC.
+
+### 10.2 `channel_type` — classes de canal em vez de ids
+
+A §5.3 escreve o prompt de papers contra um **id de conversa**. Como `chat` é escalar,
+N canais do mesmo tipo exigem N scopes com o mesmo `prompt_append` copiado, e um leitor
+do config vê uma lista de ids opacos em vez de uma intenção.
+
+O projeto já tem o padrão certo no eixo de pessoas: `people:` e `roles:` são blocos
+irmãos que resolvem um nome (`admin`) para um conjunto de ids, e `role` casa contra isso.
+O código é explícito quanto ao papel disso — um role *"não carrega permissões próprias:
+ele nomeia um conjunto de pessoas"* (D8). `channel_type` seria o análogo para conversas:
+
+```yaml
+channel_types:                     # bloco novo, irmão de people:/roles:
+  papers:  [C_PAPERS_1, C_PAPERS_2]
+  suporte: [C_SUP_1]
+
+scopes:
+  - match: {channel: slack, channel_type: papers}
+    delivery: {prompt_append: "<wiki + papers>"}
+```
+
+Ganhos: uma definição por tipo, vocabulário legível, e a composição em camadas já
+existente passa a valer por classe.
+
+O que isto exige, e por que fica fora da PoC:
+
+- eixo novo no schema, com resolução e validação próprias;
+- declaração nas `ChannelCapabilities` de cada conector que o suporte;
+- decisões de semântica ainda em aberto: um canal pode ter dois tipos? tipos compõem
+  entre si? o que acontece quando dois tipos discordam da mesma chave?
+- **e uma consequência de segurança que não é óbvia.** `scoped_chats` documenta que, no
+  Slack, os ids nomeados em scopes de `delivery`/`agent` **isentam o canal de
+  `allowed_channel_ids`** — nomear uma conversa num scope já é opt-in para o bot
+  responder ali. Um `channel_type` mal desenhado abriria vários canais de uma vez sem
+  que ninguém percebesse, que é exatamente a direção (D4) que este desenho não permite.
+
+Merece spec próprio.
