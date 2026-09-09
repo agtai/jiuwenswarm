@@ -611,14 +611,9 @@ if not staged.exists():
     staged.write_bytes(Path(PDF).read_bytes())
 
 async def main():
-    fn = wiki_ingest
-    for attr in ("func", "_func", "fn", "callback", "handler"):
-        cand = getattr(wiki_ingest, attr, None)
-        if callable(cand):
-            fn = cand
-            break
+    # wiki_ingest is a LocalFunction; the coroutine is on ._func
     t0 = time.time()
-    out = await fn(source=str(staged), workspace=WS, force=False)
+    out = await wiki_ingest._func(source=str(staged), workspace=WS, force=False)
     print(f"\n[rehearsal] {time.time() - t0:.0f}s\n{out}")
 
 asyncio.run(main())
@@ -642,7 +637,7 @@ ser reaberta antes de confiar em qualquer medição.
 .venv/bin/python -c "
 import asyncio
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest
-fn = getattr(wiki_ingest, 'func', wiki_ingest)
+fn = wiki_ingest._func
 print(asyncio.run(fn(source='/home/renan/.jiuwenswarm/config/.env', workspace='/tmp/x')))
 "
 ```
@@ -674,8 +669,25 @@ nível de arquivo + seção) antes da sexta.
 sqlite3 ~/.jiuwenswarm/agent/workspace/memory/memory.db \
   "select path from files where path like '%wiki__%' limit 10;"
 ```
-Expected: as páginas publicadas. Se vier vazio, esperar 5 s (debounce de 2 s) e repetir;
-se seguir vazio, o watcher não pegou — forçar uma reescrita ou reiniciar a sessão.
+**`sqlite3` não está instalado nesta máquina**; usar Python:
+
+```bash
+.venv/bin/python -c "
+import sqlite3, pathlib
+db = pathlib.Path.home()/'.jiuwenswarm/agent/workspace/memory/memory.db'
+c = sqlite3.connect(str(db))
+print(c.execute(\"select count(*) from files where path like '%wiki__%'\").fetchone()[0])
+"
+```
+
+**Resultado do ensaio de 2026-09-09: 0.** Não é falha da publicação — os 18 arquivos
+estão em `~/.jiuwenswarm/agent/workspace/memory/`. É que **nada indexa sem um agente
+vivo**: o watcher e o sync inicial pertencem ao gestor de memória do agente principal,
+que não roda num script CLI. O subagente da wiki tem workspace próprio
+(`<WIKI_ROOT>/.llm_wiki`) e indexa o dele, não o do agente.
+
+**Consequência: o S4 só pode ser verificado com o backend de pé.** É o primeiro item da
+Task 6, antes mesmo de postar um PDF no canal.
 
 ---
 
