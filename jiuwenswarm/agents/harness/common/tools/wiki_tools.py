@@ -34,13 +34,38 @@ from jiuwenswarm.common.kv_cache_affinity_config import (
     model_provider,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
-from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.common.utils import get_agent_sessions_dir, get_agent_workspace_dir
 
 
 logger = logging.getLogger(__name__)
 
 # Constants for wiki workspace resolution
 DEFAULT_WIKI_DIR = ".llm_wiki"
+
+#: The document types the wiki maintainer can actually read. The directory branch of
+#: ``wiki_ingest`` already filtered on these; the single-file branch did not, which is
+#: how a PNG dropped in a Slack channel reached the subagent.
+INGESTIBLE_SUFFIXES: tuple[str, ...] = (".pdf", ".md", ".txt")
+
+
+def source_is_allowed(path: Path) -> bool:
+    """Whether ``wiki_ingest`` may read ``path``.
+
+    The tool copies with ``shutil`` rather than through ``SysOperation``, so it does not
+    pass the permission rail that guards ``read_file``. Without a guard here, an agent in
+    any conversation could name ``~/.jiuwenswarm/config/.env`` and have the maintainer
+    subagent summarise it into a wiki page. Two roots are allowed because they are the two
+    places a document legitimately arrives: the session upload directory, where the Slack
+    connector saves attachments, and the agent workspace.
+
+    Resolved before comparing so ``..`` cannot walk out of an allowed root.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    roots = (get_agent_sessions_dir().resolve(), get_agent_workspace_dir().resolve())
+    return any(resolved == root or root in resolved.parents for root in roots)
 
 DEFAULT_WIKI_AGENT_SYSTEM_PROMPT_EN = (
     "You are an LLM Wiki Maintainer. You manage a workspace consisting of three primary directories:\n"
@@ -492,12 +517,18 @@ async def wiki_ingest(
         if not src_path.exists():
             return f"Error: Source {source} not found."
 
+        if not source_is_allowed(src_path):
+            return (
+                f"Error: wiki_ingest only reads documents under the agent's session "
+                f"uploads or workspace directory; {source} is outside both."
+            )
+
         # Ensure we avoid circular ingestion by skipping the .llm_wiki directory itself
         protected_root = str(final_workspace).lower()
 
         targets = []
         if src_path.is_dir():
-            for ext in (".pdf", ".md", ".txt"):
+            for ext in INGESTIBLE_SUFFIXES:
                 for p in src_path.glob(f"**/*{ext}"):
                     posix_path = p.as_posix()
                     # Skip if the file is located inside the .llm_wiki workspace
@@ -505,6 +536,11 @@ async def wiki_ingest(
                         continue
                     targets.append(p)
         else:
+            if src_path.suffix.lower() not in INGESTIBLE_SUFFIXES:
+                return (
+                    f"Error: wiki_ingest handles {', '.join(INGESTIBLE_SUFFIXES)}; "
+                    f"got '{src_path.suffix or 'no extension'}'."
+                )
             targets.append(src_path)
 
         all_results = {}
