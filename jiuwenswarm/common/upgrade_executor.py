@@ -235,14 +235,21 @@ class PipExecutor(UpgradeExecutor):
         uv_cmd = self._resolve_uv_command()
         try:
             if uv_cmd:
+                # Pin the interpreter this process runs under. uv otherwise
+                # resolves the environment from VIRTUAL_ENV or a .venv near the
+                # cwd -- ambient facts a service launcher may not provide -- and
+                # this guard then fails for the same reason the install it
+                # guards would, letting the wrong path proceed silently.
+                # Plain text output: ``--format json`` does not exist on every
+                # uv release, and a guard that only works on some versions is
+                # the same silent failure this fix removes.
                 result = subprocess.run(
-                    [uv_cmd, "pip", "show", "--format", "json", package],
+                    [uv_cmd, "pip", "show", "--python", sys.executable, package],
                     capture_output=True, text=True, timeout=10,
                 )
                 if result.returncode == 0:
-                    import json as _json
-                    data = _json.loads(result.stdout)
-                    if isinstance(data, dict) and data.get("editable"):
+                    if any(line.lower().startswith("editable project location:")
+                           for line in result.stdout.splitlines()):
                         return (
                             f"'{package}' is installed as an editable package. "
                             "Use 'git pull && uv sync' to update instead."
@@ -315,7 +322,8 @@ class PipExecutor(UpgradeExecutor):
 
         uv_cmd = self._resolve_uv_command()
         if uv_cmd:
-            args = [uv_cmd, "pip", "install", "--upgrade", package]
+            args = [uv_cmd, "pip", "install", "--python", sys.executable,
+                    "--upgrade", package]
             if pypi_mirror:
                 args.extend(["--index-url", pypi_mirror])
             return args

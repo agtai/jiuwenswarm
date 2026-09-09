@@ -24,6 +24,11 @@ export default {
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
+    // Bundled application plugins compile into this build (see
+    // ApplicationPluginOutlet's import.meta.glob) and style themselves with the
+    // same utilities, so their sources have to be scanned or every class they
+    // use is purged out of the stylesheet.
+    "../../../extensions/*/frontend/**/*.{js,ts,jsx,tsx}",
   ],
   theme: {
     extend: {
