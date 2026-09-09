@@ -5973,3 +5973,56 @@ async def test_cancel_at_model_checkpoint_prevents_next_model_and_result(tmp_pat
         await adapter.close(interrupt_running=True)
         if delivery_task is not None:
             await asyncio.gather(delivery_task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("split_index", [False, True])
+@pytest.mark.parametrize("attribute", [None, "*.md text eol=lf\n", "*.md text eol=crlf\n"])
+def test_attempt_seed_preserves_authorized_raw_bytes_and_dirty_index(
+    tmp_path: Path, attribute: str | None, split_index: bool,
+) -> None:
+    project = tmp_path / "fidelity-project"
+    _git_project(project)
+    _git(project, "config", "core.autocrlf", "true")
+    if attribute is not None:
+        (project / ".gitattributes").write_bytes(attribute.encode())
+    (project / "README.md").write_bytes(b"baseline\n")
+    (project / "mixed.txt").write_bytes(b"one\r\ntwo\nthree\r\n")
+    (project / "binary.dat").write_bytes(b"\x00original\r\n")
+    (project / "deleted.txt").write_bytes(b"remove me\n")
+    (project / "old-directory").mkdir()
+    (project / "old-directory/child").write_bytes(b"old child\n")
+    (project / "old-file").write_bytes(b"old file\n")
+    (project / "notes.md").write_bytes(b"case rename\n")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-m", "admitted files")
+    (project / "staged.md").write_bytes(b"staged\n")
+    _git(project, "add", "staged.md")
+    (project / "staged.md").write_bytes(b"staged\nunstaged\r\n")
+    (project / "deleted.txt").unlink()
+    (project / "untracked.md").write_bytes(b"untracked\n")
+    (project / "intent.md").write_bytes(b"intent-to-add\n")
+    _git(project, "add", "--intent-to-add", "intent.md")
+    _git(project, "rm", "old-directory/child")
+    (project / "old-directory").write_bytes(b"directory replaced by file\n")
+    _git(project, "add", "old-directory")
+    (project / "old-file").unlink()
+    (project / "old-file").mkdir()
+    (project / "old-file/child").write_bytes(b"file replaced by directory\n")
+    _git(project, "mv", "notes.md", "Notes.md")
+    if split_index:
+        _git(project, "update-index", "--split-index")
+    index_before = (project / ".git/index").read_bytes()
+    before = project_code_executor._project_tree_fingerprint(project)
+    originals = {p.relative_to(project): p.read_bytes() for p in project.rglob("*")
+                 if p.is_file() and ".git" not in p.relative_to(project).parts}
+    parent, checkout = project_code_executor._create_attempt_worktree(
+        project, "fidelity-attempt", project_code_executor._git_head(project),
+    )
+    try:
+        project_code_executor._seed_attempt_worktree(project, checkout, before)
+        assert {p: (checkout / p).read_bytes() for p in originals} == originals
+        assert not (checkout / "deleted.txt").exists()
+        assert project_code_executor._project_tree_fingerprint(project) == before
+        assert (project / ".git/index").read_bytes() == index_before
+    finally:
+        project_code_executor._remove_attempt_worktree(project, parent, checkout)

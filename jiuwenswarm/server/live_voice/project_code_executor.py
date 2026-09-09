@@ -1173,31 +1173,57 @@ def _remove_attempt_worktree(root: Path, parent: Path, worktree: Path) -> None:
 
 @profiled('executor.worktree_seed')
 def _seed_attempt_worktree(root: Path, worktree: Path, expected_tree: str) -> None:
-    cached_patch = _git_output(
-        root, "diff", "--cached", "--binary", "--full-index", "HEAD", "--"
-    )
-    if cached_patch:
-        _git_run_with_input(worktree, ("apply", "--binary", "-"), cached_patch)
-        _git_output(worktree, "add", "-A", "--")
-    unstaged_patch = _git_output(root, "diff", "--binary", "--full-index", "--")
-    if unstaged_patch:
-        _git_run_with_input(worktree, ("apply", "--binary", "-"), unstaged_patch)
-    raw_untracked = _git_output(
-        root,
-        "ls-files",
-        "--others",
-        "--exclude-standard",
-        "-z",
-    ).split(b"\0")
-    for raw_relative in (item for item in raw_untracked if item):
+    """Reconstruct the admitted index and working bytes as separate layers."""
+    _reject_git_visible_symlinks(root)
+    _reject_git_visible_symlinks(worktree)
+    checkout_paths = set(_git_output(worktree, "ls-files", "--cached", "-z").split(b"\0"))
+    def git_path(base: Path, name: str) -> Path:
+        value = Path(_git_output(base, "rev-parse", "--git-path", name).decode("utf-8").strip())
+        return value if value.is_absolute() else base / value
+
+    # The admitted index includes staged/intent-to-add state and the working
+    # stat cache. Recreating it via add/apply can mark byte-identical LF files
+    # dirty solely because checkout recorded CRLF sizes. Copy the actual index
+    # into this newly owned worktree; the source index is never refreshed/written.
+    source_index, target_index = git_path(root, "index"), git_path(worktree, "index")
+    if source_index.resolve() == target_index.resolve() or _is_unsafe_filesystem_link(target_index):
+        raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH")
+    shared = _git_output(root, "rev-parse", "--shared-index-path").decode("utf-8").strip()
+    if shared:
+        shared_source = Path(shared)
+        if not shared_source.is_absolute():
+            shared_source = root / shared_source
+        shared_target = git_path(worktree, shared_source.name)
+        if shared_source.resolve() != shared_target.resolve():
+            shutil.copy2(shared_source, shared_target)
+    shutil.copy2(source_index, target_index)
+    # Restore admitted working bytes independently of Git conversion/filtering.
+    visible = set(_git_output(root, "ls-files", "--cached", "--others",
+                              "--exclude-standard", "-z").split(b"\0")) - {b""}
+    # Retire checkout files first. Copying before retiring loses case-only
+    # renames on Windows and cannot replace a checkout directory with a file.
+    for raw_relative in sorted(checkout_paths - {b""}):
         relative = Path(raw_relative.decode("utf-8", errors="strict"))
-        source = root / relative
-        destination = worktree / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if source.is_symlink():
-            destination.symlink_to(source.readlink(), target_is_directory=False)
-        else:
+        source, destination = root / relative, worktree / relative
+        if (raw_relative not in visible or not source.is_file()) and destination.is_file():
+            destination.unlink()
+            parent = destination.parent
+            while parent != worktree:
+                try:
+                    parent.rmdir()  # Only now-empty directories in this owned checkout.
+                except OSError:
+                    break
+                parent = parent.parent
+    for raw_relative in sorted(visible):
+        relative = Path(raw_relative.decode("utf-8", errors="strict"))
+        source, destination = root / relative, worktree / relative
+        if source.is_file():
+            destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
+        elif source.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+    if _project_tree_fingerprint(root) != expected_tree:
+        raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH")
     if _project_tree_fingerprint(worktree) != expected_tree:
         raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH")
     _git_output(worktree, "add", "-A", "--")

@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-09 — isolated Demo diagnostic extension and acoustic calibration scope.
+> Updated: 2026-09-09 — accepted Demo root-cause repair and verification scope.
 > Default bootstrap reads only Project judgement and Current execution packet.
 > Stop at Completion boundaries unless the task needs wider planning or acceptance.
 
@@ -16,7 +16,9 @@ The interruption/query-lock repairs are deployed and passed a controlled real
 browser/Provider/Agent recheck, with new human hearing acceptance still missing.
 The isolated Demo's latest human run exposed Task worktree baseline mismatch,
 stale business context binding, rejected prepared output and a later transport
-failure. These remain open; the active change adds diagnostics, not product fixes.
+failure. A subsequent calibration run exposed Native input saturation and a
+14.607 s browser EOT-to-render interval. The user accepted root-cause repair
+and verification of these failures; implementation and acceptance remain open.
 User-end to headphone-first-sound still requires the agreed recording calibration.
 Full A/B/A2 control,
 offline recovery, artifact quality and the complete physical/device matrix are
@@ -31,14 +33,17 @@ The user paused the broad six-hour push and requested discussion rather than
 100% completion. The later three-fix implementation/recheck and interruption/
 query-lock diagnosis are completed scopes with the limits below. Their remaining
 items do not reactivate the whole backlog or historical parallel assignments.
-The active request is passive timing diagnostics in the isolated Demo created
-from the user's specified baseline, plus one user-assisted acoustic calibration.
-The user explicitly selected the pinned AgentCore installation package for this
-workspace. The [diagnostic extension record](reviews/DIAGNOSTIC_TIMING_EXTENSION_20260909.md)
-owns the changed boundary and verification; the
-[calibration runbook](runbooks/TIMING_CALIBRATION.md) owns measurement semantics
-and recording instructions. The four observed product failures, broader backlog,
-model changes and Demo feature changes remain outside this diagnostic batch.
+The user accepted root-cause repairs and verification in the isolated Demo:
+Native input accumulation/recovery, Task worktree byte fidelity, business context
+publication/binding, prepared-response compatibility, and the real conversation/
+Task journey, followed by Demo preparation. The
+[repair execution record](reviews/DEMO_ROOT_CAUSE_REPAIRS_20260909.md) owns module
+boundaries, risk and verification order. Completed passive diagnostics remain in
+the [diagnostic extension record](reviews/DIAGNOSTIC_TIMING_EXTENSION_20260909.md);
+the [calibration runbook](runbooks/TIMING_CALIBRATION.md) owns physical measurement.
+The pinned AgentCore installation package is the user's explicit choice for this
+workspace. Work/projectless, Task intent/result semantics item 4, model changes
+and the broad productization backlog remain excluded.
 
 Earlier controlled deployment evidence: `f85f0e33f2`, gpt-realtime-2.1, speed 1.25,
 minimal reasoning, server-vad-450 and selected Agent deepseek-v4-flash. The
