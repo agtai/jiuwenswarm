@@ -20,8 +20,16 @@ failure. A subsequent calibration run exposed Native input saturation and a
 14.607 s browser EOT-to-render interval. The user accepted root-cause repair
 and verification of these failures. Executor byte/index preservation is committed
 as `a4029b7c`; Native transport/lifetime, context publication and prepared-format
-repairs have passed scoped implementation review and checks. Controlled deployment
-and the integrated Task/audio recheck remain the current completion boundary.
+repairs are deployed as `9e9e5ebc` after scoped implementation review and checks.
+The real browser/Provider/Agent recheck created and applied a file Task, preserved
+all 37 original files, queried it, acknowledged its completion announcement and
+continued after interruption. It also reproduced playback timeout and Native
+input saturation; a follow-up creation/adjustment journey did not complete.
+The [deployed repair results](reviews/DEMO_ROOT_CAUSE_REPAIR_RESULTS_20260909.md)
+retain these mixed outcomes. A synchronized host/transport probe found CPU
+saturation, paging and TCP send waits together; external network versus local
+resource causation still requires a controlled low-load comparison. The
+integrated Task/audio journey remains PARTIAL, not a stable Demo acceptance.
 User-end to headphone-first-sound still requires the agreed recording calibration.
 Full A/B/A2 control,
 offline recovery, artifact quality and the complete physical/device matrix are
@@ -47,6 +55,14 @@ the [calibration runbook](runbooks/TIMING_CALIBRATION.md) owns physical measurem
 The pinned AgentCore installation package is the user's explicit choice for this
 workspace. Work/projectless, Task intent/result semantics item 4, model changes
 and the broad productization backlog remain excluded.
+
+Current deployed repair candidate: `9e9e5ebc5f`, gpt-realtime-2.1 / speed 1.25,
+minimal / server-vad-450, AgentCore package 0.1.16+jiuwenswarm.responses2.
+No change to a source installation, proxy, NIC or production endpoint is implied.
+The results record owns successful/failed journeys and timing boundaries; next
+resolve transmission under controlled host load, finish the voice adjustment
+journey, then complete the agreed human/physical calibration. No stable-latency
+claim can be made from the successful short response alone.
 
 Earlier controlled deployment evidence: `f85f0e33f2`, gpt-realtime-2.1, speed 1.25,
 minimal reasoning, server-vad-450 and selected Agent deepseek-v4-flash. The

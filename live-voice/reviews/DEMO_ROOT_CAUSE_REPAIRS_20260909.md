@@ -77,7 +77,8 @@ reviewer confirmed the finding resolved, with no additional material finding.
 The expanded matrix also covers staged plus unstaged changes, intent-to-add,
 untracked/deleted files, mixed line endings and binary bytes. Scoped diff check
 passed. Private commands/results are in `logs/demo-20260909/repair-probes/`.
-Real Agent Task creation/application on the deployed Demo is still pending.
+The later deployed real Agent Task created and applied its new file while all
+37 original project files retained their hashes; see the results record below.
 
 ## Prepared-response compatibility — refined implementation boundary
 
@@ -157,6 +158,8 @@ final affected commands used uncaptured output with coverage collection disabled
 
 The launcher generates 127.0.0.1 page/origin URLs and preserves its original BOM
 and allowed-host compatibility. Parser and scoped diff checks passed. Runtime
-restart, actual Task application/notification, browser timings and physical
-calibration remain separate evidence; this implementation record claims none
-of those as completed yet. Local evidence retains failed probes and test runs.
+restart and the real Task/audio recheck are now recorded in the
+[deployed results](DEMO_ROOT_CAUSE_REPAIR_RESULTS_20260909.md). They have mixed
+outcomes: successful Task application/notification and subsequent conversation,
+but playback timeout and input saturation still occurred. Physical calibration
+is missing. Local evidence retains failed probes and test runs.
