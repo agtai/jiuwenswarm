@@ -181,6 +181,42 @@ async def test_second_endpoint_joins_input_item_without_borrowing_prior_turn(mon
         assert committed["provider_item_id"] == "input2"
         assert committed["turn_id"] == engine._current_turn_id != prior_turn
         assert committed["turn_commit_id"]
+        assert committed["provider_start_ms"] == 600 and committed["provider_end_ms"] == 900
+        assert engine._delegates == {} and engine.snapshot().released_audio_count == 0
+    finally:
+        await engine.close()
+
+
+def test_transport_close_enum_and_cause_are_structured_without_private_reason():
+    from enum import IntEnum
+    class Code(IntEnum):
+        FAILURE = 1011
+    class ConnectionClosedError(Exception):
+        rcvd = None
+        sent = SimpleNamespace(code=Code.FAILURE, reason="keepalive ping timeout")
+        code = 1006
+    failure = ConnectionClosedError("PRIVATE_URL")
+    failure.__cause__ = OSError(10054, "PRIVATE_CAUSE")
+    fields = transport._transport_failure_fields(failure)
+    assert fields["sent_close_code"] == 1011 and type(fields["sent_close_code"]) is int
+    # Windows constructs ConnectionResetError for this WSA error number.
+    assert fields["socket_errno"] == 10054
+    assert fields["transport_cause_type"] in {"OSError", "ConnectionResetError"}
+    assert fields["close_kind"] == "keepalive_timeout"
+    assert "PRIVATE" not in repr(fields)
+
+
+@pytest.mark.asyncio
+async def test_response_request_diagnostics_join_send_and_created_without_audio_or_tool_effects(monkeypatch):
+    records = []
+    monkeypatch.setattr(native, "profile_snapshot_event", lambda event, origin, **fields: records.append({**origin, **fields}))
+    engine, _, _ = await admitted_business_engine()
+    try:
+        sent = next(r for r in records if r.get("milestone") == "response_sent")
+        created = next(r for r in records if r.get("milestone") == "response_created")
+        assert sent["response_request_id"] and sent["response_request_id"] == created["response_request_id"]
+        assert sent["response_kind"] == created["response_kind"] == "direct"
+        assert sent["turn_id"] == created["turn_id"]
         assert engine._delegates == {} and engine.snapshot().released_audio_count == 0
     finally:
         await engine.close()

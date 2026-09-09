@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-08 — current evidence and continuation scope synchronized.
+> Updated: 2026-09-09 — isolated Demo diagnostic extension and acoustic calibration scope.
 > Default bootstrap reads only Project judgement and Current execution packet.
 > Stop at Completion boundaries unless the task needs wider planning or acceptance.
 
@@ -14,6 +14,10 @@ for the scoped repair. The later human recheck confirms request-specific early
 feedback, a completed file Task and an acknowledged completion announcement.
 The interruption/query-lock repairs are deployed and passed a controlled real
 browser/Provider/Agent recheck, with new human hearing acceptance still missing.
+The isolated Demo's latest human run exposed Task worktree baseline mismatch,
+stale business context binding, rejected prepared output and a later transport
+failure. These remain open; the active change adds diagnostics, not product fixes.
+User-end to headphone-first-sound still requires the agreed recording calibration.
 Full A/B/A2 control,
 offline recovery, artifact quality and the complete physical/device matrix are
 still unproved. Code-project authorization remains required; Work/projectless
@@ -27,12 +31,16 @@ The user paused the broad six-hour push and requested discussion rather than
 100% completion. The later three-fix implementation/recheck and interruption/
 query-lock diagnosis are completed scopes with the limits below. Their remaining
 items do not reactivate the whole backlog or historical parallel assignments.
-The user has now explicitly resumed implementation of the two interruption/
-query-lock repairs below, including affected verification and controlled local
-deployment. The broad backlog, model changes and local URL implementation remain
-outside that scope.
+The active request is passive timing diagnostics in the isolated Demo created
+from the user's specified baseline, plus one user-assisted acoustic calibration.
+The user explicitly selected the pinned AgentCore installation package for this
+workspace. The [diagnostic extension record](reviews/DIAGNOSTIC_TIMING_EXTENSION_20260909.md)
+owns the changed boundary and verification; the
+[calibration runbook](runbooks/TIMING_CALIBRATION.md) owns measurement semantics
+and recording instructions. The four observed product failures, broader backlog,
+model changes and Demo feature changes remain outside this diagnostic batch.
 
-Latest controlled deployment: `f85f0e33f2`, gpt-realtime-2.1, speed 1.25,
+Earlier controlled deployment evidence: `f85f0e33f2`, gpt-realtime-2.1, speed 1.25,
 minimal reasoning, server-vad-450 and selected Agent deepseek-v4-flash. The
 [interruption/query repair record](reviews/REALTIME_INTERRUPTION_QUERY_ROOT_CAUSE_20260908.md)
 owns this browser/Provider/Agent recheck; the earlier

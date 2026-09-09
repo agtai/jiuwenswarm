@@ -54,8 +54,10 @@ _IDS = frozenset({"session_id", "media_session_id", "capture_id", "lease_id", "i
 _IDS = _IDS | frozenset({"span_id", "model_call_id", "parent_span_id", "turn_id", "commit_id", "round_id", "task_id", "attempt_id", "command_id", "outbox_id", "tool_call_id", "unit_id", "activation_id", "project_id", "execution_session_id"})
 _IDS = _IDS | frozenset({"work_id", "input_id", "context_id", "provider_call_id", "turn_commit_id", "source_event_id", "task_event_id", "model_config_version"})
 _IDS = _IDS | frozenset({"provider_response_id", "provider_item_id"})
+_IDS = _IDS | frozenset({"observed_context_id", "requested_target_id", "response_request_id"})
 _TOKENS = frozenset({"stage", "rpc_method", "error_type", "error_location", "error_code", "error_reason", "result_state", "milestone", "tool_name", "status", "reason", "reason_id", "lock_name", "lock_owner", "lock_waiter"})
 _TOKENS = _TOKENS | frozenset({"native_model", "native_output_budget"})
+_TOKENS = _TOKENS | frozenset({"provider_event_type", "output_item_type", "output_phase", "output_content_type", "transport_cause_type", "close_kind"})
 _VALUES = frozenset({"generation", "frame_count", "frames_sent", "frames_acked", "queue_frames", "received_samples", "sent_sample_end", "send_peak_ms", "vad_silence_ms", "provider_ms", "provider_start_ms", "provider_end_ms", "speech_started", "input_fenced", "elapsed_ms", "preopen_frames"})
 _VALUES = _VALUES | frozenset({
     "native_audio_speed",
@@ -81,6 +83,7 @@ _VALUES = _VALUES | frozenset({
     "canonical_receipt_bytes", "provider_output_bytes",
     "received_monotonic_ms", "decode_ms",
     "socket_errno", "received_close_code", "sent_close_code",
+    "effective_close_code", "task_count", "work_count", "part_field_count", "part_has_transcript",
 })
 WIRE_EVENTS = frozenset({
     "session.updated", "transcription_session.updated", "session.created",
@@ -116,6 +119,7 @@ FAILURE_CODES = frozenset({
     "UNPROVEN_RECOGNITION_CANCEL_ACK", "CANCELLED_HYPOTHESIS_FORBIDDEN",
 })
 _LABELS = {
+    "response_kind": frozenset({"direct", "continuation", "work_notification"}),
     "native_reasoning_effort": frozenset({"omitted", "minimal", "low", "medium", "high", "other"}),
     "native_vad_eagerness": frozenset({"omitted", "auto", "low", "medium", "high", "other"}),
     "native_vad_type": frozenset({"semantic_vad", "server_vad"}),

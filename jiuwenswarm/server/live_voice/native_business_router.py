@@ -100,19 +100,23 @@ class NativeBusinessRouter:
 
     @profiled("native.context_read", "route.binding")
     async def _read_context(self, route):
-        authority = await asyncio.to_thread(
-            self.registry._p3_composition.prepare_production_intent_authority,
-            bearer_token=None, operation="task.list", session_id=route.binding.session_id,
-            native_authority=route.native_p3_authority,
-        )
-        read = await asyncio.to_thread(authority.reader.list_visible_tasks, authority.scope)
-        history = await asyncio.to_thread(load_history_records, authority.scope.session_id)
+        with ProfileSpan("native.context_authorize"):
+            authority = await asyncio.to_thread(
+                self.registry._p3_composition.prepare_production_intent_authority,
+                bearer_token=None, operation="task.list", session_id=route.binding.session_id,
+                native_authority=route.native_p3_authority,
+            )
+        with ProfileSpan("native.context_task_read"):
+            read = await asyncio.to_thread(authority.reader.list_visible_tasks, authority.scope)
+        with ProfileSpan("native.context_history_read"):
+            history = await asyncio.to_thread(load_history_records, authority.scope.session_id)
         tasks = [{key: value for key, value in fact.canonical_dict().items() if key in {
             "task_id", "name", "state", "outcome", "revision_number", "attempt_id", "event_head",
             "supported_operations", "predecessor_task_id", "successor_task_id"}}
             for fact in read.tasks]
         snapshots = self.works().list(scope=authority.scope)
-        await self._restore_task_projection(route, authority.scope, read.tasks)
+        with ProfileSpan("native.context_projection_restore"):
+            await self._restore_task_projection(route, authority.scope, read.tasks)
         ordered = sorted(snapshots, key=lambda item: (
             item.state.value in {"accepted", "running", "cancelling"} or not item.execution_settled,
             item.updated_at), reverse=True)
@@ -455,6 +459,11 @@ class NativeBusinessRouter:
                     await self._require_context_authority(route)
                     selection = self.contexts.require(route.binding.scope, delegate.business)
             except NativeBusinessViolation as error:
+                profile_event("native_context_check", stage=delegate.business.operation,
+                    observed_context_id=delegate.business.context_id,
+                    requested_target_id=delegate.business.target_id,
+                    provider_call_id=delegate.provider_call_id, reason=error.reason,
+                    outcome="rejected")
                 if error.reason != "NATIVE_BUSINESS_CONTEXT_STALE" and error.reason not in {
                     "NATIVE_BUSINESS_TARGET_NOT_OBSERVED", "NATIVE_BUSINESS_REVISION_NOT_OBSERVED"}:
                     raise

@@ -1053,6 +1053,8 @@ export class BrowserDedicatedMediaSocketLeaf {
   }
 
   #acceptMessage(value: unknown): void {
+    let messageCallbackMs: number | null = null;
+    try { messageCallbackMs = monotonicNowMs(); } catch { /* Passive timestamp cannot reject a control message. */ }
     if (this.#pendingUplinkCompletion !== null) {
       if (typeof value !== 'string') {
         this.#failPendingUplinkCompletion('MEDIA_TRANSPORT_PROTOCOL_ERROR');
@@ -1099,7 +1101,11 @@ export class BrowserDedicatedMediaSocketLeaf {
       this.#diagnosticLastDownlinkAt = now;
       if (this.#diagnosticDownlinkCount < 128 && (result.through_seq < 8 || interval >= 80)) {
         this.#diagnosticDownlinkCount += 1;
-        this.#diagnose('media_downlink_received', { seq: result.through_seq, frame_interarrival_ms: interval });
+        this.#diagnose('media_downlink_received', {
+          seq: result.through_seq, frame_interarrival_ms: interval,
+          message_callback_ms: messageCallbackMs, owner_accept_complete_ms: now,
+          message_handler_ms: messageCallbackMs === null ? null : now - messageCallbackMs,
+        });
         this.#diagnosticDownlinkAcks.add(result.through_seq);
       }
     }

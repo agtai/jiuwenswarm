@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test:task-notification-identity": "tsc src/features/live-voice/formal/taskNotificationIdentity.ts --target ES2020 --module ES2020 --moduleResolution Bundler --outDir node_modules/.cache/task-notification-identity --skipLibCheck --noEmitOnError --strict && node --test tests/taskNotificationIdentity.test.mjs",
-    "test:live-voice-audio-diagnostics": "esbuild src/features/live-voice/formal/audioDiagnostics.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/live-voice-audio-diagnostics/audioDiagnostics.mjs && node --test tests/liveVoiceAudioDiagnostics.test.mjs",
+    "test:live-voice-audio-diagnostics": "esbuild src/features/live-voice/formal/audioDiagnostics.ts src/features/live-voice/formal/audioTimingDiagnostics.ts --bundle --platform=node --format=esm --outdir=node_modules/.cache/live-voice-audio-diagnostics --out-extension:.js=.mjs && node --test tests/liveVoiceAudioDiagnostics.test.mjs tests/liveVoiceAudioTimingDiagnostics.test.mjs",
     "test:task-notification-timeline": "esbuild src/features/chatTimeline/buildTurnTimeline.ts --bundle --platform=node --format=esm --packages=external --loader:.css=empty --loader:.svg=file --loader:.png=file --outfile=node_modules/.cache/task-notification-timeline/buildTurnTimeline.mjs --define:import.meta.env={} && node --test tests/taskNotificationTimeline.test.mjs",
     "predev": "cd ../../../.. && node ./jiuwenswarm/scripts/generate-agent-folders.js",
     "prebuild": "cd ../../../.. && node ./jiuwenswarm/scripts/generate-agent-folders.js",

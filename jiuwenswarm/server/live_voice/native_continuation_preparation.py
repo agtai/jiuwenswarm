@@ -26,6 +26,30 @@ class PreparedOutputViolation(ValueError):
         self.reason = reason
 
 
+def prepared_failure_shape(event_type, data):
+    """Closed structural labels only; never serialize content, arguments or keys."""
+    try:
+        def label(value, allowed):
+            return value if type(value) is str and value in allowed else "missing" if value is None else "other"
+        item = data.get("item") if type(data) is dict else None
+        part = data.get("part") if type(data) is dict else None
+        return {
+            "provider_event_type": label(event_type, {
+                "response.output_item.added", "response.output_item.done",
+                "response.content_part.added", "response.content_part.done",
+                "response.function_call_arguments.delta", "response.function_call_arguments.done",
+                "response.output_audio.delta", "response.output_audio.done",
+                "response.output_audio_transcript.delta", "response.output_audio_transcript.done", "response.done"}),
+            "output_item_type": label(item.get("type") if type(item) is dict else None, {"message", "function_call", "reasoning"}),
+            "output_phase": label(item.get("phase") if type(item) is dict else None, {"final_answer", "commentary"}),
+            "output_content_type": label(part.get("type") if type(part) is dict else None, {"audio", "output_audio", "text", "output_text"}),
+            "part_field_count": len(part) if type(part) is dict else None,
+            "part_has_transcript": type(part) is dict and "transcript" in part,
+        }
+    except Exception:
+        return {}
+
+
 def _identity(value):
     if (type(value) is not str or not value or value != value.strip() or len(value) > 256
             or len(value.encode("utf-8")) > 1024

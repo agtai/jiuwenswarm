@@ -14,6 +14,7 @@ const MILESTONE_EVENTS = new Set([
   'native_request_state', 'native_work_state', 'native_task_association', 'native_model_confirmed',
   'native_context_selected', 'native_text_first_visible', 'native_text_read_failed',
   'playout_first_scheduled', 'playout_clock_reached_start', 'playout_start_observation_expired',
+  'playout_signal_scheduled',
   'p1_stop_requested', 'p1_stop_result', 'playout_stop_requested', 'playout_sources_stopped',
   'barge_in_delivered', 'barge_in_ui_received', 'barge_in_rpc_requested', 'barge_in_rpc_settled',
   'native_playout_stop_ack', 'native_playout_stop_failed', 'media_terminal', 'voice_listening_start',
@@ -29,8 +30,19 @@ const ID_KEYS = new Set(['session_id', 'media_session_id', 'interaction_id', 'co
 const LABEL_KEYS = new Set(['status', 'reason', 'direction', 'outcome', 'context_state']);
 for (const key of ['request_id', 'operation_id', 'span_id', 'task_id', 'attempt_id', 'turn_id', 'commit_id', 'unit_id', 'activation_id', 'candidate_id', 'work_id', 'input_id', 'context_id', 'provider_call_id', 'turn_commit_id', 'source_event_id', 'task_event_id', 'model_id', 'model_config_version', 'round_id']) ID_KEYS.add(key);
 for (const key of ['stage', 'rpc_method', 'error_type', 'error_code', 'error_reason', 'milestone', 'detector_profile']) LABEL_KEYS.add(key);
+for (const key of ['input_time_method', 'output_time_method']) LABEL_KEYS.add(key);
 const VALUE_KEYS = new Set([
   'output_chars',
+  'input_tail_estimate_ms', 'input_tail_low_estimate_ms', 'input_tail_context_ms',
+  'input_tail_sample_end', 'input_tail_frame_seq', 'input_threshold_dbfs',
+  'input_low_threshold_dbfs', 'input_window_ms', 'acoustic_measured',
+  'capture_callback_ms', 'capture_context_ms', 'capture_frame_end_context_ms',
+  'capture_frame_sample_end', 'sample_rate_hz', 'message_callback_ms',
+  'owner_accept_complete_ms', 'message_handler_ms', 'signal_context_ms',
+  'signal_offset_ms', 'output_signal_window_ms', 'output_signal_threshold_dbfs',
+  'output_estimate_ms', 'render_estimate_ms', 'output_context_ms',
+  'output_timestamp_context_ms', 'output_timestamp_performance_ms', 'output_timestamp_age_ms',
+  'scheduled_start_context_ms', 'observation_context_ms', 'render_clock_overshoot_ms',
   'context_version',
   'work_version',
   'event_head',

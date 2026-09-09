@@ -1485,3 +1485,12 @@ async def test_public_cursor_control_send_cannot_continue_or_revive_after_close_
         if sender is not None:
             await asyncio.gather(sender, return_exceptions=True)
         await engine.close()
+def test_rejected_output_diagnostic_shape_never_contains_payload_or_arbitrary_labels():
+    from jiuwenswarm.server.live_voice.native_continuation_preparation import prepared_failure_shape
+    facts = prepared_failure_shape("response.content_part.added", {
+        "item": {"type": "message", "phase": "commentary", "PRIVATE_KEY": "PRIVATE_TEXT"},
+        "part": {"type": "audio", "transcript": "PRIVATE_TRANSCRIPT", "PRIVATE_KEY": "PRIVATE_AUDIO"}})
+    assert facts["output_phase"] == "commentary" and facts["part_has_transcript"] is True
+    assert facts["part_field_count"] == 3
+    assert "PRIVATE" not in repr(facts)
+    assert prepared_failure_shape([], {"part": {"type": ["PRIVATE"]}})["output_content_type"] == "other"

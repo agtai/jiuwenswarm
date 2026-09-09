@@ -1,4 +1,5 @@
 import { recordAudioDiagnostic, profileAudioOperation } from '../audioDiagnostics.js';
+import { CaptureTimingDiagnostics, firstSignalOffset, outputTimingFacts } from '../audioTimingDiagnostics.js';
 import {
   AudioPort,
   AudioPortViolation,
@@ -112,6 +113,9 @@ export interface BrowserAudioBufferSourceLike extends BrowserAudioNodeLike {
 export interface BrowserAudioContextLike {
   readonly sampleRate: number;
   readonly currentTime: number;
+  readonly baseLatency?: number;
+  readonly outputLatency?: number;
+  getOutputTimestamp?(): { contextTime?: number; performanceTime?: number };
   readonly destination: unknown;
   readonly audioWorklet?: Readonly<{ addModule(moduleUrl: string): Promise<void> }>;
   readonly state: 'suspended' | 'running' | 'closed' | string;
@@ -426,6 +430,7 @@ interface FarEndPlaybackSegment {
 }
 
 interface PlaybackSession {
+  diagnosticSignalObserved?: boolean;
   diagnosticStartTimer: ReturnType<typeof setTimeout> | null;
   diagnosticLastMs: number | null;
   diagnosticMaxGapMs: number;
@@ -869,6 +874,13 @@ export interface BrowserAudioIOAdapterOptions {
 }
 
 export class BrowserAudioIOAdapter {
+  readonly #captureTiming = new CaptureTimingDiagnostics();
+
+  captureTimingSnapshot(): Readonly<Record<string, number | string | boolean | null>> {
+    try {
+      return this.#captureTiming.snapshot(this.#capture?.metadata.capture_id ?? null);
+    } catch { return {}; }
+  }
   readonly #enabled: boolean;
   readonly #environment: BrowserAudioEnvironment;
   readonly #observer: BrowserAudioObserver;
@@ -1796,6 +1808,21 @@ export class BrowserAudioIOAdapter {
         this.#pruneFarEndSegments(playback, context.currentTime, 0);
       }
       const diagnosticNow = performance.now();
+      // Observe once after a successful schedule; never change reserve or ACKs.
+      if (!playback.diagnosticSignalObserved) {
+        try {
+          const signalOffset = firstSignalOffset(record.samples, record.sampleRateHz, record.startOffsetSeconds);
+          if (signalOffset !== null) {
+            playback.diagnosticSignalObserved = true;
+            recordAudioDiagnostic('playout_signal_scheduled', {
+              ...playback.response, unit_id: pending.unitId, seq: pending.seq,
+              scheduled_start_context_ms: startAt * 1000,
+              signal_offset_ms: (signalOffset - record.startOffsetSeconds) * 1000,
+              ...outputTimingFacts(context, startAt + signalOffset - record.startOffsetSeconds, diagnosticNow),
+            });
+          }
+        } catch { /* Passive timing cannot fail successful playback. */ }
+      }
       playback.diagnosticMaxGapMs = Math.max(playback.diagnosticMaxGapMs, scheduledGapMs);
       if (pending.seq < 8 || gapSeconds > 0) {
         recordAudioDiagnostic(gapSeconds > 0 ? 'playout_rebuffered' : 'playout_frame_scheduled', {
@@ -2378,6 +2405,13 @@ export class BrowserAudioIOAdapter {
       });
       session.expectedSeq += 1;
       try {
+        this.#captureTiming.observe(frame, session.context, performance.now());
+        if (frame.seq % 50 === 0) recordAudioDiagnostic('capture_clock_sample', {
+          capture_id: frame.capture.capture_id, capture_generation: frame.capture.capture_generation,
+          ...this.captureTimingSnapshot(),
+        });
+      } catch { /* Timing never changes input/turn authority. */ }
+      try {
         this.#observer.onCaptureFrame?.(frame);
       } catch {
         throw new BrowserAudioIOViolation('AUDIO_FRAME_CONSUMER_FAILED', 'the capture frame consumer rejected a frame');
@@ -2851,7 +2885,13 @@ export class BrowserAudioIOAdapter {
       try {
         if (this.#closed || this.#playback !== playback || playback.stopped) return;
         if (context.state === 'running' && context.currentTime >= startAt) {
-          recordAudioDiagnostic('playout_clock_reached_start', { ...playback.response, context_state: context.state });
+          recordAudioDiagnostic('playout_clock_reached_start', {
+            ...playback.response, context_state: context.state,
+            scheduled_start_context_ms: startAt * 1000,
+            observation_context_ms: context.currentTime * 1000,
+            render_clock_overshoot_ms: (context.currentTime - startAt) * 1000,
+            ...outputTimingFacts(context, startAt, performance.now()),
+          });
         } else if (performance.now() < deadline) playback.diagnosticStartTimer = setTimeout(observe, 16);
         else recordAudioDiagnostic('playout_start_observation_expired', { ...playback.response, context_state: context.state });
       } catch { /* Clock observation never starts, stops or acknowledges audio. */ }

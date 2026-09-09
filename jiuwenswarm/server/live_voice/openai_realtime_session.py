@@ -56,8 +56,23 @@ def _transport_failure_fields(error: BaseException) -> dict[str, str | int]:
             fields["socket_errno"] = errno
         for attribute, label in (("rcvd", "received_close_code"), ("sent", "sent_close_code")):
             code = getattr(getattr(error, attribute, None), "code", None)
-            if type(code) is int and 1_000 <= code <= 4_999:
-                fields[label] = code
+            if isinstance(code, int) and not isinstance(code, bool) and 1_000 <= code <= 4_999:
+                fields[label] = int(code)
+        code = getattr(error, "code", None)
+        if isinstance(code, int) and not isinstance(code, bool) and 1_000 <= code <= 4_999:
+            fields["effective_close_code"] = int(code)
+        cause = error.__cause__
+        if cause is not None:
+            cause_name = type(cause).__name__
+            fields["transport_cause_type"] = cause_name if cause_name in _TRANSPORT_EXCEPTION_NAMES else "other"
+            cause_errno = getattr(cause, "errno", None)
+            if type(cause_errno) is int and 0 <= cause_errno <= 65_535:
+                fields.setdefault("socket_errno", cause_errno)
+        sent_reason = getattr(getattr(error, "sent", None), "reason", None)
+        if sent_reason == "keepalive ping timeout":
+            fields["close_kind"] = "keepalive_timeout"
+        elif fields.get("effective_close_code") == 1006:
+            fields["close_kind"] = "abnormal_close"
     except Exception:
         # Diagnostics cannot change transport failure or expose arbitrary data.
         pass

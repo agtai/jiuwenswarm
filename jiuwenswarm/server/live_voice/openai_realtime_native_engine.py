@@ -21,6 +21,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from uuid import uuid4
 
 from jiuwenswarm.common.live_voice_profiling import identity_fields, profile_snapshot_event
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
@@ -309,6 +310,7 @@ class _ProviderResponseRequest:
     receipt_only: bool = False
     work_feedback_refs: tuple[tuple[str, int], ...] = ()
     business_binding: _BusinessResponseBinding | None = None
+    diagnostic_request_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -990,7 +992,13 @@ class OpenAIRealtimeNativeInteractionEngine:
             if response is not None:
                 observed["provider_response_id"] = response.provider_response_id
             if request is not None:
+                if request.diagnostic_request_id is None:
+                    request.diagnostic_request_id = uuid4().hex
                 observed["provider_call_id"] = request.delegate_call_id
+                observed["response_request_id"] = request.diagnostic_request_id
+                observed["response_kind"] = ("work_notification" if request.work_event_id else
+                    "continuation" if request.delegate_call_id or request.business_recovery else "direct")
+                observed["task_event_id"] = request.work_event_id
             profile_snapshot_event("native_business_timeline", observed, milestone=milestone, **fields)
         except Exception:
             pass
@@ -1190,6 +1198,10 @@ class OpenAIRealtimeNativeInteractionEngine:
             event_id = await self._session.send_event("conversation.item.create", payload)
             if isinstance(context, dict):
                 self._sent_business_context_id = context_id
+                self._profile_business("context_published", context_id=context_id,
+                    task_count=len(context["tasks"]) if type(context.get("tasks")) is list else None,
+                    work_count=len(context["works"]) if type(context.get("works")) is list else None,
+                    source_event_id=event_id)
             return event_id
 
     async def _send_response_request(self, request: _ProviderResponseRequest) -> str | None:
@@ -1223,6 +1235,9 @@ class OpenAIRealtimeNativeInteractionEngine:
             # Install before await: response.created may be received while
             # send_event is still returning its transport receipt.
             request.business_binding = _BusinessResponseBinding(commits[0], self._sent_business_context_id)
+            self._profile_business("context_bound", request=request,
+                observed_context_id=self._sent_business_context_id,
+                context_id=self._business_context.get("context_id"))
         return await self._session.send_event("response.create", request.payload)
 
     def _work_feedback_obsolete(self, refs: tuple[tuple[str, int], ...], *, receipt_context=None) -> bool:
@@ -1509,6 +1524,10 @@ class OpenAIRealtimeNativeInteractionEngine:
                     self._profile_business("provider_first_audio", response=response,
                         source_event_id=event.event_id, audio_bytes=len(base64.b64decode(data["delta"], validate=True)))
         except PreparedOutputViolation as exc:
+            from .native_continuation_preparation import prepared_failure_shape
+            from jiuwenswarm.common.live_voice_profiling import error_fields
+            self._profile_business("prepared_output_rejected", response=self._responses.get(provider_id),
+                **prepared_failure_shape(event.event_type, data), **error_fields(exc))
             self._discard_prepared_continuation(exc.reason, retry=exc.reason == "NATIVE_PREPARED_OUTPUT_OVERFLOW")
         if prepared.output.terminal:
             self._responses[provider_id].prepared_terminal_observed = True
@@ -2981,7 +3000,9 @@ class OpenAIRealtimeNativeInteractionEngine:
         )
         self._current_turn_id = turn_id
         self._profile_business("input_committed", source_event_id=event.event_id,
-                               provider_item_id=item_id, turn_commit_id=commit.commit_id)
+                               provider_item_id=item_id, turn_commit_id=commit.commit_id,
+                               provider_start_ms=commit.input_audio_start_ms,
+                               provider_end_ms=commit.input_audio_end_ms)
         if turn_id in self._direct_response_requested_turn_ids:
             raise OpenAIRealtimeNativeInteractionError(
                 "NATIVE_DIRECT_RESPONSE_REQUEST_CONFLICT",
@@ -3309,7 +3330,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                 PreparedProviderOutput(provider_id, event_queue_capacity=self._event_queue_capacity))
             if request.retired or request.delegate_call_id in self._retired_delegate_calls:
                 self._discard_prepared_continuation("NATIVE_PREPARED_RESPONSE_INTERRUPTED")
-            self._profile_business("continuation_created_unadmitted", response=response)
+            self._profile_business("continuation_created_unadmitted", response=response, request=request)
             return []
         self._current_response_id = provider_id
         self._state = NativeProviderState.RESPONSE_PENDING

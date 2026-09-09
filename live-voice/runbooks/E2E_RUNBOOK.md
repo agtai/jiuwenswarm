@@ -601,6 +601,9 @@ Remove-Item Env:JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED -ErrorAction Silently
 
 ### 7.7 普通 Demo 的性能记录与故障报告
 
+首音各阶段的准确含义、设备估计及“用户末音→耳机首音”的录音流程见
+[首音计时与录音校准](TIMING_CALIBRATION.md)。软件值与物理实测分栏，不可互相替代。
+
 当前源码在普通 Live Voice 路径自动记录诊断，不需要开启 L0 corpus、改代码或
 增加 Provider 调用。先按 §7.5 启动包含本次改动的后端和前端；旧进程或缓存的旧
 前端不会自动获得新埋点。源码与验证边界见

@@ -9,7 +9,7 @@ neither adapter owns formal command, task, event, or retry identity.
 
 from __future__ import annotations
 
-from jiuwenswarm.common.live_voice_profiling import profiled, profile_tool_event
+from jiuwenswarm.common.live_voice_profiling import profiled, profile_tool_event, ProfileSpan
 
 import asyncio
 import base64
@@ -5426,7 +5426,8 @@ class DirectProjectCodeExecutorAdapter:
                     binding.attempt_executor_factory(str(created_worktree)),
                     name=f"live-voice-d0-agent-acquire-{item.attempt_id}",
                 )
-                lease = await asyncio.shield(attempt_agent_acquire)
+                with ProfileSpan("executor.agent_acquire"):
+                    lease = await asyncio.shield(attempt_agent_acquire)
                 attempt_agent_release = lease.context_release
                 attempt_agent_acquire = None
                 if lease.initialization_error is not None:
@@ -5526,7 +5527,7 @@ class DirectProjectCodeExecutorAdapter:
             agent_error = False
             stream_sequence = 0
             started.set()
-            with forbid_background_project_shell_commands(), background_task_checkpoint(
+            with ProfileSpan("executor.agent_stream", execution_session_id=request.session_id), forbid_background_project_shell_commands(), background_task_checkpoint(
                 request.session_id, partial(self._adopt_model_adjustments, item, adjustment_checkpoint), file_plan=file_plan
             ):
                 async for chunk in project_executor.process_background_code_task_stream(

@@ -11,6 +11,7 @@ import json
 import math
 import re
 import sys
+import wave
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -20,12 +21,21 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from jiuwenswarm.common.live_voice_audio_diagnostics import _IDS, _LABELS, _TOKENS, _VALUES  # noqa: E402
+from scripts.live_voice.diagnostic_timing import attach_recording_annotations, response_timings  # noqa: E402
 
 MAX_RECORDS = 200_000
 MAX_LINE = 64 * 1024
 MAX_BROWSER_BYTES = 32 * 1024 * 1024
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
 BROWSER_VALUES = frozenset({
+    "input_tail_estimate_ms", "input_tail_low_estimate_ms", "input_tail_context_ms", "input_tail_sample_end",
+    "input_tail_frame_seq", "input_threshold_dbfs", "input_low_threshold_dbfs", "input_window_ms",
+    "capture_callback_ms", "capture_context_ms", "capture_frame_end_context_ms", "capture_frame_sample_end",
+    "signal_context_ms", "signal_offset_ms", "output_signal_window_ms", "output_signal_threshold_dbfs",
+    "output_estimate_ms", "render_estimate_ms", "output_context_ms", "output_timestamp_context_ms",
+    "output_timestamp_performance_ms", "output_timestamp_age_ms", "acoustic_measured",
+    "scheduled_start_context_ms", "observation_context_ms", "render_clock_overshoot_ms",
+    "message_callback_ms", "owner_accept_complete_ms", "message_handler_ms",
     "operation_generation", "pending_frames", "pending_bytes", "socket_buffered_bytes", "frame_age_ms", "tick_delay_ms",
     "rms_peak", "energy_frames", "startup_lead_ms", "buffer_ahead_ms", "schedule_gap_ms", "scheduled_sources",
     "frame_interarrival_ms", "reserve_ms", "supply_late_ms", "gap_start_context_ms",
@@ -77,6 +87,9 @@ def sanitize_record(value):
               type(field) in {int, float} and math.isfinite(field)):
             fields[key] = field
         elif key in _LABELS and isinstance(field, str) and field in _LABELS[key]:
+            fields[key] = field
+        elif key in {"input_time_method", "output_time_method"} and isinstance(field, str) and field in {
+                "processed_energy_render_clock_estimate", "get_output_timestamp_estimate", "unavailable"}:
             fields[key] = field
         elif key in {"status", "reason", "direction", "context_state"} and isinstance(field, str) and TOKEN.fullmatch(field):
             fields[key] = field
@@ -290,6 +303,7 @@ def build_report(records, warnings=(), retention=()):
                       "Open spans can mean ongoing work or missing tail records. Unobserved branches are not automatically defects.",
                       "Scheduling/ACK is not proof of physical audibility. Provider/network internals require their own evidence."],
             "coverage": coverage, "spans": spans, "failures": failures,
+            "response_timings": response_timings(records),
             "stages": sorted(aggregates, key=lambda row: row["max_ms"], reverse=True),
             "records": records, "clock_domains": dict(Counter(row["clock_id"] or "unknown" for row in records))}
 
@@ -335,6 +349,7 @@ code{font-size:12px;overflow-wrap:anywhere}.warning{padding:10px;background:#fff
 </style><h1>Live Voice · Demo 性能与故障报告</h1><p id="summary"></p><div id="warnings"></div><details open><summary>读数边界</summary><ul id="notes"></ul></details>
 <label>筛选 Session / capture / request / response / Task / 阶段：<br><input id="filter" placeholder="输入关联 ID 或阶段名"></label><button id="errors">只看失败 / 取消 / 未结束</button>
 <h2>链路覆盖</h2><p class="muted">未观测可能是本轮未触发，也可能缺少记录；不会记作 0 ms。</p><table id="coverage"></table>
+<h2>逐响应首音 / Response timing</h2><p class="muted">D = Gateway 观测结束轮次；E = Provider 回答生成相关；G = 浏览器接收/排程/渲染。各时钟视图有重叠，不可累加。物理值只来自同轮录音标注；旧导出缺少精确关联时留空。</p><table id="audio"></table>
 <h2>最慢阶段</h2><p class="muted">含嵌套、并行与等待时间；请勿将各行简单相加。</p><table id="stages"></table>
 <h2>调用时间线</h2><p id="render-limit" class="muted"></p><div id="timeline"><table id="spans"></table></div><h2>错误与取消定位</h2><div id="failures"></div>
 <details><summary>全部诊断事件（包括队列、HTTP、VAD 和模型首输出）</summary><pre id="events"></pre></details>
@@ -347,6 +362,7 @@ el('summary').textContent=`${r.record_count} 条事件 · ${Object.keys(r.clock_
 r.warnings.forEach(v=>{const n=text('div',v);n.className='warning';el('warnings').append(n)});r.notes.forEach(v=>el('notes').append(text('li',v)));
 table('coverage',['环节','记录数'],Object.entries(r.coverage).map(([k,v])=>[k,v||'未观测']));
 table('stages',['阶段','次数','P50','P95','最大'],r.stages.map(s=>[s.stage,s.count,fmt(s.p50_ms),fmt(s.p95_ms),fmt(s.max_ms)]));
+table('audio',['响应 / Response','状态 / State','阶段 ms / Stages','软件估计 / Estimates','录音 / Recording'],(r.response_timings||[]).map(s=>[s.response_id+' / '+s.response_generation,s.response_kind+' · '+s.state,JSON.stringify(s.stages_ms,null,2),JSON.stringify(s.software_estimates,null,2),JSON.stringify(s.physical,null,2)]));
 function render(){const q=el('filter').value.toLowerCase();const match=v=>JSON.stringify(v).toLowerCase().includes(q);
 const spans=r.spans.filter(match).filter(s=>!onlyErrors||!['returned','complete'].includes(s.state));
 el('render-limit').textContent=`匹配 ${spans.length} 个步骤；页面最多显示前 1000 个步骤/错误、2000 条事件。请按 ID 缩小范围，完整记录见 profile.json。`;
@@ -364,6 +380,7 @@ def main(argv=None):
     parser.add_argument("--latest", action="store_true", help="Read the managed service's current log")
     parser.add_argument("--session")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--recording-annotations", type=Path, help="Manually annotated shared-clock PCM WAV manifest")
     args = parser.parse_args(argv)
     logs = list(args.log)
     if args.latest:
@@ -385,6 +402,11 @@ def main(argv=None):
     if not selected:
         warnings.append("No matching diagnostic records. Check source version, log selection and session identity.")
     report = build_report(selected, warnings, retention)
+    if args.recording_annotations:
+        try:
+            attach_recording_annotations(report["response_timings"], args.recording_annotations)
+        except (OSError, ValueError, TypeError, KeyError, EOFError, wave.Error):
+            parser.error("Invalid recording evidence: check WAV, hash, identities, sample bounds and uncertainty.")
     output = args.output or ROOT / "logs" / ("live-voice-profile-" + datetime.now().strftime("%Y%m%d-%H%M%S"))
     output.mkdir(parents=True, exist_ok=True)
     for name, value in (("profile.json", report), ("trace.json", chrome_trace(report))):

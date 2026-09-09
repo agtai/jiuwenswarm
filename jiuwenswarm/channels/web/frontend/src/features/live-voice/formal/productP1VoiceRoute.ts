@@ -4263,7 +4263,10 @@ export class ProductP1VoiceRouteOwner {
       throw new Error('end-of-turn control escaped its media authority');
     }
     this.#l0Record('browser_eot_receipt');
-    this.#diagnose('p1_end_of_turn', { provider_start_ms: event.provider_start_ms, provider_end_ms: event.provider_end_ms });
+    this.#diagnose('p1_end_of_turn', {
+      provider_start_ms: event.provider_start_ms, provider_end_ms: event.provider_end_ms,
+      ...this.#audio.captureTimingSnapshot(),
+    });
     if (
       this.#nativeInteraction !== null
       && (this.#status !== 'playing' || !this.#bargeInSpeechStartDelivered)
