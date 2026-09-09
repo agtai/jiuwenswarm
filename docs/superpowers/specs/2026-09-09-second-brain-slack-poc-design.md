@@ -36,9 +36,31 @@ O ponto da demo **não** é provar que o agente evitou reler o PDF. Releitura é
 | Dedup por SHA-256 + cópia para `sources/` | ✅ | `_SourceManifest` |
 | Leitura de PDF por página | ✅ | `read_file{"pages": "2-11"}` — o parser de PDF está registrado |
 | Índice híbrido BM25 + vetorial | ✅ existe | `memory/manager.py`, `_merge_hybrid_results` |
-| `extraPaths` (indexar Markdown fora das pastas padrão) | ✅ plumbado | `config.py:170` → `manager.py:604` + watcher em `:377` |
+| `extraPaths` | ⚠️ **plumbado no gestor errado** — ver §3.1 | `config.py:170` → `manager.py:604`, mas esse gestor não serve o agente |
 | Trigger `has_file` no Slack | ✅ | `slack_connect.py:200` |
 | `delivery.prompt` por conversa (scopes) | ✅ | `scope_capabilities.py` |
+
+### 3.1 Duas pilhas de memória — e o agente usa a que ignora `extraPaths`
+
+    jiuwenswarm/agents/harness/common/memory/     openjiuwen/core/memory/lite/
+    MemoryIndexManager                             (kernel, pin 61becb17)
+         │ lê memory.extraPaths        ✅                │ recebe extra_paths?  ❌
+         │                                              │
+         └─ usado por: memory_tools.py                  └─ usado por: MemoryRail
+                       memory_rpc.py                                   │
+                       (console /memory da TUI)                        ▼
+                                                        É ESTE QUE O AGENTE USA
+
+- `interface_deep.py:6897` monta o `MemoryRail` de `openjiuwen.core.memory.lite`.
+- `lite/manager.py:954` chama `list_memory_files(self.workspace, node_name=...)`
+  **sem `extra_paths`**, embora o parâmetro exista (`lite/internal.py:35`).
+- Nada em `server/`, `gateway/` ou `agents/swarm/` importa o `memory_tools.py` do
+  jiuwenswarm (grep vazio).
+
+Consequência: **`memory.extraPaths` é chave morta para o agente.** A §5.4 da v1 falharia
+de forma determinística. Corrigido na §5.4 desta versão.
+
+O scan do `lite` é ainda **plano** — `os.listdir`, não `os.walk` (`lite/internal.py:80`).
 
 ### O que **não** existe
 
@@ -63,9 +85,12 @@ O ponto da demo **não** é provar que o agente evitou reler o PDF. Releitura é
         │  escreve wiki/*.md com [[fonte: arquivo.pdf p.N]] + citação
         ▼
     <papers>/.llm_wiki/wiki/*.md
-        │  indexado via memory.extraPaths
+        │  publicação: cópia/symlink arquivo-a-arquivo (§5.4)
         ▼
-    índice da memória (FTS5 + vetor)
+    <agent workspace>/memory/*.md
+        │  watcher do lite reindexa
+        ▼
+    índice do kernel lite (FTS5 + vetor)
         ▲
         │  memory_search  ← pergunta do usuário
     agente do canal sintetiza a resposta com as âncoras
@@ -128,23 +153,40 @@ nunca o sobrescreve.
 Regras acrescentadas às 7 existentes:
 
 ```markdown
-8. Toda afirmação substantiva carrega um ponteiro para a fonte, na unidade que a
-   ferramenta de leitura reportou. Para um PDF isso é a página:
-   `[[fonte: <arquivo> p.N]]`.
-9. Acompanhe o ponteiro de uma citação literal curta (≤ 25 palavras) em blockquote,
-   para que a afirmação seja conferível sem abrir a fonte.
-10. Se a ferramenta de leitura não oferece localizador, ancore no arquivo. Nunca
-    invente número de página.
-11. Ao ler um PDF, use `read_file` com o parâmetro `pages`, em faixas, e registre as
-    páginas que cada seção cobre.
+8.  Toda afirmação substantiva carrega um ponteiro para a fonte, **na mesma linha da
+    afirmação**: `[[fonte: <arquivo> p.N]]`. Para PDF, N é o número do cabeçalho
+    `## Page N` que o `read_file` devolve — nunca um número inferido.
+9.  Logo abaixo, uma citação literal curta (≤ 25 palavras) em blockquote. Cite o texto
+    **como extraído**; ele pode conter artefatos de hifenização e quebra de linha.
+10. Se a leitura não devolveu localizador, ancore no arquivo. Nunca invente página.
+11. Ao ler um PDF use `read_file` com `pages`, em faixas de **no máximo 5 páginas**.
+    Se a resposta indicar truncagem, releia em faixa menor antes de escrever qualquer
+    afirmação sobre aquele trecho.
+12. Ingira apenas `.pdf`, `.md` e `.txt`. Qualquer outro tipo: não ingerir, reportar.
 ```
+
+Justificativa das mudanças em relação à v1:
+
+- **"mesma linha"** (regra 8) — o índice fragmenta em ~256 tokens. Uma âncora separada
+  da afirmação cai noutro chunk e o S5 falha mesmo com o S3 perfeito.
+- **`## Page N`** (regra 8) — `harness/tools/filesystem.py:750` escreve
+  `f"## Page {page_no}\n{page_text}"`. O número é dado, não inferido; isto é o que
+  sustenta o S3.
+- **faixa ≤ 5** (regra 11) — o teto declarado é 20 páginas (`PDF_MAX_PAGES_PER_READ`),
+  mas `MAX_TOKENS = 25_000` estoura antes e **trunca**; uma faixa truncada produz âncora
+  deslocada sem o modelo perceber.
+- **regra 12** — `has_file` acorda para *qualquer* anexo, e `wiki_ingest` aceita arquivo
+  único de qualquer tipo (`wiki_tools.py:507`): sem esta regra o subagente tenta "ler" um
+  PNG colado no canal.
 
 A regra 8 é deliberadamente **agnóstica de formato** — fala em "a unidade que a
 ferramenta reportou", não em PDF. A especificidade vem do leitor (página para PDF, linha
 para `.md`, célula para planilha), e degrada para ancoragem em nível de arquivo quando
-não há localizador. A regra 11 corrige um defeito real: o prompt padrão manda usar
-`read_pdf`, ferramenta que o subagente **não recebe** (`final_tools=[]`); ele já usa
-`read_file` com `pages`, e a regra passa a dizer a verdade.
+não há localizador. As regras 8 e 11 também corrigem um defeito real: o prompt padrão manda usar `read_pdf`,
+ferramenta que o subagente **não recebe** (`final_tools=[]`, `wiki_tools.py:213`); ele já
+usa `read_file` com `pages`, e as regras passam a dizer a verdade. Enquanto a linha 54 do
+`wiki_tools.py` não for corrigida, espera-se **uma chamada falhada a `read_pdf` por
+ingest** — inofensiva, mas visível no log.
 
 ### 5.3 O canal de papers  *(configuração)*
 
@@ -179,26 +221,50 @@ scopes:
 `mode: [mention, has_file]` é o par mínimo: `has_file` acorda no upload do PDF,
 `mention` permite perguntar.
 
+**O `delivery.prompt` é costurado no texto da mensagem do usuário**, não no system
+prompt: `slack_connect.py:10498` faz `text = "\n\n".join([text, *appended])`. A
+instrução do canal chega, portanto, como texto de usuário a cada turno disparado — o que
+importa para escrevê-la (é instrução, não persona) e para o custo por turno.
+
 `chat` é **escalar** (`schema.py:899` recusa qualquer valor que não seja string), logo
 cada canal de papers exige seu próprio scope com o mesmo `prompt_append` copiado. Com um
 canal isso não incomoda; com vários, é a repetição que a §10.2 resolve.
 
-### 5.4 Busca híbrida  *(configuração + credencial)*
+### 5.4 Busca híbrida  *(publicação + credencial)*
 
-```yaml
-memory:
-  extraPaths:
-    - "<WIKI_ROOT>/.llm_wiki/wiki"     # caminho ABSOLUTO
-```
+**Esta seção mudou por completo em relação à v1.** A v1 declarava
+`memory.extraPaths` apontando para a wiki; isso não funciona, porque a chave alimenta um
+gestor que o agente não usa (§3.1).
 
-`extraPaths` aceita arquivo ou diretório; um diretório é varrido recursivamente por
-`.md` (`internal.py:50-58`). **Use caminho absoluto**: o resolvedor faz
-`os.path.join(workspace_dir, extra)`, então um caminho relativo é interpretado a partir
-do workspace do agente, não do diretório corrente.
+O índice que o agente consulta é o do kernel `lite`, e ele varre
+`<agent workspace>/memory/*.md` — plano, sem recursão. Logo a wiki precisa ser
+**publicada** lá.
 
-E as três variáveis de embedding em `~/.jiuwenswarm/config/.env`:
-`EMBED_API_KEY`, `EMBED_API_BASE`, `EMBED_MODEL`. Sem elas o índice funciona, mas
-**só com BM25** — a metade vetorial não existe e "híbrida" sai do discurso.
+**Passo de publicação (zero código no kernel):** depois de cada ingest, espelhar
+arquivo-a-arquivo:
+
+    <WIKI_ROOT>/.llm_wiki/wiki/*.md   →   <agent workspace>/memory/wiki__*.md
+
+- arquivo a arquivo, **não** o diretório: o scan é `os.listdir` (`lite/internal.py:80`);
+- prefixo `wiki__` para que as páginas não colidam com a memória de conversa e sejam
+  fáceis de limpar;
+- symlink serve se o leitor seguir links; cópia é o caminho seguro. Decidir no ensaio.
+
+Quem executa: o próprio agente, instruído pelo `prompt_append` a espelhar após o ingest;
+alternativamente um passo manual no ensaio de quinta. **Não** automatizar em código na PoC.
+
+**Credencial.** As três variáveis em `~/.jiuwenswarm/config/.env`:
+`EMBED_API_KEY`, `EMBED_API_BASE`, `EMBED_MODEL`. Elas chegam ao kernel via
+`config.yaml` → `interface_deep.py:6938`. Sem elas o `MemoryRail` **ainda é criado** (só
+loga um warning) e a busca cai para **BM25 puro** — funciona, mas não é híbrida.
+
+> Nota: o fallback direto por env dentro do jiuwenswarm lê `EMBED_BASE`/`EMBED_BASE_URL`
+> (`embeddings.py:49`), nomes diferentes dos que o `config.yaml` usa. Preencher os três do
+> `.env` é o caminho correto; não confiar no fallback.
+
+**Dívida registrada:** o certo é o `lite/manager.py:954` repassar `extra_paths` ao
+`list_memory_files` — duas linhas, mas dentro do `openjiuwen` fixado em `61becb17`.
+Exigiria fork ou upgrade da dependência, fora de alcance em 2 dias. Ver §10.3.
 
 ## 6. Roteiro da demo
 
@@ -220,11 +286,15 @@ E as três variáveis de embedding em `~/.jiuwenswarm/config/.env`:
 | S1 | PDF no canal vira páginas de wiki sem intervenção manual | postar e observar |
 | S2 | ≥ 90% das afirmações substantivas têm âncora | `grep -c "\[\[fonte:"` por página |
 | S3 | Âncoras corretas | conferir 5 amostras contra o PDF |
-| S4 | `memory_search` retorna páginas da wiki | consulta direta ao índice |
+| S4 | `memory_search` retorna páginas da wiki **após a publicação (§5.4)** | consulta direta ao índice |
 | S5 | Resposta no canal cita âncoras | inspeção |
 | S6 | Ingest de 1 paper < 8 min | cronometrar |
 
-**S3 é o critério que pode reprovar a PoC.** Se o modelo inventar números de página,
+**S4 é o critério que reprova a PoC de forma determinística** se o passo de publicação
+(§5.4) não for feito: sem ele o `memory_search` nunca vê a wiki, e o passo 3 da demo cai
+para o `wiki_query` — que funciona, mas é lento e não é busca.
+
+**S3 é o critério que pode reprovar de forma probabilística.** Se o modelo inventar números de página,
 o ponteiro perde a razão de ser — e como isso é instrução de prompt, não garantia,
 tem de ser medido, não presumido.
 
@@ -238,6 +308,13 @@ tem de ser medido, não presumido.
 | 3 papers ≈ 15 min de ingest | certa | pré-ensaio na quinta |
 | 120 s de orçamento para anexos | média | um PDF por mensagem |
 | Divergência com upstream (§5.1) | baixa | 2 linhas, documentada |
+| Passo de publicação esquecido → S4 falha | **alta** | é o item nº 1 do ensaio de quinta |
+| `read_file` trunca faixa em 25k tokens → âncora deslocada | média | regra 11: faixas ≤ 5 páginas |
+| Âncora cai em chunk separado da afirmação | média | regra 8: âncora na mesma linha |
+| `wiki_query` escreve na wiki sem ler o `AGENT.md` (`wiki_tools.py:352`) | média | não usar `wiki_query` para escrever na demo; se usar, revisar depois |
+| 4º paper "ao vivo" já ingerido → `[Skipped]: Deduplicated` | média | separar um paper inédito para o ensaio |
+| App Slack sem `files:read` ou sem subscrição `message.channels`/`file_share` | média | conferir escopos ao reautorizar |
+| `has_file` acorda para qualquer anexo (imagem, screenshot) | média | regra 12 do `AGENT.md` |
 
 ## 9. Questões em aberto
 
@@ -245,6 +322,16 @@ tem de ser medido, não presumido.
 2. Qual o ID do canal de papers (o `C0BKNLQ1FR7` atual é o canal de testes geral).
 3. Quais 3 papers.
 4. Há endpoint de embeddings disponível?
+
+Notas sobre o config vivo (`~/.jiuwenswarm/config/config.yaml`):
+
+- **não existe bloco `scopes:`** — a §5.3 é escrita do zero, não editada;
+- `allowed_channel_ids` tem só `C0BKNLQ1FR7`. Nomear o canal de papers num scope de
+  `delivery` **já o isenta** dessa lista (`compose.py:228`), então o bot passa a responder
+  lá sem tocar em `allowed_channel_ids`. Comportamento desejado — registrado para não
+  surpreender;
+- o ingest síncrono de ~5 min cabe folgado: o bound de um turno é 3600 s
+  (`_TURN_INITIATOR_TIMEOUT_SECONDS`).
 
 ## 10. Evoluções
 
@@ -292,3 +379,15 @@ O que isto exige, e por que fica fora da PoC:
   que ninguém percebesse, que é exatamente a direção (D4) que este desenho não permite.
 
 Merece spec próprio.
+
+### 10.3 `extra_paths` no kernel `lite`
+
+A §5.4 publica a wiki copiando arquivos para `<agent workspace>/memory/`. É um contorno.
+O correto é `lite/manager.py:954` repassar `extra_paths` — o parâmetro **já existe** na
+assinatura de `list_memory_files` (`lite/internal.py:35`) e simplesmente não é passado.
+Junto com isso valeria trocar o `os.listdir` do scan de extras por `os.walk`
+(`lite/internal.py:80`), para que apontar um diretório funcione de fato.
+
+Duas linhas, mas dentro do `openjiuwen` fixado em `61becb17`: exige contribuição upstream
+ou fork da dependência. Depois disso, a §5.4 vira uma chave de config e o passo de
+publicação desaparece.
