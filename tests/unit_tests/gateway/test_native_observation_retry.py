@@ -47,3 +47,13 @@ async def test_observation_authority_failures_remain_fatal(reason):
     with pytest.raises(NativeRuntimeClientError) as error:
         await media.DedicatedMediaProductRegistry._run_native_business_poll(service, session)
     assert error.value.reason == reason
+
+
+@pytest.mark.asyncio
+async def test_retired_observer_exits_when_its_revoked_rpc_returns():
+    session = SimpleNamespace(closed=False, activation=SimpleNamespace(observation_contract_version="v1"))
+    async def read(*args, **kwargs):
+        session.closed = True  # Exact owner retired while the RPC was in flight.
+        raise NativeRuntimeClientError("NATIVE_RUNTIME_CAPABILITY_REJECTED", "owner retired")
+    service = SimpleNamespace(_read_native_business_context=read)
+    await media.DedicatedMediaProductRegistry._run_native_business_poll(service, session)

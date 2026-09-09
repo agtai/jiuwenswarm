@@ -18,7 +18,10 @@ The isolated Demo's latest human run exposed Task worktree baseline mismatch,
 stale business context binding, rejected prepared output and a later transport
 failure. A subsequent calibration run exposed Native input saturation and a
 14.607 s browser EOT-to-render interval. The user accepted root-cause repair
-and verification of these failures; implementation and acceptance remain open.
+and verification of these failures. Executor byte/index preservation is committed
+as `a4029b7c`; Native transport/lifetime, context publication and prepared-format
+repairs have passed scoped implementation review and checks. Controlled deployment
+and the integrated Task/audio recheck remain the current completion boundary.
 User-end to headphone-first-sound still requires the agreed recording calibration.
 Full A/B/A2 control,
 offline recovery, artifact quality and the complete physical/device matrix are
@@ -79,7 +82,8 @@ runtime work; later documentation HEAD is not the deployed product version.
 - **Local connection diagnosis and entry convention recorded:** use the
   [127.0.0.1 local entry](runbooks/E2E_RUNBOOK.md#local-entry-origin).
   Browser probes isolate roughly 300 ms of localhost IPv6-to-IPv4 fallback.
-  The current launcher still generates localhost links; its code was not changed.
+  The launcher now generates 127.0.0.1 local browser/origin links. Its allowed-host
+  compatibility list is unchanged; PowerShell parsing passed.
   The later repair recheck used a 127.0.0.1 page and same-origin media: six downlink
   connections opened in 6.6–27.7 ms. This is transport evidence; an overall voice
   latency A/B or physical improvement claim remains unmeasured.

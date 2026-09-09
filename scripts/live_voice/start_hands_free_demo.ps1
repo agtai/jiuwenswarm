@@ -1290,7 +1290,7 @@ try {
             '--source-head', (& git rev-parse HEAD).Trim(),
             '--environment-ref', $L0EnvironmentRef,
             '--configuration-sha256', $l0ConfigurationSha256,
-            '--browser-origin', "http://localhost:$FrontendPort",
+            '--browser-origin', "http://127.0.0.1:$FrontendPort",
             '--nonce', $L0BatchNonce,
             '--temperature', $L0Temperature,
             '--epoch-id', $L0EpochId,
@@ -1322,7 +1322,7 @@ try {
     $browserLaunchNonce = $null
     if (-not $NoBrowser -and $L0OrdinaryChromeBatch) {
         Write-Step '在普通已安装 Chrome 中打开 L0 批次页'
-        $browserUrl = "http://localhost:$FrontendPort$L0BrowserPath"
+        $browserUrl = "http://127.0.0.1:$FrontendPort$L0BrowserPath"
         $browserUrl += "?live_voice_l0_measurement=1&live_voice_l0_batch=1"
         $browserUrl += "&live_voice_l0_coordinator_port=$L0BatchPort&live_voice_l0_nonce=$L0BatchNonce"
         Start-Process `
@@ -1332,7 +1332,7 @@ try {
         Write-Pass '已在普通 Chrome profile 打开批次页；未创建、连接或清理隔离 profile'
     } elseif (-not $NoBrowser) {
         Write-Step '打开全新隔离 Chrome'
-        $browserUrl = "http://localhost:$FrontendPort"
+        $browserUrl = "http://127.0.0.1:$FrontendPort"
         $remoteDebuggingPort = 0
         if ($L0Measurement) {
             $browserLaunchNonce = [guid]::NewGuid().ToString('N')
@@ -1353,7 +1353,7 @@ try {
                 evidence_directory = $L0MeasurementDirectory
                 run_labels_file    = $l0RunLabelsPath
                 browser_endpoint   = "http://127.0.0.1:$L0MeasurementPort"
-                browser_page_origin = "http://localhost:$FrontendPort"
+                browser_page_origin = "http://127.0.0.1:$FrontendPort"
                 browser_executable_path = $ChromeExecutable
                 browser_profile_path = $isolatedChromeProfile
                 browser_launch_process_id = [int]$isolatedChrome.LaunchProcessId
@@ -1375,7 +1375,7 @@ try {
 
     Write-Host "`n============================================================" -ForegroundColor Green
     Write-Host "  JiuwenSwarm Live Voice $RuntimeProfileLabel 已准备完成" -ForegroundColor Green
-    Write-Host "  Web: http://localhost:$FrontendPort" -ForegroundColor White
+    Write-Host "  Web: http://127.0.0.1:$FrontendPort" -ForegroundColor White
     Write-Host "  Project: $ProjectPath" -ForegroundColor White
     Write-Host "  Log: $logPath" -ForegroundColor DarkGray
     if ($null -ne $isolatedChromeProfile) {

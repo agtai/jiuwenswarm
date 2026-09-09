@@ -67,7 +67,7 @@ _VALUES = _VALUES | frozenset({
     "speech_stopped", "timeout_ms", "status_code", "response_bytes", "phase_ms",
     "write_buffer_bytes", "write_buffer_low_bytes", "write_buffer_high_bytes",
     "write_buffer_peak_bytes", "transport_paused", "write_pause_ms", "drain_ms",
-    "loop_lag_ms", "loop_lag_peak_ms", "peer_loopback", "flow_observer",
+    "loop_lag_ms", "loop_lag_peak_ms", "peer_loopback", "flow_observer", "tcp_nodelay",
     "oldest_queue_age_ms", "frame_queue_wait_ms", "pending_audio_ms",
     "observation_expired",
     "model_call_seq", "message_count", "user_message_count", "current_envelope_count",

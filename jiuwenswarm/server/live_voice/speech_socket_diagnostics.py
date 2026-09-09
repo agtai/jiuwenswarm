@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import socket as socket_module
 import time
 from contextlib import suppress
 
@@ -45,6 +46,9 @@ class SocketDiagnostics:
             result.update(write_buffer_bytes=size, write_buffer_low_bytes=low,
                 write_buffer_high_bytes=high, transport_paused=self.socket.paused)
             self.buffer_peak_bytes = max(self.buffer_peak_bytes, size)
+        with suppress(Exception):
+            tcp = self.socket.transport.get_extra_info("socket")
+            result["tcp_nodelay"] = tcp.getsockopt(socket_module.IPPROTO_TCP, socket_module.TCP_NODELAY) == 1
         return result
 
     def begin(self, frame_seq, wire_seq, *, budget_seconds=30.0):

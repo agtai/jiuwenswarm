@@ -3,6 +3,8 @@
 import asyncio
 import json
 import traceback
+import socket as socket_module
+from types import SimpleNamespace
 from collections.abc import Mapping
 
 import pytest
@@ -127,6 +129,25 @@ def realtime_config(**changes: object) -> OpenAIRealtimeSessionConfig:
     }
     values.update(changes)
     return OpenAIRealtimeSessionConfig(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_default_socket_enables_nodelay_when_resolver_reports_protocol_zero(monkeypatch):
+    import websockets
+    from jiuwenswarm.server.live_voice.openai_realtime_session import default_realtime_socket_factory
+
+    # Windows getaddrinfo can return SOCK_STREAM/proto=0. CPython 3.11's
+    # implicit TCP_NODELAY setup skips that socket despite it being TCP.
+    with socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM, 0) as tcp:
+        tcp.setsockopt(socket_module.IPPROTO_TCP, socket_module.TCP_NODELAY, 0)
+        connection = SimpleNamespace(transport=SimpleNamespace(get_extra_info=lambda name: tcp if name == "socket" else None))
+
+        async def connect(url, *, additional_headers=None, **kwargs):
+            return connection
+
+        monkeypatch.setattr(websockets, "connect", connect)
+        assert await default_realtime_socket_factory("wss://api.openai.com/v1/realtime", {}, 1) is connection
+        assert tcp.getsockopt(socket_module.IPPROTO_TCP, socket_module.TCP_NODELAY) == 1
 
 
 @pytest.mark.asyncio

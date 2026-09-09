@@ -85,6 +85,11 @@ class PreparedProviderOutput:
     truncate_acknowledged: set[tuple[str, int]] = field(default_factory=set)
     pending_truncate: tuple[str, int] | None = None
     _early_truncate_ack: bool = False
+    delete_targets: set[str] = field(default_factory=set)
+    delete_sent: set[str] = field(default_factory=set)
+    delete_acknowledged: set[str] = field(default_factory=set)
+    pending_delete: str | None = None
+    _early_delete_ack: bool = False
     _audio_indices: dict[int, tuple[str, int]] = field(default_factory=dict)
     _audio_done: set[int] = field(default_factory=set)
     _transcript_bytes: dict[int, int] = field(default_factory=dict)
@@ -114,10 +119,34 @@ class PreparedProviderOutput:
     def observe(self, event: OpenAIRealtimeEvent, data: dict) -> None:
         """Validate bounded observations before storing anything publishable."""
         try:
+            if not self.terminal:
+                self._retain_function_cleanup_identities(event.event_type, data)
             self._observe(event, data)
         except (UnicodeError, TypeError, KeyError, RecursionError, OverflowError):
             self.cleanup_unsupported = True
             raise PreparedOutputViolation("NATIVE_PREPARED_OUTPUT_INVALID") from None
+
+    def _retain_function_cleanup_identities(self, kind, data):
+        # Cleanup ownership must survive later semantic rejection (name, call
+        # arguments or incomplete terminal output). An unidentified item cannot
+        # be certified as an empty conversation mutation.
+        try:
+            if kind.startswith("response.function_call_arguments."):
+                self._bind(data["output_index"], _identity(data["item_id"]), "function_call")
+            elif kind.startswith("response.output_item."):
+                item = data.get("item")
+                if type(item) is dict and item.get("type") == "function_call":
+                    self._bind(data["output_index"], _identity(item.get("id")), "function_call")
+            elif kind == "response.done":
+                output = data["response"]["output"]
+                if len(output) > 64:
+                    raise PreparedOutputViolation("NATIVE_PREPARED_TERMINAL_UNREPRESENTED")
+                for index, item in enumerate(output):
+                    if type(item) is dict and item.get("type") == "function_call":
+                        self._bind(index, _identity(item.get("id")), "function_call")
+        except PreparedOutputViolation:
+            self.cleanup_unsupported = True
+            raise
 
     def _observe(self, event: OpenAIRealtimeEvent, data: dict) -> None:
         kind = event.event_type
@@ -147,7 +176,7 @@ class PreparedProviderOutput:
                 raise PreparedOutputViolation("NATIVE_PREPARED_OUTPUT_IDENTITY_CONFLICT")
             self._audio_indices[index] = target
             self._remember_audio_target(target)
-            if len(self.audio_targets) > 1 or self._calls:
+            if len(self.audio_targets) > 1:
                 raise PreparedOutputViolation("NATIVE_PREPARED_OUTPUT_COMPOSITION_UNSUPPORTED")
             if kind == "response.output_audio.delta":
                 if index in self._audio_done:
@@ -189,9 +218,6 @@ class PreparedProviderOutput:
                 else:
                     self._transcript_partial[index] = raw
         elif kind == "response.function_call_arguments.done":
-            self.cleanup_unsupported = True  # No negotiated function-item delete receipt.
-            if self.audio_targets:
-                raise PreparedOutputViolation("NATIVE_PREPARED_OUTPUT_COMPOSITION_UNSUPPORTED")
             call_id = _identity(data["call_id"])
             item_id = _identity(data["item_id"])
             if (type(data["name"]) is not str or data["name"] not in NATIVE_BUSINESS_FUNCTION_NAMES
@@ -215,7 +241,6 @@ class PreparedProviderOutput:
             # These metadata events never become proposals. Terminal output and
             # the closed audio events must independently establish audio cleanup.
             if kind == "response.function_call_arguments.delta":
-                self.cleanup_unsupported = True
                 index = data["output_index"]
                 if type(index) is not int or not 0 <= index < 64 or type(data["delta"]) is not str:
                     raise PreparedOutputViolation("NATIVE_PREPARED_FUNCTION_INVALID")
@@ -234,7 +259,7 @@ class PreparedProviderOutput:
                 if type(item) is not dict or item.get("type") not in {"message", "function_call"}:
                     self.cleanup_unsupported = True
                     raise PreparedOutputViolation("NATIVE_PREPARED_OUTPUT_UNSUPPORTED")
-                if item["type"] == "message" and "phase" in item and item["phase"] != "final_answer":
+                if item["type"] == "message" and "phase" in item and item["phase"] not in {"final_answer", "commentary"}:
                     self.cleanup_unsupported = True
                     raise PreparedOutputViolation("NATIVE_PREPARED_OUTPUT_UNSUPPORTED")
                 item_id = _identity(item.get("id"))
@@ -251,8 +276,6 @@ class PreparedProviderOutput:
                     self.cleanup_unsupported = True
                     raise PreparedOutputViolation("NATIVE_PREPARED_OUTPUT_IDENTITY_CONFLICT")
                 self._metadata_items[item_id] = item["type"]
-                if item["type"] == "function_call":
-                    self.cleanup_unsupported = True
             else:
                 item_id, index, content = _identity(data["item_id"]), data["output_index"], data["content_index"]
                 self._bind(index, item_id, "message")
@@ -289,6 +312,8 @@ class PreparedProviderOutput:
             self.cleanup_unsupported = True
             raise PreparedOutputViolation("NATIVE_PREPARED_OUTPUT_IDENTITY_CONFLICT")
         self._item_indices[index] = identity
+        if kind == "function_call":
+            self.delete_targets.add(item_id)
 
     def _remember_audio_target(self, target):
         if len(self.audio_targets) >= 64 and target not in self.audio_targets:
@@ -300,7 +325,7 @@ class PreparedProviderOutput:
         # Discarded content can never return to replay. Continue observing only
         # bounded identities needed for conservative zero-played cleanup.
         if kind.startswith("response.function_call_arguments."):
-            self.cleanup_unsupported = True
+            self._bind(data["output_index"], _identity(data["item_id"]), "function_call")
         elif kind.startswith("response.output_audio") or kind.startswith("response.content_part."):
             item_id, content = _identity(data["item_id"]), data["content_index"]
             if type(content) is not int or not 0 <= content < 64:
@@ -309,14 +334,15 @@ class PreparedProviderOutput:
             self._remember_audio_target((item_id, content))
         elif kind.startswith("response.output_item."):
             item = data["item"]
-            if type(item) is not dict or item.get("type") != "message":
+            if type(item) is not dict or item.get("type") not in {"message", "function_call"}:
                 self.cleanup_unsupported = True
                 return
             item_id = _identity(item.get("id"))
+            self._bind(data["output_index"], item_id, item["type"])
             if len(self._metadata_items) >= 64 and item_id not in self._metadata_items:
                 self.cleanup_unsupported = True
                 raise PreparedOutputViolation("NATIVE_PREPARED_CLEANUP_IDENTITY_OVERFLOW")
-            self._metadata_items[item_id] = "message"
+            self._metadata_items[item_id] = item["type"]
         else:
             self.cleanup_unsupported = True
 
@@ -327,8 +353,8 @@ class PreparedProviderOutput:
         manifest, audio, calls = {}, {}, {}
         for output_index, item in enumerate(output):
             if type(item) is dict and item.get("type") == "function_call":
-                self.cleanup_unsupported = True
                 manifest[output_index] = (_identity(item.get("id")), "function_call")
+                self._bind(output_index, manifest[output_index][0], "function_call")
                 calls[output_index] = item
                 continue
             if (type(item) is not dict or item.get("type") != "message"
@@ -337,7 +363,7 @@ class PreparedProviderOutput:
                     or (self.terminal_status == "completed" and item.get("status") != "completed")
                     or not {"id", "type", "role", "status", "content"}.issubset(item)
                     or set(item) - {"id", "object", "type", "role", "status", "content", "phase"}
-                    or "phase" in item and item["phase"] != "final_answer"
+                    or "phase" in item and item["phase"] not in {"final_answer", "commentary"}
                     or type(item["content"]) is not list or len(item["content"]) > 64):
                 self.cleanup_unsupported = True
                 raise PreparedOutputViolation("NATIVE_PREPARED_TERMINAL_UNREPRESENTED")
@@ -352,12 +378,11 @@ class PreparedProviderOutput:
                 else:
                     self._remember_audio_target((item_id, index))
                     audio[output_index] = (item_id, index, content["transcript"])
-        represented_ids = {target[0] for target in self.audio_targets} | {
-            json.loads(call)["item_id"] for call in self._calls.values()}
+        represented_ids = {target[0] for target in self.audio_targets} | self.delete_targets
         if set(self._metadata_items) - represented_ids:
             self.cleanup_unsupported = True
             raise PreparedOutputViolation("NATIVE_PREPARED_TERMINAL_UNREPRESENTED")
-        if len(self.audio_targets) > 1 or (self.audio_targets and self._calls):
+        if len(self.audio_targets) > 1:
             raise PreparedOutputViolation("NATIVE_PREPARED_OUTPUT_COMPOSITION_UNSUPPORTED")
         if self.terminal_status != "completed" or self.discarded:
             return  # Cancellation retains known cleanup targets, not a completed manifest.
@@ -423,5 +448,41 @@ class PreparedProviderOutput:
     def cleanup_complete(self) -> bool:
         return (self.terminal and not self.cleanup_unsupported
                 and self.pending_truncate is None
+                and self.pending_delete is None
                 and self.audio_targets <= self.truncate_sent
-                and self.audio_targets <= self.truncate_acknowledged)
+                and self.audio_targets <= self.truncate_acknowledged
+                and self.delete_targets <= self.delete_sent
+                and self.delete_targets <= self.delete_acknowledged)
+
+    def acknowledge_delete(self, data: dict) -> bool:
+        target = data.get("item_id")
+        if type(target) is not str:
+            return False
+        if target == self.pending_delete:
+            self._early_delete_ack = True
+            return False
+        if target not in self.delete_sent:
+            return False
+        self.delete_acknowledged.add(target)
+        return True
+
+    def begin_delete(self, target: str) -> None:
+        if (self.pending_delete is not None or target not in self.delete_targets
+                or target in self.delete_sent or not self.discarded or not self.terminal
+                or self.cleanup_unsupported):
+            raise PreparedOutputViolation("NATIVE_PREPARED_DELETE_INTENTION_INVALID")
+        self.pending_delete = target
+        self._early_delete_ack = False
+
+    def confirm_delete(self, target: str) -> None:
+        if self.pending_delete != target or self.cleanup_unsupported:
+            raise PreparedOutputViolation("NATIVE_PREPARED_DELETE_CONFIRMATION_INVALID")
+        self.delete_sent.add(target)
+        if self._early_delete_ack:
+            self.delete_acknowledged.add(target)
+        self.abandon_delete(target)
+
+    def abandon_delete(self, target: str) -> None:
+        if self.pending_delete == target:
+            self.pending_delete = None
+            self._early_delete_ack = False

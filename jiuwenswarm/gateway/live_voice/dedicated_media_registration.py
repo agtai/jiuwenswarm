@@ -194,6 +194,7 @@ _NATIVE_PROVIDER_EVENT_QUEUE_CAPACITY = 4096
 _NATIVE_AUDIO_PROPOSAL_BATCH = 16
 _NATIVE_PROVIDER_TRANSPORT_FAILURES = frozenset({
     "REALTIME_TRANSPORT_SEND_FAILED", "REALTIME_TRANSPORT_RECEIVE_FAILED", "REALTIME_PROVIDER_TIMEOUT",
+    "MEDIA_NATIVE_INPUT_BACKPRESSURE",
 })
 _NATIVE_ORDERED_CONTROL_OPERATIONS = frozenset(
     {"LISTEN", "REVISE", "SILENCE", "TURN_COMMIT", "SPEAK"}
@@ -1022,6 +1023,7 @@ class _NativeMediaSession:
     end_of_turn_queue: asyncio.Queue[tuple[int, int]] = field(repr=False)
     delivery_queue: asyncio.Queue[NativeEngineEvent] = field(repr=False)
     start_record: _MediaAuthority | None = field(default=None, repr=False)
+    input_enqueued_at: dict[int, float] = field(default_factory=dict, repr=False)
     start_task: asyncio.Task[None] | None = field(default=None, repr=False)
     startup_retired: bool = False
     input_task: asyncio.Task[None] | None = field(default=None, repr=False)
@@ -1029,6 +1031,8 @@ class _NativeMediaSession:
     delivery_task: asyncio.Task[None] | None = field(default=None, repr=False)
     business_poll_task: asyncio.Task[None] | None = field(default=None, repr=False)
     business_refresh_task: asyncio.Task | None = field(default=None, repr=False)
+    business_receipt_epoch: int = 0
+    business_refresh_epoch: int = 0
     notification_wake_tasks: set[asyncio.Task[None]] = field(default_factory=set, repr=False)
     business_observation_cursor: dict[str, object] | None = field(default=None, repr=False)
     business_context_result: dict[str, object] | None = field(default=None, repr=False)
@@ -1651,10 +1655,18 @@ class DedicatedMediaProductRegistry:
         try:
             session.input_queue.put_nowait(native_frame)
         except asyncio.QueueFull:
+            session.failure_reason = "MEDIA_NATIVE_INPUT_BACKPRESSURE"
+            record.native_transport_failure = True
+            profile_event("native_media_failure", **identity_fields(session.activation.binding),
+                stage="media.input", reason=session.failure_reason,
+                queue_frames=session.input_queue.qsize(),
+                pending_audio_ms=session.input_queue.qsize() * 20, outcome="failed")
+            self._schedule_native_close(record)
             raise MediaTransportViolation(
-                "MEDIA_NATIVE_INPUT_BACKPRESSURE",
+                MediaDetachReason.NATIVE_PROVIDER_TRANSPORT_FAILED.value,
                 "Native input queue is saturated",
             ) from None
+        session.input_enqueued_at[native_frame.seq] = self._monotonic()
         session.next_media_sequence += 1
         session.next_media_sample_cursor += len(frame.samples)
         session.next_input_sequence += 1
@@ -2068,6 +2080,7 @@ class DedicatedMediaProductRegistry:
                     break
                 else:
                     queue_owner.task_done()
+        session.input_enqueued_at.clear()
         client = self._native_runtime_client
         close_runtime = getattr(client, "close", None)
         if callable(close_runtime):
@@ -2109,6 +2122,8 @@ class DedicatedMediaProductRegistry:
                     await asyncio.sleep(_NATIVE_BUSINESS_POLL_SECONDS)
                     result = await self._refresh_native_business_context(session)
             except NativeRuntimeClientError as error:
+                if session.closed:
+                    return  # Revocation settled this exact observer's lifetime.
                 if error.reason != "NATIVE_RUNTIME_TIMEOUT":
                     raise
                 # An observation performs no business effect. Keep the last
@@ -2118,6 +2133,10 @@ class DedicatedMediaProductRegistry:
                     reason=error.reason, session_id=session.activation.binding.scope.session_id)
                 await asyncio.sleep(_NATIVE_BUSINESS_POLL_SECONDS)
                 continue
+            except MediaTransportViolation:
+                if session.closed:
+                    return
+                raise
             if session.closed:
                 return
             stops = await session.engine.update_business_context(result["context"], result["work_events"])
@@ -2125,21 +2144,29 @@ class DedicatedMediaProductRegistry:
                 await self._handle_native_event(session, event)
 
     async def _refresh_native_business_context(self, session: _NativeMediaSession):
-        if session.closed:
-            raise MediaTransportViolation("MEDIA_NATIVE_SESSION_CLOSED", "Business context route is closed")
-        task = session.business_refresh_task
-        if task is None:
-            task = asyncio.create_task(self._read_native_business_context(session, wait_ms=0))
-            session.business_refresh_task = task
-            def finished(done):
-                if session.business_refresh_task is done:
-                    session.business_refresh_task = None
-                if not done.cancelled():
-                    done.exception()
-            task.add_done_callback(finished)
-        await asyncio.shield(task)
-        if session.closed:
-            raise MediaTransportViolation("MEDIA_NATIVE_SESSION_CLOSED", "Business context owner closed during refresh")
+        while True:
+            if session.closed:
+                raise MediaTransportViolation("MEDIA_NATIVE_SESSION_CLOSED", "Business context route is closed")
+            task = session.business_refresh_task
+            if task is None:
+                task = asyncio.create_task(self._read_native_business_context(session, wait_ms=0))
+                session.business_refresh_task = task
+                session.business_refresh_epoch = session.business_receipt_epoch
+                def finished(done):
+                    if session.business_refresh_task is done:
+                        session.business_refresh_task = None
+                    if not done.cancelled():
+                        done.exception()
+                task.add_done_callback(finished)
+            epoch = session.business_refresh_epoch
+            await asyncio.shield(task)
+            if session.closed:
+                raise MediaTransportViolation("MEDIA_NATIVE_SESSION_CLOSED", "Business context owner closed during refresh")
+            if epoch == session.business_receipt_epoch:
+                break
+            # A shared RPC started before an admitted receipt cannot certify
+            # its effects. Coalesce one new read after that receipt, retaining
+            # cancellation ownership and cursor ordering of both reads.
         # The shared read can finish before this waiter resumes. An intervening
         # observation may already have advanced the cursor-ordered cache.
         if session.business_context_result is None:
@@ -2282,15 +2309,27 @@ class DedicatedMediaProductRegistry:
         while not session.closed:
             frame = await session.input_queue.get()
             try:
-                if frame is None:
+                if frame is None or session.closed:
                     return
-                await session.engine.offer_audio(frame)
+                started = self._monotonic()
+                enqueued = session.input_enqueued_at.pop(frame.seq, started)
+                source_event_id = await session.engine.offer_audio(frame)
+                finished = self._monotonic()
+                if frame.seq % 50 == 0 or finished - started >= .1:
+                    profile_event("native_input_delivery", **identity_fields(session.activation.binding),
+                        frame_seq=frame.seq, source_event_id=source_event_id, queue_frames=session.input_queue.qsize(),
+                        frame_queue_wait_ms=(started - enqueued) * 1000,
+                        duration_ms=(finished - started) * 1000,
+                        pending_audio_ms=session.input_queue.qsize() * 20,
+                        elapsed_ms=(finished - enqueued) * 1000, outcome="sent")
             finally:
                 session.input_queue.task_done()
 
     async def _run_native_events(self, session: _NativeMediaSession) -> None:
         while not session.closed:
             event = await session.engine.next_event()
+            if session.closed:
+                return
             take_failure = getattr(session.engine, "take_continuation_failure", None)
             if callable(take_failure):
                 while (failure := take_failure()) is not None:
@@ -2351,73 +2390,82 @@ class DedicatedMediaProductRegistry:
 
     async def _run_native_delivery(self, session: _NativeMediaSession) -> None:
         pending: NativeEngineEvent | None = None
-        while not session.closed:
-            event = pending
-            pending = None
-            if event is None:
-                event = await session.delivery_queue.get()
-            session.delivery_response = event.audio.response if event.audio is not None else (
-                event.provider_done.response if event.provider_done is not None else None
-            )
-            if event.audio is None:
+        try:
+            while not session.closed:
+                event = pending
+                pending = None
+                if event is None:
+                    event = await session.delivery_queue.get()
+                if session.closed:
+                    session.delivery_queue.task_done()
+                    return
+                session.delivery_response = event.audio.response if event.audio is not None else (
+                    event.provider_done.response if event.provider_done is not None else None
+                )
+                if event.audio is None:
+                    try:
+                        if event.delegate is not None:
+                            call_id = event.delegate.provider_call_id
+                            if call_id not in session.delegate_tasks:
+                                if len(session.delegate_tasks) >= 8:
+                                    raise MediaTransportViolation("MEDIA_NATIVE_DELEGATE_BACKPRESSURE", "Native foreground settlement capacity exceeded")
+                                # Reserve semantic ownership in delivery order before
+                                # allowing Provider done/ACK to expose an idle foreground.
+                                action = event.action
+                                assert action is not None
+                                reservation = NativeEngineEvent(action=InteractionAction(
+                                    action_id=f"{action.action_id}:reserve", operation="DELEGATE",
+                                    interaction_id=action.interaction_id, scope=action.scope,
+                                    payload=(("provider_call_id", call_id), ("turn_id", event.delegate.turn_id),
+                                             ("response_generation", str(event.delegate.response_generation))),
+                                ))
+                                try:
+                                    await self._handle_native_event(session, reservation)
+                                except NativeRuntimeClientError:
+                                    if any(ref.response_generation == event.delegate.response_generation for ref in session.barge_fenced_responses):
+                                        continue
+                                    raise
+                                if session.closed:
+                                    return
+                                session.delegate_proposals[call_id] = event
+                                task = asyncio.create_task(self._run_native_delegate_event(session, event))
+                                session.delegate_tasks[call_id] = task
+                                def settled(done, call=call_id, owner=session):
+                                    owner.delegate_tasks.pop(call, None)
+                                    owner.delegate_proposals.pop(call, None)
+                                    record = self._records.get(owner.record_id)
+                                    if record is not None:
+                                        self._consume_native_task(record, done)
+                                task.add_done_callback(settled)
+                        else:
+                            await self._handle_native_event(session, event)
+                    finally:
+                        session.delivery_queue.task_done()
+                    continue
+                batch = [event]
+                first_audio = event.audio
+                while len(batch) < _NATIVE_AUDIO_PROPOSAL_BATCH:
+                    try:
+                        candidate = session.delivery_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    candidate_audio = candidate.audio
+                    if candidate_audio is None or not _native_audio_extends_batch(
+                        first_audio,
+                        candidate_audio,
+                        ordinal=len(batch),
+                    ):
+                        pending = candidate
+                        break
+                    batch.append(candidate)
                 try:
-                    if event.delegate is not None:
-                        call_id = event.delegate.provider_call_id
-                        if call_id not in session.delegate_tasks:
-                            if len(session.delegate_tasks) >= 8:
-                                raise MediaTransportViolation("MEDIA_NATIVE_DELEGATE_BACKPRESSURE", "Native foreground settlement capacity exceeded")
-                            # Reserve semantic ownership in delivery order before
-                            # allowing Provider done/ACK to expose an idle foreground.
-                            action = event.action
-                            assert action is not None
-                            reservation = NativeEngineEvent(action=InteractionAction(
-                                action_id=f"{action.action_id}:reserve", operation="DELEGATE",
-                                interaction_id=action.interaction_id, scope=action.scope,
-                                payload=(("provider_call_id", call_id), ("turn_id", event.delegate.turn_id),
-                                         ("response_generation", str(event.delegate.response_generation))),
-                            ))
-                            try:
-                                await self._handle_native_event(session, reservation)
-                            except NativeRuntimeClientError:
-                                if any(ref.response_generation == event.delegate.response_generation for ref in session.barge_fenced_responses):
-                                    continue
-                                raise
-                            session.delegate_proposals[call_id] = event
-                            task = asyncio.create_task(self._run_native_delegate_event(session, event))
-                            session.delegate_tasks[call_id] = task
-                            def settled(done, call=call_id, owner=session):
-                                owner.delegate_tasks.pop(call, None)
-                                owner.delegate_proposals.pop(call, None)
-                                record = self._records.get(owner.record_id)
-                                if record is not None:
-                                    self._consume_native_task(record, done)
-                            task.add_done_callback(settled)
-                    else:
-                        await self._handle_native_event(session, event)
+                    await self._deliver_native_audio_batch(session, batch)
                 finally:
-                    session.delivery_queue.task_done()
-                continue
-            batch = [event]
-            first_audio = event.audio
-            while len(batch) < _NATIVE_AUDIO_PROPOSAL_BATCH:
-                try:
-                    candidate = session.delivery_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                candidate_audio = candidate.audio
-                if candidate_audio is None or not _native_audio_extends_batch(
-                    first_audio,
-                    candidate_audio,
-                    ordinal=len(batch),
-                ):
-                    pending = candidate
-                    break
-                batch.append(candidate)
-            try:
-                await self._deliver_native_audio_batch(session, batch)
-            finally:
-                for _event in batch:
-                    session.delivery_queue.task_done()
+                    for _event in batch:
+                        session.delivery_queue.task_done()
+        finally:
+            if pending is not None:
+                session.delivery_queue.task_done()
 
     async def _deliver_native_audio_batch(
         self,
@@ -2441,7 +2489,7 @@ class DedicatedMediaProductRegistry:
             assert first_audio is not None
             if first_audio.response not in session.downlink_record_ids:
                 await self._deliver_native_audio(session, admitted.pop(0))
-        if not admitted:
+        if not admitted or session.closed:
             return
         if len(admitted) == 1:
             await self._deliver_native_audio(session, admitted[0])
@@ -2505,6 +2553,8 @@ class DedicatedMediaProductRegistry:
     async def _deliver_native_audio(
         self, session: _NativeMediaSession, event: NativeEngineEvent
     ) -> None:
+        if session.closed:
+            return
         client = self._native_runtime_client
         if client is None:
             raise MediaTransportViolation(
@@ -2537,6 +2587,8 @@ class DedicatedMediaProductRegistry:
     async def _handle_native_event(
         self, session: _NativeMediaSession, event: NativeEngineEvent
     ) -> None:
+        if session.closed:
+            return
         if event.generated_transcript is not None:
             observation = event.generated_transcript
             with self._lock:
@@ -3034,6 +3086,8 @@ class DedicatedMediaProductRegistry:
         business = session.activation.business_contract_version is not None
         if not business and any(ref.response_generation == delegate.response_generation for ref in session.barge_fenced_responses):
             return
+        if business:
+            session.business_receipt_epoch += 1
         event_ids = await session.engine.send_delegate_result(
             delegate.provider_call_id,
             response,
@@ -8018,6 +8072,11 @@ class DedicatedMediaProductRegistry:
             session = self._native_pending_starts.get(key)
             if session is not None and session.record_id == record.record_id:
                 self._fence_native_start(session)
+            active = self._native_sessions.get(key)
+            if active is not None and active.record_id == record.record_id:
+                # Revoke eligibility synchronously with the route, before the
+                # asynchronous close performs RPC/socket/resource teardown.
+                active.closed = True
             self._native_close_capacity_reservations.add(key)
         try:
             loop = asyncio.get_running_loop()

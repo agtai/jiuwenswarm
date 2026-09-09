@@ -834,6 +834,83 @@ async def test_silent_terminal_ack_waits_for_runtime_while_provider_control_rema
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('lane', ['input', 'events', 'delivery'])
+async def test_native_consumer_rechecks_owner_after_already_awakened_wait(lane, monkeypatch):
+    registry = DedicatedMediaProductRegistry(enabled=True)
+    engine = _FakeNativeEngine()
+    queue = asyncio.Queue()
+    session = SimpleNamespace(closed=False, engine=engine, input_queue=queue, delivery_queue=queue,
+                              input_enqueued_at={})
+    touched = []
+    async def handled(*args):
+        touched.append(args)
+    monkeypatch.setattr(registry, '_handle_native_event', handled)
+    run = getattr(registry, '_run_native_' + lane)
+    task = asyncio.create_task(run(session))
+    await asyncio.sleep(0)
+    if lane == 'input':
+        queue.put_nowait(NativeInputAudioFrame(seq=0, sample_cursor=0, pcm16=b'\0' * 960))
+    else:
+        # Old code either handles this event or reads more session state; neither
+        # is permitted once this exact owner has been retired.
+        (engine.events if lane == 'events' else queue).put_nowait(NativeEngineEvent())
+    session.closed = True
+    try:
+        await asyncio.wait_for(task, 1)
+        assert not engine.offered_audio and not touched
+        if lane != 'events':
+            await asyncio.wait_for(queue.join(), 1)
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_native_delivery_releases_dequeued_pending_when_batch_closes_owner(monkeypatch):
+    registry = DedicatedMediaProductRegistry(enabled=True)
+    queue = asyncio.Queue()
+    queue.put_nowait(NativeEngineEvent(audio=SimpleNamespace(response='owned-response')))
+    queue.put_nowait(NativeEngineEvent())
+    session = SimpleNamespace(closed=False, delivery_queue=queue)
+    async def close_during_batch(owner, batch):
+        assert len(batch) == 1
+        owner.closed = True
+    monkeypatch.setattr(registry, '_deliver_native_audio_batch', close_during_batch)
+    await registry._run_native_delivery(session)
+    await asyncio.wait_for(queue.join(), 1)
+
+
+@pytest.mark.asyncio
+async def test_saturated_native_input_preserves_cause_and_fences_owner_before_async_cleanup():
+    activation = _native_activation()
+    client, engine = _FakeNativeRuntimeClient(activation), _FakeNativeEngine()
+    registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=client,
+        native_engine_factory=lambda _binding: engine)
+    activated = _activate(registry, params=_params(sample_rate_hz=24_000),
+                          request_origin=ORIGIN, connection_id="connection-1")
+    uplink = registry.consume_ticket(_media_ticket(activated), request_origin=ORIGIN)
+    await registry.begin_native_interaction(uplink)
+    session = registry._native_sessions[registry._native_session_keys_by_record[uplink.record_id]]
+    session.input_queue = asyncio.Queue(maxsize=1)
+    # Let the real consumer suspend in get before enqueue wakes it. Closure
+    # must still win when that already-awakened consumer resumes first.
+    await asyncio.sleep(0)
+    try:
+        registry.accept_native_frame(uplink, MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.0,) * 480))
+        with pytest.raises(MediaTransportViolation) as rejected:
+            registry.accept_native_frame(uplink, MediaAudioFrame(seq=1, sample_cursor=480, samples=(0.0,) * 480))
+        assert rejected.value.reason_id == "MEDIA_NATIVE_PROVIDER_TRANSPORT_FAILED"
+        assert session.failure_reason == "MEDIA_NATIVE_INPUT_BACKPRESSURE"
+        assert session.closed and uplink.native_transport_failure
+        assert uplink.accepted_frames == 1
+        await asyncio.sleep(0)
+        assert engine.offered_audio == [] and client.proposals == []
+    finally:
+        await registry.close_native_interaction(uplink)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure_reason", [
     "REALTIME_TRANSPORT_SEND_FAILED", "REALTIME_TRANSPORT_RECEIVE_FAILED",
     "REALTIME_PROVIDER_TIMEOUT", "UNRECOGNIZED_FAILURE",
@@ -1076,7 +1153,7 @@ async def test_native_business_late_prepared_output_keeps_real_receipt_and_accep
         return ("real-output-receipt", None)
     engine.send_delegate_result = send_result
     response = ResponseRef(activation.binding.interaction_id, "source", 1)
-    session = SimpleNamespace(closed=False, activation=activation, engine=engine, barge_fenced_responses={response: None}, projected_task_associations=set())
+    session = SimpleNamespace(closed=False, activation=activation, engine=engine, barge_fenced_responses={response: None}, projected_task_associations=set(), business_receipt_epoch=0)
     delegate = NativeBusinessProposal(binding=activation.binding, turn_id="turn", response_generation=1,
         provider_event_id="function", provider_call_id="call", provider_item_id="item", request_text="start analysis",
         business=NativeBusinessAction("work.start", "a" * 64, None, None, None, "analyze", None))
@@ -1106,7 +1183,7 @@ async def test_native_work_busy_runtime_defers_exact_provider_without_admission(
     async def defer(provider_id):
         deferred.append(provider_id)
     engine.defer_work_response = defer
-    session = SimpleNamespace(activation=activation, engine=engine, key=("s", "c", "i", "a", 1), request_ordinal=0)
+    session = SimpleNamespace(activation=activation, engine=engine, key=("s", "c", "i", "a", 1), request_ordinal=0, closed=False)
     event = NativeEngineEvent(action=InteractionAction("work-speak", "SPEAK", activation.binding.interaction_id,
         activation.binding.scope, payload=(("provider_response_id", "provider-work"), ("turn_id", "turn"), ("work_event_id", "event-1"))))
     registry = DedicatedMediaProductRegistry(enabled=True, native_runtime_client=Client(activation))

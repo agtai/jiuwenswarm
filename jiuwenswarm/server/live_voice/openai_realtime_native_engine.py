@@ -326,12 +326,15 @@ class _PreparedContinuation:
     output: PreparedProviderOutput
     retry: bool = False
     truncation_requests: dict[str, tuple[str, int]] = field(default_factory=dict)
+    deletion_requests: dict[str, str] = field(default_factory=dict)
     reported_cleanup_failure: bool = False
     pending_truncation: _PendingProviderControlSend | None = None
+    pending_deletion: _PendingProviderControlSend | None = None
 
 
 _EVENT_KEYS = {
     "error": frozenset({"type", "event_id", "error"}),
+    "conversation.item.deleted": frozenset({"type", "event_id", "item_id"}),
     "conversation.item.truncated": frozenset(
         {"type", "event_id", "item_id", "content_index", "audio_end_ms"}
     ),
@@ -425,6 +428,7 @@ _HARMLESS_EVENT_TYPES = frozenset(
         "conversation.item.done",
         "conversation.item.input_audio_transcription.delta",
         "conversation.item.truncated",
+        "conversation.item.deleted",
         "input_audio_buffer.cleared",
         "input_audio_buffer.timeout_triggered",
         "rate_limits.updated",
@@ -913,6 +917,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._pending_events: deque[NativeEngineEvent] = deque()
         self._pending_audio: deque[_BufferedAudio] = deque()
         self._processed_event_ids: set[str] = set()
+        self._protected_conversation_items: set[str] = set()
         self._action_port = InteractionEnginePort(
             INTERACTION_ACTION_OPERATIONS,
             scope=binding.scope,
@@ -953,6 +958,9 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._locally_fenced: set[str] = set()
         self._business_context: dict[str, object] | None = None
         self._sent_business_context_id: str | None = None
+        self._business_context_unpublished = False
+        self._business_receipt_epoch = 0
+        self._business_refreshed_receipt_epoch = 0
         self._business_refresh: Callable[[], Awaitable[Mapping[str, object]]] | None = None
         self._business_presentation_busy: Callable[[], bool] | None = None
         self._business_accepted_turn: str | None = None
@@ -1134,7 +1142,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         self._work_retry_after = asyncio.get_running_loop().time() + 1.0
         await self._cancel_unpresented_response(provider_id)
 
-    def _replace_business_context(self, context, work_events) -> None:
+    def _replace_business_context(self, context, work_events, *, receipt_epoch=None) -> None:
         value = self._business_context_copy(context)
         if type(work_events) is not list or len(work_events) > 32:
             raise OpenAIRealtimeNativeInteractionError("NATIVE_WORK_EVENT_QUEUE_FULL", "Work event list must be bounded")
@@ -1154,7 +1162,10 @@ class OpenAIRealtimeNativeInteractionEngine:
         except BaseException:
             self._work_events = previous
             raise
+        self._business_context_unpublished = value.get("context_id") != self._sent_business_context_id
         self._business_context = value
+        if receipt_epoch is not None:
+            self._business_refreshed_receipt_epoch = receipt_epoch
 
     async def acknowledge_business_turn(self, turn_id: str) -> None:
         self._require_operational()
@@ -1188,23 +1199,38 @@ class OpenAIRealtimeNativeInteractionEngine:
     async def _send_business_facts(self, facts: dict[str, object]) -> str:
         # Serialize the exact facts before awaiting: observer replacement cannot
         # change either the sent bytes or the identity we publish after success.
+        payload, publication = self._business_facts_snapshot(facts)
+        async with self._business_send_lock:
+            return await self._publish_business_facts_locked(payload, publication)
+
+    @staticmethod
+    def _business_facts_snapshot(facts):
         payload = {"item": {
             "type": "message", "role": "user", "content": [{"type": "input_text",
                 "text": json.dumps(facts, ensure_ascii=False, allow_nan=False, separators=(",", ":"))}],
         }}
         context = facts.get("native_business_context")
-        context_id = context.get("context_id") if isinstance(context, dict) else None
-        async with self._business_send_lock:
-            event_id = await self._session.send_event("conversation.item.create", payload)
-            if isinstance(context, dict):
-                self._sent_business_context_id = context_id
-                self._profile_business("context_published", context_id=context_id,
-                    task_count=len(context["tasks"]) if type(context.get("tasks")) is list else None,
-                    work_count=len(context["works"]) if type(context.get("works")) is list else None,
-                    source_event_id=event_id)
-            return event_id
+        publication = None if not isinstance(context, dict) else {
+            "context_id": context.get("context_id"),
+            "task_count": len(context["tasks"]) if type(context.get("tasks")) is list else None,
+            "work_count": len(context["works"]) if type(context.get("works")) is list else None,
+        }
+        return payload, publication
+
+    async def _publish_business_facts_locked(self, payload, publication) -> str:
+        event_id = await self._session.send_event("conversation.item.create", payload)
+        if publication is not None:
+            context_id = publication["context_id"]
+            self._sent_business_context_id = context_id
+            self._business_context_unpublished = (self._business_context is not None
+                and self._business_context.get("context_id") != context_id)
+            self._profile_business("context_published", **publication, source_event_id=event_id)
+        return event_id
 
     async def _send_response_request(self, request: _ProviderResponseRequest) -> str | None:
+        # A compact receipt deliberately omits the full Task snapshot. Before
+        # the next tool-capable turn, read facts after that admitted receipt;
+        # polling alone can leave a just-created Task absent from its binding.
         # Observer updates may arrive while this exact request waits for the
         # send lock. A known terminal/superseded Work cannot receive stale
         # underway-only instructions; retain the same request through refresh.
@@ -1213,17 +1239,41 @@ class OpenAIRealtimeNativeInteractionEngine:
                 if not self._inflight_request_current(request):
                     self._retire_unsent_request(request)
                     return None
-                if not (request.receipt_only and request.work_feedback_refs
-                        and self._work_feedback_obsolete(request.work_feedback_refs)):
+                obsolete = (request.receipt_only and request.work_feedback_refs
+                            and self._work_feedback_obsolete(request.work_feedback_refs))
+                refresh_due = (not request.receipt_only and self._business_refresh is not None
+                    and self._business_refreshed_receipt_epoch != self._business_receipt_epoch)
+                if not obsolete and not refresh_due:
+                    # Full-context publication and response binding share this
+                    # ordering boundary. A running response retains its frozen
+                    # binding; replacements affect only a future response.
+                    while not request.receipt_only and self._business_context_unpublished:
+                        if self._business_context.get("context_id") == self._sent_business_context_id:
+                            self._business_context_unpublished = False
+                            break
+                        await self._publish_business_facts_locked(*self._business_facts_snapshot(
+                            {"native_business_context": self._business_context}))
+                        if not self._inflight_request_current(request):
+                            self._retire_unsent_request(request)
+                            return None
+                        if (self._business_refresh is not None
+                                and self._business_refreshed_receipt_epoch != self._business_receipt_epoch):
+                            break
+                    if (not request.receipt_only and self._business_refresh is not None
+                            and self._business_refreshed_receipt_epoch != self._business_receipt_epoch):
+                        continue  # Release the send boundary before refreshing.
                     return await self._send_response_request_locked(request)
-                self._restore_full_context_successor(request)
+                if obsolete:
+                    self._restore_full_context_successor(request)
             if self._business_refresh is not None:
+                epoch = self._business_receipt_epoch
                 fresh = await self._business_refresh()
                 if not self._inflight_request_current(request):
                     self._retire_unsent_request(request)
                     return None
-                self._replace_business_context(fresh["context"], fresh["work_events"])
-            await self._send_business_facts({"native_business_context": self._business_context})
+                self._replace_business_context(fresh["context"], fresh["work_events"], receipt_epoch=epoch)
+            else:
+                await self._send_business_facts({"native_business_context": self._business_context})
 
     async def _send_response_request_locked(self, request: _ProviderResponseRequest) -> str | None:
         if self._business_context is not None:
@@ -1482,14 +1532,18 @@ class OpenAIRealtimeNativeInteractionEngine:
         if event.event_type == "conversation.item.truncated":
             prepared.output.acknowledge_truncate(data)
             return False
+        if event.event_type == "conversation.item.deleted":
+            prepared.output.acknowledge_delete(data)
+            return False
         if event.event_type == "error":
             error = self._validated_provider_error(data)
-            if error["event_id"] in prepared.truncation_requests:
+            if error["event_id"] in prepared.truncation_requests or error["event_id"] in prepared.deletion_requests:
                 self._fail_prepared_cleanup(prepared)
                 return True
-            if (prepared.pending_truncation is not None
+            pending_cleanup = prepared.pending_truncation or prepared.pending_deletion
+            if (pending_cleanup is not None
                     and not (error["type"] == "invalid_request_error" and error["code"] == "response_cancel_not_active")):
-                self._latch_control_error(prepared.pending_truncation, error)
+                self._latch_control_error(pending_cleanup, error)
                 return True
         provider_id = data.get("response_id")
         if event.event_type == "response.done":
@@ -1502,12 +1556,10 @@ class OpenAIRealtimeNativeInteractionEngine:
         if event.event_type == "response.done":
             observed_items.update(item["id"] for item in data["response"]["output"]
                                   if isinstance(item, dict) and type(item.get("id")) is str)
-        other_items = {item.provider_item_id for other in self._responses.values()
-                       if other.provider_response_id != provider_id for item in other.audio_items.values()}
-        other_items.update(wait.proposal.provider_item_id for wait in self._delegates.values())
+        other_items = self._protected_item_ids(provider_id)
         if observed_items & other_items:
-            # Never truncate an item belonging to the actual predecessor or a
-            # previously admitted function, even if Provider reuses its ID.
+            # Never alter prior playback, committed/current user input, or
+            # published business facts/results, even if Provider reuses its ID.
             prepared.output.cleanup_unsupported = True
             self._discard_prepared_continuation("NATIVE_PREPARED_OUTPUT_IDENTITY_CONFLICT")
             return True
@@ -1538,6 +1590,22 @@ class OpenAIRealtimeNativeInteractionEngine:
                 self._responses[provider_id].done = True
                 self._responses[provider_id].terminal_status = prepared.output.terminal_status
         return True
+
+    def _protected_item_ids(self, provider_id):
+        items = {item.provider_item_id for other in self._responses.values()
+                       if other.provider_response_id != provider_id for item in other.audio_items.values()}
+        items.update(wait.proposal.provider_item_id for wait in self._delegates.values())
+        items.update(self._input_commits_by_item)
+        items.update(self._protected_conversation_items)
+        if self._input_item_id is not None:
+            items.add(self._input_item_id)
+        return items
+
+    def _prepared_cleanup_has_foreign_items(self, output):
+        targets = {item_id for item_id, _ in output.audio_targets} | output.delete_targets
+        if targets & self._protected_item_ids(output.provider_id):
+            output.cleanup_unsupported = True
+        return output.cleanup_unsupported
 
     def _prepared_request_current(self, prepared: _PreparedContinuation) -> bool:
         request = prepared.request
@@ -1593,7 +1661,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                 await self._cancel_unpresented_response(output.provider_id)
                 if not self._scheduler_open() or self._prepared is not prepared:
                     return
-            if output.cleanup_unsupported:
+            if self._prepared_cleanup_has_foreign_items(output):
                 failure = (prepared.request.turn_id, "NATIVE_PREPARED_CONTEXT_CLEANUP_UNSUPPORTED")
                 if not prepared.reported_cleanup_failure:
                     self._continuation_failures.append(failure)
@@ -1609,7 +1677,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                 # owner. The sole reader can observe receipts during the write.
                 async with self._cancel_lock:
                     if (not self._scheduler_open() or self._prepared is not prepared
-                            or output.cleanup_unsupported):
+                            or self._prepared_cleanup_has_foreign_items(output)):
                         return
                     pending = _PendingProviderControlSend(output.provider_id)
                     prepared.pending_truncation = pending
@@ -1628,7 +1696,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                             self._confirm_control_error(pending, event_id)
                             self._fail_prepared_cleanup(prepared)
                             return
-                        if output.cleanup_unsupported:
+                        if self._prepared_cleanup_has_foreign_items(output):
                             return
                         output.confirm_truncate(target)
                     except BaseException as exc:
@@ -1639,8 +1707,39 @@ class OpenAIRealtimeNativeInteractionEngine:
                         output.abandon_truncate(target)
                         if prepared.pending_truncation is pending:
                             prepared.pending_truncation = None
+            for target in sorted(output.delete_targets - output.delete_sent):
+                # Only this unadmitted response's function items are eligible.
+                # Arguments never became business proposals before promotion.
+                async with self._cancel_lock:
+                    if (not self._scheduler_open() or self._prepared is not prepared
+                            or self._prepared_cleanup_has_foreign_items(output)):
+                        return
+                    pending = _PendingProviderControlSend(output.provider_id)
+                    prepared.pending_deletion = pending
+                    try:
+                        output.begin_delete(target)
+                        event_id = await self._session.send_event("conversation.item.delete", {"item_id": target})
+                        if (not self._scheduler_open() or self._prepared is not prepared
+                                or prepared.pending_deletion is not pending):
+                            return
+                        prepared.deletion_requests[event_id] = target
+                        if pending.early_error_event_id is not None:
+                            self._confirm_control_error(pending, event_id)
+                            self._fail_prepared_cleanup(prepared)
+                            return
+                        if self._prepared_cleanup_has_foreign_items(output):
+                            return
+                        output.confirm_delete(target)
+                    except BaseException as exc:
+                        reason = getattr(exc, "reason", "NATIVE_PROVIDER_CONTROL_SEND_UNCONFIRMED")
+                        self._scheduler_failure(reason)
+                        raise
+                    finally:
+                        output.abandon_delete(target)
+                        if prepared.pending_deletion is pending:
+                            prepared.pending_deletion = None
             if not output.cleanup_complete:
-                self._profile_business_wait("prepared_context_truncation_ack")
+                self._profile_business_wait("prepared_context_cleanup_ack")
                 return
             # The retained request is reused only after proven cleanup. It cannot
             # resend function outputs, rerun business work or consume a new round.
@@ -1661,6 +1760,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         # Membership/activation must still be authoritative at the promotion
         # boundary. The Runtime will independently admit the resulting SPEAK.
         refresh_context = self._business_context
+        refresh_epoch = self._business_receipt_epoch
         fresh = await self._business_refresh()
         if not self._scheduler_open() or self._prepared is not prepared or output.discarded:
             return
@@ -1669,7 +1769,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             self._scheduler_again = True
             return
         if self._business_context is refresh_context:
-            self._replace_business_context(fresh["context"], fresh["work_events"])
+            self._replace_business_context(fresh["context"], fresh["work_events"], receipt_epoch=refresh_epoch)
         if not self._prepared_request_current(prepared):
             self._discard_prepared_continuation("NATIVE_PREPARED_RESPONSE_SUPERSEDED")
             self._scheduler_again = True
@@ -1839,6 +1939,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                 refresh_turn = self._current_turn_id
                 refresh_accepted_turn = self._business_accepted_turn
                 refresh_context = self._business_context
+                refresh_epoch = self._business_receipt_epoch
                 fresh = await self._business_refresh()
                 if (not self._scheduler_open() or self._inflight_response_request is not None
                         or self._continuation_preparation and (
@@ -1846,7 +1947,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                             or self._business_accepted_turn != refresh_accepted_turn or self._user_input_pending()
                             or self._business_context is not refresh_context)):
                     return
-                self._replace_business_context(fresh["context"], fresh["work_events"])
+                self._replace_business_context(fresh["context"], fresh["work_events"], receipt_epoch=refresh_epoch)
                 context_refreshed = True
                 draining = self._response_draining(current)
                 self._profile_business("context_refresh_completed")
@@ -1888,6 +1989,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             if (self._receipt_projection and not request.receipt_only and not facts_sent and (request.delegate_call_id is not None
                     or request.business_recovery or request.work_event_id is not None)):
                 if self._business_refresh is not None and not context_refreshed:
+                    refresh_epoch = self._business_receipt_epoch
                     fresh = await self._business_refresh()
                     if not self._inflight_request_current(request):
                         self._retire_unsent_request(request)
@@ -1895,7 +1997,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                     # Gateway returns its latest cursor-ordered snapshot after
                     # the shared read. Object replacement by an observer is not
                     # a STOP and must not discard an accepted receipt successor.
-                    self._replace_business_context(fresh["context"], fresh["work_events"])
+                    self._replace_business_context(fresh["context"], fresh["work_events"], receipt_epoch=refresh_epoch)
                 if not self._inflight_request_current(request):
                     self._retire_unsent_request(request)
                     return
@@ -2165,6 +2267,7 @@ class OpenAIRealtimeNativeInteractionEngine:
         except (ValueError, TypeError):
             raise OpenAIRealtimeNativeInteractionError("NATIVE_BUSINESS_OUTPUT_INVALID", "Business output must be JSON data") from None
         self._delegate_output_started.add(parsed)
+        self._business_receipt_epoch += 1
         source = self._find_response(ref)
         self._profile_business("receipt_prepare_started", response=source, provider_call_id=parsed)
         provider_output = compact_native_business_output(project_native_receipt(output) if self._receipt_projection else output)
@@ -2193,6 +2296,14 @@ class OpenAIRealtimeNativeInteractionEngine:
                     and all(character in "0123456789abcdef" for character in context_id)
                     and set(published_context) == {"context_id", "history", "tasks", "works", "model"}):
                 self._sent_business_context_id = context_id
+                # Adopt the complete receipt only if no newer observation has
+                # replaced the source response's facts. A delayed receipt must
+                # not roll back a newer local snapshot or its future binding.
+                if (source.business_binding is not None and self._business_context is not None
+                        and self._business_context.get("context_id") == source.business_binding.context_id):
+                    self._business_context = self._business_context_copy(published_context)
+                self._business_context_unpublished = (self._business_context is not None
+                    and self._business_context.get("context_id") != context_id)
         self._delegate_results[parsed] = _DelegateResult(ref, digest, (output_id, None), receipt_only, work_feedback_ref)
         self._profile_business("receipt_sent", response=source, provider_call_id=parsed, source_event_id=output_id)
         sent = await self._request_pending_provider_response()
@@ -2594,6 +2705,10 @@ class OpenAIRealtimeNativeInteractionEngine:
             if pending_target is not None:
                 self._prepared.output.abandon_truncate(pending_target)
             self._prepared.pending_truncation = None
+            delete_target = self._prepared.output.pending_delete
+            if delete_target is not None:
+                self._prepared.output.abandon_delete(delete_target)
+            self._prepared.pending_deletion = None
         self._prepared = None
         self._promoting = None
         self._prepared_replay.clear()
@@ -2651,6 +2766,14 @@ class OpenAIRealtimeNativeInteractionEngine:
     ) -> list[NativeEngineEvent]:
         event_type = event.event_type
         if event_type in _HARMLESS_EVENT_TYPES:
+            if event_type in {"conversation.item.added", "conversation.item.done"}:
+                item = data.get("item")
+                if type(item) is dict and (item.get("type") == "function_call_output"
+                        or item.get("type") == "message" and item.get("role") != "assistant"):
+                    item_id = _identity(item.get("id"), reason="NATIVE_PROVIDER_ITEM_INVALID", field_name="item id")
+                    if item_id not in self._protected_conversation_items:
+                        self._require_input_fact_capacity(len(self._protected_conversation_items), "NATIVE_CONVERSATION_ITEM_LEDGER_FULL")
+                        self._protected_conversation_items.add(item_id)
             if event_type == "response.function_call_arguments.delta":
                 self._observe_first_arguments(event, data)
             return []

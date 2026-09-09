@@ -14,6 +14,7 @@ import inspect
 import json
 import math
 import re
+import socket as socket_module
 import time
 import unicodedata
 from collections import OrderedDict, deque
@@ -24,11 +25,12 @@ from typing import Protocol
 from urllib.parse import urlencode, urlparse, urlunparse
 
 from jiuwenswarm.common.live_voice_profiling import identity_fields, profile_snapshot_event
+from jiuwenswarm.server.live_voice.speech_socket_diagnostics import attach_socket_diagnostics, diagnostic_socket_factory
 
 
 _TIMED_CLIENT_EVENTS = frozenset({
     "session.update", "response.create", "response.cancel", "conversation.item.create",
-    "conversation.item.truncate", "input_audio_buffer.commit",
+    "conversation.item.truncate", "conversation.item.delete", "input_audio_buffer.commit",
 })
 _TIMED_PROVIDER_EVENTS = frozenset({
     "session.created", "session.updated", "response.created", "response.done",
@@ -468,7 +470,19 @@ async def default_realtime_socket_factory(
     # Optional passive observer; older supported websockets keeps its old path.
     if connection_factory is not None and "create_connection" in inspect.signature(websockets.connect).parameters:
         kwargs["create_connection"] = connection_factory
-    return await websockets.connect(url, **kwargs)
+    connection = await websockets.connect(url, **kwargs)
+    # CPython 3.11 skips its implicit TCP_NODELAY when Windows getaddrinfo
+    # reports SOCK_STREAM/proto=0. Streaming voice must not inherit Nagle's
+    # small-write delay from that resolver representation. Set it on this
+    # connection only; alternate transports retain their own configuration.
+    transport = getattr(connection, "transport", None)
+    tcp = transport.get_extra_info("socket") if transport is not None else None
+    if tcp is not None and tcp.family in (socket_module.AF_INET, socket_module.AF_INET6):
+        try:
+            tcp.setsockopt(socket_module.IPPROTO_TCP, socket_module.TCP_NODELAY, 1)
+        except OSError:
+            pass  # An unsupported socket option must not leak the open socket.
+    return connection
 
 
 @dataclass(frozen=True, slots=True)
@@ -528,7 +542,10 @@ class OpenAIRealtimeSession:
         if not isinstance(config, OpenAIRealtimeSessionConfig):
             raise TypeError("config must be OpenAIRealtimeSessionConfig")
         self._config = config
-        self._socket_factory = socket_factory or default_realtime_socket_factory
+        self._socket_factory = socket_factory or (diagnostic_socket_factory if diagnostic_origin is not None
+                                                  else default_realtime_socket_factory)
+        self._socket_diagnostics = None
+        self._input_append_count = 0
         self._state = RealtimeSessionState.NEW
         self._state_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
@@ -652,6 +669,8 @@ class OpenAIRealtimeSession:
             raise error from None
         assert socket is not None
         self._socket = socket
+        if self._diagnostic_origin is not None and getattr(socket, "transport", None) is not None:
+            self._socket_diagnostics = attach_socket_diagnostics(socket, url, **self._diagnostic_origin)
 
         try:
             created = await self._receive_event_internal(allow_opening=True)
@@ -798,12 +817,19 @@ class OpenAIRealtimeSession:
                 {"type": parsed_type, "event_id": event_id, **parsed_payload}
             )
             send_started = time.perf_counter()
-            if parsed_type in _TIMED_CLIENT_EVENTS:
+            if parsed_type == "input_audio_buffer.append":
+                self._input_append_count += 1
+            timed = (parsed_type in _TIMED_CLIENT_EVENTS or parsed_type == "input_audio_buffer.append"
+                     and self._input_append_count % 50 == 1)
+            if timed:
                 self._observe_transport("socket_send_started", parsed_type, event_id,
                     lock_wait_ms=(encode_started - lock_started) * 1000,
                     encode_ms=(send_started - encode_started) * 1000,
                     wire_bytes=len(wire.encode("utf-8")))
             socket_started = time.perf_counter()
+            observer = self._socket_diagnostics
+            if observer is not None:
+                observer.begin(None, next_count, budget_seconds=self._config.operation_timeout_seconds)
             try:
                 await asyncio.wait_for(
                     socket.send(wire),
@@ -833,8 +859,17 @@ class OpenAIRealtimeSession:
                 )
                 await self._record_primary(error.reason)
                 raise error from None
+            finally:
+                if observer is not None:
+                    observations = observer.finish()
+                    duration = (time.perf_counter() - socket_started) * 1000
+                    if timed or duration >= 100:
+                        self._observe_transport("socket_send_observation", parsed_type, event_id,
+                            lock_wait_ms=(encode_started - lock_started) * 1000,
+                            encode_ms=(send_started - encode_started) * 1000,
+                            socket_send_ms=duration, **observations)
             self._client_event_count = next_count
-            if parsed_type in _TIMED_CLIENT_EVENTS:
+            if timed:
                 self._observe_transport("socket_send_completed", parsed_type, event_id,
                                         socket_send_ms=(time.perf_counter() - socket_started) * 1000)
             return event_id

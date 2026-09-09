@@ -259,7 +259,7 @@ async def test_overflow_preserves_old_playback_and_retries_only_after_exact_clea
 
 
 @pytest.mark.asyncio
-async def test_unadmitted_function_cleanup_is_explicitly_unsupported_and_no_new_generation():
+async def test_unadmitted_function_cleanup_requires_exact_delete_ack_before_new_generation():
     engine, socket, _ = await preparing_engine()
     try:
         await feed(engine, socket, business_function("f2", "p2", "call2"))
@@ -273,13 +273,119 @@ async def test_unadmitted_function_cleanup_is_explicitly_unsupported_and_no_new_
         failures = []
         while (failure := engine.take_continuation_failure()) is not None:
             failures.append(failure[1])
-        assert "NATIVE_PREPARED_CONTEXT_CLEANUP_UNSUPPORTED" in failures
+        assert "NATIVE_PREPARED_CONTEXT_CLEANUP_UNSUPPORTED" not in failures
         assert "NATIVE_PREPARED_RESPONSE_INTERRUPTED" not in failures
         await feed(engine, socket, speech_stopped("e2", "u2", 1200))
         commit = await feed(engine, socket, input_committed("c2", "u2"))
         await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
         assert len(requests(socket)) == 2 and not engine._delegates
-        assert not [event for event in socket.sent if event["type"] == "conversation.item.delete"]
+        deletions = [event for event in socket.sent if event["type"] == "conversation.item.delete"]
+        assert [event['item_id'] for event in deletions] == ['item-call2']
+        await feed(engine, socket, provider_event('conversation.item.deleted', 'wrong-delete', item_id='audio1'))
+        assert len(requests(socket)) == 2 and not engine._delegates
+        await feed(engine, socket, provider_event('conversation.item.deleted', 'right-delete', item_id='item-call2'))
+        assert len(requests(socket)) == 3 and not engine._delegates
+        assert engine.snapshot().released_audio_count == 1
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('owner', ['committed_input', 'current_input', 'business_facts', 'tool_output'])
+@pytest.mark.parametrize('late_protection', [False, True])
+async def test_prepared_cleanup_cannot_delete_existing_conversation_history(owner, late_protection):
+    engine, socket, _ = await preparing_engine()
+    try:
+        item_id = 'u1' if owner == 'committed_input' else 'protected-item'
+        call = {**business_function('collision-call', 'p2', 'call2'), 'item_id': item_id}
+        if late_protection:
+            await feed(engine, socket, call)
+        if owner == 'current_input':
+            await feed(engine, socket, speech_started('new-speech', item_id, 700))
+        elif owner in {'business_facts', 'tool_output'}:
+            item = {'id': item_id, 'type': 'message', 'role': 'user', 'content': []} if owner == 'business_facts' else {
+                'id': item_id, 'type': 'function_call_output', 'call_id': 'old-call', 'output': '{}'}
+            await feed(engine, socket, provider_event('conversation.item.added', 'history-added', item=item))
+        if not late_protection:
+            await feed(engine, socket, call)
+        if owner != 'current_input':
+            await feed(engine, socket, speech_started('new-speech', 'u2', 700))
+        await feed(engine, socket, response_done('collision-terminal', 'p2', status='cancelled'))
+        assert engine._prepared.output.cleanup_unsupported
+        assert not [e for e in socket.sent if e['type'] in ('conversation.item.delete', 'conversation.item.truncate')]
+        assert not engine._delegates and engine.snapshot().released_audio_count == 1
+        assert len(requests(socket)) == 2
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field,value', [('name', 'unknown_function'), ('call_id', ''), ('output_index', -1), ('item_id', '')])
+async def test_invalid_function_observation_cannot_certify_empty_context_cleanup(field, value):
+    engine, socket, _ = await preparing_engine()
+    try:
+        call = {**business_function('invalid-call', 'p2', 'call2'), field: value}
+        await feed(engine, socket, call)
+        await feed(engine, socket, response_done('cancelled-invalid', 'p2', status='cancelled'))
+        assert not engine._prepared.output.cleanup_complete
+        assert engine._prepared.output.cleanup_unsupported or 'item-call2' in engine._prepared.output.delete_targets
+        assert not engine._delegates and engine.snapshot().released_audio_count == 1
+        assert len(requests(socket)) == 2
+    finally:
+        await engine.close()
+
+
+async def mixed_commentary_output(engine, socket):
+    call = business_function('mixed-call', 'p2', 'mixed-call-id')
+    call['output_index'] = 1
+    audio = {'id': 'audio2', 'type': 'message', 'role': 'assistant', 'phase': 'commentary',
+             'status': 'completed', 'content': [{'type': 'audio', 'transcript': '我来确认任务。'}]}
+    function = function_terminal(call)['response']['output'][0]
+    await feed(engine, socket, provider_event('response.output_item.added', 'mixed-a-added',
+        response_id='p2', output_index=0, item={**audio, 'status': 'in_progress', 'content': []}))
+    await feed(engine, socket, provider_event('response.content_part.added', 'mixed-part-added',
+        response_id='p2', output_index=0, item_id='audio2', content_index=0,
+        part={'type': 'audio', 'transcript': ''}))
+    await feed(engine, socket, provider_event('response.output_item.added', 'mixed-f-added',
+        response_id='p2', output_index=1, item={**function, 'status': 'in_progress', 'arguments': ''}))
+    await feed(engine, socket, output_audio_delta('mixed-a', 'p2', 'audio2', 0))
+    await feed(engine, socket, output_audio_done('mixed-a-done', 'p2', 'audio2'))
+    await feed(engine, socket, output_transcript_done('mixed-transcript', 'p2', 'audio2', '我来确认任务。'))
+    await feed(engine, socket, provider_event('response.content_part.done', 'mixed-part-done',
+        response_id='p2', output_index=0, item_id='audio2', content_index=0, part=audio['content'][0]))
+    await feed(engine, socket, provider_event('response.output_item.done', 'mixed-a-item-done',
+        response_id='p2', output_index=0, item=audio))
+    await feed(engine, socket, call)
+    await feed(engine, socket, provider_event('response.output_item.done', 'mixed-f-done',
+        response_id='p2', output_index=1, item=function))
+    terminal = response_done('mixed-terminal', 'p2')
+    terminal['response']['output'] = [audio, function]
+    await feed(engine, socket, terminal)
+    return call
+
+
+@pytest.mark.asyncio
+async def test_real_provider_commentary_and_function_composition_promotes_with_exact_admission():
+    engine, socket, _ = await preparing_engine()
+    try:
+        call = await mixed_commentary_output(engine, socket)
+        assert not engine._prepared.output.discarded
+        assert engine._prepared.output.terminal
+        assert engine._responses['p2'].runtime_ref is None and not engine._delegates
+        assert engine.snapshot().released_audio_count == 1
+        await engine.acknowledge_presentation(response_ref(1))
+        assert action_payload(await next_output(engine))['provider_response_id'] == 'p2'
+        await engine.admit_response('p2', response_ref(2))
+        observed = []
+        for _ in range(8):
+            event = await next_output(engine)
+            observed.append(event)
+            if event.delegate is not None:
+                break
+        assert any(event.audio is not None and event.audio.response == response_ref(2) for event in observed)
+        assert observed[-1].delegate.provider_call_id == call['call_id']
+        assert engine.snapshot().delegate_count == 1
+        assert not [e for e in socket.sent if e['type'] in ('conversation.item.delete', 'conversation.item.truncate')]
     finally:
         await engine.close()
 
@@ -407,7 +513,9 @@ async def test_receipt_refresh_observation_preserves_one_current_successor(obser
     from jiuwenswarm.server.live_voice.native_business_observation import canonical_native_receipt
     entered, release = asyncio.Event(), asyncio.Event()
     latest = {"context": business_context(), "work_events": []}
+    refresh_calls = []
     async def refresh():
+        refresh_calls.append(True)
         entered.set()
         await release.wait()
         return latest
@@ -449,6 +557,7 @@ async def test_receipt_refresh_observation_preserves_one_current_successor(obser
         for _ in range(3):
             await engine._request_pending_provider_response()
         assert len(requests(socket)) == (1 if observation == "interrupted" else 2)
+        assert refresh_calls == [True]
         outputs = [e["item"] for e in socket.sent if e["type"] == "conversation.item.create"]
         assert len([i for i in outputs if i["type"] == "function_call_output"]) == 1
         if observation != "interrupted":
@@ -1095,14 +1204,14 @@ async def test_captured_realtime_audio_shape_is_verified_before_paced_admitted_r
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("defect", ["commentary", "null_phase", "unknown_field", "text", "transcript_conflict"])
-async def test_captured_terminal_alias_does_not_admit_commentary_unknown_fields_or_changed_facts(defect):
+@pytest.mark.parametrize("defect", ["unsupported_phase", "null_phase", "unknown_field", "text", "transcript_conflict"])
+async def test_captured_terminal_alias_does_not_admit_unsupported_fields_or_changed_facts(defect):
     engine, socket, _ = await preparing_engine(event_queue_capacity=256)
     try:
         events = list(captured_audio_shape_events())
         terminal = events[-1]["response"]["output"][0]
-        if defect == "commentary":
-            terminal["phase"] = "commentary"
+        if defect == "unsupported_phase":
+            terminal["phase"] = "unknown_phase"
         elif defect == "null_phase":
             terminal["phase"] = None
         elif defect == "unknown_field":
@@ -1140,28 +1249,97 @@ def control_error(event_id, request_id, *, cancel=False, **changes):
         "message": "Synthetic control error", "param": None, "event_id": request_id, **changes})
 
 
-async def pending_control_send(monkeypatch, *, cancel=False, pre_intention_ack=False, fail_after_write=False):
-    monkeypatch.setattr(preparation, "MAX_PREPARED_OUTPUT_BYTES", 1024)
+async def pending_control_send(monkeypatch, *, cancel=False, delete=False, pre_intention_ack=False, fail_after_write=False):
+    monkeypatch.setattr(preparation, "MAX_PREPARED_OUTPUT_BYTES", 32 if delete else 1024)
     engine, socket, _ = await preparing_engine(session_config=engine_config(operation_timeout_seconds=1.0))
+    operation = "response.cancel" if cancel else "conversation.item.delete" if delete else "conversation.item.truncate"
     if fail_after_write:
         original_send = socket.send
         async def failing_send(message):
             await original_send(message)
-            if json.loads(message)["type"] == ("response.cancel" if cancel else "conversation.item.truncate"):
+            if json.loads(message)["type"] == operation:
                 raise OSError("Synthetic failure after control bytes were written")
         socket.send = failing_send
     if pre_intention_ack:
-        await feed(engine, socket, truncate_ack("unsolicited-before-intention"))
+        await feed(engine, socket, delete_ack("unsolicited-before-intention") if delete else truncate_ack("unsolicited-before-intention"))
     if cancel:
         socket.block_send_at = socket.send_calls + 1
         await consume_provider_control(engine, socket, output_audio_delta("a2", "p2", "audio2", 0))
     else:
-        await feed(engine, socket, output_audio_delta("a2", "p2", "audio2", 0))
+        await feed(engine, socket, business_function("f2", "p2", "call2") if delete else output_audio_delta("a2", "p2", "audio2", 0))
         socket.block_send_at = socket.send_calls + 1
         await consume_provider_control(engine, socket, response_done("d2", "p2", status="cancelled"))
     await asyncio.wait_for(socket.send_entered.wait(), .5)
-    assert socket.sent[-1]["type"] == ("response.cancel" if cancel else "conversation.item.truncate")
+    assert socket.sent[-1]["type"] == operation
     return engine, socket, engine._prepared, engine._continuation_scheduler
+
+
+def delete_ack(event_id='early-delete', item_id='item-call2'):
+    return provider_event('conversation.item.deleted', event_id, item_id=item_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['success', 'send_failure', 'rejection', 'foreign_error', 'close', 'cancelled', 'timeout'])
+async def test_delete_ack_requires_exact_intention_and_successful_send(monkeypatch, outcome):
+    engine, socket, prepared, scheduler = await pending_control_send(monkeypatch,
+        delete=True, pre_intention_ack=True, fail_after_write=outcome == 'send_failure')
+    try:
+        await consume_provider_control(engine, socket, delete_ack('wrong-early', 'audio1'))
+        socket.push(delete_ack('unsolicited-before-intention'))
+        assert await engine.next_event() == NativeEngineEvent()
+        assert not prepared.output._early_delete_ack and not prepared.output.delete_acknowledged
+        await consume_provider_control(engine, socket, delete_ack())
+        assert prepared.output._early_delete_ack
+        assert not prepared.output.delete_sent and not prepared.output.cleanup_complete
+        if outcome in ('rejection', 'foreign_error'):
+            await consume_provider_control(engine, socket, control_error('delete-error',
+                socket.sent[-1]['event_id'] if outcome == 'rejection' else 'foreign-control'))
+        if outcome == 'close':
+            await engine.close()
+        elif outcome == 'cancelled':
+            scheduler.cancel()
+        elif outcome != 'timeout':
+            socket.release_send.set()
+        await asyncio.wait_for(asyncio.gather(scheduler, return_exceptions=True), 1.5)
+        assert prepared.output.pending_delete is None and prepared.pending_deletion is None
+        assert not prepared.output._early_delete_ack
+        if outcome == 'success':
+            assert prepared.output.delete_sent == prepared.output.delete_acknowledged == {'item-call2'}
+            assert prepared.output.cleanup_complete
+            await engine.acknowledge_presentation(response_ref(1))
+            assert len(requests(socket)) == 3
+        else:
+            assert not prepared.output.delete_acknowledged and not prepared.output.cleanup_complete
+            assert len(requests(socket)) == 2
+        assert engine.snapshot().released_audio_count == 1 and not engine._delegates
+        assert not [e for e in socket.sent if e['type'] == 'conversation.item.truncate']
+    finally:
+        socket.release_send.set()
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_mixed_output_waits_for_audio_and_function_cleanup_without_effects():
+    engine, socket, _ = await preparing_engine()
+    try:
+        await mixed_commentary_output(engine, socket)
+        prepared = engine._prepared
+        await feed(engine, socket, speech_started('interrupt-mixed', 'u2', 700))
+        await engine.stop_foreground(response_ref(1))
+        assert prepared.output.discarded and not prepared.output.cleanup_complete
+        assert {e['item_id'] for e in socket.sent if e['type'] == 'conversation.item.delete'} == {'item-mixed-call-id'}
+        assert {e['item_id'] for e in socket.sent if e['type'] == 'conversation.item.truncate'} == {'audio2'}
+        await consume_provider_control(engine, socket, delete_ack('mixed-delete', 'item-mixed-call-id'))
+        assert not prepared.output.cleanup_complete
+        await consume_provider_control(engine, socket, truncate_ack('mixed-truncate'))
+        scheduler = engine._continuation_scheduler
+        if scheduler is not None:
+            await asyncio.wait_for(scheduler, .5)
+        assert prepared.output.cleanup_complete
+        assert engine.snapshot().released_audio_count == 1 and not engine._delegates
+        assert not engine._responses['p1'].presentation_acknowledged
+    finally:
+        await engine.close()
 
 
 @pytest.mark.asyncio

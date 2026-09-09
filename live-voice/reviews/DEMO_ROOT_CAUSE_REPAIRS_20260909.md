@@ -78,3 +78,85 @@ The expanded matrix also covers staged plus unstaged changes, intent-to-add,
 untracked/deleted files, mixed line endings and binary bytes. Scoped diff check
 passed. Private commands/results are in `logs/demo-20260909/repair-probes/`.
 Real Agent Task creation/application on the deployed Demo is still pending.
+
+## Prepared-response compatibility — refined implementation boundary
+
+Real gpt-realtime-2.1 probes reproduced the rejection in three independent
+sessions: one response contains an assistant audio message with `phase=commentary`
+and a separate function-call item. The existing preparation parser rejects that
+phase and mixed composition, then treats unadmitted function cleanup as unsupported.
+A fourth isolated Provider probe confirmed exact `conversation.item.delete` /
+`conversation.item.deleted` for its own unexecuted function item. These probes use
+synthetic context receipts and do not execute an Agent/Task or prove product E2E.
+
+Refine this accepted compatibility repair to Tier 3 for Provider-context
+preservation across the Session/Engine/preparation boundary: retain the supported
+single-audio plus bounded function composition, preserve item identities and
+terminal manifests, and release effects only through existing current-response
+Runtime admission after promotion. Unplayed audio retains zero-played truncation;
+unexecuted function items require exact deletion send and Provider ACK before a
+successor. Early/foreign/failed/ambiguous receipts cannot certify cleanup, and
+already admitted predecessor/history items must never be removed. No Tool/Task
+replay, new business policy, extra output modality or browser wire change.
+Required checks include positive mixed promotion, interruption before/after
+terminal, exact/early/wrong/rejected delete ACK, source identity collision, zero
+forbidden effects and subsequent-turn recovery, plus independent boundary review
+and real product verification. Multiple audio outputs and unsupported metadata
+remain closed. Private evidence: `prepared-shape-1..5.json` in the probe directory.
+
+## Native repair implementation verification
+
+Business publication now serializes a stable payload and response binding under
+one send boundary. Receipt epochs prevent a pre-receipt in-flight context read
+from certifying new facts; authoritative refresh is single-flight and reused by
+the following request. Old response bindings remain immutable and delayed old
+receipts cannot replace newer observer facts. Independent review's three ordering
+findings were reproduced, corrected and confirmed resolved.
+
+Prepared storage accepts the observed single commentary audio plus bounded
+function-call composition; the fifth real Provider probe completed without
+discard or unsupported cleanup. No Agent/Task ran in those isolated probes.
+Promotion still requires current Runtime admission. Discard cleanup waits for
+exact successful truncation/deletion sends and Provider ACKs. Current/committed
+user input and published conversation facts/results are protected against ID
+collision, including protection arriving after a cleanup target was observed.
+Failed function validation retains identifiable cleanup targets; unknown
+identities cannot certify empty cleanup. Independent review's two findings and
+the late-protection ordering variant are resolved. The combined Native Engine,
+bound business and preparation modules passed **366 tests in 52.59 s**.
+
+The Windows resolver can return a stream socket with proto=0, causing CPython
+3.11 to skip its implicit TCP_NODELAY. The Native connection now sets that option
+on its own TCP socket. This corrects a local low-latency setting, but **does not
+prove the only cause of the 14.607 s run**. Repeated 45 s real transport probes
+also measured severe TCP loss/retransmission/timeouts on some connections;
+both healthy and congested results exist. No production IP pin, packet dropping,
+queue expansion or arbitrary buffering delay was introduced.
+
+Native diagnostics now report actual TCP_NODELAY, sampled send lock/encoding/
+socket/drain/write-buffer/loop observations and input queue residence. The exact
+source event ID connects successful frame delivery to its send; a Gateway queue
+ACK still does not establish Provider receipt. These cannot split unobserved
+one-way network transit from Provider processing or establish physical sound.
+
+Input saturation retains its server cause and uses the existing transport-failure
+wire classification. Exact owner retirement happens before asynchronous cleanup;
+input/event/delivery consumers recheck after waits and cannot start fresh effects
+after closure. Pending delivery items retain queue accounting on cancellation or
+closure. Already dispatched business operations still settle without replay.
+The existing explicit Start successor path is retained, not a new automatic
+retry policy. Independent media review confirmed the closure findings resolved.
+The final media/Session/socket group passed 233 checks; two failures were a
+pre-existing SimpleNamespace fixture missing the newly consulted `closed` field
+and a loopback test timing drain from task creation rather than actual drain
+entry. The fixture now represents the owner, and the test waits for actual drain
+entry and a monotonic deadline. Both affected checks then passed in 7.88 s.
+The seven closure/queue/receipt/batching checks passed in 5.90 s. Earlier test
+attempts that stalled during diagnostic logging/capture were stopped and retained;
+final affected commands used uncaptured output with coverage collection disabled.
+
+The launcher generates 127.0.0.1 page/origin URLs and preserves its original BOM
+and allowed-host compatibility. Parser and scoped diff checks passed. Runtime
+restart, actual Task application/notification, browser timings and physical
+calibration remain separate evidence; this implementation record claims none
+of those as completed yet. Local evidence retains failed probes and test runs.

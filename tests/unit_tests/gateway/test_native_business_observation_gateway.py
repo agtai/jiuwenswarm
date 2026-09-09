@@ -94,6 +94,7 @@ async def test_client_rechecks_activation_after_observation_completion():
 def coordinator(monkeypatch, observer):
     session = SimpleNamespace(key=("session", "interaction", "connection"), closed=False, business_read_ticket=0, business_applied_ticket=0,
         business_observation_cursor=None, business_context_result=None, business_refresh_task=None,
+        business_receipt_epoch=0, business_refresh_epoch=0,
         activation=SimpleNamespace(observation_contract_version=NATIVE_BUSINESS_OBSERVATION_VERSION))
     registry = DedicatedMediaProductRegistry(enabled=True)
     registry._native_sessions[session.key] = session
@@ -103,6 +104,28 @@ def coordinator(monkeypatch, observer):
     published = []
     monkeypatch.setattr(registry, "_publish_native_work_state", lambda session, result: published.append(result))
     return registry, session, published
+
+
+@pytest.mark.asyncio
+async def test_post_receipt_refresh_cannot_reuse_a_pre_receipt_read(monkeypatch):
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+    async def observer(*args, **kwargs):
+        calls.append(kwargs)
+        sequence = len(calls)
+        if sequence == 1:
+            entered.set()
+            await release.wait()
+        return observation(sequence=sequence, read_sequence=sequence)
+    registry, session, _ = coordinator(monkeypatch, observer)
+    old = asyncio.create_task(registry._refresh_native_business_context(session))
+    await entered.wait()
+    session.business_receipt_epoch += 1
+    fresh = asyncio.create_task(registry._refresh_native_business_context(session))
+    release.set()
+    values = await asyncio.gather(old, fresh)
+    assert len(calls) == 2
+    assert all(value['cursor']['read_sequence'] == 2 for value in values)
 
 
 @pytest.mark.asyncio

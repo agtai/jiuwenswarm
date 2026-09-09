@@ -212,9 +212,20 @@ async def test_real_loopback_factory_wire_and_observer(monkeypatch):
             # not a claim that this loopback network is congested.
             observer.begin(1, 2)
             socket.pause_writing()
+            entered = asyncio.Event()
+            original_drain = socket.drain
+            async def observed_drain():
+                entered.set()
+                return await original_drain()
+            monkeypatch.setattr(socket, 'drain', observed_drain)
             pending = asyncio.create_task(socket.send("second"))
             try:
-                await asyncio.sleep(0.12)
+                await asyncio.wait_for(entered.wait(), 1)
+                # Windows timer resolution may wake sleep early, and creating
+                # the send task does not establish when its drain started.
+                deadline = asyncio.get_running_loop().time() + .12
+                while asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(.01)
                 assert not pending.done()
             finally:
                 socket.resume_writing()

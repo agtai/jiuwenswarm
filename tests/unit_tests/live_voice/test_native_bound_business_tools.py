@@ -97,6 +97,123 @@ def function_outputs(socket):
 
 
 @pytest.mark.asyncio
+async def test_new_turn_publishes_updated_task_context_before_binding_response():
+    engine, socket, _ = await f.started_business_engine(f.speech_started('s', 'u', 0),
+        f.speech_stopped('e', 'u', 500), f.input_committed('c', 'u'))
+    updated = {**f.business_context(), 'context_id': 'b' * 64,
+               'tasks': [{'task_id': 'new-task', 'revision': 1}]}
+    try:
+        engine._replace_business_context(updated, [])
+        _, _, commit = await f.accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        create_index = next(i for i, e in enumerate(socket.sent) if e['type'] == 'response.create')
+        published = socket.sent[create_index - 1]
+        assert published['type'] == 'conversation.item.create'
+        assert json.loads(published['item']['content'][0]['text']) == {'native_business_context': updated}
+        assert engine._inflight_response_request.business_binding.context_id == 'b' * 64
+        assert engine.snapshot().delegate_count == engine.snapshot().released_audio_count == 0
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_old_accepted_receipt_during_next_turn_send_wait_refreshes_without_replay():
+    engine, socket, _ = await f.admitted_business_engine(
+        f.business_function('f', 'p1', 'call1'), f.response_done('d', 'p1'))
+    calls = []
+    async def refresh():
+        calls.append(True)
+        return {'context': {**f.business_context(), 'context_id': 'b' * 64}, 'work_events': []}
+    engine._business_refresh = refresh
+    engine._continuation_preparation = True
+    receipt = None
+    try:
+        await engine.next_event()
+        await engine.next_event()
+        await engine.stop_foreground(f.response_ref(1))
+        await engine._business_send_lock.acquire()
+        socket.push(f.speech_started('s2', 'u2', 600))
+        socket.push(f.speech_stopped('e2', 'u2', 900))
+        socket.push(f.input_committed('c2', 'u2'))
+        await f.accept_basic_turn(engine)
+        for _ in range(30):
+            if engine._inflight_response_request is not None:
+                break
+            await asyncio.sleep(0)
+        assert engine._inflight_response_request is not None
+        receipt = asyncio.create_task(engine.send_delegate_result('call1', f.response_ref(1),
+            '{"receipt":{"state":"running","work_id":"work-1"}}'))
+        await asyncio.sleep(0)
+        engine._business_send_lock.release()
+        await asyncio.wait_for(receipt, 1)
+        scheduler = engine._continuation_scheduler
+        if scheduler is not None:
+            await asyncio.wait_for(scheduler, 1)
+        assert calls == [True]
+        assert engine._inflight_response_request.business_binding.context_id == 'b' * 64
+        assert len(function_outputs(socket)) == 1
+        assert len([e for e in socket.sent if e['type'] == 'response.create']) == 2
+        assert engine.snapshot().delegate_count == 1 and engine.snapshot().released_audio_count == 0
+    finally:
+        if engine._business_send_lock.locked():
+            engine._business_send_lock.release()
+        if receipt is not None:
+            await asyncio.gather(receipt, return_exceptions=True)
+        await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_delayed_full_receipt_cannot_roll_back_already_published_newer_facts():
+    engine, socket, _ = await f.admitted_business_engine(
+        f.business_function('f', 'p1', 'call1'), f.response_done('d', 'p1'))
+    newer = {**f.business_context(), 'context_id': 'b' * 64}
+    try:
+        await engine.next_event()
+        await engine.next_event()
+        engine._replace_business_context(newer, [])
+        await engine._send_business_facts({'native_business_context': newer})
+        await engine.send_delegate_result('call1', f.response_ref(1), json.dumps({
+            'contract_version': 'live-voice.native-business.v1', 'operation': 'context.get',
+            'status': 'observed', 'context': f.business_context()}))
+        assert engine._business_context == newer
+        assert engine._inflight_response_request.business_binding.context_id == 'b' * 64
+        assert len(function_outputs(socket)) == 1
+        assert engine.snapshot().released_audio_count == 0
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('retire', [False, True])
+async def test_context_publication_in_flight_rechecks_newer_facts_and_stop(retire):
+    engine, socket, _ = await f.started_business_engine(f.speech_started('s', 'u', 0),
+        f.speech_stopped('e', 'u', 500), f.input_committed('c', 'u'))
+    engine._continuation_preparation = True
+    try:
+        engine._replace_business_context({**f.business_context(), 'context_id': 'b' * 64}, [])
+        socket.block_send_at = socket.send_calls + 1
+        await f.accept_basic_turn(engine)
+        await asyncio.wait_for(socket.send_entered.wait(), .5)
+        if retire:
+            socket.push(f.speech_started('s2', 'u2', 600))
+            await engine.next_event()
+        else:
+            engine._replace_business_context({**f.business_context(), 'context_id': 'c' * 64}, [])
+        socket.release_send.set()
+        scheduler = engine._continuation_scheduler
+        if scheduler is not None:
+            await asyncio.wait_for(scheduler, .5)
+        created = [e for e in socket.sent if e['type'] == 'response.create']
+        assert len(created) == (0 if retire else 1)
+        if not retire:
+            assert engine._inflight_response_request.business_binding.context_id == 'c' * 64
+        assert engine.snapshot().delegate_count == engine.snapshot().released_audio_count == 0
+    finally:
+        socket.release_send.set()
+        await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_bound_call_after_stop_has_zero_delegate_or_audio_effect():
     engine, socket, _ = await f.admitted_business_engine()
     try:
