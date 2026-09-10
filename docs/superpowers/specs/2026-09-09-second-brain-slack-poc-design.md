@@ -1006,6 +1006,48 @@ use `content`, which was never assigned, so the caller sees
 alone — but it cost time during 15.1, because the useful message was buried under the
 useless one.
 
+### 15.4 TODO — orphan FTS rows, mechanism confirmed, impact unmeasured
+
+**Not a finding yet.** The mechanism is established; whether it costs anything is not,
+and this is recorded so that it gets measured rather than assumed either way.
+
+Observed on the live corpus after five ingests: `chunks` holds **584** rows while
+`chunks_fts_docsize` holds **1393** — **809 orphans, 58% of the table**. The share grows
+with every re-index, and every ingest re-indexes every page it rewrote.
+
+The mechanism, confirmed by direct test rather than by reading: when a file is re-indexed,
+`manager.py` issues `DELETE FROM chunks_fts WHERE path = ?` before writing the new chunks.
+On a contentless FTS5 table (`content=''`) the column values are not stored, so `path` is
+NULL for every row and the `WHERE` matches nothing. The delete is a **silent no-op** — it
+raises nothing and removes nothing. Deleting by `rowid` works; deleting by any column does
+not.
+
+The kernel knows orphans exist and guards the read path, restricting matches to rowids
+still present in `chunks`, with the comment: *"without this filter, high-scoring orphans
+fill the LIMIT before the real hits surface — returning []"*. So **no orphan content
+reaches an answer**, and that is why this is a TODO and not a defect.
+
+What is unmeasured is the effect on *ranking*. BM25 scores a document against corpus
+statistics — inverse document frequency and average document length — and SQLite computes
+those over the whole FTS table, orphans included. With 58% of the table being text that no
+longer exists, every IDF in the index is computed against a corpus that is nearly
+two-thirds stale. A term that has since been removed from the wiki still suppresses its own
+weight; a page rewritten five times still votes five times on the average length. Whether
+that moves anything past the point where ranking changes is exactly the open question.
+
+**How to settle it.** Take the current database, copy it, and rebuild the copy from scratch
+so the FTS holds only live rows. Run the same ten questions against both through
+`measure_judge_en.py`, and compare not just the hit count but the *ordering* of the top-5
+for each question. If the orderings are identical, the orphans are inert and this entry can
+be closed as harmless. If they differ, the fix is one line — delete by rowid, which the
+kernel already does correctly elsewhere in the same function — and it belongs upstream with
+the other three.
+
+Do this measurement *before* proposing the fix, not after. Four instruments in this project
+have already reported problems the system did not have (§14), and "58% of the table is
+garbage" is exactly the kind of alarming-sounding number that invites a fix nobody verified
+was needed.
+
 ### What these have in common
 
 All three are silent. None raises where it fails, none logs above INFO, and each presents

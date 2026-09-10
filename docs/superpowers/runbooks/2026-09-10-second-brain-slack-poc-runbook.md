@@ -429,5 +429,11 @@ Retrieval quality, end to end, judged by content rather than by page name:
   It feeds a different memory manager than the one the agent actually searches. Pages are
   copied into `<workspace>/memory` with a `wiki__` prefix instead, at the end of each
   successful ingest.
+- **`chunks_fts` holding more rows than `chunks` is expected, not corruption.** Re-indexing
+  a file deletes its old FTS rows with `DELETE ... WHERE path = ?`, which is a silent no-op
+  on a contentless FTS5 table, so orphan postings accumulate — 809 of 1393 rows here. No
+  orphan content reaches an answer: the read path filters to rowids still in `chunks`.
+  Whether the orphans skew BM25's corpus statistics is an open question with a measurement
+  plan in spec §15.4; do not "fix" it before running that measurement.
 - **Ingest cost.** Roughly 3-4 minutes per paper after the fixes on this branch, ~96% of
   it LLM time. Budget for it in a live demo, and prefer ingesting beforehand.
