@@ -1,105 +1,105 @@
-# Second Brain PoC — canal de papers no Slack
+# Second Brain PoC — a papers channel on Slack
 
-Data: 2026-09-09 · Branch: `feat/second-brain-slack-poc` (base `55c3c3a85`)
-Alvo: demo em 2026-09-11 (sexta)
+Date: 2026-09-09 · Branch: `feat/second-brain-slack-poc` (base `55c3c3a85`)
+Target: demo on 2026-09-11 (Friday)
 
-## 1. Objetivo
+## 1. Goal
 
-Um canal do Slack dedicado a papers onde:
+A Slack channel dedicated to papers, where:
 
-1. alguém joga um PDF;
-2. o agente compila o paper numa **wiki persistente** (padrão LLM Wiki do Karpathy),
-   com páginas de entidade/conceito interligadas e um índice;
-3. as afirmações da wiki carregam **ponteiros para o texto original** (arquivo + página
-   + citação curta), para conferência;
-4. perguntas posteriores são respondidas por **busca híbrida** (BM25 + vetorial) sobre
-   as páginas da wiki.
+1. someone drops a PDF;
+2. the agent compiles the paper into a **persistent wiki** (Karpathy's LLM Wiki
+   pattern), with interlinked entity/concept pages and an index;
+3. the wiki's claims carry **pointers back to the original text** (file + page +
+   short quote), so they can be checked;
+4. later questions are answered by **hybrid search** (BM25 + vector) over the wiki
+   pages.
 
-O ponto da demo **não** é provar que o agente evitou reler o PDF. Releitura é
-*verificação*, e o ponteiro é o produto.
+The point of the demo is **not** to prove the agent avoided re-reading the PDF.
+Re-reading is *verification*, and the pointer is the product.
 
-## 2. Fora de escopo
+## 2. Out of scope
 
-- **WikiSkill** (Google): compila a *execução do agente* em skills procedurais, não
-  fontes em conhecimento. É outra demo.
-- Grafo/backlinks nativos, export, sincronização, versionamento de páginas.
-- Provar ausência de releitura (negar ferramentas de leitura).
-- Tornar a wiki genérica para outros tipos de documento. A PoC é condicionada a um canal.
+- **WikiSkill** (Google): it compiles the *agent's own execution* into procedural
+  skills, not sources into knowledge. That is a different demo.
+- Native graph/backlinks, export, synchronisation, page versioning.
+- Proving the absence of re-reading (denying read tools).
+- Making the wiki generic across document types. The PoC is scoped to one channel.
 
-## 3. O que já existe (verificado em código, não suposto)
+## 3. What already exists (verified in code, not assumed)
 
-| Peça | Estado | Evidência |
+| Piece | State | Evidence |
 |---|---|---|
-| Wiki de 3 camadas (`sources/`, `wiki/`, `schema/`) | ✅ funciona | smoke test: 1 PDF de 28 pág. → 17 páginas em 294 s |
-| `wiki_ingest` / `wiki_query` / `wiki_lint` | ✅ implementadas | `tools/wiki_tools.py` |
-| `index.md` (Entities/Concepts/Sources) + `log.md` | ✅ gerados | smoke test |
-| Dedup por SHA-256 + cópia para `sources/` | ✅ | `_SourceManifest` |
-| Leitura de PDF por página | ✅ | `read_file{"pages": "2-11"}` — o parser de PDF está registrado |
-| Índice híbrido BM25 + vetorial | ✅ existe | `memory/manager.py`, `_merge_hybrid_results` |
-| `extraPaths` | ⚠️ **plumbado no gestor errado** — ver §3.1 | `config.py:170` → `manager.py:604`, mas esse gestor não serve o agente |
-| Trigger `has_file` no Slack | ✅ | `slack_connect.py:200` |
-| `delivery.prompt` por conversa (scopes) | ✅ | `scope_capabilities.py` |
+| Three-layer wiki (`sources/`, `wiki/`, `schema/`) | ✅ works | smoke test: one 28-page PDF → 17 pages in 294 s |
+| `wiki_ingest` / `wiki_query` / `wiki_lint` | ✅ implemented | `tools/wiki_tools.py` |
+| `index.md` (Entities/Concepts/Sources) + `log.md` | ✅ generated | smoke test |
+| SHA-256 dedup + copy into `sources/` | ✅ | `_SourceManifest` |
+| Page-level PDF reading | ✅ | `read_file{"pages": "2-11"}` — the PDF parser is registered |
+| Hybrid BM25 + vector index | ✅ exists | `memory/manager.py`, `_merge_hybrid_results` |
+| `extraPaths` | ⚠️ **plumbed into the wrong manager** — see §3.1 | `config.py:170` → `manager.py:604`, but that manager does not serve the agent |
+| Slack `has_file` trigger | ✅ | `slack_connect.py:200` |
+| Per-conversation `delivery.prompt` (scopes) | ✅ | `scope_capabilities.py` |
 
-### 3.1 Duas pilhas de memória — e o agente usa a que ignora `extraPaths`
+### 3.1 Two memory stacks — and the agent uses the one that ignores `extraPaths`
 
     jiuwenswarm/agents/harness/common/memory/     openjiuwen/core/memory/lite/
     MemoryIndexManager                             (kernel, pin 61becb17)
-         │ lê memory.extraPaths        ✅                │ recebe extra_paths?  ❌
+         │ reads memory.extraPaths      ✅               │ receives extra_paths?  ❌
          │                                              │
-         └─ usado por: memory_tools.py                  └─ usado por: MemoryRail
-                       memory_rpc.py                                   │
-                       (console /memory da TUI)                        ▼
-                                                        É ESTE QUE O AGENTE USA
+         └─ used by: memory_tools.py                    └─ used by: MemoryRail
+                     memory_rpc.py                                    │
+                     (the TUI's /memory console)                      ▼
+                                                        THIS IS THE ONE THE AGENT USES
 
-- `interface_deep.py:6897` monta o `MemoryRail` de `openjiuwen.core.memory.lite`.
-- `lite/manager.py:954` chama `list_memory_files(self.workspace, node_name=...)`
-  **sem `extra_paths`**, embora o parâmetro exista (`lite/internal.py:35`).
-- Nada em `server/`, `gateway/` ou `agents/swarm/` importa o `memory_tools.py` do
-  jiuwenswarm (grep vazio).
+- `interface_deep.py:6897` builds the `MemoryRail` from `openjiuwen.core.memory.lite`.
+- `lite/manager.py:954` calls `list_memory_files(self.workspace, node_name=...)`
+  **without `extra_paths`**, although the parameter exists (`lite/internal.py:35`).
+- Nothing in `server/`, `gateway/` or `agents/swarm/` imports jiuwenswarm's
+  `memory_tools.py` (empty grep).
 
-Consequência: **`memory.extraPaths` é chave morta para o agente.** A §5.4 da v1 falharia
-de forma determinística. Corrigido na §5.4 desta versão.
+Consequence: **`memory.extraPaths` is a dead key for the agent.** §5.4 as written in v1
+would have failed deterministically. Corrected in §5.4 of this version.
 
-O scan do `lite` é ainda **plano** — `os.listdir`, não `os.walk` (`lite/internal.py:80`).
+The `lite` scan is also **flat** — `os.listdir`, not `os.walk` (`lite/internal.py:80`).
 
-### O que **não** existe
+### What does **not** exist
 
-| Lacuna | Detalhe |
+| Gap | Detail |
 |---|---|
-| Wiki tools registradas | removidas pelo upstream em `e4fae3061` (MR !4526, 06/ago) |
-| Ancoragem na fonte | o `AGENT.md` gerado manda interligar só *dentro* de `wiki/` |
-| Busca híbrida no `wiki_query` | ele usa `read_file`/`grep`; sem BM25, sem vetor |
-| Embeddings configurados | `EMBED_API_KEY`/`_BASE`/`_MODEL` vazias |
+| Wiki tools registered | unregistered upstream in `e4fae3061` (MR !4526, 6 Aug) |
+| Anchoring to the source | the generated `AGENT.md` only asks for links *within* `wiki/` |
+| Hybrid search inside `wiki_query` | it uses `read_file`/`grep`; no BM25, no vector |
+| Embeddings configured | `EMBED_API_KEY`/`_BASE`/`_MODEL` empty |
 
-## 4. Arquitetura
+## 4. Architecture
 
-    PDF no canal #papers
-        │  trigger has_file
+    PDF in #papers
+        │  has_file trigger
         ▼
-    conector Slack — baixa para <session>/uploads/, põe o caminho no texto
-        │  delivery.prompt manda chamar wiki_ingest(source=<path>, workspace=<papers>)
+    Slack connector — downloads to <session>/uploads/, puts the path in the text
+        │  delivery.prompt tells it to call wiki_ingest(source=<path>, workspace=<papers>)
         ▼
-    wiki_ingest → subagente mantenedor
-        │  lê schema/AGENT.md (com a regra de ancoragem)
-        │  lê o PDF por faixas de página
-        │  escreve wiki/*.md com [[fonte: arquivo.pdf p.N]] + citação
+    wiki_ingest → maintainer subagent
+        │  reads schema/AGENT.md (carrying the anchoring rule)
+        │  reads the PDF in page ranges
+        │  writes wiki/*.md with [[fonte: file.pdf p.N]] + quote
         ▼
     <papers>/.llm_wiki/wiki/*.md
-        │  publicação: cópia/symlink arquivo-a-arquivo (§5.4)
+        │  publication: file-by-file copy (§5.4)
         ▼
     <agent workspace>/memory/*.md
-        │  watcher do lite reindexa
+        │  the lite watcher reindexes
         ▼
-    índice do kernel lite (FTS5 + vetor)
+    the lite kernel's index (FTS5 + vector)
         ▲
-        │  memory_search  ← pergunta do usuário
-    agente do canal sintetiza a resposta com as âncoras
+        │  memory_search  ← the user's question
+    the channel agent synthesises the answer with the anchors
 
-Dois caminhos de leitura coexistem, com papéis distintos:
+Two reading paths coexist, with distinct roles:
 
-- **`memory_search`** (híbrido, rápido) — o caso comum: pergunta pontual.
-- **`wiki_query`** (subagente lendo a wiki) — perguntas que exigem varrer o acervo
-  inteiro ("o que há em comum entre os três papers?").
+- **`memory_search`** (hybrid, fast) — the common case: a pointed question.
+- **`wiki_query`** (subagent reading the wiki) — questions that require sweeping the
+  whole library ("what do the three papers have in common?").
 
 ## 5. As quatro mudanças
 
