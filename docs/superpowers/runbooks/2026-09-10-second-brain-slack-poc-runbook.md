@@ -51,8 +51,12 @@ Retrieval quality measured on the same 10 questions against the same library:
 | Configuration | Score |
 |---|---|
 | BM25 only, no embeddings | 3/10 |
-| hybrid, `baai/bge-m3`, questions in Portuguese | 7/10 |
-| hybrid, `baai/bge-m3`, questions in English | 9/10 |
+| hybrid, `baai/bge-m3`, questions in Portuguese | 9/10 |
+| hybrid, `baai/bge-m3`, questions in English | 10/10 |
+
+(The 3/10 baseline is from the earlier three-paper corpus; the two hybrid rows are the
+current four-paper corpus, judged on whole pages. Spec §12 and §14 carry the history and
+why an earlier measurement of the same rows read 7/10 and 9/10.)
 
 Without embeddings the keyword leg alone is left, and the FTS5 trigram tokenizer matches
 short foreign-language stopwords inside English words: `'o que e AREX?'` becomes
@@ -254,9 +258,11 @@ scopes:
 
 Two rules there are load-bearing and worth understanding before you edit them:
 
-- **SEARCH LANGUAGE** exists because of the 7/10-vs-9/10 gap in §3. The library is
-  English; querying it in English and answering in the user's language is what recovers
-  those two points.
+- **SEARCH LANGUAGE** exists because of the Portuguese-vs-English gap in §3. The library
+  is English; querying it in English and answering in the user's language is what closes
+  it. The gap was two points when the rule was written and is one point now, on a
+  conceptual question ("does this work in production?") that English answers and
+  Portuguese does not.
 - **FROZEN LIBRARY** keeps the demo reproducible. Note the explicit mention of
   `allow_write`: the rule is addressed to the main agent, but the write it forbids used to
   happen inside `wiki_query`'s subagent, a layer the channel prompt does not reach. Naming

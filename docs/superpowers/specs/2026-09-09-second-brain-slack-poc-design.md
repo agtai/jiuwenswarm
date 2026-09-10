@@ -776,6 +776,28 @@ measurement (see §14).
 | + `bge-m3`, question in Portuguese | 7/10 |
 | + `bge-m3`, question in English | **9/10** |
 
+> **Measured with a judge that read 500 characters per page.** The median wiki page is
+> ~7.5k, so the judge ruled on 7% of it. The row below re-runs the same questions with the
+> judge reading the whole page; §14 records the defect. The three-paper numbers above are
+> kept as measured rather than restated, because the corpus has also changed since.
+
+Re-measured on 2026-09-10 against the four-paper corpus, with both the judge window and the
+two shared-code defects of §15 fixed:
+
+| | Score |
+|---|---|
+| hybrid, question in Portuguese | 9/10 |
+| hybrid, question in English | **10/10** |
+
+The gain is **not** attributable to the §15 fixes, and the isolation run says so: holding
+the corpus and the code fixed and varying only the judge window gives 9/10 → 10/10 in
+English and 9/10 → 9/10 in Portuguese. The English point came from the instrument. What
+the §15 fixes bought is measured elsewhere — the lexical channel went from 0/10 to 8/10
+questions returning any hit at all — and this ten-question set cannot show it, because it
+was already saturated by the dense channel. A set that would show it is one of exact
+identifiers: acronyms, model names, version numbers, author names. That set does not exist
+yet.
+
 The whole gain from the encoder landed on the lexical questions — 1/5 → 5/5 — the ones
 that should always have worked. That confirms the diagnosis: the problem was the
 question's language, not divergent vocabulary.
@@ -861,17 +883,18 @@ the sixth.
 
 ---
 
-## 14. Method note: the instrument was wrong three times
+## 14. Method note: the instrument was wrong four times
 
-Three measurements in one day reported a problem the system did not have. In every case
-the artefact was fine and the tool measuring it was broken. Recorded because three is a
-pattern, not luck.
+Four measurements reported a problem the system did not have, three of them in one day. In
+every case the artefact was fine and the tool measuring it was broken. Recorded because
+four is a pattern, not luck.
 
 | What was measured | The bug | What it reported |
 |---|---|---|
 | Anchor format | `sed 's/p[0-9]*//'` matches a `p` with **zero** digits, eating the `p` in `.pdf` | a `.df` defect that does not exist |
 | Retrieval, by page name | the labels were the old wiki's; re-ingestion renamed the pages | a regression from 7/10 to 3/10 |
 | Retrieval, by LLM judge | `max_tokens=5` on a reasoning model, which spent them on `reasoning_content` and returned an empty `content` | 0/10, judging even an exactly-matching page as NO |
+| Retrieval, by LLM judge | the judge was shown the first 500 characters of a page; the median page is ~7.5k | a MISS on "how many parameters does AREX-Base have?", whose answer sits at character 649 of one retrieved page and 2503 of another — a correct retrieval scored as a failure |
 
 The general lesson: **measuring an AI system with AI tools requires verifying the
 instrument before believing the number** — and verifying it against a case whose answer is
@@ -882,6 +905,91 @@ not merely surprising.
 The practical consequence for this document: every number here carries how it was measured,
 and the retracted ones stay retracted in place rather than being deleted.
 
-Two of the three would have cost real work: the first nearly bought a nine-minute
+Two of the four would have cost real work: the first nearly bought a nine-minute
 re-ingest per paper to fix nothing; the second nearly attributed a regression to the
 `AGENT.md` rules that had just been added.
+
+The fourth is the one worth generalising from, because it did not look like a bug at all.
+It reported a plausible number — one hard factual question missed out of ten — for a year
+and a half of reading, and nothing about it invited suspicion. It was caught only by
+asking a different question of the same MISS: *is this a retrieval failure or a corpus
+gap?* Grepping the corpus answered neither, and answered a third: the page was retrieved
+and the fact was in it. **A plausible failure deserves the same scrutiny as an implausible
+one**; the third bug was caught in minutes because 0/10 is absurd, and the fourth survived
+because 9/10 is not.
+
+---
+
+## 15. Three defects in shared code, found by building on it
+
+None of these are in this PoC. All three are in `openjiuwen`'s `memory/lite`, which
+`MemoryRail` and `CodingMemoryRail` also use, so they affect every deployment and not just
+the papers channel. Each is a one-line fix. Two are corrected on this branch by patch
+modules under `jiuwenswarm/server/runtime/memory/`, following the repository's existing
+`*_patch.py` convention; the third is left alone because it is cosmetic.
+
+### 15.1 The BM25 index emptied itself on every restart
+
+`_ensure_schema` creates `chunks_fts` with `tokenize='trigram'`. SQLite stores the CREATE
+statement verbatim, so the quotes are part of the stored text. `_fts_table_is_legacy` then
+tests for the unquoted `tokenize=trigram`, never matches, and reports the table it just
+created as pre-migration — so it is dropped, on every startup.
+
+That alone would be survivable: `initialize()` force-reindexes after a migration. But the
+reindex is gated on `_needs_fts_migration_reindex`, true only while `meta` lacks
+`ftsTrigram`. So the first startup is correct — drop, reindex, record the flag — and every
+startup after it drops the table and declines to refill it. `chunks` still holds every row,
+because the incremental sync skips files whose hash has not changed.
+
+Nothing raises. Hybrid search keeps answering from the vector channel alone, so the symptom
+is degraded quality rather than an error, and the only trace is an INFO line that reads like
+a one-time migration notice and in fact repeats every boot — nine times in one day here.
+It also survives every test that creates a temp database and initialises once: the bug
+needs a *persisted* database and a *restart*.
+
+Measured cost on this corpus: 482 chunks indexed, 0 rows in the FTS table, and 0 of 10
+questions returning any lexical hit. After repair, 482 and 8 of 10.
+
+### 15.2 The lexical ranking was inverted
+
+Credit for this one to Miguel, who found it while writing up the second brain data-flow
+document and worked around it locally rather than fixing shared code.
+
+FTS5 reports match quality in `rank` as a negative number where more negative is better —
+which is why the kernel's own keyword query says `ORDER BY rank` with no `DESC`. But
+`bm25_rank_to_score` mapped it with `1 / (1 + |rank|)`, so the score *fell* as the match
+improved, disagreeing with the SQL ordering of the very rows it scored.
+
+Not cosmetic. `search` merges `0.7 * vector + 0.3 * text` and keeps rows scoring at least
+`min_score`, 0.7 by default. On this corpus the best keyword hit for one query sat at rank
+−3.7968: it scored 0.2085 and contributed 0.06, so a document also scoring 0.80 on the
+vector channel landed at 0.623 and was filtered out — *because* its keyword match was good.
+Corrected, the same row scores 0.7915, contributes 0.24, and the document lands at 0.797
+and is kept.
+
+The symptom had been seen upstream and read as a property of BM25 rather than a defect: the
+kernel comments that pure-keyword scores "commonly land 0.1-0.3 after the rank->score
+transform" and compensates with a separate, lower `keywordMinScore` floor. That range is
+exactly what an inverted transform yields for good matches. **A workaround that fits the
+symptom is evidence the cause was never located.**
+
+One trap in fixing it: `manager.py` imports the function by name at module level, so
+patching only `internal` leaves the manager calling the original and the patch silently
+does nothing. Both bindings must be rebound. `jiuwenswarm` also carries its own copy of the
+same function, with the same defect; that one is fixed directly.
+
+### 15.3 An error message hidden behind an UnboundLocalError
+
+`_index_file` logs `no available sys_operation when _index_file` and then falls through to
+use `content`, which was never assigned, so the caller sees
+`cannot access local variable 'content'` instead of the real cause. Cosmetic, and left
+alone — but it cost time during 15.1, because the useful message was buried under the
+useless one.
+
+### What these have in common
+
+All three are silent. None raises where it fails, none logs above INFO, and each presents
+as something other than itself: a migration notice, a property of BM25, a variable error.
+The subsystem they live in is the one every agent's memory runs through, and its failures
+degrade quality rather than break, which is the hardest kind to notice from the outside —
+and the reason they were found by *building* on the subsystem rather than by reading it.
