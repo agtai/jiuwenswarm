@@ -676,157 +676,212 @@ papers that degrades silently. Decide whether it becomes a periodic step or a ma
 
 ---
 
-## 12. Embeddings — de opcional a requisito
+## 12. Embeddings — from optional to required
 
-A §11 e as versões anteriores desta seção tratavam embeddings como acabamento, e a
-alternativa barata seria expansão de consulta por prompt. **Ambas as posições estavam
-erradas**, e o que as derrubou foi uma observação simples: *não deveria ser problema
-perguntar em português, chinês ou alemão sobre um acervo em inglês, nem deveria ser
-preciso um método ad-hoc por idioma.*
+§11 and earlier versions of this section treated embeddings as polish, with
+prompt-driven query expansion as the cheap alternative. **Both positions were wrong**, and
+what undid them was a simple observation: *it should not be a problem to ask in
+Portuguese, Chinese or German about an English library, and it should not take an ad-hoc
+method per language.*
 
-### A medição que motivou a mudança
+### The measurement that forced the change
 
-Dez perguntas sobre o acervo de dois papers, medindo se a página correta aparece no
-top-5 do ranking BM25 (usando `split_query_tokens` e `build_fts_query` reais):
+Ten questions about the two-paper library, scoring whether the right page reaches the
+BM25 top five (using the kernel's own `split_query_tokens` and `build_fts_query`):
 
-    baseline, pergunta literal em português:  3/10
+    baseline, literal question in Portuguese:  3/10
 
-E o modo de falha não é vocabulário divergente — é pior:
+And the failure mode is worse than vocabulary mismatch:
 
-    'o que e AREX?'  →  FTS: '"que" OR "AREX"'  →  arex.md nem entra no top-5
+    'o que e AREX?'  →  FTS: '"que" OR "AREX"'  →  arex.md does not even reach the top 5
 
-Uma stopword portuguesa afundou a pergunta mais fácil possível sobre o corpus, porque o
-tokenizador `trigram` casa **substring**: `que` casa *frequency*, *sequence*, *technique*.
+A Portuguese stopword sank the easiest possible question about the corpus, because the
+`trigram` tokeniser matches **substrings**: `que` matches *frequency*, *sequence*,
+*technique*.
 
-### Por que expansão de consulta não é a resposta
+### Why query expansion is not the answer
 
-Num cenário multilíngue, expandir a consulta por prompt **é tradução disfarçada**:
-depende do modelo acertar o vocabulário do documento a cada pergunta, falha em silêncio,
-e precisa de uma regra nova por idioma. É exatamente o método ad-hoc que se quer evitar.
+In a multilingual setting, expanding the query by prompt **is translation in disguise**:
+it depends on the model guessing the document's vocabulary on every question, it fails
+silently, and it needs a new rule per language. That is precisely the ad-hoc method to
+avoid.
 
-**Busca lexical é monolíngue por construção.** Não existe substring comum entre
-"escalável" e "scalable"; nenhum ajuste de tokenizador resolve isso. O próprio kernel
-admite o problema e o resolve um idioma por vez:
+**Lexical retrieval is monolingual by construction.** No substring is shared between
+"escalável" and "scalable"; no tokeniser setting fixes that. The kernel itself concedes
+the problem and solves it one language at a time:
 
 - `lite/internal.py:182` — *"Short tokens (<3 chars, e.g. 2-char Chinese) can't match trigram"*
-- `lite/manager.py:584` — migração `unicode61 → trigram` feita porque a anterior *"never matched Chinese queries"*
-- `JiuwenMemory` configura `tokenizer: jieba` **especificamente** para BM25 chinês
+- `lite/manager.py:584` — the `unicode61 → trigram` migration, made because the previous one *"never matched Chinese queries"*
+- `JiuwenMemory` configures `tokenizer: jieba` **specifically** for Chinese BM25
 
-Um tokenizador dedicado por idioma não escala.
+A dedicated tokeniser per language does not scale.
 
-### A decisão
+### The decision
 
-**Embedding multilíngue é o único mecanismo principiado**, e passa a ser requisito do
-produto — não da PoC, que já funciona em BM25 para perguntas em inglês com vocabulário
-literal. Um encoder multilíngue aproxima "escalável", "scalable" e "可扩展" no espaço
-vetorial porque foi treinado para isso; não é heurística.
+**A multilingual embedding is the only principled mechanism**, and it becomes a product
+requirement — not a PoC one, since the PoC already worked on BM25 for English questions
+with literal vocabulary. A multilingual encoder puts "escalável", "scalable" and "可扩展"
+near each other in vector space because it was trained to; that is not a heuristic.
 
-| Método | Cross-lingual? |
+| Method | Cross-lingual? |
 |---|---|
-| BM25 / trigram | ❌ por construção |
-| doc2query, SPLADE | ❌ expandem termos no mesmo idioma |
-| Expansão de consulta | ⚠️ só via tradução implícita — ad-hoc |
-| **Embedding multilíngue** | ✅ **por construção** |
-| Híbrido (denso + BM25) | ✅ o denso carrega o cross-lingual |
+| BM25 / trigram | ❌ by construction |
+| doc2query, SPLADE | ❌ they expand terms within one language |
+| Query expansion | ⚠️ only through implicit translation — ad-hoc |
+| **Multilingual embedding** | ✅ **by construction** |
+| Hybrid (dense + BM25) | ✅ the dense half carries the cross-lingual load |
 
-**A wiki (§11-A/doc2query) continua valendo e não é redundante com isso.** Ela resolve
-outra coisa: perguntas globais, que nenhum embedding recupera se ninguém escreveu a
-comparação. Foi o que respondeu à pergunta "onde os dois papers discordam". As duas são
-complementares — a wiki compõe conhecimento, o embedding cruza idiomas.
+**The wiki (§11-A/doc2query) still holds and is not redundant with this.** It solves a
+different problem: global questions, which no embedding retrieves when nobody wrote the
+comparison. It is what answered "where do the two papers disagree". The two are
+complementary — the wiki compounds knowledge, the encoder crosses languages.
 
-### Como configurar
+### Configuration — applied on 2026-09-10
 
-O OpenRouter passou a servir embeddings em `/api/v1/embeddings`, compatível com OpenAI,
-o que encaixa direto nas três variáveis já existentes:
+OpenRouter now serves OpenAI-compatible embeddings at `/api/v1/embeddings`, which drops
+straight into the three existing variables:
 
 ```
 EMBED_API_BASE=https://openrouter.ai/api/v1
-EMBED_API_KEY=<chave do OpenRouter>
+EMBED_API_KEY=<OpenRouter key>
 EMBED_MODEL=baai/bge-m3
 ```
 
-**A dimensão não precisa ser configurada:** `_ensure_vector_table` recria a tabela
-vetorial sob a dimensão do modelo no primeiro write, e há lógica de DROP quando o modelo
-muda (`lite/manager.py:427-487`).
+**The dimension needs no configuration:** `_ensure_vector_table` rebuilds the vector
+table under the model's dimension on first write, and there is DROP logic for when the
+model changes (`lite/manager.py:427-487`). Verified live: 1024 dimensions, and the index
+meta records `{"provider": "openai_compatible", "model": "baai/bge-m3", "chunkTokens":
+256, "ftsTrigram": true, "vectorDims": 1024}`.
 
-### Modelos a testar, em ordem
+### Models worth testing, in order
 
-| Modelo | Dim | Contexto | Preço /M | Por quê |
+| Model | Dim | Context | Price /M | Why |
 |---|---|---|---|---|
-| **`baai/bge-m3`** | 1024 | 8K | **$0.01** | referência aberta em multilíngue (100+ idiomas), mais barato da lista, dimensão modesta |
-| `qwen/qwen3-embedding-8b` | — | 33K | $0.01 | mesmo preço, contexto muito maior; multilíngue forte |
-| `openai/text-embedding-3-large` | — | 8K | $0.13 | controle conhecido, 13× mais caro e não é o melhor cross-lingual |
+| **`baai/bge-m3`** | 1024 | 8K | **$0.01** | the open reference for multilingual retrieval (100+ languages), cheapest tier, modest dimension. **In use.** |
+| `qwen/qwen3-embedding-8b` | — | 33K | $0.01 | same price, far longer context; strong multilingual |
+| `openai/text-embedding-3-large` | — | 8K | $0.13 | a known control, 13× the price and not the best cross-lingual |
 
-Chunks nossos têm ~963 chars, então 8K de contexto sobra. O custo total de indexar o
-acervo atual (245 chunks, ~60k tokens) é de centavos em qualquer um deles.
+Our chunks run ~963 chars, so 8K of context is ample. Indexing the whole library (245
+chunks, ~60k tokens) costs cents in any of them.
 
-### Como medir
+### The result
 
-As mesmas 10 perguntas, com o baseline honesto de **3/10** já registrado. Se um encoder
-multilíngue levar isso a 8–9, o número justifica a decisão — e vale para qualquer idioma
-que alguém use no canal, não só português. Trocar o modelo força reindexação; medir os
-três exige três reindexações do acervo (minutos, não horas).
+Same ten questions, scored by an **independent LLM judge** against page *content* rather
+than fixed page names — the names change on every re-ingest, which broke an earlier
+measurement (see §14).
+
+| | Score |
+|---|---|
+| BM25 only, question in Portuguese | 3/10 |
+| + `bge-m3`, question in Portuguese | 7/10 |
+| + `bge-m3`, question in English | **9/10** |
+
+The whole gain from the encoder landed on the lexical questions — 1/5 → 5/5 — the ones
+that should always have worked. That confirms the diagnosis: the problem was the
+question's language, not divergent vocabulary.
+
+### And a rule that came out of the last row
+
+Asking in English scores 9/10 against 7/10 in Portuguese, and the mechanism is visible in
+the scores: the four transversal pages sat at ~0.52 in the dense ranking, all but tied,
+so any additional signal decides. An English query makes the FTS contribute **signal**
+instead of noise, and `_merge_hybrid_results` fuses two good rankings instead of carrying
+one.
+
+This is not the ad-hoc method rejected above. It is a single rule derived from a fact
+about the system — *the library has a language; query it in that language* — and it does
+not change per user language or per domain. Formally it is query normalisation to the
+index language, standard practice in cross-lingual retrieval. It lives in the channel's
+`prompt_append` as SEARCH LANGUAGE, and it separates the query's language from the
+answer's: the user is answered in the language they asked in.
+
+Caveats worth keeping: n=10, so two questions of difference may be noise — the
+qualitative signal (C3 and L5 turning) is more trustworthy than the number. It assumes a
+monolingual library; with mixed-language sources the rule would have to name which
+language, or query in several.
+
+## 13. The library that grows when it is queried
+
+Observed on 2026-09-10, in the live channel. Asking *"where do the two papers disagree?"*
+produced the expected answer **and wrote a new page**:
+
+    divergence-coverage-gaps.md   5529 bytes   9 anchors   registered in index.md
+    wiki: 35 → 37 pages
+
+Not a defect. It is §10.1 working: `wiki_query` keeps its write-back, and the write-back
+is bound to `schema/AGENT.md`, so the page came out anchored and indexed like any other.
+It is the *"valuable analyses can be filed back into the wiki"* of Karpathy's pattern,
+happening without anyone asking.
+
+Before that, the ingestion had already produced `divergence-inventory.md` — an audit of
+the wiki's own `disagreements.md`, recording that the page **heads five divergences while
+the index and the log count six**, and that a cross-reference points at a section the page
+does not carry. The wiki documented its own defect instead of hiding it, which is rule 13
+applied at a level nobody specified: not to a missing value, but to the consistency of the
+library.
+
+### Why this is the design's most valuable property
+
+A RAG answers and forgets. Here, **the question is a contribution**: it leaves an analysis
+in the library that the next question can find. The library grows not only by ingestion
+but by use, which is the difference between an index and a second brain.
+
+### And why it was switched off for the demo
+
+Two faces:
+
+- **For:** you can show the tree before and after the same question and watch the library
+  grow live. That is a hard argument to refute.
+- **Against:** the artefact stops being stable. A question rehearsed on Thursday can
+  answer differently on Friday, because the wiki changed during the rehearsal. And there
+  is a publication mismatch: pages written by a query **do not** pass through
+  `publish_wiki_pages`, which only runs inside `wiki_ingest` — so they exist in the wiki
+  and stay **invisible to search** until the next ingestion.
+
+Predictability won for the demo. The channel's `prompt_append` gained a FROZEN LIBRARY
+rule: when answering, never write to the wiki, never create or edit pages, never touch
+`index.md` or `log.md`; if a gap or inconsistency is noticed while answering, **report it
+in the answer** instead of fixing it on disk.
+
+Note that the rule **keeps the finding and drops only the writing**: the agent is still
+required to report gaps, it just does not repair them itself. That is how the answer about
+the divergences could say "the page heads five, the index counts six" and still deliver
+the sixth.
+
+### What to do after the demo
+
+1. **Turn the write-back back on** — it is the property, not the defect.
+2. **Publish what a query writes.** The mismatch above is a real bug: call
+   `publish_wiki_pages` at the end of a `wiki_query` that wrote. Until that exists, an
+   analysis filed by a query is invisible to the next search, which cancels half the value
+   of filing it. The two audit pages were published by hand on 2026-09-10.
+3. **Decide whether the library needs versions.** If asking changes the wiki, "yesterday's
+   wiki" and "today's wiki" are different objects, and nothing today tells them apart. See
+   §10.4 and the versioning discussion in §11-A4.
 
 ---
 
-## 13. O acervo que cresce ao ser consultado
+## 14. Method note: the instrument was wrong three times
 
-Observado em 2026-09-10, no canal real. Perguntar *"onde os dois papers discordam?"*
-produziu a resposta esperada **e criou uma página nova na wiki**:
+Three measurements in one day reported a problem the system did not have. In every case
+the artefact was fine and the tool measuring it was broken. Recorded because three is a
+pattern, not luck.
 
-    divergence-coverage-gaps.md   5529 bytes   9 âncoras   registrada no index.md
-    wiki: 35 → 37 páginas
+| What was measured | The bug | What it reported |
+|---|---|---|
+| Anchor format | `sed 's/p[0-9]*//'` matches a `p` with **zero** digits, eating the `p` in `.pdf` | a `.df` defect that does not exist |
+| Retrieval, by page name | the labels were the old wiki's; re-ingestion renamed the pages | a regression from 7/10 to 3/10 |
+| Retrieval, by LLM judge | `max_tokens=5` on a reasoning model, which spent them on `reasoning_content` and returned an empty `content` | 0/10, judging even an exactly-matching page as NO |
 
-Não foi defeito. É a §10.1 funcionando: o `wiki_query` mantém o write-back, e ele está
-amarrado ao `schema/AGENT.md`, então a página saiu com âncoras e entrou no índice como
-qualquer outra. É o *"valuable analyses can be filed back into the wiki"* do padrão do
-Karpathy, acontecendo sem ninguém pedir.
+The general lesson: **measuring an AI system with AI tools requires verifying the
+instrument before believing the number** — and verifying it against a case whose answer is
+known in advance. The third bug was caught precisely because a judge that says NO to
+`autonomous-context-updating.md` for "what is Autonomous Context Updating?" is impossible,
+not merely surprising.
 
-Antes disso, a ingestão já havia produzido `divergence-inventory.md` — uma auditoria da
-própria `disagreements.md`, que registra que a página **encabeça cinco divergências
-enquanto o índice e o log contam seis**, e que há uma referência cruzada apontando para
-uma seção que a página não carrega. A wiki documentou o próprio defeito em vez de
-escondê-lo, que é a regra 13 aplicada num nível que ninguém especificou: não a um valor
-faltante, mas à consistência do acervo.
+The practical consequence for this document: every number here carries how it was measured,
+and the retracted ones stay retracted in place rather than being deleted.
 
-### Por que isto é a propriedade mais valiosa do desenho
-
-Um RAG responde e esquece. Aqui, **a pergunta é uma contribuição**: ela deixa no acervo
-uma análise que a próxima pergunta encontra. O acervo não cresce só por ingestão — cresce
-por uso, que é a diferença entre um índice e um segundo cérebro.
-
-### E por que ela foi desligada para a demo
-
-Duas faces:
-
-- **A favor:** dá para mostrar a árvore antes e depois da mesma pergunta e ver o acervo
-  crescer ao vivo. É um argumento difícil de refutar.
-- **Contra:** o artefato deixa de ser estável. Uma pergunta ensaiada na quinta pode dar
-  outro resultado na sexta, porque a wiki mudou no ensaio. E há um descompasso de
-  publicação: páginas criadas por consulta **não** passam pelo `publish_wiki_pages`, que
-  só roda no `wiki_ingest` — então elas existem na wiki e ficam **invisíveis à busca**
-  até a próxima ingestão.
-
-Para a demo venceu a previsibilidade. O `prompt_append` do canal ganhou:
-
-    ACERVO CONGELADO: ao RESPONDER, nunca escreva na wiki. Nao crie paginas,
-    nao edite paginas existentes, nao atualize o index.md nem o log.md. Se ao
-    responder voce notar uma lacuna ou inconsistencia no acervo, RELATE na
-    resposta em vez de corrigi-la no disco. A wiki so muda por ingestao.
-
-Repare que a regra **preserva o achado e descarta só a escrita**: o agente continua
-obrigado a relatar lacunas, apenas não as conserta sozinho. Foi assim que a resposta
-sobre as divergências pôde dizer "a página encabeça cinco, o índice conta seis" e ainda
-entregar a sexta.
-
-### O que fazer depois da demo
-
-1. **Religar o write-back** — é a propriedade, não o defeito.
-2. **Publicar o que a consulta escreve.** O descompasso acima é um bug real: chamar
-   `publish_wiki_pages` também ao fim de um `wiki_query` que escreveu. Enquanto isso não
-   existir, uma análise arquivada pela consulta é invisível para a busca seguinte, o que
-   anula metade do valor de arquivá-la. As duas páginas de auditoria foram publicadas à
-   mão em 2026-09-10 (35 publicadas de 37).
-3. **Decidir se o acervo precisa de versão.** Se perguntar muda a wiki, "a wiki de
-   ontem" e "a wiki de hoje" são objetos distintos, e nada hoje os distingue. Ver §10.4
-   e a discussão de versionamento/tombstones na §11-A4.
+Two of the three would have cost real work: the first nearly bought a nine-minute
+re-ingest per paper to fix nothing; the second nearly attributed a regression to the
+`AGENT.md` rules that had just been added.
