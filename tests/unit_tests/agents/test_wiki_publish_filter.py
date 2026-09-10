@@ -61,5 +61,7 @@ def test_query_prompt_searches_before_reading():
 
 
 def test_query_prompt_makes_a_write_follow_the_schema_rules():
-    prompt = wiki_tools.build_query_prompt("q")
+    # Only reachable with allow_write=True now: a query is read-only by default, so
+    # there is no write for the schema rules to govern unless the caller asks for one.
+    prompt = wiki_tools.build_query_prompt("q", allow_write=True)
     assert "AGENT.md" in prompt

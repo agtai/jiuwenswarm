@@ -81,7 +81,7 @@ WIKI_PUBLISH_PREFIX = "wiki__"
 NON_PUBLISHED_PAGES: frozenset[str] = frozenset({"index.md", "log.md"})
 
 
-def build_query_prompt(question: str) -> str:
+def build_query_prompt(question: str, allow_write: bool = False) -> str:
     """The instruction ``wiki_query`` gives its subagent.
 
     **Search first, read second.** The subagent used to be told only to answer "strictly
@@ -94,9 +94,15 @@ def build_query_prompt(question: str) -> str:
     the candidates for the cost of a single read. ``grep`` second for the terms the
     question actually uses. Only then whole pages, and only the ones that survived.
 
-    The write-back is kept, because an analysis worth having is worth filing, but it is
-    now bound to ``schema/AGENT.md``: the old wording invited a page written without the
-    anchoring rules the rest of the wiki follows.
+    **Read-only unless the caller says otherwise.** The write-back is kept, because an
+    analysis worth having is worth filing, and it stays bound to ``schema/AGENT.md`` so a
+    filed page follows the same anchoring rules as the rest of the wiki. What changed is
+    the default. Offering it unconditionally put the decision in the wrong place: a
+    caller that wants a frozen library -- the papers channel during a demo, say -- states
+    that in its own prompt, which addresses the main agent and never reaches this
+    subagent. A real run duly created a page, registered it in ``index.md`` and appended
+    to ``log.md`` while merely answering a question. Freezing is the caller's policy, so
+    it belongs in the caller's argument, not in prose the caller cannot see.
     """
     return (
         f"Answer this question strictly from `wiki/`: '{question}'.\n"
@@ -107,9 +113,15 @@ def build_query_prompt(question: str) -> str:
         "3. read in full ONLY the pages steps 1 and 2 selected.\n"
         "Cite the `[[fonte: ...]]` anchors of every claim you use; if a page carries no"
         " anchor for something, say so rather than asserting it.\n"
-        "If the answer forms a genuinely new insight worth keeping, you may write it"
-        " back as a wiki page -- but read `schema/AGENT.md` first and follow its rules,"
-        " anchors included."
+        + (
+            "If the answer forms a genuinely new insight worth keeping, you may write it"
+            " back as a wiki page -- but read `schema/AGENT.md` first and follow its"
+            " rules, anchors included."
+            if allow_write
+            else "This is a read-only query: do NOT create, edit or delete any file."
+            " If you notice a gap or inconsistency in the wiki, report it in your answer"
+            " instead of repairing it on disk."
+        )
     )
 
 
@@ -489,9 +501,10 @@ class LLMWiki:
 
         return result
 
-    async def query(self, question: str) -> Dict[str, Any]:
+    async def query(self, question: str, *, allow_write: bool = False) -> Dict[str, Any]:
         return await self.agent.invoke(
-            {"query": build_query_prompt(question)}, session=self._session
+            {"query": build_query_prompt(question, allow_write=allow_write)},
+            session=self._session,
         )
 
     async def lint(self) -> Dict[str, Any]:
@@ -681,9 +694,17 @@ async def wiki_ingest(
     " If the user specifies a target directory like 'wiki_lib' or 'bibliography', pass that exact path as `workspace`.",
 )
 async def wiki_query(
-    query: str, workspace: str = "", sys_operation: Optional[SysOperation] = None
+    query: str,
+    workspace: str = "",
+    allow_write: bool = False,
+    sys_operation: Optional[SysOperation] = None,
 ) -> str:
-    """Queries the LLM Wiki."""
+    """Queries the LLM Wiki.
+
+    ``allow_write`` lets the answer be filed back as a wiki page. It defaults to off:
+    a question should not mutate the library, and a caller that wants the library to
+    grow from questions has to say so.
+    """
     if not query or not query.strip():
         return "Error: Query cannot be empty."
     try:
@@ -701,7 +722,7 @@ async def wiki_query(
         )
         await wiki.ensure_initialized()
 
-        result = await wiki.query(question=query)
+        result = await wiki.query(question=query, allow_write=allow_write)
         if "output" in result:
             return str(result["output"])
         elif "error" in result:
