@@ -1,60 +1,61 @@
-# Second Brain PoC (canal de papers no Slack) — Plano de Implementação
+# Second Brain PoC (Slack papers channel) — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Fazer com que um PDF postado num canal do Slack vire páginas de wiki ancoradas na fonte e pesquisáveis pelo `memory_search` do agente, sem intervenção manual.
+**Goal:** Make a PDF posted in a Slack channel become wiki pages anchored to the source and searchable through the agent's `memory_search`, with no manual intervention.
 
-**Architecture:** Quatro mudanças. Duas em `wiki_tools.py` (restringir de onde o `wiki_ingest` lê, e publicar as páginas no diretório de memória do agente ao final de um ingest bem-sucedido); uma em `interface_deep.py` (registrar `wiki_ingest`/`wiki_query`, revertendo parte de `e4fae3061`); e duas de configuração (pré-semear o `schema/AGENT.md` do workspace de papers com as regras de ancoragem, e escrever o scope do canal).
+**Architecture:** Four changes. Two in `wiki_tools.py` (restrict where `wiki_ingest` may read from, and publish the pages into the agent's memory directory at the end of a successful ingest); one in `interface_deep.py` (register `wiki_ingest`/`wiki_query`, partially reverting `e4fae3061`); and two configuration ones (pre-seed the papers workspace's `schema/AGENT.md` with the anchoring rules, and write the channel scope).
 
-**Tech Stack:** Python 3.11, pytest + monkeypatch, `openjiuwen` no commit fixado `61becb17`, uv.
+**Tech Stack:** Python 3.11, pytest + monkeypatch, `openjiuwen` pinned at commit `61becb17`, uv.
 
 **Spec:** `docs/superpowers/specs/2026-09-09-second-brain-slack-poc-design.md`
 
 ## Global Constraints
 
-- Branch de trabalho: `feat/second-brain-slack-poc`; worktree
+- Working branch: `feat/second-brain-slack-poc`; worktree
   `/home/renan/openJiuwen-ai/jiuwenswarm/.claude/worktrees/wiki-smoke`.
-- Rodar tudo com o venv da worktree: `.venv/bin/python`, `.venv/bin/pytest`.
-- **Não** alterar nada em `.venv/` (é o `openjiuwen` fixado). Toda mudança é em `jiuwenswarm/`.
-- Testes novos vão em `tests/unit_tests/agents/`, seguindo o padrão de
+- Run everything with the worktree's venv: `.venv/bin/python`, `.venv/bin/pytest`.
+- Do **not** touch anything under `.venv/` (that is the pinned `openjiuwen`). Every change
+  goes in `jiuwenswarm/`.
+- New tests go in `tests/unit_tests/agents/`, following the pattern of
   `test_wiki_tools_runtime_config.py` (pytest, `monkeypatch`, `SimpleNamespace`).
-- Estilo do repositório: docstrings em inglês, comentários explicando *por quê*.
-- Commit por tarefa, mensagem em inglês, prefixo convencional (`feat:`/`fix:`/`test:`).
-- **As Tasks 1–3 e 5 não dependem do Slack.** Só a Task 6 (ensaio) precisa dos tokens.
+- Repository style: docstrings in English, comments explaining *why*.
+- One commit per task, message in English, conventional prefix (`feat:`/`fix:`/`test:`).
+- **Tasks 1-3 and 5 do not depend on Slack.** Only Task 6 needs the tokens.
 
 ---
 
 ## File Structure
 
-| Arquivo | Responsabilidade | Ação |
+| File | Responsibility | Action |
 |---|---|---|
-| `jiuwenswarm/agents/harness/common/tools/wiki_tools.py` | ferramentas da wiki; ganha guarda de origem e publicação | Modificar |
-| `jiuwenswarm/server/runtime/agent_adapter/interface_deep.py` | registro de tools do agente | Modificar (`:7716-7722`) |
-| `tests/unit_tests/agents/test_wiki_ingest_source_guard.py` | testes da guarda de origem | Criar |
-| `tests/unit_tests/agents/test_wiki_publish.py` | testes da publicação | Criar |
-| `tests/unit_tests/agents/test_shared_tool_registration.py` | teste do registro | Criar |
-| `~/.jiuwenswarm/wikis/papers/.llm_wiki/schema/AGENT.md` | regras do mantenedor (fora do repo) | Criar |
-| `~/.jiuwenswarm/config/config.yaml` | bloco `scopes:` (fora do repo) | Modificar |
+| `jiuwenswarm/agents/harness/common/tools/wiki_tools.py` | wiki tools; gains the source guard and publication | Modify |
+| `jiuwenswarm/server/runtime/agent_adapter/interface_deep.py` | agent tool registration | Modify (`:7716-7722`) |
+| `tests/unit_tests/agents/test_wiki_ingest_source_guard.py` | source guard tests | Create |
+| `tests/unit_tests/agents/test_wiki_publish.py` | publication tests | Create |
+| `tests/unit_tests/agents/test_shared_tool_registration.py` | registration test | Create |
+| `~/.jiuwenswarm/wikis/papers/.llm_wiki/schema/AGENT.md` | maintainer rules (outside the repo) | Create |
+| `~/.jiuwenswarm/config/config.yaml` | `scopes:` block (outside the repo) | Modify |
 
 ---
 
-### Task 1: Restringir de onde o `wiki_ingest` pode ler
+### Task 1: Restrict where `wiki_ingest` may read from
 
-Fecha o buraco da §5.1: hoje `wiki_ingest` aceita qualquer caminho absoluto, sem validar
-extensão no ramo de arquivo único, e o ramo de diretório faz `glob("**/*")` de qualquer
-raiz — `wiki_ingest(source="~")` ingeriria todo `.md` do usuário.
+Closes the hole in §5.1: today `wiki_ingest` accepts any absolute path, validates no
+extension in the single-file branch, and its directory branch does `glob("**/*")` from any
+root -- `wiki_ingest(source="~")` would ingest every `.md` the user owns.
 
 **Files:**
 - Modify: `jiuwenswarm/agents/harness/common/tools/wiki_tools.py`
 - Test: `tests/unit_tests/agents/test_wiki_ingest_source_guard.py`
 
 **Interfaces:**
-- Consumes: `get_agent_workspace_dir()` e `get_agent_sessions_dir()` de `jiuwenswarm.common.utils`.
+- Consumes: `get_agent_workspace_dir()` and `get_agent_sessions_dir()` from `jiuwenswarm.common.utils`.
 - Produces: `INGESTIBLE_SUFFIXES: tuple[str, ...]`, `source_is_allowed(path: Path) -> bool`.
 
 - [ ] **Step 1: Write the failing test**
 
-Criar `tests/unit_tests/agents/test_wiki_ingest_source_guard.py`:
+Create `tests/unit_tests/agents/test_wiki_ingest_source_guard.py`:
 
 ```python
 from __future__ import annotations
@@ -118,21 +119,21 @@ Expected: FAIL — `AttributeError: module 'wiki_tools' has no attribute 'source
 
 - [ ] **Step 3: Write minimal implementation**
 
-Em `wiki_tools.py:37`, **substituir** a linha
+In `wiki_tools.py:37`, **replace** the line
 
 ```python
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 ```
 
-por
+with
 
 ```python
 from jiuwenswarm.common.utils import get_agent_sessions_dir, get_agent_workspace_dir
 ```
 
-(`shutil` já está importado na linha 11; `Path` na 7.)
+(`shutil` is already imported on line 11; `Path` on line 7.)
 
-Logo abaixo de `DEFAULT_WIKI_DIR = ".llm_wiki"`:
+Right below `DEFAULT_WIKI_DIR = ".llm_wiki"`:
 
 ```python
 #: The document types the wiki maintainer can actually read. The directory branch of
@@ -168,7 +169,7 @@ Expected: 5 passed
 
 - [ ] **Step 5: Wire the guard into `wiki_ingest`**
 
-Em `wiki_ingest`, logo após o bloco `if not src_path.exists(): ...`:
+In `wiki_ingest`, right after the `if not src_path.exists(): ...` block:
 
 ```python
         if not source_is_allowed(src_path):
@@ -178,14 +179,14 @@ Em `wiki_ingest`, logo após o bloco `if not src_path.exists(): ...`:
             )
 ```
 
-E no ramo de arquivo único, trocar:
+And in the single-file branch, replace:
 
 ```python
         else:
             targets.append(src_path)
 ```
 
-por:
+with:
 
 ```python
         else:
@@ -197,27 +198,27 @@ por:
             targets.append(src_path)
 ```
 
-E no ramo de diretório, trocar `for ext in (".pdf", ".md", ".txt"):` por
-`for ext in INGESTIBLE_SUFFIXES:` — uma lista, não duas.
+And in the directory branch, replace `for ext in (".pdf", ".md", ".txt"):` with
+`for ext in INGESTIBLE_SUFFIXES:` -- one list, not two.
 
-> **Cobertura da §5.1 do spec, e o que fica de fora.** Esta task implementa as
-> mitigações (1) restringir `source` e (2) validar extensão. As outras duas ficam
-> deliberadamente fora da PoC:
+> **Coverage of spec §5.1, and what is left out.** This task implements mitigations
+> (1) restrict `source` and (2) validate the extension. The other two are deliberately
+> out of scope for the PoC:
 >
-> - **(3) usar `sys_operation.fs()` para a cópia** — é a correção arquitetural correta
->   (põe a leitura de volta atrás do rail de permissão), mas com `source` restrito aos
->   dois diretórios que o próprio agente já pode ler, o ganho marginal em 2 dias é
->   pequeno e o risco de mexer no caminho de cópia é real. **Registrar como dívida.**
-> - **(4) negar por scope** — só faz sentido depois de existirem outros canais; é opt-out
->   e não substitui (1).
+> - **(3) use `sys_operation.fs()` for the copy** -- this is the architecturally correct
+>   fix (it puts the read back behind the permission rail), but with `source` restricted
+>   to the two directories the agent can already read, the marginal gain over 2 days is
+>   small and the risk of disturbing the copy path is real. **Record as debt.**
+> - **(4) deny by scope** -- only makes sense once other channels exist; it is opt-out and
+>   does not replace (1).
 >
-> Se a Task 1 for cortada por tempo, **a demo não deve ir ao ar**: sem ela qualquer
-> conversa no Slack pode mandar o `wiki_ingest` ler um arquivo arbitrário.
+> If Task 1 gets cut for time, **the demo must not go live**: without it any Slack
+> conversation can make `wiki_ingest` read an arbitrary file.
 
 - [ ] **Step 6: Run the full wiki test file to check nothing regressed**
 
 Run: `.venv/bin/pytest tests/unit_tests/agents/ -k wiki -v`
-Expected: todos passam (inclui `test_wiki_tools_runtime_config.py`)
+Expected: all pass (includes `test_wiki_tools_runtime_config.py`)
 
 - [ ] **Step 7: Commit**
 
@@ -235,11 +236,11 @@ the directory branch did -- one list now serves both."
 
 ---
 
-### Task 2: Publicar as páginas da wiki no índice do agente
+### Task 2: Publish the wiki pages into the agent's index
 
-Sem isto o `memory_search` nunca vê a wiki e a demo perde a busca (S4). O spec §5.4
-explica por que isto é código e não prompt: no Slack o modelo não recebe o caminho do
-workspace, e um `cp` de fora dele dispararia aprovação no meio do turno.
+Without this `memory_search` never sees the wiki and the demo loses search (S4). Spec
+§5.4 explains why this is code and not prompt: in Slack the model is not given the
+workspace path, and a `cp` from outside it would trigger an approval mid-turn.
 
 **Files:**
 - Modify: `jiuwenswarm/agents/harness/common/tools/wiki_tools.py`
@@ -251,7 +252,7 @@ workspace, e um `cp` de fora dele dispararia aprovação no meio do turno.
 
 - [ ] **Step 1: Write the failing test**
 
-Criar `tests/unit_tests/agents/test_wiki_publish.py`:
+Create `tests/unit_tests/agents/test_wiki_publish.py`:
 
 ```python
 from __future__ import annotations
@@ -324,7 +325,7 @@ Expected: FAIL — `AttributeError: module 'wiki_tools' has no attribute 'publis
 
 - [ ] **Step 3: Write minimal implementation**
 
-Em `wiki_tools.py`, abaixo de `source_is_allowed`:
+In `wiki_tools.py`, below `source_is_allowed`:
 
 ```python
 #: Prefix for a wiki page copied into the agent's memory directory. It keeps the pages
@@ -366,14 +367,14 @@ Expected: 5 passed
 
 - [ ] **Step 5: Call it at the end of a successful ingest**
 
-Em `LLMWiki.ingest`, substituir as duas últimas linhas:
+In `LLMWiki.ingest`, replace the last two lines:
 
 ```python
         await self._manifest.record(sha256=sha256, name=source_path.name, destination=destination)
         return result
 ```
 
-por:
+with:
 
 ```python
         await self._manifest.record(sha256=sha256, name=source_path.name, destination=destination)
@@ -394,7 +395,7 @@ por:
 - [ ] **Step 6: Run the whole wiki test suite**
 
 Run: `.venv/bin/pytest tests/unit_tests/agents/ -k wiki -v`
-Expected: todos passam
+Expected: all pass
 
 - [ ] **Step 7: Commit**
 
@@ -413,21 +414,21 @@ is correct either way."
 
 ---
 
-### Task 3: Registrar `wiki_ingest` e `wiki_query` no runtime
+### Task 3: Register `wiki_ingest` and `wiki_query` in the runtime
 
-Sem isto o agente não tem as ferramentas — elas estão definidas e nunca registradas
-desde `e4fae3061`. `wiki_lint` fica de fora: a demo não precisa dele.
+Without this the agent has no such tools -- they are defined and never registered, since
+`e4fae3061`. `wiki_lint` stays out: the demo does not need it.
 
 **Files:**
 - Modify: `jiuwenswarm/server/runtime/agent_adapter/interface_deep.py` (`:7716-7722`)
 - Test: `tests/unit_tests/agents/test_shared_tool_registration.py`
 
 **Interfaces:**
-- Produces: `SHARED_AGENT_TOOLS: tuple` no módulo `interface_deep`.
+- Produces: `SHARED_AGENT_TOOLS: tuple` in the `interface_deep` module.
 
 - [ ] **Step 1: Write the failing test**
 
-Criar `tests/unit_tests/agents/test_shared_tool_registration.py`:
+Create `tests/unit_tests/agents/test_shared_tool_registration.py`:
 
 ```python
 from __future__ import annotations
@@ -460,14 +461,14 @@ Expected: FAIL — `AttributeError: module 'interface_deep' has no attribute 'SH
 
 - [ ] **Step 3: Write minimal implementation**
 
-Em `interface_deep.py`, **logo abaixo** da linha 334
-(`from jiuwenswarm.agents.harness.common.tools.pdf_tools import read_pdf`), adicionar:
+In `interface_deep.py`, **right below** line 334
+(`from jiuwenswarm.agents.harness.common.tools.pdf_tools import read_pdf`), add:
 
 ```python
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query
 ```
 
-Em nível de módulo, logo abaixo desse import:
+At module level, right below that import:
 
 ```python
 #: Tools every agent shares. wiki_ingest and wiki_query were unregistered upstream in
@@ -478,7 +479,7 @@ Em nível de módulo, logo abaixo desse import:
 SHARED_AGENT_TOOLS = (wiki_ingest, wiki_query, read_pdf)
 ```
 
-E trocar o laço em `_get_tool_cards`:
+And replace the loop in `_get_tool_cards`:
 
 ```python
         for wtool in [read_pdf]:
@@ -486,7 +487,7 @@ E trocar o laço em `_get_tool_cards`:
             tool_cards.append(wtool.card)
 ```
 
-por:
+with:
 
 ```python
         for wtool in SHARED_AGENT_TOOLS:
@@ -502,7 +503,7 @@ Expected: 2 passed
 - [ ] **Step 5: Check the adapter still imports and nothing else broke**
 
 Run: `.venv/bin/pytest tests/unit_tests/agentserver/ -x -q`
-Expected: sem novas falhas (anotar as pré-existentes, se houver, antes de mudar nada)
+Expected: no new failures (note the pre-existing ones, if any, before changing anything)
 
 - [ ] **Step 6: Commit**
 
@@ -521,13 +522,14 @@ is testable."
 
 ---
 
-### Task 4: Pré-semear o `schema/AGENT.md` do workspace de papers
+### Task 4: Pre-seed the papers workspace's `schema/AGENT.md`
 
-`ensure_initialized` só escreve o arquivo **se ele não existir**, então semeá-lo antes do
-primeiro ingest é o jeito de dar as regras de ancoragem sem tocar no default do código.
+`ensure_initialized` writes the file **only if it does not exist**, so seeding it before
+the first ingest is the way to supply the anchoring rules without touching the code
+default.
 
 **Files:**
-- Create: `~/.jiuwenswarm/wikis/papers/.llm_wiki/schema/AGENT.md` (fora do repo)
+- Create: `~/.jiuwenswarm/wikis/papers/.llm_wiki/schema/AGENT.md` (outside the repo)
 
 - [ ] **Step 1: Create the directory**
 
@@ -562,9 +564,9 @@ cat > ~/.jiuwenswarm/wikis/papers/.llm_wiki/schema/AGENT.md <<'EOF'
 EOF
 ```
 
-Nota sobre a regra 13: no smoke test o subagente inventou a data do `log.md` (usou a do
-arXiv) quando não conseguiu rodar `date`. A regra existe para tornar esse comportamento
-explicitamente proibido, já que ele é o mesmo padrão que produziria uma âncora inventada.
+A note on rule 13: in the smoke test the subagent invented the `log.md` date (it used
+arXiv's) when it could not run `date`. The rule exists to make that behaviour explicitly
+forbidden, since it is the same pattern that would produce an invented anchor.
 
 - [ ] **Step 3: Verify it is not overwritten**
 
@@ -572,16 +574,16 @@ explicitamente proibido, já que ele é o mesmo padrão que produziria uma ânco
 cd /home/renan/openJiuwen-ai/jiuwenswarm/.claude/worktrees/wiki-smoke
 md5sum ~/.jiuwenswarm/wikis/papers/.llm_wiki/schema/AGENT.md
 ```
-Guardar o hash; conferir de novo depois da Task 6 — deve ser idêntico.
+Keep the hash; check it again after Task 6 -- it must be identical.
 
 ---
 
-### Task 5: Ensaio pelo CLI (sem Slack)
+### Task 5: CLI rehearsal (no Slack)
 
-Prova as Tasks 1–3 de ponta a ponta antes de qualquer dependência de credencial.
+Proves Tasks 1-3 end to end before any credential dependency.
 
 **Files:**
-- Create: `/home/renan/second_brain_rehearsal.py` (script descartável, fora do repo)
+- Create: `/home/renan/second_brain_rehearsal.py` (throwaway script, outside the repo)
 
 - [ ] **Step 1: Write the rehearsal script**
 
@@ -625,11 +627,11 @@ EOF
 Run: `cd /home/renan/openJiuwen-ai/jiuwenswarm/.claude/worktrees/wiki-smoke && .venv/bin/python /home/renan/second_brain_rehearsal.py 2>&1 | tail -30`
 Expected: `[Success]`
 
-- [ ] **Step 3: Check for the degraded-harness errors (§8.1 do spec)**
+- [ ] **Step 3: Check for the degraded-harness errors (spec §8.1)**
 
 Run: `.venv/bin/python /home/renan/second_brain_rehearsal.py 2>&1 | grep -c "NoneType.*attribute 'id'"`
-Expected: **0**. Se não for 0, os erros não eram do runner descartável e a §8.1 precisa
-ser reaberta antes de confiar em qualquer medição.
+Expected: **0**. If it is not 0, the errors did not come from the throwaway runner and
+§8.1 must be reopened before trusting any measurement.
 
 - [ ] **Step 4: Verify the guard refuses a file outside the allowed roots**
 
@@ -641,27 +643,27 @@ fn = wiki_ingest._func
 print(asyncio.run(fn(source='/home/renan/.jiuwenswarm/config/.env', workspace='/tmp/x')))
 "
 ```
-Expected: mensagem `Error: wiki_ingest only reads documents under ...`
+Expected: the message `Error: wiki_ingest only reads documents under ...`
 
 - [ ] **Step 5: Verify publication reached the memory directory**
 
 ```bash
 ls ~/.jiuwenswarm/agent/workspace/memory/wiki__*.md | head
 ```
-Expected: uma linha por página da wiki.
+Expected: one line per wiki page.
 
-- [ ] **Step 6: Measure the anchoring (S2/S3 do spec)**
+- [ ] **Step 6: Measure the anchoring (spec S2/S3)**
 
 ```bash
 W=~/.jiuwenswarm/wikis/papers/.llm_wiki/wiki
 grep -c "\[\[fonte:" $W/*.md | sort -t: -k2 -rn | head
 ```
-Depois escolher **3 páginas**, contar à mão as afirmações substantivas (denominador) e as
-ancoradas (numerador), e conferir 5 âncoras abrindo o PDF na página indicada — lembrando
-que `## Page N` é o índice **físico** do pdfplumber, não o número impresso.
+Then pick **3 pages**, count by hand the substantive claims (denominator) and the
+anchored ones (numerator), and check 5 anchors by opening the PDF at the page named --
+remembering that `## Page N` is pdfplumber's **physical** index, not the printed number.
 
-Registrar os números. Se ficarem abaixo de 90%, aplicar o fallback do spec (âncora em
-nível de arquivo + seção) antes da sexta.
+Record the numbers. If they land below 90%, apply the spec's fallback (file-level + section
+anchor) before Friday.
 
 - [ ] **Step 7: Verify the index picked the pages up (S4)**
 
@@ -669,7 +671,7 @@ nível de arquivo + seção) antes da sexta.
 sqlite3 ~/.jiuwenswarm/agent/workspace/memory/memory.db \
   "select path from files where path like '%wiki__%' limit 10;"
 ```
-**`sqlite3` não está instalado nesta máquina**; usar Python:
+**`sqlite3` is not installed on this machine**; use Python:
 
 ```bash
 .venv/bin/python -c "
@@ -680,21 +682,21 @@ print(c.execute(\"select count(*) from files where path like '%wiki__%'\").fetch
 "
 ```
 
-**Resultado do ensaio de 2026-09-09: 0.** Não é falha da publicação — os 18 arquivos
-estão em `~/.jiuwenswarm/agent/workspace/memory/`. É que **nada indexa sem um agente
-vivo**: o watcher e o sync inicial pertencem ao gestor de memória do agente principal,
-que não roda num script CLI. O subagente da wiki tem workspace próprio
-(`<WIKI_ROOT>/.llm_wiki`) e indexa o dele, não o do agente.
+**Result of the 2026-09-09 rehearsal: 0.** Not a publication failure -- the 18 files are
+in `~/.jiuwenswarm/agent/workspace/memory/`. The point is that **nothing indexes without a
+live agent**: the watcher and the initial sync belong to the main agent's memory manager,
+which does not run in a CLI script. The wiki subagent has its own workspace
+(`<WIKI_ROOT>/.llm_wiki`) and indexes that one, not the agent's.
 
-**Consequência: o S4 só pode ser verificado com o backend de pé.** É o primeiro item da
-Task 6, antes mesmo de postar um PDF no canal.
+**Consequence: S4 can only be verified with the backend up.** It is the first item of
+Task 6, even before posting a PDF in the channel.
 
 ---
 
-### Task 6: Scope do canal (depende dos tokens do Slack)
+### Task 6: Channel scope (depends on the Slack tokens)
 
 **Files:**
-- Modify: `~/.jiuwenswarm/config/config.yaml` (fora do repo)
+- Modify: `~/.jiuwenswarm/config/config.yaml` (outside the repo)
 
 - [ ] **Step 1: Back up the config**
 
@@ -705,37 +707,37 @@ cp -p ~/.jiuwenswarm/config/config.yaml \
 
 - [ ] **Step 2: Add the scopes block**
 
-No topo do arquivo (é uma chave de nível superior; hoje **não existe** bloco `scopes:`):
+At the top of the file (it is a top-level key; today **no** `scopes:` block exists):
 
 ```yaml
 scopes:
   - match: {channel: slack}
     delivery:
       prompt: |
-        Responda de forma direta e cite suas fontes.
+        Answer directly and cite your sources.
 
   - match:
       channel: slack
-      chat:    "<ID_DO_CANAL_DE_PAPERS>"
+      chat:    "<PAPERS_CHANNEL_ID>"
     delivery:
       mode: [mention, has_file]
       mid_turn: queue
       prompt_append: |
-        Este canal é uma biblioteca de papers com uma LLM Wiki em
+        This channel is a library of papers backed by an LLM Wiki at
         /home/renan/.jiuwenswarm/wikis/papers.
-        - Anexo novo, e só se for .pdf/.md/.txt:
-          1. chame wiki_ingest(source=<caminho do anexo>,
+        - New attachment, and only if it is .pdf/.md/.txt:
+          1. call wiki_ingest(source=<path of the attachment>,
              workspace="/home/renan/.jiuwenswarm/wikis/papers");
-          2. relate quais páginas foram criadas ou atualizadas, listando o
-             diretório da wiki — o retorno de wiki_ingest diz apenas [Success].
-             A publicação no índice é automática; não a faça você.
-        - Pergunta: use memory_search para achar as páginas relevantes e
-          responda citando as âncoras [[fonte: … p.N]].
-        - Nunca afirme sem âncora.
-        - Anexo que não seja .pdf/.md/.txt: não ingira; diga por quê.
+          2. report which pages were created or updated, by listing the wiki
+             directory -- wiki_ingest only returns [Success]. Publishing to the
+             index is automatic; do not do it yourself.
+        - Question: use memory_search to find the relevant pages and answer
+          citing the anchors [[fonte: ... p.N]].
+        - Never assert anything without an anchor.
+        - Attachment that is not .pdf/.md/.txt: do not ingest; say why.
 ```
 
-Substituir `<ID_DO_CANAL_DE_PAPERS>` pelo id real, entre aspas.
+Replace `<PAPERS_CHANNEL_ID>` with the real id, in quotes.
 
 - [ ] **Step 3: Validate the YAML**
 
@@ -758,19 +760,19 @@ cd /home/renan/openJiuwen-ai/jiuwenswarm && uv run jiuwenswarm-start debug --ski
 sleep 20
 grep -iE "scope|slack" logs/$(ls -t logs | head -1) | head -20
 ```
-Expected: nenhum aviso de scope descartado. Um aviso nomeando a conversa e a chave
-significa que o valor foi recusado e aquela conversa caiu para a camada de baixo.
+Expected: no discarded-scope warning. A warning naming the conversation and the key means
+the value was refused and that conversation fell back to the layer below.
 
 - [ ] **Step 5: Post a PDF in the channel and observe**
 
-Critérios: S1 (vira páginas sem intervenção), S6 (< 8 min), publicação automática
-(`ls ~/.jiuwenswarm/agent/workspace/memory/wiki__*.md`), e depois uma pergunta no canal
-verificando S5 (resposta com âncora).
+Criteria: S1 (becomes pages with no intervention), S6 (< 8 min), automatic publication
+(`ls ~/.jiuwenswarm/agent/workspace/memory/wiki__*.md`), and then a question in the channel
+verifying S5 (an anchored answer).
 
 - [ ] **Step 6: Stop the backend**
 
 ```bash
 cd /home/renan/openJiuwen-ai/jiuwenswarm && uv run jiuwenswarm-stop
 ```
-Se as portas continuarem escutando, matar os PIDs — o `jiuwenswarm-stop` já perdeu o
-rastro do processo pai uma vez.
+If the ports keep listening, kill the PIDs -- `jiuwenswarm-stop` has lost track of the
+parent process once already.
