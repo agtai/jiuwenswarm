@@ -508,3 +508,44 @@ Junto com isso valeria trocar o `os.listdir` do scan de extras por `os.walk`
 Duas linhas, mas dentro do `openjiuwen` fixado em `61becb17`: exige contribuição upstream
 ou fork da dependência. Depois disso, a §5.4 vira uma chave de config e o passo de
 publicação desaparece.
+
+### 10.4 Âncoras clicáveis — hyperlink para a página do PDF
+
+Hoje a âncora `[[fonte: paper.pdf p7]]` é texto. A evolução natural é torná-la um link
+que abre o PDF **na página citada**, transformando o double-check de "abra o arquivo e
+procure" em um clique.
+
+**O que já está resolvido.** O conector converte link Markdown em `mrkdwn` do Slack
+sozinho — `_normalize_slack_mrkdwn` (`slack_connect.py:11916`). Verificado:
+
+    IN : [paper.pdf p.7](http://host/x.pdf#page=7)
+    OUT: <http://host/x.pdf#page=7|paper.pdf p.7>
+
+Ou seja, **não é preciso gerar a sintaxe `<url|texto>`**; basta o agente escrever Markdown.
+
+**O que precisa mudar na regra 8.** O colchete duplo quebra o regex e passa intacto:
+
+    IN : [[fonte: x.pdf p7]](http://host/x.pdf#page=7)
+    OUT: (inalterado — não vira link)
+
+A âncora teria de virar colchete simples: `[fonte: x.pdf p.7](url)`.
+
+**O elo que falta: de onde vem a URL.** Três opções, nenhuma gratuita.
+
+| Opção | Viável? | Observação |
+|---|---|---|
+| Permalink do Slack | ❌ | o visualizador do Slack não honra `#page=N` |
+| `url_private` do arquivo | ⚠️ | abre no navegador com a sessão do usuário; `#page` só funciona se o navegador renderizar o PDF inline. **É o caminho certo**: o arquivo já está hospedado, com o controle de acesso do canal |
+| Servidor HTTP local sobre `sources/` | ✅ | trivial (`python3 -m http.server`), mas a URL é `localhost` — serve para demo com tela compartilhada, não para os outros clicarem |
+
+**E uma cadeia de metadados que hoje não existe.** O `wiki_ingest` copia o PDF para
+`sources/` com prefixo de hash e **descarta a origem no Slack**: o `slack_file_id` fica no
+registro do anexo (`slack_connect.py:11375`) e nunca chega à wiki. Para um link baseado no
+`url_private` seria preciso carregá-lo por toda a cadeia — conector → prompt → parâmetro do
+`wiki_ingest` → frontmatter da página → âncora. Isso é o grosso do trabalho, não o link.
+
+**Por que fica fora da PoC.** Nada aqui é difícil isoladamente, mas são quatro mudanças
+acopladas (formato da âncora, cadeia de metadados, hospedagem do arquivo, e reingestão das
+páginas já escritas no formato antigo) e a demo já entrega a verificação sem elas — o
+ponteiro em texto já diz arquivo e página, que é o que a tese exige. O clique é conforto,
+não prova.
