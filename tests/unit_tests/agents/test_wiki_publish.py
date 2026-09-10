@@ -5,18 +5,20 @@ from pathlib import Path
 from jiuwenswarm.agents.harness.common.tools import wiki_tools
 
 
-def test_publishes_every_markdown_page_with_the_prefix(tmp_path):
+def test_publishes_every_content_page_with_the_prefix(tmp_path):
+    # index.md and log.md are deliberately excluded; see
+    # test_wiki_publish_filter.py for that contract.
     wiki = tmp_path / "wiki"
     wiki.mkdir()
-    (wiki / "index.md").write_text("# Index")
+    (wiki / "bigbird.md").write_text("# BigBird")
     (wiki / "sparse_attention.md").write_text("# Sparse attention")
     memory = tmp_path / "memory"
 
     published = wiki_tools.publish_wiki_pages(wiki, memory)
 
     names = sorted(p.name for p in published)
-    assert names == ["wiki__index.md", "wiki__sparse_attention.md"]
-    assert (memory / "wiki__index.md").read_text() == "# Index"
+    assert names == ["wiki__bigbird.md", "wiki__sparse_attention.md"]
+    assert (memory / "wiki__bigbird.md").read_text() == "# BigBird"
 
 
 def test_creates_the_memory_directory_when_absent(tmp_path):

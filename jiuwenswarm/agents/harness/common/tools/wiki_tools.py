@@ -73,6 +73,44 @@ def source_is_allowed(path: Path) -> bool:
 #: dated session files the memory index also stores.
 WIKI_PUBLISH_PREFIX = "wiki__"
 
+#: Pages that are navigation rather than knowledge, and are kept out of the memory
+#: index. They name every topic in the wiki, so they match almost any query and crowd
+#: out the pages that actually answer it; and their chunks carry no source anchor, so a
+#: retrieval landing on one leaves the agent with nothing to cite.
+NON_PUBLISHED_PAGES: frozenset[str] = frozenset({"index.md", "log.md"})
+
+
+def build_query_prompt(question: str) -> str:
+    """The instruction ``wiki_query`` gives its subagent.
+
+    **Search first, read second.** The subagent used to be told only to answer "strictly
+    based on `wiki/`", with no method, so it listed the directory and read every page.
+    That is affordable at twenty pages and not at two hundred: the wiki is a compounding
+    artefact, so the naive version gets slower and less reliable with every source
+    ingested, which is the opposite of what the design promises.
+
+    ``index.md`` first because it is the catalogue -- one line per page -- so it narrows
+    the candidates for the cost of a single read. ``grep`` second for the terms the
+    question actually uses. Only then whole pages, and only the ones that survived.
+
+    The write-back is kept, because an analysis worth having is worth filing, but it is
+    now bound to ``schema/AGENT.md``: the old wording invited a page written without the
+    anchoring rules the rest of the wiki follows.
+    """
+    return (
+        f"Answer this question strictly from `wiki/`: '{question}'.\n"
+        "Work in this order, and do NOT read the whole wiki:\n"
+        "1. read `wiki/index.md` to see which pages exist and pick the candidates;\n"
+        "2. `grep` the wiki for the question's key terms to catch pages the index"
+        " summary did not reveal;\n"
+        "3. read in full ONLY the pages steps 1 and 2 selected.\n"
+        "Cite the `[[fonte: ...]]` anchors of every claim you use; if a page carries no"
+        " anchor for something, say so rather than asserting it.\n"
+        "If the answer forms a genuinely new insight worth keeping, you may write it"
+        " back as a wiki page -- but read `schema/AGENT.md` first and follow its rules,"
+        " anchors included."
+    )
+
 
 def publish_wiki_pages(wiki_dir: Path, memory_dir: Path) -> List[Path]:
     """Copy each wiki page into the agent's memory directory, and say which.
@@ -90,9 +128,17 @@ def publish_wiki_pages(wiki_dir: Path, memory_dir: Path) -> List[Path]:
     if not wiki_dir.is_dir():
         return []
     memory_dir.mkdir(parents=True, exist_ok=True)
+
+    # A wiki published before this rule left index/log copies behind; they would
+    # otherwise stay in the index for ever, since nothing else ever deletes them.
+    for name in NON_PUBLISHED_PAGES:
+        stale = memory_dir / f"{WIKI_PUBLISH_PREFIX}{name}"
+        if stale.exists():
+            stale.unlink()
+
     published: List[Path] = []
     for page in sorted(wiki_dir.glob("*.md")):
-        if not page.is_file():
+        if not page.is_file() or page.name in NON_PUBLISHED_PAGES:
             continue
         target = memory_dir / f"{WIKI_PUBLISH_PREFIX}{page.name}"
         shutil.copyfile(page, target)
@@ -415,11 +461,9 @@ class LLMWiki:
         return result
 
     async def query(self, question: str) -> Dict[str, Any]:
-        query = (
-            f"Answer this strictly based on `wiki/`: '{question}'."
-            f" If your answer forms a valuable new insight, write it back into the wiki."
+        return await self.agent.invoke(
+            {"query": build_query_prompt(question)}, session=self._session
         )
-        return await self.agent.invoke({"query": query}, session=self._session)
 
     async def lint(self) -> Dict[str, Any]:
         query = (
