@@ -2172,3 +2172,32 @@
   Offline configuration, startup selection, registration and payload checks own
   verification. It does not establish a latency floor, new physical acceptance
   or resolution of the recorded environment/product observations.
+
+## D-125 Unify Native business instructions for prompt feedback and complete execution
+
+- Date: 2026-09-10. The user supplied the English session candidate and consolidated
+  instruction proposal. Immediate useful feedback, timely execution and less
+  repetition take priority while preserving complete requirements and real
+  business state. Ordinary self-contained questions start with the answer.
+  Necessary tools may accompany a minimal acknowledgment in the same response;
+  acknowledgment playback is not a prerequisite for execution.
+- Do not impose a sentence count, an action recap or another lookup announcement
+  for dependent calls. Explicit explanation, repetition and verification requests
+  still receive the requested detail. The complete executable `request_text`
+  retains dates, numbers, negations, exact filenames and preservation constraints.
+  Task/Work ownership and existing operation/authorization rules remain intact.
+- Intent acknowledgment is distinct from confirmed acceptance, running,
+  adjustment applied/rejected and completion. Use exact receipts and their
+  observation time. Only heard history establishes spoken delivery. Shared
+  language, detail and truth rules apply to session and response-level variants,
+  including correction and delayed results.
+- User speech and the current answer retain priority. Earlier results use an
+  available runtime speaking turn, briefly reconnect to their topic, or directly
+  answer the current follow-up. Do not routinely ask which answer should come
+  first. A new topic does not cancel accepted work.
+- This is a Tier 1 wording boundary for Native business tools. Prompt text cannot
+  establish cross-response semantic deduplication, physical delivery or model
+  adherence. Runtime identity, admission, scheduling, heard ACK, tool schemas and
+  permissions remain authoritative. The non-business delegate path is separate.
+  Re-evaluate with the user's real sessions, separately observing acknowledgment
+  first sound, actual tool launch, substantive-result first sound and correctness.

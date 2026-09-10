@@ -211,12 +211,13 @@ async def test_acceptance_speech_does_not_wait_and_dependent_steps_require_fresh
         assert len(requests) == 2 and requests[-1]["response"]["tool_choice"] == "auto"
         assert [tool["name"] for tool in requests[-1]["response"]["tools"]] == ["jiuwen_bound_context_get"]
         if kind == "task":
-            assert "one brief natural sentence" in requests[-1]["response"]["instructions"]
+            assert "Briefly communicate that confirmed acceptance" in requests[-1]["response"]["instructions"]
         elif kind == "work":
-            assert "This is not durable Task" in requests[-1]["response"]["instructions"]
-            assert "Do not poll work.get" in requests[-1]["response"]["instructions"]
+            assert "not a verified answer, durable Task acceptance" in requests[-1]["response"]["instructions"]
+            assert "Do not poll for completion" in requests[-1]["response"]["instructions"]
+            assert "after an equivalent delivered acknowledgment" in requests[-1]["response"]["instructions"]
         else:
-            assert "as-of observations" in requests[-1]["response"]["instructions"]
+            assert "observation at its recorded time" in requests[-1]["response"]["instructions"]
         before = tuple(socket.sent)
         assert await engine.send_delegate_result("call1", f.response_ref(1), canonical) == result
         assert tuple(socket.sent) == before
@@ -320,7 +321,7 @@ async def test_known_work_terminal_or_new_revision_cannot_get_stale_feedback(whe
         requests=[e for e in socket.sent if e["type"]=="response.create"]
         assert len(requests)==2 and refreshes
         assert "tools" not in requests[-1]["response"]
-        assert "has been accepted or is running" not in requests[-1]["response"]["instructions"]
+        assert "# Current response: accepted or running lookup" not in requests[-1]["response"]["instructions"]
         assert engine._sent_business_context_id == "b"*64
         assert engine.snapshot().delegate_count == 1 and engine.snapshot().released_audio_count == 0
     finally:

@@ -41,20 +41,27 @@ _SERVER_CONTEXT_ABSENT = object()
 _ACTION_FIELDS = ("context_id", "target_id", "expected_revision", "name", "instruction", "adjustment")
 _MAX_ARGUMENT_UTF8_BYTES = 16_384
 _DESCRIPTIONS = {
-    "context.get": "Read current server context when facts, IDs or revisions are missing or stale; then continue the needed call.",
-    "task.list": "Read the current background Task overview. Use this for an overview instead of one status call per Task.",
-    "task.status": "Read the status of an exact background Task from server facts.",
-    "task.result": "Read the actual result of an exact background Task. Accepted or running does not mean completed.",
-    "task.create": "Create one background artifact Task when the user delegates a deliverable, including an itinerary or plan, even without a filename. Use this instead of work.start for background deliverables. For a changed copy of a project file, include source, all changes, exact destination and preservation of the source in this one Task.",
-    "task.create_successor": "Create one successor to an exact Task on the user's explicit request. A changed result saved under a new filename belongs in this one Task: read the predecessor result, apply every change to the new output, and preserve the source. Do not also adjust the predecessor.",
-    "task.adjust": "Apply the user's explicit change to the exact existing background Task itself. A request for a changed copy saved as a new file uses a new Task instead. A new question alone is not an adjustment.",
-    "task.cancel": "Cancel the exact background Task only on the user's explicit request. Speech interruption is not cancellation.",
-    "work.start": "Use real Jiuwen Agent/tools for read-only questions, analysis or current external information lookup, including weather, forecasts and venue facts. Call promptly without announcing a plan. This read-only Agent cannot create a background Task or write a deliverable; explicit background deliverables use task.create.",
-    "work.list": "Read the current independent analysis work overview.",
-    "work.get": "Read the actual state and complete result of an exact analysis work item when the user asks, or more completed-result detail is needed. Do not repeatedly poll accepted/running work; the server supplies its result when ready.",
-    "work.update": "Apply explicit revised analysis requirements to the exact independent work item.",
-    "work.cancel": "Cancel the exact independent analysis work only on an explicit request. Speech interruption is not cancellation.",
+    "context.get": "Read server facts, target IDs or revisions only when required information is missing or stale; then continue the necessary call. Do not repeat an acknowledgment for this dependent lookup or use it to recheck an exact receipt.",
+    "task.list": "Read the background Task overview when requested. Use this instead of one status call per Task; report only the returned observations.",
+    "task.status": "Read the observed state of an exact background Task. Use its server ID, never a title or guessed ID. Report the state at the observation time without inferring completion or adjustment success.",
+    "task.result": "Read the actual result of an exact background Task. Answer from its concrete facts, preserving requested detail and certainty. Accepted or running does not mean completed; a display name is not an artifact filename.",
+    "task.create": "Create one background artifact Task for a user-delegated deliverable, including an itinerary or plan even without a filename. Use this instead of {work_start}. For a changed project-file copy, include the actual source, all changes, exact destination and preservation of the source in this one Task. A brief spoken acknowledgment must not shorten the executable request or delay the call. Acceptance is not completion.",
+    "task.create_successor": "Create one successor to an exact observed Task on the user's explicit request, using its ID and revision. Include the actual source filename, every change, exact new output and preservation of the source. Do not also adjust the predecessor or duplicate accepted work. Acceptance is not completion.",
+    "task.adjust": "Request the user's explicit change to the exact existing Task itself using its observed ID and revision. A changed copy uses {task_create} or {task_create_successor}; a new question is not an adjustment. Dispatched means accepted, not applied; report the exact adjustment observation.",
+    "task.cancel": "Request cancellation of the exact Task only when the user asks to cancel that work. Use the observed ID and revision and report the receipt. Speech interruption or a new topic is not cancellation.",
+    "work.start": "Start real Jiuwen Agent/tools for read-only analysis or lookup of external/project facts, including weather, forecasts, opening hours and ticket conditions. Call promptly; a minimal acknowledgment is sufficient and need not finish playing first. This Agent cannot create Tasks or write deliverables; use {task_create} for a delegated background deliverable. Do not repeat an already delivered lookup announcement.",
+    "work.list": "Read the independent analysis Work overview when requested. Use this instead of querying each item separately; preserve observed states.",
+    "work.get": "Read the state and complete result of an exact Work when the user asks for status or needs more completed-result detail. Use the observed ID. Do not poll accepted/running Work to wait; the server supplies its result. Avoid retelling information already confirmed as heard.",
+    "work.update": "Request an explicit revision of the exact analysis Work using its observed ID and revision. Preserve every revised requirement. A new unrelated question does not revise existing Work; report only the actual receipt.",
+    "work.cancel": "Request cancellation of the exact analysis Work only when the user asks to cancel it, using its observed ID and revision. Speech interruption or a new topic does not cancel accepted Work; report the actual receipt.",
 }
+
+
+def _tool_description(operation: str, *, bound_context: bool) -> str:
+    names = _BOUND_FUNCTION_OPERATIONS if bound_context else _FUNCTION_OPERATIONS
+    return _DESCRIPTIONS[operation].format(**{
+        operation.replace(".", "_"): name for name, operation in names.items()
+    })
 
 
 def _property(field: str, operation: str) -> dict[str, object]:
@@ -106,18 +113,18 @@ def native_business_tools(*, bound_context: bool = False) -> list[dict[str, obje
                     **_property("request_text", operation), "maxLength": 4096,
                     "description": "The ONE complete, self-contained executable request for this operation, preserving every user constraint and literal filename. "
                     "Resolve references from confirmed conversation facts; do not copy unrelated operations into this request. "
-                    "Include required source, transformations, exact destination and preservation rules. "
+                    "Include required source, transformations, exact destination, dates, numbers, negations and preservation rules. "
                     "This text is used unchanged as both the request and the executable " + intent_field +
                     "; do not shorten it into a title or acknowledgement. Trimmed, control-free, at most 4096 UTF-8 bytes.",
                 }
             result.append({"type": "function", "name": name,
-                "description": _DESCRIPTIONS[operation] + " The server binds the exact context; do not generate a context ID.",
+                "description": _tool_description(operation, bound_context=True) + " The server binds the exact context; do not generate a context ID.",
                 "parameters": {"type": "object", "additionalProperties": False,
                                "required": fields, "properties": properties}})
         return result
     return [
         {
-            "type": "function", "name": name, "description": _DESCRIPTIONS[operation],
+            "type": "function", "name": name, "description": _tool_description(operation, bound_context=False),
             "parameters": {
                 "type": "object", "additionalProperties": False,
                 "required": ["request_text", *_OPERATIONS[operation]],

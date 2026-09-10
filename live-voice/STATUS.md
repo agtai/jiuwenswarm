@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-10 — two user Mini/VAD300 sessions analyzed; fixes deferred.
+> Updated: 2026-09-10 — Native business prompt integrated; real-session acceptance pending.
 > Default bootstrap reads only Project judgement and Current execution packet.
 > Stop at Completion boundaries unless the task needs wider planning or acceptance.
 
@@ -9,10 +9,14 @@
 **PARTIAL — bounded repairs and user acceptance exist; the full product is not
 feature complete or a newly accepted controlled candidate.**
 
-The current user decision is to retain the Mini session observations, make
-Realtime Native / Mini / server-vad-300 the portable startup defaults
-([D-124](decisions/DECISIONS.md#d-124-default-new-live-voice-starts-to-realtime-mini-and-server-vad-300)),
-and defer issue repair/classification until comparison in another
+The user's Native business prompt direction is implemented in session, receipt,
+notification, correction and tool descriptions: prompt useful feedback, timely
+tools and less repetition while preserving complete requirements and observed
+business truth. [D-125](decisions/DECISIONS.md#d-125-unify-native-business-instructions-for-prompt-feedback-and-complete-execution)
+owns the accepted policy; actual model adherence and latency await user sessions.
+Mini/server-vad-300 startup defaults
+remain as recorded in [D-124](decisions/DECISIONS.md#d-124-default-new-live-voice-starts-to-realtime-mini-and-server-vad-300).
+Other issue repair/classification remains deferred until comparison in another
 environment. WebSocket congestion remains in the record: the user reports it did
 not reproduce in another environment and requests no investigation or repair now.
 The [Mini/VAD300 comparison record](evidence/MINI_VAD300_ENV_COMPARISON_20260910.md)
@@ -23,8 +27,8 @@ but neither meal adjustment applied; full-text delivery, artifact fidelity,
 notification/query latency and diagnostic coverage observations remain open.
 The old multi-second WebSocket input backlog was not observed in these runs;
 that issue remains recorded for the user's cross-environment comparison.
-After the user's clarification, further automated verification is stopped; those
-observations are not user acceptance. The historical
+After the user's clarification, further automated browser/voice/Agent verification
+is stopped; those observations are not user acceptance. The historical
 repair authorizations and next steps below do not reactivate paused work.
 
 The user accepted audible tearing and the earlier browser first-sound metric
@@ -66,22 +70,27 @@ support has been discussed, not implemented.
 
 ### Continuation boundary
 
-**Active packet (2026-09-10):** make Realtime Native / Mini / server-vad-300
-the source and launcher defaults for another server or session (D-124), while
-retaining the completed offline analysis. This Tier 1 configuration boundary owns
-the environment selector, PowerShell launcher, their configuration/registration
-checks and the startup runbook. These source defaults are implemented. Missing
-settings select Mini/VAD300; old machine-saved endpoints do not override that
-default; explicit comparison
-overrides and explicit Cascade remain supported. Invalid configuration and missing
-Provider credentials fail closed before activation. Completed verification is
-offline:
-configuration tests, affected registration/Provider-payload checks, PowerShell
-parsing and isolated startup-configuration evaluation; the complete scoped diff
-was reviewed. No service restart, real voice/Agent test, transport fix or paid
-service
-change is included. The dependency is the existing Native Engine and configured
-Provider access; no new API, protocol or task policy is introduced.
+**Completed source packet (2026-09-10):** the user's session/response instruction
+candidates are integrated into the active Native business path and its 13 bound
+tools. This Tier 1 prompt boundary owns a shared instruction definition, Engine
+instruction selection, tool descriptions and affected regression checks.
+Direct answers need no routine acknowledgment; tool requests allow a minimal
+acknowledgment with a prompt call. Complete request_text, literal filenames,
+Task/Work ownership, real receipt distinctions and heard-history rules remain.
+Session, receipt, notification and correction variants must share those rules;
+no fixed sentence count or repeated lookup announcement is required.
+Acceptance covers effective outgoing payloads, unchanged schemas/authority,
+tool admission without waiting for spoken delivery, silent-response settlement
+and existing notification arbitration. Model adherence and actual latency still
+require the user's later real sessions. This packet does not add a semantic
+classifier, cross-response delivery/deduplication protocol, or alter scheduling,
+model/VAD, transport, private deployments or the non-business delegate path.
+The [scoped review](reviews/NATIVE_BUSINESS_PROMPT_20260910.md) records the complete
+diff audit and offline results, including five failures reproduced on the
+pre-change baseline in the projection-off context-refresh path. Those failures
+remain recorded; this is not a full-green or physical acceptance claim. No
+deployment or service restart was performed. Recorded issues outside this prompt
+scope remain deferred; no further automated browser/voice/Agent run is requested.
 
 Private deployment preparation is complete. The dated
 comparison record identifies the deployed source;
@@ -218,7 +227,7 @@ checking disputed/touched source facts; this documentation pass is not a fresh
 | Speech Synthesis | Streaming/batch TTS, response ownership/ACK, sample-credit prepared delivery and diagnostic-cost repair | Full physical long-answer continuity, underrun, pronunciation and stale-output proof; scoped accepted first-sound samples do not close the full boundary |
 | Realtime Media | Dedicated transport, registration/rotation, bounded P2 pull, exact Native wake, transient observation-timeout recovery and interruption/query repairs with scoped human acceptance | Separate transport/input-saturation failures; full load/loss/order/corruption/reconnect coverage; local-origin voice gain unmeasured |
 | Conversation Runtime | Commit/generation fencing, Stop/Exit, Cascade generation interruption, Native work independent of speech, response arbitration/ACK and unified source/successor retirement with scoped human acceptance | Broader combined physical listening/notification/Task races without old-audio revival or detached-Task miscontrol |
-| Interaction Intelligence | Cascade semantic routing; Native typed business calls, bounded argument correction and truthful request-specific preambles | Full Native business-audio journey, endpoint/false-interruption evaluation, language/device scope |
+| Interaction Intelligence | Cascade semantic routing; Native typed business calls, bounded argument correction and unified session/receipt/notification instructions for minimal feedback and complete requests | Actual model adherence, repeated-feedback/merged-result delivery acceptance, full Native business-audio journey, endpoint/false-interruption evaluation and language/device scope |
 | Agent Bridge and dialogue truth | Real Agent/file tools, independent read-only Native work, model/context binding, reply continuations, restart-unknown checkpoints and canonical heard history | Tool-parameter/receipt/result latency; literal intent/path drift, arithmetic, feasibility and brevity; retain failed workspace-query interpretation evidence |
 | Task Control Core and Store | Canonical multi-Task state, durable commands/replay, exact targets/CAS and bounded adjustment delivery | Current concurrency/restart integration and full Task-operation coverage |
 | Executor & Durability | Direct D0/D2 v2 admission/reconciliation, sealed results/checkpoints, source preservation and file-effect checks; real failure prevents partial apply in scoped cases | Model path drift/preservation conflicts, long-report convergence/length and full result/control acceptance; recovered originals do not erase failures; no D1/host-crash claim |

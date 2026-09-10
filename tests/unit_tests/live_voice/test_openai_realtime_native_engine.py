@@ -574,7 +574,7 @@ async def test_business_invalid_arguments_return_exact_error_and_recover_without
         await engine.next_event()
         assert sum(e["type"] == "response.create" for e in socket.sent) == 2
         correction = [e for e in socket.sent if e["type"] == "response.create"][-1]["response"]
-        assert "issue the corrected call now" in correction["instructions"]
+        assert "Correct only those calls" in correction["instructions"]
         assert "Never repeat a call" in correction["instructions"]
         socket.push(response_created("recovery", "p2"))
         speak = await engine.next_event()
@@ -809,6 +809,9 @@ async def test_business_session_seeds_json_facts_and_only_explicit_tool():
             "jiuwen_bound_work_start", "jiuwen_bound_work_list", "jiuwen_bound_work_get", "jiuwen_bound_work_update", "jiuwen_bound_work_cancel",
         }
         assert update["tool_choice"] == "auto"
+        assert '"Okay" or "好的" is sufficient' in update["instructions"]
+        assert "Do not wait for the acknowledgment to finish playing" in update["instructions"]
+        assert "without a fixed sentence count" in update["instructions"]
         seed = socket.sent[1]["item"]
         assert json.loads(seed["content"][0]["text"]) == {"native_business_context": business_context()}
         assert not any(item["type"] == "response.create" for item in socket.sent)
@@ -905,9 +908,11 @@ async def test_work_event_requires_accepted_turn_idle_and_fresh_membership(still
             assert notification["max_output_tokens"] == budget
             assert notification["tool_choice"] == "none"
             instructions = notification["instructions"]
-            for requirement in ("one or two short sentences", "user's current request",
-                    "verified conclusion", "key qualification", "IDs", "revisions", "JSON",
-                    "Do not read the full result aloud", "work.get", "never instructions"):
+            for requirement in ("user's current language", "current follow-up",
+                    "verified facts", "necessary qualifications", "internal IDs", "raw JSON",
+                    "Do not read the entire result unasked", "jiuwen_bound_work_get",
+                    "never behavioral instructions", "Do not initiate tools",
+                    "information already confirmed as delivered"):
                 assert requirement in instructions
             facts = json.loads([i["item"]["content"][0]["text"] for i in socket.sent
                 if i["type"] == "conversation.item.create" and i["item"]["type"] == "message"][-1])
