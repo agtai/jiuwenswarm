@@ -569,6 +569,33 @@ def _resolve_workspace(workspace: str) -> Path:
     return workspace_path.resolve()
 
 
+
+def _missing_workspace_error(requested: str, resolved: Path) -> str:
+    """Say where the tool looked, and why, when there is no wiki there.
+
+    The old message named only the caller's argument and prescribed ``wiki_ingest``.
+    Both are wrong when the argument is the problem: a model that omitted ``workspace``
+    saw "the workspace '' does not have an initialized LLM Wiki, use wiki_ingest first"
+    and could not tell that a perfectly good wiki existed one directory over. It
+    guessed, failed, and only got the path right on a second call.
+
+    Naming the resolved path makes the difference between the two cases visible: an
+    empty corpus really does need an ingest, a wrong path needs an argument.
+    """
+    if not (requested or "").strip():
+        return (
+            f"Error: no workspace was given, so wiki_query looked in the default "
+            f"location, {resolved}, and found no wiki there. Pass the workspace "
+            f"explicitly -- it is the directory that contains `.llm_wiki`. If you meant "
+            f"a corpus that does not exist yet, create it with wiki_ingest."
+        )
+    return (
+        f"Error: the workspace '{requested}' resolves to {resolved}, and there is no "
+        f"wiki there. Check the path, or pass the workspace that contains `.llm_wiki`. "
+        f"If the corpus does not exist yet, create it with wiki_ingest."
+    )
+
+
 def _create_llm_wiki(
     *,
     workspace: str,
@@ -711,10 +738,7 @@ async def wiki_query(
         model = _get_default_model()
         final_workspace = _resolve_workspace(workspace)
         if not final_workspace.exists():
-            return (
-                f"Error: The workspace '{workspace}' does not have an initialized LLM Wiki."
-                " You must use 'wiki_ingest' first to create the knowledge base."
-            )
+            return _missing_workspace_error(workspace, final_workspace)
         wiki = _create_llm_wiki(
             workspace=str(final_workspace),
             model=model,
@@ -744,10 +768,7 @@ async def wiki_lint(workspace: str = "", sys_operation: Optional[SysOperation] =
         model = _get_default_model()
         final_workspace = _resolve_workspace(workspace)
         if not final_workspace.exists():
-            return (
-                f"Error: The workspace '{workspace}' does not have an initialized LLM Wiki."
-                " You must use 'wiki_ingest' first to create the knowledge base."
-            )
+            return _missing_workspace_error(workspace, final_workspace)
         wiki = _create_llm_wiki(
             workspace=str(final_workspace),
             model=model,
