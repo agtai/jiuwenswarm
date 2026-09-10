@@ -664,3 +664,96 @@ metadados** que a §10.4 exige, então as duas devem ser feitas juntas.
 Ficou deliberadamente fora do registro de ferramentas (§5.1). Mas é ele quem detecta
 órfãs e links quebrados — hoje em zero **por sorte, não por verificação**. Com dez papers
 isso degrada silenciosamente. Decidir se entra como passo periódico ou manual.
+
+---
+
+## 12. Embeddings — de opcional a requisito
+
+A §11 e as versões anteriores desta seção tratavam embeddings como acabamento, e a
+alternativa barata seria expansão de consulta por prompt. **Ambas as posições estavam
+erradas**, e o que as derrubou foi uma observação simples: *não deveria ser problema
+perguntar em português, chinês ou alemão sobre um acervo em inglês, nem deveria ser
+preciso um método ad-hoc por idioma.*
+
+### A medição que motivou a mudança
+
+Dez perguntas sobre o acervo de dois papers, medindo se a página correta aparece no
+top-5 do ranking BM25 (usando `split_query_tokens` e `build_fts_query` reais):
+
+    baseline, pergunta literal em português:  3/10
+
+E o modo de falha não é vocabulário divergente — é pior:
+
+    'o que e AREX?'  →  FTS: '"que" OR "AREX"'  →  arex.md nem entra no top-5
+
+Uma stopword portuguesa afundou a pergunta mais fácil possível sobre o corpus, porque o
+tokenizador `trigram` casa **substring**: `que` casa *frequency*, *sequence*, *technique*.
+
+### Por que expansão de consulta não é a resposta
+
+Num cenário multilíngue, expandir a consulta por prompt **é tradução disfarçada**:
+depende do modelo acertar o vocabulário do documento a cada pergunta, falha em silêncio,
+e precisa de uma regra nova por idioma. É exatamente o método ad-hoc que se quer evitar.
+
+**Busca lexical é monolíngue por construção.** Não existe substring comum entre
+"escalável" e "scalable"; nenhum ajuste de tokenizador resolve isso. O próprio kernel
+admite o problema e o resolve um idioma por vez:
+
+- `lite/internal.py:182` — *"Short tokens (<3 chars, e.g. 2-char Chinese) can't match trigram"*
+- `lite/manager.py:584` — migração `unicode61 → trigram` feita porque a anterior *"never matched Chinese queries"*
+- `JiuwenMemory` configura `tokenizer: jieba` **especificamente** para BM25 chinês
+
+Um tokenizador dedicado por idioma não escala.
+
+### A decisão
+
+**Embedding multilíngue é o único mecanismo principiado**, e passa a ser requisito do
+produto — não da PoC, que já funciona em BM25 para perguntas em inglês com vocabulário
+literal. Um encoder multilíngue aproxima "escalável", "scalable" e "可扩展" no espaço
+vetorial porque foi treinado para isso; não é heurística.
+
+| Método | Cross-lingual? |
+|---|---|
+| BM25 / trigram | ❌ por construção |
+| doc2query, SPLADE | ❌ expandem termos no mesmo idioma |
+| Expansão de consulta | ⚠️ só via tradução implícita — ad-hoc |
+| **Embedding multilíngue** | ✅ **por construção** |
+| Híbrido (denso + BM25) | ✅ o denso carrega o cross-lingual |
+
+**A wiki (§11-A/doc2query) continua valendo e não é redundante com isso.** Ela resolve
+outra coisa: perguntas globais, que nenhum embedding recupera se ninguém escreveu a
+comparação. Foi o que respondeu à pergunta "onde os dois papers discordam". As duas são
+complementares — a wiki compõe conhecimento, o embedding cruza idiomas.
+
+### Como configurar
+
+O OpenRouter passou a servir embeddings em `/api/v1/embeddings`, compatível com OpenAI,
+o que encaixa direto nas três variáveis já existentes:
+
+```
+EMBED_API_BASE=https://openrouter.ai/api/v1
+EMBED_API_KEY=<chave do OpenRouter>
+EMBED_MODEL=baai/bge-m3
+```
+
+**A dimensão não precisa ser configurada:** `_ensure_vector_table` recria a tabela
+vetorial sob a dimensão do modelo no primeiro write, e há lógica de DROP quando o modelo
+muda (`lite/manager.py:427-487`).
+
+### Modelos a testar, em ordem
+
+| Modelo | Dim | Contexto | Preço /M | Por quê |
+|---|---|---|---|---|
+| **`baai/bge-m3`** | 1024 | 8K | **$0.01** | referência aberta em multilíngue (100+ idiomas), mais barato da lista, dimensão modesta |
+| `qwen/qwen3-embedding-8b` | — | 33K | $0.01 | mesmo preço, contexto muito maior; multilíngue forte |
+| `openai/text-embedding-3-large` | — | 8K | $0.13 | controle conhecido, 13× mais caro e não é o melhor cross-lingual |
+
+Chunks nossos têm ~963 chars, então 8K de contexto sobra. O custo total de indexar o
+acervo atual (245 chunks, ~60k tokens) é de centavos em qualquer um deles.
+
+### Como medir
+
+As mesmas 10 perguntas, com o baseline honesto de **3/10** já registrado. Se um encoder
+multilíngue levar isso a 8–9, o número justifica a decisão — e vale para qualquer idioma
+que alguém use no canal, não só português. Trocar o modelo força reindexação; medir os
+três exige três reindexações do acervo (minutos, não horas).
