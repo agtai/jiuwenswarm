@@ -101,245 +101,237 @@ Two reading paths coexist, with distinct roles:
 - **`wiki_query`** (subagent reading the wiki) — questions that require sweeping the
   whole library ("what do the three papers have in common?").
 
-## 5. As quatro mudanças
+## 5. The four changes
 
-### 5.1 Registrar as três wiki tools  *(código — obrigatório)*
+### 5.1 Register the wiki tools  *(code — required)*
 
-`server/runtime/agent_adapter/interface_deep.py`, revertendo `e4fae3061`:
+`server/runtime/agent_adapter/interface_deep.py`, reverting `e4fae3061`:
 
 ```python
-from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
+from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query
 ...
-for wtool in [wiki_ingest, wiki_query, read_pdf]:   # wiki_lint não é preciso na demo
+SHARED_AGENT_TOOLS = (wiki_ingest, wiki_query, read_pdf)   # wiki_lint is not needed
 ```
 
-**O registro é global — e isto é uma escolha, não uma impossibilidade.**
+**Registration is global — and that is a choice, not an impossibility.**
 
-*Via `scopes` seria impossível*: eles só estreitam permissões (D4: `allow` nunca amplia,
-pois a fusão é `strictest`) e `not` existe apenas em eixos de identidade, então nenhum
-scope pode **conceder** uma ferramenta a um canal.
+*Via `scopes` it would be impossible*: they only narrow permissions (D4: `allow` never
+widens, because the merge is `strictest`) and `not` exists only on identity axes, so no
+scope can **grant** a tool to a channel.
 
-*Via código seria possível*: o adapter tem `_is_session_scoped_adapter`, e o
-`_tool_owner_id()` já se escopa por sessão (`<card id>_s_<session>`). Como o id de sessão
-do Slack é `slack_{team}_{channel}_{thread}`, o canal é derivável dentro de
+*Via code it would be possible*: the adapter has `_is_session_scoped_adapter`, and
+`_tool_owner_id()` already scopes by session (`<card id>_s_<session>`). Since a Slack
+session id is `slack_{team}_{channel}_{thread}`, the channel is derivable inside
 `_get_tool_cards`.
 
-*Escolhemos global* por custo/benefício: o condicional mexe no caminho quente de
-construção do agente e exige um terceiro parse de id de sessão — que o próprio código já
-desaconselha (`parse_slack_cron_session` está documentado como uma segunda cópia
-indesejada desse parse).
+*We chose global* on cost/benefit: the conditional touches the hot path of agent
+construction and needs a third parse of the session id — which the code itself
+discourages (`parse_slack_cron_session` is documented as an unwanted second copy of that
+parse).
 
-**Mas o global tem um custo de segurança, e a v2 o subestimava.** A afirmação anterior
-("não é risco, porque um agente não chama `wiki_ingest` sem ser instruído") está errada.
+**But global carries a security cost, and v2 understated it.** The earlier claim ("not a
+risk, because an agent does not call `wiki_ingest` unless instructed") is wrong.
 
-`wiki_ingest` valida extensão **apenas no ramo de diretório**; para um arquivo único não
-valida nada (`wiki_tools.py:498-508`), e a cópia é `shutil.copy2` direto
-(`wiki_tools.py:331`), **fora do `SysOperation`** — logo fora do rail de permissão que
-guarda `read_file`. Um agente em qualquer canal pode então chamar
-`wiki_ingest(source="~/.jiuwenswarm/config/.env")`: o arquivo é copiado para `sources/`,
-o subagente o lê, e o conteúdo vira página de wiki — que a §5.4 publica no índice.
+`wiki_ingest` validates extensions **only on its directory branch**; for a single file it
+validates nothing (`wiki_tools.py:498-508`), and the copy is a bare `shutil.copy2`
+(`wiki_tools.py:331`), **outside `SysOperation`** — hence outside the permission rail
+that guards `read_file`. An agent in any channel could therefore call
+`wiki_ingest(source="~/.jiuwenswarm/config/.env")`: the file is copied into `sources/`,
+the subagent reads it, and the content becomes a wiki page — which §5.4 then publishes
+into the index.
 
-A precisão importa: isto **não cria** a capacidade de ler arquivos onde o agente já tem
-`bash`/`read_file`. O que cria é um **caminho de leitura que não passa pelo rail de
-permissão** — num canal onde `bash` foi negado por scope, `wiki_ingest` continuaria
-aberto. É uma inconsistência de guarda.
+The precision matters: this does **not create** the ability to read files where the agent
+already has `bash`/`read_file`. What it creates is a **read path that does not pass
+through the permission rail** — in a channel where `bash` was denied by a scope,
+`wiki_ingest` would stay open. It is a guard inconsistency.
 
-**Mitigações.** Uma revisão posterior mostrou que a lista anterior era fraca; esta é a
-corrigida:
+**Mitigations.** A later review showed the earlier list was weak; this is the corrected
+one:
 
-1. **Restringir `source`** ao diretório de uploads da sessão
-   (`get_agent_sessions_dir()/<sid>/uploads`, que é onde o conector deposita os anexos —
-   `slack_connect.py:11358`) ou ao workspace do agente. **Este é o fecho real.** Validar
-   extensão sozinho não basta: o ramo de diretório faz `glob("**/*")` a partir de
-   qualquer raiz (`wiki_tools.py:500-506`), logo `wiki_ingest(source="~")` ingeriria todo
-   `.md` do usuário.
-2. **Validar extensão também no ramo de arquivo único** — o filtro `.pdf/.md/.txt` já
-   existe no outro ramo; é o bug óbvio, mas é complemento, não substituto de (1).
-3. **Usar `sys_operation.fs()` para a cópia**, em vez de `shutil.copy2`. O parâmetro
-   `sys_operation` **já chega** na função (`wiki_tools.py:475`) e é ignorado. Isto põe a
-   leitura de volta atrás do rail de permissão, que é a inconsistência de origem.
-4. **Negar por scope onde não se quer** — `permissions: {tools: {wiki_ingest: deny}}`.
-   Funciona (estreitar é permitido), mas é opt-out por canal: o default global segue
-   aberto, então não substitui (1).
+1. **Restrict `source`** to the session's upload directory
+   (`get_agent_sessions_dir()/<sid>/uploads`, where the connector deposits attachments —
+   `slack_connect.py:11358`) or to the agent workspace. **This is the real fix.**
+   Validating the extension alone is not enough: the directory branch runs `glob("**/*")`
+   from any root (`wiki_tools.py:500-506`), so `wiki_ingest(source="~")` would ingest
+   every markdown file the user owns.
+2. **Validate the extension on the single-file branch too** — the `.pdf/.md/.txt` filter
+   already exists on the other branch; it is the obvious bug, but a complement to (1),
+   not a substitute.
+3. **Use `sys_operation.fs()` for the copy** instead of `shutil.copy2`. The
+   `sys_operation` parameter **already arrives** at the function (`wiki_tools.py:475`)
+   and is ignored. This puts the read back behind the permission rail, which is the
+   original inconsistency.
+4. **Deny by scope where it is unwanted** — `permissions: {tools: {wiki_ingest: deny}}`.
+   It works (narrowing is allowed), but it is opt-out per channel: the global default
+   stays open, so it does not replace (1).
 
-> **O que NÃO é mitigação.** Deixar `wiki_lint` de fora do registro não protege nada: ele
-> apenas lê a wiki. Quem escreve nela é o `wiki_query` — *"write it back into the wiki"*,
-> `wiki_tools.py:352` — e esse **fica** registrado. Uma versão anterior deste spec listava
-> isso como mitigação; era teatro.
+> **What is NOT a mitigation.** Leaving `wiki_lint` out of the registration protects
+> nothing: it only reads the wiki. What writes to it is `wiki_query` — *"write it back
+> into the wiki"*, `wiki_tools.py:352` — and that one **stays** registered. An earlier
+> version of this spec listed that as a mitigation; it was theatre.
 
-O que escopa o *comportamento* é o `delivery.prompt` (§5.3): a ferramenta existe em todo
-lugar, mas só o canal de papers instrui a usá-la. Registro condicional é a evolução
-natural se a PoC virar produto.
+What scopes the *behaviour* is `delivery.prompt` (§5.3): the tool exists everywhere, but
+only the papers channel instructs its use. Conditional registration is the natural
+evolution if the PoC becomes a product.
 
-Se depois quisermos proibi-la em algum canal, aí sim `scopes` serve —
-`permissions: {tools: {wiki_ingest: deny}}` estreita e funciona.
+> **Note on the divergence from upstream.** MR !4526 removed these three tools as part of
+> a prompt-surface cleanup; it reports no defect in the wiki and the review was
+> procedural (`/lgtm`). The same MR introduced *per-channel* prompt injection
+> (`BrowserTaskPromptRail`), so its principle is "scope it, do not hand it to everyone" —
+> which is what we do through `delivery.prompt`. Even so, this is a divergence to be
+> revisited at the next rebase.
 
-> **Nota sobre a divergência com o upstream.** A MR !4526 removeu estas três tools como
-> parte de uma faxina de superfície de prompt; ela não relata defeito na wiki e a revisão
-> foi procedimental (`/lgtm`). A mesma MR introduziu injeção de prompt *por canal*
-> (`BrowserTaskPromptRail`), ou seja, o princípio dela é "escope, não distribua a todos" —
-> que é o que fazemos via `delivery.prompt`. Ainda assim, isto é uma divergência a ser
-> reavaliada no próximo rebase.
+### 5.2 The anchoring rule  *(file — zero code)*
 
-### 5.2 Regra de ancoragem  *(arquivo — zero código)*
+`ensure_initialized` writes `schema/AGENT.md` **only if it does not already exist**. So
+it is enough to **pre-seed** the file in the papers workspace before the first ingest;
+the code never overwrites it.
 
-`ensure_initialized` escreve `schema/AGENT.md` **somente se ele não existir**. Logo
-basta **pré-semear** o arquivo no workspace de papers antes do primeiro ingest; o código
-nunca o sobrescreve.
-
-Regras acrescentadas às 7 existentes:
+Rules added to the seven that already existed:
 
 ```markdown
-8.  Toda afirmação substantiva carrega um ponteiro para a fonte, **na mesma linha da
-    afirmação**: `[[fonte: <arquivo> p.N]]`. Para PDF, N é o número do cabeçalho
-    `## Page N` que o `read_file` devolve — nunca um número inferido.
-9.  Logo abaixo, uma citação literal curta (≤ 25 palavras) em blockquote. Cite o texto
-    **como extraído**; ele pode conter artefatos de hifenização e quebra de linha.
-10. Se a leitura não devolveu localizador, ancore no arquivo. Nunca invente página.
-11. Ao ler um PDF use `read_file` com `pages`, em faixas de **no máximo 5 páginas**.
-    Se a resposta indicar truncagem, releia em faixa menor antes de escrever qualquer
-    afirmação sobre aquele trecho.
-12. Ingira apenas `.pdf`, `.md` e `.txt`. Qualquer outro tipo: não ingerir, reportar.
+8.  Every substantive claim carries a pointer to its source, ON THE SAME LINE as the
+    claim: `[[fonte: <file> p.N]]`. For a PDF, N is the number in the `## Page N`
+    heading that `read_file` returns — never an inferred number.
+9.  Directly below, a short literal quote (≤ 25 words) in a blockquote. Quote it AS
+    EXTRACTED; it may carry hyphenation and line-break artefacts.
+10. If a read returned no locator, anchor on the file. Never invent a page.
+11. Read a PDF with `read_file` and `pages`, in ranges of AT MOST 5 pages. If a response
+    looks truncated, re-read a smaller range before writing any claim about that stretch.
+12. Ingest only `.pdf`, `.md` and `.txt`. Anything else: do not ingest, report why.
 ```
 
-Justificativa das mudanças em relação à v1:
+Why these differ from v1:
 
-- **"mesma linha"** (regra 8) — o índice fragmenta em ~256 tokens. Uma âncora separada
-  da afirmação cai noutro chunk e o S5 falha mesmo com o S3 perfeito.
-- **`## Page N`** (regra 8) — `harness/tools/filesystem.py:750` escreve
-  `f"## Page {page_no}\n{page_text}"`. O número é dado, não inferido; isto é o que
-  sustenta o S3. **Atenção ao conferir:** é o índice *físico* do pdfplumber (a 1ª página
-  do arquivo é 1), não o número impresso na página. Num paper com capa ou numeração
-  romana no início, os dois divergem — confira pelo contador do visualizador de PDF, não
-  pelo número impresso.
-- **faixa ≤ 5** (regra 11) — o teto declarado é 20 páginas (`PDF_MAX_PAGES_PER_READ`),
-  mas `MAX_TOKENS = 25_000` estoura antes e **trunca**; uma faixa truncada produz âncora
-  deslocada sem o modelo perceber.
-- **regra 12** — `has_file` acorda para *qualquer* anexo, e `wiki_ingest` aceita arquivo
-  único de qualquer tipo (`wiki_tools.py:507`): sem esta regra o subagente tenta "ler" um
-  PNG colado no canal.
+- **"same line"** (rule 8) — the index chunks at ~256 tokens. An anchor separated from
+  its claim lands in another chunk and S5 fails even with S3 perfect.
+- **`## Page N`** (rule 8) — `harness/tools/filesystem.py:750` writes
+  `f"## Page {page_no}\n{page_text}"`. The number is given, not inferred; this is what
+  sustains S3. **Careful when checking:** it is pdfplumber's *physical* index (the file's
+  first page is 1), not the number printed on the page. In a paper with a cover or roman
+  numerals up front the two diverge — check against the PDF viewer's counter, not the
+  printed number.
+- **ranges ≤ 5** (rule 11) — the declared ceiling is 20 pages
+  (`PDF_MAX_PAGES_PER_READ`), but `MAX_TOKENS = 25_000` blows first and **truncates**; a
+  truncated range produces a displaced anchor without the model noticing.
+- **rule 12** — `has_file` wakes on *any* attachment, and `wiki_ingest` accepts a single
+  file of any type (`wiki_tools.py:507`): without this rule the subagent tries to "read"
+  a PNG pasted into the channel.
 
-A regra 8 tem uma **parte agnóstica e uma parte concreta**, e a distinção importa: o
-princípio é "a unidade que o leitor reportou", mas o formato efetivamente exigido é
-`p.N`, que só existe para PDF. Para outros tipos a regra 10 cobre (âncora no arquivo).
-Uma generalização real — linha para `.md`, célula para planilha — fica para quando houver
-um segundo tipo de fonte em uso.
+Rule 8 has an **agnostic part and a concrete part**, and the distinction matters: the
+principle is "the unit the reader reported", but the format actually demanded is `p.N`,
+which only exists for PDFs. Other types fall to rule 10 (anchor on the file). A real
+generalisation — line for `.md`, cell for a spreadsheet — waits until a second source
+type is in use.
 
-O princípio permanece: fala em "a unidade que a
-ferramenta reportou", não em PDF. A especificidade vem do leitor (página para PDF, linha
-para `.md`, célula para planilha), e degrada para ancoragem em nível de arquivo quando
-não há localizador. As regras 8 e 11 também corrigem um defeito real: o prompt padrão manda usar `read_pdf`,
-ferramenta que o subagente **não recebe** (`final_tools=[]`, `wiki_tools.py:213`); ele já
-usa `read_file` com `pages`, e as regras passam a dizer a verdade. A linha 54 do `wiki_tools.py` continua mandando usar `read_pdf`, mas
-**isso não produz chamada falhada**: no smoke test o subagente simplesmente ignorou a
-instrução e foi direto ao `read_file` (zero ocorrências de `read_pdf` no log). O prompt
-está errado e é inofensivo; as regras 8 e 11 é que passam a dizer a verdade.
+Rules 8 and 11 also correct a real defect: the default prompt tells the subagent to use
+`read_pdf`, a tool it **does not receive** (`final_tools=[]`, `wiki_tools.py:213`). That
+**produces no failed call**: in the smoke test the subagent simply ignored the
+instruction and went straight to `read_file` (zero occurrences of `read_pdf` in the log).
+The prompt is wrong and harmless; rules 8 and 11 are what start telling the truth.
 
-### 5.3 O canal de papers  *(configuração)*
+### 5.3 The papers channel  *(configuration)*
 
-Escrito em **duas camadas**, usando a composição que `compose.py` já implementa: prosa
-com `<key>_append` acrescenta ao que a camada acima assentou, em vez de substituir.
+Written in **two layers**, using the composition `compose.py` already implements: prose
+with `<key>_append` adds to what the layer above settled, rather than replacing it.
 
 ```yaml
 scopes:
-  # camada 1 — comportamento base, todo canal Slack
+  # layer 1 — base behaviour, every Slack conversation
   - match: {channel: slack}
     delivery:
       prompt: |
-        <comportamento base do bot>
+        Answer directly and cite your sources.
 
-  # camada 2 — este canal é de papers
+  # layer 2 — this conversation is a papers library
   - match:
       channel: slack
-      chat:    <ID_DO_CANAL_DE_PAPERS>
+      chat:    "<PAPERS_CHANNEL_ID>"
     delivery:
       mode: [mention, has_file]
-      mid_turn: queue          # ver nota abaixo — o default `cancel` mata o ingest
+      mid_turn: queue          # see below — the `cancel` default kills the ingest
       prompt_append: |
-        Este canal é uma biblioteca de papers com uma LLM Wiki em
-        <WIKI_ROOT>.
-        - Anexo novo, e só se for .pdf/.md/.txt:
-          1. chame wiki_ingest(source=<caminho do anexo>, workspace="<WIKI_ROOT>");
-          2. relate quais páginas foram criadas ou atualizadas, listando o
-             diretório da wiki — o retorno de wiki_ingest diz apenas [Success].
-             A publicação no índice é automática (§5.4); não a faça você.
-        - Pergunta: use memory_search para achar as páginas relevantes e
-          responda citando as âncoras [[fonte: … p.N]]. Para perguntas que
-          exigem varrer o acervo inteiro, use wiki_query.
-        - Nunca afirme sem âncora.
-        - Anexo que não seja .pdf/.md/.txt: não ingira; diga por quê.
+        <INGESTING · ANSWERING · SHOWING THE LIBRARY · CONSTRAINTS>
 ```
 
-`mode: [mention, has_file]` é o par mínimo: `has_file` acorda no upload do PDF,
-`mention` permite perguntar.
+The prompt body is kept in the live config rather than duplicated here, because it has
+been edited repeatedly and a copy in this document would drift. Its four sections are:
+**INGESTING** (when and how to call `wiki_ingest`), **ANSWERING** (search, search
+language, anchors, answer directly), **SHOWING THE LIBRARY** (the tree) and
+**CONSTRAINTS** (frozen library, no bash). It is written in English; see §14.
 
-**`mid_turn: queue` não é opcional.** O default é `cancel`
-(`scopes/schema.py:123` — *"cancel is first because it is the default"*). Durante os ~5
-minutos de um ingest, **qualquer mensagem de outra pessoa na thread cancela o turno**; e
-como o manifesto só grava após sucesso (`wiki_tools.py:340`), a tentativa seguinte
-recomeça do zero. Num canal com gente comentando, isso é quase garantido. `queue` segura
-a mensagem até a sessão ficar ociosa; o Slack implementa os três mecanismos.
+`mode: [mention, has_file]` is the minimum pair: `has_file` wakes on the PDF upload,
+`mention` allows asking.
 
-**O `delivery.prompt` é costurado no texto da mensagem do usuário**, não no system
-prompt: `slack_connect.py:10498` faz `text = "\n\n".join([text, *appended])`. A
-instrução do canal chega, portanto, como texto de usuário a cada turno disparado — o que
-importa para escrevê-la (é instrução, não persona) e para o custo por turno.
+**`mid_turn: queue` is not optional.** The default is `cancel` (`scopes/schema.py:123` —
+*"cancel is first because it is the default"*). During the ~5 minutes of an ingest, **any
+message from another person in the thread cancels the turn**; and because the manifest
+only records on success (`wiki_tools.py:340`), the next attempt starts from nothing. In a
+channel where people comment, that is close to guaranteed. `queue` holds the message
+until the session goes idle; Slack implements all three mechanisms.
 
-`chat` é **escalar** (`schema.py:899` recusa qualquer valor que não seja string), logo
-cada canal de papers exige seu próprio scope com o mesmo `prompt_append` copiado. Com um
-canal isso não incomoda; com vários, é a repetição que a §10.2 resolve.
+**`delivery.prompt` is spliced into the user's message text**, not into the system
+prompt: `slack_connect.py:10498` does `text = "\n\n".join([text, *appended])`. The
+channel's instruction therefore arrives as user text on every triggered turn — which
+matters both for how it is written (it is instruction, not persona) and for the per-turn
+cost.
 
-### 5.4 Busca híbrida  *(publicação + credencial)*
+`chat` is **scalar** (`schema.py:899` refuses any non-string value), so each papers
+channel needs its own scope with the same `prompt_append` copied. With one channel that
+does not hurt; with several, it is the repetition §10.2 solves.
 
-**Esta seção mudou por completo em relação à v1.** A v1 declarava
-`memory.extraPaths` apontando para a wiki; isso não funciona, porque a chave alimenta um
-gestor que o agente não usa (§3.1).
+### 5.4 Hybrid search  *(publication + credential)*
 
-O índice que o agente consulta é o do kernel `lite`, e ele varre
-`<agent workspace>/memory/*.md` — plano, sem recursão. Logo a wiki precisa ser
-**publicada** lá.
+**This section changed completely from v1.** v1 declared `memory.extraPaths` pointing at
+the wiki; that does not work, because the key feeds a manager the agent does not use
+(§3.1).
 
-**Passo de publicação — em código, não por prompt.** A v3 deste spec mandava o agente
-espelhar via `prompt_append`. **Isso não funciona no Slack**, por duas razões verificadas:
+The index the agent consults is the `lite` kernel's, and it scans
+`<agent workspace>/memory/*.md` — flat, no recursion. So the wiki has to be **published**
+there.
 
-- o modelo **não sabe onde fica o workspace**: a seção de diretórios só é injetada para
-  os canais `tui`/`web`/`ws_client` (`runtime_prompt_rail.py:325`);
-- copiar exigiria `bash cp` de um diretório **fora** do workspace, o que passa pelo
-  `file_guard` e no Slack vira **botão de aprovação no meio do turno**. A demo dependeria
-  de um clique.
+**The publication step — in code, not by prompt.** v3 of this spec told the agent to
+mirror the pages via `prompt_append`. **That does not work on Slack**, for two verified
+reasons:
 
-Como `wiki_tools.py` já será editado para as mitigações da §5.1, a publicação vira ~5
-linhas ali: após `[Success]`, copiar `wiki/*.md` para
-`get_agent_workspace_dir()/memory/wiki__*.md`. Isso elimina o risco que a §8 marcava como
-"alta" e torna o S1 ("sem intervenção manual") verdadeiro.
+- the model **does not know where the workspace is**: the directory section is injected
+  only for the `tui`/`web`/`ws_client` channels (`runtime_prompt_rail.py:325`);
+- copying would need `bash cp` from a directory **outside** the workspace, which passes
+  through the `file_guard` and on Slack becomes an **approval button mid-turn**. The demo
+  would hang on a click.
 
-O espelhamento é arquivo-a-arquivo:
+Since `wiki_tools.py` is already being edited for the §5.1 mitigations, publication
+becomes ~5 lines there: after `[Success]`, copy `wiki/*.md` into
+`get_agent_workspace_dir()/memory/wiki__*.md`. That removes the risk §8 marked as "high"
+and makes S1 ("no manual intervention") true.
+
+The mirroring is file by file:
 
     <WIKI_ROOT>/.llm_wiki/wiki/*.md   →   <agent workspace>/memory/wiki__*.md
 
-- arquivo a arquivo, **não** o diretório: o scan é `os.listdir` (`lite/internal.py:80`);
-- prefixo `wiki__` para que as páginas não colidam com a memória de conversa e sejam
-  fáceis de limpar;
-- **cópia, nunca `mv` nem symlink**: o watcher não tem handler `on_moved`
-  (`lite/manager.py:778`), então um arquivo movido não dispara reindexação;
-- eventos no **primeiro segundo** após a inicialização são ignorados, e **não há sync
-  periódico** de fallback se o watcher falhar (`lite/config.py:52`). Se a publicação
-  acontecer logo após um restart, force uma nova escrita ou reinicie a sessão.
+- file by file, **not** the directory: the scan is `os.listdir` (`lite/internal.py:80`);
+- the `wiki__` prefix keeps the pages from colliding with conversation memory and makes
+  them easy to clean up;
+- **copy, never `mv` or a symlink**: the watcher has no `on_moved` handler
+  (`lite/manager.py:778`), so a moved file is not reindexed;
+- events in the **first second** after start-up are ignored, and there is **no periodic
+  sync** fallback if the watcher fails (`lite/config.py:52`). If publication happens
+  right after a restart, force a fresh write or restart the session.
 
-Quem executa: o próprio `wiki_ingest`, ao final de uma ingestão bem-sucedida.
+Who runs it: `wiki_ingest` itself, at the end of a successful ingestion.
 
-**Credencial.** As três variáveis em `~/.jiuwenswarm/config/.env`:
-`EMBED_API_KEY`, `EMBED_API_BASE`, `EMBED_MODEL`. Elas chegam ao kernel via
-`config.yaml` → `interface_deep.py:6938`. Sem elas o `MemoryRail` **ainda é criado** (só
-loga um warning) e a busca cai para **BM25 puro** — funciona, mas não é híbrida.
+**Credential.** The three variables in `~/.jiuwenswarm/config/.env`: `EMBED_API_KEY`,
+`EMBED_API_BASE`, `EMBED_MODEL`. They reach the kernel via `config.yaml` →
+`interface_deep.py:6938`. Without them the `MemoryRail` is **still created** (it only
+logs a warning) and search falls back to **pure BM25** — it works, but it is not hybrid.
 
-> Nota: o fallback direto por env dentro do jiuwenswarm lê `EMBED_BASE`/`EMBED_BASE_URL`
-> (`embeddings.py:49`), nomes diferentes dos que o `config.yaml` usa. Preencher os três do
-> `.env` é o caminho correto; não confiar no fallback.
+> Note: the direct env fallback inside jiuwenswarm reads `EMBED_BASE`/`EMBED_BASE_URL`
+> (`embeddings.py:49`), different names from the ones `config.yaml` uses. Filling the
+> three in `.env` is the correct path; do not rely on the fallback.
 
-**Dívida registrada:** o certo é o `lite/manager.py:954` repassar `extra_paths` ao
-`list_memory_files` — duas linhas, mas dentro do `openjiuwen` fixado em `61becb17`.
-Exigiria fork ou upgrade da dependência, fora de alcance em 2 dias. Ver §10.3.
+**Recorded debt:** the right fix is for `lite/manager.py:954` to pass `extra_paths` to
+`list_memory_files` — two lines, but inside the `openjiuwen` pinned at `61becb17`. It
+would require a fork or a dependency upgrade, out of reach in two days. See §10.3.
 
 ## 6. Roteiro da demo
 
