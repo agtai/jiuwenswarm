@@ -481,20 +481,23 @@ deixaria a contradição para o leitor.
 `recursive-self-improvement.md` e mostrar a seção que só existe porque um segundo paper
 entrou.
 
-### Defeito conhecido: a extensão na âncora
+### Defeito reportado que NÃO existe — a extensão na âncora
 
-As âncoras do segundo paper saíram com a extensão truncada:
+Uma versão anterior desta seção registrava que as âncoras do segundo paper saíam com a
+extensão truncada (`.df` em vez de `.pdf`). **Isso estava errado, e o erro era do
+verificador, não do modelo.**
 
-    [[fonte: 45e4144f_2607.21461v2.df p10]]      (esperado: .pdf)
+A medição tinha passado as âncoras por `sed 's/p[0-9]*//'` para agrupar por arquivo.
+`p[0-9]*` casa um `p` seguido de **zero** ou mais dígitos, portanto casa o `p` de `.pdf`
+e o remove. O `.df` foi produzido pelo próprio comando de verificação.
 
-O modelo elidiu o `p` de `.pdf`, provavelmente induzido pelo `p.N` que vem logo depois
-na regra 8. Não impede a verificação — o arquivo continua identificável — mas quebraria
-um hyperlink da §10.4 e é visível para quem reparar.
+Contagem correta sobre a wiki inteira:
 
-Correção é de prompt: dar um exemplo literal completo na regra 8 em vez do
-`<filename>` genérico. **Não aplicada antes da demo** porque a wiki atual está boa e
-reingerir custa ~9 min por paper; as páginas existentes manteriam o formato antigo de
-qualquer modo.
+    567 âncoras com ".pdf p"        0 âncoras com extensão quebrada
+
+Fica registrado como lição de método: **uma medição de conformidade precisa ser
+verificada com o mesmo rigor que o artefato que ela mede.** Um `sed` mal escrito quase
+custou uma reingestão de 9 minutos por paper para consertar um defeito inexistente.
 
 ## 10. Evoluções
 
