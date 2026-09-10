@@ -757,3 +757,67 @@ As mesmas 10 perguntas, com o baseline honesto de **3/10** já registrado. Se um
 multilíngue levar isso a 8–9, o número justifica a decisão — e vale para qualquer idioma
 que alguém use no canal, não só português. Trocar o modelo força reindexação; medir os
 três exige três reindexações do acervo (minutos, não horas).
+
+---
+
+## 13. O acervo que cresce ao ser consultado
+
+Observado em 2026-09-10, no canal real. Perguntar *"onde os dois papers discordam?"*
+produziu a resposta esperada **e criou uma página nova na wiki**:
+
+    divergence-coverage-gaps.md   5529 bytes   9 âncoras   registrada no index.md
+    wiki: 35 → 37 páginas
+
+Não foi defeito. É a §10.1 funcionando: o `wiki_query` mantém o write-back, e ele está
+amarrado ao `schema/AGENT.md`, então a página saiu com âncoras e entrou no índice como
+qualquer outra. É o *"valuable analyses can be filed back into the wiki"* do padrão do
+Karpathy, acontecendo sem ninguém pedir.
+
+Antes disso, a ingestão já havia produzido `divergence-inventory.md` — uma auditoria da
+própria `disagreements.md`, que registra que a página **encabeça cinco divergências
+enquanto o índice e o log contam seis**, e que há uma referência cruzada apontando para
+uma seção que a página não carrega. A wiki documentou o próprio defeito em vez de
+escondê-lo, que é a regra 13 aplicada num nível que ninguém especificou: não a um valor
+faltante, mas à consistência do acervo.
+
+### Por que isto é a propriedade mais valiosa do desenho
+
+Um RAG responde e esquece. Aqui, **a pergunta é uma contribuição**: ela deixa no acervo
+uma análise que a próxima pergunta encontra. O acervo não cresce só por ingestão — cresce
+por uso, que é a diferença entre um índice e um segundo cérebro.
+
+### E por que ela foi desligada para a demo
+
+Duas faces:
+
+- **A favor:** dá para mostrar a árvore antes e depois da mesma pergunta e ver o acervo
+  crescer ao vivo. É um argumento difícil de refutar.
+- **Contra:** o artefato deixa de ser estável. Uma pergunta ensaiada na quinta pode dar
+  outro resultado na sexta, porque a wiki mudou no ensaio. E há um descompasso de
+  publicação: páginas criadas por consulta **não** passam pelo `publish_wiki_pages`, que
+  só roda no `wiki_ingest` — então elas existem na wiki e ficam **invisíveis à busca**
+  até a próxima ingestão.
+
+Para a demo venceu a previsibilidade. O `prompt_append` do canal ganhou:
+
+    ACERVO CONGELADO: ao RESPONDER, nunca escreva na wiki. Nao crie paginas,
+    nao edite paginas existentes, nao atualize o index.md nem o log.md. Se ao
+    responder voce notar uma lacuna ou inconsistencia no acervo, RELATE na
+    resposta em vez de corrigi-la no disco. A wiki so muda por ingestao.
+
+Repare que a regra **preserva o achado e descarta só a escrita**: o agente continua
+obrigado a relatar lacunas, apenas não as conserta sozinho. Foi assim que a resposta
+sobre as divergências pôde dizer "a página encabeça cinco, o índice conta seis" e ainda
+entregar a sexta.
+
+### O que fazer depois da demo
+
+1. **Religar o write-back** — é a propriedade, não o defeito.
+2. **Publicar o que a consulta escreve.** O descompasso acima é um bug real: chamar
+   `publish_wiki_pages` também ao fim de um `wiki_query` que escreveu. Enquanto isso não
+   existir, uma análise arquivada pela consulta é invisível para a busca seguinte, o que
+   anula metade do valor de arquivá-la. As duas páginas de auditoria foram publicadas à
+   mão em 2026-09-10 (35 publicadas de 37).
+3. **Decidir se o acervo precisa de versão.** Se perguntar muda a wiki, "a wiki de
+   ontem" e "a wiki de hoje" são objetos distintos, e nada hoje os distingue. Ver §10.4
+   e a discussão de versionamento/tombstones na §11-A4.
