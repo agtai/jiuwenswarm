@@ -26,7 +26,7 @@ Current state of the reference library: 4 papers, 52 pages, 1276 anchors, 0 brok
 ## 2. Prerequisites
 
 ```bash
-git checkout feat/second-brain-slack-poc
+git checkout second-brain-slack-poc-renan
 uv sync          # openjiuwen is PINNED; do not upgrade it casually
 ```
 

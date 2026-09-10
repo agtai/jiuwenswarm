@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Working branch: `feat/second-brain-slack-poc`; worktree
+- Working branch: `second-brain-slack-poc-renan`; worktree
   `/home/renan/openJiuwen-ai/jiuwenswarm/.claude/worktrees/wiki-smoke`.
 - Run everything with the worktree's venv: `.venv/bin/python`, `.venv/bin/pytest`.
 - Do **not** touch anything under `.venv/` (that is the pinned `openjiuwen`). Every change

@@ -1,6 +1,6 @@
 # Second Brain PoC — a papers channel on Slack
 
-Date: 2026-09-09 · Branch: `feat/second-brain-slack-poc` (base `55c3c3a85`)
+Date: 2026-09-09 · Branch: `second-brain-slack-poc-renan` (base `55c3c3a85`)
 Target: demo on 2026-09-11 (Friday)
 
 ## 1. Goal
