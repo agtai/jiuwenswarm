@@ -383,6 +383,22 @@ Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 
 ### 7.5 当前受控 Live Voice 启动与预演
 
+源码和两种启动 profile 默认使用 `openai-realtime-native`、
+`gpt-realtime-2.1-mini`、`server-vad-300`（2026-09-10，
+[D-124](../decisions/DECISIONS.md#d-124-default-new-live-voice-starts-to-realtime-mini-and-server-vad-300)）。
+另一台服务器必须先取得包含此变更的源码并重启服务；新建聊天本身不会更新旧进程。
+启动器不再从旧机器保存文件恢复 VAD，未传模型/端点参数时使用源码默认值。
+对照实验仍可显式传 `-NativeRealtimeModel`、`-NativeEndpointMode`，
+或 `-InteractionEngine cascade`；这些选择不会改变下次无参数启动的默认值。
+不通过启动器时，环境变量 `LIVE_VOICE_INTERACTION_ENGINE`、
+`LIVE_VOICE_NATIVE_REALTIME_MODEL`、`LIVE_VOICE_NATIVE_ENDPOINT_MODE` 仍是显式覆盖，
+部署时应清除旧值或分别设为上述三个值。密钥、项目和数据路径仍需在目标机配置。
+在 `logs/live_voice_runtime_contract.json` 核对 `interaction_engine`、
+`native_realtime_model` 和 `native_endpoint_mode`，语音启用后再核对 Provider
+`configuration_confirmed` 中的模型与 `silence_duration_ms=300`。
+这只固定模型/端点；若复现本次时延比较，还应显式传
+`-NativeAudioSpeed 1.25 -NativeReasoningEffort minimal`，并遵循证据中的其余环境条件。
+
 服务就绪后，按 [本机页面入口约定](#local-entry-origin) 打开
 `http://127.0.0.1:5173/` 或对应的 `/chat/<实际会话 ID>`，端口随实际配置调整。
 若启动器、控制台或旧快捷方式显示 `localhost`，给用户的链接仍使用 `127.0.0.1`；

@@ -152,12 +152,18 @@ async def test_web_disconnect_unregisters_physical_subscriptions() -> None:
 
 @pytest.mark.parametrize("eagerness", ["auto", "high"])
 @pytest.mark.parametrize("budget", ["inf", "4096"])
+@pytest.mark.parametrize("engine_setting", [None, "openai-realtime-native"])
 def test_web_handlers_select_native_runtime_client_once(
     monkeypatch: pytest.MonkeyPatch,
     eagerness: str,
     budget: str,
+    engine_setting: str | None,
 ) -> None:
-    monkeypatch.setenv("LIVE_VOICE_INTERACTION_ENGINE", "openai-realtime-native")
+    monkeypatch.delenv("LIVE_VOICE_INTERACTION_ENGINE", raising=False)
+    monkeypatch.delenv("LIVE_VOICE_NATIVE_REALTIME_MODEL", raising=False)
+    monkeypatch.delenv("LIVE_VOICE_NATIVE_ENDPOINT_MODE", raising=False)
+    if engine_setting is not None:
+        monkeypatch.setenv("LIVE_VOICE_INTERACTION_ENGINE", engine_setting)
     monkeypatch.setenv("LIVE_VOICE_SPEECH_API_KEY", "private-test-key")
     monkeypatch.setenv("LIVE_VOICE_SPEECH_API_BASE", "https://api.openai.com/v1")
     monkeypatch.setenv("LIVE_VOICE_NATIVE_VAD_EAGERNESS", eagerness)
@@ -179,6 +185,8 @@ def test_web_handlers_select_native_runtime_client_once(
     binding = NativeInteractionBinding(ScopeRef("user", "project", "session", Assurance.AUTHENTICATED),
                                        "interaction", "activation", 1, "correlation")
     engine = channel.live_voice_media_registry._native_engine_factory(binding)
+    assert engine._session._config.model == "gpt-realtime-2.1-mini"
+    assert engine._endpoint_mode == "server-vad-300"
     assert engine._vad_eagerness == eagerness
     assert engine._max_output_tokens == (budget if budget == "inf" else int(budget))
     assert engine._session.snapshot().client_event_count == 0
@@ -194,10 +202,14 @@ def test_invalid_native_endpoint_setting_leaves_no_runtime_client_or_factory(mon
     assert channel.live_voice_media_registry._native_engine_factory is None
 
 
+@pytest.mark.parametrize("engine_setting", [None, "openai-realtime-native"])
 def test_native_engine_without_gateway_provider_secret_fails_before_activation(
     monkeypatch: pytest.MonkeyPatch,
+    engine_setting: str | None,
 ) -> None:
-    monkeypatch.setenv("LIVE_VOICE_INTERACTION_ENGINE", "openai-realtime-native")
+    monkeypatch.delenv("LIVE_VOICE_INTERACTION_ENGINE", raising=False)
+    if engine_setting is not None:
+        monkeypatch.setenv("LIVE_VOICE_INTERACTION_ENGINE", engine_setting)
     monkeypatch.delenv("LIVE_VOICE_SPEECH_API_KEY", raising=False)
     channel = FakeWebChannel()
 

@@ -4180,14 +4180,18 @@ async def test_retiring_admitted_delegate_successor_drains_already_buffered_outp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("silence", [300, 450, 600])
+@pytest.mark.parametrize("silence", [None, 300, 450, 600])
 async def test_fixed_endpoint_presets_leave_response_and_interrupt_with_engine(silence):
-    engine, socket, _ = active_engine(endpoint_mode=f"server-vad-{silence}")
+    socket = ScriptedSocket(negotiation())
+    options = {} if silence is None else {"endpoint_mode": f"server-vad-{silence}"}
+    engine = OpenAIRealtimeNativeInteractionEngine(
+        config(), binding=binding(), socket_factory=CapturingFactory(socket), **options,
+    )
     try:
         await engine.start()
         assert socket.sent[0]["session"]["audio"]["input"]["turn_detection"] == {
             "type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300,
-            "silence_duration_ms": silence, "create_response": False, "interrupt_response": False,
+            "silence_duration_ms": silence or 300, "create_response": False, "interrupt_response": False,
         }
         assert not any(event["type"] == "response.create" for event in socket.sent)
     finally:

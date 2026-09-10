@@ -9,8 +9,10 @@
 **PARTIAL — bounded repairs and user acceptance exist; the full product is not
 feature complete or a newly accepted controlled candidate.**
 
-The current user decision is to record the Mini session observations, prepare
-Mini + server-vad-300 for user verification, and defer repair/classification until comparison in another
+The current user decision is to retain the Mini session observations, make
+Realtime Native / Mini / server-vad-300 the portable startup defaults
+([D-124](decisions/DECISIONS.md#d-124-default-new-live-voice-starts-to-realtime-mini-and-server-vad-300)),
+and defer issue repair/classification until comparison in another
 environment. WebSocket congestion remains in the record: the user reports it did
 not reproduce in another environment and requests no investigation or repair now.
 The [Mini/VAD300 comparison record](evidence/MINI_VAD300_ENV_COMPARISON_20260910.md)
@@ -64,15 +66,32 @@ support has been discussed, not implemented.
 
 ### Continuation boundary
 
-**Active packet (2026-09-10):** documentation and offline analysis of user-provided
-Mini/VAD300 sessions; private deployment preparation is complete. The dated
+**Active packet (2026-09-10):** make Realtime Native / Mini / server-vad-300
+the source and launcher defaults for another server or session (D-124), while
+retaining the completed offline analysis. This Tier 1 configuration boundary owns
+the environment selector, PowerShell launcher, their configuration/registration
+checks and the startup runbook. These source defaults are implemented. Missing
+settings select Mini/VAD300; old machine-saved endpoints do not override that
+default; explicit comparison
+overrides and explicit Cascade remain supported. Invalid configuration and missing
+Provider credentials fail closed before activation. Completed verification is
+offline:
+configuration tests, affected registration/Provider-payload checks, PowerShell
+parsing and isolated startup-configuration evaluation; the complete scoped diff
+was reviewed. No service restart, real voice/Agent test, transport fix or paid
+service
+change is included. The dependency is the existing Native Engine and configured
+Provider access; no new API, protocol or task policy is introduced.
+
+Private deployment preparation is complete. The dated
 comparison record identifies the deployed source;
 use the existing independent Mini project/data, speed 1.25, minimal reasoning,
 local barge-in off and pinned AgentCore; server VAD has changed from 450 to 300 ms.
 Preserve the original session/files. Record remaining and newly observed issues,
 including WebSocket congestion, without implementing fixes. Cross-environment
 classification and any new repair scope await the user's later decision. No further
-automated tests are requested after the clarification; retain completed test evidence
+automated browser/voice/Agent tests are requested after the clarification; retain
+completed test evidence
 without treating it as user acceptance. The two later user sessions were analyzed
 from existing diagnostics, history, logs and persisted Task/Work/artifact snapshots;
 no new browser/voice/Agent test, product change or service restart was performed.

@@ -32,7 +32,7 @@ param(
     [ValidateRange(0, 65535)]
     [int]$FrontendPort = 0,
     [ValidateSet('cascade', 'openai-realtime-native')]
-    [string]$InteractionEngine = 'cascade',
+    [string]$InteractionEngine = 'openai-realtime-native',
     [ValidateLength(1, 256)]
     [ValidatePattern('^[^\r\n]+$')]
     [string]$NativeRealtimeModel = 'gpt-realtime-2.1-mini',
@@ -45,7 +45,7 @@ param(
     [ValidateSet('provider-default', 'minimal', 'low', IgnoreCase = $false)]
     [string]$NativeReasoningEffort = 'provider-default',
     [ValidateSet('semantic-vad', 'server-vad-300', 'server-vad-450', 'server-vad-600', IgnoreCase = $false)]
-    [string]$NativeEndpointMode = 'semantic-vad',
+    [string]$NativeEndpointMode = 'server-vad-300',
     [switch]$L0Measurement,
     [switch]$L0OrdinaryChromeBatch,
     [switch]$L0ResumeBatch,
@@ -723,13 +723,8 @@ try {
         $savedLocalBargeInProperty = $savedConfig.PSObject.Properties['local_barge_in_profile']
         $savedAudioSpeedProperty = $savedConfig.PSObject.Properties['native_audio_speed']
         $savedReasoningEffortProperty = $savedConfig.PSObject.Properties['native_reasoning_effort']
-        $savedEndpointProperty = $savedConfig.PSObject.Properties['native_endpoint_mode']
-        if (-not $PSBoundParameters.ContainsKey('NativeEndpointMode') -and $null -ne $savedEndpointProperty -and $null -ne $savedEndpointProperty.Value) {
-            $NativeEndpointMode = [string]$savedEndpointProperty.Value
-            if (@('semantic-vad', 'server-vad-300', 'server-vad-450', 'server-vad-600') -cnotcontains $NativeEndpointMode) {
-                Fail 'Saved Native endpoint mode is invalid.'
-            }
-        }
+        # Engine/model/endpoint defaults belong to source, not an earlier
+        # machine experiment. Comparisons require explicit launch parameters.
         if (-not $PSBoundParameters.ContainsKey('NativeReasoningEffort') -and $null -ne $savedReasoningEffortProperty -and $null -ne $savedReasoningEffortProperty.Value) {
             $NativeReasoningEffort = [string]$savedReasoningEffortProperty.Value
             if (@('provider-default', 'minimal', 'low') -cnotcontains $NativeReasoningEffort) {

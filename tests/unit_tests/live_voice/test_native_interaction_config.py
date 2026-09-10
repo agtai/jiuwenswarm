@@ -20,12 +20,12 @@ from jiuwenswarm.server.live_voice.native_interaction_config import (
 )
 
 
-def test_cascade_is_the_default_and_does_not_require_openai_secret() -> None:
+def test_fresh_environment_selects_native_mini_and_vad300() -> None:
     selection = select_interaction_engine_environment({})
 
-    assert selection.kind is InteractionEngineKind.CASCADE
-    assert selection.native_model is None
-    assert selection.native_vad_eagerness is None
+    assert selection.kind is InteractionEngineKind.OPENAI_REALTIME_NATIVE
+    assert selection.native_model == "gpt-realtime-2.1-mini"
+    assert selection.native_endpoint_mode == "server-vad-300"
 
 
 def test_explicit_cascade_ignores_native_model_configuration() -> None:
@@ -111,11 +111,11 @@ def test_invalid_selection_fails_closed_without_cascade_fallback(
 
 
 def test_selection_reads_only_passed_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(INTERACTION_ENGINE_ENV, "openai-realtime-native")
+    monkeypatch.setenv(INTERACTION_ENGINE_ENV, "cascade")
 
     selection = select_interaction_engine_environment({})
 
-    assert selection.kind is InteractionEngineKind.CASCADE
+    assert selection.kind is InteractionEngineKind.OPENAI_REALTIME_NATIVE
 
 
 @pytest.mark.parametrize("eagerness", [None, "auto", "high"])
@@ -145,15 +145,14 @@ def test_native_endpoint_configuration_is_exact_and_fails_closed(value):
     assert raised.value.reason == "NATIVE_VAD_EAGERNESS_INVALID"
 
 
-@pytest.mark.parametrize("kind", [None, "cascade"])
-def test_cascade_never_reads_native_endpoint_configuration(kind):
+def test_cascade_never_reads_native_endpoint_configuration():
     class CascadeEnvironment(dict):
         def get(self, key, *default):
             if key in {"LIVE_VOICE_NATIVE_ENDPOINT_MODE", NATIVE_VAD_EAGERNESS_ENV, NATIVE_REALTIME_MODEL_ENV, NATIVE_MAX_OUTPUT_TOKENS_ENV, NATIVE_AUDIO_SPEED_ENV, NATIVE_REASONING_EFFORT_ENV}:
                 raise AssertionError("Cascade accessed Native-only configuration")
             return super().get(key, *default)
 
-    environment = CascadeEnvironment({} if kind is None else {INTERACTION_ENGINE_ENV: kind})
+    environment = CascadeEnvironment({INTERACTION_ENGINE_ENV: "cascade"})
     selected = select_interaction_engine_environment(environment)
     assert selected.kind is InteractionEngineKind.CASCADE
     assert selected.native_vad_eagerness is None
@@ -220,9 +219,9 @@ def test_native_audio_speed_rejects_invalid_environment(raw):
 
 @pytest.mark.parametrize("mode", ["semantic-vad", "server-vad-300", "server-vad-450", "server-vad-600"])
 def test_native_fixed_endpoint_presets_are_explicit_and_do_not_read_process_state(mode, monkeypatch):
-    monkeypatch.setenv("LIVE_VOICE_NATIVE_ENDPOINT_MODE", "server-vad-300")
+    monkeypatch.setenv("LIVE_VOICE_NATIVE_ENDPOINT_MODE", "server-vad-450")
     default = select_interaction_engine_environment({INTERACTION_ENGINE_ENV: "openai-realtime-native"})
-    assert default.native_endpoint_mode == "semantic-vad"
+    assert default.native_endpoint_mode == "server-vad-300"
     selected = select_interaction_engine_environment({INTERACTION_ENGINE_ENV: "openai-realtime-native", "LIVE_VOICE_NATIVE_ENDPOINT_MODE": mode})
     assert selected.native_endpoint_mode == mode
 

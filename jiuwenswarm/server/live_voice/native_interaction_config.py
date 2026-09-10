@@ -20,7 +20,7 @@ NATIVE_MAX_OUTPUT_TOKENS_ENV = "LIVE_VOICE_NATIVE_MAX_OUTPUT_TOKENS"
 NATIVE_AUDIO_SPEED_ENV = "LIVE_VOICE_NATIVE_AUDIO_SPEED"
 NATIVE_REASONING_EFFORT_ENV = "LIVE_VOICE_NATIVE_REASONING_EFFORT"
 NATIVE_ENDPOINT_MODE_ENV = "LIVE_VOICE_NATIVE_ENDPOINT_MODE"
-DEFAULT_NATIVE_ENDPOINT_MODE = "semantic-vad"
+DEFAULT_NATIVE_ENDPOINT_MODE = "server-vad-300"
 DEFAULT_NATIVE_AUDIO_SPEED = 1.0
 DEFAULT_NATIVE_REALTIME_MODEL = "gpt-realtime-2.1-mini"
 DEFAULT_NATIVE_VAD_EAGERNESS = "auto"
@@ -172,7 +172,7 @@ def select_interaction_engine_environment(
             "INTERACTION_ENGINE_ENVIRONMENT_INVALID",
             "interaction Engine environment must be a mapping",
         )
-    raw_kind = environ.get(INTERACTION_ENGINE_ENV, InteractionEngineKind.CASCADE.value)
+    raw_kind = environ.get(INTERACTION_ENGINE_ENV, InteractionEngineKind.OPENAI_REALTIME_NATIVE.value)
     if (
         type(raw_kind) is not str
         or not raw_kind

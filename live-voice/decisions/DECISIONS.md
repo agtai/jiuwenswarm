@@ -2154,3 +2154,21 @@
   writers and do not prove multi-file crash atomicity. Unknown post-write effects
   retain the existing D2 reconciliation/manual boundary. Speech semantics,
   exact requested output, latency and physical acceptance still need real evidence.
+
+## D-124 Default new Live Voice starts to Realtime Mini and server VAD 300
+
+- Date: 2026-09-10. The user explicitly requested portable Mini/VAD300 defaults
+  for another server/session after the recorded comparison. The environment
+  selector and both launcher profiles default to `openai-realtime-native`,
+  `gpt-realtime-2.1-mini` and `server-vad-300`. This supersedes the earlier
+  default-Cascade selection; explicit Cascade remains supported.
+- Model/engine/endpoint are source defaults. The launcher ignores previously
+  saved endpoint experiments; explicit launch arguments still override defaults.
+  Direct server starts continue to honor explicit environment values. Existing
+  running processes and private credentials are not changed by a source commit.
+- This is a Tier 1 configuration boundary using the existing Native contract.
+  It preserves validation, fail-closed missing credentials, application-owned
+  response/interruption control, and separate audio-speed/reasoning choices.
+  Offline configuration, startup selection, registration and payload checks own
+  verification. It does not establish a latency floor, new physical acceptance
+  or resolution of the recorded environment/product observations.
