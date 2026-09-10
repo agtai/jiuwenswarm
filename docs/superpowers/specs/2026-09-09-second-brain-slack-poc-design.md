@@ -333,163 +333,171 @@ logs a warning) and search falls back to **pure BM25** — it works, but it is n
 `list_memory_files` — two lines, but inside the `openjiuwen` pinned at `61becb17`. It
 would require a fork or a dependency upgrade, out of reach in two days. See §10.3.
 
-## 6. Roteiro da demo
+## 6. Demo script
 
-**Pré-ensaio (quinta):** ingerir 3 papers com sobreposição temática. ~5 min cada
-(medido), logo ~15 min — **inviável ao vivo**. A wiki chega pronta na sexta.
+**Pre-rehearsal (Thursday):** ingest three papers with overlapping subject matter.
+~7-9 min each (measured), so ~25 min — **not viable live**. The wiki arrives ready on
+Friday.
 
-1. Mostrar o acervo: `index.md` com Entities / Concepts / Sources.
-2. Abrir uma página e mostrar as âncoras `[[fonte: … p.N]]` com as citações.
-3. Perguntar algo pontual no canal → resposta por `memory_search` com âncora.
-4. **Conferir**: abrir o PDF na página apontada e comparar com a citação.
-   Este é o clímax da demo — é o que "ponteiro" significa.
-5. *(Opcional, só se o ensaio aprovar)* pergunta transversal → `wiki_query`.
+1. Show the library: the tree from `index.md`, grouped into Entities / Concepts /
+   Sources / Transversal pages.
+2. Open a page and show the `[[fonte: … p.N]]` anchors with their quotes.
+3. Ask a pointed question in the channel → answer via `memory_search`, with anchors.
+4. **Check it**: open the PDF at the cited page and compare against the quote.
+   This is the climax — it is what "pointer" means.
+5. Ask a comparative question ("what is MetaSkill's strength against the other two?") →
+   an answer that spans three sources with anchors from all of them.
 
-**Cortes deliberados, e as razões:**
+**Deliberate cuts, and why:**
 
-| Cortado | Por quê |
+| Cut | Why |
 |---|---|
-| Ingest ao vivo de um 4º paper | ~5 min de silêncio na frente da plateia. Além disso o dedup por SHA-256 exigiria um paper inédito, e um `mid_turn` mal configurado cancelaria o turno |
-| Embeddings / "híbrida" no discurso | as `EMBED_*` estão vazias; BM25 sozinho funciona. Só prometer híbrida se a chave existir na quinta — senão dizer "busca sobre a wiki" |
-| `wiki_query` ao vivo (passo 5) | ele **escreve** na wiki (`wiki_tools.py:352`) sem ler o `AGENT.md`, então pode criar páginas sem âncora. Manter só se o ensaio mostrar que não estraga; e sempre por último |
+| Live ingest of a fourth paper | 7-9 minutes of silence in front of an audience. SHA-256 dedup would also demand a paper never ingested before, and a misconfigured `mid_turn` would cancel the turn |
+| Write-back during answers | `wiki_query` writes to the wiki (`wiki_tools.py:352`); a corpus that changes while you rehearse cannot be rehearsed. Frozen for the demo — see §13 |
 
-## 7. Critérios de sucesso
+## 7. Success criteria
 
-| # | Critério | Como verificar |
+| # | Criterion | How to verify |
 |---|---|---|
-| S1 | PDF no canal vira páginas de wiki **e é publicado no índice** sem intervenção manual | postar e observar. Só é verdade com a publicação em código (§5.4) |
-| S2 | ≥ 90% das afirmações substantivas têm âncora | amostrar **3 páginas**, contar à mão as afirmações substantivas (denominador) e as ancoradas (numerador). `grep -c` sozinho não mede: não há denominador automático |
-| S3 | Âncoras corretas | conferir 5 amostras contra o PDF |
-| S4 | `memory_search` retorna páginas da wiki **após a publicação (§5.4)** | não há CLI para o índice do `lite`; verificar com `sqlite3 ~/.jiuwenswarm/agent/workspace/memory/memory.db "select path from files where path like '%wiki__%'"` |
-| S5 | Resposta no canal cita âncoras | inspeção |
-| S6 | Ingest de 1 paper < 8 min | cronometrar |
+| S1 | A PDF in the channel becomes wiki pages **and is published to the index** with no manual step | post one and watch. Only true with publication in code (§5.4) |
+| S2 | ≥ 90% of substantive claims carry an anchor | sample **3 pages**, count substantive claims by hand (the denominator) and anchored ones (the numerator). `grep -c` alone does not measure this: there is no automatic denominator |
+| S3 | Anchors are correct | check 5 samples against the PDF |
+| S4 | `memory_search` returns wiki pages **after publication (§5.4)** | there is no CLI for the `lite` index; check with Python's `sqlite3` against `~/.jiuwenswarm/agent/workspace/memory/memory.db` (`select count(*) from files where path like '%wiki__%'`) |
+| S5 | The channel's answer cites anchors | inspection |
+| S6 | Ingesting one paper takes < 8 min | stopwatch |
 
-**S4 é o critério que reprova a PoC de forma determinística** se o passo de publicação
-(§5.4) não for feito: sem ele o `memory_search` nunca vê a wiki, e o passo 3 da demo cai
-para o `wiki_query` — que funciona, mas é lento e não é busca.
+**S4 is the criterion that fails the PoC deterministically** if the publication step
+(§5.4) is skipped: without it `memory_search` never sees the wiki, and step 3 of the demo
+falls back to `wiki_query` — which works, but is slow and is not search.
 
-**S3 é o critério que pode reprovar de forma probabilística.** Se o modelo inventar números de página,
-o ponteiro perde a razão de ser — e como isso é instrução de prompt, não garantia,
-tem de ser medido, não presumido.
+**S3 is the criterion that can fail probabilistically.** If the model invents page
+numbers the pointer loses its reason to exist — and since that is a prompt instruction
+rather than a guarantee, it has to be measured, not assumed.
 
-## 8. Riscos
+## 8. Risks
 
-| Risco | Prob. | Mitigação |
+Resolved rows are struck through rather than deleted, so the reasoning survives.
+
+| Risk | Prob. | Mitigation |
 |---|---|---|
-| Modelo inventa páginas (S3) | média | medir na quinta; se falhar, cair para âncora em nível de arquivo + seção |
-| Sem `EMBED_*` | alta hoje | demo em BM25; ajustar o discurso |
-| Slack sem credencial | alta hoje | reautorizar o app; sem isso não há demo |
-| 3 papers ≈ 15 min de ingest | certa | pré-ensaio na quinta |
-| 120 s de orçamento para anexos | média | um PDF por mensagem |
-| Divergência com upstream (§5.1) | baixa | 2 linhas, documentada |
-| Passo de publicação esquecido → S4 falha | **alta** | é o item nº 1 do ensaio de quinta |
-| `read_file` trunca faixa em 25k tokens → âncora deslocada | média | regra 11: faixas ≤ 5 páginas |
-| Âncora cai em chunk separado da afirmação | média | regra 8: âncora na mesma linha |
-| `wiki_query` escreve na wiki sem ler o `AGENT.md` (`wiki_tools.py:352`) | média | não usar `wiki_query` para escrever na demo; se usar, revisar depois |
-| 4º paper "ao vivo" já ingerido → `[Skipped]: Deduplicated` | média | separar um paper inédito para o ensaio |
-| App Slack sem `files:read` ou sem subscrição `message.channels`/`file_share` | média | conferir escopos ao reautorizar |
-| `has_file` acorda para qualquer anexo (imagem, screenshot) | média | regra 12 do `AGENT.md` + a guarda de extensão no `prompt_append` |
-| `wiki_ingest` lê qualquer arquivo fora do rail de permissão | **alta** | as 4 mitigações da §5.1, sendo (1) o fecho real |
-| **`mid_turn` default `cancel` cancela o ingest de 5 min** | **alta** | `mid_turn: queue` no scope (§5.3) — não é opcional |
-| **46 erros `NoneType … 'id'` no smoke test** (ver §8.1) | **desconhecida** | reproduzir pelo Slack na quinta antes de confiar em qualquer medição |
-| Publicação após restart cai na janela morta do watcher | baixa | forçar nova escrita; ver §5.4 |
-| ~~`config.yaml` em 0644~~ | — | **resolvido**: todos os arquivos com segredo em 0600 |
+| Model invents pages (S3) | medium | measure at the rehearsal; if it fails, fall back to file+section anchors |
+| ~~No `EMBED_*`~~ | — | **resolved**: `baai/bge-m3` via OpenRouter, 1024 dims (§12) |
+| ~~Slack without credentials~~ | — | **resolved**: app authorised, seven scopes granted, bot in the channel |
+| Three papers ≈ 25 min of ingest | certain | pre-rehearsal on Thursday |
+| 120 s attachment budget | medium | one PDF per message |
+| Divergence from upstream (§5.1) | low | two lines, documented |
+| ~~Publication step forgotten → S4 fails~~ | — | **resolved**: publication runs inside `wiki_ingest` |
+| `read_file` truncates a range at 25k tokens → displaced anchor | medium | rule 11: ranges ≤ 5 pages |
+| Anchor lands in a chunk separate from its claim | medium | rule 8: anchor on the same line |
+| ~~`wiki_query` writes without reading `AGENT.md`~~ | — | **resolved**: the write-back is bound to `AGENT.md`, and frozen for the demo (§13) |
+| A "live" fourth paper already ingested → `[Skipped]: Deduplicated` | medium | keep an un-ingested paper aside |
+| ~~Slack app missing `files:read` or the message subscription~~ | — | **resolved**: verified against the API |
+| `has_file` wakes on any attachment (image, screenshot) | medium | rule 12 of `AGENT.md` plus the extension guard in `prompt_append` |
+| ~~`wiki_ingest` reads any file outside the permission rail~~ | — | **resolved**: `source` restricted to session uploads and the workspace |
+| ~~`mid_turn` default `cancel` kills a multi-minute ingest~~ | — | **resolved**: `mid_turn: queue` in the scope |
+| **46 `NoneType … 'id'` errors in the smoke test** (see §8.1) | **unknown** | still unexplained; the ingests through Slack succeeded regardless |
+| Publication right after a restart lands in the watcher's dead window | low | force a fresh write; see §5.4 |
+| ~~`config.yaml` at 0644~~ | — | **resolved**: every secret-bearing file at 0600 |
 
-### 8.1 O smoke test não foi limpo — e todas as medições vêm dele
+### 8.1 The smoke test was not clean — and every measurement came from it
 
-O ingest que produziu a wiki de referência terminou em `[Success]`, mas o log tem
-**46 ocorrências de `'NoneType' object has no attribute 'id'`** — em cada `write_file`,
-`edit_file` e `bash`. Os arquivos **foram** escritos (a wiki existe e é boa), mas o modelo
-viu falha e gastou iterações relendo para conferir.
+The ingest that produced the reference wiki ended in `[Success]`, but its log carries
+**46 occurrences of `'NoneType' object has no attribute 'id'`** — on every `write_file`,
+`edit_file` and `bash`. The files **were** written (the wiki exists and is good), but the
+model saw failure and spent iterations re-reading to check.
 
-Consequências que precisam ser ditas em voz alta:
+Consequences that need saying out loud:
 
-- os **294 s** medidos e o comportamento observado ("ignorou `read_pdf`", "leu em 4
-  faixas") vêm dessa execução degradada. Não são baseline confiável;
-- a causa provável é diferença de harness entre o runner standalone (que usei) e o
-  caminho real do Slack — **mas ninguém verificou isso**;
-- o subagente **improvisa quando não consegue cumprir uma regra**: sem `bash` funcional,
-  inventou a data do `log.md` (usou a do arXiv) em vez de parar; e leu faixas de 10
-  páginas descrevendo-as como 3 blocos. Isto é o prognóstico direto para as regras 8-12:
-  esperar **conformidade parcial**, não obediência.
+- the **294 s** measured and the behaviour observed ("ignored `read_pdf`", "read in four
+  ranges") come from that degraded run. They are not a trustworthy baseline;
+- the likely cause is a harness difference between the standalone runner used and the
+  real Slack path — **but nobody verified that**;
+- the subagent **improvises when it cannot satisfy a rule**: with `bash` failing, it
+  invented the `log.md` date (using the arXiv one) instead of stopping, and read ranges
+  of ten pages while describing them as three blocks. That is the direct prognosis for
+  rules 8-12: expect **partial conformance**, not obedience.
 
-**Ação:** o primeiro item do ensaio de quinta é reproduzir o ingest **pelo Slack**, não
-por CLI, e verificar se os 46 erros somem. Se persistirem, medir S2/S3 contra essa
-realidade e não contra a esperança.
+**Later:** the ingests run through Slack succeeded and produced good pages, so the errors
+did not block the result. They remain unexplained, and the honest reading is that the
+timings in this document are upper bounds from a degraded path.
 
-## 9. Questões em aberto
+## 9. Open questions — all answered on 2026-09-10
 
-1. Qual `<WIKI_ROOT>` — sugestão: `~/.jiuwenswarm/wikis/papers`. **Precisa ser caminho
-   literal e absoluto no YAML**: no Slack o modelo não recebe a seção de diretórios
-   (`runtime_prompt_rail.py:325`) e não descobriria o caminho sozinho.
-2. Qual o ID do canal de papers (o `C0BKNLQ1FR7` atual é o canal de testes geral).
-3. Quais 3 papers.
-4. Há endpoint de embeddings disponível?
+| # | Question | Answer |
+|---|---|---|
+| 1 | `<WIKI_ROOT>` | `/home/renan/.jiuwenswarm/agent/workspace/wikis/papers` — **inside** the agent workspace, so file access there does not trip the external-directory guard. It must be a literal absolute path in the YAML: on Slack the model never receives the directory section (`runtime_prompt_rail.py:325`) |
+| 2 | Papers channel id | `C0C0T5WBAMU`, a **private** channel — hence `groups:history`/`groups:read` and the `message.groups` subscription rather than the `channels:*` pair |
+| 3 | Which papers | SARSI (`2607.12254v2`), AREX (`2607.21461v2`), MetaSkill-Evolve (`2607.05297v1`) |
+| 4 | Embeddings endpoint | `baai/bge-m3` through OpenRouter — see §12 |
 
-Notas sobre o config vivo (`~/.jiuwenswarm/config/config.yaml`):
+Notes on the live config (`~/.jiuwenswarm/config/config.yaml`):
 
-- **não existe bloco `scopes:`** — a §5.3 é escrita do zero, não editada;
-- `allowed_channel_ids` tem só `C0BKNLQ1FR7`. Nomear o canal de papers num scope de
-  `delivery` **já o isenta** dessa lista (`compose.py:228`), então o bot passa a responder
-  lá sem tocar em `allowed_channel_ids`. Comportamento desejado — registrado para não
-  surpreender;
-- o ingest síncrono de ~5 min cabe folgado: o bound de um turno é 3600 s
-  (`_TURN_INITIATOR_TIMEOUT_SECONDS`);
-- **`models.defaults` tem 11 entradas, e as 11 estão com `is_default: true`.** O código
-  pega a primeira (`wiki_tools.py:368`); trocar de modelo exige reordenar ou limpar as
-  flags, não só repor uma chave;
-- **higiene:** `config.yaml`, `.env` e todos os `.bak*`/`.pre-align` estão agora em
-  `0600` (feito). Ao repor os tokens do Slack, **não restaure o backup inteiro** — ele
-  carrega outras diferenças de `models.defaults`; copie só as duas linhas.
+- there was **no `scopes:` block**; §5.3 was written from scratch rather than edited;
+- naming the papers channel in a `delivery` scope **already exempts it** from
+  `allowed_channel_ids` (`compose.py:228`), so the bot answers there without touching
+  that list. Desired behaviour — recorded so it does not surprise anyone;
+- a synchronous ingest of several minutes fits comfortably: the bound on one turn is
+  3600 s (`_TURN_INITIATOR_TIMEOUT_SECONDS`);
+- **`models.defaults` holds 11 entries and all 11 carry `is_default: true`.** The code
+  takes the first (`wiki_tools.py:368`); changing model means reordering or clearing the
+  flags, not just replacing a key;
+- **hygiene:** `config.yaml`, `.env` and every `.bak*`/`.pre-align` are now at `0600`.
+  When restoring Slack tokens, **do not restore a whole backup** — it carries other
+  `models.defaults` differences; copy only the two lines.
 
-## 9.1 Resultado — verificado pelo Slack em 2026-09-10
+## 9.1 Result — verified through Slack on 2026-09-10
 
-A PoC rodou de ponta a ponta pelo canal real, com dois papers.
+The PoC ran end to end through the real channel.
 
-| Critério | Resultado |
+| Criterion | Result |
 |---|---|
-| S1 PDF vira wiki sem intervenção | ✅ |
-| S2 âncoras | ✅ **556** âncoras em 30 páginas |
-| S3 âncoras corretas | ✅ 3 amostras conferidas contra o PDF |
-| S4 índice serve a wiki | ✅ 30 publicadas, FTS com 324 docs |
-| S5 resposta com âncora no canal | ✅ |
-| S6 ingest < 8 min | ⚠️ ~9 min por paper |
+| S1 PDF becomes wiki with no manual step | ✅ |
+| S2 anchors | ✅ **1117** anchors across 45 pages (three papers) |
+| S3 anchors correct | ✅ samples checked against the PDF |
+| S4 the index serves the wiki | ✅ published and searchable |
+| S5 the channel's answer carries anchors | ✅ |
+| S6 ingest < 8 min | ⚠️ ~7-9 min per paper |
 
-    papers  1 → 2      páginas  18 → 30      âncoras  229 → 556
+    papers  1 → 2 → 3      pages  18 → 30 → 45      anchors  229 → 556 → 1117
 
-### O acervo compôs, e isto é o achado principal
+### The library compounded, and that is the main finding
 
-O segundo paper **não** produziu apenas páginas novas: reescreveu as do primeiro.
-`sarsi-agents.md` ganhou 8 menções ao AREX, `recursive-self-improvement.md` 9, e
-`evaluation-framework.md` 4 — e não como citação decorativa, mas como distinção
-conceitual. O agente percebeu que os dois papers usam *"recursive self-improvement"*
-com sentidos diferentes e escreveu uma seção sobre isso na página do conceito.
+The second paper did **not** merely add pages: it rewrote the first paper's.
+`sarsi-agents.md` gained eight references to AREX, `recursive-self-improvement.md` nine,
+and `evaluation-framework.md` four — not as decoration, but as a conceptual distinction.
+The agent noticed the two papers use *"recursive self-improvement"* for different things
+and wrote a section saying so on the concept's page.
 
-É a tese do Karpathy observada — *"the cross-references are already there"* — e é o
-argumento mais forte de que isto não é RAG: um RAG recuperaria os dois trechos e
-deixaria a contradição para o leitor.
+With the third paper the effect strengthened: asked for MetaSkill-Evolve's strength
+against the other two, the answer built a three-way comparison in which each cell was
+anchored, and its caveats used one paper as a ruler on another — SARSI's H1 hypothesis
+(equal-compute efficiency) applied to MetaSkill's evaluation, noting it is not actually
+tested. Nobody wrote that anywhere; it was derived across three sources.
 
-**Consequência para a demo:** o clímax não é a busca, é abrir
-`recursive-self-improvement.md` e mostrar a seção que só existe porque um segundo paper
-entrou.
+This is Karpathy's thesis observed — *"the cross-references are already there"* — and it
+is the strongest argument that this is not RAG: a RAG would retrieve both passages and
+leave the contradiction to the reader.
 
-### Defeito reportado que NÃO existe — a extensão na âncora
+**Consequence for the demo:** the climax is not the search. It is the comparison across
+sources, and the page that exists only because a second paper arrived.
 
-Uma versão anterior desta seção registrava que as âncoras do segundo paper saíam com a
-extensão truncada (`.df` em vez de `.pdf`). **Isso estava errado, e o erro era do
-verificador, não do modelo.**
+### A reported defect that does NOT exist — the anchor extension
 
-A medição tinha passado as âncoras por `sed 's/p[0-9]*//'` para agrupar por arquivo.
-`p[0-9]*` casa um `p` seguido de **zero** ou mais dígitos, portanto casa o `p` de `.pdf`
-e o remove. O `.df` foi produzido pelo próprio comando de verificação.
+An earlier version of this section recorded that the second paper's anchors truncated the
+extension (`.df` instead of `.pdf`). **That was wrong, and the error belonged to the
+checker, not the model.**
 
-Contagem correta sobre a wiki inteira:
+The measurement had piped the anchors through `sed 's/p[0-9]*//'` to group them by file.
+`p[0-9]*` matches a `p` followed by **zero** or more digits, so it matched the `p` in
+`.pdf` and removed it. The `.df` was manufactured by the verification command itself.
 
-    567 âncoras com ".pdf p"        0 âncoras com extensão quebrada
+Correct count across the whole wiki:
 
-Fica registrado como lição de método: **uma medição de conformidade precisa ser
-verificada com o mesmo rigor que o artefato que ela mede.** Um `sed` mal escrito quase
-custou uma reingestão de 9 minutos por paper para consertar um defeito inexistente.
+    567 anchors reading ".pdf p"        0 anchors with a broken extension
+
+Recorded as a method note: **a conformance measurement needs checking as carefully as the
+artefact it measures.** A badly written `sed` nearly bought a nine-minute re-ingest per
+paper to fix nothing. It was not the last such error either — see §14.
 
 ## 10. Evoluções
 
