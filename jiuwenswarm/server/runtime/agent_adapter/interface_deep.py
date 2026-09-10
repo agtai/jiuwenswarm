@@ -394,6 +394,7 @@ from jiuwenswarm.common.mcp_config import (
 )
 from jiuwenswarm.server.runtime.mcp.call_timeout_patch import apply_mcp_call_timeout_patch
 from jiuwenswarm.server.runtime.memory.fts_trigram_patch import apply_fts_trigram_patch
+from jiuwenswarm.server.runtime.memory.bm25_score_patch import apply_bm25_score_patch
 from jiuwenswarm.common.task_loop_config import (
     resolve_task_loop_completion_timeout,
 )
@@ -1580,6 +1581,12 @@ class JiuWenSwarmDeepAdapter:
         # is gated on a meta flag the first startup already set. Silent: chunks
         # survive, hybrid search keeps answering from vectors alone. Idempotent.
         apply_fts_trigram_patch()
+        # Corrects the FTS5 rank->score transform, which inverted the lexical
+        # ranking: rank is negative and more negative is better, but the stock
+        # 1/(1+|rank|) made a better match score lower. Hybrid weights text at 0.3
+        # and filters the merge at 0.7, so a strong keyword hit contributed less
+        # than a weak one and could push a good document under the floor.
+        apply_bm25_score_patch()
         self._instance: DeepAgent | None = None
         self._project_dir: str | None = None
         self._workspace_dir: str = str(get_agent_workspace_dir())

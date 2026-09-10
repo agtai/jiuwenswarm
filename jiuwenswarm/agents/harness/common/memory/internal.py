@@ -163,10 +163,29 @@ def build_fts_query(query: str) -> str:
 
 
 def bm25_rank_to_score(rank: float) -> float:
-    """Convert BM25 rank to similarity score (0-1)."""
-    if rank >= 0:
-        return 1.0 / (1.0 + rank)
-    return 1.0 / (1.0 - rank)
+    """Map an FTS5 ``rank`` to a 0-1 score that grows with match quality.
+
+    FTS5 reports match quality in ``rank`` as a negative number where more
+    negative is better -- which is why the keyword query says ``ORDER BY rank``
+    with no ``DESC``. The previous transform was ``1 / (1 + |rank|)``, so the
+    score *fell* as the match improved and disagreed with the SQL ordering of
+    the very rows it scored.
+
+    That is not cosmetic downstream: hybrid search merges ``0.7 * vector +
+    0.3 * text`` and keeps rows scoring at least ``min_score`` (0.7), so a
+    strong keyword hit contributed less than a weak one and could push a
+    genuinely good document under the floor.
+
+    Match strength maps monotonically into [0, 1): zero strength scores 0, a
+    rank of -3.8 scores 0.79, and nothing reaches 1, so the value stays
+    comparable with the cosine similarities on the vector side.
+    """
+    strength = -float(rank)
+    if strength <= 0.0:
+        # No match strength: FTS5 returns negative ranks for hits, so this is
+        # either a non-hit or a caller passing an already-positive score.
+        return 0.0
+    return strength / (1.0 + strength)
 
 
 def is_memory_path(rel_path: str) -> bool:

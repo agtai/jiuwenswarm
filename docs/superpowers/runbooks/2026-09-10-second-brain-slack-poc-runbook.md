@@ -104,6 +104,32 @@ dropped and never refilled. Nothing raises; the only trace is an INFO line,
 at adapter startup, so on this branch you should not hit it. Delete `memory.db` only if
 you are running without that patch.
 
+### The lexical ranking was also inverted
+
+A second, independent defect in the same subsystem. FTS5 reports match quality in `rank`
+as a negative number where more negative is better -- which is why the kernel's keyword
+query says `ORDER BY rank` with no `DESC`. But `bm25_rank_to_score` mapped it with
+`1 / (1 + |rank|)`, so the score *fell* as the match improved.
+
+Measured on this corpus, for one query's top five rows:
+
+| rank | stock score | corrected |
+|---|---|---|
+| -3.7968 (best) | 0.2085 | 0.7915 |
+| -3.6085 (worst of the five) | 0.2170 | 0.7830 |
+
+Hybrid search merges `0.7 * vector + 0.3 * text` and keeps rows scoring at least 0.7, so
+a document with a vector score of 0.80 and that best keyword hit scored 0.623 and was
+filtered out -- *because* its keyword match was good. Corrected it scores 0.797 and is
+kept. The symptom had been noticed upstream and read as a property of BM25: the kernel
+comments that scores "commonly land 0.1-0.3 after the rank->score transform" and
+compensates with a lower floor on the no-embeddings path.
+
+`jiuwenswarm/server/runtime/memory/bm25_score_patch.py` corrects it, and the copy of the
+same function in `jiuwenswarm/agents/harness/common/memory/internal.py` is fixed directly.
+Both bindings have to be rebound in the kernel: `manager.py` imports the function by name
+at module level, so patching only `internal` would silently do nothing.
+
 ---
 
 ## 4. Chat model
