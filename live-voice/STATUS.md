@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-10 — Mini/VAD300 prepared for user verification; fixes deferred.
+> Updated: 2026-09-10 — two user Mini/VAD300 sessions analyzed; fixes deferred.
 > Default bootstrap reads only Project judgement and Current execution packet.
 > Stop at Completion boundaries unless the task needs wider planning or acceptance.
 
@@ -14,7 +14,13 @@ Mini + server-vad-300 for user verification, and defer repair/classification unt
 environment. WebSocket congestion remains in the record: the user reports it did
 not reproduce in another environment and requests no investigation or repair now.
 The [Mini/VAD300 comparison record](evidence/MINI_VAD300_ENV_COMPARISON_20260910.md)
-owns the issue IDs, prepared configuration and already-executed automated evidence.
+owns M01–M12, prepared configuration and already-executed automated evidence.
+The [two user-session analysis](evidence/MINI_VAD300_USER_SESSIONS_20260910.md)
+records the user's later VAD300 runs and adds M13–M17. Both file Tasks completed,
+but neither meal adjustment applied; full-text delivery, artifact fidelity,
+notification/query latency and diagnostic coverage observations remain open.
+The old multi-second WebSocket input backlog was not observed in these runs;
+that issue remains recorded for the user's cross-environment comparison.
 After the user's clarification, further automated verification is stopped; those
 observations are not user acceptance. The historical
 repair authorizations and next steps below do not reactivate paused work.
@@ -58,15 +64,18 @@ support has been discussed, not implemented.
 
 ### Continuation boundary
 
-**Active packet (2026-09-10):** documentation and private deployment preparation
-for user verification. The dated comparison record identifies the deployed source;
+**Active packet (2026-09-10):** documentation and offline analysis of user-provided
+Mini/VAD300 sessions; private deployment preparation is complete. The dated
+comparison record identifies the deployed source;
 use the existing independent Mini project/data, speed 1.25, minimal reasoning,
 local barge-in off and pinned AgentCore; server VAD has changed from 450 to 300 ms.
 Preserve the original session/files. Record remaining and newly observed issues,
 including WebSocket congestion, without implementing fixes. Cross-environment
 classification and any new repair scope await the user's later decision. No further
 automated tests are requested after the clarification; retain completed test evidence
-without treating it as user acceptance.
+without treating it as user acceptance. The two later user sessions were analyzed
+from existing diagnostics, history, logs and persisted Task/Work/artifact snapshots;
+no new browser/voice/Agent test, product change or service restart was performed.
 
 The following paragraphs describe earlier packets, not current execution orders.
 
