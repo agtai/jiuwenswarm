@@ -928,6 +928,26 @@ the papers channel. Each is a one-line fix. Two are corrected on this branch by 
 modules under `jiuwenswarm/server/runtime/memory/`, following the repository's existing
 `*_patch.py` convention; the third is left alone because it is cosmetic.
 
+> **Verified still present upstream on 2026-09-10.** In `agent-core`
+> (`gitcode.com/openJiuwen/agent-core`) on branch `develop` at `4b3860b5`, all three are
+> byte-identical to what we run. In `jiuwenswarm` on branch `develop` at `029c76a64`, the
+> rank-to-score inversion is also present, because `jiuwenswarm` carries its own copy of
+> that function in `agents/harness/common/memory/internal.py` — and that copy is live code,
+> imported by `interface.py`, `memory_tools.py`, `agent_ws_server.py`, `memory_rpc.py` and
+> `memory_forbidden_rail.py`. So 15.2 has two independent instances in the product.
+> Defects 15.1 and 15.3 are `agent-core`-only: `jiuwenswarm`'s vendored copy predates the
+> trigram migration and that `_index_file` branch.
+>
+> **Upgrading the dependency would fix none of them.** The pin `61becb17` is an ancestor of
+> `agent-core` HEAD and 104 commits behind it, but `memory/lite/manager.py` and
+> `memory/lite/internal.py` have received **zero** commits in that interval, and the files
+> installed in our venv hash identically to HEAD.
+>
+> Two separate reports are therefore needed: one against `agent-core` `develop` covering all
+> three, and one against `jiuwenswarm` `develop` covering 15.2 alone — the latter with a fix
+> ready, since it is the same one-line change already made on
+> `second-brain-slack-poc-renan`.
+
 ### 15.1 The BM25 index emptied itself on every restart
 
 `_ensure_schema` creates `chunks_fts` with `tokenize='trigram'`. SQLite stores the CREATE

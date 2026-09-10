@@ -158,9 +158,36 @@ Unchanged from the kernel: `files`, `chunks` (~256-token chunks, 32 overlap),
 `chunks_fts` (FTS5 trigram, BM25), `chunks_vec` (sqlite-vec), `embedding_cache`, `meta`.
 Chunks, not pages, are the retrieval unit, so one page occupies several rows.
 
-Two defects in that shared code were found by building on it and are patched from
-`jiuwenswarm/server/runtime/memory/`: the FTS table was dropped on every restart and never
-refilled, and the BM25 rank-to-score transform was inverted. Spec §15 has both.
+Three defects in that shared code were found by building on it. Two are corrected on this
+branch by patch modules under `jiuwenswarm/server/runtime/memory/`; the third is cosmetic
+and left alone. Spec §15 describes all three in full.
+
+- **`chunks_fts` was dropped on every restart and never refilled.** `_ensure_schema`
+  creates the table with `tokenize='trigram'` and SQLite stores the CREATE verbatim, so
+  the quotes are in the stored text; `_fts_table_is_legacy` tests for the unquoted
+  `tokenize=trigram` and therefore reports the table it just created as pre-migration. The
+  force-reindex that would refill it is gated on a `meta` flag the first startup already
+  recorded. Measured here: 482 chunks indexed, 0 rows in the FTS table, 0 of 10 questions
+  returning a lexical hit.
+- **The BM25 rank-to-score transform was inverted.** FTS5 reports match quality as a
+  negative `rank` where more negative is better, but `bm25_rank_to_score` mapped it with
+  `1 / (1 + |rank|)`, so the score fell as the match improved. Found by Miguel while
+  writing the cataloguing document.
+- **`_index_file` logs a missing `sys_operation` and then uses an unassigned `content`,**
+  so the caller sees an `UnboundLocalError` instead of the real cause.
+
+> These defects are in shared code, also used by `MemoryRail` and `CodingMemoryRail`, so
+> they are not specific to this PoC. All three were verified still present upstream on
+> **2026-09-10**: in `agent-core` on branch **`develop`** at `4b3860b5`, and — for the
+> rank-to-score inversion, which `jiuwenswarm` carries a second copy of in
+> `agents/harness/common/memory/internal.py` — in `jiuwenswarm` on branch **`develop`** at
+> `029c76a64`. Our pin, `61becb17`, is 104 commits behind `agent-core` HEAD, but
+> `memory/lite/manager.py` and `memory/lite/internal.py` have had **zero** commits in that
+> interval and the installed files are byte-identical to HEAD, so upgrading the dependency
+> would fix none of them. The corrections live on branch
+> **`second-brain-slack-poc-renan`**, pushed to both `agtai/jiuwenswarm` and
+> `harenome/jiuwenswarm-private`; each is a one-line change, so adopting them upstream is a
+> deletion of the patch module rather than a migration.
 
 ---
 
