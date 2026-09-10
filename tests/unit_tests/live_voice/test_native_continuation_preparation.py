@@ -1133,7 +1133,11 @@ async def test_scheduler_socket_failure_wakes_reader_even_if_send_already_marked
     try:
         reader = asyncio.create_task(engine.next_event())
         await asyncio.sleep(0)
-        socket.fail_send_at = socket.send_calls + (1 if failing_send == "facts" else 2)
+        # Result input now travels inside response.create. Only a changed
+        # context needs a separate publication before that response.
+        if failing_send == "facts":
+            fresh["context"] = {**fresh["context"], "context_id": "b" * 64}
+        socket.fail_send_at = socket.send_calls + 1
         fresh["work_events"] = [work_event()]
         with pytest.raises(OpenAIRealtimeNativeInteractionError):
             await engine.update_business_context(fresh["context"], fresh["work_events"])
@@ -1145,6 +1149,7 @@ async def test_scheduler_socket_failure_wakes_reader_even_if_send_already_marked
         assert engine.snapshot().released_audio_count == 1 and not engine._delegates
     finally:
         if reader is not None:
+            reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
         await engine.close()
 

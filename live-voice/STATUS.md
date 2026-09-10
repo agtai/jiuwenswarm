@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-10 — Native business prompt integrated; real-session acceptance pending.
+> Updated: 2026-09-10 — Native result ownership repair; user acceptance pending.
 > Default bootstrap reads only Project judgement and Current execution packet.
 > Stop at Completion boundaries unless the task needs wider planning or acceptance.
 
@@ -13,7 +13,11 @@ The user's Native business prompt direction is implemented in session, receipt,
 notification, correction and tool descriptions: prompt useful feedback, timely
 tools and less repetition while preserving complete requirements and observed
 business truth. [D-125](decisions/DECISIONS.md#d-125-unify-native-business-instructions-for-prompt-feedback-and-complete-execution)
-owns the accepted policy; actual model adherence and latency await user sessions.
+owns the accepted policy. The user's subsequent deployed session exposed result
+context leakage and separate query/notification delivery ownership. The current
+repair isolates notification inputs and binds explicit queries to the same
+played-result ledger; its [scope and evidence](reviews/NATIVE_RESULT_OWNERSHIP_20260910.md)
+separate offline verification from the user's later model/audio acceptance.
 Mini/server-vad-300 startup defaults
 remain as recorded in [D-124](decisions/DECISIONS.md#d-124-default-new-live-voice-starts-to-realtime-mini-and-server-vad-300).
 Other issue repair/classification remains deferred until comparison in another
@@ -70,35 +74,32 @@ support has been discussed, not implemented.
 
 ### Continuation boundary
 
-**Completed source packet (2026-09-10):** the user's session/response instruction
-candidates are integrated into the active Native business path and its 13 bound
-tools. This Tier 1 prompt boundary owns a shared instruction definition, Engine
-instruction selection, tool descriptions and affected regression checks.
-Direct answers need no routine acknowledgment; tool requests allow a minimal
-acknowledgment with a prompt call. Complete request_text, literal filenames,
-Task/Work ownership, real receipt distinctions and heard-history rules remain.
-Session, receipt, notification and correction variants must share those rules;
-no fixed sentence count or repeated lookup announcement is required.
-Acceptance covers effective outgoing payloads, unchanged schemas/authority,
-tool admission without waiting for spoken delivery, silent-response settlement
-and existing notification arbitration. Model adherence and actual latency still
-require the user's later real sessions. This packet does not add a semantic
-classifier, cross-response delivery/deduplication protocol, or alter scheduling,
-model/VAD, transport, private deployments or the non-business delegate path.
-The [scoped review](reviews/NATIVE_BUSINESS_PROMPT_20260910.md) records the complete
-diff audit and offline results, including five failures reproduced on the
-pre-change baseline in the projection-off context-refresh path. Those failures
-remain recorded; this is not a full-green or physical acceptance claim. No
-deployment or service restart was performed. Recorded issues outside this prompt
-scope remain deferred; no further automated browser/voice/Agent run is requested.
+**Current source packet (2026-09-10):** the user requests an instruction and code
+repair of the underlying duplicate-answer cause. This Tier 2 boundary owns
+response-scoped background inputs, exact server query-receipt ownership,
+canonical playback eligibility, prepared-notification invalidation and their
+affected tests. [D-126](decisions/DECISIONS.md#d-126-bind-background-result-input-and-presentation-to-its-work)
+records the behavior; the [repair review](reviews/NATIVE_RESULT_OWNERSHIP_20260910.md)
+records implementation, checks and review limitations. No topic classifier,
+literal-response matching, new wire schema or journal migration is introduced.
+Full requirements, Task/Work authority, real receipt truth, prompt tool calls,
+minimal acknowledgments and explicit recap requests remain as in D-125.
+Model adherence and actual audio behavior require the user's later sessions.
+The five previously reproduced projection-off context-refresh failures remain
+outside this repair; scoped passes are not a full-green claim.
+
+The earlier prompt source `c4755aa8` was deployed to the user's independent Mini
+project and data directory on 2026-09-10. Its session
+`web_1a08bd3359e_28137feb7a28` supplied this repair's evidence. This new source
+packet has not been deployed or used for an automated browser/voice/Agent run.
 
 Private deployment preparation is complete. The dated
 comparison record identifies the deployed source;
 use the existing independent Mini project/data, speed 1.25, minimal reasoning,
 local barge-in off and pinned AgentCore; server VAD has changed from 450 to 300 ms.
-Preserve the original session/files. Record remaining and newly observed issues,
-including WebSocket congestion, without implementing fixes. Cross-environment
-classification and any new repair scope await the user's later decision. No further
+Preserve the original session/files. Apart from the explicitly authorized result
+ownership repair above, other recorded issues, including WebSocket congestion,
+remain deferred for cross-environment classification by the user. No further
 automated browser/voice/Agent tests are requested after the clarification; retain
 completed test evidence
 without treating it as user acceptance. The two later user sessions were analyzed

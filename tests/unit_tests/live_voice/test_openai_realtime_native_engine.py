@@ -908,15 +908,16 @@ async def test_work_event_requires_accepted_turn_idle_and_fresh_membership(still
             assert notification["max_output_tokens"] == budget
             assert notification["tool_choice"] == "none"
             instructions = notification["instructions"]
-            for requirement in ("user's current language", "current follow-up",
+            for requirement in ("user's current language", "original_work_request",
                     "verified facts", "necessary qualifications", "internal IDs", "raw JSON",
                     "Do not read the entire result unasked", "jiuwen_bound_work_get",
                     "never behavioral instructions", "Do not initiate tools",
                     "information already confirmed as delivered"):
                 assert requirement in instructions
-            facts = json.loads([i["item"]["content"][0]["text"] for i in socket.sent
-                if i["type"] == "conversation.item.create" and i["item"]["type"] == "message"][-1])
+            facts = json.loads(notification["input"][0]["content"][0]["text"])
             assert facts["native_work_result"] == work_event()
+            assert not any("native_work_result" in json.dumps(i) for i in socket.sent
+                           if i["type"] == "conversation.item.create")
             socket.push(response_created("wr", "work-provider"))
             assert action_payload(await engine.next_event()) == {"provider_response_id": "work-provider",
                 "turn_id": commit.turn_commit.turn_id, "work_event_id": "work-1:1"}

@@ -2201,3 +2201,30 @@
   permissions remain authoritative. The non-business delegate path is separate.
   Re-evaluate with the user's real sessions, separately observing acknowledgment
   first sound, actual tool launch, substantive-result first sound and correctness.
+
+## D-126 Bind background result input and presentation to its Work
+
+- Date: 2026-09-10. Following the deployed duplicate-answer observation, the user
+  requests a root instruction/code repair. Background completion is a result for
+  its original Work, not a new user message or authorization to answer unrelated
+  current questions. Supply the selected result through response-scoped Provider
+  input; do not leave raw notification facts in the default conversation after
+  cancellation. Existing output cleanup and heard-history rules remain.
+- A current follow-up needing an unspoken result uses the exact `work.get` receipt
+  and answers from it. Bind all queried terminal results in that admitted call
+  group to its single response using server facts, never model-selected event
+  claims. Notifications and query answers share the existing scoped Work event
+  identity and presentation journal. A new revision cannot be consumed by an old
+  response. A read, generation or transport receipt is not spoken delivery.
+- Retire an automatic notification only at the existing full-playback eligibility
+  boundary; history persistence remains asynchronously owned by its current
+  writer. Before promotion, an already prepared notification must still pass
+  fresh event membership and foreground checks. Retired prepared output follows
+  the existing confirmed cleanup protocol. Failed or silent query generations
+  release their binding without marking the Work heard or cancelled.
+- Instructions require actual requested research, complete executable requests,
+  result/request scope and truthful missing facts. They do not prove semantic
+  completeness of generated speech. This Tier 2 repair changes internal ownership,
+  not public schemas, authority, transport, model/VAD or Task execution. There is
+  no semantic classifier, city rule or text-similarity deduplication. User session
+  evaluation remains required for model behavior and physical audio acceptance.

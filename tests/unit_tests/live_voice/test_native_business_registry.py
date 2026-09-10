@@ -332,3 +332,69 @@ async def test_project_rebound_while_agent_resource_waits_has_zero_work_or_agent
         if pending: await asyncio.gather(pending,return_exceptions=True)
         await env.registry.stop()
         await env.harness.composition.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ack_before_done", [False, True])
+async def test_queried_results_retire_notifications_only_at_canonical_played_history(tmp_path, monkeypatch, ack_before_done):
+    from tests.unit_tests.live_voice import test_product_composition_registry as f
+    from tests.unit_tests.live_voice.test_native_work_runtime import admission, terminal
+    env = await make_registry(tmp_path, monkeypatch)
+    router = env.registry._native_business
+    route = env.registry._p2_routes[(env.binding.scope.session_id, env.binding.interaction_id)]
+    history = f._HistoryWriter()
+    route.activation_lease._runtime._history_writer = history
+    async def send(proposal, request_id):
+        result = await env.registry.handle_native_propose(
+            params=f._native_propose_params(env.binding, env.capability, proposal),
+            request_id=request_id, session_id=env.binding.scope.session_id)
+        assert result.ok, result.payload
+        return result.payload["result"]
+    async def runner(control):
+        return "Verified facts, with their source and limitations."
+    try:
+        works = []
+        for index in range(3):
+            work = await router.works().start(**admission(runner, current_scope=env.binding.scope,
+                request=f"work-request-{index}", input_id=f"work-input-{index}"))
+            works.append(await terminal(router.works(), work))
+        for index in range(2):
+            await call(env, "work.get", stem=f"query-{index}", target_id=works[index].work_id)
+        ids = [router._work_event_id(work) for work in works]
+        pending = lambda: [router._work_journal.presented(event, env.binding.scope) for event in ids]
+        assert pending() == [False, False, False]
+        ended = f._native_done_proposal(env.binding, env.source)
+        await send(replace(ended, provider_done=replace(ended.provider_done,
+            transcript=None, transcript_event_id=None)), "source-ended")
+        speak = f._native_speak_proposal(env.binding)
+        reply = await send(replace(speak, action=replace(speak.action, action_id="query-answer",
+            payload=(("provider_response_id", "query-answer"), ("provider_call_id", "query-0-call"),
+                     ("turn_id", "native-turn-1")))), "query-answer")
+        ref = ResponseRef(**reply["response"])
+        assert pending() == [False, False, False]
+        pcm = f._native_audio_proposal(env.binding, ref)
+        audio = await send(replace(pcm, audio_observation=replace(pcm.audio_observation,
+            provider_response_id="query-answer")), "query-audio")
+        terminal_proposal = f._native_done_proposal(env.binding, ref)
+        terminal_proposal = replace(terminal_proposal, provider_done=replace(terminal_proposal.provider_done,
+            provider_event_id="query-done", provider_response_id="query-answer",
+            transcript="Both verified results, including their limitations."))
+        if not ack_before_done:
+            await send(terminal_proposal, "query-done")
+        assert pending() == [False, False, False]
+        params = f._native_ack_params(env.binding, env.capability, ref,
+            unit_id=audio["presentation_unit"]["unit_id"])
+        ack = await env.registry.handle_native_presentation_ack(params=params,
+            request_id="query-heard", session_id=env.binding.scope.session_id)
+        assert ack.ok, ack.payload
+        if ack_before_done:
+            assert pending() == [False, False, False]
+            await send(terminal_proposal, "query-done")
+        assert pending() == [True, True, False]
+        await asyncio.wait_for(history.native_written.wait(), 1)
+        assert len(history.native_assistants) == 1
+        assert router.work_events(env.binding.scope)[0]["event_id"] == ids[2]
+        assert not env.manager.agent.executions
+    finally:
+        await env.registry.stop()
+        await env.harness.composition.stop()

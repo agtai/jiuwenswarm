@@ -1122,6 +1122,22 @@ class OpenAIRealtimeNativeInteractionEngine:
         async with self._business_send_lock:
             return await self._publish_business_facts_locked(payload, publication)
 
+    def _work_response_input(self, work: dict[str, object]) -> list[dict[str, object]]:
+        """Scope notification input to its result, never the latest conversation.
+
+        Explicit input replaces the Provider's default input. It must not be
+        published with conversation.item.create: cancelled output cleanup would
+        leave that synthetic user message (and its raw result) behind.
+        """
+        context = self._business_context or {}
+        source = next((item for item in context.get("works", [])
+                       if item.get("work_id") == work["work_id"]
+                       and item.get("revision") == work["revision"]), {})
+        return [self._business_facts_snapshot({
+            "native_work_result": work,
+            "original_work_request": source.get("instruction"),
+        })[0]["item"]]
+
     @staticmethod
     def _business_facts_snapshot(facts):
         payload = {"item": {
@@ -1848,7 +1864,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                     self._profile_business_wait("actual_playback", response=current)
                     return
             context_refreshed = False
-            facts_sent = False
+            scoped_work_input = False
             if not self._response_request_queue:
                 if not allow_work or not self._work_ready(preparing=draining):
                     return
@@ -1883,6 +1899,7 @@ class OpenAIRealtimeNativeInteractionEngine:
                         turn_id=self._business_accepted_turn, delegate_call_id=None,
                         work_event_id=work["event_id"], payload={"response": {
                             "metadata": {"work_event_id": work["event_id"]}, "tool_choice": "none",
+                            "input": self._work_response_input(work),
                             "max_output_tokens": self._max_output_tokens,
                             "instructions": _WORK_NOTIFICATION_INSTRUCTIONS,
                         }})
@@ -1891,11 +1908,10 @@ class OpenAIRealtimeNativeInteractionEngine:
                     if draining:
                         request.predecessor = current.runtime_ref
                         request.preparation_deadline = asyncio.get_running_loop().time() + _PREPARED_RESPONSE_TIMEOUT_SECONDS
-                    await self._send_business_facts({"native_work_result": work, "native_business_context": self._business_context})
                     if not self._inflight_request_current(request):
                         self._retire_unsent_request(request)
                         return
-                    facts_sent = True
+                    scoped_work_input = True
             else:
                 request = self._response_request_queue.popleft()
                 self._inflight_response_request = request
@@ -1905,7 +1921,7 @@ class OpenAIRealtimeNativeInteractionEngine:
             if draining and request.predecessor is None:
                 request.predecessor = current.runtime_ref
                 request.preparation_deadline = asyncio.get_running_loop().time() + _PREPARED_RESPONSE_TIMEOUT_SECONDS
-            if (self._receipt_projection and not request.receipt_only and not facts_sent and (request.delegate_call_id is not None
+            if (self._receipt_projection and not request.receipt_only and not scoped_work_input and (request.delegate_call_id is not None
                     or request.business_recovery or request.work_event_id is not None)):
                 if self._business_refresh is not None and not context_refreshed:
                     refresh_epoch = self._business_receipt_epoch

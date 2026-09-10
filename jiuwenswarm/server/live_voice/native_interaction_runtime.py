@@ -890,6 +890,24 @@ class NativeInteractionRuntimeOwner:
             self._current_response = retained_response
             return admission
 
+    def business_query_receipts(self, call_id: str, turn_id: str) -> tuple[str, ...]:
+        """Sealed Work queries in the exact successor's business call group.
+
+        The caller cannot select Provider-supplied event IDs or another turn's
+        results. Reading these receipts does not establish presentation.
+        """
+        from .native_business_contract import NativeBusinessProposal
+        self._require_open()
+        source = self._delegates_by_call.get(call_id)
+        if source is None:
+            raise NativeInteractionRuntimeError("NATIVE_DELEGATE_RESPONSE_UNKNOWN", "Unknown query response source")
+        if source.proposal.turn_id != turn_id:
+            raise NativeInteractionRuntimeError("NATIVE_DELEGATE_RESPONSE_TURN_MISMATCH", "SPEAK must bind the exact source turn")
+        return tuple(result.canonical_text for sibling_id, result in self._prepared_delegate_results.items()
+                     if (sibling := self._delegates_by_call[sibling_id]).source_response == source.source_response
+                     and isinstance(sibling.proposal, NativeBusinessProposal)
+                     and sibling.proposal.business.operation == "work.get")
+
     def _retire_terminal_predecessor_audio_locked(self) -> None:
         predecessor = self._current_response
         if predecessor is None or (

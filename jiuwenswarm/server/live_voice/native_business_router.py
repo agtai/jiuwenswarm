@@ -205,15 +205,19 @@ class NativeBusinessRouter:
             return getattr(error, "reason", "NATIVE_TASK_ORIGIN_UNAVAILABLE")
         return None
 
+    @staticmethod
+    def _work_event_id(snapshot):
+        return "native-work-event-" + hashlib.sha256(canonical_json_bytes({
+            "scope": snapshot.scope.to_dict(), "work_id": snapshot.work_id,
+            "revision": snapshot.revision, "state": snapshot.state.value,
+        })).hexdigest()
+
     def work_events(self, scope):
         events = []
         for snapshot in self.works().list(scope=scope):
             if snapshot.state.value not in {"completed", "failed", "unknown", "cancelled"}:
                 continue
-            identity = "native-work-event-" + hashlib.sha256(canonical_json_bytes({
-                "scope": scope.to_dict(), "work_id": snapshot.work_id, "revision": snapshot.revision,
-                "state": snapshot.state.value,
-            })).hexdigest()
+            identity = self._work_event_id(snapshot)
             if self._work_journal.presented(identity, scope) or self._work_journal.suppressed(identity, scope):
                 continue
             events.append({"event_id": identity, "work_id": snapshot.work_id, "revision": snapshot.revision,
@@ -596,22 +600,60 @@ class NativeBusinessRouter:
             raise NativeInteractionRuntimeError("NATIVE_WORK_PRESENTATION_CAPACITY", "work presentation ledger is full")
         response_id = "native-work-response-" + hashlib.sha256(event_id.encode()).hexdigest()
         admission = await route.native_runtime_owner.accept_work_provider_response(provider_response_id, response_id, turn_id=turn_id)
-        self._work_presentations[(route.binding.scope, admission.response)] = event_id
+        self._work_presentations[(route.binding.scope, admission.response)] = (event_id,)
+        return admission
+
+    async def admit_business_response(self, route, *, provider_response_id, call_id, turn_id):
+        """Bind explicit result queries and notifications to one delivery ledger."""
+        owner, scope = route.native_runtime_owner, route.binding.scope
+        receipts = owner.business_query_receipts(call_id, turn_id)
+        if receipts and len(self._work_presentations) >= 128:
+            raise NativeInteractionRuntimeError("NATIVE_WORK_PRESENTATION_CAPACITY", "work presentation ledger is full")
+        admission = await owner.accept_delegate_provider_response(provider_response_id, call_id, turn_id)
+        # Admission freezes every sibling call onto the same response. Inspect
+        # server receipts, not a model's claim that it used a particular result.
+        events = set()
+        for text in receipts:
+            receipt = json.loads(text)
+            if receipt.get("operation") != "work.get" or receipt.get("status") == "rejected":
+                continue
+            fact = receipt.get("work")
+            if not isinstance(fact, dict):
+                continue
+            snapshot = next((item for item in self.works().list(scope=scope)
+                             if item.work_id == fact.get("work_id")), None)
+            # A later revision/state may have appeared while the query's answer
+            # waited. It must never be consumed by that old answer's ACK.
+            if (snapshot is None or snapshot.state.value not in {"completed", "failed", "unknown", "cancelled"}
+                    or snapshot.to_dict() != fact):
+                continue
+            identity = self._work_event_id(snapshot)
+            if not self._work_journal.presented(identity, scope) and not self._work_journal.suppressed(identity, scope):
+                events.add(identity)
+        if events:
+            self._work_presentations[(scope, admission.response)] = tuple(sorted(events))
         return admission
 
     def acknowledge_work(self, route, response):
         key = (route.binding.scope, response)
-        event_id = self._work_presentations.get(key)
-        if event_id is not None:
-            self._work_journal.mark_presented(event_id, route.binding.scope)
+        events = self._work_presentations.get(key)
+        if events is not None:
+            for event_id in events:
+                self._work_journal.mark_presented(event_id, route.binding.scope)
             self._work_presentations.pop(key, None)
             self.works().wake_observers(route.binding.scope)
 
+    def release_unheard_work_response(self, route, response):
+        # A failed or transcript-free generation cannot produce canonical heard
+        # history. Release its in-memory binding without consuming the result.
+        self._work_presentations.pop((route.binding.scope, response), None)
+
     def interrupt_work_presentation(self, route, response):
         key = (route.binding.scope, response)
-        event_id = self._work_presentations.get(key)
-        if event_id is not None:
-            self._work_journal.mark_suppressed(event_id, route.binding.scope, "speech_interrupted")
+        events = self._work_presentations.get(key)
+        if events is not None:
+            for event_id in events:
+                self._work_journal.mark_suppressed(event_id, route.binding.scope, "speech_interrupted")
             self._work_presentations.pop(key, None)
             self.works().wake_observers(route.binding.scope)
 

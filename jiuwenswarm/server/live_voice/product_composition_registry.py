@@ -5700,6 +5700,8 @@ class AgentServerProductCompositionRegistry:
                             "Native completion must be a standalone observation",
                         )
                     accepted = await owner.accept_provider_done(proposal.provider_done)
+                    if not proposal.provider_done.completed or not proposal.provider_done.transcript:
+                        self._native_business.release_unheard_work_response(route, proposal.provider_done.response)
                     history = await owner.history_admission(
                         proposal.provider_done.response
                     )
@@ -5777,6 +5779,9 @@ class AgentServerProductCompositionRegistry:
                             proposal.action.action_id.encode("utf-8")
                         ).hexdigest()
                         admission = await owner.accept_provider_response(provider_response_id, response_id, turn_id=turn_id)
+                    elif route.native_business_enabled:
+                        admission = await self._native_business.admit_business_response(route,
+                            provider_response_id=provider_response_id, call_id=call_id, turn_id=turn_id)
                     else:
                         admission = await owner.accept_delegate_provider_response(
                             provider_response_id, call_id, turn_id,
