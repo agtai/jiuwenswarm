@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-09 — interruption/query scoped human acceptance passed.
+> Updated: 2026-09-10 — Mini/VAD300 prepared for user verification; fixes deferred.
 > Default bootstrap reads only Project judgement and Current execution packet.
 > Stop at Completion boundaries unless the task needs wider planning or acceptance.
 
@@ -8,6 +8,16 @@
 
 **PARTIAL — bounded repairs and user acceptance exist; the full product is not
 feature complete or a newly accepted controlled candidate.**
+
+The current user decision is to record the Mini session observations, prepare
+Mini + server-vad-300 for user verification, and defer repair/classification until comparison in another
+environment. WebSocket congestion remains in the record: the user reports it did
+not reproduce in another environment and requests no investigation or repair now.
+The [Mini/VAD300 comparison record](evidence/MINI_VAD300_ENV_COMPARISON_20260910.md)
+owns the issue IDs, prepared configuration and already-executed automated evidence.
+After the user's clarification, further automated verification is stopped; those
+observations are not user acceptance. The historical
+repair authorizations and next steps below do not reactivate paused work.
 
 The user accepted audible tearing and the earlier browser first-sound metric
 for the scoped repair. The later human recheck confirms request-specific early
@@ -34,7 +44,8 @@ fixes; a separate baseline transport probe also reproduced long sends and TCP
 retransmission without either changed module. The two commits' scoped checks
 passed on their exact source. Local synchronous Code/SDK initialization also
 blocks Task receipt delivery and remains unrepaired. The originating cause of
-the separate transport degradation is still unresolved. The
+the separate transport degradation was unresolved in that historical control;
+the user's current environment observation and deferral apply above. The
 broader integrated Task/audio boundary remains PARTIAL; the scoped interruption,
 query and file-Task human journey is now accepted, without a stable-latency claim.
 User-end to headphone-first-sound still requires the agreed recording calibration.
@@ -46,6 +57,18 @@ support has been discussed, not implemented.
 ## Current execution packet
 
 ### Continuation boundary
+
+**Active packet (2026-09-10):** documentation and private deployment preparation
+for user verification. The dated comparison record identifies the deployed source;
+use the existing independent Mini project/data, speed 1.25, minimal reasoning,
+local barge-in off and pinned AgentCore; server VAD has changed from 450 to 300 ms.
+Preserve the original session/files. Record remaining and newly observed issues,
+including WebSocket congestion, without implementing fixes. Cross-environment
+classification and any new repair scope await the user's later decision. No further
+automated tests are requested after the clarification; retain completed test evidence
+without treating it as user acceptance.
+
+The following paragraphs describe earlier packets, not current execution orders.
 
 The user paused the broad six-hour push and requested discussion rather than
 100% completion. The later three-fix implementation/recheck and interruption/
@@ -60,11 +83,12 @@ boundaries, risk and verification order. Completed passive diagnostics remain in
 the [diagnostic extension record](reviews/DIAGNOSTIC_TIMING_EXTENSION_20260909.md).
 The user-requested [endpoint frame follow-up](reviews/ENDPOINT_FRAME_DIAGNOSTICS_20260909.md)
 adds per-frame input timings and passive heartbeat RTT for a new recording;
-the 450 ms VAD setting remains fixed and Provider-internal timing remains unobserved.
+that historical run fixed VAD at 450 ms; Provider-internal timing remains unobserved.
 The [calibration runbook](runbooks/TIMING_CALIBRATION.md) owns physical measurement.
 The pinned AgentCore installation package is the user's explicit choice for this
-workspace. Work/projectless, Task intent/result semantics item 4, model changes
-and the broad productization backlog remain excluded.
+workspace. Work/projectless, Task intent/result semantics item 4 and the broad
+productization backlog remain excluded. The current Mini/VAD300 change is the
+explicit exception to the earlier model/endpoint freeze.
 
 Accepted repair behavior baseline: `b4aa449017`, gpt-realtime-2.1 / speed 1.25,
 minimal / server-vad-450, AgentCore package 0.1.16+jiuwenswarm.responses2.
@@ -74,9 +98,9 @@ owns its exact session, observed Agent selection and evidence limits. This close
 the two repairs' human recheck, not the paused wider backlog.
 No change to a source installation, proxy, NIC or production endpoint is implied.
 The results and rollback records own successful/failed journeys and timing
-boundaries. Low-load and pre-fix controls are complete; next repair the isolated
-local event-loop blockers and locate the separate transport degradation, finish
-the voice adjustment journey, then complete the agreed human/physical calibration. No stable-latency
+boundaries. Low-load and pre-fix controls are complete. The earlier proposed
+event-loop/transport repairs and full adjustment/calibration follow-up are paused
+under the current record-first decision. No stable-latency
 claim can be made from the successful short response alone.
 
 Earlier controlled deployment evidence: `f85f0e33f2`, gpt-realtime-2.1, speed 1.25,
