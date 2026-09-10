@@ -87,10 +87,22 @@ from two different models are not comparable, and nothing detects the mismatch f
 rm ~/.jiuwenswarm/agent/workspace/memory/memory.db
 ```
 
-The same applies after a migration that alters the FTS schema. We hit a state where
-`chunks` held 114 rows and `chunks_fts_docsize` held 0 — the trigram migration had
-dropped the table and only rewrites files whose content changed, so an unchanged wiki was
-never reindexed. Search silently returned nothing. Deleting the database is the fix.
+### The BM25 index used to empty itself on every restart
+
+If you see `chunks` holding rows while `chunks_fts_docsize` holds 0, the lexical half of
+hybrid search is dead and only the vector channel is answering. The cause is upstream, in
+`openjiuwen/core/memory/lite/manager.py`: `_ensure_schema` creates the table with
+`tokenize='trigram'` (quoted, and SQLite stores the CREATE verbatim) while
+`_fts_table_is_legacy` looks for the unquoted `tokenize=trigram`. The substring never
+matches, so the table the manager just created is read as legacy and dropped — on every
+startup. The force-reindex that would refill it is gated on a `ftsTrigram` flag in `meta`
+that the first startup already recorded, so from the second boot onwards the table is
+dropped and never refilled. Nothing raises; the only trace is an INFO line,
+`Migrating chunks_fts from unicode61 to trigram`, which repeats on every boot.
+
+`jiuwenswarm/server/runtime/memory/fts_trigram_patch.py` fixes both halves and is applied
+at adapter startup, so on this branch you should not hit it. Delete `memory.db` only if
+you are running without that patch.
 
 ---
 

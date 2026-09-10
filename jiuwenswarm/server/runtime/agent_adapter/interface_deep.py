@@ -393,6 +393,7 @@ from jiuwenswarm.common.mcp_config import (
     preflight_mcp_server_reachable,
 )
 from jiuwenswarm.server.runtime.mcp.call_timeout_patch import apply_mcp_call_timeout_patch
+from jiuwenswarm.server.runtime.memory.fts_trigram_patch import apply_fts_trigram_patch
 from jiuwenswarm.common.task_loop_config import (
     resolve_task_loop_completion_timeout,
 )
@@ -1572,6 +1573,13 @@ class JiuWenSwarmDeepAdapter:
         # killed remote MCP server fails fast instead of hanging on the MCP
         # SDK's 300s SSE read timeout. Idempotent (module-level _PATCHED guard).
         apply_mcp_call_timeout_patch()
+        # Keeps openjiuwen from dropping the BM25 index on every restart: its
+        # trigram-migration check looks for an unquoted tokenize=trigram while
+        # _ensure_schema writes it quoted, so a freshly created trigram table is
+        # read as legacy and dropped, and the force-reindex that would refill it
+        # is gated on a meta flag the first startup already set. Silent: chunks
+        # survive, hybrid search keeps answering from vectors alone. Idempotent.
+        apply_fts_trigram_patch()
         self._instance: DeepAgent | None = None
         self._project_dir: str | None = None
         self._workspace_dir: str = str(get_agent_workspace_dir())
