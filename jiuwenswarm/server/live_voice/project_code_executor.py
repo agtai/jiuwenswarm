@@ -5125,6 +5125,11 @@ class DirectProjectCodeExecutorAdapter:
     async def _source_instruction(self, item):
         source = item.spec.native_source
         if source is None:
+            if self._durability_store is not None:
+                expanded = await asyncio.to_thread(
+                    self._durability_store.adjustment_queue.execution_instruction, item)
+                if expanded is not None:
+                    return expanded
             return item.spec.instruction
         # Store verifies the complete update/retry lineage. A changed digest
         # alone must never manufacture evidence of a legitimate Task update.

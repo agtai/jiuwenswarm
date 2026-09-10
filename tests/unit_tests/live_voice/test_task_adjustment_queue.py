@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import asyncio
 import json
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +20,11 @@ from tests.unit_tests.live_voice.test_persistent_task_core import (
 
 def _completed(tmp_path):
     return _successor_fixture(tmp_path, "changes.sqlite3", outcome=TerminalOutcome.COMPLETED)
+
+
+def _expanded(store, task):
+    return store.adjustment_queue.execution_instruction(SimpleNamespace(
+        task_id=task.task_id, attempt_id=task.attempt_id, scope=task.scope, spec=task.spec))
 
 
 def test_completed_change_is_durable_and_successor_replay_is_exactly_once(tmp_path):
@@ -40,8 +46,8 @@ def test_completed_change_is_durable_and_successor_replay_is_exactly_once(tmp_pa
     child = reopened.get_task(facts["continuation_task_id"], _scope())
     assert child.predecessor_task_id == original.task_id and child.revision_number == 2
     assert command.payload["adjustment"] in child.spec.instruction
-    assert "changes-result.txt" in child.spec.instruction
-    assert original.spec.instruction in child.spec.instruction
+    assert "changes-result.txt" in _expanded(reopened, child)
+    assert original.spec.instruction in _expanded(reopened, child)
     assert child.spec.context == original.spec.context
     assert facts["adjustment_state"] == "pending", "queued successor is not a saved change"
     assert reopened.events(original.task_id, _scope()) == before
@@ -170,8 +176,9 @@ def test_changes_are_serial_and_failure_never_becomes_saved_success(tmp_path, ou
         assert [item["adjustment_state"] for item in facts] == ["applied", "pending"]
         child = store.get_task(facts[1]["continuation_task_id"], _scope())
         assert child.predecessor_task_id == first.task_id
-        assert child.spec.instruction.count("original_requirements") == 1, "no recursive instruction growth"
-        assert "saved revision" in child.spec.instruction and "Change 1" in child.spec.instruction
+        expanded = _expanded(store, child)
+        assert expanded.count("original_requirements") == 1, "no recursive instruction growth"
+        assert "saved revision" in expanded and "Change 1" in expanded
     else:
         assert all(item["adjustment_state"] == "rejected" for item in facts)
         if outcome is TerminalOutcome.INTERRUPTED:
@@ -201,6 +208,149 @@ def test_followup_transaction_rollback_recovery_and_corrupt_binding(tmp_path, mo
     with pytest.raises(FormalTaskViolation, match="receipt binding"):
         reopened.adjustment_queue.advance(policy=core._admission_policy)
     assert reopened.counts()["tasks"] == 2
+
+
+def test_maximum_multibyte_change_survives_restart_without_wire_expansion(tmp_path):
+    database, store, _, core, original, _, _ = _completed(tmp_path)
+    change = "改" * 1365 + "!"
+    assert len(change.encode("utf-8")) == 4096
+    command, grant = _adjust(original.task_id, change)
+    assert core.execute(command, grant, now=NOW).ok
+    store = SqliteTaskStore(database)
+    assert store.adjustment_queue.advance(policy=core._admission_policy)
+    child_id = store.adjustment_queue.facts(original.task_id, _scope())["followup_adjustment"]["continuation_task_id"]
+    child = store.get_task(child_id, _scope())
+    assert child.spec.instruction == change
+    expanded = _expanded(store, child)
+    assert len(expanded.encode("utf-8")) > 4096
+    assert change in expanded and original.spec.instruction in expanded
+    assert "immutable result" in expanded
+    assert _expanded(SqliteTaskStore(database), child) == expanded
+    assert not store.adjustment_queue.advance(policy=core._admission_policy)
+    assert store.counts()["tasks"] == 2
+    assert store.get_task(original.task_id, _scope()) == original
+
+
+def test_expansion_keeps_original_and_adjustment_native_speech_after_reopen(tmp_path):
+    from jiuwenswarm.common.schema.live_voice_contract_v2 import CommandEnvelope
+    from tests.unit_tests.live_voice.test_native_task_source import source, PROPOSAL
+    database = tmp_path / "native-expansion.sqlite3"
+    store = SqliteTaskStore(database)
+    core = PersistentTaskCore(store, _Executor())
+    request = _create(tmp_path, instruction=PROPOSAL)
+    original_speech = "原始要求：保留上海出发、全部日期和输入文件。" * 60
+    change_speech = "修改要求：周六中午烧鹅，周日中午茶点，其余不变。" * 60
+    native = source(scope=_scope())
+    native = replace(native, transcript=replace(native.transcript, transcript=original_speech))
+    value = request.envelope.to_dict()
+    value["payload"]["native_source"] = native.to_dict()
+    created = core.execute(CommandEnvelope.from_dict(value), request.authorization, context=request.context, now=NOW)
+    assert created.ok
+    item = store.claim_outbox("original")
+    store.complete_outbox(item, executor_ref=f"legacy:{item.attempt_id}", observations=_observations(
+        item, outcome=TerminalOutcome.COMPLETED, result_text="Complete saved itinerary.",
+        result_artifacts=(TaskResultArtifact("itinerary.md", hashlib.sha256(b"saved").hexdigest()),)))
+    original = store.get_task(created.result["task_id"], _scope())
+    command, grant = _adjust(original.task_id, PROPOSAL)
+    adjusted_source = replace(native, operation="task.adjust", target_id=original.task_id,
+        expected_revision=original.revision_number, source_identity="native-business:" + "b" * 64,
+        transcript=replace(native.transcript, transcript=change_speech))
+    value = command.to_dict()
+    value["payload"]["native_source"] = adjusted_source.to_dict()
+    assert core.execute(CommandEnvelope.from_dict(value), grant, now=NOW).ok
+    reopened = SqliteTaskStore(database)
+    assert reopened.adjustment_queue.advance(policy=core._admission_policy)
+    child_item = reopened.claim_outbox("continued")
+    expanded = reopened.adjustment_queue.execution_instruction(child_item)
+    assert len(expanded.encode("utf-8")) > 4096
+    assert original_speech in expanded and change_speech in expanded
+    assert "Complete saved itinerary." in expanded and "itinerary.md" in expanded
+    assert len(child_item.spec.instruction.encode("utf-8")) <= 4096
+    assert store.get_task(original.task_id, _scope()) == original
+
+
+def test_previously_compiled_successor_still_loads_exact_instruction(tmp_path, monkeypatch):
+    from jiuwenswarm.common.schema.live_voice_contract_v2 import CommandEnvelope
+    database, store, _, core, original, _, _ = _completed(tmp_path)
+    command, grant = _adjust(original.task_id, "Add dinner; keep all dates.")
+    assert core.execute(command, grant, now=NOW).ok
+    queue = store.adjustment_queue
+    successor = queue._successor
+    def legacy_successor(command, task, result, c, *, original):
+        envelope, spec = successor(command, task, result, c, original=original)
+        instruction = queue._execution_instruction(command, original, result)
+        value = envelope.to_dict()
+        value["payload"]["instruction"] = instruction
+        return CommandEnvelope.from_dict(value), replace(spec, instruction=instruction)
+    monkeypatch.setattr(queue, "_successor", legacy_successor)
+    assert queue.advance(policy=core._admission_policy)
+    item = store.claim_outbox("legacy-dispatch")
+    assert _expanded(SqliteTaskStore(database), store.get_task(item.task_id, item.scope)) == item.spec.instruction
+
+
+@pytest.mark.parametrize("changed", ["scope", "attempt", "spec"])
+def test_successor_context_requires_exact_scope_attempt_and_spec(tmp_path, changed):
+    _, store, _, core, original, _, _ = _completed(tmp_path)
+    command, grant = _adjust(original.task_id, "Add dinner.")
+    assert core.execute(command, grant, now=NOW).ok
+    assert store.adjustment_queue.advance(policy=core._admission_policy)
+    item = store.claim_outbox("context-read")
+    before = store.counts()
+    if changed == "scope":
+        item = replace(item, scope=replace(item.scope, session_id="another-session"))
+    elif changed == "attempt":
+        item = replace(item, attempt_id="unrelated-attempt")
+    else:
+        item = replace(item, spec=replace(item.spec, instruction="Delete the original."))
+    with pytest.raises(FormalTaskViolation):
+        store.adjustment_queue.execution_instruction(item)
+    assert store.counts() == before
+
+
+def test_missing_continuation_ledger_cannot_fall_back_to_partial_instruction(tmp_path):
+    _, store, _, core, original, _, _ = _completed(tmp_path)
+    command, grant = _adjust(original.task_id, "Change dinner only.")
+    assert core.execute(command, grant, now=NOW).ok
+    assert store.adjustment_queue.advance(policy=core._admission_policy)
+    item = store.claim_outbox("missing-context")
+    with store._transaction() as c:
+        c.execute("DELETE FROM task_adjustment_queue_v1 WHERE command_id=?", (command.command_id,))
+    before = store.counts()
+    with pytest.raises(FormalTaskViolation, match="retained context"):
+        store.adjustment_queue.execution_instruction(item)
+    assert store.counts() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("startup", [False, True])
+async def test_invalid_derived_command_settles_once_and_unrelated_dispatch_runs(tmp_path, monkeypatch, startup):
+    from jiuwenswarm.common.schema.live_voice_contract_v2 import ContractViolation, ErrorCode
+    database, store, executor, core, original, _, _ = _completed(tmp_path)
+    command, grant = _adjust(original.task_id, "Add dinner.")
+    assert core.execute(command, grant, now=NOW).ok
+    def invalid(*args, **kwargs):
+        raise ContractViolation(ErrorCode.INVALID_ARGUMENT, "INVALID_TEXT", "derived command rejected")
+    monkeypatch.setattr(store.adjustment_queue, "_successor", invalid)
+    before = store.counts()
+    assert store.adjustment_queue.advance(policy=core._admission_policy)
+    assert store.counts() == before
+    assert not core.execute(command, grant, now=NOW).ok
+    assert core.execute(command, grant, now=NOW).error.reason == "TASK_ADJUSTMENT_FOLLOWUP_INVALID"
+    assert not store.adjustment_queue.advance(policy=core._admission_policy)
+    assert executor.dispatches == [] and executor.adjustments == []
+    store = SqliteTaskStore(database)
+    core = PersistentTaskCore(store, executor)
+    request = _create(tmp_path, identity_suffix="-unrelated")
+    created = core.execute(request.envelope, request.authorization, context=request.context, now=NOW)
+    assert created.ok
+    if startup:
+        await core.reconcile()
+    else:
+        assert await core.drain_outbox_once()
+    other = store.get_task(created.result["task_id"], _scope())
+    assert executor.dispatches == [other.attempt_id]
+    assert store.counts()["tasks"] == 2
+    assert store.get_task(original.task_id, _scope()) == original
 
 
 def test_native_projection_contains_saved_truth_and_independent_final_failure(tmp_path):
@@ -237,7 +387,8 @@ async def test_real_direct_files_and_core_continue_late_change_without_duplicate
     project = tmp_path / "project"
     _git_project(project)
     change = "9月12日第一晚牛肉火锅，第二晚烧烤；保留原有景点，不得修改原件.md。"
-    original_text = "文化村、深圳湾"
+    original_text = "文化村、深圳湾；保留完整行程与日期。" * 200
+    original_requirements = "保留原件与所有景点。" * 100
     class Agent(_DirectProjectExecutor):
         async def process_background_code_task_stream(self, request):
             self.requests.append(request)
@@ -245,6 +396,8 @@ async def test_real_direct_files_and_core_continue_late_change_without_duplicate
             output = original_text
             if len(self.requests) > 1:
                 assert change in request.params["query"]
+                assert original_requirements in request.params["query"]
+                assert original_text in request.params["query"]
                 assert (root / "行程.md").read_text(encoding="utf-8") == original_text
                 from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
                 from jiuwenswarm.server.live_voice.file_effect_plan import FileEffectPlanError
@@ -275,7 +428,7 @@ async def test_real_direct_files_and_core_continue_late_change_without_duplicate
     if timing == "cutover":
         monkeypatch.setattr(store.adjustment_queue, "try_close", controlled_close)
     try:
-        request = _create(project)
+        request = _create(project, instruction=original_requirements)
         created = core.execute(request.envelope, request.authorization, context=request.context, now=NOW)
         assert created.ok
         task_id = created.result["task_id"]

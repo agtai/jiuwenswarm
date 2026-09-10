@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-10 — Task adjustment continuation repair; user acceptance pending.
+> Updated: 2026-09-10 — adjustment dispatch/startup recovery; user acceptance pending.
 > Default bootstrap reads only Project judgement and Current execution packet.
 > Stop at Completion boundaries unless the task needs wider planning or acceptance.
 
@@ -8,6 +8,14 @@
 
 **PARTIAL — bounded repairs and user acceptance exist; the full product is not
 feature complete or a newly accepted controlled candidate.**
+
+Deployment of `57d3b29f18` exposed a 5,272-byte compiled adjustment instruction
+against the 4,096-byte command bound. Its pending row blocked dispatch and P3
+restart. The user's [dispatch recovery repair](reviews/ADJUSTMENT_DISPATCH_RECOVERY_20260910.md)
+keeps bounded commands and resolves complete context from verified Store records
+at execution. Derived validation failure settles only that adjustment. Existing
+data-copy and local Git/file checks cover this repair; they do not establish
+Provider/audio acceptance. Runtime readiness is recorded by the deployed contract.
 
 The user's Native business prompt direction is implemented in session, receipt,
 notification, correction and tool descriptions: prompt useful feedback, timely
@@ -78,7 +86,14 @@ support has been discussed, not implemented.
 
 ### Continuation boundary
 
-**Current source packet (2026-09-10):** the user authorizes a compact root repair
+**Current follow-up (2026-09-10):** repair and redeploy adjustment dispatch/startup
+on baseline `57d3b29f18`, preserving this machine's configured project, data and
+audio settings. The [recovery record](reviews/ADJUSTMENT_DISPATCH_RECOVERY_20260910.md)
+owns the Tier 3 persisted-context/Executor seam, Tier 2 failure settlement,
+verification and independent-review limitation. No queue deletion or manual
+production data rewrite is authorized or needed by this repair.
+
+**Preceding source packet (2026-09-10):** the user authorizes a compact root repair
 of adjustment admission, late execution, final-state feedback and result-grounded
 summaries. Baseline is `1750387a`, following the D-126 Work result repair.
 [D-127](decisions/DECISIONS.md#d-127-coordinate-task-adjustments-with-cutoff-continuation-and-saved-result-truth)
@@ -98,7 +113,9 @@ outside this repair; scoped passes are not a full-green claim.
 The earlier prompt source `c4755aa8` was deployed to the user's independent Mini
 project and data directory on 2026-09-10. Its session
 `web_1a08bd3359e_28137feb7a28` supplied this repair's evidence. This new source
-packet has not been deployed or used for an automated browser/voice/Agent run.
+packet was subsequently deployed as `57d3b29f18` on the current machine; the
+dispatch/startup failure above came from that deployment. No new automated
+browser/voice journey is part of this follow-up.
 
 Private deployment preparation is complete. The dated
 comparison record identifies the deployed source;
