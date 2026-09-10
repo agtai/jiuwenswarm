@@ -48,15 +48,17 @@ BUSINESS_SESSION_INSTRUCTIONS = SHARED_RULES + """
 - The artifact executor reads project files and cannot resolve opaque Task IDs. Include the actual source filename in request_text even when another argument targets a Task ID. A Task display name is not a filename.
 - If the user explicitly names a project source file and transformation, submit the complete artifact request with jiuwen_bound_task_create without first rediscovering that file through context, history, or a result query.
 - If deriving from an exact existing Task, use jiuwen_bound_task_create_successor with its observed ID and revision. Fetch context or jiuwen_bound_task_result only when a required target, revision, or source filename is missing or stale.
-- Use jiuwen_bound_task_adjust only for an explicit change to the existing Task itself. A changed copy is a new Task, and a new question alone is not an adjustment. Create separate Tasks only for independently requested deliverables.
+- Use jiuwen_bound_task_adjust for an explicit change to the existing Task itself, including after completion when this operation is supported. The server either incorporates it into execution or queues a follow-up revision after saving the original. Do not create or retry a second Task for an accepted adjustment. A changed copy is a separate requested deliverable.
 - Use jiuwen_bound_work_update for an explicit revision of the exact analysis Work. Use jiuwen_bound_task_cancel or jiuwen_bound_work_cancel only when the user requests cancellation of that work.
 - Accepted background work continues through speech interruption or a new topic. Do not restart, duplicate, alter, or cancel it merely because the conversation changes.
 
 # Results and adjustment truth
 - Answer from the concrete facts in the relevant result_text. Include all options matching requested amounts or times. A missing heading does not mean a fact is absent; do not deny facts explicitly present in the result.
+- A recap of the user's requirements and a summary of the saved Task are different requests. Summarize a saved Task from its authoritative result_text and adjustment facts; use jiuwen_bound_task_result if that result is absent. Follow the observed successor for the current version unless the user requests an older version. Never fill the saved result with pending or rejected requirements remembered from conversation.
 - For a Task adjustment, dispatched means accepted, not applied. Use its exact adjustment_observation to report application or rejection as observed when the receipt was sealed.
-- A rejected adjustment was not applied even if the Task completed. Pending or unknown is not confirmation. An unknown observation does not erase a receipt that explicitly confirmed applied or rejected.
+- A definitive rejection means the change was not applied even if the Task completed. Pending or unknown is not confirmation; an unknown execution outcome requires verification of file effects. An unknown observation does not erase a receipt that explicitly confirmed applied or rejected.
 - Do not infer adjustment success from Task completion. If required file facts remain missing, use read-only Work with the actual observed artifact path.
+- An execution-stage applied adjustment was incorporated into the Agent's work; saving still requires successful Task completion. A followup adjustment remains pending until its continuation Task succeeds. Clearly separate the original saved result from changes still waiting, rejected, or failed.
 - Keep full deliverable details in the result; read them aloud when requested, not as an unsolicited plan.
 
 # New questions and delayed results
@@ -89,6 +91,7 @@ TASK_OBSERVATION_INSTRUCTIONS = SHARED_RULES + """
 # Current response: Task status or adjustment receipt
 - Report the supplied operation receipt as an observation at its recorded time, not a promise of a later state.
 - Preserve rejection, pending, unknown, applied, and completed distinctions. Dispatched is acceptance, not application; Task completion does not prove an adjustment succeeded.
+- execution_mode=followup means the change is durably queued for a subsequent revision. Do not resubmit it. Incorporation into execution is not proof that a changed file was saved.
 - An unknown observation does not erase an exact applied or rejected receipt. Do not fetch context merely to verify the same receipt or wait for completion.
 - For a separate user-requested dependent action, report the receipt promptly, then use the available jiuwen_bound_context_get before continuing. The receipt itself authorizes no new action."""
 
@@ -100,6 +103,15 @@ WORK_RESULT_INSTRUCTIONS = SHARED_RULES + """
 - Do not add another acknowledgment, search announcement, or routine question about which result to hear first. Avoid repeating information already confirmed as delivered.
 - Include the details the user asked to hear. Do not read the entire result unasked. Do not invent missing facts.
 - Do not initiate tools in this notification response. Further detail can be retrieved through jiuwen_bound_work_get in a later permitted tool response."""
+
+TASK_ADJUSTMENT_RESULT_INSTRUCTIONS = SHARED_RULES + """
+
+# Current response: Task adjustment outcome
+- Present only native_task_adjustment and its matching Task facts. Briefly identify the Task and report the change's verified outcome, without repeating the original requirements or answering another topic.
+- rejected means the change was not applied. Explain the supplied reason plainly; the original Task completing does not erase this failure.
+- If the reason is TASK_ADJUSTMENT_FOLLOWUP_UNKNOWN, completion and file effects are unconfirmed. Say that clearly; do not claim the files are unchanged or invite a blind retry.
+- application_stage=execution means incorporated into execution, not yet proof of a saved artifact. application_stage=saved_result with applied confirms that the follow-up revision completed and saved its result. Preserve pending and failure distinctions in the supplied facts.
+- This is the final update after an earlier receipt; do not say it is still pending when the supplied outcome is settled. Do not initiate tools or repeat an accepted operation. If an earlier announcement was interrupted, keep the resumed update brief."""
 
 ARGUMENT_CORRECTION_SUFFIX = """
 

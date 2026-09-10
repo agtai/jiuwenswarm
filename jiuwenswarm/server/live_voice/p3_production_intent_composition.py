@@ -559,7 +559,9 @@ class StoreProductionTaskAuthorityReader:
         ):
             operations.add("task.cancel")
         if (
-            task.state is FormalTaskState.RUNNING
+            (task.state is FormalTaskState.RUNNING
+             or (task.state is FormalTaskState.TERMINAL and task.outcome is TerminalOutcome.COMPLETED))
+            and not task.cancel_requested and not task.dispatch_fenced
             and ("adjust.task-checkpoint", "v1") in operation_versions
         ):
             operations.add("task.adjust")

@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-10 — Native result ownership repair; user acceptance pending.
+> Updated: 2026-09-10 — Task adjustment continuation repair; user acceptance pending.
 > Default bootstrap reads only Project judgement and Current execution packet.
 > Stop at Completion boundaries unless the task needs wider planning or acceptance.
 
@@ -18,6 +18,10 @@ context leakage and separate query/notification delivery ownership. The current
 repair isolates notification inputs and binds explicit queries to the same
 played-result ledger; its [scope and evidence](reviews/NATIVE_RESULT_OWNERSHIP_20260910.md)
 separate offline verification from the user's later model/audio acceptance.
+The same session also exposed adjustment admission after executor cutoff and
+failure omitted from spoken feedback. The authorized D-127 repair coordinates
+cutoff/admission, continues late changes through existing successor Tasks, and
+projects real saved results plus independent adjustment outcomes into Native.
 Mini/server-vad-300 startup defaults
 remain as recorded in [D-124](decisions/DECISIONS.md#d-124-default-new-live-voice-starts-to-realtime-mini-and-server-vad-300).
 Other issue repair/classification remains deferred until comparison in another
@@ -74,14 +78,17 @@ support has been discussed, not implemented.
 
 ### Continuation boundary
 
-**Current source packet (2026-09-10):** the user requests an instruction and code
-repair of the underlying duplicate-answer cause. This Tier 2 boundary owns
-response-scoped background inputs, exact server query-receipt ownership,
-canonical playback eligibility, prepared-notification invalidation and their
-affected tests. [D-126](decisions/DECISIONS.md#d-126-bind-background-result-input-and-presentation-to-its-work)
-records the behavior; the [repair review](reviews/NATIVE_RESULT_OWNERSHIP_20260910.md)
+**Current source packet (2026-09-10):** the user authorizes a compact root repair
+of adjustment admission, late execution, final-state feedback and result-grounded
+summaries. Baseline is `1750387a`, following the D-126 Work result repair.
+[D-127](decisions/DECISIONS.md#d-127-coordinate-task-adjustments-with-cutoff-continuation-and-saved-result-truth)
+owns the new behavior. Tier 3 covers the additive Store-owned queue, successor
+transaction and the closed Task adjustment notification variant carried by the
+existing Native observation channel. Tier 2 covers result projection, shared
+playback ownership and interruption recovery. The
+[repair review](reviews/NATIVE_RESULT_OWNERSHIP_20260910.md)
 records implementation, checks and review limitations. No topic classifier,
-literal-response matching, new wire schema or journal migration is introduced.
+response-text matching, second executor or second audio scheduler is introduced.
 Full requirements, Task/Work authority, real receipt truth, prompt tool calls,
 minimal acknowledgments and explicit recap requests remain as in D-125.
 Model adherence and actual audio behavior require the user's later sessions.

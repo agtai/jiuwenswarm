@@ -2228,3 +2228,40 @@
   not public schemas, authority, transport, model/VAD or Task execution. There is
   no semantic classifier, city rule or text-similarity deduplication. User session
   evaluation remains required for model behavior and physical audio acceptance.
+
+## D-127 Coordinate Task adjustments with cutoff, continuation and saved-result truth
+
+- Date: 2026-09-10. The user explicitly authorizes the complete adjustment-chain
+  repair with compact reuse of existing mechanisms. A running Task is not proof
+  that its executor still accepts changes. Store admission and the last executor
+  checkpoint share one transaction; already admitted requests settle before closure.
+- An authorized change arriving after closure or successful completion is durable
+  pending work. Once the original saved result is available, materialize an ordinary
+  immutable successor and its existing dispatch outbox in the same transaction as
+  the continuation ticket. The accepted adjustment authorizes this continuation;
+  the model must not submit a duplicate creation. Keep the original Task/result,
+  exact project/model binding, full requested changes and original speech evidence.
+- Serialize additional changes along successors created by that original Task's
+  adjustment queue. A different explicit successor, cancelled/fenced execution or
+  failed/unknown base cannot silently become the target. Idempotent replay and
+  transaction recovery cannot create another successor. Ordinary successor
+  dispatch, file guards, effect verification and admission limits remain owners.
+- Distinguish pending, incorporated into execution and confirmed saved completion.
+  A failed continuation does not erase a successful original result. An unknown
+  continuation does not establish unchanged files or permission for a blind retry.
+  Expose independent final adjustment facts to Native, even if the original Task
+  has already completed. Summaries use saved result text/artifacts and adjustment
+  facts, following an observed successor for the current revision.
+- Reuse the existing response-scoped result input, foreground scheduler and
+  presentation journal. Task status/result/adjustment receipts bind only their
+  exact observed outcomes to the answering response. Actual heard ACK consumes
+  the corresponding notification; interruption leaves a final Task adjustment
+  available for a later idle slot. Work's existing suppression behavior remains.
+- Tier 3 covers the additive `task_adjustment_cutovers_v1` and
+  `task_adjustment_queue_v1` tables and the closed Task event variant in Native's
+  existing observation carrier. Legacy Task tables stay at schema v6; existing
+  Work events remain accepted. Deploy server and gateway together: older binaries
+  do not implement continuation and older gateways reject the new event variant.
+  Do not downgrade while deferred work remains. Offline SQLite/Git/file and
+  serialized gateway tests establish those local seams, not Provider/model/audio
+  acceptance. WebSocket and model/VAD settings are outside this change.

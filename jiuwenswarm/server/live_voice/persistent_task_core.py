@@ -1128,6 +1128,9 @@ class PersistentTaskCore:
         defer_adjustments: bool = False,
     ) -> bool:
         worker = worker_id or f"task-core-{uuid.uuid4().hex}"
+        advanced = False if defer_adjustments else await asyncio.to_thread(
+            self.store.adjustment_queue.advance, policy=self._admission_policy, now=observed_at,
+        )
         item = self.store.claim_outbox(
             worker,
             observed_at=observed_at,
@@ -1135,7 +1138,7 @@ class PersistentTaskCore:
             < _MAX_INFLIGHT_ADJUSTMENTS,
         )
         if item is None:
-            return False
+            return advanced
         if item.kind is OutboxKind.ATTEMPT_ADJUST:
             # Store serializes same-Attempt adjustments. Each claim retains its
             # own owner even if another process reclaims this outbox row.
@@ -1410,7 +1413,7 @@ class PersistentTaskCore:
         return delivered
 
     async def reconcile(self) -> dict[str, int]:
-        """Resolve only original attempts; never creates a replacement attempt."""
+        """Reconcile original Attempts and explicitly authorized successor changes."""
 
         claimed_before = (
             (datetime.now(UTC) - _OUTBOX_CLAIM_LEASE).isoformat().replace("+00:00", "Z")
@@ -1422,6 +1425,9 @@ class PersistentTaskCore:
         # dispatch.  Direct D2 managed-baseline validation intentionally needs
         # both the completed journal effect and its canonical Task settlement.
         status_summary = await self.reconcile_status()
+        # Schedule follow-ups once per batch. The deferred adjustment claim loop
+        # below deliberately does not yield between claims and cleanup ownership.
+        await asyncio.to_thread(self.store.adjustment_queue.advance, policy=self._admission_policy)
         delivered, delivery_unavailable = self._reap_adjustment_deliveries()
         scheduled = 0
         while True:

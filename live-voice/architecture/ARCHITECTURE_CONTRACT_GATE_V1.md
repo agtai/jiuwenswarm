@@ -202,14 +202,24 @@ Terminal outcome is required and uses `completed`, `failed`, `cancelled`, `inter
 Executor attempt transitions are `accepted -> running -> terminal`, with the same terminal outcome vocabulary. An Executor reports events; it does not directly mutate the canonical task. Task Core may project `blocked` or `decision_required` from authoritative Executor/Harness events while an attempt remains live.
 
 P3α operations are `create/get/list/status/cancel/events/adjust`. `task.adjust`
-targets the exact authenticated subject/project/Session current Task while it is
-non-terminal and carries one bounded untrusted instruction. Task Core persists
-the command, `task.adjust_requested` and an adjustment outbox item atomically.
+targets the exact authenticated subject/project/Session Task and observed revision
+and carries one bounded untrusted instruction. Before the Store-backed executor's
+last checkpoint closes, Task Core persists the command, `task.adjust_requested`
+and an adjustment outbox item atomically. Admission and checkpoint closure share
+the same SQLite write transaction.
 Only the running Executor may resolve that request at an authoritative safe
 checkpoint; `task.adjust_applied` or `task.adjust_rejected` is then persisted
 before terminal/result projection. A Store-only description/UI change is not an
-applied adjustment. Terminal Tasks and historical results are immutable, and a
-revision requires a distinct explicit create request. `provide_input`, generic
+applied adjustment. After closure, or for a completed Task, D-127 permits the
+explicit adjustment to be queued durably and executed as an ordinary successor
+after the exact saved predecessor result is available. Terminal Tasks and their
+historical result records remain immutable. Queued changes are serialized along
+only their own successor chain; failed/unknown/cancelled bases, stale identity
+and unrelated successors do not authorize another execution. Original speech,
+complete requirements and project/model bindings remain execution inputs.
+Execution adoption is distinct from confirmed saving. Final adjustment facts
+remain independently observable even after the original Task completes.
+`provide_input`, generic
 `update`, `pause`, `resume`, `reprioritize`, arbitrary execution recovery, and
 side-effect reconciliation remain `UNSUPPORTED` until a later contract
 explicitly adds them.

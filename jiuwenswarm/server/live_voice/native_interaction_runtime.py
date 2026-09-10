@@ -891,7 +891,7 @@ class NativeInteractionRuntimeOwner:
             return admission
 
     def business_query_receipts(self, call_id: str, turn_id: str) -> tuple[str, ...]:
-        """Sealed Work queries in the exact successor's business call group.
+        """Sealed result/control receipts in the exact successor's call group.
 
         The caller cannot select Provider-supplied event IDs or another turn's
         results. Reading these receipts does not establish presentation.
@@ -906,7 +906,7 @@ class NativeInteractionRuntimeOwner:
         return tuple(result.canonical_text for sibling_id, result in self._prepared_delegate_results.items()
                      if (sibling := self._delegates_by_call[sibling_id]).source_response == source.source_response
                      and isinstance(sibling.proposal, NativeBusinessProposal)
-                     and sibling.proposal.business.operation == "work.get")
+                     and sibling.proposal.business.operation in {"work.get", "task.status", "task.result", "task.adjust"})
 
     def _retire_terminal_predecessor_audio_locked(self) -> None:
         predecessor = self._current_response

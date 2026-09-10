@@ -407,16 +407,20 @@ def _validate_business_context_result(result: dict[str, object]) -> dict[str, ob
             raise ValueError("work event collection is invalid")
         identities = set()
         for event in events:
-            if type(event) is not dict or set(event) != {"event_id", "work_id", "revision", "state", "result_text", "reason"}:
+            task_event = type(event) is dict and "task_id" in event
+            ids = ("event_id", "task_id", "adjustment_id") if task_event else ("event_id", "work_id")
+            if type(event) is not dict or set(event) != set(ids) | {"revision", "state", "result_text", "reason"}:
                 raise ValueError("work event fields are not closed")
-            if not all(_canonical_result_identity(event[key]) for key in ("event_id", "work_id")):
+            if not all(_canonical_result_identity(event[key]) for key in ids):
                 raise ValueError("work identity is invalid")
             if event["event_id"] in identities:
                 raise ValueError("duplicate work event")
             identities.add(event["event_id"])
             if type(event["revision"]) is not int or not 0 < event["revision"] <= MAX_SAFE_INTEGER:
                 raise ValueError("work revision is invalid")
-            if event["state"] not in {"completed", "failed", "cancelled", "unknown"}:
+            if task_event and not any(task.get("task_id") == event["task_id"] and task.get("revision_number") == event["revision"] for task in context["tasks"]):
+                raise ValueError("Task adjustment has no matching visible revision")
+            if event["state"] not in ({"applied", "rejected"} if task_event else {"completed", "failed", "cancelled", "unknown"}):
                 raise ValueError("work event is not terminal")
             if event["result_text"] is not None and (
                 type(event["result_text"]) is not str

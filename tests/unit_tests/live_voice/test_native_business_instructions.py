@@ -19,6 +19,7 @@ from tests.unit_tests.live_voice.test_native_acceptance_fast_path import (
     prompts.TASK_ACCEPTED_INSTRUCTIONS,
     prompts.TASK_OBSERVATION_INSTRUCTIONS,
     prompts.WORK_RESULT_INSTRUCTIONS,
+    prompts.TASK_ADJUSTMENT_RESULT_INSTRUCTIONS,
 ])
 def test_effective_variants_preserve_shared_truth_language_and_requested_detail(instructions):
     assert instructions.startswith(prompts.SHARED_RULES + "\n\n")

@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
 
-from .native_task_source import source_extension, source_from_payload, require_payload_source
+from .native_task_source import source_extension, require_payload_source
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
@@ -1107,6 +1107,8 @@ class SqliteTaskStore:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._failpoint = failpoint
         self._initialize()
+        from .task_adjustment_queue import TaskAdjustmentQueue
+        self.adjustment_queue = TaskAdjustmentQueue(self)
 
     def _connect(self, *, foreign_keys: bool = True) -> sqlite3.Connection:
         connection: sqlite3.Connection | None = None
@@ -4411,8 +4413,13 @@ class SqliteTaskStore:
         selection: PersistedExecutorSelection | None = None,
         admission_policy: AdmissionPolicy | None = None,
     ) -> ResultEnvelope:
-        """Atomically create one immutable Task revision after a terminal Task."""
+        """Create a revision using the same transaction as deferred changes."""
+        with self._transaction() as connection:
+            return self._create_successor(connection, command, spec, observed_at=observed_at,
+                selection=selection, admission_policy=admission_policy)
 
+    def _create_successor(self, connection, command, spec, *, observed_at,
+                          selection=None, admission_policy=None):
         self._validate_successor_command(command)
         if require_payload_source(command) != spec.native_source:
             raise ValueError("NATIVE_TASK_SOURCE_SPEC_MISMATCH")
@@ -4420,149 +4427,118 @@ class SqliteTaskStore:
         scope_key = _scope_key(command.scope)
         predecessor_id = command.target_ref.id
         payload = command.payload
-        with self._transaction() as connection:
-            replay = self._command_replay(connection, command, fingerprint)
-            if replay is not None:
-                return replay
-            predecessor_row = self._require_task_row(
-                connection, predecessor_id, command.scope
+        replay = self._command_replay(connection, command, fingerprint)
+        if replay is not None:
+            return replay
+        predecessor_row = self._require_task_row(
+            connection, predecessor_id, command.scope
+        )
+        self._verify_durable_lineage(connection, predecessor_row)
+        predecessor = self._task_from_row(predecessor_row)
+        attempt_row = connection.execute(
+            "SELECT * FROM attempts WHERE attempt_id=?",
+            (predecessor.attempt_id,),
+        ).fetchone()
+        terminal_event = connection.execute(
+            "SELECT * FROM task_events WHERE task_id=? AND seq=?",
+            (predecessor_id, predecessor.event_head),
+        ).fetchone()
+        existing_successor = connection.execute(
+            "SELECT task_id FROM tasks WHERE predecessor_task_id=?",
+            (predecessor_id,),
+        ).fetchone()
+        eligible = {
+            TerminalOutcome.COMPLETED,
+            TerminalOutcome.FAILED,
+            TerminalOutcome.CANCELLED,
+            TerminalOutcome.INTERRUPTED,
+        }
+        try:
+            requested_outcome = TerminalOutcome(payload["predecessor_outcome"])
+        except (KeyError, TypeError, ValueError):
+            return self._persist_business_decision(
+                connection,
+                command,
+                fingerprint,
+                disposition=TaskCommandDisposition.CONFLICT,
+                code=ErrorCode.CONFLICT,
+                reason="TASK_SUCCESSOR_PRECONDITION_CONFLICT",
+                message="successor predecessor outcome is not canonical",
+                observed_at=observed_at,
             )
-            self._verify_durable_lineage(connection, predecessor_row)
-            predecessor = self._task_from_row(predecessor_row)
-            attempt_row = connection.execute(
-                "SELECT * FROM attempts WHERE attempt_id=?",
-                (predecessor.attempt_id,),
-            ).fetchone()
-            terminal_event = connection.execute(
-                "SELECT * FROM task_events WHERE task_id=? AND seq=?",
-                (predecessor_id, predecessor.event_head),
-            ).fetchone()
-            existing_successor = connection.execute(
-                "SELECT task_id FROM tasks WHERE predecessor_task_id=?",
-                (predecessor_id,),
-            ).fetchone()
-            eligible = {
-                TerminalOutcome.COMPLETED,
-                TerminalOutcome.FAILED,
-                TerminalOutcome.CANCELLED,
-                TerminalOutcome.INTERRUPTED,
-            }
-            try:
-                requested_outcome = TerminalOutcome(payload["predecessor_outcome"])
-            except (KeyError, TypeError, ValueError):
-                return self._persist_business_decision(
-                    connection,
-                    command,
-                    fingerprint,
-                    disposition=TaskCommandDisposition.CONFLICT,
-                    code=ErrorCode.CONFLICT,
-                    reason="TASK_SUCCESSOR_PRECONDITION_CONFLICT",
-                    message="successor predecessor outcome is not canonical",
-                    observed_at=observed_at,
-                )
-            if (
-                predecessor.state is not FormalTaskState.TERMINAL
-                or predecessor.outcome not in eligible
-                or attempt_row is None
-                or attempt_row["task_id"] != predecessor_id
-                or attempt_row["state"] != FormalAttemptState.TERMINAL.value
-                or attempt_row["outcome"]
-                != (None if predecessor.outcome is None else predecessor.outcome.value)
-                or terminal_event is None
-                or terminal_event["event_type"] != "task.terminal"
-                or terminal_event["event_id"]
-                != payload.get("predecessor_terminal_event_id")
-                or payload.get("expected_predecessor_revision_number")
-                != predecessor.revision_number
-                or payload.get("expected_predecessor_event_head")
-                != predecessor.event_head
-                or requested_outcome is not predecessor.outcome
-                or existing_successor is not None
-            ):
-                return self._persist_business_decision(
-                    connection,
-                    command,
-                    fingerprint,
-                    disposition=TaskCommandDisposition.CONFLICT,
-                    code=ErrorCode.CONFLICT,
-                    reason="TASK_SUCCESSOR_PRECONDITION_CONFLICT",
-                    message=(
-                        "successor requires exact eligible immutable predecessor truth"
-                    ),
-                    observed_at=observed_at,
-                )
-            prior_context = predecessor.spec.context
-            if (
-                spec.context.source,
-                spec.context.stable_id,
-                spec.context.uri,
-                spec.context.scope,
-            ) != (
-                prior_context.source,
-                prior_context.stable_id,
-                prior_context.uri,
-                prior_context.scope,
-            ):
-                raise FormalTaskViolation(
-                    "TASK_SUCCESSOR_CONTEXT_IDENTITY_MISMATCH",
-                    "successor must preserve predecessor project identity",
-                    ErrorCode.PERMISSION_DENIED,
-                )
-            expected_spec_payload = {
-                "name": spec.name,
-                "instruction": spec.instruction,
-                "constraints": list(spec.constraints),
-                "executor_id": spec.executor_id,
-                "side_effect_class": spec.side_effect_class,
-                "attributes": dict(spec.attributes),
-            }
-            if any(
-                payload.get(key) != value
-                for key, value in expected_spec_payload.items()
-            ):
-                raise FormalTaskViolation(
-                    "TASK_SUCCESSOR_SPEC_MISMATCH",
-                    "successor resolved specification disagrees with command facts",
-                    ErrorCode.PROTOCOL_VIOLATION,
-                )
-            result_rows = connection.execute(
-                """SELECT * FROM task_results
-                   WHERE task_id=? AND attempt_id=? ORDER BY source_event_id""",
-                (predecessor_id, predecessor.attempt_id),
-            ).fetchall()
-            requested_digest = payload.get("predecessor_result_sha256")
-            if predecessor.outcome is TerminalOutcome.COMPLETED:
-                if len(result_rows) != 1:
-                    return self._persist_business_decision(
-                        connection,
-                        command,
-                        fingerprint,
-                        disposition=TaskCommandDisposition.CONFLICT,
-                        code=ErrorCode.CONFLICT,
-                        reason="TASK_SUCCESSOR_RESULT_CONFLICT",
-                        message=(
-                            "completed predecessor lacks one canonical current result"
-                        ),
-                        observed_at=observed_at,
-                    )
-                result_record = self._task_result_from_row(result_rows[0])
-                expected_digest = hashlib.sha256(
-                    canonical_json_bytes(result_record.to_dict())
-                ).hexdigest()
-                if requested_digest != expected_digest:
-                    return self._persist_business_decision(
-                        connection,
-                        command,
-                        fingerprint,
-                        disposition=TaskCommandDisposition.CONFLICT,
-                        code=ErrorCode.CONFLICT,
-                        reason="TASK_SUCCESSOR_RESULT_CONFLICT",
-                        message=(
-                            "successor result digest no longer matches predecessor"
-                        ),
-                        observed_at=observed_at,
-                    )
-            elif requested_digest is not None or result_rows:
+        if (
+            predecessor.state is not FormalTaskState.TERMINAL
+            or predecessor.outcome not in eligible
+            or attempt_row is None
+            or attempt_row["task_id"] != predecessor_id
+            or attempt_row["state"] != FormalAttemptState.TERMINAL.value
+            or attempt_row["outcome"]
+            != (None if predecessor.outcome is None else predecessor.outcome.value)
+            or terminal_event is None
+            or terminal_event["event_type"] != "task.terminal"
+            or terminal_event["event_id"]
+            != payload.get("predecessor_terminal_event_id")
+            or payload.get("expected_predecessor_revision_number")
+            != predecessor.revision_number
+            or payload.get("expected_predecessor_event_head")
+            != predecessor.event_head
+            or requested_outcome is not predecessor.outcome
+            or existing_successor is not None
+        ):
+            return self._persist_business_decision(
+                connection,
+                command,
+                fingerprint,
+                disposition=TaskCommandDisposition.CONFLICT,
+                code=ErrorCode.CONFLICT,
+                reason="TASK_SUCCESSOR_PRECONDITION_CONFLICT",
+                message=(
+                    "successor requires exact eligible immutable predecessor truth"
+                ),
+                observed_at=observed_at,
+            )
+        prior_context = predecessor.spec.context
+        if (
+            spec.context.source,
+            spec.context.stable_id,
+            spec.context.uri,
+            spec.context.scope,
+        ) != (
+            prior_context.source,
+            prior_context.stable_id,
+            prior_context.uri,
+            prior_context.scope,
+        ):
+            raise FormalTaskViolation(
+                "TASK_SUCCESSOR_CONTEXT_IDENTITY_MISMATCH",
+                "successor must preserve predecessor project identity",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        expected_spec_payload = {
+            "name": spec.name,
+            "instruction": spec.instruction,
+            "constraints": list(spec.constraints),
+            "executor_id": spec.executor_id,
+            "side_effect_class": spec.side_effect_class,
+            "attributes": dict(spec.attributes),
+        }
+        if any(
+            payload.get(key) != value
+            for key, value in expected_spec_payload.items()
+        ):
+            raise FormalTaskViolation(
+                "TASK_SUCCESSOR_SPEC_MISMATCH",
+                "successor resolved specification disagrees with command facts",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        result_rows = connection.execute(
+            """SELECT * FROM task_results
+               WHERE task_id=? AND attempt_id=? ORDER BY source_event_id""",
+            (predecessor_id, predecessor.attempt_id),
+        ).fetchall()
+        requested_digest = payload.get("predecessor_result_sha256")
+        if predecessor.outcome is TerminalOutcome.COMPLETED:
+            if len(result_rows) != 1:
                 return self._persist_business_decision(
                     connection,
                     command,
@@ -4570,109 +4546,139 @@ class SqliteTaskStore:
                     disposition=TaskCommandDisposition.CONFLICT,
                     code=ErrorCode.CONFLICT,
                     reason="TASK_SUCCESSOR_RESULT_CONFLICT",
-                    message="non-completed predecessor must not bind a Task result",
+                    message=(
+                        "completed predecessor lacks one canonical current result"
+                    ),
                     observed_at=observed_at,
                 )
-            self._hit("successor.before_ids")
-            task_id = f"task-{uuid.uuid4().hex}"
-            attempt_id = f"attempt-{uuid.uuid4().hex}"
-            outbox_id = f"outbox-{uuid.uuid4().hex}"
-            event_id = f"event-{uuid.uuid4().hex}"
-            result = ResultEnvelope.success(
-                owner=command,
-                result={
-                    "task_id": task_id,
-                    "predecessor_task_id": predecessor_id,
-                    "revision_number": predecessor.revision_number + 1,
-                    "attempt_id": attempt_id,
-                    "state": FormalTaskState.ACCEPTED.value,
-                    "outbox_id": outbox_id,
-                },
-                observed_at=observed_at,
-                extensions={
-                    **command_result_extensions(
-                        TaskCommandDisposition.ACCEPTED,
-                        admission_event_id=event_id,
+            result_record = self._task_result_from_row(result_rows[0])
+            expected_digest = hashlib.sha256(
+                canonical_json_bytes(result_record.to_dict())
+            ).hexdigest()
+            if requested_digest != expected_digest:
+                return self._persist_business_decision(
+                    connection,
+                    command,
+                    fingerprint,
+                    disposition=TaskCommandDisposition.CONFLICT,
+                    code=ErrorCode.CONFLICT,
+                    reason="TASK_SUCCESSOR_RESULT_CONFLICT",
+                    message=(
+                        "successor result digest no longer matches predecessor"
                     ),
-                    "live_voice.store": {"durability": "sqlite_outbox"},
-                },
-            )
-            self._insert_command(
+                    observed_at=observed_at,
+                )
+        elif requested_digest is not None or result_rows:
+            return self._persist_business_decision(
                 connection,
                 command,
                 fingerprint,
-                scope_key,
-                result,
-                observed_at,
-            )
-            self._hit("successor.after_command")
-            connection.execute(
-                """
-                INSERT INTO tasks(
-                    task_id, scope_key, scope_json, spec_json, state, outcome,
-                    attempt_id, correlation_id, event_head, created_at, updated_at,
-                    create_command_id, predecessor_task_id, revision_number
-                ) VALUES(?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task_id,
-                    scope_key,
-                    _json_dump(command.scope.to_dict()),
-                    _json_dump(spec.to_dict()),
-                    FormalTaskState.ACCEPTED.value,
-                    attempt_id,
-                    command.correlation_id,
-                    observed_at,
-                    observed_at,
-                    command.command_id,
-                    predecessor_id,
-                    predecessor.revision_number + 1,
-                ),
-            )
-            self._hit("successor.after_task")
-            self._insert_attempt(
-                connection,
-                attempt_id=attempt_id,
-                task_id=task_id,
-                attempt_number=1,
-                executor_id=spec.executor_id,
-                state=FormalAttemptState.ACCEPTED,
+                disposition=TaskCommandDisposition.CONFLICT,
+                code=ErrorCode.CONFLICT,
+                reason="TASK_SUCCESSOR_RESULT_CONFLICT",
+                message="non-completed predecessor must not bind a Task result",
                 observed_at=observed_at,
-                selection=selection,
-                admission_policy=admission_policy,
             )
-            self._hit("successor.after_attempt")
-            self._insert_event(
-                connection,
-                event_id=event_id,
-                task_id=task_id,
-                attempt_id=attempt_id,
-                scope=command.scope,
-                seq=0,
-                event_type="task.accepted",
-                state=FormalTaskState.ACCEPTED.value,
-                outcome=None,
-                producer="task_core",
-                source_event_id=None,
-                causation_id=command.command_id,
-                correlation_id=command.correlation_id,
-                occurred_at=observed_at,
-                details={"command_id": command.command_id},
-            )
-            self._hit("successor.after_event")
-            self._insert_outbox(
-                connection,
-                outbox_id=outbox_id,
-                kind=OutboxKind.ATTEMPT_DISPATCH,
-                task_id=task_id,
-                attempt_id=attempt_id,
-                command_id=command.command_id,
-                scope=command.scope,
-                spec=spec,
-                now=observed_at,
-            )
-            self._hit("successor.after_outbox")
-            return result
+        self._hit("successor.before_ids")
+        task_id = f"task-{uuid.uuid4().hex}"
+        attempt_id = f"attempt-{uuid.uuid4().hex}"
+        outbox_id = f"outbox-{uuid.uuid4().hex}"
+        event_id = f"event-{uuid.uuid4().hex}"
+        result = ResultEnvelope.success(
+            owner=command,
+            result={
+                "task_id": task_id,
+                "predecessor_task_id": predecessor_id,
+                "revision_number": predecessor.revision_number + 1,
+                "attempt_id": attempt_id,
+                "state": FormalTaskState.ACCEPTED.value,
+                "outbox_id": outbox_id,
+            },
+            observed_at=observed_at,
+            extensions={
+                **command_result_extensions(
+                    TaskCommandDisposition.ACCEPTED,
+                    admission_event_id=event_id,
+                ),
+                "live_voice.store": {"durability": "sqlite_outbox"},
+            },
+        )
+        self._insert_command(
+            connection,
+            command,
+            fingerprint,
+            scope_key,
+            result,
+            observed_at,
+        )
+        self._hit("successor.after_command")
+        connection.execute(
+            """
+            INSERT INTO tasks(
+                task_id, scope_key, scope_json, spec_json, state, outcome,
+                attempt_id, correlation_id, event_head, created_at, updated_at,
+                create_command_id, predecessor_task_id, revision_number
+            ) VALUES(?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                scope_key,
+                _json_dump(command.scope.to_dict()),
+                _json_dump(spec.to_dict()),
+                FormalTaskState.ACCEPTED.value,
+                attempt_id,
+                command.correlation_id,
+                observed_at,
+                observed_at,
+                command.command_id,
+                predecessor_id,
+                predecessor.revision_number + 1,
+            ),
+        )
+        self._hit("successor.after_task")
+        self._insert_attempt(
+            connection,
+            attempt_id=attempt_id,
+            task_id=task_id,
+            attempt_number=1,
+            executor_id=spec.executor_id,
+            state=FormalAttemptState.ACCEPTED,
+            observed_at=observed_at,
+            selection=selection,
+            admission_policy=admission_policy,
+        )
+        self._hit("successor.after_attempt")
+        self._insert_event(
+            connection,
+            event_id=event_id,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            scope=command.scope,
+            seq=0,
+            event_type="task.accepted",
+            state=FormalTaskState.ACCEPTED.value,
+            outcome=None,
+            producer="task_core",
+            source_event_id=None,
+            causation_id=command.command_id,
+            correlation_id=command.correlation_id,
+            occurred_at=observed_at,
+            details={"command_id": command.command_id},
+        )
+        self._hit("successor.after_event")
+        self._insert_outbox(
+            connection,
+            outbox_id=outbox_id,
+            kind=OutboxKind.ATTEMPT_DISPATCH,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            command_id=command.command_id,
+            scope=command.scope,
+            spec=spec,
+            now=observed_at,
+        )
+        self._hit("successor.after_outbox")
+        return result
 
     @staticmethod
     def _validate_successor_command(command: CommandEnvelope) -> None:
@@ -5195,8 +5201,15 @@ class SqliteTaskStore:
                 "SELECT * FROM attempts WHERE attempt_id=?",
                 (task["attempt_id"],),
             ).fetchone()
+            if (not task["cancel_requested"] and not task["dispatch_fenced"]
+                    and (task["state"] == FormalTaskState.RUNNING.value
+                         or (task["state"] == FormalTaskState.TERMINAL.value
+                             and task["outcome"] == TerminalOutcome.COMPLETED.value))
+                    and self.adjustment_queue.closed(connection, task)):
+                return self.adjustment_queue.defer(connection, command, fingerprint, task, observed_at)
             if (
                 task["state"] != FormalTaskState.RUNNING.value
+                or task["cancel_requested"] or task["dispatch_fenced"]
                 or attempt is None
                 or attempt["task_id"] != task_id
                 or attempt["state"] != FormalAttemptState.RUNNING.value
@@ -10635,6 +10648,9 @@ class SqliteTaskStore:
         command: CommandEnvelope,
         fingerprint: bytes,
     ) -> ResultEnvelope | None:
+        deferred = self.adjustment_queue.replay(connection, command, fingerprint)
+        if deferred is not None:
+            return deferred
         row = connection.execute(
             """
             SELECT * FROM commands

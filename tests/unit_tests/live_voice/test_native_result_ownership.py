@@ -49,6 +49,33 @@ async def test_prepared_result_input_excludes_latest_question_and_other_work():
 
 
 @pytest.mark.asyncio
+async def test_task_adjustment_wire_and_provider_input_bind_exact_visible_revision():
+    from jiuwenswarm.gateway.live_voice.native_interaction_runtime_client import _validate_business_context_result, NativeRuntimeClientError
+    from tests.unit_tests.live_voice import test_openai_realtime_native_engine as f
+    event = {"event_id": "change-final", "task_id": "task-1", "adjustment_id": "change-1",
+             "revision": 1, "state": "rejected", "reason": "FOLLOWUP_FAILED", "result_text": "Change failed"}
+    facts = f.business_context()
+    facts["tasks"] = [{"task_id": "task-1", "revision_number": 1, "result_text": "Original saved result"}]
+    facts["history"] = [{"role": "user", "content": "UNRELATED_QUESTION", "delivery": "user_input"}]
+    payload = {"kind": "business_context", "contract_version": "live-voice.native-business.v1", "context": facts, "work_events": [event]}
+    assert _validate_business_context_result(payload) == payload
+    for bad in ({**event, "revision": 2}, {**event, "work_id": "another"}, {**event, "state": "pending"}):
+        with pytest.raises(NativeRuntimeClientError):
+            _validate_business_context_result({**payload, "work_events": [bad]})
+    engine, _, _ = await f.started_business_engine()
+    try:
+        engine._replace_business_context(facts, [event])
+        scoped = json.loads(engine._work_response_input(event)[0]["content"][0]["text"])
+        assert scoped == {"native_task_adjustment": event, "task": {"task_id": "task-1", "revision_number": 1}}
+        assert "UNRELATED" not in json.dumps(scoped)
+        with pytest.raises(f.OpenAIRealtimeNativeInteractionError):
+            engine._work_response_input({**event, "revision": 2})
+        assert engine.snapshot().released_audio_count == 0 and not engine._delegates
+    finally:
+        await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_query_ack_retires_prepared_notification_before_audio_and_cleans_output():
     engine, socket, fresh = await p.preparing_engine()
     try:
@@ -115,6 +142,108 @@ async def successor(h):
 async def close_harness(h):
     await h.owner.close()
     await h.router.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["heard", "interrupted", "silent", "stale"])
+async def test_task_query_and_final_notification_share_only_exact_heard_outcome(tmp_path, outcome):
+    h = await result_harness(tmp_path)
+    event = {"event_id": "task-change-final", "task_id": "task-1", "adjustment_id": "adjust-1",
+             "revision": 1, "state": "rejected", "reason": "ADJUSTMENT_CHECKPOINT_CLOSED", "result_text": "Change failed"}
+    h.router._task_events[h.scope] = [event]
+    try:
+        proposal = replace(business(h.source.response, "query-0"),
+            business=NativeBusinessAction("task.result", "a" * 64, "task-1", None, None, None, None))
+        _, admitted = await h.owner.admit_delegate(proposal, committed_at="2026-09-10T00:00:00Z")
+        sealed = {**event, "event_id": "different-change"} if outcome == "stale" else event
+        await h.owner.prepare_delegate_result(admitted, canonical_text=json.dumps({
+            "operation": "task.result", "status": "dispatched", "task_notifications": [sealed],
+        }), route=UnifiedCommittedInputRoute.DIALOGUE, allow_interrupted=True)
+        reply = await successor(h)
+        journal = h.router._work_journal
+        assert not journal.presented(event["event_id"], h.scope)
+        if outcome == "heard":
+            await h.owner.accept_audio(audio(reply.response, "answer", 0))
+            await h.owner.accept_provider_done(done(reply.response, "answer", transcript="追加修改失败，原结果保持原状。"))
+            heard = await h.owner.acknowledge_audio(ack_for(h.runtime, reply.response, 0))
+            h.router.acknowledge_work(h.route, heard.response)
+            assert journal.presented(event["event_id"], h.scope)
+        elif outcome == "interrupted":
+            h.router.interrupt_work_presentation(h.route, reply.response)
+        elif outcome == "silent":
+            h.router.release_unheard_work_response(h.route, reply.response)
+        else:
+            h.router.acknowledge_work(h.route, reply.response)
+        if outcome != "heard":
+            assert h.router.work_events(h.scope) == [event]
+            assert not journal.presented(event["event_id"], h.scope)
+            assert not journal.suppressed(event["event_id"], h.scope)
+        assert all(work.state.value == "completed" for work in h.router.works().list(scope=h.scope))
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_interrupted_task_notification_can_admit_a_fresh_generation_then_ack(tmp_path):
+    h = await result_harness(tmp_path)
+    event = {"event_id": "task-change-final", "task_id": "task-1", "adjustment_id": "adjust-1",
+             "revision": 1, "state": "rejected", "reason": "FOLLOWUP_FAILED", "result_text": "Change failed"}
+    h.router._task_events[h.scope] = [event]
+    h.route.activation_lease = SimpleNamespace(task_notification_foreground_safe=lambda _: True)
+    try:
+        await h.owner.accept_provider_done(done(h.source.response, "source", transcript=None))
+        async def admit(provider):
+            return await h.router.admit_work_response(h.route, event_id=event["event_id"],
+                provider_response_id=provider, turn_id="native-turn-1")
+        first = await admit("notification-1")
+        await h.owner.accept_audio(audio(first.response, "notification-1", 0))
+        await h.owner.interrupt_delegate_source(action_id="stop-notification", response=first.response)
+        h.router.interrupt_work_presentation(h.route, first.response)
+        second = await admit("notification-2")
+        assert first.response != second.response and await admit("notification-2") == second
+        assert not h.router._work_journal.presented(event["event_id"], h.scope)
+        await h.owner.accept_audio(audio(second.response, "notification-2", 0))
+        await h.owner.accept_provider_done(done(second.response, "notification-2", transcript="修改未完成。"))
+        heard = await h.owner.acknowledge_audio(ack_for(h.runtime, second.response, 0))
+        h.router.acknowledge_work(h.route, heard.response)
+        assert h.router._work_journal.presented(event["event_id"], h.scope)
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "completed"])
+async def test_silent_task_notification_retries_without_marking_it_heard(status):
+    from tests.unit_tests.live_voice import test_openai_realtime_native_engine as f
+    event = {"event_id": "change-final", "task_id": "task-1", "adjustment_id": "change-1",
+             "revision": 1, "state": "rejected", "reason": "FOLLOWUP_FAILED", "result_text": "Change failed"}
+    facts = f.business_context()
+    facts["tasks"] = [{"task_id": "task-1", "revision_number": 1}]
+    async def refresh():
+        return {"context": facts, "work_events": [event]}
+    engine, socket, _ = await f.started_business_engine(f.speech_started("s", "u", 0),
+        f.speech_stopped("e", "u", 500), f.input_committed("c", "u"), f.response_created("r", "p1"),
+        f.response_done("done", "p1"), refresh=refresh)
+    try:
+        _, _, commit = await f.accept_basic_turn(engine)
+        await engine.acknowledge_business_turn(commit.turn_commit.turn_id)
+        await engine.next_event()
+        await engine.admit_response("p1", f.response_ref(1))
+        await engine.next_event()
+        await engine.update_business_context(facts, [event])
+        socket.push(f.response_created("notify", "p2"))
+        await engine.next_event()
+        await engine.admit_response("p2", f.response_ref(2))
+        socket.push(f.response_done("silent", "p2", status=status))
+        await engine.next_event()
+        assert event["event_id"] not in engine._work_seen
+        assert not engine._responses["p2"].presentation_acknowledged
+        assert engine.snapshot().released_audio_count == 0
+        engine._work_retry_after = 0  # Advance only the bounded retry deadline.
+        await engine.update_business_context(facts, [event])
+        assert len([value for value in socket.sent if value["type"] == "response.create"]) == 3
+    finally:
+        await engine.close()
 
 
 @pytest.mark.asyncio

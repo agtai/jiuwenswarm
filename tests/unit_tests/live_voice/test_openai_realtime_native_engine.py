@@ -1125,10 +1125,18 @@ async def test_work_speech_respects_task_audio_owner_and_busy_runtime_retry():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["work", "task"])
 @pytest.mark.parametrize("phase", ["requested", "created", "admitted"])
-async def test_work_speech_interruption_retries_only_unadmitted_event_with_new_response(phase):
+async def test_work_speech_interruption_retries_only_unadmitted_event_with_new_response(phase, kind):
+    event = work_event()
+    if kind == "task":
+        event = {key: value for key, value in event.items() if key != "work_id"}
+        event.update(task_id="task-1", adjustment_id="change-1", state="rejected")
+    facts = business_context()
+    if kind == "task":
+        facts["tasks"] = [{"task_id": "task-1", "revision_number": 1}]
     async def refresh():
-        return {"context": business_context(), "work_events": [work_event()]}
+        return {"context": facts, "work_events": [event]}
     engine, socket, _ = await started_business_engine(speech_started("s", "u", 0),
         speech_stopped("e", "u", 500), input_committed("c", "u"), response_created("r", "p1"),
         response_done("done", "p1"), refresh=refresh)
@@ -1138,10 +1146,10 @@ async def test_work_speech_interruption_retries_only_unadmitted_event_with_new_r
         await engine.next_event()
         await engine.admit_response("p1", response_ref(1))
         await engine.next_event()
-        await engine.update_business_context(business_context(), [work_event()])
+        await engine.update_business_context(facts, [event])
         if phase != "requested":
             socket.push(response_created("wr", "work-provider"))
-            assert action_payload(await engine.next_event())["work_event_id"] == work_event()["event_id"]
+            assert action_payload(await engine.next_event())["work_event_id"] == event["event_id"]
             if phase == "admitted":
                 await engine.admit_response("work-provider", response_ref(2))
         socket.push(speech_started("s2", "u2", 500))
@@ -1169,13 +1177,13 @@ async def test_work_speech_interruption_retries_only_unadmitted_event_with_new_r
         await engine.admit_response("user-provider-2", response_ref(3))
         socket.push(response_done("d2", "user-provider-2"))
         await engine.next_event()
-        await engine.update_business_context(business_context(), [work_event()])
+        await engine.update_business_context(facts, [event])
         creates = [item for item in socket.sent if item["type"] == "response.create"]
-        assert len(creates) == (3 if phase == "admitted" else 4)
-        if phase != "admitted":
+        assert len(creates) == (3 if phase == "admitted" and kind == "work" else 4)
+        if phase != "admitted" or kind == "task":
             socket.push(response_created("retry", "work-provider-new"))
             assert action_payload(await engine.next_event()) == {"provider_response_id": "work-provider-new",
-                "turn_id": second.turn_commit.turn_id, "work_event_id": work_event()["event_id"]}
+                "turn_id": second.turn_commit.turn_id, "work_event_id": event["event_id"]}
         assert len([i for i in socket.sent if i["type"] == "response.cancel" and i["response_id"] == "work-provider"]) == 1
     finally:
         await engine.close()

@@ -1831,7 +1831,7 @@ class ProductionMultiTaskResolver:
                 "TASK_TARGET_REQUIRED",
                 None,
             )
-        if task.terminal and operation != "task.create_successor":
+        if task.terminal and operation not in {"task.create_successor", "task.adjust"}:
             return (
                 ProductionTaskPolicyOutcome.CONFLICT,
                 "TERMINAL_TASK_IMMUTABLE",
@@ -1879,7 +1879,8 @@ class ProductionMultiTaskResolver:
                 None,
             )
         if operation == "task.adjust":
-            if task.state is not TaskState.RUNNING:
+            if (task.state is not TaskState.RUNNING
+                    and not (task.terminal and task.outcome is TerminalOutcome.COMPLETED)):
                 return (
                     ProductionTaskPolicyOutcome.CONFLICT,
                     "TASK_ADJUST_STATE_CONFLICT",

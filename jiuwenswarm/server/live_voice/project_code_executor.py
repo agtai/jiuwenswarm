@@ -848,6 +848,7 @@ def _decode_d2_checkpoint_state(payload: bytes) -> dict[str, object]:
 
 
 def _checkpoint_file_plan(checkpoint, state, *, task_id, scope, spec, effects):
+    from .file_effect_plan import file_plan_source_digest
     plan = state.get("file_effect_plan")
     if (checkpoint.state_schema_id != _D2_CHECKPOINT_STATE_SCHEMA
             or checkpoint.state_schema_version != (1 if plan is None else 2)):
@@ -857,7 +858,7 @@ def _checkpoint_file_plan(checkpoint, state, *, task_id, scope, spec, effects):
         or checkpoint.producer_attempt_id != effects.binding.origin_attempt_id
         or plan.attempt_id != effects.binding.logical_origin_attempt_id
         or plan.baseline_digest != state["before_tree"]
-        or spec.native_source is None or plan.source_digest != spec.native_source.digest
+        or plan.source_digest != file_plan_source_digest(spec)
     ):
         raise RuntimeError("FILE_EFFECT_CHECKPOINT_IDENTITY_MISMATCH")
     return plan
@@ -5220,7 +5221,13 @@ class DirectProjectCodeExecutorAdapter:
                 )
                 if not candidates:
                     if not expect_more:
-                        expect_more = await self._admitted_adjustments_pending(item)
+                        if self._durability_store is None:
+                            expect_more = False
+                        else:
+                            expect_more = not await asyncio.to_thread(
+                                self._durability_store.adjustment_queue.try_close,
+                                item.task_id, item.attempt_id, item.scope,
+                            )
                     if not expect_more:
                         checkpoint.accepting = False
                         self._adjustment_checkpoints.pop(item.attempt_id, None)
@@ -5434,7 +5441,9 @@ class DirectProjectCodeExecutorAdapter:
             ):
                 raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH")
             file_plan = None
-            if item.spec.native_source is not None:
+            continued = self._durability_store is not None and await asyncio.to_thread(
+                self._durability_store.adjustment_queue.owns_successor, item.task_id, item.scope)
+            if item.spec.native_source is not None or continued:
                 from .file_effect_plan import FileEffectPlanSession
                 file_plan = FileEffectPlanSession(item=item, target=target_root, worktree=created_worktree,
                     baseline_digest=record.before_tree,

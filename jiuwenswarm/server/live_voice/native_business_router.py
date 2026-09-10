@@ -43,6 +43,7 @@ class NativeBusinessRouter:
         self._executor_lock = asyncio.Lock()
         self._work_presentations = {}
         self._selected_work_events = {}
+        self._task_events = {}
         self._context_reads = {}
         self._context_read_sequence = 0
 
@@ -117,6 +118,17 @@ class NativeBusinessRouter:
         snapshots = self.works().list(scope=authority.scope)
         with ProfileSpan("native.context_projection_restore"):
             await self._restore_task_projection(route, authority.scope, read.tasks)
+        from .task_control_presentation import native_task_presentation
+        task_facts, task_events = await asyncio.to_thread(
+            native_task_presentation, self.registry._p3_composition._core.store,
+            authority.scope, [task["task_id"] for task in tasks],
+            presented=self._work_journal.presented,
+        )
+        for task in tasks:
+            task.update(task_facts[task["task_id"]])
+        self._task_events[authority.scope] = task_events
+        while len(self._task_events) > 128:
+            self._task_events.pop(next(iter(self._task_events)))
         ordered = sorted(snapshots, key=lambda item: (
             item.state.value in {"accepted", "running", "cancelling"} or not item.execution_settled,
             item.updated_at), reverse=True)
@@ -213,7 +225,9 @@ class NativeBusinessRouter:
         })).hexdigest()
 
     def work_events(self, scope):
-        events = []
+        self.works()
+        events = [event for event in self._task_events.get(scope, ())
+                  if not self._work_journal.presented(event["event_id"], scope)]
         for snapshot in self.works().list(scope=scope):
             if snapshot.state.value not in {"completed", "failed", "unknown", "cancelled"}:
                 continue
@@ -401,9 +415,26 @@ class NativeBusinessRouter:
                 native_authority=route.native_p3_authority)
         if not formal.ok:
             return {"status": "rejected", "operation": action.operation, "error": formal.payload.get("error")}
-        return {"status": "dispatched", "operation": action.operation,
+        result = {"status": "dispatched", "operation": action.operation,
                 "task_id": formal.payload.get("result", {}).get("task_id", action.target_id),
                 "receipt": formal.payload.get("result")}
+        if action.operation in {"task.status", "task.result"}:
+            await self._task_result_facts(route, result)
+        return result
+
+    async def _task_result_facts(self, route, result):
+        from .task_control_presentation import native_task_presentation
+        try:
+            facts, events = await asyncio.to_thread(native_task_presentation,
+                self.registry._p3_composition._core.store, route.binding.scope, [result["task_id"]], maximum_result_bytes=0,
+                presented=self._work_journal.presented)
+            result["task_control"] = facts[result["task_id"]]
+            result["task_notifications"] = events
+            self._task_events[route.binding.scope] = [event for event in self._task_events.get(route.binding.scope, ())
+                if event["task_id"] != result["task_id"]] + events
+        except Exception:
+            # Read failure must not rewrite an accepted mutation or saved result.
+            result["task_control_reason"] = "NATIVE_TASK_CONTROL_UNAVAILABLE"
 
     async def _adjustment_observation(self, route, result):
         """Seal one as-of control read without changing the durable command receipt."""
@@ -430,12 +461,12 @@ class NativeBusinessRouter:
                     or (receipt.get("adjustment_state") in {"applied", "rejected"}
                         and state not in {receipt["adjustment_state"], "unknown"})):
                 return {**unknown, "observation_reason": "NATIVE_ADJUSTMENT_OBSERVATION_MISMATCH"}
-            # Only the observed terminal-race reason is needed for this surface.
-            # Other rejection details remain with the authenticated Task owner.
             reason = facts.get("requested_adjustment_reason")
             return {**identity, "state": state, "event_head": head,
                     "timing": "observed_before_receipt_sealed",
-                    "reason": reason if reason == "TASK_TERMINAL_BEFORE_ADJUSTMENT" else None}
+                    "reason": reason,
+                    **({"execution_mode": "followup", "continuation_task_id": facts["followup_adjustment"].get("continuation_task_id")}
+                       if "followup_adjustment" in facts else {})}
         except Exception:
             return unknown
 
@@ -542,6 +573,10 @@ class NativeBusinessRouter:
                         result["context_refresh_reason"] = getattr(error, "reason", "NATIVE_BUSINESS_CONTEXT_UNAVAILABLE")
                 if delegate.business.operation == "task.adjust" and result.get("status") == "dispatched":
                     result["adjustment_observation"] = await self._adjustment_observation(route, result)
+                    await self._task_result_facts(route, result)
+                    observed = result["adjustment_observation"]
+                    result["task_notifications"] = [event for event in result.get("task_notifications", ())
+                        if event["adjustment_id"] == observed.get("adjustment_id") and event["state"] == observed.get("state")]
                 if (len(canonical_json_bytes(result)) > 262144
                     or len(json.dumps(result, ensure_ascii=True, separators=(",", ":")).encode()) > 524288):
                     result.pop("context", None)
@@ -598,7 +633,11 @@ class NativeBusinessRouter:
             raise NativeInteractionRuntimeError("NATIVE_WORK_EVENT_STALE", "work result is no longer current")
         if len(self._work_presentations) >= 128:
             raise NativeInteractionRuntimeError("NATIVE_WORK_PRESENTATION_CAPACITY", "work presentation ledger is full")
-        response_id = "native-work-response-" + hashlib.sha256(event_id.encode()).hexdigest()
+        # The result identity survives interruption; each actual generation has
+        # its own response identity while an exact Provider replay stays stable.
+        response_id = "native-work-response-" + hashlib.sha256(canonical_json_bytes({
+            "event_id": event_id, "provider_response_id": provider_response_id,
+        })).hexdigest()
         admission = await route.native_runtime_owner.accept_work_provider_response(provider_response_id, response_id, turn_id=turn_id)
         self._work_presentations[(route.binding.scope, admission.response)] = (event_id,)
         return admission
@@ -615,6 +654,10 @@ class NativeBusinessRouter:
         events = set()
         for text in receipts:
             receipt = json.loads(text)
+            if receipt.get("status") != "rejected" and receipt.get("operation") in {"task.status", "task.result", "task.adjust"}:
+                for event in receipt.get("task_notifications", ()):
+                    if event in self._task_events.get(scope, ()) and not self._work_journal.presented(event["event_id"], scope):
+                        events.add(event["event_id"])
             if receipt.get("operation") != "work.get" or receipt.get("status") == "rejected":
                 continue
             fact = receipt.get("work")
@@ -653,7 +696,8 @@ class NativeBusinessRouter:
         events = self._work_presentations.get(key)
         if events is not None:
             for event_id in events:
-                self._work_journal.mark_suppressed(event_id, route.binding.scope, "speech_interrupted")
+                if not any(event["event_id"] == event_id for event in self._task_events.get(route.binding.scope, ())):
+                    self._work_journal.mark_suppressed(event_id, route.binding.scope, "speech_interrupted")
             self._work_presentations.pop(key, None)
             self.works().wake_observers(route.binding.scope)
 

@@ -3046,64 +3046,11 @@ class P3AuthenticatedComposition:
                     session_id=session_id, now=now, require_clean=False,
                     native_authority=native_authority,
                 )
-                task, attempt, admission = self._core.store.task_read_snapshot(task_id, authority.scope)
                 self._require_exact_task_context(
                     authority=authority, operation="task.status", task_id=task_id, now=now,
                 )
-                after_seq = max(-1, task.event_head - 64)
-                events = self._core.store.events(task_id, authority.scope, after_seq=after_seq,
-                                                attempt_id=task.attempt_id)
-                adjustments: dict[str, tuple[int, str, object]] = {}
-                requested_state = "unknown"
-                requested_reason = None
-                execution_event = None
-                states = {"task.adjust_requested": "pending", "task.adjust_applied": "applied",
-                          "task.adjust_rejected": "rejected"}
-                for event in events:
-                    if event.seq > task.event_head:
-                        continue
-                    if event.event_type.startswith("attempt.") or event.event_type == f"task.{task.state.value}":
-                        execution_event = {
-                            "event_id": event.event_id, "event_type": event.event_type,
-                            "occurred_at": event.occurred_at,
-                            "details": {key: event.details[key] for key in ("reason", "summary", "error", "raw_status") if key in event.details},
-                        }
-                    if event.event_type not in states:
-                        continue
-                    command_id = event.details.get("command_id")
-                    if not isinstance(command_id, str):
-                        continue
-                    if adjustment_id is not None and command_id == adjustment_id:
-                        requested_state = states[event.event_type]
-                        requested_reason = event.details.get("reason")
-                    if event.event_type == "task.adjust_requested":
-                        adjustments[command_id] = (event.seq, "pending", None)
-                    elif command_id in adjustments:
-                        adjustments[command_id] = (adjustments[command_id][0], states[event.event_type], event.details.get("reason"))
-                latest = max(adjustments.values(), default=None, key=lambda item: item[0])
-                return {
-                    "task_id": task.task_id, "attempt_id": task.attempt_id,
-                    "name": task.spec.name, "state": task.state.value,
-                    "outcome": None if task.outcome is None else task.outcome.value,
-                    "attempt_state": None if attempt is None else attempt.state.value,
-                    "execution_event": execution_event,
-                    "reconciliation_state": None if task.reconciliation_state is None else task.reconciliation_state.value,
-                    "reconciliation_reason": task.reconciliation_reason,
-                    "admission": None if admission is None else {
-                        "queued": admission.queued,
-                        "reason": admission.reason,
-                        "next_eligible_at": admission.next_eligible_at,
-                        "deadline_at": admission.deadline_at,
-                        "reconciliation_required": admission.reconciliation_required,
-                        "reconciliation_reason": admission.reconciliation_reason,
-                        "manual_action": admission.manual_action,
-                    },
-                    "event_head": task.event_head,
-                    "events_after_seq": after_seq,
-                    "adjustment_state": latest[1] if latest else ("none" if after_seq == -1 else "unknown"),
-                    "adjustment_reason": latest[2] if latest else None,
-                    **({"requested_adjustment_state": requested_state, "requested_adjustment_reason": requested_reason} if adjustment_id is not None else {}),
-                }
+                from .task_control_presentation import read_task_control_facts
+                return read_task_control_facts(self._core.store, task_id, authority.scope, adjustment_id=adjustment_id)
             return await self._run_blocking(read)
         finally:
             await self._leave_operation()

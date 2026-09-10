@@ -59,6 +59,7 @@ from jiuwenswarm.server.live_voice.native_business_instructions import (
     TASK_ACCEPTED_INSTRUCTIONS as _TASK_ACCEPTED_INSTRUCTIONS,
     TASK_OBSERVATION_INSTRUCTIONS as _TASK_OBSERVATION_INSTRUCTIONS,
     WORK_RESULT_INSTRUCTIONS as _WORK_NOTIFICATION_INSTRUCTIONS,
+    TASK_ADJUSTMENT_RESULT_INSTRUCTIONS as _TASK_NOTIFICATION_INSTRUCTIONS,
     ARGUMENT_CORRECTION_SUFFIX as _BUSINESS_ARGUMENT_CORRECTION_INSTRUCTIONS,
     CORRECTION_EXHAUSTED_SUFFIX as _BUSINESS_ARGUMENT_CORRECTION_EXHAUSTED,
 )
@@ -975,12 +976,16 @@ class OpenAIRealtimeNativeInteractionEngine:
 
     @staticmethod
     def _work_event_copy(event: Mapping[str, object]) -> dict[str, object]:
-        if not isinstance(event, Mapping) or set(event) != {"event_id", "work_id", "revision", "state", "result_text", "reason"}:
+        task_event = isinstance(event, Mapping) and "task_id" in event
+        fields = {"event_id", "revision", "state", "result_text", "reason"}
+        fields.update({"task_id", "adjustment_id"} if task_event else {"work_id"})
+        if not isinstance(event, Mapping) or set(event) != fields:
             raise OpenAIRealtimeNativeInteractionError("NATIVE_WORK_EVENT_INVALID", "Work event fields must be closed")
-        for key in ("event_id", "work_id"):
+        for key in (("event_id", "task_id", "adjustment_id") if task_event else ("event_id", "work_id")):
             _identity(event[key], reason="NATIVE_WORK_EVENT_INVALID", field_name=key)
         if (type(event["revision"]) is not int or not 0 < event["revision"] <= MAX_SAFE_INTEGER
-                or type(event["state"]) is not str or event["state"] not in {"completed", "failed", "cancelled", "unknown"}):
+                or type(event["state"]) is not str
+                or event["state"] not in ({"applied", "rejected"} if task_event else {"completed", "failed", "cancelled", "unknown"})):
             raise OpenAIRealtimeNativeInteractionError("NATIVE_WORK_EVENT_INVALID", "Work event revision or state is invalid")
         if event["reason"] is not None:
             _identity(event["reason"], reason="NATIVE_WORK_EVENT_INVALID", field_name="reason")
@@ -1130,6 +1135,16 @@ class OpenAIRealtimeNativeInteractionEngine:
         leave that synthetic user message (and its raw result) behind.
         """
         context = self._business_context or {}
+        if "task_id" in work:
+            source = next((item for item in context.get("tasks", [])
+                           if item.get("task_id") == work["task_id"]
+                           and item.get("revision_number") == work["revision"]), {})
+            if not source:
+                raise OpenAIRealtimeNativeInteractionError("NATIVE_WORK_EVENT_INVALID", "Task adjustment requires its exact visible revision")
+            return [self._business_facts_snapshot({
+                "native_task_adjustment": work,
+                "task": {key: source[key] for key in ("task_id", "name", "revision_number", "state", "outcome") if key in source},
+            })[0]["item"]]
         source = next((item for item in context.get("works", [])
                        if item.get("work_id") == work["work_id"]
                        and item.get("revision") == work["revision"]), {})
@@ -1901,7 +1916,8 @@ class OpenAIRealtimeNativeInteractionEngine:
                             "metadata": {"work_event_id": work["event_id"]}, "tool_choice": "none",
                             "input": self._work_response_input(work),
                             "max_output_tokens": self._max_output_tokens,
-                            "instructions": _WORK_NOTIFICATION_INSTRUCTIONS,
+                            "instructions": (_TASK_NOTIFICATION_INSTRUCTIONS if "task_id" in work
+                                             else _WORK_NOTIFICATION_INSTRUCTIONS),
                         }})
                     self._work_seen[work["event_id"]] = hashlib.sha256(canonical_json_bytes(work)).digest()
                     self._inflight_response_request = request
@@ -2348,6 +2364,9 @@ class OpenAIRealtimeNativeInteractionEngine:
         """Stop exact generation; a later played cursor separately truncates it."""
         await self.fence_response(ref)
         response = self._find_response(ref)
+        if (response.work_event_id is not None and not response.presentation_acknowledged
+                and "task_id" in self._work_events.get(response.work_event_id, {})):
+            self._work_seen.pop(response.work_event_id, None)
         if self._promoting is not None and self._promoting.request.predecessor == ref:
             self._retire_unadmitted_promotion(self._promoting.output.provider_id)
         if self._prepared is not None and self._prepared.request.predecessor == ref:
@@ -2537,6 +2556,8 @@ class OpenAIRealtimeNativeInteractionEngine:
         if response.presentation_acknowledged:
             return False
         response.presentation_acknowledged = True
+        if not response.presentable:
+            self._retry_unheard_task_result(response)
         self._profile_business("presentation_acknowledged", response=response,
                                status="completed" if response.presentable else "partial")
         await self._request_pending_provider_response()
@@ -2558,9 +2579,16 @@ class OpenAIRealtimeNativeInteractionEngine:
         if response.delivery_settled:
             return False
         response.delivery_settled = True
+        if response.next_audio_sequence == 0:
+            self._retry_unheard_task_result(response)
         self._profile_business("delivery_settled", response=response)
         await self._request_pending_provider_response()
         return True
+
+    def _retry_unheard_task_result(self, response):
+        if "task_id" in self._work_events.get(response.work_event_id, {}):
+            self._work_seen.pop(response.work_event_id, None)
+            self._work_retry_after = asyncio.get_running_loop().time() + 1.0
 
     def _discard_response_output(
         self, response: _ProviderResponse, ref: ResponseRef

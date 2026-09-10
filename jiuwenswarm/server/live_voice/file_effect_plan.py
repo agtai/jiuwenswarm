@@ -214,6 +214,11 @@ class FileEffectPlan:
             raise FileEffectPlanError("FILE_EFFECT_OPERATION_MISMATCH")
 
 
+def file_plan_source_digest(spec):
+    """A continued Task binds its complete durable spec, without invented speech."""
+    return spec.native_source.digest if spec.native_source is not None else hashlib.sha256(spec.fingerprint_bytes()).hexdigest()
+
+
 class FileEffectPlanSession:
     """One Executor-owned interpretation window; a tool cannot choose its owner."""
 
@@ -223,7 +228,7 @@ class FileEffectPlanSession:
         self.target = target.resolve(strict=True)
         self.worktree = worktree.resolve(strict=True)
         self.baseline_digest = _digest(baseline_digest)
-        self.source_digest = item.spec.native_source.digest
+        self.source_digest = file_plan_source_digest(item.spec)
         self.spec_digest = hashlib.sha256(item.spec.fingerprint_bytes()).hexdigest()
         self.validate_target = validate_target
         self.protected_paths = tuple(path.casefold() for path in protected_paths)

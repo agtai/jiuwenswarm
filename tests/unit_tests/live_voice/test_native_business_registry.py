@@ -335,6 +335,56 @@ async def test_project_rebound_while_agent_resource_waits_has_zero_work_or_agent
 
 
 @pytest.mark.asyncio
+async def test_native_completed_adjust_preserves_speech_and_exposes_final_saved_truth(tmp_path, monkeypatch):
+    from jiuwenswarm.common.schema.live_voice_contract_v2 import TerminalOutcome
+    from jiuwenswarm.server.live_voice.formal_task_models import TaskResultArtifact
+    import hashlib
+    spoken = "第一晚牛肉火锅，第二晚烧烤；不得修改原件.md。"
+    env = await make_registry(tmp_path, monkeypatch, input_text=spoken)
+    executor = env.harness.executor
+    executor.dispatch_outcome = TerminalOutcome.COMPLETED
+    dispatch = executor.dispatch
+    async def saved_dispatch(item):
+        delivered = await dispatch(item)
+        text = "原始行程" if item.spec.native_source is not None else "原始行程；牛肉火锅；烧烤"
+        return replace(delivered, observations=tuple(replace(obs, result_text=text,
+            result_artifacts=(TaskResultArtifact("行程.md", hashlib.sha256(text.encode()).hexdigest()),))
+            if obs.attempt_outcome is TerminalOutcome.COMPLETED else obs for obs in delivered.observations))
+    monkeypatch.setattr(executor, "dispatch", saved_dispatch)
+    try:
+        original, _ = await call(env, "task.create", stem="original", name="行程", instruction="生成原始行程")
+        core, store = env.harness.composition._core, env.harness.composition._core.store
+        await core.drain_outbox_once()
+        task = store.get_task(original["task_id"], env.binding.scope)
+        assert task.outcome is TerminalOutcome.COMPLETED
+        adjusted, _ = await call(env, "task.adjust", stem="meals", target_id=task.task_id,
+            expected_revision=task.revision_number, adjustment=spoken, text=spoken)
+        assert adjusted["status"] == "dispatched", adjusted
+        assert adjusted["adjustment_observation"]["state"] == "pending"
+        assert adjusted["adjustment_observation"]["execution_mode"] == "followup"
+        assert await core.drain_outbox_once()
+        await core.drain_outbox_once()
+        latest = await context(env)
+        fact = next(value for value in latest["tasks"] if value["task_id"] == task.task_id)
+        assert fact["result_text"] == "原始行程"
+        assert fact["adjustment_state"] == "applied"
+        child = store.get_task(fact["followup_adjustment"]["continuation_task_id"], env.binding.scope)
+        assert spoken in child.spec.instruction and "retained_speech" in child.spec.instruction
+        assert child.spec.context == task.spec.context
+        queried, _ = await call(env, "task.result", stem="result", target_id=task.task_id)
+        assert queried["task_control"]["adjustment_state"] == "applied"
+        assert len(queried["task_notifications"]) == 1
+        activation = env.client.activation_for(session_id="session-1", interaction_id="interaction-1", connection_id="business-wire")
+        observation = await env.client.business_context(activation, request_id="final-adjustment-observation")
+        assert observation["work_events"] == queried["task_notifications"]
+        assert store.get_task(task.task_id, env.binding.scope) == task
+        assert len(executor.dispatches) == 2 and env.manager.agent.executions == []
+    finally:
+        await env.registry.stop()
+        await env.harness.composition.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("ack_before_done", [False, True])
 async def test_queried_results_retire_notifications_only_at_canonical_played_history(tmp_path, monkeypatch, ack_before_done):
     from tests.unit_tests.live_voice import test_product_composition_registry as f

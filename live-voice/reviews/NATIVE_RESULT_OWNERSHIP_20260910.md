@@ -122,3 +122,115 @@ The new source is not deployed. No new real Provider, browser, microphone or
 Agent execution was performed for this repair. Model compliance, language and
 detail fidelity, physical playback and any latency effect await the user's
 sessions; the result ledger is not proof that a model included every fact.
+
+## Task adjustment continuation — authorized 2026-09-10
+
+The user accepted repair of adjustment admission/closure, durable continuation,
+final-state delivery and result-grounded summaries, with reuse of existing Task
+mechanisms and no topic-specific patches. This extends the prior Work-only scope.
+
+Intended behavior: the Store linearizes the last adjustment checkpoint against
+admission. An explicit change admitted after that checkpoint waits durably for
+the exact original result, then uses the existing immutable successor Task and
+project execution queue. Replays cannot create another revision. Cancellation,
+unknown/failed base results, stale identity and unrelated successors fail closed.
+Accepted speech evidence and all constraints remain attached to the change.
+Adjustment adoption is distinct from a successfully saved artifact. Final control
+facts and actual results must reach presentation and Native context.
+
+Owned surfaces: Task Store/Executor cutoff and continuation, production Task
+policy, authenticated control/result reads, Native instructions/context and
+existing notification ownership. Risk is Tier 3 for the additive durable queue
+and its Core integration, Tier 2 for presentation/concurrency. No new classifier,
+provider tuning, WebSocket repair, service restart, push or real voice/Agent run.
+Existing immutable Task/result and executor authorization boundaries remain.
+
+Acceptance: P/N/B/S/T/C/R/I/F/K/X from root TESTING, emphasizing exact file/result
+content, arrival on both sides of closure, completed-task changes, duplicate and
+ordered changes, restart, cancellation/failure, scope isolation and interrupted
+presentation. Offline evidence cannot establish model/audio user acceptance.
+### Implementation and verification
+
+Baseline: `1750387a`. The Store-owned cutoff and deferred-change ledger share
+the canonical SQLite transaction. A fast executor can close before its dispatch
+receipt projects RUNNING. Before closure, the existing adjustment outbox settles
+normally; afterwards, accepted changes await the actual saved result and create
+ordinary successor Tasks atomically. The existing successor implementation was
+extracted into a transaction-taking helper: AST comparison finds only SQL-string
+indentation differences in its body. No second executor or replacement task state
+machine is introduced.
+
+The queue preserves original requirements and retained speech, complete changes,
+context/model binding and immutable predecessor results. Consecutive changes
+use the latest saved queue-owned successor without recursively nesting prior
+generated instructions. Ordinary file guards remain active: Native-created work
+binds its speech digest, and internally derived continuations bind the complete
+durable spec to the same file-effect plan. Unplanned writes fail before mutation.
+Pending is not saved; only a completed child with a captured result settles the
+change as applied. Failed/cancelled continuations remain rejected; interrupted
+execution explicitly reports unknown effects rather than unchanged files.
+
+Native reads actual saved results plus independent adjustment states. Whole
+result content is included within a shared 64 KiB context budget; larger results
+remain available through the existing exact result query. Diagnostic progress
+windows do not retire unheard final adjustment outcomes. Historical control facts
+stay durable; at most 64 unpresented Task events are projected per batch, and the
+existing scheduler selects one result. The queue admits at most 64 outstanding
+changes across the Store; overflow has no new execution effect and exact replay
+continues to work. Existing wire/context, response and journal capacity guards
+remain in force.
+
+The Native observation carrier now accepts a closed Task-adjustment event variant
+alongside unchanged Work events. Gateway and Engine require exact visible Task
+revision binding. Notification input contains the selected adjustment and matching
+Task identity/status, excluding another question, older saved content or a newer
+adjustment's requirements. Task queries and observed adjustment receipts share
+the existing presentation journal. Each actual Provider generation has a distinct
+response ID; the result ID survives interruption. Only heard ACK consumes it.
+Interrupted or silent/failed generations can retry in an idle slot, with existing
+user-speech priority and a bounded retry delay. No service was restarted or deployed.
+
+Commands use `.venv/Scripts/python.exe -m pytest`, `-o addopts= -o log_cli=false
+-p no:cov -q --tb=short --show-capture=no`. Groups overlap; do not add their counts:
+
+| Check group | Result |
+|---|---|
+| Queue, full Persistent Core, full Direct executor, file-effect plan | 564 passed, 2 host-dependent filesystem checks skipped |
+| Native/P3/production policy, source retention, Runtime/Engine, gateway client (14 files) | 846 passed; the same 5 inherited projection-off context-refresh failures |
+| Affected Native/queue checks after final event/receipt/history refinements (9 files) | 498 passed |
+| Final queue and presentation recovery scenarios, including fast cutoff and silent generation | 38 passed |
+
+The eight intermediate Core cleanup failures were introduced by yielding inside
+the intentionally deferred adjustment claim batch. They were fixed by advancing
+continuations once per reconciliation batch, preserving existing claim/cleanup
+ownership; the full Core/Direct rerun above passes. Intermediate rejected-envelope
+format errors were also corrected to canonical failure receipts. No new explained
+failure is left open. The five inherited failures are exactly the cases listed
+in the earlier Work review above; they remain outside D-127, not a full-green claim.
+
+Scenario evidence covers P/N/B/S/T/C/R/I/F/K/X: real local SQLite transactions,
+concurrent admission scheduling, crash rollback/reopen, ordered changes, unrelated
+successor isolation, cancelled/failed/unknown outcomes, exact scope/attempt/replay,
+capacity, actual temporary Git worktrees/files and SHA-256 result matching,
+file-plan rejection, serialized Native/P3/gateway queries, exact notification
+revision, partial interruption, fresh generation admission, silent failure,
+heard ACK and zero unapproved file/Task/audio/history effects. Agent/Provider
+responses are controlled fixtures; this establishes the owned local execution
+and transport seams, not real model compliance or physical audio acceptance.
+
+Cold review covered the complete scoped diff, successor extraction, transaction
+rollback, source and file-effect inheritance, canonical failure envelopes,
+existing deferred cleanup scheduling, final-event retention, exact query coverage,
+per-generation notification identity and failed/partial playback. Tool discovery
+found review UI and GitHub review posting, but no callable independent reviewer.
+The recorded substitute is Main's cold diff review plus the cross-boundary/fault
+tests; it is not independent review. Changed Python compiles, Ruff F checks and
+Markdown/link/diff checks are recorded at local handoff. Detailed outputs are
+retained under ignored `logs/adjustment-20260910/`.
+
+The user explicitly requested completion without redeployment. Existing services,
+private configuration, Mini/VAD300 settings, WebSocket behavior and unrelated SDK
+workspace files remain outside this change. Deploy server and gateway together
+when later requested; older binaries do not implement the additive continuation
+ledger or the new Task event variant. User voice sessions remain the model/audio
+acceptance boundary.
