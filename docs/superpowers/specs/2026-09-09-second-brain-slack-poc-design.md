@@ -450,6 +450,52 @@ Notas sobre o config vivo (`~/.jiuwenswarm/config/config.yaml`):
   `0600` (feito). Ao repor os tokens do Slack, **não restaure o backup inteiro** — ele
   carrega outras diferenças de `models.defaults`; copie só as duas linhas.
 
+## 9.1 Resultado — verificado pelo Slack em 2026-09-10
+
+A PoC rodou de ponta a ponta pelo canal real, com dois papers.
+
+| Critério | Resultado |
+|---|---|
+| S1 PDF vira wiki sem intervenção | ✅ |
+| S2 âncoras | ✅ **556** âncoras em 30 páginas |
+| S3 âncoras corretas | ✅ 3 amostras conferidas contra o PDF |
+| S4 índice serve a wiki | ✅ 30 publicadas, FTS com 324 docs |
+| S5 resposta com âncora no canal | ✅ |
+| S6 ingest < 8 min | ⚠️ ~9 min por paper |
+
+    papers  1 → 2      páginas  18 → 30      âncoras  229 → 556
+
+### O acervo compôs, e isto é o achado principal
+
+O segundo paper **não** produziu apenas páginas novas: reescreveu as do primeiro.
+`sarsi-agents.md` ganhou 8 menções ao AREX, `recursive-self-improvement.md` 9, e
+`evaluation-framework.md` 4 — e não como citação decorativa, mas como distinção
+conceitual. O agente percebeu que os dois papers usam *"recursive self-improvement"*
+com sentidos diferentes e escreveu uma seção sobre isso na página do conceito.
+
+É a tese do Karpathy observada — *"the cross-references are already there"* — e é o
+argumento mais forte de que isto não é RAG: um RAG recuperaria os dois trechos e
+deixaria a contradição para o leitor.
+
+**Consequência para a demo:** o clímax não é a busca, é abrir
+`recursive-self-improvement.md` e mostrar a seção que só existe porque um segundo paper
+entrou.
+
+### Defeito conhecido: a extensão na âncora
+
+As âncoras do segundo paper saíram com a extensão truncada:
+
+    [[fonte: 45e4144f_2607.21461v2.df p10]]      (esperado: .pdf)
+
+O modelo elidiu o `p` de `.pdf`, provavelmente induzido pelo `p.N` que vem logo depois
+na regra 8. Não impede a verificação — o arquivo continua identificável — mas quebraria
+um hyperlink da §10.4 e é visível para quem reparar.
+
+Correção é de prompt: dar um exemplo literal completo na regra 8 em vez do
+`<filename>` genérico. **Não aplicada antes da demo** porque a wiki atual está boa e
+reingerir custa ~9 min por paper; as páginas existentes manteriam o formato antigo de
+qualquer modo.
+
 ## 10. Evoluções
 
 ### 10.1 Híbrida por dentro do `wiki_query`
