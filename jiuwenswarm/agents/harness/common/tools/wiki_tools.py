@@ -15,6 +15,7 @@ from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelReques
 from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig, tool
 from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.foundation.tool.exposure import ToolExposure
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.core.foundation.kv_cache import resolve_session_lineage
 from openjiuwen.core.session import get_current_session
@@ -337,8 +338,17 @@ class LLMWiki:
 
         _sid = session_id or hashlib.sha256(str(self.workspace.resolve()).encode()).hexdigest()[:16]
         self._session_id: str = _sid
+        self.agent_card: AgentCard = final_card
+        # The card is not decoration: ``Session.get_agent_id`` reads ``self._card.id``,
+        # and the kernel's write_file/edit_file/bash call it while building their history
+        # path -- AFTER the file is already written. A card-less session therefore made
+        # every successful write report ``'NoneType' object has no attribute 'id'`` (167
+        # times in one three-paper run). The maintainer then spent turns re-reading files
+        # to verify writes that had in fact succeeded, and `bash date` failed, which is
+        # why every log.md entry was dated [unknown] in violation of its own rule 13.
         self._session: Session = Session(
             session_id=_sid,
+            card=final_card,
             parent_session_id=parent_session_id,
         )
 
@@ -433,12 +443,31 @@ class LLMWiki:
         if source_path.resolve() != destination.resolve():
             shutil.copy2(source_path, destination)
 
+        # Two clauses here used to dominate the ingest's wall clock. "other relevant
+        # .md files" was read as licence to open the whole wiki (~30 pages, driving the
+        # prompt to 146k tokens), and "a detailed summary" produced a 6.8k-token log
+        # entry that cost 46 s in a single call and grows log.md without bound. The
+        # replacements below narrow both without touching the anchoring contract: the
+        # discovery recipe is the same index-then-grep one build_query_prompt already
+        # uses, and the log entry is capped rather than dropped.
+        #
+        # The date is passed in because the maintainer cannot shell out for it. It used
+        # to try `bash date`, which failed, and rule 13 then obliged it to write
+        # [unknown] -- so every log entry carried a non-date. UTC here matches the
+        # manifest's ingested_at, so the two can never disagree.
+        today = datetime.datetime.now(tz=datetime.timezone.utc).date().isoformat()
         query = (
             f"Read the rules in your `schema/AGENT.md`."
             f" Process the new raw source document '{destination.name}' inside `sources/` into the wiki."
-            f" CRITICAL: You MUST read `wiki/index.md` and other relevant `.md` files to discover existing topics."
+            f" Today's date is {today}; use it for any date you must record."
+            f" To discover existing topics: read `wiki/index.md`, then grep the wiki for"
+            f" the key terms of this source, and read in full ONLY the pages that match."
+            f" Do not read the wiki exhaustively."
             f" Actively interconnect them by adding deep Markdown cross-links."
-            f" FINALLY, you MUST append a detailed summary of what knowledge you extracted into `wiki/log.md`!"
+            f" FINALLY, append an entry to `wiki/log.md` of AT MOST 30 lines: the pages"
+            f" you created, the pages you edited, the page ranges you read, and any rule"
+            f" you could not satisfy. Read only the tail of `wiki/log.md` before"
+            f" appending -- it is an append-only timeline and you never need its history."
         )
         result = await self.agent.invoke({"query": query}, session=self._session)
 
@@ -713,3 +742,23 @@ async def wiki_lint(workspace: str = "", sys_operation: Optional[SysOperation] =
         return json.dumps(result, indent=2)
     except Exception as e:
         return f"Wiki Lint Error: {str(e)}"
+
+
+# ``wiki_ingest`` drives a whole subagent session -- reading a paper, writing pages and
+# cross-linking them -- and routinely runs for several minutes. The kernel's
+# DEFAULT_TOOL_CALL_TIMEOUT of 300 s was killing it mid-write, after which the caller
+# silently re-invoked it from scratch; a measured run finished only because the killed
+# attempt had already written half the pages, and a paper that genuinely needs more than
+# 300 s would loop forever. Declaring the call exempt lets it run to completion, still
+# bounded by the kernel's MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT.
+#
+# The exposure is part of the same fix rather than a separate preference. Under
+# progressive tools a deferred tool is reached through the model-visible ``tool_call``
+# wrapper, whose own call carries the default timeout -- so exempting only the target
+# would still leave it killed by its parent. Declaring the exposure keeps the
+# registration policy from deferring these two, and it also spares the ingest the
+# ``tool_search`` round trip that discovering a deferred tool costs.
+for _long_running_tool in (wiki_ingest, wiki_query):
+    _long_running_tool.card.properties = {"resilience": {"timeout_s": None}}
+    _long_running_tool.card.exposure = ToolExposure.DIRECT
+    _long_running_tool.card.set_exposure_declared(True)
