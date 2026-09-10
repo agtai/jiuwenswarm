@@ -499,171 +499,180 @@ Recorded as a method note: **a conformance measurement needs checking as careful
 artefact it measures.** A badly written `sed` nearly bought a nine-minute re-ingest per
 paper to fix nothing. It was not the last such error either — see §14.
 
-## 10. Evoluções
+## 10. Evolutions
 
-### 10.1 Híbrida por dentro do `wiki_query`
+### 10.1 Hybrid search inside `wiki_query`
 
-A PoC coloca a híbrida **ao lado** do `wiki_query`. O passo seguinte é colocá-la
-**dentro**: o `wiki_query` recuperaria as páginas relevantes antes de abri-las, em vez
-de listar o diretório e ler tudo. Hoje ele lê a wiki inteira — com 17 páginas funciona,
-com 200 não. Isso exige modificar uma ferramenta upstream e por isso fica fora da PoC.
+The PoC puts hybrid search **beside** `wiki_query`. The next step is to put it
+**inside**: `wiki_query` would retrieve the relevant pages before opening them, instead
+of listing the directory and reading everything. §11-A1 applied the cheap half of this
+as a prompt change; the full version needs the tool to hold an index of its own, which
+means modifying an upstream tool and stays out of the PoC.
 
-### 10.2 `channel_type` — classes de canal em vez de ids
+### 10.2 `channel_type` — classes of conversation instead of ids
 
-A §5.3 escreve o prompt de papers contra um **id de conversa**. Como `chat` é escalar,
-N canais do mesmo tipo exigem N scopes com o mesmo `prompt_append` copiado, e um leitor
-do config vê uma lista de ids opacos em vez de uma intenção.
+§5.3 writes the papers prompt against a **conversation id**. Because `chat` is scalar, N
+channels of the same kind need N scopes with the same `prompt_append` copied, and a
+reader of the config sees a list of opaque ids rather than an intention.
 
-O projeto já tem o padrão certo no eixo de pessoas: `people:` e `roles:` são blocos
-irmãos que resolvem um nome (`admin`) para um conjunto de ids, e `role` casa contra isso.
-O código é explícito quanto ao papel disso — um role *"não carrega permissões próprias:
-ele nomeia um conjunto de pessoas"* (D8). `channel_type` seria o análogo para conversas:
+The project already has the right pattern on the people axis: `people:` and `roles:` are
+sibling blocks resolving a name (`admin`) into a set of ids, and `role` matches against
+that. The code is explicit about the role of a role — it *"carries no permissions of its
+own: it names a set of people"* (D8). `channel_type` would be the analogue for
+conversations:
 
 ```yaml
-channel_types:                     # bloco novo, irmão de people:/roles:
+channel_types:                     # new block, sibling to people:/roles:
   papers:  [C_PAPERS_1, C_PAPERS_2]
-  suporte: [C_SUP_1]
+  support: [C_SUP_1]
 
 scopes:
   - match: {channel: slack, channel_type: papers}
     delivery: {prompt_append: "<wiki + papers>"}
 ```
 
-Ganhos: uma definição por tipo, vocabulário legível, e a composição em camadas já
-existente passa a valer por classe.
+Gains: one definition per kind, readable vocabulary, and the existing layered composition
+starts applying per class.
 
-O que isto exige, e por que fica fora da PoC:
+What it would require, and why it stays out of the PoC:
 
-- eixo novo no schema, com resolução e validação próprias;
-- declaração nas `ChannelCapabilities` de cada conector que o suporte;
-- decisões de semântica ainda em aberto: um canal pode ter dois tipos? tipos compõem
-  entre si? o que acontece quando dois tipos discordam da mesma chave?
-- **e uma consequência de segurança que não é óbvia.** `scoped_chats` documenta que, no
-  Slack, os ids nomeados em scopes de `delivery`/`agent` **isentam o canal de
-  `allowed_channel_ids`** — nomear uma conversa num scope já é opt-in para o bot
-  responder ali. Um `channel_type` mal desenhado abriria vários canais de uma vez sem
-  que ninguém percebesse, que é exatamente a direção (D4) que este desenho não permite.
+- a new axis in the schema, with its own resolution and validation;
+- a declaration in each supporting connector's `ChannelCapabilities`;
+- semantics still undecided: can a channel hold two types? do types compose? what happens
+  when two types disagree about the same key?
+- **and a security consequence that is not obvious.** `scoped_chats` documents that on
+  Slack the ids named in `delivery`/`agent` scopes **exempt the channel from
+  `allowed_channel_ids`** — naming a conversation in a scope is already opt-in for the
+  bot to answer there. A badly designed `channel_type` would open several channels at
+  once without anyone noticing, which is exactly the direction (D4) this design forbids.
 
-Merece spec próprio.
+Deserves its own spec.
 
-### 10.3 `extra_paths` no kernel `lite`
+### 10.3 `extra_paths` in the `lite` kernel
 
-A §5.4 publica a wiki copiando arquivos para `<agent workspace>/memory/`. É um contorno.
-O correto é `lite/manager.py:954` repassar `extra_paths` — o parâmetro **já existe** na
-assinatura de `list_memory_files` (`lite/internal.py:35`) e simplesmente não é passado.
-Junto com isso valeria trocar o `os.listdir` do scan de extras por `os.walk`
-(`lite/internal.py:80`), para que apontar um diretório funcione de fato.
+§5.4 publishes the wiki by copying files into `<agent workspace>/memory/`. That is a
+workaround. The right fix is for `lite/manager.py:954` to pass `extra_paths` to
+`list_memory_files` — the parameter **already exists** in the signature
+(`lite/internal.py:35`) and is simply never passed. Alongside it, the extras scan's
+`os.listdir` should become `os.walk` (`lite/internal.py:80`), so that pointing at a
+directory actually works.
 
-Duas linhas, mas dentro do `openjiuwen` fixado em `61becb17`: exige contribuição upstream
-ou fork da dependência. Depois disso, a §5.4 vira uma chave de config e o passo de
-publicação desaparece.
+Two lines, but inside the `openjiuwen` pinned at `61becb17`: it needs an upstream
+contribution or a fork of the dependency. After that, §5.4 collapses into a config key
+and the publication step disappears.
 
-### 10.4 Âncoras clicáveis — hyperlink para a página do PDF
+### 10.4 Clickable anchors — a hyperlink to the PDF page
 
-Hoje a âncora `[[fonte: paper.pdf p7]]` é texto. A evolução natural é torná-la um link
-que abre o PDF **na página citada**, transformando o double-check de "abra o arquivo e
-procure" em um clique.
+Today `[[fonte: paper.pdf p7]]` is text. The natural evolution is to make it a link that
+opens the PDF **at the cited page**, turning the double-check from "open the file and
+search" into a click.
 
-**O que já está resolvido.** O conector converte link Markdown em `mrkdwn` do Slack
-sozinho — `_normalize_slack_mrkdwn` (`slack_connect.py:11916`). Verificado:
+**What is already solved.** The connector converts Markdown links into Slack `mrkdwn` on
+its own — `_normalize_slack_mrkdwn` (`slack_connect.py:11916`). Verified:
 
     IN : [paper.pdf p.7](http://host/x.pdf#page=7)
     OUT: <http://host/x.pdf#page=7|paper.pdf p.7>
 
-Ou seja, **não é preciso gerar a sintaxe `<url|texto>`**; basta o agente escrever Markdown.
+So **there is no need to emit `<url|text>` syntax**; the agent writing Markdown is enough.
 
-**O que precisa mudar na regra 8.** O colchete duplo quebra o regex e passa intacto:
+**What rule 8 would have to change.** The double bracket defeats the regex and passes
+through untouched:
 
     IN : [[fonte: x.pdf p7]](http://host/x.pdf#page=7)
-    OUT: (inalterado — não vira link)
+    OUT: (unchanged — not a link)
 
-A âncora teria de virar colchete simples: `[fonte: x.pdf p.7](url)`.
+The anchor would have to become a single bracket: `[fonte: x.pdf p.7](url)`.
 
-**O elo que falta: de onde vem a URL.** Três opções, nenhuma gratuita.
+**The missing link: where the URL comes from.** Three options, none free.
 
-| Opção | Viável? | Observação |
+| Option | Viable? | Note |
 |---|---|---|
-| Permalink do Slack | ❌ | o visualizador do Slack não honra `#page=N` |
-| `url_private` do arquivo | ⚠️ | abre no navegador com a sessão do usuário; `#page` só funciona se o navegador renderizar o PDF inline. **É o caminho certo**: o arquivo já está hospedado, com o controle de acesso do canal |
-| Servidor HTTP local sobre `sources/` | ✅ | trivial (`python3 -m http.server`), mas a URL é `localhost` — serve para demo com tela compartilhada, não para os outros clicarem |
+| Slack permalink | ❌ | Slack's viewer does not honour `#page=N` |
+| The file's `url_private` | ⚠️ | opens in the browser under the user's session; `#page` only works if the browser renders the PDF inline. **This is the right path**: the file is already hosted, under the channel's access control |
+| Local HTTP server over `sources/` | ✅ | trivial (`python3 -m http.server`), but the URL is `localhost` — good for a screen-shared demo, not for others to click |
 
-**E uma cadeia de metadados que hoje não existe.** O `wiki_ingest` copia o PDF para
-`sources/` com prefixo de hash e **descarta a origem no Slack**: o `slack_file_id` fica no
-registro do anexo (`slack_connect.py:11375`) e nunca chega à wiki. Para um link baseado no
-`url_private` seria preciso carregá-lo por toda a cadeia — conector → prompt → parâmetro do
-`wiki_ingest` → frontmatter da página → âncora. Isso é o grosso do trabalho, não o link.
+**And a metadata chain that does not exist today.** `wiki_ingest` copies the PDF into
+`sources/` under a hash prefix and **discards its Slack origin**: `slack_file_id` stays in
+the attachment record (`slack_connect.py:11375`) and never reaches the wiki. A link based
+on `url_private` would need it carried the whole way — connector → prompt →
+`wiki_ingest` parameter → page frontmatter → anchor. That is the bulk of the work, not
+the link.
 
-**Por que fica fora da PoC.** Nada aqui é difícil isoladamente, mas são quatro mudanças
-acopladas (formato da âncora, cadeia de metadados, hospedagem do arquivo, e reingestão das
-páginas já escritas no formato antigo) e a demo já entrega a verificação sem elas — o
-ponteiro em texto já diz arquivo e página, que é o que a tese exige. O clique é conforto,
-não prova.
+**Why it stays out of the PoC.** Nothing here is hard in isolation, but it is four
+coupled changes (anchor format, metadata chain, file hosting, and re-ingesting pages
+already written in the old format) and the demo already delivers verification without
+them — a textual pointer already names file and page, which is what the thesis requires.
+The click is comfort, not proof.
 
 ---
 
-## 11. Pontos de melhora, medidos na wiki real (2 papers)
+## 11. Improvements, measured on the real wiki
 
-Estado estrutural em 2026-09-10: 30 páginas, 221 KB, 257 arestas, **0 órfãs, 0 links
-quebrados**, 567 âncoras. A estrutura está saudável; o que segue é sobre escala e
-precisão.
+Structural health on 2026-09-10, at two papers: 30 pages, 221 KB, 257 edges, **0 orphans,
+0 broken links**, 567 anchors. The structure is sound; what follows is about scale and
+precision. (At three papers: 45 pages, 1117 anchors.)
 
-| # | Ponto | Custo | Estado |
+| # | Point | Cost | State |
 |---|---|---|---|
-| A1 | `wiki_query` lia a wiki inteira | prompt | ✅ **aplicado** |
-| A2 | `index.md`/`log.md` poluíam o índice | 1 regra | ✅ **aplicado** |
-| A3 | chunks no teto cortam afirmação+citação | config | aberto |
-| A4 | prefixo de hash nas âncoras | metadados | aberto |
-| A5 | ninguém roda o `wiki_lint` | operação | aberto |
+| A1 | `wiki_query` read the whole wiki | prompt | ✅ **applied** |
+| A2 | `index.md`/`log.md` polluted the index | 1 rule | ✅ **applied** |
+| A3 | chunks at the ceiling split claim from quote | config | open |
+| A4 | the hash prefix in anchors | metadata | open |
+| A5 | nobody runs `wiki_lint` | operations | open |
 
-### A1 — `wiki_query` não escalava  ✅ aplicado
+### A1 — `wiki_query` did not scale  ✅ applied
 
-Ele era instruído apenas a *"answer strictly based on `wiki/`"*, sem método, e portanto
-listava o diretório e lia tudo: **221 KB com dois papers**. Como o acervo é projetado
-para compor, a versão ingênua piora a cada fonte — o oposto do que o desenho promete.
+It was told only to *"answer strictly based on `wiki/`"*, with no method, so it listed the
+directory and read all of it: **221 KB at two papers**. Because the library is designed to
+compound, the naive version degrades with every source — the opposite of what the design
+promises.
 
-O prompt agora ordena o trabalho: `index.md` primeiro (é o catálogo, uma linha por
-página), `grep` depois pelos termos da pergunta, e só então as páginas que sobreviveram.
-O write-back continua, mas agora **preso ao `schema/AGENT.md`** — a redação anterior
-permitia escrever uma página sem as âncoras que todas as outras carregam.
+The prompt now orders the work: `index.md` first (it is the catalogue, one line per page),
+`grep` next for the question's own terms, and only then whole pages, and only the ones
+that survived. The write-back remains, but is now **bound to `schema/AGENT.md`** — the
+earlier wording allowed a page to be written without the anchors every other page carries.
 
-Isto **não** é a busca híbrida da §10.1, que segue sendo a solução completa; é a correção
-que cabia sem tocar na arquitetura.
+This is **not** the hybrid search of §10.1, which remains the complete solution; it is the
+correction that fitted without touching the architecture.
 
-### A2 — páginas de navegação fora do índice  ✅ aplicado
+### A2 — navigation pages out of the index  ✅ applied
 
-`index.md` e `log.md` nomeiam **todos** os tópicos da wiki, então casam com quase
-qualquer consulta e afogam a página que de fato responde. Pior: **17 dos 26 chunks sem
-âncora eram deles** — uma recuperação que caia ali deixa o agente sem nada para citar.
+`index.md` and `log.md` name **every** topic in the wiki, so they match nearly any query
+and drown the page that actually answers it. Worse: **17 of the 26 anchorless chunks were
+theirs** — a retrieval landing on one leaves the agent with nothing to cite.
 
-Ambos deixam de ser publicados, e cópias antigas são removidas (nada mais as apagaria).
+Neither is published any more, and stale copies are removed (nothing else would delete
+them).
 
-### A3 — o chunking está no teto
+### A3 — chunking sits at the ceiling
 
-    245 chunks · média 963 chars · máximo 1067
+    245 chunks · mean 963 chars · max 1067
 
-Os chunks estão colados no limite. Uma afirmação com blockquote de 25 palavras ocupa boa
-parte disso, então o par afirmação+citação corre risco real de ser partido — que é
-exatamente o que a regra 8 ("âncora na mesma linha") tenta evitar, e ela só protege
-dentro de uma linha, não dentro de um chunk.
+The chunks are pressed against the limit. A claim with a 25-word blockquote takes a good
+share of that, so the claim+quote pair runs a real risk of being split — which is exactly
+what rule 8 ("anchor on the same line") tries to avoid, and rule 8 only protects within a
+line, not within a chunk.
 
-`memory.chunking` é configurável. Subir para ~1500 daria folga. **Precisa de medição
-antes**: chunk maior reduz precisão da recuperação, então é um trade-off, não uma
-melhoria óbvia.
+`memory.chunking` is configurable. Raising it to ~1500 would give room. **It needs
+measuring first**: a larger chunk lowers retrieval precision, so this is a trade-off, not
+an obvious improvement. It also interacts with the encoder — dense retrieval prefers
+smaller, coherent chunks while BM25 tolerates larger ones — so changing chunking and the
+embedding model at the same time makes it impossible to attribute the result.
 
-### A4 — o prefixo de hash nas âncoras
+### A4 — the hash prefix in anchors
 
     [[fonte: 45e4144f_2607.21461v2.pdf p10]]
 
-O `sha256[:8]_` vem de como `wiki_ingest` nomeia o arquivo em `sources/`. Serve para
-desambiguar, mas polui toda resposta e impede um link limpo. Guardar o nome original no
-frontmatter da página-fonte e ancorar por ele resolve — e é a **mesma cadeia de
-metadados** que a §10.4 exige, então as duas devem ser feitas juntas.
+The `sha256[:8]_` comes from how `wiki_ingest` names the file in `sources/`. It
+disambiguates, but it pollutes every answer and prevents a clean link. Storing the
+original name in the source page's frontmatter and anchoring by that solves it — and it
+is the **same metadata chain** §10.4 needs, so the two should be done together.
 
-### A5 — o `wiki_lint` não roda
+### A5 — `wiki_lint` never runs
 
-Ficou deliberadamente fora do registro de ferramentas (§5.1). Mas é ele quem detecta
-órfãs e links quebrados — hoje em zero **por sorte, não por verificação**. Com dez papers
-isso degrada silenciosamente. Decidir se entra como passo periódico ou manual.
+It was deliberately left out of the tool registration (§5.1). But it is what detects
+orphans and broken links — today both are zero **by luck, not by verification**. At ten
+papers that degrades silently. Decide whether it becomes a periodic step or a manual one.
 
 ---
 
