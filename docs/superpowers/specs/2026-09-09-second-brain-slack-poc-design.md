@@ -598,3 +598,69 @@ acopladas (formato da âncora, cadeia de metadados, hospedagem do arquivo, e rei
 páginas já escritas no formato antigo) e a demo já entrega a verificação sem elas — o
 ponteiro em texto já diz arquivo e página, que é o que a tese exige. O clique é conforto,
 não prova.
+
+---
+
+## 11. Pontos de melhora, medidos na wiki real (2 papers)
+
+Estado estrutural em 2026-09-10: 30 páginas, 221 KB, 257 arestas, **0 órfãs, 0 links
+quebrados**, 567 âncoras. A estrutura está saudável; o que segue é sobre escala e
+precisão.
+
+| # | Ponto | Custo | Estado |
+|---|---|---|---|
+| A1 | `wiki_query` lia a wiki inteira | prompt | ✅ **aplicado** |
+| A2 | `index.md`/`log.md` poluíam o índice | 1 regra | ✅ **aplicado** |
+| A3 | chunks no teto cortam afirmação+citação | config | aberto |
+| A4 | prefixo de hash nas âncoras | metadados | aberto |
+| A5 | ninguém roda o `wiki_lint` | operação | aberto |
+
+### A1 — `wiki_query` não escalava  ✅ aplicado
+
+Ele era instruído apenas a *"answer strictly based on `wiki/`"*, sem método, e portanto
+listava o diretório e lia tudo: **221 KB com dois papers**. Como o acervo é projetado
+para compor, a versão ingênua piora a cada fonte — o oposto do que o desenho promete.
+
+O prompt agora ordena o trabalho: `index.md` primeiro (é o catálogo, uma linha por
+página), `grep` depois pelos termos da pergunta, e só então as páginas que sobreviveram.
+O write-back continua, mas agora **preso ao `schema/AGENT.md`** — a redação anterior
+permitia escrever uma página sem as âncoras que todas as outras carregam.
+
+Isto **não** é a busca híbrida da §10.1, que segue sendo a solução completa; é a correção
+que cabia sem tocar na arquitetura.
+
+### A2 — páginas de navegação fora do índice  ✅ aplicado
+
+`index.md` e `log.md` nomeiam **todos** os tópicos da wiki, então casam com quase
+qualquer consulta e afogam a página que de fato responde. Pior: **17 dos 26 chunks sem
+âncora eram deles** — uma recuperação que caia ali deixa o agente sem nada para citar.
+
+Ambos deixam de ser publicados, e cópias antigas são removidas (nada mais as apagaria).
+
+### A3 — o chunking está no teto
+
+    245 chunks · média 963 chars · máximo 1067
+
+Os chunks estão colados no limite. Uma afirmação com blockquote de 25 palavras ocupa boa
+parte disso, então o par afirmação+citação corre risco real de ser partido — que é
+exatamente o que a regra 8 ("âncora na mesma linha") tenta evitar, e ela só protege
+dentro de uma linha, não dentro de um chunk.
+
+`memory.chunking` é configurável. Subir para ~1500 daria folga. **Precisa de medição
+antes**: chunk maior reduz precisão da recuperação, então é um trade-off, não uma
+melhoria óbvia.
+
+### A4 — o prefixo de hash nas âncoras
+
+    [[fonte: 45e4144f_2607.21461v2.pdf p10]]
+
+O `sha256[:8]_` vem de como `wiki_ingest` nomeia o arquivo em `sources/`. Serve para
+desambiguar, mas polui toda resposta e impede um link limpo. Guardar o nome original no
+frontmatter da página-fonte e ancorar por ele resolve — e é a **mesma cadeia de
+metadados** que a §10.4 exige, então as duas devem ser feitas juntas.
+
+### A5 — o `wiki_lint` não roda
+
+Ficou deliberadamente fora do registro de ferramentas (§5.1). Mas é ele quem detecta
+órfãs e links quebrados — hoje em zero **por sorte, não por verificação**. Com dez papers
+isso degrada silenciosamente. Decidir se entra como passo periódico ou manual.
