@@ -869,6 +869,83 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     # before_model_call: pause check + context fix + compression info
     # ------------------------------------------------------------------
 
+    async def _adopt_execution_work(self, ctx, *, model_call, prepare, invoke=False, task_iteration=False):
+        """Prepare actual work authority or recheck it after all rail waits."""
+        from openjiuwen.core.runner.callback.errors import AbortError
+        from openjiuwen.core.single_agent.rail.base import ModelCallInputs, TaskIterationInputs
+
+        try:
+            if invoke or task_iteration:
+                input_type = TaskIterationInputs if task_iteration else InvokeInputs
+                if not isinstance(ctx.inputs, input_type) or not isinstance(ctx.extra, dict):
+                    raise ValueError("AGENT_WORK_CONTEXT_INVALID")
+                incoming = ctx.inputs.run_context
+                if incoming is not None:
+                    # Deep supplies typed entry inputs; ReAct supplies extra.
+                    # Never replace an existing conflicting work binding.
+                    if "run_context" in ctx.extra and ctx.extra["run_context"] != incoming:
+                        raise ValueError("AGENT_WORK_CONTEXT_MISMATCH")
+                    ctx.extra["run_context"] = incoming
+            run_context = ctx.extra.get("run_context") if isinstance(ctx.extra, dict) else None
+            context_extra = (run_context.get("extra") if isinstance(run_context, dict)
+                             else getattr(run_context, "extra", None))
+            # Even a malformed or restored descriptor requires a live host
+            # resolver. Its presence must never downgrade to the legacy path.
+            bound = isinstance(context_extra, dict) and "jiuwenswarm_execution" in context_extra
+            if bound and not isinstance(ctx.session, Session):
+                raise ValueError("AGENT_WORK_SESSION_UNAVAILABLE")
+            if ctx.session is None:
+                # Legacy outer invokes may create their Session later. A
+                # managed descriptor cannot substitute for a real SDK Session.
+                return
+            resolver = getattr(self, "execution_work_resolver", None)
+            if resolver is None:
+                if bound:
+                    raise ValueError("AGENT_WORK_BINDING_UNAVAILABLE")
+                return
+            work = resolver(ctx)
+            if work is None:
+                if bound:
+                    raise ValueError("AGENT_WORK_BINDING_UNAVAILABLE")
+                return
+            # The final checkpoint repeats live/policy/permission adoption,
+            # while only prepare applies the selected model runtime.
+            await work.before_effect(ctx, model_call=model_call and prepare)
+            if invoke or task_iteration:
+                # Entry inputs are not ModelCallInputs. The SDK takes its
+                # first tool snapshot only after this lifecycle hook returns.
+                return
+            if model_call and prepare:
+                if not isinstance(ctx.inputs, ModelCallInputs):
+                    raise ValueError("AGENT_WORK_MODEL_INPUT_INVALID")
+                # ReAct keeps its invoke-level snapshot across iterations and
+                # retries. Refresh from the runtime just applied to this work.
+                tools = await ctx.agent.ability_manager.list_tool_info()
+                if not isinstance(tools, list):
+                    raise ValueError("AGENT_WORK_MODEL_TOOLS_INVALID")
+                ctx.inputs.tools = list(tools)
+            policy = work.policy.tool_policy
+            if model_call and policy != "configured":
+                ctx.inputs.tools = ([] if policy == "none" else [
+                    tool for tool in (ctx.inputs.tools or [])
+                    if getattr(tool, "name", None) in NATIVE_READ_ONLY_TOOL_NAMES
+                ])
+            elif not model_call and policy != "configured":
+                inputs = ctx.inputs
+                if (policy == "none" or not isinstance(inputs, ToolCallInputs)
+                        or inputs.tool_name != getattr(inputs.tool_call, "name", None)
+                        or inputs.tool_name not in NATIVE_READ_ONLY_TOOL_NAMES):
+                    raise ValueError("AGENT_WORK_TOOL_FORBIDDEN")
+        except Exception as error:
+            failure = getattr(self, "execution_work_failure", None)
+            if failure is not None:
+                try:
+                    await failure(ctx, error)
+                except Exception:
+                    logger.exception("Unable to record execution binding failure")
+            # Ordinary rail errors are logged and ignored by AgentCore.
+            raise AbortError("AGENT_WORK_AUTHORITY_REJECTED", cause=error) from error
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         sid = self._resolve_sid(ctx, ctx.session)
         await self._get_pause_event(sid).wait()

@@ -10,6 +10,7 @@ import logging
 import re
 import time
 import weakref
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -331,6 +332,31 @@ class TeamManager:
 
     def has_stream_task(self, session_id: str) -> bool:
         return session_id in self._stream_tasks
+
+    def get_stream_task(self, session_id: str) -> asyncio.Task | None:
+        """Observe the existing physical producer without starting or restoring it."""
+        return self._stream_tasks.get(session_id)
+
+    async def cancel_stream_task_exact(self, session_id: str, *, expected_task, before_effect) -> bool:
+        """Cancel only the original producer; its exit is not proof of Team completion."""
+        async with self._get_lifecycle_lock(session_id):
+            if self._stream_tasks.get(session_id) is not expected_task or expected_task.done():
+                return False
+            result = before_effect()
+            if result is not None:
+                if asyncio.iscoroutine(result):
+                    result.close()
+                raise ValueError('team_cancel_guard_must_return_none')
+            expected_task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(expected_task), timeout=1.0)
+        except asyncio.CancelledError:
+            if not expected_task.done():
+                raise
+        except TimeoutError:
+            # Physical exit remains visible through the retained original Task.
+            pass
+        return True
 
     def pop_stream_task(self, session_id: str) -> asyncio.Task | None:
         return self._stream_tasks.pop(session_id, None)
@@ -740,6 +766,7 @@ class TeamManager:
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
         requested_model_name: str | None = None,
+        execution_context: Any = None,
     ) -> TeamAgentSpec:
         """Build a team spec via provider-based assembly (no parent DeepAgent).
 
@@ -763,6 +790,8 @@ class TeamManager:
         from jiuwenswarm.agents.swarm import enrich_team_spec_for_swarm
 
         config_base = get_config()
+        if execution_context is not None:
+            execution_context.check()
         self._team_evolution_enabled[session_id] = get_skill_evolution_enabled(config_base)
         await self._ensure_postgresql_for_leader(config_base)
         spec, has_binding = self._load_session_team_spec(
@@ -781,6 +810,7 @@ class TeamManager:
             request_id=request_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
+            **({'execution_context': execution_context} if execution_context is not None else {}),
         )
         return spec
 
@@ -1318,7 +1348,66 @@ class TeamManager:
                 request_metadata,
             )
 
-    async def interact(self, session_id: str, user_input: Any) -> tuple[bool, str | None]:
+    async def reply_swarmflow(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        correlation_id: str,
+        answer: str,
+        before_effect: Callable[[], None] | None = None,
+    ) -> tuple[bool, str | None]:
+        """Consume an exact pending reply through its existing SDK owner.
+
+        Unlike general interaction, this must not restore a runtime before
+        rejecting a stale target. The SDK validates its live session/run/input
+        and invokes the synchronous authority guard immediately before consuming
+        the pending Future. A monitor snapshot or publish ACK cannot prove that.
+        """
+        team_name = self.get_active_team_name(session_id)
+        if not team_name:
+            return False, "not_active"
+        reply = getattr(Runner, "reply_swarmflow_human", None)
+        if not callable(reply):
+            return False, "swarmflow_reply_unavailable"
+        result = await reply(
+            session_id=session_id,
+            team_name=team_name,
+            run_id=run_id,
+            correlation_id=correlation_id,
+            answer=answer,
+            before_effect=before_effect,
+        )
+        if not result:
+            return False, getattr(result, "reason", None) or "runner_failed"
+        return True, None
+
+    async def interact(self, session_id: str, user_input: Any, *, expected_task=None,
+                       before_effect=None) -> tuple[bool, str | None]:
+        if before_effect is not None:
+            # Guarded Host controls target only an existing physical producer.
+            # A read/reply cannot silently restore or create another runtime.
+            if (not callable(before_effect) or expected_task is None
+                    or self._stream_tasks.get(session_id) is not expected_task or expected_task.done()
+                    or type(user_input) is not str):
+                return False, 'configured_team_producer_changed'
+            team_name = self.get_active_team_name(session_id)
+            if not team_name:
+                return False, 'not_active'
+            from openjiuwen.agent_teams.interaction import GodViewMessage
+
+            def admit():
+                if (self._stream_tasks.get(session_id) is not expected_task or expected_task.done()
+                        or self.get_active_team_name(session_id) != team_name):
+                    raise ValueError('configured_team_producer_changed')
+                result = before_effect()
+                if asyncio.iscoroutine(result):
+                    result.close()
+                if result is not None:
+                    raise ValueError('configured_team_guard_must_return_none')
+            result = await Runner.interact_agent_team(GodViewMessage(body=user_input),
+                team_name=team_name, session_id=session_id, before_effect=admit)
+            return (True, None) if result else (False, getattr(result, 'reason', None) or 'runner_failed')
         try:
             if not self.is_runtime_active(session_id):
                 restored = await self.wait_for_resumable_runtime(session_id)
@@ -2540,9 +2629,9 @@ class TeamManager:
             if self._stream_tasks.get(session_id) is task:
                 self._stream_tasks.pop(session_id, None)
 
-    async def cancel_all_stream_tasks(self, reason: str = "") -> None:
+    async def cancel_all_stream_tasks(self, reason: str = "", *, preserve_sessions=frozenset()) -> None:
         """Cancel Team stream tasks after AgentServer disconnects."""
-        session_ids = list(self._stream_tasks)
+        session_ids = [session_id for session_id in self._stream_tasks if session_id not in preserve_sessions]
         await asyncio.gather(
             *(self._cancel_stream_task(session_id, reason) for session_id in session_ids),
         )
@@ -2558,6 +2647,11 @@ class TeamManager:
 # routed through interact() instead of being misidentified as a first request
 # and colliding with the Runner team pool.
 _team_manager: TeamManager | None = None
+
+
+def get_existing_team_manager(channel_id: str | None = None) -> TeamManager | None:
+    """Read the existing cross-channel owner without creating one."""
+    return _team_manager
 
 
 def get_team_manager(channel_id: str | None = None) -> TeamManager:
@@ -2581,9 +2675,12 @@ def refresh_team_shared_skill_links_across_managers(session_id: str | None = Non
     return tm.refresh_team_shared_skill_links(session_id)
 
 
-async def cancel_all_team_stream_tasks_across_managers(reason: str = "") -> None:
+async def cancel_all_team_stream_tasks_across_managers(reason: str = "", *, preserve_sessions=frozenset()) -> None:
     """Cancel all team stream tasks on the singleton manager."""
-    await get_team_manager().cancel_all_stream_tasks(reason=reason)
+    if preserve_sessions:
+        await get_team_manager().cancel_all_stream_tasks(reason=reason, preserve_sessions=preserve_sessions)
+    else:
+        await get_team_manager().cancel_all_stream_tasks(reason=reason)
 
 
 async def stop_team_session_runtime_across_managers(

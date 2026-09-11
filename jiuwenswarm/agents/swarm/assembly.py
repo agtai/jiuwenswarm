@@ -63,6 +63,7 @@ def enrich_team_spec_for_swarm(
     request_id: str | None = None,
     channel_id: str | None = None,
     request_metadata: dict[str, Any] | None = None,
+    execution_context: Any = None,
 ) -> None:
     """Enrich *spec* in place for provider-based swarm assembly.
 
@@ -80,6 +81,12 @@ def enrich_team_spec_for_swarm(
         channel_id: Raw channel id from the request, if any.
         request_metadata: Request metadata mapping (carries ``mode`` etc.).
     """
+    if execution_context is not None:
+        from jiuwenswarm.server.runtime.team_execution import _TeamRun
+
+        if type(execution_context) is not _TeamRun:
+            raise ValueError('configured_team_authority_unavailable')
+        execution_context.check()
     register_swarm_providers()
 
     config = get_config()
@@ -127,6 +134,19 @@ def enrich_team_spec_for_swarm(
             member_spec = _with_project_cwd(member_spec, project_dir)
             spec.agents[role] = member_spec
 
+    if execution_context is not None:
+        from jiuwenswarm.server.runtime.team_execution import _TeamRun
+        from jiuwenswarm.agents.harness.team.rails.team_execution_rail import (
+            TEAM_EXECUTION_CONTEXT, TEAM_EXECUTION_RAIL,
+        )
+        from openjiuwen.harness.schema.deep_agent_spec import RailSpec
+
+        if type(execution_context) is not _TeamRun:
+            raise ValueError('configured_team_authority_unavailable')
+        execution_context.check()
+        base.extras[TEAM_EXECUTION_CONTEXT] = execution_context
+        for member in spec.agents.values():
+            member.rails = list(member.rails or []) + [RailSpec(type=TEAM_EXECUTION_RAIL)]
     spec.build_context = base
     # Carry a serializable seed alongside the live context so members rebuilt
     # across a serialization boundary (spawned teammate, distributed remote,

@@ -47,6 +47,9 @@ from openjiuwen.agent_teams.rails.subagent_elements import (
 from openjiuwen.agent_teams.schema.build_context import register_build_context_factory
 
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
+from jiuwenswarm.agents.harness.team.rails.team_execution_rail import (
+    TEAM_EXECUTION_RAIL as _TEAM_EXECUTION_RAIL,
+)
 from jiuwenswarm.agents.swarm.providers import (
     builtin_rails as _builtin_rails,
     code_rails as _code_rails,
@@ -87,6 +90,7 @@ SKILL_RETRIEVAL_PROMPT = _member_rails.SKILL_RETRIEVAL_PROMPT
 SYMPHONY_ORCHESTRATION_PROMPT = _member_rails.SYMPHONY_ORCHESTRATION_PROMPT
 TEAM_PERMISSION = _member_rails.TEAM_PERMISSION
 TEAM_PERMISSION_POLICY = _member_rails.TEAM_PERMISSION_POLICY
+TEAM_EXECUTION = _TEAM_EXECUTION_RAIL
 TEAM_SKILL_EVOLUTION = _evolution_rails.TEAM_SKILL_EVOLUTION
 TEAM_SKILL_CREATE = _evolution_rails.TEAM_SKILL_CREATE
 MEMBER_SKILL_EVOLUTION = _evolution_rails.MEMBER_SKILL_EVOLUTION

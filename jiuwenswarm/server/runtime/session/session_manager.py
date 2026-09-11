@@ -94,10 +94,11 @@ class SessionManager:
                     session_id,
                 )
 
-    async def cancel_all_session_tasks(self, log_msg_prefix: str = "") -> None:
+    async def cancel_all_session_tasks(self, log_msg_prefix: str = "", *, preserve_sessions=frozenset()) -> None:
         """取消所有 session 的非流式任务."""
         for session_id in list(self._session_tasks.keys()):
-            await self.cancel_session_task(session_id, log_msg_prefix)
+            if session_id not in preserve_sessions:
+                await self.cancel_session_task(session_id, log_msg_prefix)
 
     @staticmethod
     def _cancel_result_future(result_future: asyncio.Future[Any] | None) -> None:

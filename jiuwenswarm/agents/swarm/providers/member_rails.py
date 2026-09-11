@@ -68,6 +68,20 @@ SYMPHONY_ORCHESTRATION_PROMPT = "swarm.symphony_orchestration_prompt"
 TEAM_PERMISSION_POLICY = "swarm.team_permission_policy"
 
 
+@harness_element(kind=ElementKind.RAIL, name='swarm.team_execution',
+                 description='Trusted in-process configured Team execution admission.')
+def _build_team_execution_rail(params: dict[str, Any], context: Any) -> Any:
+    from jiuwenswarm.agents.harness.team.rails.team_execution_rail import (
+        TEAM_EXECUTION_CONTEXT, TeamExecutionRail,
+    )
+    from jiuwenswarm.server.runtime.team_execution import _TeamRun
+
+    owner = (getattr(context, 'extras', None) or {}).get(TEAM_EXECUTION_CONTEXT)
+    if params or type(owner) is not _TeamRun:
+        raise ValueError('configured_team_authority_unavailable')
+    return TeamExecutionRail(owner, role=context.role, member_name=context.member_name)
+
+
 def _workspace_root(ctx: SwarmBuildContext) -> str | None:
     """Resolve the member workspace root path."""
     workspace = getattr(ctx, "workspace", None)

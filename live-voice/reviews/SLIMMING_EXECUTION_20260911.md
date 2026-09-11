@@ -33,7 +33,7 @@ build/tests passed 6 fake-P1, 9 replica and 12 recorder cases. Relocation bodies
 production import direction, changed links and diff whitespace checks pass.
 These overlapping selections are not added into a misleading unique test count.
 
-## Batch 2 — shared execution (active)
+## Batch 2 — shared execution (complete)
 
 Preserve the current Host fixes while adopting configured Agent execution,
 immutable work/model/permission binding and SDK-owned settlement. This is a
@@ -166,3 +166,50 @@ honors frozen source rather than exempting any same-version SDK; existing
 launcher tests: 44 passed, five platform skips. Installed SDK still resolves to
 `.deps/agent-core-w3`; no install/restart occurred. Source tree evidence remains
 the audited 365 SDK checks. Shared execution integration is still outstanding.
+
+## Batch 2b — configured shared execution integration (complete)
+
+Tier 2/3: adapt the candidate Host runtime/facade/SDK binding implementation and
+retire Voice-owned duplicate Agent work execution. Keep current Task result and
+adjustment code; Native business vocabulary and Web/RPC entrypoints remain as
+they are. Shared Goal/Team/Workflow adapters are Host capabilities and are not
+new voice operations. Integrate source hunks against the common baseline so
+current fixes survive. Use isolated exact-SDK processes for scoped producer,
+model/tool/source, cancellation and output-owner checks before environment
+adoption. No remote update or physical journey is part of this module step.
+
+Batch 2b integration scope is now concrete: configured Agent streams, formal
+Native foreground/Work, immutable model/tool/source bindings, and original
+Team/SwarmFlow reply/observation owners. WebSocket chat and transport cleanup use
+the shared service; old Workflow query code delegates to its Host helper. New
+Core Workflow bootstrap/execution, the new Agent-input RPC adapter and new Native
+Goal/Team/Workflow vocabulary were excluded, together with candidate-only tests
+for those unadopted endpoints. Existing business/result/adjustment code remains.
+The Responses-only wheel builder and copied patch are retired in favor of the
+immutable upstream dependency.
+
+Checks against exact SDK source: shared producer/formal/model/source/cleanup
+selection passed after correcting the invocation to preserve pytest's existing
+asyncio auto mode (the initial 38 async cases did not execute, not product
+failures; corrected context file: 48 passed). Adapter/Goal/Team/Swarm regressions:
+371 passed. Current result ownership, Native tool contract and real temporary
+project late-change/save-as/restart cases: 106 passed. WebSocket routing,
+disconnect and send: 106 passed. Shared reply/Team/query and changed Manager
+constructor/KV-cache checks: 132 passed. Overlapping selections are not summed.
+Changed-file undefined-name and whitespace checks pass. One pre-existing
+Authlib deprecation warning remains outside this boundary.
+
+Review: inspected the complete changed boundary and its ownership/cancellation,
+source binding, final-output and public-entry seams. No callable independent
+code-review tool is available in this session; do not claim independent review
+signoff. Existing adversarial boundary tests and cold diff inspection are the
+recorded substitute, without another review loop or physical run.
+
+Environment adoption: installed only the locked AgentCore package with `uv pip
+install --no-deps` into the repository `.venv`. `direct_url.json` proves exact
+commit `ffeb1abc`; all 40 changed SDK Python modules match the audited source
+(after newline normalization). Actual installed-package Responses/Agent and
+shared-formal checks: 53 passed. Host/WebSocket/Native imports succeed. Both
+`.deps/agent-core` and `.deps/agent-core-w3` remain unchanged. No service restart
+or browser/Provider call was performed; source checks do not constitute live
+process deployment or physical acceptance.

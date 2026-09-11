@@ -6,25 +6,21 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import math
 import secrets
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from collections import deque
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timezone
+from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 from jiuwenswarm.common.live_voice_operation_budgets import (
     NATIVE_AGENT_TIMEOUT_SECONDS, NATIVE_AGENT_MAX_TIMEOUT_SECONDS,
 )
 from jiuwenswarm.server.live_voice.native_foreground import (
     NATIVE_FOREGROUND, NativeForegroundInterrupted,
-)
-from jiuwenswarm.server.live_voice.native_work_runtime import (
-    NativeWorkControl, NativeWorkCancelled, context_identity,
 )
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
@@ -44,7 +40,6 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.server.live_voice.agent_bridge import AgentEvent
 from jiuwenswarm.server.live_voice.agent_bridge_runtime import (
-    AgentBridgeCompletionStatus,
     AgentBridgeCompletionHandle,
     AgentBridgeDispatchReservation,
     AgentBridgeRuntime,
@@ -672,6 +667,7 @@ class AgentConversationRuntime:
         history_writer: FormalHistoryWriter | None = None,
         harness: JiuWenSwarmRoundHarness | None = None,
         bridge: AgentBridgeRuntime | None = None,
+        execution_service: Any = None,
         response_generation_owner: Callable[[str, int], int] | None = None,
         native_delegate_timeout_seconds: float = (
             _DEFAULT_NATIVE_DELEGATE_TIMEOUT_SECONDS
@@ -745,6 +741,8 @@ class AgentConversationRuntime:
         )
         self._history_writer = history_writer or SessionFormalHistoryWriter()
         self._native_delegate_timeout_seconds = float(native_delegate_timeout_seconds)
+        self._execution_service = execution_service
+        self._native_delegate_settlements: set[asyncio.Task] = set()
         self._max_requests = max_requests
         self._notifications = _BoundedNotificationBuffer(
             observer_capacity=notification_capacity,
@@ -856,69 +854,6 @@ class AgentConversationRuntime:
         self._native_owner = owner
         return owner
 
-    async def execute_native_work(
-        self, *, control: NativeWorkControl, commit: TurnCommit,
-        context: FormalContextSnapshot, correlation_id: str, channel_id: str = "web",
-        allow_tools: bool = True,
-    ) -> str:
-        """Execute admitted read-only work independently of any spoken response.
-
-        The internal ResponseRef correlates Harness/Bridge records only. No CR
-        turn, presentation, history, notification or speech authority is created.
-        """
-        self._require_admission()
-        if (not isinstance(control, NativeWorkControl) or not isinstance(commit, TurnCommit)
-                or not isinstance(context, FormalContextSnapshot)
-                or control.snapshot.scope != self._scope or commit.scope != self._scope
-                or control.snapshot.input_id != commit.commit_id
-                or control.snapshot.context_id != context_identity(context)):
-            raise AgentConversationRuntimeViolation("NATIVE_WORK_BINDING_MISMATCH",
-                "Native work requires its exact admitted input and context", ErrorCode.PERMISSION_DENIED)
-        specifications = [entry for entry in context.entries
-                          if entry.ref.source == "live_voice.native_work_specification"]
-        try:
-            specification = json.loads(specifications[0].content) if len(specifications) == 1 else None
-        except (ValueError, TypeError):
-            specification = None
-        if not isinstance(specification, dict) or specification.get("instruction") != control.snapshot.instruction:
-            raise AgentConversationRuntimeViolation("NATIVE_WORK_SPECIFICATION_MISMATCH",
-                "Native work requires its exact selected specification", ErrorCode.PERMISSION_DENIED)
-        context.validate_for(commit)
-        self._validate_dispatch_channel(channel_id)
-        if type(allow_tools) is not bool:
-            raise AgentConversationRuntimeViolation("INVALID_AGENT_TOOL_POLICY", "tool policy must be boolean", ErrorCode.INVALID_ARGUMENT)
-        if self._facade is None:
-            raise AgentConversationRuntimeViolation("FORMAL_AGENT_FACADE_UNAVAILABLE", "formal Agent facade is unavailable", ErrorCode.CAPABILITY_UNAVAILABLE)
-        control.check()
-        identity = control.snapshot
-        request_id = f"{identity.work_id}:r{identity.revision}"
-        response = ResponseRef(commit.interaction_id, request_id, 1)
-        fingerprint = hashlib.sha256(canonical_json_bytes({
-            "commit": commit.to_dict(), "context_id": identity.context_id,
-            "model_identity": identity.model_identity, "model_config_version": identity.model_config_version,
-            "correlation_id": correlation_id, "channel_id": channel_id, "allow_tools": allow_tools,
-        })).digest()
-        async with self._identity_claim_lock:
-            prior = self._native_delegate_executions.get(request_id)
-            if prior is not None:
-                if prior[0] != fingerprint:
-                    raise AgentConversationRuntimeViolation("NATIVE_WORK_REQUEST_CONFLICT", "work revision cannot change execution binding", ErrorCode.CONFLICT)
-                operation = prior[1]
-            else:
-                if len(self._native_delegate_executions) >= self._max_requests:
-                    raise AgentConversationRuntimeViolation("NATIVE_WORK_LEDGER_FULL", "bounded Agent work ledger is full", ErrorCode.UNAVAILABLE)
-                token = NATIVE_FOREGROUND.set(None)
-                try:
-                    operation = asyncio.create_task(self._run_native_delegate(
-                        request_id=request_id, source_response=response, correlation_id=correlation_id,
-                        commit=commit, context=context, channel_id=channel_id, allow_tools=allow_tools,
-                        answer_from_selected_task_result=False, work_control=control,
-                    ), name=f"native-agent-work:{request_id}")
-                finally:
-                    NATIVE_FOREGROUND.reset(token)
-                self._native_delegate_executions[request_id] = (fingerprint, operation)
-        return await asyncio.shield(operation)
-
     async def execute_native_delegate(
         self,
         *,
@@ -931,7 +866,7 @@ class AgentConversationRuntime:
         allow_tools: bool = True,
         answer_from_selected_task_result: bool = False,
     ) -> str:
-        """Run one Native delegate through the retained Harness/Agent Bridge.
+        """Run one Native delegate through the retained common execution service.
 
         The source Native response supplies only the Bridge correlation fence.
         This path deliberately creates no second CR turn/response, TEXT
@@ -1085,159 +1020,60 @@ class AgentConversationRuntime:
         channel_id: str,
         allow_tools: bool,
         answer_from_selected_task_result: bool,
-        work_control: NativeWorkControl | None = None,
     ) -> str:
-        harness_reservation: HarnessRoundReservation | None = None
-        bridge_reservation: AgentBridgeDispatchReservation | None = None
-        round_handle: HarnessRoundHandle | None = None
-        foreground = work_control if work_control is not None else NATIVE_FOREGROUND.get()
+        from jiuwenswarm.server.runtime.session_execution import SessionExecutionUnavailable
+
+        foreground = NATIVE_FOREGROUND.get()
+        service = self._execution_service
+        if service is None or self._facade is None:
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_EXECUTION_SERVICE_UNAVAILABLE", "The configured execution service is unavailable",
+                ErrorCode.UNAVAILABLE)
+        if foreground is not None:
+            foreground.check()
+            foreground.observe("agent_started", timeout_ms=self._native_delegate_timeout_seconds * 1000)
+        private_id = hashlib.sha256(canonical_json_bytes({
+            "scope": commit.scope.to_dict(), "request_id": request_id,
+            "response": {"interaction_id": source_response.interaction_id,
+                         "response_id": source_response.response_id,
+                         "response_generation": source_response.response_generation},
+            "correlation_id": correlation_id,
+        })).hexdigest()
+        execution = FormalAgentExecution(request_id=request_id, channel_id=channel_id,
+            internal_session_id="lv-formal-native-" + private_id, commit=commit, context=context,
+            allow_tools=allow_tools and not any(
+                item.ref.source == "live_voice.task_result" for item in context.entries),
+            answer_from_selected_task_result=answer_from_selected_task_result)
+        entry = service.start_formal(self._facade, execution)
+        self._native_delegate_settlements.add(entry.task)
+        entry.task.add_done_callback(self._native_delegate_settlements.discard)
+        waiter = asyncio.create_task(service.wait_formal(entry), name="native-formal-result:" + request_id)
+        waiter.add_done_callback(lambda task: None if task.cancelled() else task.exception())
         try:
-            if foreground is not None:
-                foreground.check()
-                if work_control is None:
-                    foreground.observe("agent_started", timeout_ms=self._native_delegate_timeout_seconds * 1000)
-                else:
-                    # The service work owner has the sole execution deadline.
-                    # Speech/delegate budgets never retire accepted work.
-                    foreground.observe("agent_started")
-            assert self._facade is not None
-            harness_reservation = self._harness.reserve_round(
-                HarnessRoundBinding(
-                    request_id=request_id,
-                    response_id=source_response.response_id,
-                    correlation_id=correlation_id,
-                    commit=commit,
-                ),
-                facade=self._facade,
-            )
-            bridge_reservation = self._bridge.reserve_dispatch(
-                request_id=request_id,
-                round_id=harness_reservation.round_id,
-                response_id=source_response.response_id,
-                correlation_id=correlation_id,
-                commit=commit,
-                adapter_id=JiuWenSwarmAgentAdapter.adapter_id,
-            )
-            self._harness.begin_round_commit(harness_reservation)
-            self._bridge.begin_dispatch_commit(bridge_reservation)
-            round_handle = self._harness.commit_round(
-                harness_reservation,
-                response_ref=source_response,
-                context=context,
-                facade=self._facade,
-                channel_id=channel_id,
-                allow_tools=allow_tools,
-                answer_from_selected_task_result=(answer_from_selected_task_result),
-                read_only_tools=work_control is not None,
-                model_identity=work_control.snapshot.model_identity if work_control else None,
-                model_config_version=work_control.snapshot.model_config_version if work_control else None,
-            )
-            submission = self._bridge.commit_dispatch(
-                bridge_reservation,
-                response_ref=source_response,
-                adapter=JiuWenSwarmAgentAdapter(round_handle),
-            )
-            if work_control is not None:
-                work_control.settlement = asyncio.create_task(round_handle.wait_settled())
-            try:
-                if foreground is None:
-                    completion = await asyncio.wait_for(
-                        submission.completion, timeout=self._native_delegate_timeout_seconds,
-                    )
-                else:
-                    completion = await foreground.read_only(
-                        asyncio.shield(submission.completion),
-                        timeout=self._native_delegate_timeout_seconds if work_control is None else None,
-                    )
-            except (TimeoutError, NativeForegroundInterrupted, NativeWorkCancelled) as timeout_error:
-                interrupted = isinstance(timeout_error, (NativeForegroundInterrupted, NativeWorkCancelled))
-                cancel = CommandEnvelope.from_dict(
-                    {
-                        "contract_version": "live-voice.contract.v2",
-                        "request_id": request_id,
-                        "command_id": (
-                            ("native-delegate-interrupt-" if interrupted else "native-delegate-timeout-")
-                            + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
-                        ),
-                        "command_type": "round.cancel",
-                        "issued_at": datetime.now(UTC)
-                        .isoformat(timespec="microseconds")
-                        .replace("+00:00", "Z"),
-                        "scope": commit.scope.to_dict(),
-                        "correlation_id": correlation_id,
-                        "causation_id": None,
-                        "origin": {
-                            "kind": "committed_turn",
-                            "turn_id": commit.turn_id,
-                            "commit_id": commit.commit_id,
-                        },
-                        "target_ref": {
-                            "kind": "round",
-                            "id": round_handle.round_id,
-                        },
-                        "context_refs": [],
-                        "required_capabilities": ["round.cancel"],
-                        "payload": {},
-                        "extensions": {},
-                    }
-                )
-                round_handle.cancel(cancel)
-                cancel_completion = None
-                try:
-                    cancel_completion = await asyncio.wait_for(
-                        submission.completion,
-                        timeout=_NATIVE_DELEGATE_CANCEL_SETTLEMENT_SECONDS,
-                    )
-                except TimeoutError:
-                    pass
-                if work_control is not None:
-                    if (cancel_completion is None
-                            or cancel_completion.status is not AgentBridgeCompletionStatus.TERMINAL_OBSERVED):
-                        raise AgentConversationRuntimeViolation("NATIVE_WORK_CANCEL_OUTCOME_UNKNOWN",
-                            "work cancellation has not reached a terminal observation", ErrorCode.RESULT_UNKNOWN) from timeout_error
-                    raise AgentConversationRuntimeViolation(
-                        "NATIVE_WORK_CANCELLED" if interrupted else "NATIVE_WORK_DEADLINE_EXCEEDED",
-                        "Native work ended after cancellation", ErrorCode.CANCELLED,
-                    ) from timeout_error
-                if foreground is not None:
-                    foreground.observe("agent_cancelled", outcome="cancelled" if interrupted else "timeout")
-                raise AgentConversationRuntimeViolation(
-                    "NATIVE_DELEGATE_INTERRUPTED" if interrupted else "NATIVE_DELEGATE_AGENT_TIMEOUT",
-                    "Native Agent foreground interrupted" if interrupted else "Native Agent delegate exceeded its server-owned deadline",
-                    ErrorCode.CANCELLED if interrupted else ErrorCode.TIMEOUT,
-                ) from timeout_error
-            if (
-                completion.status is not AgentBridgeCompletionStatus.TERMINAL_OBSERVED
-                or completion.terminal_outcome is not TerminalOutcome.COMPLETED
-                or completion.canonical_final_count != 1
-                or completion.canonical_text is None
-            ):
-                raise AgentConversationRuntimeViolation(
-                    "NATIVE_DELEGATE_AGENT_RESULT_INVALID",
-                    "Agent Bridge did not return one completed canonical final",
-                    ErrorCode.RESULT_UNKNOWN,
-                )
+            pending = asyncio.shield(waiter)
+            text = (await asyncio.wait_for(pending, self._native_delegate_timeout_seconds)
+                    if foreground is None else await foreground.read_only(
+                        pending, timeout=self._native_delegate_timeout_seconds))
             if foreground is not None:
                 foreground.check()
                 foreground.observe("agent_completed", outcome="complete")
-            return completion.canonical_text
+            return text
+        except (TimeoutError, NativeForegroundInterrupted) as error:
+            interrupted = isinstance(error, NativeForegroundInterrupted)
+            settlement = service.cancel_formal(entry)
+            await asyncio.wait({settlement}, timeout=_NATIVE_DELEGATE_CANCEL_SETTLEMENT_SECONDS)
+            if foreground is not None:
+                foreground.observe("agent_cancelled", outcome="cancelled" if interrupted else "timeout")
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_DELEGATE_INTERRUPTED" if interrupted else "NATIVE_DELEGATE_AGENT_TIMEOUT",
+                "Native foreground interrupted" if interrupted else "Native delegate exceeded its deadline",
+                ErrorCode.CANCELLED if interrupted else ErrorCode.TIMEOUT) from error
+        except SessionExecutionUnavailable as error:
+            raise AgentConversationRuntimeViolation(
+                "NATIVE_DELEGATE_AGENT_RESULT_INVALID", "Configured Agent did not return a completed canonical final",
+                ErrorCode.RESULT_UNKNOWN) from error
         except BaseException:
-            if bridge_reservation is not None:
-                try:
-                    self._bridge.rollback_undelivered_dispatch(
-                        bridge_reservation,
-                        reason="native_delegate_failed",
-                    )
-                except (AgentBridgeRuntimeViolation, RuntimeError):
-                    pass
-            if harness_reservation is not None:
-                try:
-                    self._harness.rollback_unstarted_round(
-                        harness_reservation,
-                        reason="native_delegate_failed",
-                    )
-                except (HarnessRoundViolation, RuntimeError):
-                    pass
+            service.cancel_formal(entry)
             raise
 
     async def start(self) -> bool:
@@ -1510,83 +1346,6 @@ class AgentConversationRuntime:
             }
         )
 
-    async def start_turn(self, interaction_id: str, turn_id: str) -> None:
-        self._require_admission()
-        async with self._identity_claim_lock:
-            if turn_id in self._turn_identity_claims:
-                raise AgentConversationRuntimeViolation(
-                    "TURN_IDENTITY_ALREADY_CLAIMED",
-                    "turn_id is already owned by another admitted turn",
-                    ErrorCode.CONFLICT,
-                )
-            claim = _TurnIdentityClaim(
-                interaction_id=interaction_id,
-                turn_id=turn_id,
-                commit=None,
-                product_request_id=None,
-            )
-            self._turn_identity_claims[turn_id] = claim
-            try:
-                await self._cr.start_turn(interaction_id, turn_id)
-            except asyncio.CancelledError:
-                # CR loop writes are cancellation-shielded after posting.  Keep
-                # the claim so a product admission cannot race the retained write.
-                raise
-            except BaseException:
-                if self._turn_identity_claims.get(turn_id) is claim:
-                    self._turn_identity_claims.pop(turn_id, None)
-                raise
-
-    async def commit_turn(self, commit: TurnCommit) -> bool:
-        self._require_admission()
-        async with self._identity_claim_lock:
-            self._validate_turn_commit(commit)
-            prior_turn = self._turn_identity_claims.get(commit.turn_id)
-            if (
-                prior_turn is None
-                or prior_turn.product_request_id is not None
-                or prior_turn.interaction_id != commit.interaction_id
-                or (
-                    prior_turn.commit is not None
-                    and prior_turn.commit.canonical_bytes() != commit.canonical_bytes()
-                )
-            ):
-                raise AgentConversationRuntimeViolation(
-                    "TURN_COMMIT_CONFLICT",
-                    "legacy commit must match its exact start_turn identity claim",
-                    ErrorCode.CONFLICT,
-                )
-            prior_commit = self._commit_identity_claims.get(commit.commit_id)
-            if prior_commit is not None and prior_commit.turn_id != commit.turn_id:
-                raise AgentConversationRuntimeViolation(
-                    "TURN_COMMIT_CONFLICT",
-                    "commit_id is already owned by another admitted turn",
-                    ErrorCode.CONFLICT,
-                )
-            upgraded = _TurnIdentityClaim(
-                interaction_id=commit.interaction_id,
-                turn_id=commit.turn_id,
-                commit=commit,
-                product_request_id=None,
-            )
-            self._turn_identity_claims[commit.turn_id] = upgraded
-            self._commit_identity_claims[commit.commit_id] = upgraded
-            try:
-                accepted, _event = await self._cr.commit_turn(commit)
-            except asyncio.CancelledError:
-                # The posted CR commit remains authoritative even if this waiter
-                # leaves.  Retaining both claims prevents cross-path reuse.
-                raise
-            except BaseException:
-                self._turn_identity_claims[commit.turn_id] = prior_turn
-                if prior_commit is None:
-                    self._commit_identity_claims.pop(commit.commit_id, None)
-                else:
-                    self._commit_identity_claims[commit.commit_id] = prior_commit
-                raise
-            self._commits[commit.turn_id] = commit
-            return accepted
-
     async def _commit_admitted_turn(
         self, commit: TurnCommit, *, request_id: str
     ) -> bool:
@@ -1774,11 +1533,18 @@ class AgentConversationRuntime:
                 outcome = product_entry.outcome
             else:
                 self._require_admission()
-                existing_admission = self._admissions.get(request_id)
-                if existing_admission is not None:
-                    # A legacy dispatch already owns the exact committed CR
-                    # identity and reservations.  Product replay may attach to
-                    # that retained outcome without allocating another claim.
+                turn_key = (commit.interaction_id, commit.turn_id)
+                bound_request = self._submitted_turn_bindings.get(turn_key)
+                if bound_request is not None and bound_request != request_id:
+                    raise AgentConversationRuntimeViolation(
+                        "COMMITTED_TURN_ALREADY_SUBMITTED",
+                        "one product TurnCommit cannot be rebound to another request",
+                        ErrorCode.CONFLICT,
+                    )
+                # One fence owns identity preflight, claim registration,
+                # reservation, and product ledger writes.
+                claim = self._claim_product_identity(commit, request_id=request_id)
+                try:
                     outcome = self._register_committed_turn_submission(
                         request_id=request_id,
                         response_id=response_id,
@@ -1793,37 +1559,9 @@ class AgentConversationRuntime:
                         supersedes=supersedes,
                         speculation=speculation,
                     )
-                else:
-                    turn_key = (commit.interaction_id, commit.turn_id)
-                    bound_request = self._submitted_turn_bindings.get(turn_key)
-                    if bound_request is not None and bound_request != request_id:
-                        raise AgentConversationRuntimeViolation(
-                            "COMMITTED_TURN_ALREADY_SUBMITTED",
-                            "one product TurnCommit cannot be rebound to another request",
-                            ErrorCode.CONFLICT,
-                        )
-                    # One fence owns identity preflight, claim registration,
-                    # reservation, and product ledger writes.  Legacy start and
-                    # commit operations use this same fence and claim registry.
-                    claim = self._claim_product_identity(commit, request_id=request_id)
-                    try:
-                        outcome = self._register_committed_turn_submission(
-                            request_id=request_id,
-                            response_id=response_id,
-                            correlation_id=correlation_id,
-                            commit=commit,
-                            context=context,
-                            channel_id=channel_id,
-                            fingerprint=fingerprint,
-                            before_dispatch=before_dispatch,
-                            after_dispatch=after_dispatch,
-                            allow_tools=allow_tools,
-                            supersedes=supersedes,
-                            speculation=speculation,
-                        )
-                    except BaseException:
-                        self._release_product_identity(claim)
-                        raise
+                except BaseException:
+                    self._release_product_identity(claim)
+                    raise
 
         return self._unwrap_admission(await asyncio.shield(outcome))
 
@@ -2692,24 +2430,6 @@ class AgentConversationRuntime:
                 ErrorCode.UNAVAILABLE,
             )
 
-        existing_admission = self._admissions.get(request_id)
-        if existing_admission is not None:
-            if existing_admission.fingerprint != fingerprint:
-                raise AgentConversationRuntimeViolation(
-                    "COMPOSITION_REQUEST_ID_CONFLICT",
-                    "request_id cannot change its formal dispatch binding",
-                    ErrorCode.CONFLICT,
-                )
-            self._submitted_turn_bindings[turn_key] = request_id
-            self._committed_turn_submissions[request_id] = (
-                _CommittedTurnSubmissionEntry(
-                    fingerprint=fingerprint,
-                    commit=commit,
-                    outcome=existing_admission.outcome,
-                    coordinator=existing_admission.coordinator,
-                )
-            )
-            return existing_admission.outcome
         if len(self._admissions) >= self._max_requests:
             raise AgentConversationRuntimeViolation(
                 "COMPOSITION_REQUEST_LEDGER_FULL",
@@ -2800,150 +2520,6 @@ class AgentConversationRuntime:
         )
         product_entry.coordinator = coordinator
         admission_entry.coordinator = coordinator
-        return outcome
-
-    async def dispatch_committed_turn(
-        self,
-        *,
-        request_id: str,
-        response_id: str,
-        correlation_id: str,
-        commit: TurnCommit,
-        context: FormalContextSnapshot,
-        channel_id: str = "web",
-    ) -> AgentConversationHandle:
-        self._require_admission()
-        self._require_exact_commit(commit)
-        self._validate_dispatch_channel(channel_id)
-        if self._facade is None:
-            raise AgentConversationRuntimeViolation(
-                "FORMAL_AGENT_FACADE_UNAVAILABLE",
-                "formal Agent facade is not configured",
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-            )
-        context.validate_for(commit)
-        fingerprint = self._admission_fingerprint(
-            request_id=request_id,
-            response_id=response_id,
-            correlation_id=correlation_id,
-            commit=commit,
-            context=context,
-            channel_id=channel_id,
-            allow_tools=True,
-        )
-
-        async with self._identity_claim_lock:
-            existing = self._admissions.get(request_id)
-            if existing is not None:
-                if existing.fingerprint != fingerprint:
-                    raise AgentConversationRuntimeViolation(
-                        "COMPOSITION_REQUEST_ID_CONFLICT",
-                        "request_id cannot change its formal dispatch binding",
-                        ErrorCode.CONFLICT,
-                    )
-                outcome = existing.outcome
-            else:
-                self._require_exact_commit(commit)
-                turn_key = (commit.interaction_id, commit.turn_id)
-                bound_request = self._submitted_turn_bindings.get(turn_key)
-                identity_claim = self._turn_identity_claims.get(commit.turn_id)
-                if (bound_request is not None and bound_request != request_id) or (
-                    identity_claim is not None
-                    and identity_claim.product_request_id is not None
-                    and identity_claim.product_request_id != request_id
-                ):
-                    raise AgentConversationRuntimeViolation(
-                        "COMMITTED_TURN_ALREADY_SUBMITTED",
-                        "request-bound TurnCommit cannot dispatch under another request",
-                        ErrorCode.CONFLICT,
-                    )
-                outcome = self._register_legacy_dispatch(
-                    request_id=request_id,
-                    response_id=response_id,
-                    correlation_id=correlation_id,
-                    commit=commit,
-                    context=context,
-                    channel_id=channel_id,
-                    fingerprint=fingerprint,
-                )
-
-        return self._unwrap_admission(await asyncio.shield(outcome))
-
-    def _register_legacy_dispatch(
-        self,
-        *,
-        request_id: str,
-        response_id: str,
-        correlation_id: str,
-        commit: TurnCommit,
-        context: FormalContextSnapshot,
-        channel_id: str,
-        fingerprint: bytes,
-    ) -> asyncio.Future[_AdmissionOutcome]:
-        """Register one fenced legacy dispatch without changing turn ownership."""
-
-        if len(self._admissions) >= self._max_requests:
-            raise AgentConversationRuntimeViolation(
-                "COMPOSITION_REQUEST_LEDGER_FULL",
-                "bounded composition request ledger is full for this runtime session",
-                ErrorCode.UNAVAILABLE,
-            )
-
-        harness_reservation: HarnessRoundReservation | None = None
-        bridge_reservation: AgentBridgeDispatchReservation | None = None
-        try:
-            harness_reservation = self._harness.reserve_round(
-                HarnessRoundBinding(
-                    request_id=request_id,
-                    response_id=response_id,
-                    correlation_id=correlation_id,
-                    commit=commit,
-                ),
-                facade=self._facade,
-            )
-            bridge_reservation = self._bridge.reserve_dispatch(
-                request_id=request_id,
-                round_id=harness_reservation.round_id,
-                response_id=response_id,
-                correlation_id=correlation_id,
-                commit=commit,
-                adapter_id=JiuWenSwarmAgentAdapter.adapter_id,
-            )
-            self._harness.begin_round_commit(harness_reservation)
-            self._bridge.begin_dispatch_commit(bridge_reservation)
-        except BaseException:
-            if bridge_reservation is not None:
-                self._bridge.abort_dispatch(
-                    bridge_reservation, reason="composition_admission_failed"
-                )
-            if harness_reservation is not None:
-                self._harness.abort_round_reservation(
-                    harness_reservation, reason="composition_admission_failed"
-                )
-            raise
-
-        running = asyncio.get_running_loop()
-        outcome: asyncio.Future[_AdmissionOutcome] = running.create_future()
-        entry = _AdmissionEntry(
-            fingerprint=fingerprint,
-            harness_reservation=harness_reservation,
-            bridge_reservation=bridge_reservation,
-            outcome=outcome,
-            coordinator=None,
-        )
-        self._admissions[request_id] = entry
-        self._submitted_turn_bindings[(commit.interaction_id, commit.turn_id)] = (
-            request_id
-        )
-        coordinator = running.create_task(
-            self._complete_admission(
-                entry,
-                context=context,
-                channel_id=channel_id,
-            ),
-            name=f"live-voice-agent-admission:{request_id}",
-        )
-        entry.coordinator = coordinator
         return outcome
 
     async def next_notification(self) -> AgentConversationNotification:
@@ -4600,6 +4176,9 @@ class AgentConversationRuntime:
                 await asyncio.shield(
                     asyncio.gather(*native_delegate_tasks, return_exceptions=True)
                 )
+            if self._native_delegate_settlements:
+                await asyncio.shield(asyncio.gather(
+                    *tuple(self._native_delegate_settlements), return_exceptions=True))
             await self._bridge.close()
             if self._consumer is not None:
                 await asyncio.shield(self._consumer)

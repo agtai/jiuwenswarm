@@ -55,6 +55,7 @@ def e2a_to_agent_request(env: E2AEnvelope) -> AgentRequest:
         request_id=env.request_id or "",
         channel_id=env.channel or "web",
         session_id=env.session_id,
+        user_id=env.user_id or "",
         chat_id=env.chat_id,
         req_method=req_method,
         params=dict(env.params or {}),

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import replace
 import json
 import logging
@@ -23,6 +24,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Tuple
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
 from jiuwenswarm.server.runtime.agent_adapter import formal_tool_gate
+from jiuwenswarm.server.runtime.agent_adapter.stream_history_state import SOURCE_FIELDS, StreamHistoryState
 from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     AgentAdapter,
     create_adapter,
@@ -66,7 +68,6 @@ from jiuwenswarm.common.utils import (
     reset_free_search_runtime_flags,
 )
 from jiuwenswarm.server.runtime.a2ui.integration import (
-    TeamA2UIBlockBuffer,
     finalize_assistant_response_if_a2ui,
 )
 from jiuwenswarm.server.runtime.a2ui.runtime.finalizer import should_finalize_a2ui_content
@@ -464,6 +465,8 @@ def _trigger_auto_memory_extraction(
     request: AgentRequest,
     session_id: str,
     is_stream: bool = False,
+    *,
+    model: Any = None,
 ) -> None:
     """Trigger auto memory extraction after conversation ends.
 
@@ -524,6 +527,7 @@ def _trigger_auto_memory_extraction(
                 project_dir=project_dir,
                 messages=messages,
                 parent_agent=parent_agent,  # Pass live adapter for cache sharing
+                **({"model": model} if model is not None else {}),
             )
         )
         mode = request.params.get("mode", "unknown") if isinstance(request.params, dict) else "unknown"
@@ -1594,6 +1598,33 @@ class JiuWenSwarm:
         return retry_without_a2ui_call
 
     @staticmethod
+    def build_agent_interrupt_input(question, answers, *, expected_pending_token, before_effect, prepare_effect):
+        """Convert an observed question using its original SDK input identity."""
+        from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+        from jiuwenswarm.server.runtime.session_execution import SessionExecutionUnavailable
+
+        source = question.get("source")
+        input_id = question.get("request_id")
+        if source not in {"ask_user_interrupt", "permission_interrupt", "confirm_interrupt"} or not input_id:
+            raise SessionExecutionUnavailable("AGENT_INTERRUPT_QUESTION_INVALID")
+        known = {item.get("question") for item in question.get("questions", []) if isinstance(item, dict)}
+        if any(answer.get("question") and answer["question"] not in known for answer in answers):
+            raise SessionExecutionUnavailable("AGENT_INTERRUPT_ANSWER_QUESTION_MISMATCH")
+        converted = JiuWenSwarm._build_interactive_input_from_answers(input_id, answers, source)
+        strict = InteractiveInput(expected_pending_token=expected_pending_token, before_effect=before_effect,
+                                  prepare_effect=prepare_effect)
+        for key, value in converted.user_inputs.items():
+            strict.update(key, value)
+        return strict
+
+    def _requires_exact_agent_interrupt_reply(self, request):
+        params = request.params if isinstance(request.params, dict) else {}
+        if not params.get("answers") or is_team_params(params):
+            return False
+        from jiuwenswarm.server.runtime.session_execution import current_agent_interrupt_requires_exact_reply
+        return current_agent_interrupt_requires_exact_reply(self, request)
+
+    @staticmethod
     def _build_interactive_input_from_answers(
             request_id: str,
             answers: list[dict],
@@ -2078,6 +2109,9 @@ class JiuWenSwarm:
 
         支持多 session 并发执行，同 session 内任务按先进后出顺序执行.
         """
+        if self._requires_exact_agent_interrupt_reply(request):
+            return AgentResponse(request_id=request.request_id, channel_id=request.channel_id, ok=False,
+                payload={"error": "AGENT_INTERRUPT_EXACT_REPLY_REQUIRED"})
         if request.req_method == ReqMethod.CHAT_CANCEL:
             return await self._process_interrupt(request)
 
@@ -2086,8 +2120,13 @@ class JiuWenSwarm:
             return await adapter.handle_user_answer(request)
 
         if request.req_method == ReqMethod.CHAT_SWARMFLOW_REPLY:
-            adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
-            return await adapter.handle_swarmflow_reply(request)
+            from jiuwenswarm.server.runtime.team_workflow_capabilities import reply_swarmflow_request
+            return await reply_swarmflow_request(request)
+
+        from jiuwenswarm.server.runtime.session_execution import current_execution_policy
+
+        policy = current_execution_policy()
+        records_generated_history = policy is None or policy.records_generated_history
 
         # Non-stream goal command (GET, PAUSE, CLEAR)
         if request.req_method == ReqMethod.COMMAND_GOAL:
@@ -2109,7 +2148,7 @@ class JiuWenSwarm:
                     # Only set writes user history (objective as the user turn).
                     # pause / resume / clear / get stay control-only.
                     # 忙碌时与流式路径同一 helper：推迟到上一轮收尾再落盘。
-                    if ok and str(action or "").strip().lower() == "set":
+                    if records_generated_history and ok and str(action or "").strip().lower() == "set":
                         goal_obj = goal_result.get("goal")
                         record_fn = getattr(adapter, "_record_goal_set_history_if_needed", None)
                         if callable(record_fn):
@@ -2212,7 +2251,7 @@ class JiuWenSwarm:
         query = request.params.get("query", "")
         # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
         # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
-        if _should_record_user_history(request.params):
+        if records_generated_history and _should_record_user_history(request.params):
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
@@ -2242,7 +2281,7 @@ class JiuWenSwarm:
             )
 
         # cloud memory: before chat hook
-        if memory_mode == "cloud":
+        if records_generated_history and memory_mode == "cloud":
             mem_ctx = MemoryHookContext(
                 session_id=request.session_id or "default",
                 request_id=request.request_id or "",
@@ -2260,7 +2299,7 @@ class JiuWenSwarm:
 
         result = await self._session_manager.submit_and_wait(session_id, run_agent_task)
 
-        if result.ok and result.payload.get("content"):
+        if records_generated_history and result.ok and result.payload.get("content"):
             content = result.payload["content"]
             content_str = content if isinstance(content, str) else str(content)
             repair_call = getattr(adapter, "repair_model_response", None)
@@ -2309,7 +2348,8 @@ class JiuWenSwarm:
             if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
                 _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
 
-        _schedule_symphony_session_feedback(session_id, request.request_id)
+        if records_generated_history:
+            _schedule_symphony_session_feedback(session_id, request.request_id)
         return result
 
     async def process_message_stream(
@@ -2319,6 +2359,11 @@ class JiuWenSwarm:
 
         支持多 session 并发执行，同 session 内任务按先进后出顺序执行.
         """
+        if self._requires_exact_agent_interrupt_reply(request):
+            yield AgentResponseChunk(request_id=request.request_id, channel_id=request.channel_id,
+                payload={"event_type": "chat.error", "error": "AGENT_INTERRUPT_EXACT_REPLY_REQUIRED"},
+                is_complete=False)
+            return
         # Streaming command.goal: get/pause/clear stay one-shot; set/resume
         # continue into the DeepAdapter attach→set/resume→read path below.
         if request.req_method == ReqMethod.COMMAND_GOAL:
@@ -2423,6 +2468,13 @@ class JiuWenSwarm:
                 )
                 return
 
+        from jiuwenswarm.server.runtime.session_execution import (
+            current_execution_policy, current_output_work, current_output_is_managed,
+        )
+        from jiuwenswarm.server.runtime.execution_context import ExecutionContextUnavailable
+
+        policy = current_execution_policy()
+        records_inbound_history = policy is None or policy.records_generated_history
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
 
         session_id = self._session_manager.get_session_id(request.session_id)
@@ -2443,7 +2495,8 @@ class JiuWenSwarm:
         # the DeepAdapter stream path (same success gate as unary process_message).
         params_for_history = request.params if isinstance(request.params, dict) else {}
         if (
-            request.req_method != ReqMethod.COMMAND_GOAL
+            records_inbound_history
+            and request.req_method != ReqMethod.COMMAND_GOAL
             and _should_record_user_history(params_for_history)
         ):
             append_history_record(
@@ -2498,7 +2551,7 @@ class JiuWenSwarm:
             )
 
         # cloud memory: before chat hook
-        if memory_mode == "cloud":
+        if records_inbound_history and memory_mode == "cloud":
             mem_ctx = MemoryHookContext(
                 session_id=request.session_id or "default",
                 request_id=request.request_id or "",
@@ -2537,58 +2590,117 @@ class JiuWenSwarm:
         stream_queue = asyncio.Queue(maxsize=self.STREAM_QUEUE_MAXSIZE)
         stream_done = asyncio.Event()
         producer_cancellation: asyncio.CancelledError | None = None
-        final_answer_content = ""
-        final_answer_chunks: list[str] = []
-        durable_pending_final_chunks: list[str] = []
-        durable_pending_final_started_at: float | None = None
-        durable_pending_reasoning_chunks: list[str] = []
-        durable_final_content = ""
-        # 这条流是否带过 Goal 事件。Goal 仍 active 时流结束是不发 chat.final 的
-        # （见 interface_deep._should_emit_stream_end_chat_final），气泡里的正文
-        # 就没人落盘；收尾时按这个标记补一次，只影响 Goal 流。
-        saw_goal_stream_output = False
 
-        def _consume_durable_reasoning_content() -> str:
-            nonlocal durable_pending_reasoning_chunks
-            reasoning_text = "".join(durable_pending_reasoning_chunks)
-            durable_pending_reasoning_chunks = []
+        def _source_chunk(state, chunk):
+            return replace(chunk, payload=state.source_payload(chunk.payload))
+
+        def _require_current_work(state):
+            if state.work is not None and current_output_work(state.source) is not state.work:
+                raise ExecutionContextUnavailable("AGENT_OUTPUT_WORK_MISMATCH")
+
+        def _append_work_history(state, **kwargs):
+            _require_current_work(state)
+            owner = state.request
+            extra = dict(kwargs.get("extra") or {})
+            if state.work is not None:
+                # Public payload fields may describe an interaction but cannot replace
+                # the history record's authoritative request or actor identity.
+                for key in ("id", "request_id", "session_id", "channel_id", "role", "content",
+                            "timestamp", "mode", "live_voice_binding"):
+                    extra.pop(key, None)
+                extra.update(state.source)
+            kwargs.update(session_id=owner.session_id or session_id, request_id=owner.request_id,
+                          channel_id=owner.channel_id, mode=owner.params.get("mode", "unknown"),
+                          extra=extra or None)
+            append_history_record(**kwargs)
+
+        def _configure_postprocessing(state):
+            repair = getattr(adapter, "repair_model_response", None)
+            state.configure_turn(language=get_config().get("preferred_language", "zh"),
+                                 turn=user_turn if state.work is None else None)
+            if state.work is None:
+                state.repair_call = repair
+                state.retry_without_a2ui_call = self._make_retry_without_a2ui_call(adapter=adapter, request=state.request)
+                return
+            model = getattr(state.work, "model", None)
+            if model is None:
+                raise ExecutionContextUnavailable("AGENT_WORK_MODEL_UNAVAILABLE")
+
+            async def bound_repair(prompt):
+                _require_current_work(state)
+                if not callable(repair):
+                    raise ExecutionContextUnavailable("AGENT_WORK_REPAIR_UNAVAILABLE")
+                return await repair(prompt, model=model)
+
+            async def bound_retry(query):
+                # Managed formatting retries use the original request's prompt context
+                # and frozen model. They never re-enter Agent or repeat completed tools.
+                retry_turn = replace(state.user_turn.with_text(query),
+                                     metadata={**(state.user_turn.metadata or {}), "skip_a2ui": True})
+                return await bound_repair(str(retry_turn.render()))
+
+            state.repair_call = bound_repair
+            state.retry_without_a2ui_call = bound_retry
+
+        def _state_for_output(payload):
+            work = current_output_work(payload)
+            if work is None:
+                # Unstamped reader control events must not acquire a managed work's
+                # buffers. A genuinely legacy reader retains its independent slot.
+                return legacy_state if policy is None and not current_output_is_managed() else None
+            if not work.policy.records_generated_history:
+                return None
+            if payload.get("event_type") in {"chat.usage_metadata", "goal.updated", "goal.snapshot"}:
+                return None
+            key = (work.binding_id, payload["source_task_id"])
+            selected = history_states.get(key)
+            if selected is None:
+                selected = StreamHistoryState(request=work.request, work=work,
+                    source={name: deepcopy(payload[name]) for name in SOURCE_FIELDS if name in payload})
+                _configure_postprocessing(selected)
+                history_states[key] = selected
+            return selected
+
+        legacy_state = StreamHistoryState(request=deepcopy(request))
+        history_states = {None: legacy_state}
+        state = legacy_state
+
+        def _consume_durable_reasoning_content(state) -> str:
+            reasoning_text = "".join(state.durable_pending_reasoning_chunks)
+            state.durable_pending_reasoning_chunks = []
             return reasoning_text if reasoning_text.strip() else ""
 
-        def _attach_reasoning_content(extra_fields: dict[str, Any] | None = None) -> dict[str, Any] | None:
-            reasoning_text = _consume_durable_reasoning_content()
+        def _attach_reasoning_content(state, extra_fields: dict[str, Any] | None = None) -> dict[str, Any] | None:
+            reasoning_text = _consume_durable_reasoning_content(state)
             if not reasoning_text:
                 return extra_fields
             merged = dict(extra_fields) if isinstance(extra_fields, dict) else {}
             merged["reasoning_content"] = reasoning_text
             return merged
 
-        def _reset_durable_pending_final() -> None:
-            nonlocal durable_pending_final_chunks, durable_pending_final_started_at
-            durable_pending_final_chunks = []
-            durable_pending_final_started_at = None
+        def _reset_durable_pending_final(state) -> None:
+            state.durable_pending_final_chunks = []
+            state.durable_pending_final_started_at = None
 
-        def _note_durable_pending_final_delta(content: str) -> None:
-            nonlocal durable_pending_final_started_at
-            if durable_pending_final_started_at is None:
-                durable_pending_final_started_at = time.time()
-            durable_pending_final_chunks.append(content)
+        def _note_durable_pending_final_delta(state, content: str) -> None:
+            if state.durable_pending_final_started_at is None:
+                state.durable_pending_final_started_at = time.time()
+            state.durable_pending_final_chunks.append(content)
 
-        def _note_goal_stream_payload(event_type: str, payload: dict[str, Any]) -> None:
-            nonlocal saw_goal_stream_output
-            if saw_goal_stream_output:
+        def _note_goal_stream_payload(state, event_type: str, payload: dict[str, Any]) -> None:
+            if state.saw_goal_stream_output:
                 return
             if event_type.startswith("goal.") or payload.get("goal_intermediate"):
-                saw_goal_stream_output = True
+                state.saw_goal_stream_output = True
 
-        def _persist_pending_final_text() -> None:
-            nonlocal durable_final_content
-            pending_text = "".join(durable_pending_final_chunks)
-            segment_started_at = durable_pending_final_started_at
-            _reset_durable_pending_final()
-            if not pending_text or pending_text == durable_final_content:
+        def _persist_pending_final_text(state) -> None:
+            pending_text = "".join(state.durable_pending_final_chunks)
+            segment_started_at = state.durable_pending_final_started_at
+            _reset_durable_pending_final(state)
+            if not pending_text or pending_text == state.durable_final_content:
                 return
-            extra_fields = _attach_reasoning_content({
-                k: v for k, v in request.params.items()
+            extra_fields = _attach_reasoning_content(state, {
+                k: v for k, v in state.request.params.items()
                 if k in ("source", "proactive_type", "proactive_target")
             })
             if not isinstance(extra_fields, dict):
@@ -2598,7 +2710,7 @@ class JiuWenSwarm:
                 segment_started_at=segment_started_at,
                 extra_fields=extra_fields,
             )
-            append_history_record(
+            _append_work_history(state,
                 session_id=session_id,
                 request_id=rid,
                 channel_id=cid,
@@ -2609,9 +2721,92 @@ class JiuWenSwarm:
                 # 透传 proactive 标记到 history——刷新页面时前端靠 payload.source===
                 # 'proactive_recommendation' 渲染推荐卡片，不带则退化白色气泡。
                 extra=extra_fields if extra_fields else None,
-                mode=request.params.get("mode", "unknown"),
+                mode=state.request.params.get("mode", "unknown"),
             )
-            durable_final_content = pending_text
+            state.durable_final_content = pending_text
+
+        async def _finish_work_history(state):
+            if not state.has_output or not state.records_history:
+                return
+            if state.work is not None and not state.has_final:
+                return
+            _require_current_work(state)
+            state_memory_mode = get_memory_mode(get_config())
+            assistant_message = state.final_answer_content or "".join(state.final_answer_chunks)
+            finalized_assistant_message = await finalize_assistant_response_if_a2ui(
+                assistant_message,
+                channel=state.request.channel_id,
+                user_query=state.user_turn.text,
+                request_id=state.request.request_id,
+                repair_call=state.repair_call,
+                retry_without_a2ui_call=state.retry_without_a2ui_call,
+            )
+            if finalized_assistant_message and (
+                    finalized_assistant_message != assistant_message or state.suppress_a2ui_stream
+            ):
+                _append_work_history(state,
+                    session_id=session_id,
+                    request_id=rid,
+                    channel_id=cid,
+                    role="assistant",
+                    event_type="chat.final",
+                    content=finalized_assistant_message,
+                    timestamp=time.time(),
+                    extra=_attach_reasoning_content(state, {
+                        k: v for k, v in state.request.params.items()
+                        if k in ("source", "proactive_type", "proactive_target")
+                    }),
+                    mode=state.request.params.get("mode", "unknown"),
+                )
+                state.final_answer_content = finalized_assistant_message
+                state.final_answer_chunks = []
+                yield _source_chunk(state, _make_a2ui_final_chunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    session_id=session_id,
+                    content=finalized_assistant_message,
+                ))
+
+            # cloud memory: after chat hook
+            if state_memory_mode == "cloud":
+                _require_current_work(state)
+                assistant_message = state.final_answer_content or "".join(state.final_answer_chunks)
+                after_ctx = MemoryHookContext(
+                    session_id=state.request.session_id or "default",
+                    request_id=state.request.request_id or "",
+                    channel_id=state.request.channel_id,
+                    agent_name="main_agent",
+                    workspace_dir=str(get_agent_home_dir()),
+                    assistant_message=assistant_message,
+                    extra=state.request.params,
+                )
+                await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
+
+            # auto memory: extract memories after conversation ends
+            # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
+            mode = state.request.params.get("mode", "code") if isinstance(state.request.params, dict) else "code"
+            config = get_config()
+            if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
+                _require_current_work(state)
+                _trigger_auto_memory_extraction(adapter, state.request, state.request.session_id or session_id,
+                                                    is_stream=True, **({"model": state.work.model} if state.work is not None else {}))
+
+            _schedule_symphony_session_feedback(state.request.session_id or session_id, state.request.request_id)
+
+        def _round_presentation(chunk):
+            payload = dict(chunk.payload)
+            repeated = payload.pop("repeats_streamed_text", False)
+            payload["event_type"] = "chat.delta"
+            payload["goal_intermediate"] = True
+            return None if repeated or not payload.get("content") else replace(chunk, payload=payload)
+
+        async def _finish_managed_history(state, *, round_end=False):
+            async for finalized_chunk in _finish_work_history(state):
+                if round_end:
+                    finalized_chunk = _round_presentation(finalized_chunk)
+                if finalized_chunk is not None:
+                    yield finalized_chunk
+            history_states.pop((state.work.binding_id, state.source["source_task_id"]), None)
 
         async def run_stream_task():
             nonlocal producer_cancellation
@@ -2690,28 +2885,17 @@ class JiuWenSwarm:
             # wait behind the long-lived output consumer.
             stream_task = asyncio.create_task(run_stream_task())
 
-        suppress_a2ui_stream = False
-        a2ui_pending_render_sent = False
-        a2ui_stream_probe = ""
-        team_a2ui_blocks = TeamA2UIBlockBuffer()
-        repair_call = getattr(adapter, "repair_model_response", None)
-        retry_without_a2ui_call = self._make_retry_without_a2ui_call(
-            adapter=adapter,
-            request=request,
-        )
+        _configure_postprocessing(legacy_state)
 
-        team_a2ui_tasks: dict[tuple[str, str], asyncio.Task] = {}
-        team_a2ui_pending_finals: dict[tuple[str, str], dict[str, Any]] = {}
-
-        async def _finalize_team_a2ui_block(payload: dict[str, Any], decision: Any) -> None:
+        async def _finalize_team_a2ui_block(state, payload: dict[str, Any], decision: Any) -> None:
             try:
                 finalized = await finalize_assistant_response_if_a2ui(
                     decision.raw_block,
-                    channel=cid,
-                    user_query=user_turn.text,
-                    request_id=f"{rid}:{decision.key[0]}:{decision.key[1]}",
-                    repair_call=repair_call,
-                    retry_without_a2ui_call=retry_without_a2ui_call,
+                    channel=state.request.channel_id,
+                    user_query=state.user_turn.text,
+                    request_id=f"{state.request.request_id}:{decision.key[0]}:{decision.key[1]}",
+                    repair_call=state.repair_call,
+                    retry_without_a2ui_call=state.retry_without_a2ui_call,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
@@ -2723,32 +2907,33 @@ class JiuWenSwarm:
                 finalized = decision.raw_block
             await stream_queue.put((
                 "team_a2ui_finalized",
-                (payload, decision, finalized),
+                (state, payload, decision, finalized),
             ))
 
-        def _schedule_team_a2ui_block(payload: dict[str, Any], decision: Any) -> None:
+        def _schedule_team_a2ui_block(state, payload: dict[str, Any], decision: Any) -> None:
             logger.info(
                 "Team A2UI block finalization scheduled: request_id=%s round=%s member=%s",
                 rid,
                 decision.key[0],
                 decision.key[1],
             )
-            team_a2ui_tasks[decision.key] = asyncio.create_task(
-                _finalize_team_a2ui_block(payload, decision)
+            state.team_a2ui_tasks[decision.key] = asyncio.create_task(
+                _finalize_team_a2ui_block(state, payload, decision)
             )
 
         def _process_team_a2ui_payload(
+                state,
                 payload: dict[str, Any],
         ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
             """Schedule member-local finalization without pausing teammates."""
             event_type = str(payload.get("event_type") or "")
             content = str(payload.get("content") or "")
-            key = team_a2ui_blocks.key_for(payload)
-            if event_type == "chat.final" and key in team_a2ui_tasks:
-                team_a2ui_pending_finals[key] = payload
+            key = state.team_a2ui_blocks.key_for(payload)
+            if event_type == "chat.final" and key in state.team_a2ui_tasks:
+                state.team_a2ui_pending_finals[key] = payload
                 return [], None
 
-            decision = team_a2ui_blocks.consume(payload, event_type, content)
+            decision = state.team_a2ui_blocks.consume(payload, event_type, content)
             if decision is None:
                 return [], payload
 
@@ -2760,7 +2945,7 @@ class JiuWenSwarm:
                 return direct_payloads, {**payload, "content": decision.replacement}
 
             if decision.raw_block:
-                _schedule_team_a2ui_block(payload, decision)
+                _schedule_team_a2ui_block(state, payload, decision)
             if decision.suppress:
                 return direct_payloads, None
             return direct_payloads, payload
@@ -2774,7 +2959,7 @@ class JiuWenSwarm:
             while (
                     not stream_done.is_set()
                     or not stream_queue.empty()
-                    or bool(team_a2ui_tasks)
+                    or any(item.team_a2ui_tasks for item in history_states.values())
             ):
                 try:
                     item = await asyncio.wait_for(stream_queue.get(), timeout=0.1)
@@ -2783,22 +2968,22 @@ class JiuWenSwarm:
 
                 event_type, data = item
                 if event_type == "team_a2ui_finalized":
-                    original_payload, decision, finalized = data
-                    team_a2ui_tasks.pop(decision.key, None)
-                    pending_final = team_a2ui_pending_finals.pop(decision.key, None)
+                    state, original_payload, decision, finalized = data
+                    state.team_a2ui_tasks.pop(decision.key, None)
+                    pending_final = state.team_a2ui_pending_finals.pop(decision.key, None)
                     if pending_final is not None:
-                        team_a2ui_blocks.remember_finalized(
+                        state.team_a2ui_blocks.remember_finalized(
                             decision.key,
                             decision.raw_block,
                             finalized,
                         )
-                        replay = team_a2ui_blocks.consume(
+                        replay = state.team_a2ui_blocks.consume(
                             pending_final,
                             "chat.final",
                             str(pending_final.get("content") or ""),
                         )
                         if replay is not None and replay.raw_block:
-                            _schedule_team_a2ui_block(pending_final, replay)
+                            _schedule_team_a2ui_block(state, pending_final, replay)
                             continue
                         replay_content = replay.replacement if replay is not None else None
                         output_payload = {
@@ -2814,7 +2999,7 @@ class JiuWenSwarm:
                             "session_id": session_id,
                         }
                     else:
-                        team_a2ui_blocks.remember_finalized(
+                        state.team_a2ui_blocks.remember_finalized(
                             decision.key,
                             decision.raw_block,
                             finalized,
@@ -2855,17 +3040,18 @@ class JiuWenSwarm:
                     }
                     if error_type:
                         error_payload["error_type"] = error_type
-                    append_history_record(
-                        session_id=session_id,
-                        request_id=rid,
-                        channel_id=cid,
-                        role="assistant",
-                        event_type="chat.error",
-                        content=str(data),
-                        timestamp=time.time(),
-                        mode=request.params.get("mode", "unknown"),
-                        extra={"error_type": error_type} if error_type else None,
-                    )
+                    if policy is None and not current_output_is_managed():
+                        _append_work_history(legacy_state,
+                            session_id=session_id,
+                            request_id=rid,
+                            channel_id=cid,
+                            role="assistant",
+                            event_type="chat.error",
+                            content=str(data),
+                            timestamp=time.time(),
+                            mode=request.params.get("mode", "unknown"),
+                            extra={"error_type": error_type} if error_type else None,
+                        )
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
@@ -2873,14 +3059,28 @@ class JiuWenSwarm:
                         is_complete=False,
                     )
                 else:
+                    if isinstance(data, dict) and isinstance(data.get("event_type"), str):
+                        data = AgentResponseChunk(request_id=rid, channel_id=cid, payload=data)
                     if isinstance(data, AgentResponseChunk):
-                        if suppress_a2ui_stream:
+                        payload = data.payload if isinstance(data.payload, dict) else {}
+                        round_end = payload.get("event_type") == "agent.work_round_end"
+                        selected = _state_for_output(payload)
+                        if selected is None:
+                            visible = _round_presentation(data) if round_end else data
+                            if visible is not None:
+                                yield visible
+                            continue
+                        state = selected
+                        if round_end:
+                            data = replace(data, payload={**payload, "event_type": "chat.final"})
+                        state.has_output = True
+                        if state.suppress_a2ui_stream:
                             data = _normalize_nested_stream_chunk(data)
                             if data is None:
                                 continue
                         if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
                             et = str(data.payload.get("event_type"))
-                            _note_goal_stream_payload(et, data.payload)
+                            _note_goal_stream_payload(state, et, data.payload)
                             should_record = et.startswith("chat.")
                             final_segment_started_at: float | None = None
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
@@ -2888,10 +3088,10 @@ class JiuWenSwarm:
                             if et == "context.compression_state":
                                 _append_compact_history_from_payload(
                                     payload=data.payload,
-                                    session_id=session_id,
-                                    request_id=rid,
-                                    channel_id=cid,
-                                    mode=request.params.get("mode", "unknown"),
+                                    session_id=state.request.session_id or session_id,
+                                    request_id=state.request.request_id,
+                                    channel_id=state.request.channel_id,
+                                    mode=state.request.params.get("mode", "unknown"),
                                 )
 
                             payload_content = str(data.payload.get("content", ""))
@@ -2901,11 +3101,11 @@ class JiuWenSwarm:
                                 next_payload.pop("_team_a2ui_finalized", None)
                                 data = replace(data, payload=next_payload)
                             if (
-                                    is_team_mode
+                                    state.is_team_mode
                                     and not locally_finalized
                                     and et in {"chat.delta", "chat.final"}
                             ):
-                                direct_payloads, next_payload = _process_team_a2ui_payload(data.payload)
+                                direct_payloads, next_payload = _process_team_a2ui_payload(state, data.payload)
                                 for direct_payload in direct_payloads:
                                     yield replace(
                                         data,
@@ -2919,14 +3119,14 @@ class JiuWenSwarm:
                                 payload_content = str(next_payload.get("content", ""))
                             a2ui_split = None
                             if (
-                                    _should_probe_a2ui_stream(is_team_mode=is_team_mode)
+                                    _should_probe_a2ui_stream(is_team_mode=state.is_team_mode)
                                     and et in {"chat.delta", "chat.final"}
                                     and payload_content
                             ):
-                                a2ui_split = _split_a2ui_stream_content(a2ui_stream_probe, payload_content)
-                                a2ui_stream_probe = _extend_a2ui_stream_probe(a2ui_stream_probe, payload_content)
+                                a2ui_split = _split_a2ui_stream_content(state.a2ui_stream_probe, payload_content)
+                                state.a2ui_stream_probe = _extend_a2ui_stream_probe(state.a2ui_stream_probe, payload_content)
                             if _should_defer_a2ui_processing_status(
-                                    suppress_a2ui_stream=suppress_a2ui_stream,
+                                    suppress_a2ui_stream=state.suppress_a2ui_stream,
                                     event_type=et,
                                     payload=data.payload,
                             ):
@@ -2937,16 +3137,16 @@ class JiuWenSwarm:
                                 )
                                 continue
                             if et == "chat.delta":
-                                final_answer_chunks.append(payload_content)
-                                if suppress_a2ui_stream or a2ui_split is not None:
-                                    first_a2ui_suppression = not suppress_a2ui_stream
+                                state.final_answer_chunks.append(payload_content)
+                                if state.suppress_a2ui_stream or a2ui_split is not None:
+                                    first_a2ui_suppression = not state.suppress_a2ui_stream
                                     if first_a2ui_suppression:
                                         logger.info(
                                             "A2UI stream suppression activated: request_id=%s event_type=%s",
                                             rid,
                                             et,
                                         )
-                                    suppress_a2ui_stream = True
+                                    state.suppress_a2ui_stream = True
                                     if a2ui_split is not None and a2ui_split[0]:
                                         prefix_payload = dict(data.payload)
                                         prefix_payload["content"] = a2ui_split[0]
@@ -2956,46 +3156,50 @@ class JiuWenSwarm:
                                             payload=prefix_payload,
                                             is_complete=False,
                                         )
-                                    if first_a2ui_suppression and not a2ui_pending_render_sent:
-                                        yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
-                                        a2ui_pending_render_sent = True
+                                    if first_a2ui_suppression and not state.a2ui_pending_render_sent:
+                                        yield _source_chunk(state, _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid))
+                                        state.a2ui_pending_render_sent = True
                                     continue
-                                _note_durable_pending_final_delta(payload_content)
+                                _note_durable_pending_final_delta(state, payload_content)
                                 should_record = False
                             elif et == "chat.reasoning":
-                                durable_pending_reasoning_chunks.append(payload_content)
+                                state.durable_pending_reasoning_chunks.append(payload_content)
                                 should_record = False
                             elif et == "chat.tool_call":
-                                _persist_pending_final_text()
+                                _persist_pending_final_text(state)
                             elif et == "chat.final":
+                                state.has_final = True
                                 if isinstance(data.payload, dict):
                                     ensure_final_mode_inplace(data.payload)
-                                if suppress_a2ui_stream or a2ui_split is not None:
-                                    first_a2ui_suppression = not suppress_a2ui_stream
+                                if state.suppress_a2ui_stream or a2ui_split is not None:
+                                    first_a2ui_suppression = not state.suppress_a2ui_stream
                                     if first_a2ui_suppression:
                                         logger.info(
                                             "A2UI stream suppression activated: request_id=%s event_type=%s",
                                             rid,
                                             et,
                                         )
-                                    suppress_a2ui_stream = True
-                                    if first_a2ui_suppression and not a2ui_pending_render_sent:
-                                        yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
-                                        a2ui_pending_render_sent = True
+                                    state.suppress_a2ui_stream = True
+                                    if first_a2ui_suppression and not state.a2ui_pending_render_sent:
+                                        yield _source_chunk(state, _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid))
+                                        state.a2ui_pending_render_sent = True
                                     if payload_content:
-                                        final_answer_content = payload_content
-                                        final_answer_chunks.clear()
-                                    _reset_durable_pending_final()
+                                        state.final_answer_content = payload_content
+                                        state.final_answer_chunks.clear()
+                                    _reset_durable_pending_final(state)
+                                    if state.work is not None:
+                                        async for finalized_chunk in _finish_managed_history(state, round_end=round_end):
+                                            yield finalized_chunk
                                     continue
                                 # 先记住本段起始时刻：下面的 reset/flush 会把它清掉。
-                                final_segment_started_at = durable_pending_final_started_at
+                                final_segment_started_at = state.durable_pending_final_started_at
                                 if payload_content:
-                                    _reset_durable_pending_final()
+                                    _reset_durable_pending_final(state)
                                 else:
                                     # 空 final 只是收尾/拆气泡信号（Goal 中间态 final 被降级成
                                     # chat.delta、流末尾的兜底 final），气泡里留下的正文就是前面
                                     # 那些 delta。这里必须落盘同一份，否则历史里整段回答会消失。
-                                    _persist_pending_final_text()
+                                    _persist_pending_final_text(state)
                                     final_segment_started_at = None
 
                             if should_record:
@@ -3009,11 +3213,11 @@ class JiuWenSwarm:
                                             if k not in ("type", "timestamp", "content"):
                                                 extra_fields[k] = v
                                 if et in {"chat.final", "chat.tool_call"}:
-                                    extra_fields = _attach_reasoning_content(extra_fields)
+                                    extra_fields = _attach_reasoning_content(state, extra_fields)
                                 # 透传 proactive 标记——刷新页面时前端靠 source 识别卡片
                                 for pk in ("source", "proactive_type", "proactive_target"):
-                                    if pk not in extra_fields and pk in request.params:
-                                        extra_fields[pk] = request.params[pk]
+                                    if pk not in extra_fields and pk in state.request.params:
+                                        extra_fields[pk] = state.request.params[pk]
                                 if not isinstance(extra_fields, dict):
                                     extra_fields = {}
                                 record_timestamp = _resolve_final_record_timestamp(
@@ -3023,7 +3227,7 @@ class JiuWenSwarm:
                                     ),
                                     extra_fields=extra_fields,
                                 )
-                                append_history_record(
+                                _append_work_history(state,
                                     session_id=session_id,
                                     request_id=rid,
                                     channel_id=cid,
@@ -3032,180 +3236,21 @@ class JiuWenSwarm:
                                     content=data.payload.get("content") or data.payload.get("error") or "",
                                     timestamp=record_timestamp,
                                     extra=extra_fields if extra_fields else None,
-                                    mode=request.params.get("mode", "unknown"),
+                                    mode=state.request.params.get("mode", "unknown"),
                                 )
                                 if et == "chat.final":
-                                    durable_final_content = str(data.payload.get("content", ""))
+                                    state.durable_final_content = str(data.payload.get("content", ""))
                             if et == "chat.final":
                                 next_final_content = str(data.payload.get("content", ""))
                                 if next_final_content:
-                                    final_answer_content = next_final_content
-                                    final_answer_chunks.clear()
-                        yield data
-                    elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
-                        et = str(data.get("event_type"))
-                        _note_goal_stream_payload(et, data)
-                        should_record = et.startswith("chat.")
-                        final_segment_started_at = None
-                        if not should_record and et == EventType.TEAM_MESSAGE.value:
-                            should_record = True
-                        if et == "context.compression_state":
-                            _append_compact_history_from_payload(
-                                payload=data,
-                                session_id=session_id,
-                                request_id=rid,
-                                channel_id=cid,
-                                mode=request.params.get("mode", "unknown"),
-                            )
-
-                        payload_content = str(data.get("content", ""))
-                        locally_finalized = bool(data.get("_team_a2ui_finalized"))
-                        if locally_finalized:
-                            data = dict(data)
-                            data.pop("_team_a2ui_finalized", None)
-                        if (
-                                is_team_mode
-                                and not locally_finalized
-                                and et in {"chat.delta", "chat.final"}
-                        ):
-                            direct_payloads, next_payload = _process_team_a2ui_payload(data)
-                            for direct_payload in direct_payloads:
-                                yield AgentResponseChunk(
-                                    request_id=rid,
-                                    channel_id=cid,
-                                    payload=direct_payload,
-                                    is_complete=False,
-                                )
-                            if next_payload is None:
-                                continue
-                            data = next_payload
-                            et = str(next_payload.get("event_type") or et)
-                            payload_content = str(next_payload.get("content", ""))
-                        a2ui_split = None
-                        if (
-                                _should_probe_a2ui_stream(is_team_mode=is_team_mode)
-                                and et in {"chat.delta", "chat.final"}
-                                and payload_content
-                        ):
-                            a2ui_split = _split_a2ui_stream_content(a2ui_stream_probe, payload_content)
-                            a2ui_stream_probe = _extend_a2ui_stream_probe(a2ui_stream_probe, payload_content)
-                        if _should_defer_a2ui_processing_status(
-                                suppress_a2ui_stream=suppress_a2ui_stream,
-                                event_type=et,
-                                payload=data,
-                        ):
-                            logger.info(
-                                "A2UI processing_status=false deferred until finalization: "
-                                "request_id=%s",
-                                rid,
-                            )
-                            continue
-                        if et == "chat.final":
-                            ensure_final_mode_inplace(data)
-                        if et == "chat.delta":
-                            final_answer_chunks.append(payload_content)
-                            if suppress_a2ui_stream or a2ui_split is not None:
-                                first_a2ui_suppression = not suppress_a2ui_stream
-                                if first_a2ui_suppression:
-                                    logger.info(
-                                        "A2UI stream suppression activated: request_id=%s event_type=%s",
-                                        rid,
-                                        et,
-                                    )
-                                suppress_a2ui_stream = True
-                                if a2ui_split is not None and a2ui_split[0]:
-                                    prefix_payload = dict(data)
-                                    prefix_payload["content"] = a2ui_split[0]
-                                    yield AgentResponseChunk(
-                                        request_id=rid,
-                                        channel_id=cid,
-                                        payload=prefix_payload,
-                                        is_complete=False,
-                                    )
-                                if first_a2ui_suppression and not a2ui_pending_render_sent:
-                                    yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
-                                    a2ui_pending_render_sent = True
-                                continue
-                            _note_durable_pending_final_delta(payload_content)
-                            should_record = False
-                        elif et == "chat.reasoning":
-                            durable_pending_reasoning_chunks.append(payload_content)
-                            should_record = False
-                        elif et == "chat.tool_call":
-                            _persist_pending_final_text()
-                        elif et == "chat.final":
-                            if suppress_a2ui_stream or a2ui_split is not None:
-                                first_a2ui_suppression = not suppress_a2ui_stream
-                                if first_a2ui_suppression:
-                                    logger.info(
-                                        "A2UI stream suppression activated: request_id=%s event_type=%s",
-                                        rid,
-                                        et,
-                                    )
-                                suppress_a2ui_stream = True
-                                if first_a2ui_suppression and not a2ui_pending_render_sent:
-                                    yield _make_a2ui_pending_render_chunk(request_id=rid, channel_id=cid)
-                                    a2ui_pending_render_sent = True
-                                if payload_content:
-                                    final_answer_content = payload_content
-                                    final_answer_chunks.clear()
-                                _reset_durable_pending_final()
-                                continue
-                            final_segment_started_at = durable_pending_final_started_at
-                            if payload_content:
-                                _reset_durable_pending_final()
-                            else:
-                                # 同上：空 final 收尾时把气泡正文落盘，别丢历史。
-                                _persist_pending_final_text()
-                                final_segment_started_at = None
-
-                        if should_record:
-                            extra_fields = {k: v for k, v in data.items() if k not in ("event_type", "content")}
-                            if et == EventType.TEAM_MESSAGE.value and "event" in data:
-                                event_data = data.get("event", {})
-                                if isinstance(event_data, dict):
-                                    for k, v in event_data.items():
-                                        if k not in ("type", "timestamp", "content"):
-                                            extra_fields[k] = v
-                            if et in {"chat.final", "chat.tool_call"}:
-                                extra_fields = _attach_reasoning_content(extra_fields)
-                            # 透传 proactive 标记——刷新页面时前端靠 source 识别卡片
-                            for pk in ("source", "proactive_type", "proactive_target"):
-                                if pk not in extra_fields and pk in request.params:
-                                    extra_fields[pk] = request.params[pk]
-                            if not isinstance(extra_fields, dict):
-                                extra_fields = {}
-                            record_timestamp = _resolve_final_record_timestamp(
-                                event_type=et,
-                                segment_started_at=(
-                                    final_segment_started_at if et == "chat.final" else None
-                                ),
-                                extra_fields=extra_fields,
-                            )
-                            append_history_record(
-                                session_id=session_id,
-                                request_id=rid,
-                                channel_id=cid,
-                                role="assistant",
-                                event_type=et,
-                                content=data.get("content") or data.get("error") or "",
-                                timestamp=record_timestamp,
-                                extra=extra_fields if extra_fields else None,
-                                mode=request.params.get("mode", "unknown"),
-                            )
-                            if et == "chat.final":
-                                durable_final_content = str(data.get("content", ""))
-                        if et == "chat.final":
-                            next_final_content = str(data.get("content", ""))
-                            if next_final_content:
-                                final_answer_content = next_final_content
-                                final_answer_chunks.clear()
-                        yield AgentResponseChunk(
-                            request_id=rid,
-                            channel_id=cid,
-                            payload=data,
-                            is_complete=False,
-                        )
+                                    state.final_answer_content = next_final_content
+                                    state.final_answer_chunks.clear()
+                        visible = _round_presentation(data) if round_end else data
+                        if visible is not None:
+                            yield visible
+                        if state.work is not None and state.has_final:
+                            async for finalized_chunk in _finish_managed_history(state, round_end=round_end):
+                                yield finalized_chunk
         except asyncio.CancelledError:
             logger.info("[JiuWenSwarm] 流式处理被中断: request_id=%s", rid)
             raise
@@ -3213,13 +3258,13 @@ class JiuWenSwarm:
             # Goal 还在跑时这条流不会收到收尾的 chat.final，气泡里已经展示的正文
             # 也就没有任何一处落盘。补一次，否则重新打开历史记录时这段回答凭空
             # 消失，和实时看到的不是一回事。非 Goal 流不进这里。
-            if saw_goal_stream_output:
-                _persist_pending_final_text()
+            if legacy_state.has_output and legacy_state.saw_goal_stream_output:
+                _persist_pending_final_text(legacy_state)
             # The adapter producer owns RuntimeOutputStream.  Cancelling and
             # awaiting it releases the runtime output lease and aborts the
             # in-flight round when the outer WebSocket consumer disappears.
             unfinished_a2ui_tasks = [
-                task for task in team_a2ui_tasks.values() if not task.done()
+                task for item in history_states.values() for task in item.team_a2ui_tasks.values() if not task.done()
             ]
             for task in unfinished_a2ui_tasks:
                 task.cancel()
@@ -3247,63 +3292,9 @@ class JiuWenSwarm:
         if producer_cancellation is not None:
             raise producer_cancellation
 
-        assistant_message = final_answer_content or "".join(final_answer_chunks)
-        finalized_assistant_message = await finalize_assistant_response_if_a2ui(
-            assistant_message,
-            channel=cid,
-            user_query=user_turn.text,
-            request_id=rid or "",
-            repair_call=repair_call,
-            retry_without_a2ui_call=retry_without_a2ui_call,
-        )
-        if finalized_assistant_message and (
-                finalized_assistant_message != assistant_message or suppress_a2ui_stream
-        ):
-            append_history_record(
-                session_id=session_id,
-                request_id=rid,
-                channel_id=cid,
-                role="assistant",
-                event_type="chat.final",
-                content=finalized_assistant_message,
-                timestamp=time.time(),
-                extra=_attach_reasoning_content({
-                    k: v for k, v in request.params.items()
-                    if k in ("source", "proactive_type", "proactive_target")
-                }),
-                mode=request.params.get("mode", "unknown"),
-            )
-            final_answer_content = finalized_assistant_message
-            final_answer_chunks = []
-            yield _make_a2ui_final_chunk(
-                request_id=rid,
-                channel_id=cid,
-                session_id=session_id,
-                content=finalized_assistant_message,
-            )
-
-        # cloud memory: after chat hook
-        if memory_mode == "cloud":
-            assistant_message = final_answer_content or "".join(final_answer_chunks)
-            after_ctx = MemoryHookContext(
-                session_id=request.session_id or "default",
-                request_id=request.request_id or "",
-                channel_id=request.channel_id,
-                agent_name="main_agent",
-                workspace_dir=str(get_agent_home_dir()),
-                assistant_message=assistant_message,
-                extra=request.params,
-            )
-            await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
-
-        # auto memory: extract memories after conversation ends
-        # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
-        mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
-        config = get_config()
-        if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
-            _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
-
-        _schedule_symphony_session_feedback(session_id, rid)
+        for state in list(history_states.values()):
+            async for finalized_chunk in _finish_work_history(state):
+                yield finalized_chunk
         yield AgentResponseChunk(
             request_id=rid,
             channel_id=cid,
@@ -3489,6 +3480,26 @@ class JiuWenSwarm:
         adapter_cleaned = bool(await cleanup_fn(session_id))
         return processor_cleaned or adapter_cleaned
 
+    def peek_session_goal(self, session_id: str) -> dict[str, Any] | None:
+        """Expose the existing session Goal owner without initialization."""
+        from jiuwenswarm.server.runtime.agent_resolution import SessionAgentUnavailable
+
+        peek = getattr(self._adapter, "peek_session_goal", None)
+        if not callable(peek):
+            raise SessionAgentUnavailable("SESSION_GOAL_OWNER_UNAVAILABLE")
+        return peek(session_id)
+
+    async def control_session_goal(self, session_id: str, *, action: str,
+                                   goal_id: str, control_revision: int, before_effect):
+        """Forward exact controls to the existing SDK Goal owner."""
+        from jiuwenswarm.server.runtime.agent_resolution import SessionAgentUnavailable
+
+        control = getattr(self._adapter, "control_session_goal", None)
+        if not callable(control):
+            raise SessionAgentUnavailable("SESSION_GOAL_OWNER_UNAVAILABLE")
+        return await control(session_id, action=action, goal_id=goal_id,
+                             control_revision=control_revision, before_effect=before_effect)
+
     def has_session_runtime(self, session_id: str | None = None) -> bool:
         """Return whether this facade still owns session-scoped runtime."""
         if self._session_manager.has_session_runtime(session_id):
@@ -3503,9 +3514,12 @@ class JiuWenSwarm:
             return bool(has_runtime())
         return bool(has_runtime(session_id))
 
-    async def cancel_inflight_work(self, log_prefix: str = "[gateway disconnect] ") -> None:
-        """Gateway 与 AgentServer 的 WebSocket 断开时调用：取消 session 流式任务并中止 adapter 内层循环。"""
-        await self._session_manager.cancel_all_session_tasks(log_prefix)
+    async def cancel_inflight_work(self, log_prefix: str = "[gateway disconnect] ", *, preserve_sessions=frozenset()) -> None:
+        """Cancel transport work while preserving service-owned session runtimes."""
+        if preserve_sessions:
+            await self._session_manager.cancel_all_session_tasks(log_prefix, preserve_sessions=preserve_sessions)
+        else:
+            await self._session_manager.cancel_all_session_tasks(log_prefix)
         adapter = self._adapter
         if adapter is None:
             return
@@ -3513,7 +3527,10 @@ class JiuWenSwarm:
         if not callable(abort_fn):
             return
         try:
-            await abort_fn()
+            if preserve_sessions:
+                await abort_fn(preserve_sessions=preserve_sessions)
+            else:
+                await abort_fn()
         except Exception:
             logger.exception("[JiuWenSwarm] adapter.abort_on_gateway_disconnect failed")
 

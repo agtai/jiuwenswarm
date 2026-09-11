@@ -343,8 +343,8 @@ class TestHandleCommandWorkflows:
         assert first.get("status")
 
     @pytest.mark.anyio
-    async def test_handler_exception_returns_empty_snapshot(self) -> None:
-        """When handler raises exception, return empty workflows list."""
+    async def test_handler_exception_returns_unavailable(self) -> None:
+        """A failed observation cannot claim that no workflows exist."""
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
         server = AgentWebSocketServer.__new__(AgentWebSocketServer)
@@ -363,14 +363,13 @@ class TestHandleCommandWorkflows:
 
         assert len(ws.sent) == 1
         wire = json.loads(ws.sent[0])
-        payload = self._extract_payload_from_wire(wire)
-        assert payload["type"] == "workflow_run_snapshot"
-        assert payload["workflows"] == []
-        assert payload["session_id"] == "sess-3"
+        assert wire["response_kind"] == "e2a.error"
+        assert wire["body"]["details"]["error"] == "WORKFLOW_OBSERVATION_UNAVAILABLE"
+        assert "workflows" not in wire["body"]["details"]
 
     @pytest.mark.anyio
     async def test_response_ok_is_true(self) -> None:
-        """All responses from this handler should have ok=True."""
+        """A successful observation is encoded as a workflow snapshot."""
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
         server = AgentWebSocketServer.__new__(AgentWebSocketServer)
@@ -394,8 +393,8 @@ class TestHandleCommandWorkflows:
         assert payload["type"] == "workflow_run_snapshot"
 
     @pytest.mark.anyio
-    async def test_empty_session_id_defaults_to_empty_string(self) -> None:
-        """When session_id is None, it defaults to empty string."""
+    async def test_missing_session_rejects_without_reading_owner(self) -> None:
+        """Missing scope cannot query the workflow owner."""
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
         server = AgentWebSocketServer.__new__(AgentWebSocketServer)
@@ -408,12 +407,13 @@ class TestHandleCommandWorkflows:
         with patch(
             "jiuwenswarm.agents.harness.team.get_team_manager",
             return_value=fake_tm,
-        ):
+        ) as manager:
             await server._handle_command_workflows(ws, request, send_lock)
 
         wire = json.loads(ws.sent[0])
-        payload = self._extract_payload_from_wire(wire)
-        assert payload["session_id"] == ""
+        assert wire["response_kind"] == "e2a.error"
+        assert wire["body"]["details"]["error"] == "session_id is required"
+        manager.assert_not_called()
 
     @pytest.mark.anyio
     async def test_empty_channel_id_defaults_to_web(self) -> None:

@@ -4,8 +4,8 @@
 
 真人回复 swarmflow human_session 轮次的入站参数结构。回复经标准三层路由链
 （TUI 空壳 ack → message_handler 转发 → process_message 分派）到达
-``handle_swarmflow_reply``，由其构造 ``HumanAgentMessage(target="swarmflow:<run_id>:<corr>")``
-交 ``TeamManager.interact`` 走 agent-core 薄路由。
+共享 ``reply_swarmflow_request``，由既存 Team owner 调用 AgentCore 的
+``Runner.reply_swarmflow_human``，原子消费精确 run/correlation 的等待输入。
 """
 
 from typing import TypedDict
@@ -15,14 +15,13 @@ class SwarmflowReplyParams(TypedDict, total=False):
     """chat.swarmflow_reply 参数契约（TypedDict，供类型标注与文档）。"""
 
     session_id: str
-    """团队 session_id（handler 据此定位 team runtime）。"""
+    """必须与经过认证的请求 envelope session_id 一致，不能覆盖它。"""
 
     team_name: str
-    """团队名。仅日志/调试用，handler 不消费——``TeamManager.interact`` 内部
-    用 ``get_active_team_name(session_id)`` 解析。"""
+    """兼容字段；共享适配从既存 Team owner 解析真实 team_name。"""
 
     run_id: str
-    """workflow run id。构造 run-scoped reply topic，使并发 run 互不串扰。"""
+    """必需的精确 workflow run id；缺失时不退回广播或恢复 runtime。"""
 
     correlation_id: str
     """人机轮次关联号 ``{phase}:{label}:{turn}``，跨 resume 稳定。"""

@@ -24,8 +24,8 @@ The execution record identifies which SDK environment was actually tested or
 adopted. A process already running the older `.deps/agent-core-w3` source is not
 claimed to use the new SDK merely because the repository lock changed.
 
-No twelve-patch mirror is kept inside Live Voice. The former Responses patch
-builder is historical reconstruction tooling, not the current install path.
+No twelve-patch mirror is kept inside Live Voice. The former Responses-only
+patch and builder are retired; Git retains their history.
 AgentCore owns SDK execution settlement, model-call guards and source/output
 binding. JiuwenSwarm owns configured facade execution and durable project Tasks;
 Live Voice owns speech input, media and presentation adaptation. Enabling new
