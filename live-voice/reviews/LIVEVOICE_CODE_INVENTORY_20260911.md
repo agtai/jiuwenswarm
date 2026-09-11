@@ -287,18 +287,18 @@ Python/TypeScript wire 模型、错误与消息契约。统一 schema 来源，�
 
 | 文件 | 物理行 | 非空行 | 代码职责 / 入口 |
 |---|---:|---:|---|
-| [jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/conversationRuntimeReplica.ts](../../jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/conversationRuntimeReplica.ts) | 258 | 238 | conversationRuntimeReplica |
-| [jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/fakeP1Vertical.ts](../../jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/fakeP1Vertical.ts) | 104 | 94 | fakeP1Vertical |
-| [jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/webLifecycleObservationRecorder.ts](../../jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/webLifecycleObservationRecorder.ts) | 383 | 357 | webLifecycleObservationRecorder |
-| [jiuwenswarm/server/live_voice/alpha_benchmark.py](../../jiuwenswarm/server/live_voice/alpha_benchmark.py) | 633 | 564 | Deterministic, evidence-bounded Live Voice Alpha benchmark summaries. |
-| [jiuwenswarm/server/live_voice/alpha_privacy_conformance.py](../../jiuwenswarm/server/live_voice/alpha_privacy_conformance.py) | 1,025 | 899 | Bounded synthetic-canary checks for Live Voice Alpha privacy surfaces. |
-| [jiuwenswarm/server/live_voice/executor_port.py](../../jiuwenswarm/server/live_voice/executor_port.py) | 117 | 95 | Truthful deterministic executor port for P3-alpha attempts. |
-| [jiuwenswarm/server/live_voice/fake_verticals.py](../../jiuwenswarm/server/live_voice/fake_verticals.py) | 404 | 370 | Deterministic P1, P2, and P3-alpha integration verticals. |
-| [jiuwenswarm/server/live_voice/observability_fault_harness.py](../../jiuwenswarm/server/live_voice/observability_fault_harness.py) | 391 | 325 | Bounded, payload-free fault exporter for Live Voice observability tests. |
-| [jiuwenswarm/server/live_voice/product_p2_readiness.py](../../jiuwenswarm/server/live_voice/product_p2_readiness.py) | 262 | 219 | Pure dependency-readiness evaluator for the product P2 browser journey. |
-| [jiuwenswarm/server/live_voice/realtime_media.py](../../jiuwenswarm/server/live_voice/realtime_media.py) | 822 | 742 | Bounded, conversation-neutral realtime media port. |
-| [jiuwenswarm/server/live_voice/sli_window_contract.py](../../jiuwenswarm/server/live_voice/sli_window_contract.py) | 386 | 351 | Content-free SLI window arithmetic for P3 diagnostics. |
-| [jiuwenswarm/server/live_voice/telemetry_privacy_contract.py](../../jiuwenswarm/server/live_voice/telemetry_privacy_contract.py) | 221 | 187 | Declaration-only privacy vocabulary for P3 telemetry composition. |
+| [jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/conversationRuntimeReplica.ts](../../jiuwenswarm/channels/web/frontend/tests/support/live_voice/conversationRuntimeReplica.ts) | 258 | 238 | conversationRuntimeReplica |
+| [jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/fakeP1Vertical.ts](../../jiuwenswarm/channels/web/frontend/tests/support/live_voice/fakeP1Vertical.ts) | 104 | 94 | fakeP1Vertical |
+| [jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/webLifecycleObservationRecorder.ts](../../jiuwenswarm/channels/web/frontend/tests/support/live_voice/webLifecycleObservationRecorder.ts) | 383 | 357 | webLifecycleObservationRecorder |
+| [jiuwenswarm/server/live_voice/alpha_benchmark.py](../../tests/support/live_voice/alpha_benchmark.py) | 633 | 564 | Deterministic, evidence-bounded Live Voice Alpha benchmark summaries. |
+| [jiuwenswarm/server/live_voice/alpha_privacy_conformance.py](../../tests/support/live_voice/alpha_privacy_conformance.py) | 1,025 | 899 | Bounded synthetic-canary checks for Live Voice Alpha privacy surfaces. |
+| [jiuwenswarm/server/live_voice/executor_port.py](../../tests/support/live_voice/executor_port.py) | 117 | 95 | Truthful deterministic executor port for P3-alpha attempts. |
+| [jiuwenswarm/server/live_voice/fake_verticals.py](../../tests/support/live_voice/fake_verticals.py) | 404 | 370 | Deterministic P1, P2, and P3-alpha integration verticals. |
+| [jiuwenswarm/server/live_voice/observability_fault_harness.py](../../tests/support/live_voice/observability_fault_harness.py) | 391 | 325 | Bounded, payload-free fault exporter for Live Voice observability tests. |
+| [jiuwenswarm/server/live_voice/product_p2_readiness.py](../../tests/support/live_voice/product_p2_readiness.py) | 262 | 219 | Pure dependency-readiness evaluator for the product P2 browser journey. |
+| [jiuwenswarm/server/live_voice/realtime_media.py](../../tests/support/live_voice/realtime_media.py) | 822 | 742 | Bounded, conversation-neutral realtime media port. |
+| [jiuwenswarm/server/live_voice/sli_window_contract.py](../../tests/support/live_voice/sli_window_contract.py) | 386 | 351 | Content-free SLI window arithmetic for P3 diagnostics. |
+| [jiuwenswarm/server/live_voice/telemetry_privacy_contract.py](../../tests/support/live_voice/telemetry_privacy_contract.py) | 221 | 187 | Declaration-only privacy vocabulary for P3 telemetry composition. |
 
 ## 共享接入面：不可整文件计入 Live Voice
 

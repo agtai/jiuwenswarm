@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { AudioPortViolation } from '../node_modules/.cache/live-voice-fake-p1/features/live-voice/formal/audioPort.js';
-import { FakeP1Vertical, FakeP1VerticalViolation } from '../node_modules/.cache/live-voice-fake-p1/features/live-voice/formal/fakeP1Vertical.js';
+import { AudioPortViolation } from '../node_modules/.cache/live-voice-fake-p1/src/features/live-voice/formal/audioPort.js';
+import { FakeP1Vertical, FakeP1VerticalViolation } from '../node_modules/.cache/live-voice-fake-p1/tests/support/live_voice/fakeP1Vertical.js';
 
 const first = Object.freeze({ interaction_id: 'interaction-1', response_id: 'response-1', response_generation: 0 });
 const second = Object.freeze({ interaction_id: 'interaction-1', response_id: 'response-2', response_generation: 1 });

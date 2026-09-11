@@ -10,7 +10,7 @@ from enum import StrEnum
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import TerminalOutcome
 
-from .task_core import DispatchIntent
+from jiuwenswarm.server.live_voice.task_core import DispatchIntent
 
 
 class ExecutorPortViolation(ValueError):

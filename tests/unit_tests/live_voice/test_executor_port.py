@@ -7,7 +7,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     TerminalOutcome,
 )
-from jiuwenswarm.server.live_voice.executor_port import (
+from tests.support.live_voice.executor_port import (
     ExecutorPort,
     ExecutorPortViolation,
     ExecutorState,

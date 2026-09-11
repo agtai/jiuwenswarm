@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-10 — adjustment dispatch/startup recovery; user acceptance pending.
+> Updated: 2026-09-11 — behavior-preserving slimming and ownership refactor active.
 > Default bootstrap reads only Project judgement and Current execution packet.
 > Stop at Completion boundaries unless the task needs wider planning or acceptance.
 
@@ -84,9 +84,23 @@ support has been discussed, not implemented.
 
 ## Current execution packet
 
+### Active slimming and ownership refactor (2026-09-11)
+
+The user authorizes completing the six refactor batches from the
+[code/reuse audit](reviews/LIVEVOICE_CODE_REUSE_AUDIT_20260911.md): remove test
+support from production, share Agent execution, split composition/UI owners,
+return generic Task/Executor capabilities to JiuwenSwarm and SDK primitives to
+AgentCore, consolidate supported paths, and prepare maintainable release layout.
+Preserve current Native/P1/Cascade behavior, Task/file/adjustment truth, playback
+ACK and user configuration/data. Do not reopen deferred network diagnosis.
+Checks and review follow the affected boundary, without repeated full-suite or
+physical runs for mechanical moves. Local commits are authorized; remote updates
+and publishing remain outside this packet. The
+[execution record](reviews/SLIMMING_EXECUTION_20260911.md) owns batch results.
+
 ### Continuation boundary
 
-**Current follow-up (2026-09-10):** repair and redeploy adjustment dispatch/startup
+**Preceding follow-up (2026-09-10):** repair and redeploy adjustment dispatch/startup
 on baseline `57d3b29f18`, preserving this machine's configured project, data and
 audio settings. The [recovery record](reviews/ADJUSTMENT_DISPATCH_RECOVERY_20260910.md)
 owns the Tier 3 persisted-context/Executor seam, Tier 2 failure settlement,

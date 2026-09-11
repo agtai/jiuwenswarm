@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-from jiuwenswarm.server.live_voice.alpha_benchmark import (
+from tests.support.live_voice.alpha_benchmark import (
     AlphaBenchmarkCase,
     AlphaBenchmarkPlan,
     AlphaBenchmarkTarget,

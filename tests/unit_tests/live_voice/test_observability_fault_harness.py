@@ -13,7 +13,7 @@ from jiuwenswarm.server.live_voice.observability import (
     create_metric,
     create_observation,
 )
-from jiuwenswarm.server.live_voice.observability_fault_harness import (
+from tests.support.live_voice.observability_fault_harness import (
     MAX_OBSERVABILITY_FAULT_STEPS,
     DisabledObservabilityFaultHarness,
     InjectedObservabilityExportError,

@@ -31,7 +31,7 @@ from jiuwenswarm.channels.web.live_voice_deployment_observer import (
     LiveVoiceDeploymentObservationRequest,
     observe_live_voice_deployment_runtime,
 )
-from jiuwenswarm.server.live_voice.alpha_privacy_conformance import (
+from tests.support.live_voice.alpha_privacy_conformance import (
     ALPHA_PRIVACY_SURFACES,
 )
 

@@ -5,7 +5,7 @@ import test from 'node:test';
 import {
   ConversationReplicaViolation,
   ConversationRuntimeReplica,
-} from '../node_modules/.cache/live-voice-conversation-runtime/features/live-voice/formal/conversationRuntimeReplica.js';
+} from '../node_modules/.cache/live-voice-conversation-runtime/tests/support/live_voice/conversationRuntimeReplica.js';
 
 const fixture = JSON.parse(await readFile(new URL('../../../../../tests/fixtures/live_voice_a_packages/conversation_runtime.json', import.meta.url), 'utf8'));
 

@@ -131,6 +131,15 @@ def _assert_existing_relative_path(value: str) -> None:
     assert not path.is_absolute()
     assert ".." not in path.parts
     assert "\\" not in value
+    if value in _load().get("retired_source_paths", []):
+        assert not (ROOT / path).exists(), value
+        assert _git_object_exists(INVENTORY_BASELINE, value), value
+        return
+    relocated = _load().get("support_relocations_20260911", {}).get(value)
+    if relocated is not None:
+        assert not (ROOT / path).exists(), value
+        path = Path(relocated)
+        assert not path.is_absolute() and ".." not in path.parts
     assert (ROOT / path).exists(), value
 
 
@@ -327,8 +336,12 @@ def test_shared_files_are_symbol_scoped_and_retain_current_authority() -> None:
             assert "Completed in" in boundary["delete_precondition"]
         path = ROOT / boundary["path"]
         source = path.read_text(encoding="utf-8")
+        retired = manifest.get("retired_source_symbols", {}).get(boundary["path"], [])
         for symbol in boundary["candidate_symbols"] + boundary["retained_symbols"]:
-            assert symbol in source, (boundary["path"], symbol)
+            if symbol in retired:
+                assert symbol not in source, (boundary["path"], symbol)
+            else:
+                assert symbol in source, (boundary["path"], symbol)
     by_path = {boundary["path"]: boundary for boundary in boundaries}
     assert (
         "handle_registered_media_socket"

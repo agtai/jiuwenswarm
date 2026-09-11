@@ -694,5 +694,27 @@
       "affected_tests": ["tests/unit_tests/live_voice/test_live_voice_retirement_manifest.py"],
       "rollback": "Recover documents from Git and restore their index links."
     }
-  ]
+  ],
+  "retired_source_paths": ["jiuwenswarm/server/live_voice/demo_fixture_contract.py"],
+  "retired_source_symbols": {
+    "jiuwenswarm/server/live_voice/project_code_executor.py": ["DEMO_ITINERARY_TASK_NAME"],
+    "jiuwenswarm/server/live_voice/voice_task_bridge.py": ["DEMO_ITINERARY_TASK_NAME"],
+    "jiuwenswarm/server/live_voice/batch_speech.py": ["PRODUCT_DEMO_POLICY_BYPASS_ENV"],
+    "jiuwenswarm/server/live_voice/p3_authenticated_composition.py": ["_PRODUCT_DEMO_POLICY_BYPASS_ENV", "_DEMO_ADJUSTMENT_CHECKPOINT_ENV"],
+    "jiuwenswarm/server/live_voice/product_composition_registry.py": ["PRODUCT_DEMO_POLICY_BYPASS_ENV"]
+  },
+  "support_relocations_20260911": {
+    "jiuwenswarm/server/live_voice/alpha_benchmark.py": "tests/support/live_voice/alpha_benchmark.py",
+    "jiuwenswarm/server/live_voice/alpha_privacy_conformance.py": "tests/support/live_voice/alpha_privacy_conformance.py",
+    "jiuwenswarm/server/live_voice/executor_port.py": "tests/support/live_voice/executor_port.py",
+    "jiuwenswarm/server/live_voice/fake_verticals.py": "tests/support/live_voice/fake_verticals.py",
+    "jiuwenswarm/server/live_voice/observability_fault_harness.py": "tests/support/live_voice/observability_fault_harness.py",
+    "jiuwenswarm/server/live_voice/product_p2_readiness.py": "tests/support/live_voice/product_p2_readiness.py",
+    "jiuwenswarm/server/live_voice/realtime_media.py": "tests/support/live_voice/realtime_media.py",
+    "jiuwenswarm/server/live_voice/sli_window_contract.py": "tests/support/live_voice/sli_window_contract.py",
+    "jiuwenswarm/server/live_voice/telemetry_privacy_contract.py": "tests/support/live_voice/telemetry_privacy_contract.py",
+    "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/fakeP1Vertical.ts": "jiuwenswarm/channels/web/frontend/tests/support/live_voice/fakeP1Vertical.ts",
+    "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/conversationRuntimeReplica.ts": "jiuwenswarm/channels/web/frontend/tests/support/live_voice/conversationRuntimeReplica.ts",
+    "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/webLifecycleObservationRecorder.ts": "jiuwenswarm/channels/web/frontend/tests/support/live_voice/webLifecycleObservationRecorder.ts"
+  }
 }

@@ -14,17 +14,17 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     TerminalOutcome,
 )
+from tests.support.live_voice.legacy_task_core import TaskCore
 from jiuwenswarm.server.live_voice.task_core import (
     AuthorizationContext,
     TaskCommand,
-    TaskCore,
     TaskCoreViolation,
     TaskQuery,
     TaskSpec,
     TaskState,
     project_work_progress,
 )
-from jiuwenswarm.server.live_voice.executor_port import ExecutorPort, ExecutorState
+from tests.support.live_voice.executor_port import ExecutorPort, ExecutorState
 
 
 def scope(subject: str = "subject-1") -> ScopeRef:

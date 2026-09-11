@@ -1,11 +1,11 @@
-import { AudioPort, AudioPortViolation, createAudioRenderPlan, type AudioResponseRef } from './audioPort.js';
+import { AudioPort, AudioPortViolation, createAudioRenderPlan, type AudioResponseRef } from '../../../src/features/live-voice/formal/audioPort.js';
 import {
   CONTRACT_VERSION,
   createRouteTelemetryLedger,
   createRouteTelemetryRecord,
   type RouteTelemetryLedger,
   type RouteTelemetryRecord,
-} from './liveVoiceRouteTelemetry.js';
+} from '../../../src/features/live-voice/formal/liveVoiceRouteTelemetry.js';
 
 export type FakeP1CommitState = 'partial' | 'uncommitted' | 'committed';
 

@@ -10,7 +10,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TerminalOutcome,
     TurnCommit,
 )
-from jiuwenswarm.server.live_voice.fake_verticals import (
+from tests.support.live_voice.fake_verticals import (
     FakeIntegratedVerticals,
     FakeTrackAvailability,
     FakeVerticalViolation,
