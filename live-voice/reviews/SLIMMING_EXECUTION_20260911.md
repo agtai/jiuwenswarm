@@ -213,3 +213,17 @@ shared-formal checks: 53 passed. Host/WebSocket/Native imports succeed. Both
 `.deps/agent-core` and `.deps/agent-core-w3` remain unchanged. No service restart
 or browser/Provider call was performed; source checks do not constitute live
 process deployment or physical acceptance.
+
+## Batch 3c — Registry diagnostic projection (complete)
+
+Tier 0: extract the existing observation/metric and Task/progress diagnostic
+projection methods into one implementation mixin. Registry remains the sole
+route/state/lease owner; the existing adapter retains its FIFO and worker.
+Preserve every method body and logger identity, with no new export policy or
+authority. Verify AST equivalence and existing diagnostic ownership regressions.
+Further lifecycle splitting is not required to claim fewer maintained copies.
+
+All ten method ASTs (567 body lines) are identical. Existing exact route,
+lease/export ownership and content-free durability projection checks: three
+passed. Logger identity is unchanged; five now-unused Registry imports removed.
+Undefined-name and whitespace checks pass. No constructor or state was added.
