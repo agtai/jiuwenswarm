@@ -42,17 +42,12 @@ Goal/Team/Workflow capability is enabled solely as a side effect of slimming.
 The existing installed SDK and running services remain unchanged during source
 integration; validate against the exact candidate SDK in an isolated process.
 
-## Remaining batches
+## Batch index
 
-2. Shared Agent execution and SDK capability consumption; preserve current
-   result ownership, permission/model binding and actual cancellation settlement.
-3. Composition and Web controller decomposition without duplicate state owners.
-4. Generic Task/Executor ownership in Host services, keeping schema/transactions.
-5. Remove superseded paths and duplicate maintenance only after caller/oracle migration.
-6. Configuration, dependency and document layout suitable for formal integration.
-
-New behavior or provider/installation decisions are not inferred from path moves.
-Record changed boundary and evidence here at each coherent batch completion.
+All six behavior-preserving batches are recorded below; numerical order follows
+ownership dependencies rather than Git chronology. Final layout and deliberately
+retained compatibility dependencies are in [code ownership](../architecture/CODE_OWNERSHIP.md).
+Counts distinguish relocation from net deletion in the [current inventory](SLIMMING_CODE_INVENTORY_20260911.md).
 
 ## Batch 4a — Host durability ownership (complete)
 
@@ -227,3 +222,19 @@ All ten method ASTs (567 body lines) are identical. Existing exact route,
 lease/export ownership and content-free durability projection checks: three
 passed. Logger identity is unchanged; five now-unused Registry imports removed.
 Undefined-name and whitespace checks pass. No constructor or state was added.
+
+## Batch 6b — formal integration layout and closure (complete)
+
+Recorded implemented SDK/Host/Voice, test, configuration and document ownership;
+retained supported paths, source-evidence compatibility and distinct trust-boundary
+validators explicitly. Recomputed every baseline module and moved file, including
+new split files and shared services. Historical audit remains a baseline record.
+No bulk protocol rewrite, user-data migration, remote update or deployment is
+needed to complete this bounded refactor. Source and package layout inspection
+confirms production owns no imported test implementation. Existing test failures
+and paused physical acceptance remain explicit rather than relabeled as success.
+
+Final documentation checks cover new/changed relative file links, stale imports,
+tracked diff whitespace and Git exclusions. The one trailing empty line in the
+new diagnostic module is removed here; no method body changes. No full-suite or
+second physical run was added for this documentation closure.

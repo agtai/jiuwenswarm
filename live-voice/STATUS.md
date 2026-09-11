@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-09-11 — behavior-preserving slimming and ownership refactor active.
+> Updated: 2026-09-11 — behavior-preserving slimming and ownership refactor completed locally.
 > Default bootstrap reads only Project judgement and Current execution packet.
 > Stop at Completion boundaries unless the task needs wider planning or acceptance.
 
@@ -84,19 +84,26 @@ support has been discussed, not implemented.
 
 ## Current execution packet
 
-### Active slimming and ownership refactor (2026-09-11)
+### Completed local slimming and ownership refactor (2026-09-11)
 
-The user authorizes completing the six refactor batches from the
-[code/reuse audit](reviews/LIVEVOICE_CODE_REUSE_AUDIT_20260911.md): remove test
-support from production, share Agent execution, split composition/UI owners,
-return generic Task/Executor capabilities to JiuwenSwarm and SDK primitives to
-AgentCore, consolidate supported paths, and prepare maintainable release layout.
-Preserve current Native/P1/Cascade behavior, Task/file/adjustment truth, playback
-ACK and user configuration/data. Do not reopen deferred network diagnosis.
-Checks and review follow the affected boundary, without repeated full-suite or
-physical runs for mechanical moves. Local commits are authorized; remote updates
-and publishing remain outside this packet. The
-[execution record](reviews/SLIMMING_EXECUTION_20260911.md) owns batch results.
+The accepted six behavior-preserving batches are complete locally: production/test
+separation, configured shared Agent execution with immutable AgentCore source,
+composition/UI helper separation, Host Task/Executor/durability ownership,
+superseded implementation retirement and integration layout. The
+[execution record](reviews/SLIMMING_EXECUTION_20260911.md) owns scoped evidence;
+[implemented ownership](architecture/CODE_OWNERSHIP.md) owns placement and retained
+compatibility boundaries; the [inventory](reviews/SLIMMING_CODE_INVENTORY_20260911.md)
+separates relocation from net deletion. Existing UI/result-context baseline test
+failures remain recorded; this is not a full-green suite or feature-complete claim.
+
+No new Native vocabulary, protocol, storage migration or supported-route removal
+was introduced. The pinned SDK is installed in the repository environment, but
+services were not restarted and no browser/Provider journey was run. Existing
+runtime processes are not evidence that this source has been deployed. Remote
+updates/publishing and paused physical acceptance remain outside this packet.
+Further source-evidence decoupling or protocol generation is a separate design
+boundary, not automatically activated work. The preceding product repairs and
+deferred network observations remain governed by Project judgement above.
 
 ### Continuation boundary
 

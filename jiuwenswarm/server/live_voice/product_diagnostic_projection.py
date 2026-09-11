@@ -594,4 +594,3 @@ class ProductDiagnosticProjection:
             completed=presentation is not None,
             observed_at=observed_at,
         )
-

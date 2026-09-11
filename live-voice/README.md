@@ -11,6 +11,7 @@ linked history is conditional and does not activate work.
 | Task | Read after STATUS |
 |---|---|
 | Local browser entry/link or environment reconstruction | [Local entry convention](runbooks/E2E_RUNBOOK.md#local-entry-origin), then the applicable startup section |
+| Code ownership, slimming or upstream integration | [Implemented ownership](architecture/CODE_OWNERSHIP.md), then the current execution record and inventory |
 | SDK source and dependency preparation | [Pinned AgentCore source](runbooks/AGENTCORE_SOURCE.md) and the active execution record; source pinning is separate from deployment |
 | Current repair or diagnosis | Affected source/tests and directory `AGENTS.md`; only the implicated contract/evidence and applicable root [TESTING.md](../TESTING.md) sections |
 | Another capability/module | That capability row and dependency route in STATUS; affected source/tests; only the relevant accepted design/ACG/decision sections |
