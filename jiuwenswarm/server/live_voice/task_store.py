@@ -76,12 +76,12 @@ from .formal_task_models import (
     command_result_extensions,
     utc_now,
 )
-from .durability_checkpoint import D1Checkpoint
-from .durability_authority import (
+from jiuwenswarm.server.runtime.durability.durability_checkpoint import D1Checkpoint
+from jiuwenswarm.server.runtime.durability.durability_authority import (
     DurabilityMutationAuthorization,
     _durability_authorization_payload_digest,
 )
-from .durability_effects import (
+from jiuwenswarm.server.runtime.durability.durability_effects import (
     EffectContinuationAuthorization,
     EffectFact,
     ExternalEffectDispatch,
@@ -89,8 +89,8 @@ from .durability_effects import (
     ExternalEffectSettlement,
     effect_fact_bytes,
 )
-from .durability_identity import DurabilityProfileBinding
-from .durability_readers import (
+from jiuwenswarm.server.runtime.durability.durability_identity import DurabilityProfileBinding
+from jiuwenswarm.server.runtime.durability.durability_readers import (
     CheckpointPrefixRow,
     DurabilityPrefixViolation,
     DurabilityReadBinding,
@@ -100,7 +100,7 @@ from .durability_readers import (
     verify_checkpoint_prefix,
     verify_effect_prefix,
 )
-from .durability_recovery_facts import ExecutorRecoveryFacts
+from jiuwenswarm.server.runtime.durability.durability_recovery_facts import ExecutorRecoveryFacts
 from .executor_capabilities import ExecutorCapabilityProfile
 
 _SCHEMA_VERSION = 6

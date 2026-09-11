@@ -55,9 +55,9 @@ from .formal_task_models import (
     require_exact_payload,
     utc_now,
 )
-from .durability_identity import DurabilityProfileBinding
-from .durability_authority import DurabilityMutationAuthorization
-from .durability_recovery_facts import ExecutorRecoveryFacts
+from jiuwenswarm.server.runtime.durability.durability_identity import DurabilityProfileBinding
+from jiuwenswarm.server.runtime.durability.durability_authority import DurabilityMutationAuthorization
+from jiuwenswarm.server.runtime.durability.durability_recovery_facts import ExecutorRecoveryFacts
 from .task_store import SqliteTaskStore
 
 _PROJECTABLE_TASK_EVENTS = frozenset(

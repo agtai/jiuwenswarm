@@ -33,7 +33,7 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskRetryProductRequestFingerprint,
     TaskRetryAuthoritySnapshot,
 )
-from jiuwenswarm.server.live_voice.durability_recovery_facts import (
+from jiuwenswarm.server.runtime.durability.durability_recovery_facts import (
     ExecutorRecoveryFacts,
 )
 from jiuwenswarm.server.live_voice.progress_notification_arbiter import (

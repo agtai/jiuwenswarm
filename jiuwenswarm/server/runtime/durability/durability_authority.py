@@ -23,7 +23,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     canonical_json_bytes,
 )
 
-from .durability_identity import DurabilityProfileBinding
+from jiuwenswarm.server.runtime.durability.durability_identity import DurabilityProfileBinding
 
 _CONSTRUCTION_TOKEN = object()
 _RECEIPT_SIGNING_KEY: Final = secrets.token_bytes(32)

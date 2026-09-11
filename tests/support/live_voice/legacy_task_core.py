@@ -525,4 +525,3 @@ class TaskCore:
                 ErrorCode.NOT_FOUND,
             )
         return task
-

@@ -716,5 +716,13 @@
     "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/fakeP1Vertical.ts": "jiuwenswarm/channels/web/frontend/tests/support/live_voice/fakeP1Vertical.ts",
     "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/conversationRuntimeReplica.ts": "jiuwenswarm/channels/web/frontend/tests/support/live_voice/conversationRuntimeReplica.ts",
     "jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/webLifecycleObservationRecorder.ts": "jiuwenswarm/channels/web/frontend/tests/support/live_voice/webLifecycleObservationRecorder.ts"
+  },
+  "host_relocations_20260911": {
+    "jiuwenswarm/server/live_voice/durability_identity.py": "jiuwenswarm/server/runtime/durability/durability_identity.py",
+    "jiuwenswarm/server/live_voice/durability_authority.py": "jiuwenswarm/server/runtime/durability/durability_authority.py",
+    "jiuwenswarm/server/live_voice/durability_checkpoint.py": "jiuwenswarm/server/runtime/durability/durability_checkpoint.py",
+    "jiuwenswarm/server/live_voice/durability_effects.py": "jiuwenswarm/server/runtime/durability/durability_effects.py",
+    "jiuwenswarm/server/live_voice/durability_readers.py": "jiuwenswarm/server/runtime/durability/durability_readers.py",
+    "jiuwenswarm/server/live_voice/durability_recovery_facts.py": "jiuwenswarm/server/runtime/durability/durability_recovery_facts.py"
   }
 }

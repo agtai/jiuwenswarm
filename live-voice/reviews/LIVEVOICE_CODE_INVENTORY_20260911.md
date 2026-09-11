@@ -142,12 +142,12 @@ Realtime Provider 会话、事件映射、Native 参数、提案/载体契约、
 
 | 文件 | 物理行 | 非空行 | 代码职责 / 入口 |
 |---|---:|---:|---|
-| [jiuwenswarm/server/live_voice/durability_authority.py](../../jiuwenswarm/server/live_voice/durability_authority.py) | 229 | 204 | Opaque, one-operation durability mutation authorization. |
-| [jiuwenswarm/server/live_voice/durability_checkpoint.py](../../jiuwenswarm/server/live_voice/durability_checkpoint.py) | 499 | 457 | Pure canonical D1 checkpoint value and codec. |
-| [jiuwenswarm/server/live_voice/durability_effects.py](../../jiuwenswarm/server/live_voice/durability_effects.py) | 920 | 826 | Pure D2 external-effect facts, codec, and reconciliation decision. |
-| [jiuwenswarm/server/live_voice/durability_identity.py](../../jiuwenswarm/server/live_voice/durability_identity.py) | 150 | 128 | Authority-free identity values shared by pure durability assets. |
-| [jiuwenswarm/server/live_voice/durability_readers.py](../../jiuwenswarm/server/live_voice/durability_readers.py) | 689 | 628 | Schema-neutral verified prefix readers for caller-owned durability rows. |
-| [jiuwenswarm/server/live_voice/durability_recovery_facts.py](../../jiuwenswarm/server/live_voice/durability_recovery_facts.py) | 466 | 422 | Canonical authority-free Executor recovery generation facts. |
+| [jiuwenswarm/server/live_voice/durability_authority.py](../../jiuwenswarm/server/runtime/durability/durability_authority.py) | 229 | 204 | Opaque, one-operation durability mutation authorization. |
+| [jiuwenswarm/server/live_voice/durability_checkpoint.py](../../jiuwenswarm/server/runtime/durability/durability_checkpoint.py) | 499 | 457 | Pure canonical D1 checkpoint value and codec. |
+| [jiuwenswarm/server/live_voice/durability_effects.py](../../jiuwenswarm/server/runtime/durability/durability_effects.py) | 920 | 826 | Pure D2 external-effect facts, codec, and reconciliation decision. |
+| [jiuwenswarm/server/live_voice/durability_identity.py](../../jiuwenswarm/server/runtime/durability/durability_identity.py) | 150 | 128 | Authority-free identity values shared by pure durability assets. |
+| [jiuwenswarm/server/live_voice/durability_readers.py](../../jiuwenswarm/server/runtime/durability/durability_readers.py) | 689 | 628 | Schema-neutral verified prefix readers for caller-owned durability rows. |
+| [jiuwenswarm/server/live_voice/durability_recovery_facts.py](../../jiuwenswarm/server/runtime/durability/durability_recovery_facts.py) | 466 | 422 | Canonical authority-free Executor recovery generation facts. |
 | [jiuwenswarm/server/live_voice/executor_capabilities.py](../../jiuwenswarm/server/live_voice/executor_capabilities.py) | 373 | 330 | Immutable Executor capability declarations and deterministic selection. |
 | [jiuwenswarm/server/live_voice/file_effect_plan.py](../../jiuwenswarm/server/live_voice/file_effect_plan.py) | 416 | 369 | A frozen restriction on an authorized Task's file effects, never a grant. |
 | [jiuwenswarm/server/live_voice/project_code_executor.py](../../jiuwenswarm/server/live_voice/project_code_executor.py) | 7,092 | 6,779 | Formal attempt adapters for the bounded project Code Agent. |

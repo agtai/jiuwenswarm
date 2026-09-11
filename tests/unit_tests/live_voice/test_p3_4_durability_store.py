@@ -19,12 +19,12 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TerminalOutcome,
     canonical_json_bytes,
 )
-from jiuwenswarm.server.live_voice.durability_checkpoint import D1Checkpoint
-from jiuwenswarm.server.live_voice.durability_authority import (
+from jiuwenswarm.server.runtime.durability.durability_checkpoint import D1Checkpoint
+from jiuwenswarm.server.runtime.durability.durability_authority import (
     _durability_authorization_payload_digest,
     _mint_durability_mutation_authorization,
 )
-from jiuwenswarm.server.live_voice.durability_effects import (
+from jiuwenswarm.server.runtime.durability.durability_effects import (
     EffectObservationKind,
     ExternalEffectBinding,
     ExternalEffectDispatch,
@@ -32,11 +32,11 @@ from jiuwenswarm.server.live_voice.durability_effects import (
     ExternalEffectObservation,
     effect_fact_bytes,
 )
-from jiuwenswarm.server.live_voice.durability_identity import (
+from jiuwenswarm.server.runtime.durability.durability_identity import (
     DurabilityProfileBinding,
 )
-from jiuwenswarm.server.live_voice.durability_readers import DurabilityReadBinding
-from jiuwenswarm.server.live_voice.durability_recovery_facts import (
+from jiuwenswarm.server.runtime.durability.durability_readers import DurabilityReadBinding
+from jiuwenswarm.server.runtime.durability.durability_recovery_facts import (
     ExecutorRecoveryFacts,
 )
 from jiuwenswarm.server.live_voice.executor_capabilities import (

@@ -20,11 +20,11 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     canonical_json_bytes,
 )
-from jiuwenswarm.server.live_voice.durability_checkpoint import (
+from jiuwenswarm.server.runtime.durability.durability_checkpoint import (
     MAX_D1_CHECKPOINT_WIRE_BYTES,
     D1Checkpoint,
 )
-from jiuwenswarm.server.live_voice.durability_effects import (
+from jiuwenswarm.server.runtime.durability.durability_effects import (
     EffectContinuationAuthorization,
     EffectDispatchReceipt,
     EffectFact,
@@ -35,7 +35,7 @@ from jiuwenswarm.server.live_voice.durability_effects import (
     ExternalEffectSettlement,
     effect_fact_from_bytes,
 )
-from jiuwenswarm.server.live_voice.durability_identity import (
+from jiuwenswarm.server.runtime.durability.durability_identity import (
     DurabilityIdentityViolation,
     DurabilityProfileBinding,
 )

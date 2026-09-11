@@ -5,10 +5,10 @@ from dataclasses import replace
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
-from jiuwenswarm.server.live_voice.durability_identity import (
+from jiuwenswarm.server.runtime.durability.durability_identity import (
     DurabilityProfileBinding,
 )
-from jiuwenswarm.server.live_voice.durability_recovery_facts import (
+from jiuwenswarm.server.runtime.durability.durability_recovery_facts import (
     ExecutorRecoveryFacts,
     ExecutorRecoveryFactsViolation,
 )

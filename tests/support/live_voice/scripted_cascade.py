@@ -274,4 +274,3 @@ class ScriptedCascadeInteractionEngine:
                 retained_actions=retained,
                 retained_observation_identities=len(self._observation_identities),
             )
-

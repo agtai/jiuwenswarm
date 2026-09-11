@@ -135,7 +135,9 @@ def _assert_existing_relative_path(value: str) -> None:
         assert not (ROOT / path).exists(), value
         assert _git_object_exists(INVENTORY_BASELINE, value), value
         return
-    relocated = _load().get("support_relocations_20260911", {}).get(value)
+    relocations = {**_load().get("support_relocations_20260911", {}),
+                   **_load().get("host_relocations_20260911", {})}
+    relocated = relocations.get(value)
     if relocated is not None:
         assert not (ROOT / path).exists(), value
         path = Path(relocated)

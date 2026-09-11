@@ -55,13 +55,13 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import background_task_checkpoint
 
-from .durability_checkpoint import D1Checkpoint
-from .durability_authority import (
+from jiuwenswarm.server.runtime.durability.durability_checkpoint import D1Checkpoint
+from jiuwenswarm.server.runtime.durability.durability_authority import (
     DurabilityMutationAuthorization,
     _durability_authorization_payload_digest,
     _mint_durability_mutation_authorization,
 )
-from .durability_effects import (
+from jiuwenswarm.server.runtime.durability.durability_effects import (
     EffectDispatchReceipt,
     EffectContinuationAuthorization,
     EffectObservationKind,
@@ -73,13 +73,13 @@ from .durability_effects import (
     ExternalEffectSettlement,
     effect_fact_bytes,
 )
-from .durability_identity import DurabilityProfileBinding
-from .durability_readers import (
+from jiuwenswarm.server.runtime.durability.durability_identity import DurabilityProfileBinding
+from jiuwenswarm.server.runtime.durability.durability_readers import (
     DurabilityReadBinding,
     VerifiedCheckpointPrefix,
     VerifiedEffectPrefix,
 )
-from .durability_recovery_facts import ExecutorRecoveryFacts
+from jiuwenswarm.server.runtime.durability.durability_recovery_facts import ExecutorRecoveryFacts
 from .executor_capabilities import (
     EXECUTOR_CAPABILITY_PROFILE_SCHEMA_VERSION,
     ExecutorCapabilityProfile,

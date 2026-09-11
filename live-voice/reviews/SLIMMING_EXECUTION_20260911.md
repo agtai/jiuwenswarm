@@ -53,3 +53,20 @@ integration; validate against the exact candidate SDK in an isolated process.
 
 New behavior or provider/installation decisions are not inferred from path moves.
 Record changed boundary and evidence here at each coherent batch completion.
+
+## Batch 4a — Host durability ownership (complete)
+
+Tier 0: move the six immutable durability/authorization modules as one dependency
+closure to `server/runtime/durability`. Preserve implementation bodies, module
+singletons, serialized identifiers and common wire-schema types. Update all
+repository Python consumers; no forwarding copies. Voice-specific schema naming
+is retained for compatibility, not claimed as an SDK-independent API. Store,
+Executor and Native source policy stay unchanged in this step. Acceptance is
+body equivalence, import resolution and existing durability/Store regressions.
+
+Six modules / 2,953 baseline physical lines now belong to Host runtime. All
+implementation bodies match the parent commit after imports are excluded; all
+repository Python imports use the new owner. Existing pure contract, SQLite
+authorization/recovery and Direct executor tests: 86 passed in 89.45 seconds.
+No database or installed dependency changed. Fixed two support-file trailing
+EOF blank lines found by the previous staged whitespace check.

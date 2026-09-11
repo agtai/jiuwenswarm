@@ -19,7 +19,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TerminalOutcome,
     canonical_json_bytes,
 )
-from jiuwenswarm.server.live_voice.durability_effects import (
+from jiuwenswarm.server.runtime.durability.durability_effects import (
     EffectObservationKind,
     EffectSettlementKind,
     ExternalEffectDispatch,
@@ -31,7 +31,7 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     FormalTaskViolation,
     ReconciliationState,
 )
-from jiuwenswarm.server.live_voice.durability_recovery_facts import (
+from jiuwenswarm.server.runtime.durability.durability_recovery_facts import (
     ExecutorRecoveryFacts,
 )
 from jiuwenswarm.server.live_voice.executor_capabilities import (
