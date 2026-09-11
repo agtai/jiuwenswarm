@@ -107,3 +107,19 @@ bodies, including delayed-import functions, are identical. Related Live Voice
 and AgentServer collection succeeds: 6,645 collected (not executed). Focused
 Task adjustment, file plan, real temporary-project snapshots, task handoff and
 manifest selection: 86 passed in 138.16 seconds. No product Store bytes changed.
+
+## Batch 3b — Registry result context codec (complete)
+
+Tier 0: extract the five stateless Task result/context methods and their bounds
+into `TaskResultContext`; Registry inherits those same methods without a second
+state owner. Preserve source validation, artifact hash/path checks, paging and
+method call signatures. No new policy, output or access grant. Existing result
+context and interrupted-dialogue tests own acceptance.
+
+All five method ASTs are identical and remain callable on Registry through a
+stateless base class. Ruff import/name checks pass. Focused existing context
+selection: 13 passed; the semantic query integration case already fails on the
+parent Registry (expects tools disabled but the classifier chose ordinary
+dialogue). Reproduced that one case by loading the exact parent module in an
+isolated process, without changing source files. This pre-existing semantic
+fixture mismatch is retained; result codec checks introduce no observed failure.
