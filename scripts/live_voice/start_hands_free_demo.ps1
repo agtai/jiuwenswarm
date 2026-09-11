@@ -700,14 +700,19 @@ try {
         Write-Pass "L0 内容无关证据目录已隔离：$L0MeasurementDirectory"
     }
 
-    # Keep the machine selection at one stable path so a non-default data
-    # directory can still be discovered by the next no-argument launch.
+    # Explicit configuration owns its saved selection; default launches retain
+    # the stable machine path for no-argument discovery.
     $demoConfigName = if ($RuntimeProfile -eq 'formal-web-validation') {
         'live-voice-formal-web-validation.json'
     } else {
         'live-voice-demo.json'
     }
-    $DemoConfigPath = Join-Path $env:USERPROFILE ".jiuwenswarm\config\$demoConfigName"
+    $selectionConfigDirectory = if ([string]::IsNullOrWhiteSpace($ConfigurationDirectory)) {
+        Join-Path $env:USERPROFILE '.jiuwenswarm\config'
+    } else {
+        [System.IO.Path]::GetFullPath($ConfigurationDirectory)
+    }
+    $DemoConfigPath = Join-Path $selectionConfigDirectory $demoConfigName
     $savedConfig = $null
     if (Test-Path -LiteralPath $DemoConfigPath -PathType Leaf) {
         $savedConfig = Get-Content -Raw -LiteralPath $DemoConfigPath -Encoding UTF8 | ConvertFrom-Json

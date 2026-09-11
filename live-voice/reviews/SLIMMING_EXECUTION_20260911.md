@@ -131,7 +131,7 @@ uses DirectProjectCodeExecutorAdapter. Move its unchanged class into test suppor
 and migrate consumers. Retain every oracle and shared binding interface. No
 production fallback, scheduling, file or cancellation behavior is removed.
 
-## Batch 6a — isolated launcher selection (active)
+## Batch 6a — isolated launcher selection (complete)
 
 Tier 1: adopt the isolated configuration-path fix from `aff82618` without its
 branch allowlist/history changes. An explicitly selected configuration directory
@@ -145,3 +145,8 @@ manifest selection: 83 passed and one manifest substring collision (`Direct...`
 contains the retired class name). The retirement check now matches whole
 identifiers and the one affected test passes. No assertion was removed; the
 Direct implementation was not edited. Production has no legacy-class import.
+
+Batch 6a result: PowerShell parser reports no errors. Evaluated only the two
+selection assignments: empty directory keeps the exact former machine path;
+explicit directory resolves its own saved selection. No launch, private file
+write, directory creation or environment installation occurred.
