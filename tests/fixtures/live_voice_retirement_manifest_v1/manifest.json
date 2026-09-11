@@ -723,6 +723,13 @@
     "jiuwenswarm/server/live_voice/durability_checkpoint.py": "jiuwenswarm/server/runtime/durability/durability_checkpoint.py",
     "jiuwenswarm/server/live_voice/durability_effects.py": "jiuwenswarm/server/runtime/durability/durability_effects.py",
     "jiuwenswarm/server/live_voice/durability_readers.py": "jiuwenswarm/server/runtime/durability/durability_readers.py",
-    "jiuwenswarm/server/live_voice/durability_recovery_facts.py": "jiuwenswarm/server/runtime/durability/durability_recovery_facts.py"
+    "jiuwenswarm/server/live_voice/durability_recovery_facts.py": "jiuwenswarm/server/runtime/durability/durability_recovery_facts.py",
+    "jiuwenswarm/server/live_voice/task_store.py": "jiuwenswarm/server/runtime/formal_tasks/task_store.py",
+    "jiuwenswarm/server/live_voice/persistent_task_core.py": "jiuwenswarm/server/runtime/formal_tasks/persistent_task_core.py",
+    "jiuwenswarm/server/live_voice/formal_task_models.py": "jiuwenswarm/server/runtime/formal_tasks/formal_task_models.py",
+    "jiuwenswarm/server/live_voice/executor_capabilities.py": "jiuwenswarm/server/runtime/formal_tasks/executor_capabilities.py",
+    "jiuwenswarm/server/live_voice/project_code_executor.py": "jiuwenswarm/server/runtime/formal_tasks/project_code_executor.py",
+    "jiuwenswarm/server/live_voice/file_effect_plan.py": "jiuwenswarm/server/runtime/formal_tasks/file_effect_plan.py",
+    "jiuwenswarm/server/live_voice/task_adjustment_queue.py": "jiuwenswarm/server/runtime/formal_tasks/task_adjustment_queue.py"
   }
 }

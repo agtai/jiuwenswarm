@@ -71,7 +71,7 @@ from .formal_history_writer import (
     native_assistant_history_record,
     native_user_history_record,
 )
-from .formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     FormalTaskState,
     FormalTaskViolation,
     OutboxKind,
@@ -84,7 +84,7 @@ from .formal_task_models import (
     TerminalOutcome,
     utc_now,
 )
-from .task_store import TaskDurabilityDiagnosticSnapshot
+from jiuwenswarm.server.runtime.formal_tasks.task_store import TaskDurabilityDiagnosticSnapshot
 from .interaction_engine import INTERACTION_ACTION_OPERATIONS, InteractionEnginePort
 from .native_interaction_carrier import (
     NATIVE_NOTIFICATION_WAKE_VERSION, notification_wake_response,

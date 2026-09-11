@@ -27,7 +27,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     canonical_json_bytes,
 )
 
-from .formal_task_models import FormalTaskViolation
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
 from .p3_confirmation import P3_CONFIRMATION_MAX_CAPACITY, P3_CONFIRMATION_MAX_TTL
 
 # Unaccepted work descriptions are data, not short-lived confirmation grants.

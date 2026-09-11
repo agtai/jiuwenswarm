@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import MAX_SAFE_INTEGER
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
 from jiuwenswarm.server.live_voice.p2_response_generation_store import (
     SqliteP2ResponseGenerationOwner,
 )

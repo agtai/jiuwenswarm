@@ -21,7 +21,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     WorkProgressEventV2,
 )
 
-from .formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     AdmissionPolicy,
     AppliedTaskRetryReplay,
     ExecutorDeliveryResult,
@@ -58,7 +58,7 @@ from .formal_task_models import (
 from jiuwenswarm.server.runtime.durability.durability_identity import DurabilityProfileBinding
 from jiuwenswarm.server.runtime.durability.durability_authority import DurabilityMutationAuthorization
 from jiuwenswarm.server.runtime.durability.durability_recovery_facts import ExecutorRecoveryFacts
-from .task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 
 _PROJECTABLE_TASK_EVENTS = frozenset(
     {
@@ -683,7 +683,7 @@ class PersistentTaskCore:
                     command, observed_at=observed_at
                 )
             if command.command_type == "task.create_successor":
-                from .native_task_source import source_payload_fields, require_payload_source
+                from jiuwenswarm.server.live_voice.native_task_source import source_payload_fields, require_payload_source
                 require_exact_payload(
                     command.payload,
                     source_payload_fields(command.payload, self._SUCCESSOR_PAYLOAD),
@@ -761,7 +761,7 @@ class PersistentTaskCore:
                 )
                 return self.store.update(command, observed_at=observed_at)
             if command.command_type == "task.adjust":
-                from .native_task_source import source_payload_fields, require_payload_source
+                from jiuwenswarm.server.live_voice.native_task_source import source_payload_fields, require_payload_source
                 require_exact_payload(
                     command.payload,
                     source_payload_fields(command.payload, frozenset({"adjustment"})),
@@ -823,7 +823,7 @@ class PersistentTaskCore:
                 now=observed_at,
             )
             payload = command.payload
-            from .native_task_source import source_payload_fields, require_payload_source
+            from jiuwenswarm.server.live_voice.native_task_source import source_payload_fields, require_payload_source
             require_exact_payload(
                 payload, source_payload_fields(payload, self._CREATE_PAYLOAD), field_name="task.create payload"
             )

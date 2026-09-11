@@ -12,7 +12,7 @@ from typing import Any, Protocol
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode
 
-from .formal_task_models import FormalTaskViolation
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
 
 
 @dataclass(frozen=True, slots=True)

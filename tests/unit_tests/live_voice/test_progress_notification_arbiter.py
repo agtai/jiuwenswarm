@@ -33,7 +33,7 @@ from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
     SpeechDisposition,
     SpeechPolicy,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import PersistentTaskEvent
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import PersistentTaskEvent
 
 
 def scope(

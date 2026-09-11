@@ -337,7 +337,7 @@ async def test_project_rebound_while_agent_resource_waits_has_zero_work_or_agent
 @pytest.mark.asyncio
 async def test_native_completed_adjust_preserves_speech_and_exposes_final_saved_truth(tmp_path, monkeypatch):
     from jiuwenswarm.common.schema.live_voice_contract_v2 import TerminalOutcome
-    from jiuwenswarm.server.live_voice.formal_task_models import TaskResultArtifact
+    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TaskResultArtifact
     import hashlib
     spoken = "第一晚牛肉火锅，第二晚烧烤；不得修改原件.md。"
     env = await make_registry(tmp_path, monkeypatch, input_text=spoken)

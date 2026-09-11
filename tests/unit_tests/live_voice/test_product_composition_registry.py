@@ -37,7 +37,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommit,
     TurnCommitLedger,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     ExecutorDeliveryResult,
     ExecutorObservation,
     ExecutorResolution,
@@ -113,7 +113,7 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     PreparedProductionIntentAuthority,
     ResolvedAuthority,
 )
-from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
 from jiuwenswarm.server.live_voice.p2_response_generation_store import (
     SqliteP2ResponseGenerationOwner,
 )
@@ -190,12 +190,12 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextSnapshot,
 )
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     FORMAL_PROJECT_EXECUTOR_ID,
     ProjectExecutionBinding,
 )
-from jiuwenswarm.server.live_voice.task_store import (
+from jiuwenswarm.server.runtime.formal_tasks.task_store import (
     SqliteTaskStore,
     TaskDurabilityDiagnosticSnapshot,
     TaskOutboxDiagnosticFact,

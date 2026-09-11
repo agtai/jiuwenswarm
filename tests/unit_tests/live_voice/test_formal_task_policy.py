@@ -21,7 +21,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommit,
     TurnCommitLedger,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     FormalTaskViolation,
     ResolvedTaskContext,
     TaskAuthorizationGrant,

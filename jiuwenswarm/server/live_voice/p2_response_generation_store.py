@@ -13,7 +13,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     MAX_SAFE_INTEGER,
 )
 
-from .formal_task_models import FormalTaskViolation
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
 
 _SCHEMA_VERSION = "1"
 _EXACT_CAPACITY = 128

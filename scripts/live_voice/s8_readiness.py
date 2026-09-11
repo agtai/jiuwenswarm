@@ -3285,7 +3285,7 @@ def _verify_task_store_settlement(
             ):
                 raise ReadinessError("TASK_STORE_EXECUTOR_NOT_SETTLED")
             try:
-                from jiuwenswarm.server.live_voice.project_code_executor import (
+                from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
                     _AttemptOwnershipLock,
                     _attempt_ownership_lock_path,
                     _is_unsafe_filesystem_link,

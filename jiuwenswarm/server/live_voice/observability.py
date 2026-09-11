@@ -1786,7 +1786,7 @@ def observation_from_task_event(
 ) -> LiveVoiceObservation:
     """Project a public PersistentTaskEvent without copying its free-text details."""
 
-    from jiuwenswarm.server.live_voice.formal_task_models import PersistentTaskEvent
+    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import PersistentTaskEvent
 
     if not isinstance(event, PersistentTaskEvent):
         raise _violation("INVALID_TASK_EVENT", "event must be PersistentTaskEvent")
@@ -1835,7 +1835,7 @@ def observation_from_task_outbox(
 ) -> LiveVoiceObservation:
     """Observe a durable outbox item without copying its task spec or instruction."""
 
-    from jiuwenswarm.server.live_voice.formal_task_models import (
+    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
         OutboxKind,
         OutboxState,
         PersistentOutboxItem,

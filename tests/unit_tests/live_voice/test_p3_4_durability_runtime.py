@@ -27,32 +27,32 @@ from jiuwenswarm.server.runtime.durability.durability_effects import (
     ExternalEffectObservation,
     ExternalEffectSettlement,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     FormalTaskViolation,
     ReconciliationState,
 )
 from jiuwenswarm.server.runtime.durability.durability_recovery_facts import (
     ExecutorRecoveryFacts,
 )
-from jiuwenswarm.server.live_voice.executor_capabilities import (
+from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import (
     TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
     TaskExecutionRequirements,
     select_executor,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     PersistedExecutorSelection,
 )
-from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AuthenticatedPrincipal,
     ServerSessionProjectAuthorityResolver,
 )
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     DirectProjectManagedBaselineReader,
     _AttemptOwnershipLock,
 )
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_persistent_task_core import (
     EXPIRY,
     NOW,
@@ -136,7 +136,7 @@ async def test_direct_d2_serial_tasks_accept_only_exact_settled_managed_baseline
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.task_store.utc_now",
+        "jiuwenswarm.server.runtime.formal_tasks.task_store.utc_now",
         lambda: NOW,
     )
     project = tmp_path / "serial-project"
@@ -299,7 +299,7 @@ async def test_direct_d2_public_dispatch_commits_checkpoint_and_intent_before_ap
     assert adapter.capability_profiles()[-1].durability_level == "D2"
     seen_before_apply: list[tuple[int, tuple[type[object], ...]]] = []
 
-    from jiuwenswarm.server.live_voice import project_code_executor
+    from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
 
     real_apply = project_code_executor._apply_attempt_patch
 
@@ -459,7 +459,7 @@ async def test_core_operator_recovery_uses_fresh_direct_quiescence_and_linked_at
         historical_binding
     )
     if native_source:
-        from jiuwenswarm.server.live_voice import project_code_executor
+        from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
         state = project_code_executor._decode_d2_checkpoint_state(historical_checkpoints.records[-1].state_bytes)
         before_counts = restarted._durability_store.counts()
         before_tree = project_code_executor._project_tree_fingerprint(project)
@@ -758,7 +758,7 @@ async def test_core_operator_recovery_uses_fresh_direct_quiescence_and_linked_at
             claim_token=forged_claim[0],
             claim_generation=forged_claim[1],
         )
-    from jiuwenswarm.server.live_voice import project_code_executor
+    from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
 
     real_apply = project_code_executor._apply_attempt_patch
     real_linked_reserve = restarted._journal.reserve_completion
@@ -840,7 +840,7 @@ async def test_core_operator_recovery_uses_fresh_direct_quiescence_and_linked_at
     assert recovery_apply_calls == 1
     assert (project / "result.txt").read_text(encoding="utf-8") == "done"
     if native_source:
-        from jiuwenswarm.server.live_voice.project_code_executor import _decode_d2_checkpoint_state
+        from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import _decode_d2_checkpoint_state
         plans = []
         for attempt_id in (producer.attempt_id, linked.attempt_id, second_linked.attempt_id):
             branch = _durability_binding(restarted._durability_store, task.task_id, attempt_id)
@@ -878,7 +878,7 @@ async def test_direct_restart_reconciles_crash_after_apply_without_duplicate_cal
     real_append = store.append_durability_effect_fact
     apply_calls = 0
 
-    from jiuwenswarm.server.live_voice import project_code_executor
+    from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
 
     real_apply = project_code_executor._apply_attempt_patch
 
@@ -978,7 +978,7 @@ async def test_direct_ambiguous_observation_requires_manual_without_second_call(
     real_append = store.append_durability_effect_fact
     apply_calls = 0
 
-    from jiuwenswarm.server.live_voice import project_code_executor
+    from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
 
     real_apply = project_code_executor._apply_attempt_patch
 

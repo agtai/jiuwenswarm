@@ -16,13 +16,13 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AuthenticatedPrincipal,
     ServerSessionProjectAuthorityResolver,
 )
-from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.live_voice import project_code_executor
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
+from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     DirectProjectManagedBaselineReader,
 )
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_p3_4_durability_runtime import (
     _create_selected_task,
 )
@@ -47,7 +47,7 @@ async def handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = SqliteTaskStore(database)
     current_time = [NOW]
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.task_store.utc_now", lambda: current_time[0]
+        "jiuwenswarm.server.runtime.formal_tasks.task_store.utc_now", lambda: current_time[0]
     )
     started = asyncio.Event()
     finish_body = asyncio.Event()

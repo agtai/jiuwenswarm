@@ -3,7 +3,7 @@
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ContextRef, ScopeRef
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
 from jiuwenswarm.server.live_voice.product_composition_registry import AgentServerProductCompositionRegistry
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextEntry, FormalContextSnapshot,

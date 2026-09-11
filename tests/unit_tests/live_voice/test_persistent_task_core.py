@@ -32,7 +32,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     canonical_json_bytes,
     validate_transition,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     ExecutorDeliveryResult,
     ExecutorObservation,
     ExecutorResolution,
@@ -64,14 +64,14 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskRetryProductRequestFingerprint,
     utc_now,
 )
-from jiuwenswarm.server.live_voice.persistent_task_core import (
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import (
     PersistentTaskCore,
     project_task_event,
 )
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     FORMAL_PROJECT_EXECUTOR_ID,
 )
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 from jiuwenswarm.server.live_voice.voice_task_policy import (
     FormalTaskPolicyAdapter,
     FormalTaskPolicyInput,
@@ -89,7 +89,7 @@ _V6_DURABILITY_TABLES = (
 
 
 def test_task_event_authority_snapshot_is_publicly_exported() -> None:
-    from jiuwenswarm.server.live_voice import formal_task_models
+    from jiuwenswarm.server.runtime.formal_tasks import formal_task_models
 
     assert "TaskEventAuthoritySnapshot" in formal_task_models.__all__
     assert formal_task_models.TaskEventAuthoritySnapshot is TaskEventAuthoritySnapshot
@@ -220,7 +220,7 @@ def test_formal_task_spec_constraints_enforce_closed_utf8_bounds(
 def test_command_result_extension_helper_is_exact_and_payload_free(
     tmp_path: Path,
 ) -> None:
-    from jiuwenswarm.server.live_voice import formal_task_models
+    from jiuwenswarm.server.runtime.formal_tasks import formal_task_models
 
     invocation = _create(tmp_path, instruction="private command instruction")
     extensions = formal_task_models.command_result_extensions(
@@ -6830,7 +6830,7 @@ def test_mutation_precondition_is_durable_and_tamper_evident(
 
 
 def test_task_mutation_precondition_has_closed_public_numeric_contract() -> None:
-    from jiuwenswarm.server.live_voice import formal_task_models
+    from jiuwenswarm.server.runtime.formal_tasks import formal_task_models
 
     assert "TaskMutationPrecondition" in formal_task_models.__all__
     assert (
@@ -8390,7 +8390,7 @@ async def test_inflight_adjustment_lost_owner_fences_delivery_without_applied_ev
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
 ) -> None:
-    from jiuwenswarm.server.live_voice import persistent_task_core as core_module
+    from jiuwenswarm.server.runtime.formal_tasks import persistent_task_core as core_module
 
     monkeypatch.setattr(core_module, "_ADJUSTMENT_CLAIM_RENEW_SECONDS", 0.01)
     entered = asyncio.Event()
@@ -8455,7 +8455,7 @@ async def test_inflight_adjustment_renews_lease_and_preserves_same_task_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from jiuwenswarm.server.live_voice import persistent_task_core as core_module
+    from jiuwenswarm.server.runtime.formal_tasks import persistent_task_core as core_module
 
     monkeypatch.setattr(core_module, "_ADJUSTMENT_CLAIM_RENEW_SECONDS", 0.01)
     renewed = asyncio.Event()
@@ -8549,7 +8549,7 @@ async def test_inflight_noncooperative_child_close_is_bounded_and_retains_owner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from jiuwenswarm.server.live_voice import persistent_task_core as core_module
+    from jiuwenswarm.server.runtime.formal_tasks import persistent_task_core as core_module
 
     monkeypatch.setattr(core_module, "_ADJUSTMENT_CLEANUP_SECONDS", 0.02)
     entered, release, fenced = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -8653,7 +8653,7 @@ async def test_inflight_capacity_keeps_adjustment_pending_but_allows_cancel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from jiuwenswarm.server.live_voice import persistent_task_core as core_module
+    from jiuwenswarm.server.runtime.formal_tasks import persistent_task_core as core_module
 
     monkeypatch.setattr(core_module, "_MAX_INFLIGHT_ADJUSTMENTS", 1)
     entered, release = asyncio.Event(), asyncio.Event()
@@ -8748,7 +8748,7 @@ async def test_inflight_final_settlement_retains_exact_disposition_on_retry(
     store_rejects: bool,
     failure: str,
 ) -> None:
-    from jiuwenswarm.server.live_voice import persistent_task_core as core_module
+    from jiuwenswarm.server.runtime.formal_tasks import persistent_task_core as core_module
 
     monkeypatch.setattr(core_module, "_ADJUSTMENT_CLEANUP_SECONDS", 0.01)
     entered, release = asyncio.Event(), asyncio.Event()

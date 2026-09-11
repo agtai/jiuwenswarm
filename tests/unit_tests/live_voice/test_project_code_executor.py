@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from jiuwenswarm.server.live_voice import project_code_executor
+from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
 
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
@@ -31,7 +31,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TerminalOutcome,
 )
 from jiuwenswarm.common.utils import get_agent_workspace_dir
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     ExecutorDeliveryResult,
     ExecutorObservation,
     ExecutorResolution,
@@ -50,7 +50,7 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskAdjustmentSettlement,
     TaskAdjustmentState,
 )
-from jiuwenswarm.server.live_voice.executor_capabilities import (
+from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import (
     TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
     ExecutorCapabilityProfile,
     TaskExecutionRequirements,
@@ -59,7 +59,7 @@ from jiuwenswarm.server.live_voice.executor_capabilities import (
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AgentManagerProjectBindingResolver,
 )
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     AttemptProjectExecutorLease,
     DirectProjectCodeExecutorAdapter,
     FORMAL_PROJECT_EXECUTOR_ID,
@@ -71,7 +71,7 @@ from jiuwenswarm.server.live_voice.project_code_executor import (
     ProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
 )
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 from jiuwenswarm.server.runtime.agent_adapter import interface as agent_interface
 from jiuwenswarm.server.runtime.agent_manager import AgentManager
 from scripts.live_voice.w2_rehearsal.w2_d069_runtime_diagnostic import (
@@ -1990,7 +1990,7 @@ async def test_direct_result_relocates_exact_artifact_paths_before_checkout_clea
 
 
 def test_result_path_relocation_preserves_unrelated_paths_and_literal_text(tmp_path: Path) -> None:
-    from jiuwenswarm.server.live_voice.formal_task_models import TaskResultArtifact
+    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TaskResultArtifact
 
     source, target = tmp_path / "checkout", tmp_path / "retained project"
     artifact = TaskResultArtifact("nested/《result.md》", "a" * 64)
@@ -2011,7 +2011,7 @@ async def test_real_direct_core_adjustment_does_not_block_other_running_cancel(
     lose_settlement: bool,
 ) -> None:
     """Real Direct/Core/files; controlled Agent streams, not Provider evidence."""
-    from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
+    from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
     from tests.unit_tests.live_voice.test_persistent_task_core import (
         NOW,
         _adjust,
@@ -4820,7 +4820,7 @@ async def test_direct_executor_rejects_runtime_support_inside_target_before_agen
     executor = _DirectProjectExecutor(project)
     resolver = _Resolver(_direct_binding(project, executor))
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.project_code_executor.get_agent_workspace_dir",
+        "jiuwenswarm.server.runtime.formal_tasks.project_code_executor.get_agent_workspace_dir",
         lambda: project / "runtime",
     )
     adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "p3.sqlite3")
@@ -5122,7 +5122,7 @@ async def test_successor_never_recovers_or_deletes_while_predecessor_process_own
         (
             "import sys",
             "from pathlib import Path",
-            "from jiuwenswarm.server.live_voice.project_code_executor import (",
+            "from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (",
             "    _AttemptOwnershipLock, _create_attempt_worktree",
             ")",
             "root = Path(sys.argv[1])",
@@ -5835,7 +5835,7 @@ async def test_missing_journal_stays_fail_closed_without_every_exact_fact(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lose_settlement", [False, True])
 async def test_model_boundary_waits_for_admitted_adjustments_before_next_model(tmp_path, lose_settlement):
-    from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
+    from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
     from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
     from tests.unit_tests.live_voice.test_persistent_task_core import NOW, _adjust, _create
 

@@ -24,7 +24,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
 )
 
-from .formal_task_models import TaskAuthorizationGrant
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import TaskAuthorizationGrant
 from .p3_confirmation import P3ConfirmationBinding, VerifiedP3Confirmation
 
 if TYPE_CHECKING:

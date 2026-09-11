@@ -24,8 +24,8 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     canonical_json_bytes,
 )
 
-from .executor_capabilities import ExecutorCapabilityProfile
-from .formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import ExecutorCapabilityProfile
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     FormalAttemptState,
     FormalTaskState,
     FormalTaskViolation,
@@ -54,7 +54,7 @@ from .production_task_intent import (
     TrustedProductionOriginReceipt,
 )
 from .task_core import AttemptState, TaskState
-from .task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 
 
 _QUERY_OPERATIONS = frozenset(

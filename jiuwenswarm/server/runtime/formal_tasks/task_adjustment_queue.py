@@ -15,10 +15,10 @@ from dataclasses import replace
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CommandEnvelope, ContractViolation, ErrorCode, ResultEnvelope, canonical_json_bytes,
 )
-from .formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     FormalTaskViolation, TaskCommandDisposition, command_result_extensions, utc_now,
 )
-from .native_task_source import require_payload_source
+from jiuwenswarm.server.live_voice.native_task_source import require_payload_source
 
 
 def _json(value):
@@ -136,7 +136,7 @@ class TaskAdjustmentQueue:
 
     def _command(self, row):
         command = CommandEnvelope.from_dict(json.loads(row["command_json"]))
-        from .task_store import _scope_key
+        from jiuwenswarm.server.runtime.formal_tasks.task_store import _scope_key
         stored = json.loads(row["fingerprint"])
         if (command.command_type != "task.adjust" or command.command_id != row["command_id"]
                 or command.target_ref.id != row["task_id"] or _scope_key(command.scope) != row["scope_key"]
@@ -225,7 +225,7 @@ class TaskAdjustmentQueue:
 
     def advance(self, *, policy, now=None):
         """One bounded scheduling pass, safe across processes and restarts."""
-        from .task_store import _selection_from_attempt_row
+        from jiuwenswarm.server.runtime.formal_tasks.task_store import _selection_from_attempt_row
         now = now or utc_now()
         with self.store._snapshot_reader() as c:
             if not c.execute("SELECT 1 FROM task_adjustment_queue_v1 WHERE state IN ('pending','running') LIMIT 1").fetchone():

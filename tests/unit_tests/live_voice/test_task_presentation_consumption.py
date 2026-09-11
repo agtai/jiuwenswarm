@@ -17,7 +17,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ResultEnvelope,
     ScopeRef,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     PersistentTaskEvent,
     TaskAuthorizationGrant,
     TaskResultArtifact,
@@ -36,8 +36,8 @@ from jiuwenswarm.server.live_voice.presentation_ledger import (
     TaskPresentationViolation,
     TextPresentationAdoptionAck,
 )
-from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_persistent_task_core import (
     NOW,
     _Executor,

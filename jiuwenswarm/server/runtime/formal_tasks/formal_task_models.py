@@ -20,7 +20,7 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from .native_task_source import NativeTaskSource, source_extension, source_from_payload
+from jiuwenswarm.server.live_voice.native_task_source import NativeTaskSource, source_extension, source_from_payload
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,

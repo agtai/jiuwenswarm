@@ -126,6 +126,13 @@ def _load() -> dict:
     return json.loads(MANIFEST.read_text(encoding="utf-8"))
 
 
+def _current_source_path(value: str) -> Path:
+    manifest = _load()
+    relocations = {**manifest.get("support_relocations_20260911", {}),
+                   **manifest.get("host_relocations_20260911", {})}
+    return ROOT / relocations.get(value, value)
+
+
 def _assert_existing_relative_path(value: str) -> None:
     path = Path(value)
     assert not path.is_absolute()
@@ -296,7 +303,7 @@ def test_every_audit_object_has_a_live_source_locator_and_current_disposition() 
         _assert_existing_relative_path(source)
         source_text = source_cache.setdefault(
             source,
-            (ROOT / source).read_text(encoding="utf-8"),
+            _current_source_path(source).read_text(encoding="utf-8"),
         )
         assert mapping["locator_token"] in source_text, mapping["id"]
         assert set(mapping["manifest_entry_ids"]).issubset(entries)
@@ -336,7 +343,7 @@ def test_shared_files_are_symbol_scoped_and_retain_current_authority() -> None:
                 "jiuwenswarm/dotenv_early.py",
             }
             assert "Completed in" in boundary["delete_precondition"]
-        path = ROOT / boundary["path"]
+        path = _current_source_path(boundary["path"])
         source = path.read_text(encoding="utf-8")
         retired = manifest.get("retired_source_symbols", {}).get(boundary["path"], [])
         for symbol in boundary["candidate_symbols"] + boundary["retained_symbols"]:
@@ -363,9 +370,7 @@ def test_shared_files_are_symbol_scoped_and_retain_current_authority() -> None:
         if entry["id"] == "legacy_project_scheduler_adapter"
     )
     assert "DirectProjectCodeExecutorAdapter" in executor_entry["replacement_owner"]
-    assert "DirectProjectCodeExecutorAdapter" in (
-        ROOT / "jiuwenswarm/server/live_voice/project_code_executor.py"
-    ).read_text(encoding="utf-8")
+    assert "DirectProjectCodeExecutorAdapter" in _current_source_path("jiuwenswarm/server/live_voice/project_code_executor.py").read_text(encoding="utf-8")
 
 
 def test_legacy_ticket_media_targets_only_prefix_compatibility_symbols() -> None:
@@ -523,7 +528,7 @@ def _audit_batch_paths(source: str, start: str, end: str) -> set[str]:
 def test_document_batches_and_later_rebaseline_are_complete_and_linked() -> None:
     manifest = _load()["document_rebaseline"]
     source_path = manifest["source_audit"]
-    source = (ROOT / source_path).read_text(encoding="utf-8")
+    source = _current_source_path(source_path).read_text(encoding="utf-8")
     batch_a = manifest["batch_a_completed"]
     batch_b = manifest["batch_b"]
     batch_c = manifest["batch_c"]

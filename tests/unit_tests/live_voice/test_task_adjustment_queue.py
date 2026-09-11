@@ -9,10 +9,10 @@ from types import SimpleNamespace
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import TerminalOutcome
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation, TaskMutationPrecondition, TaskResultArtifact
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation, TaskMutationPrecondition, TaskResultArtifact
 import hashlib
-from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_persistent_task_core import (
     NOW, _adjust, _create, _Executor, _observations, _scope, _successor_fixture,
 )
@@ -400,7 +400,7 @@ async def test_real_direct_files_and_core_continue_late_change_without_duplicate
                 assert original_text in request.params["query"]
                 assert (root / "行程.md").read_text(encoding="utf-8") == original_text
                 from jiuwenswarm.server.runtime.agent_adapter.background_task_checkpoint import current_background_task_checkpoint
-                from jiuwenswarm.server.live_voice.file_effect_plan import FileEffectPlanError
+                from jiuwenswarm.server.runtime.formal_tasks.file_effect_plan import FileEffectPlanError
                 plan = current_background_task_checkpoint(request.session_id).file_plan
                 assert plan is not None, "continuation keeps the existing file-effect boundary"
                 await plan.seal({"requirement_head": plan.requirement_head, "preserve_existing": False,

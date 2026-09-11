@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeVar
 
-from .native_task_source import source_extension, require_payload_source
+from jiuwenswarm.server.live_voice.native_task_source import source_extension, require_payload_source
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
@@ -34,7 +34,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     validate_transition,
 )
 
-from .formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     AdmissionDisposition,
     AdmissionPolicy,
     AdmissionPriority,
@@ -101,7 +101,7 @@ from jiuwenswarm.server.runtime.durability.durability_readers import (
     verify_effect_prefix,
 )
 from jiuwenswarm.server.runtime.durability.durability_recovery_facts import ExecutorRecoveryFacts
-from .executor_capabilities import ExecutorCapabilityProfile
+from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import ExecutorCapabilityProfile
 
 _SCHEMA_VERSION = 6
 _DEFAULT_TASK_PAGE_LIMIT = 50
@@ -1107,7 +1107,7 @@ class SqliteTaskStore:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._failpoint = failpoint
         self._initialize()
-        from .task_adjustment_queue import TaskAdjustmentQueue
+        from jiuwenswarm.server.runtime.formal_tasks.task_adjustment_queue import TaskAdjustmentQueue
         self.adjustment_queue = TaskAdjustmentQueue(self)
 
     def _connect(self, *, foreign_keys: bool = True) -> sqlite3.Connection:

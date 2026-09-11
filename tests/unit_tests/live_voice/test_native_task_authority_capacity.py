@@ -8,7 +8,7 @@ import sqlite3
 
 import pytest
 
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     P3_PRODUCT_AUTHORITY_OPERATIONS,
 )
@@ -26,7 +26,7 @@ from jiuwenswarm.server.live_voice.production_task_intent import (
     ProductionTaskPolicyOutcome,
     build_production_origin_binding,
 )
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 from jiuwenswarm.server.live_voice.voice_task_bridge import VoiceTaskBridge
 from tests.unit_tests.live_voice.test_p3_authenticated_composition import (
     TOKEN,

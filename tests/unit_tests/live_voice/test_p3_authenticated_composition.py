@@ -32,7 +32,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     AdmissionDisposition,
     AdmissionPolicy,
     ExecutorDeliveryResult,
@@ -54,7 +54,7 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskAdjustmentState,
     utc_now,
 )
-from jiuwenswarm.server.live_voice.executor_capabilities import (
+from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import (
     ExecutorCapabilityProfile,
 )
 from jiuwenswarm.server.live_voice.live_voice_configuration_declaration import (
@@ -121,8 +121,8 @@ from jiuwenswarm.server.live_voice.p3_model_resolution import (
     ResolvedP3Model,
     ServerModelCatalogResolver,
 )
-from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.live_voice.project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     DirectProjectManagedBaselineReader,
     FORMAL_PROJECT_EXECUTOR_ID,
@@ -137,7 +137,7 @@ from jiuwenswarm.server.live_voice.production_task_intent import (
     ProductionTaskIntentRequest,
     build_production_origin_binding,
 )
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 from jiuwenswarm.server.live_voice.task_progress_return import (
     TaskProgressOriginBinding,
     TaskProgressOriginKind,
@@ -6641,7 +6641,7 @@ async def test_product_retry_reuses_persisted_selection_after_profile_drift(
     """Catches retry reselecting from a changed process capability profile."""
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.task_store.utc_now",
+        "jiuwenswarm.server.runtime.formal_tasks.task_store.utc_now",
         lambda: NOW,
     )
     profile = DirectProjectCodeExecutorAdapter.capability_profile()
@@ -7014,7 +7014,7 @@ async def test_stop_settles_direct_interruption_into_canonical_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.task_store.utc_now",
+        "jiuwenswarm.server.runtime.formal_tasks.task_store.utc_now",
         lambda: NOW,
     )
     project = tmp_path / "project"

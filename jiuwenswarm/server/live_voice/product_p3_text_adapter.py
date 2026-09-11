@@ -26,7 +26,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ResultEnvelope,
 )
 
-from .formal_task_models import FormalTaskViolation, TaskAuthorizationGrant, utc_now
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation, TaskAuthorizationGrant, utc_now
 from .product_authority import (
     AuthorityResourceBinding,
     AuthorityRouteContext,

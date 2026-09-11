@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     FormalTaskState,
     OutboxKind,
     OutboxState,

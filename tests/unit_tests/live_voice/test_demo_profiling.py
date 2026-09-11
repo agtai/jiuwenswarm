@@ -274,7 +274,7 @@ def test_http_model_tool_boundaries_and_backward_wall_clock_are_not_mispaired():
 
 
 def test_stable_error_reason_and_tool_ids_without_private_data(records):
-    from jiuwenswarm.server.live_voice.formal_task_models import ErrorCode, FormalTaskViolation
+    from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import ErrorCode, FormalTaskViolation
     error = FormalTaskViolation("SEMANTIC_PROVIDER_TIMEOUT", "PRIVATE_ERROR", ErrorCode.TIMEOUT)
     fields = profile.error_fields(error)
     assert fields["error_reason"] == "SEMANTIC_PROVIDER_TIMEOUT"

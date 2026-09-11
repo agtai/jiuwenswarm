@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
 from jiuwenswarm.server.live_voice.unified_committed_input import (
     SqliteUnifiedCommittedInputJournal,
 )

@@ -89,3 +89,21 @@ failure requires `onTaskRefresh` in unchanged ChatPanel/index.tsx. These eleven
 pre-existing stale UI-oracle failures are retained and not counted as successes;
 this mechanical split introduces no remaining observed failure. esbuild also
 reports two pre-existing duplicate `empty` locale keys. No runtime was restarted.
+
+## Batch 4b — Host formal Task and Executor ownership (complete)
+
+Tier 0: re-home the seven existing formal Task/Store/adjustment/capability/file
+Executor modules together. Preserve every implementation body, transaction,
+SQLite schema, journal format, result and adjustment rule. Update all Python
+consumers, including module monkeypatch targets. Existing common wire schema
+and Native source adapter are compatibility dependencies: this is Host ownership
+of the existing formal execution service, not a new generic SDK Task API. Voice
+input adaptation stays in Live Voice. No runtime migration or service restart.
+Acceptance: body equivalence, import/discovery checks and the current saved-file,
+adjustment and Task execution regressions.
+
+Seven modules / 27,750 baseline physical lines re-owned. All non-import AST
+bodies, including delayed-import functions, are identical. Related Live Voice
+and AgentServer collection succeeds: 6,645 collected (not executed). Focused
+Task adjustment, file plan, real temporary-project snapshots, task handoff and
+manifest selection: 86 passed in 138.16 seconds. No product Store bytes changed.

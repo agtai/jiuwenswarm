@@ -21,7 +21,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     TerminalOutcome,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     ExecutorObservation,
     ExecutorResolution,
     FormalAttemptState,
@@ -61,7 +61,7 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
     _evidence_id,
     project_task_progress_event,
 )
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 
 NOW = "2026-08-06T10:00:00Z"
 EXPIRY = "2026-08-06T11:00:00Z"

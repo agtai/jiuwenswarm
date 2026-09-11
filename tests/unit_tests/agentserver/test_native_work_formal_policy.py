@@ -22,7 +22,7 @@ from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
 )
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep
 from jiuwenswarm.server.live_voice.p3_model_resolution import ServerModelCatalogResolver
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import FormalTaskViolation
 from tests.unit_tests.agentserver.test_formal_live_voice_adapter import (
     FormalInstance,
     OutputLease,

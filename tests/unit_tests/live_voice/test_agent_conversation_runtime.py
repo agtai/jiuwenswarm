@@ -67,7 +67,7 @@ from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationSurface,
     PresentationUnit,
 )
-from jiuwenswarm.server.live_voice.formal_task_models import PersistentTaskEvent
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import PersistentTaskEvent
 from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
     ForegroundFact,
     ForegroundSnapshot,

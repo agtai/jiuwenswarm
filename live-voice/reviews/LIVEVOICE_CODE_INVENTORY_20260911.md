@@ -130,11 +130,11 @@ Realtime Provider 会话、事件映射、Native 参数、提案/载体契约、
 
 | 文件 | 物理行 | 非空行 | 代码职责 / 入口 |
 |---|---:|---:|---|
-| [jiuwenswarm/server/live_voice/formal_task_models.py](../../jiuwenswarm/server/live_voice/formal_task_models.py) | 2,648 | 2,458 | Formal P3-alpha task records shared by the persistent Core and Executor. |
-| [jiuwenswarm/server/live_voice/persistent_task_core.py](../../jiuwenswarm/server/live_voice/persistent_task_core.py) | 1,645 | 1,578 | Formal persistent P3 Task Core and durable outbox orchestration. |
-| [jiuwenswarm/server/live_voice/task_adjustment_queue.py](../../jiuwenswarm/server/live_voice/task_adjustment_queue.py) | 352 | 328 | Durable cutover from a running adjustment to an immutable Task revision. |
+| [jiuwenswarm/server/live_voice/formal_task_models.py](../../jiuwenswarm/server/runtime/formal_tasks/formal_task_models.py) | 2,648 | 2,458 | Formal P3-alpha task records shared by the persistent Core and Executor. |
+| [jiuwenswarm/server/live_voice/persistent_task_core.py](../../jiuwenswarm/server/runtime/formal_tasks/persistent_task_core.py) | 1,645 | 1,578 | Formal persistent P3 Task Core and durable outbox orchestration. |
+| [jiuwenswarm/server/live_voice/task_adjustment_queue.py](../../jiuwenswarm/server/runtime/formal_tasks/task_adjustment_queue.py) | 352 | 328 | Durable cutover from a running adjustment to an immutable Task revision. |
 | [jiuwenswarm/server/live_voice/task_core.py](../../jiuwenswarm/server/live_voice/task_core.py) | 714 | 658 | Deterministic P3-alpha Task Core with replay and exact authorization. |
-| [jiuwenswarm/server/live_voice/task_store.py](../../jiuwenswarm/server/live_voice/task_store.py) | 15,224 | 14,890 | SQLite authority for formal P3 command/task/event/attempt state. |
+| [jiuwenswarm/server/live_voice/task_store.py](../../jiuwenswarm/server/runtime/formal_tasks/task_store.py) | 15,224 | 14,890 | SQLite authority for formal P3 command/task/event/attempt state. |
 
 ## Executor / Durability
 
@@ -148,9 +148,9 @@ Realtime Provider 会话、事件映射、Native 参数、提案/载体契约、
 | [jiuwenswarm/server/live_voice/durability_identity.py](../../jiuwenswarm/server/runtime/durability/durability_identity.py) | 150 | 128 | Authority-free identity values shared by pure durability assets. |
 | [jiuwenswarm/server/live_voice/durability_readers.py](../../jiuwenswarm/server/runtime/durability/durability_readers.py) | 689 | 628 | Schema-neutral verified prefix readers for caller-owned durability rows. |
 | [jiuwenswarm/server/live_voice/durability_recovery_facts.py](../../jiuwenswarm/server/runtime/durability/durability_recovery_facts.py) | 466 | 422 | Canonical authority-free Executor recovery generation facts. |
-| [jiuwenswarm/server/live_voice/executor_capabilities.py](../../jiuwenswarm/server/live_voice/executor_capabilities.py) | 373 | 330 | Immutable Executor capability declarations and deterministic selection. |
-| [jiuwenswarm/server/live_voice/file_effect_plan.py](../../jiuwenswarm/server/live_voice/file_effect_plan.py) | 416 | 369 | A frozen restriction on an authorized Task's file effects, never a grant. |
-| [jiuwenswarm/server/live_voice/project_code_executor.py](../../jiuwenswarm/server/live_voice/project_code_executor.py) | 7,092 | 6,779 | Formal attempt adapters for the bounded project Code Agent. |
+| [jiuwenswarm/server/live_voice/executor_capabilities.py](../../jiuwenswarm/server/runtime/formal_tasks/executor_capabilities.py) | 373 | 330 | Immutable Executor capability declarations and deterministic selection. |
+| [jiuwenswarm/server/live_voice/file_effect_plan.py](../../jiuwenswarm/server/runtime/formal_tasks/file_effect_plan.py) | 416 | 369 | A frozen restriction on an authorized Task's file effects, never a grant. |
+| [jiuwenswarm/server/live_voice/project_code_executor.py](../../jiuwenswarm/server/runtime/formal_tasks/project_code_executor.py) | 7,092 | 6,779 | Formal attempt adapters for the bounded project Code Agent. |
 
 ## Task Semantics / Business Bridge
 

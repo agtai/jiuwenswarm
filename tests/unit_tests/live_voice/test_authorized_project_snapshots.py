@@ -24,10 +24,10 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AuthenticatedPrincipal,
     ServerSessionProjectAuthorityResolver,
 )
-from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
-from jiuwenswarm.server.live_voice import project_code_executor
-from jiuwenswarm.server.live_voice.project_code_executor import DirectProjectCodeExecutorAdapter
-from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore
+from jiuwenswarm.server.runtime.formal_tasks import project_code_executor
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import DirectProjectCodeExecutorAdapter
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_p3_4_durability_runtime import _create_selected_task
 from tests.unit_tests.live_voice.test_persistent_task_core import EXPIRY, NOW, _scope
 from tests.unit_tests.live_voice.test_project_code_executor import (
@@ -98,7 +98,7 @@ class _FileToolCarrier:
 
 
 def _harness(tmp_path, monkeypatch):
-    monkeypatch.setattr("jiuwenswarm.server.live_voice.task_store.utc_now", lambda: NOW)
+    monkeypatch.setattr("jiuwenswarm.server.runtime.formal_tasks.task_store.utc_now", lambda: NOW)
     project = tmp_path / "project"
     index = _mixed_project(project)
     store = SqliteTaskStore(tmp_path / "tasks.sqlite3")

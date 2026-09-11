@@ -41,7 +41,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.common.utils import get_user_workspace_dir
 
-from .formal_task_models import (
+from jiuwenswarm.server.runtime.formal_tasks.formal_task_models import (
     AdmissionPolicy,
     FormalTaskViolation,
     FormalTaskSpec,
@@ -71,14 +71,14 @@ from .live_voice_configuration_declaration import (
     ValidatedLiveVoiceConfiguration,
     ValidatedProviderConfiguration,
 )
-from .executor_capabilities import (
+from jiuwenswarm.server.runtime.formal_tasks.executor_capabilities import (
     TASK_EXECUTION_REQUIREMENTS_SCHEMA_VERSION,
     ExecutorCapabilityProfile,
     ExecutorSelection,
     TaskExecutionRequirements,
     select_executor,
 )
-from .persistent_task_core import PersistentTaskCore, ReconciliationEventSink
+from jiuwenswarm.server.runtime.formal_tasks.persistent_task_core import PersistentTaskCore, ReconciliationEventSink
 from .p2_response_generation_store import SqliteP2ResponseGenerationOwner
 from .p3_confirmation import (
     P3ConfirmationBinding,
@@ -104,7 +104,7 @@ from .product_authority import (
 )
 from .presentation_ledger import TaskPresentationDelivery
 from .product_p3_text_adapter import ProductP3AuthorizedQuery
-from .project_code_executor import (
+from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     AttemptProjectExecutorLease,
     DirectProjectCodeExecutorAdapter,
     DirectProjectManagedBaselineReader,
@@ -126,7 +126,7 @@ from .task_progress_return import (
     TaskProgressOriginBinding,
     TaskProgressOriginKind,
 )
-from .task_store import SqliteTaskStore, TaskDurabilityDiagnosticSnapshot
+from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore, TaskDurabilityDiagnosticSnapshot
 from .task_semantics import (
     TaskSemanticContext,
     TaskSemanticDecision,
