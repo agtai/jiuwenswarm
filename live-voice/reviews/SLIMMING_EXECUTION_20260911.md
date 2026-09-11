@@ -70,3 +70,22 @@ repository Python imports use the new owner. Existing pure contract, SQLite
 authorization/recovery and Direct executor tests: 86 passed in 89.45 seconds.
 No database or installed dependency changed. Fixed two support-file trailing
 EOF blank lines found by the previous staged whitespace check.
+
+## Batch 3a — Web panel decomposition (complete)
+
+Tier 0: separate existing stateless operation/contract helpers and diagnostic
+view from the React controller. Keep the single existing hook/state owner,
+public panel exports, request ordering, timers, effect dependencies and JSX
+unchanged. No new policy, state replica or protocol. Check declaration bodies
+and existing panel/mounted tests, plus frontend typecheck for module wiring.
+
+The controller, operation helpers and view retain all 102 original declaration
+bodies (excluding export modifiers). Frontend `tsc --noEmit` passes. Existing
+panel/mounted selection: 210 passed, 13 failed, one skipped. Two failures were
+source-location assertions: redirected only those lookups to the helper owner;
+both pass. Ten mounted failures reproduce with the exact pre-split panel bundle
+(all ten fail at the same absent legacy Task controls). The remaining static
+failure requires `onTaskRefresh` in unchanged ChatPanel/index.tsx. These eleven
+pre-existing stale UI-oracle failures are retained and not counted as successes;
+this mechanical split introduces no remaining observed failure. esbuild also
+reports two pre-existing duplicate `empty` locale keys. No runtime was restarted.

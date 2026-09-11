@@ -2034,7 +2034,8 @@ test('recognized P1 text can enter P2 while every retained voice operation block
 
 test('foreground presentation fence keeps exact activation and response identity without superseded generation residue', async () => {
   const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
-  const fence = source.match(
+  const operationsSource = await readFile(new URL('../src/components/ChatPanel/liveVoiceProductOperations.ts', import.meta.url), 'utf8');
+  const fence = operationsSource.match(
     /type PendingForegroundPresentationFence = Readonly<\{(?<fields>[\s\S]*?)\}>;/,
   )?.groups?.fields;
 
@@ -2064,6 +2065,7 @@ test('ChatPanel mounts the production browser-ownership lifecycle used by the ti
     'utf8',
   );
   const panelSource = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const operationsSource = await readFile(new URL('../src/components/ChatPanel/liveVoiceProductOperations.ts', import.meta.url), 'utf8');
   const lifecycleCall = source.slice(
     source.indexOf('useProductVoiceBrowserOwnership({'),
     source.indexOf('let formalVoiceVisualState'),
@@ -2097,7 +2099,7 @@ test('ChatPanel mounts the production browser-ownership lifecycle used by the ti
   assert.match(lifecycleSource, /createBrowserLiveVoiceOwnershipBarrier/);
   assert.match(lifecycleSource, /cleanupControlRef/);
   assert.match(lifecycleSource, /unmountedRef/);
-  assert.match(panelSource, /closeSession\(sessionId: string\): Promise<void>/);
+  assert.match(operationsSource, /closeSession\(sessionId: string\): Promise<void>/);
   assert.match(start, /await browserOwnership\.acquire/);
   assert.match(start, /await ownershipBarrier\.wait\(\)/);
   assert.match(start, /await ownershipBarrier\.run\(async \(\) => \{/);
