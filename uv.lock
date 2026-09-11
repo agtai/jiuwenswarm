@@ -1991,9 +1991,9 @@ requires-dist = [
     { name = "mutagen", specifier = ">=1.47.0" },
     { name = "mutagen", marker = "extra == 'harmony'", specifier = ">=1.47.0" },
     { name = "numpy", specifier = ">=1.24.0" },
-    { name = "openjiuwen", marker = "extra == 'harmony'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
-    { name = "openjiuwen", extras = ["claude", "codex"], git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
-    { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
+    { name = "openjiuwen", marker = "extra == 'harmony'", git = "https://github.com/agtai/agent-core.git?rev=ffeb1abcc5cc0bc72b5c813a3316d4334d39e15f" },
+    { name = "openjiuwen", extras = ["claude", "codex"], git = "https://github.com/agtai/agent-core.git?rev=ffeb1abcc5cc0bc72b5c813a3316d4334d39e15f" },
+    { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'", git = "https://github.com/agtai/agent-core.git?rev=ffeb1abcc5cc0bc72b5c813a3316d4334d39e15f" },
     { name = "opentelemetry-api", specifier = ">=1.28.0" },
     { name = "opentelemetry-api", marker = "extra == 'harmony'", specifier = ">=1.28.0" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.28.0" },
@@ -2929,8 +2929,8 @@ wheels = [
 
 [[package]]
 name = "openjiuwen"
-version = "0.1.16"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop#94e10cb6102c36fe78a64547957c0def97299273" }
+version = "0.1.16+jiuwenswarm.responses2"
+source = { git = "https://github.com/agtai/agent-core.git?rev=ffeb1abcc5cc0bc72b5c813a3316d4334d39e15f#ffeb1abcc5cc0bc72b5c813a3316d4334d39e15f" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },

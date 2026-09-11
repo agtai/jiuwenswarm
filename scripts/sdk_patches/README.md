@@ -1,3 +1,7 @@
+> Historical reconstruction tooling. Current source installs use the immutable
+> [AgentCore dependency](../../live-voice/runbooks/AGENTCORE_SOURCE.md); do not use
+> this older Responses-only wheel to replace that source.
+
 # OpenAI Responses SDK dependency
 
 The installed upstream SDK at `94e10cb6102c36fe78a64547957c0def97299273`

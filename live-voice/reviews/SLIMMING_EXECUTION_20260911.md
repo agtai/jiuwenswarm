@@ -150,3 +150,19 @@ Batch 6a result: PowerShell parser reports no errors. Evaluated only the two
 selection assignments: empty directory keeps the exact former machine path;
 explicit directory resolves its own saved selection. No launch, private file
 write, directory creation or environment installation occurred.
+
+## Batch 2a — immutable AgentCore source (complete)
+
+Pin the already-audited twelve-commit SDK tree `ffeb1abc` as the declared Git
+dependency instead of floating upstream develop. Resolve the lock without
+installing into the current environment. Consume upstream source directly; do
+not vendor twelve patch copies into Live Voice. Existing 365 scoped SDK checks
+on this exact tree remain reusable evidence. Runtime adoption and shared Host
+execution remain separate, not implied by dependency declaration alone.
+
+Batch 2a result: lock resolution changes only AgentCore identity/version; all
+other dependency versions stay fixed. `uv lock --check` passes. Debug launcher
+honors frozen source rather than exempting any same-version SDK; existing
+launcher tests: 44 passed, five platform skips. Installed SDK still resolves to
+`.deps/agent-core-w3`; no install/restart occurred. Source tree evidence remains
+the audited 365 SDK checks. Shared execution integration is still outstanding.
