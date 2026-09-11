@@ -4980,6 +4980,17 @@ class AgentServerProductCompositionRegistry:
         Called under the activation lock. This never admits old input, restores
         permission, invokes the model or replays a Task operation.
         """
+        if self._native_business._atlas_host is not None:
+            try:
+                host = self._native_business._atlas_host
+                await host.context(route.binding)
+                registration = host._registration(route.binding)
+                return {"voice_task_ids": [], "execution_host": {
+                    "kind": "atlas", "binding_id": registration["binding"]["bindingId"]}}
+            except Exception:
+                # Preserve the successful activation receipt so the client can
+                # close its lease. No microphone starts without confirmation.
+                return {"voice_task_ids": [], "execution_host": {"kind": "unavailable"}}
         journal = self._unified_journal
         read = getattr(self._p3_composition, "read_task_creation_origins", None)
         if journal is None or not callable(read) or not self._p3_presentation_consumption_available:
@@ -8943,6 +8954,9 @@ class AgentServerProductCompositionRegistry:
         channel_id: str,
     ) -> P3RouteResult:
         """Admit one authenticated final into the sole semantic implementation."""
+
+        if self._native_business._atlas_host is not None:
+            return _error_result(request_id, reason="ATLAS_TEXT_REQUIRES_ATLAS_CHAT", code=ErrorCode.UNSUPPORTED)
 
         journal = self._unified_journal
         bridge = self._task_intent_bridge

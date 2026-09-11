@@ -27,6 +27,7 @@ from .native_business_observation import (
 from .native_interaction_contract import NativeInteractionBinding
 from .native_interaction_runtime import NativeInteractionRuntimeError
 from .voice_task_bridge import UnifiedCommittedInputRoute
+from .atlas_local_host import AtlasLocalHost
 
 
 def _now():
@@ -46,6 +47,7 @@ class NativeBusinessRouter:
         self._task_events = {}
         self._context_reads = {}
         self._context_read_sequence = 0
+        self._atlas_host = AtlasLocalHost.configured()
 
     def require_route(self, *, binding, capability, session_id):
         from .product_p2_interaction_adapter import P2LeaseState
@@ -101,6 +103,19 @@ class NativeBusinessRouter:
 
     @profiled("native.context_read", "route.binding")
     async def _read_context(self, route):
+        if self._atlas_host is not None:
+            await self._require_context_authority(route)
+            observed = await self._atlas_host.context(route.binding)
+            await self._require_context_authority(route)
+            scope, native = route.binding.scope, route.native_p3_authority
+            self.works()  # Reuse the existing heard-result ledger, not an executor.
+            self._task_events[scope] = observed["events"]
+            selection = self.contexts.select(scope=scope,
+                history=select_conversation_history(observed["history"]),
+                tasks=observed["tasks"], works=observed["works"],
+                model={"model_identity": native.model_identity, "model_config_version": native.model_config_version})
+            self._context_read_sequence += 1
+            return selection, self._context_read_sequence
         with ProfileSpan("native.context_authorize"):
             authority = await asyncio.to_thread(
                 self.registry._p3_composition.prepare_production_intent_authority,
@@ -206,6 +221,8 @@ class NativeBusinessRouter:
                     correlation_id=route.binding.correlation_id, response_ref=None)
 
     def _record_task_origin(self, route, delegate, admission, result):
+        if self._atlas_host is not None:
+            return None  # Atlas IDs must never be written into Swarm Task discovery.
         if (result.get("status") != "dispatched" or not result.get("task_id")
             or delegate.business.operation not in {"task.create", "task.create_successor"}):
             return None
@@ -531,6 +548,9 @@ class NativeBusinessRouter:
                         facts = {"status": "rejected", "reason": invalid}
                     elif delegate.business.operation == "context.get":
                         facts = {"status": "observed"}
+                    elif self._atlas_host is not None:
+                        await self._require_context_authority(route)
+                        facts = await self._atlas_host.execute(route.binding, delegate)
                     elif delegate.business.operation.startswith("task."):
                         from .native_task_source import SOURCE_OPERATIONS
                         with ProfileSpan("native.task_source_wait"):
@@ -551,7 +571,7 @@ class NativeBusinessRouter:
                 # Save the creation association before any optional await. A
                 # reconnect can discover the true receipt even while refresh is
                 # pending. Recording is idempotent and also retried on replay.
-                if (result.get("status") == "dispatched" and result.get("task_id")
+                if (self._atlas_host is None and result.get("status") == "dispatched" and result.get("task_id")
                     and delegate.business.operation in {"task.create", "task.create_successor"}):
                     result["native_origin"] = {
                         "scope_sha256": hashlib.sha256(canonical_json_bytes(route.binding.scope.to_dict())).hexdigest(),
@@ -594,7 +614,7 @@ class NativeBusinessRouter:
             result_route = UnifiedCommittedInputRoute.TASK if delegate.business.operation.startswith("task.") else UnifiedCommittedInputRoute.DIALOGUE
             prepared = await owner.prepare_delegate_result(admission, canonical_text=text, route=result_route, allow_interrupted=True)
             task_id = result.get("task_id")
-            if type(task_id) is str:
+            if self._atlas_host is None and type(task_id) is str:
                 async with self.registry._lock:
                     if (self.registry._p2_routes.get((route.binding.session_id, route.binding.interaction_id)) is route
                         and not route.native_closed and not self.registry._stopped
@@ -654,6 +674,11 @@ class NativeBusinessRouter:
         events = set()
         for text in receipts:
             receipt = json.loads(text)
+            if self._atlas_host is not None:
+                for event in receipt.get("host_notifications", ()):
+                    if event in self._task_events.get(scope, ()) and not self._work_journal.presented(event["event_id"], scope):
+                        events.add(event["event_id"])
+                continue
             if receipt.get("status") != "rejected" and receipt.get("operation") in {"task.status", "task.result", "task.adjust"}:
                 for event in receipt.get("task_notifications", ()):
                     if event in self._task_events.get(scope, ()) and not self._work_journal.presented(event["event_id"], scope):

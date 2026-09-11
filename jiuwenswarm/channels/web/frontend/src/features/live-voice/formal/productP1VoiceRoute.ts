@@ -667,6 +667,7 @@ export class ProductP1VoiceRouteOwner {
       native_agent_model_confirmed?: () => boolean;
       audio_environment?: BrowserAudioEnvironment;
       capture_stream_factory?: BrowserAudioCaptureStreamFactory;
+      capture_worklet_module_url?: string;
       local_barge_in_profile?: 'off' | 'verified_headset_aec_v1';
       on_status?: (status: ProductP1VoiceStatus, reason: string | null) => void;
       on_concurrent_capture_started?: () => void;
@@ -698,6 +699,7 @@ export class ProductP1VoiceRouteOwner {
       enabled: this.#enabled,
       ...(input.audio_environment === undefined ? {} : { environment: input.audio_environment }),
       ...(input.capture_stream_factory === undefined ? {} : { captureStreamFactory: input.capture_stream_factory }),
+      ...(input.capture_worklet_module_url === undefined ? {} : { captureWorkletModuleUrl: input.capture_worklet_module_url }),
       ...(input.local_barge_in_profile === undefined ? {} : { localBargeInProfile: input.local_barge_in_profile }),
       observer: {
         onCaptureFrame: frame => this.#acceptCaptureFrame(frame),

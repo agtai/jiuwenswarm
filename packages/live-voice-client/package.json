@@ -1,0 +1,12 @@
+{
+  "name": "@jiuwenswarm/live-voice-client",
+  "version": "0.1.0-atlas.4",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": { "types": "./dist/headlessNativeVoice.d.ts", "import": "./dist/index.js" },
+    "./capture-worklet": "./dist/liveVoiceCaptureProcessor.js"
+  },
+  "files": ["dist", "LICENSE"],
+  "scripts": { "build": "node build.mjs" }
+}
