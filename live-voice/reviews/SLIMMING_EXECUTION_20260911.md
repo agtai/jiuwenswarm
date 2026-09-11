@@ -123,3 +123,25 @@ parent Registry (expects tools disabled but the classifier chose ordinary
 dialogue). Reproduced that one case by loading the exact parent module in an
 isolated process, without changing source files. This pre-existing semantic
 fixture mismatch is retained; result codec checks introduce no observed failure.
+
+## Batch 5a — legacy Executor support separation (complete)
+
+Tier 0: only tests instantiate the legacy scheduler-backed Executor; production
+uses DirectProjectCodeExecutorAdapter. Move its unchanged class into test support
+and migrate consumers. Retain every oracle and shared binding interface. No
+production fallback, scheduling, file or cancellation behavior is removed.
+
+## Batch 6a — isolated launcher selection (active)
+
+Tier 1: adopt the isolated configuration-path fix from `aff82618` without its
+branch allowlist/history changes. An explicitly selected configuration directory
+owns the saved launch selection; no-argument launches retain the current machine
+path. No existing private file is migrated or overwritten by this source edit.
+Validate PowerShell parsing and both path branches without running the launcher.
+
+Batch 5a result: removed the 492-line legacy class from production; class AST is
+identical in support and both consumers migrated. Existing Executor/integration/
+manifest selection: 83 passed and one manifest substring collision (`Direct...`
+contains the retired class name). The retirement check now matches whole
+identifiers and the one affected test passes. No assertion was removed; the
+Direct implementation was not edited. Production has no legacy-class import.

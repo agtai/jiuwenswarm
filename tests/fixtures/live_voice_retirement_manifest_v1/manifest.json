@@ -697,7 +697,7 @@
   ],
   "retired_source_paths": ["jiuwenswarm/server/live_voice/demo_fixture_contract.py"],
   "retired_source_symbols": {
-    "jiuwenswarm/server/live_voice/project_code_executor.py": ["DEMO_ITINERARY_TASK_NAME"],
+    "jiuwenswarm/server/live_voice/project_code_executor.py": ["DEMO_ITINERARY_TASK_NAME", "ProjectCodeExecutorAdapter"],
     "jiuwenswarm/server/live_voice/voice_task_bridge.py": ["DEMO_ITINERARY_TASK_NAME"],
     "jiuwenswarm/server/live_voice/batch_speech.py": ["PRODUCT_DEMO_POLICY_BYPASS_ENV"],
     "jiuwenswarm/server/live_voice/p3_authenticated_composition.py": ["_PRODUCT_DEMO_POLICY_BYPASS_ENV", "_DEMO_ADJUSTMENT_CHECKPOINT_ENV"],

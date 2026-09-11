@@ -348,7 +348,7 @@ def test_shared_files_are_symbol_scoped_and_retain_current_authority() -> None:
         retired = manifest.get("retired_source_symbols", {}).get(boundary["path"], [])
         for symbol in boundary["candidate_symbols"] + boundary["retained_symbols"]:
             if symbol in retired:
-                assert symbol not in source, (boundary["path"], symbol)
+                assert re.search(r"(?<![A-Za-z0-9_])" + re.escape(symbol) + r"(?![A-Za-z0-9_])", source) is None, (boundary["path"], symbol)
             else:
                 assert symbol in source, (boundary["path"], symbol)
     by_path = {boundary["path"]: boundary for boundary in boundaries}

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.support.live_voice.legacy_project_executor import ProjectCodeExecutorAdapter
+
 import asyncio
 from pathlib import Path
 
@@ -34,7 +36,6 @@ from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     FORMAL_PROJECT_EXECUTOR_ID,
     PROJECT_CODE_PIPELINE,
-    ProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
 )
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.support.live_voice.legacy_project_executor import ProjectCodeExecutorAdapter
+
 import asyncio
 import hashlib
 import inspect
@@ -68,7 +70,6 @@ from jiuwenswarm.server.runtime.formal_tasks.project_code_executor import (
     PROJECT_CODE_EFFECT_POLICY,
     PROJECT_CODE_EXECUTOR,
     PROJECT_CODE_PIPELINE,
-    ProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
 )
 from jiuwenswarm.server.runtime.formal_tasks.task_store import SqliteTaskStore
